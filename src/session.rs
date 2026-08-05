@@ -26,12 +26,18 @@ impl Session {
 
     /// Create the worktree if it does not exist yet. Idempotent, so relaunching
     /// into an existing session resumes it.
-    pub fn ensure(&self, repo: &Path) -> Result<()> {
+    pub fn ensure(&self, repo: &Path, base: &str) -> Result<()> {
         if self.worktree.exists() {
             return Ok(());
         }
         std::fs::create_dir_all(self.worktree.parent().unwrap())?;
         let path = self.worktree.to_string_lossy().into_owned();
+
+        // A directory removed outside git leaves its registration behind, and
+        // `worktree add` then refuses forever. Prune first so a session id can
+        // never become permanently unusable. Prune only drops entries whose
+        // directory is already gone, so live sessions are unaffected.
+        let _ = git(repo, &["worktree", "prune"]);
 
         // `omh rm` keeps branches on purpose, so a session id can outlive its
         // worktree. Reattach to the existing branch rather than failing — that
@@ -39,7 +45,9 @@ impl Session {
         let args: Vec<&str> = if self.branch_exists(repo) {
             vec!["worktree", "add", &path, &self.branch]
         } else {
-            vec!["worktree", "add", "-b", &self.branch, &path]
+            // Explicit base: without it git branches from whatever HEAD is,
+            // which produces a session whose diff has the wrong baseline.
+            vec!["worktree", "add", "-b", &self.branch, &path, base]
         };
         git(repo, &args)
             .with_context(|| format!("creating worktree for session {}", self.id))?;
@@ -48,6 +56,15 @@ impl Session {
 
     fn branch_exists(&self, repo: &Path) -> bool {
         git(repo, &["rev-parse", "--verify", "--quiet", &self.branch]).is_ok()
+    }
+
+    /// How many commits `base` has that this session does not. A session that
+    /// silently drifts behind trunk makes the agent work against stale code.
+    pub fn behind(&self, repo: &Path, base: &str) -> usize {
+        git(repo, &["rev-list", "--count", &format!("{}..{base}", self.branch)])
+            .ok()
+            .and_then(|out| out.trim().parse().ok())
+            .unwrap_or(0)
     }
 
     pub fn remove(&self, repo: &Path) -> Result<()> {
@@ -60,6 +77,29 @@ impl Session {
     pub fn diff(&self, repo: &Path, base: &str) -> Result<String> {
         git(repo, &["diff", "--stat", &format!("{base}...{}", self.branch)])
     }
+}
+
+/// The branch a session should be reviewed against. Hardcoding `main` breaks
+/// every repo that still uses `master`, or any other convention — and it fails
+/// at review time, after the agent has already done the work.
+pub fn default_branch(repo: &Path) -> String {
+    // What the remote says is authoritative when there is one.
+    if let Ok(head) = git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+        if let Some(name) = head.trim().strip_prefix("origin/") {
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    for candidate in ["main", "master"] {
+        if git(repo, &["rev-parse", "--verify", "--quiet", candidate]).is_ok() {
+            return candidate.to_string();
+        }
+    }
+    // Whatever this repo actually calls its trunk.
+    git(repo, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "HEAD".into())
 }
 
 /// Human-readable, monotonic session ids: `s01`, `s02`, ...
@@ -130,7 +170,7 @@ mod tests {
     fn ensure_creates_worktree_on_its_own_branch() {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s01".into());
-        s.ensure(&root).unwrap();
+        s.ensure(&root, "main").unwrap();
         assert!(s.worktree.join(".git").exists());
         assert_eq!(s.branch, "omh/s01");
     }
@@ -139,8 +179,8 @@ mod tests {
     fn ensure_is_idempotent() {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s01".into());
-        s.ensure(&root).unwrap();
-        s.ensure(&root).unwrap();
+        s.ensure(&root, "main").unwrap();
+        s.ensure(&root, "main").unwrap();
     }
 
     /// Regression: `rm` keeps branches on purpose so unreviewed work can never be
@@ -152,7 +192,7 @@ mod tests {
         let wt = d.path().join("wt");
         let s = Session::new(&wt, "s01".into());
 
-        s.ensure(&root).unwrap();
+        s.ensure(&root, "main").unwrap();
         std::fs::write(s.worktree.join("work.txt"), "agent output").unwrap();
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
@@ -161,7 +201,7 @@ mod tests {
         assert!(!s.worktree.exists(), "worktree gone");
         assert!(s.branch_exists(&root), "branch must survive rm");
 
-        s.ensure(&root).unwrap();
+        s.ensure(&root, "main").unwrap();
         assert_eq!(
             std::fs::read_to_string(s.worktree.join("work.txt")).unwrap(),
             "agent output",
@@ -173,7 +213,7 @@ mod tests {
     fn diff_reports_against_base() {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s01".into());
-        s.ensure(&root).unwrap();
+        s.ensure(&root, "main").unwrap();
         std::fs::write(s.worktree.join("new.rs"), "fn main() {}").unwrap();
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "add"]).unwrap();
@@ -197,5 +237,145 @@ mod tests {
         let (_d, root) = repo();
         let err = git(&root, &["rev-parse", "--verify", "nope"]).unwrap_err();
         assert!(err.to_string().contains("rev-parse"), "got: {err}");
+    }
+
+    /// Regression: a worktree directory removed outside git (manual `rm -rf`,
+    /// disk cleanup, a stale checkout) left the registration behind, and every
+    /// later `ensure` failed with "missing but already registered". A session id
+    /// must never become permanently unusable.
+    #[test]
+    fn a_worktree_deleted_behind_gits_back_is_recoverable() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+
+        std::fs::remove_dir_all(&s.worktree).unwrap();
+
+        s.ensure(&root, "main").expect("must recover rather than fail forever");
+        assert!(s.worktree.join(".git").exists());
+    }
+
+    /// Pruning must not disturb a session whose directory is still there.
+    #[test]
+    fn recovering_one_session_leaves_others_alone() {
+        let (d, root) = repo();
+        let wt = d.path().join("wt");
+        let keep = Session::new(&wt, "s01".into());
+        let lose = Session::new(&wt, "s02".into());
+        keep.ensure(&root, "main").unwrap();
+        lose.ensure(&root, "main").unwrap();
+
+        std::fs::remove_dir_all(&lose.worktree).unwrap();
+        lose.ensure(&root, "main").unwrap();
+
+        assert!(keep.worktree.join(".git").exists(), "untouched session survived");
+        assert!(lose.worktree.join(".git").exists());
+    }
+
+    fn repo_on(branch: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", branch],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["commit", "-q", "--allow-empty", "-m", "root"],
+        ] {
+            git(&root, &args).unwrap();
+        }
+        (dir, root)
+    }
+
+    /// Regression: `omh diff` assumed `main`, so on a `master` repo it failed at
+    /// review time — after the agent had already done the work.
+    #[test]
+    fn the_default_branch_is_detected_not_assumed() {
+        for branch in ["main", "master", "trunk"] {
+            let (_d, root) = repo_on(branch);
+            assert_eq!(default_branch(&root), branch, "on a {branch} repo");
+        }
+    }
+
+    #[test]
+    fn diff_against_the_detected_default_just_works() {
+        let (d, root) = repo_on("master");
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "master").unwrap();
+        std::fs::write(s.worktree.join("new.rs"), "fn main() {}").unwrap();
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "work"]).unwrap();
+
+        let out = s.diff(&root, &default_branch(&root)).unwrap();
+        assert!(out.contains("new.rs"), "got: {out}");
+    }
+
+    /// Regression: sessions branched from whatever HEAD happened to be, so one
+    /// created while you were on a feature branch — or a moment before a commit
+    /// landed — started from the wrong place and its diff was meaningless.
+    #[test]
+    fn a_new_session_branches_from_the_named_base_not_from_head() {
+        let (d, root) = repo_on("master");
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "trunk work"]).unwrap();
+        let trunk_tip = git(&root, &["rev-parse", "master"]).unwrap().trim().to_string();
+
+        // wander off somewhere unrelated before creating the session
+        git(&root, &["checkout", "-q", "-b", "feature"]).unwrap();
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "unrelated"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "master").unwrap();
+
+        let started_at = git(&s.worktree, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        assert_eq!(started_at, trunk_tip, "must start from master, not feature");
+    }
+
+    #[test]
+    fn an_explicit_base_is_honoured() {
+        let (d, root) = repo_on("master");
+        git(&root, &["checkout", "-q", "-b", "feature"]).unwrap();
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "feature work"]).unwrap();
+        let tip = git(&root, &["rev-parse", "feature"]).unwrap().trim().to_string();
+        git(&root, &["checkout", "-q", "master"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "feature").unwrap();
+        assert_eq!(git(&s.worktree, &["rev-parse", "HEAD"]).unwrap().trim(), tip);
+    }
+
+    /// Resuming must never move a branch that already holds work — rebasing an
+    /// agent's unreviewed commits out from under it would be unrecoverable.
+    #[test]
+    fn resuming_never_moves_an_existing_branch() {
+        let (d, root) = repo_on("master");
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "master").unwrap();
+        std::fs::write(s.worktree.join("work.txt"), "agent output").unwrap();
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
+        let agent_tip = git(&root, &["rev-parse", &s.branch]).unwrap().trim().to_string();
+
+        git(&root, &["commit", "-q", "--allow-empty", "-m", "trunk moved on"]).unwrap();
+        s.remove(&root).unwrap();
+        s.ensure(&root, "master").unwrap();
+
+        assert_eq!(
+            git(&root, &["rev-parse", &s.branch]).unwrap().trim(),
+            agent_tip,
+            "the agent's commit must survive"
+        );
+    }
+
+    #[test]
+    fn a_session_reports_how_far_behind_it_has_drifted() {
+        let (d, root) = repo_on("master");
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "master").unwrap();
+        assert_eq!(s.behind(&root, "master"), 0);
+
+        for m in ["one", "two"] {
+            git(&root, &["commit", "-q", "--allow-empty", "-m", m]).unwrap();
+        }
+        assert_eq!(s.behind(&root, "master"), 2);
     }
 }

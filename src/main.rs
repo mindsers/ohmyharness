@@ -36,6 +36,10 @@ struct Cli {
     #[arg(long, short, global = true)]
     session: Option<String>,
 
+    /// Branch a new session from this ref instead of the default branch.
+    #[arg(long, global = true)]
+    from: Option<String>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -51,8 +55,9 @@ enum Cmd {
     /// Show what a session changed, against a base branch.
     Diff {
         session: String,
-        #[arg(long, default_value = "main")]
-        base: String,
+        /// Defaults to the repo's own default branch, not an assumed `main`.
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Remove a session's worktree. The branch is kept.
     Rm { session: String },
@@ -134,7 +139,7 @@ fn main() -> Result<()> {
         Cmd::Init => init(&cwd),
         Cmd::Auth { harness } => auth(&cwd, harness),
         Cmd::Ls => ls(&cwd),
-        Cmd::Diff { session, base } => diff(&cwd, session, base),
+        Cmd::Diff { session, base } => diff(&cwd, session, base.as_deref()),
         Cmd::Rm { session } => rm(&cwd, session),
         Cmd::Config { section } => show_config(&cwd, section.as_deref()),
         Cmd::Set { key, value, layer } => set(&cwd, key, value, *layer),
@@ -345,9 +350,15 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         .session
         .clone()
         .unwrap_or_else(|| session::next_id(&paths.worktrees()));
+    // Branch from the trunk, not from wherever HEAD happens to be — a session
+    // started on a feature branch produces a diff against the wrong baseline.
+    let base = cli
+        .from
+        .clone()
+        .unwrap_or_else(|| session::default_branch(&paths.repo));
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
-        session.ensure(&paths.repo)?;
+        session.ensure(&paths.repo, &base)?;
     }
 
     let plan = container::plan(&paths, &profile, &adapter, &session, &argv[1..], opts)?;
@@ -570,16 +581,31 @@ fn ls(cwd: &std::path::Path) -> Result<()> {
     if sessions.is_empty() {
         println!("  (none)");
     }
-    for s in sessions {
-        println!("  {s:<10} omh/{s}");
+    let base = session::default_branch(&paths.repo);
+    for id in sessions {
+        let sess = Session::new(&paths.worktrees(), id.clone());
+        let drift = match sess.behind(&paths.repo, &base) {
+            0 => String::new(),
+            n => format!("  ({n} behind {base})"),
+        };
+        println!("  {id:<10} {}{drift}", sess.branch);
     }
     Ok(())
 }
 
-fn diff(cwd: &std::path::Path, id: &str, base: &str) -> Result<()> {
+fn diff(cwd: &std::path::Path, id: &str, base: Option<&str>) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = Session::new(&paths.worktrees(), id.to_string());
-    print!("{}", session.diff(&paths.repo, base)?);
+    let base = base
+        .map(str::to_string)
+        .unwrap_or_else(|| session::default_branch(&paths.repo));
+    let out = session.diff(&paths.repo, &base)?;
+    if out.trim().is_empty() {
+        // Silence reads as breakage. Say which comparison came up empty.
+        println!("no changes on {} (against {base})", session.branch);
+    } else {
+        print!("{out}");
+    }
     Ok(())
 }
 
