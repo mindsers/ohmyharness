@@ -1,0 +1,11 @@
+# An adapter is four facts. That is the whole reason adding a harness is cheap.
+name    = "claude"
+bin     = "claude"
+install = "npm install -g @anthropic-ai/claude-code"
+
+# Claude Code reads AGENTS.md natively now, but CLAUDE.md still takes precedence
+# where both exist — so point both at the same staged bytes.
+rules  = { path = "/work/CLAUDE.md", also = ["/work/AGENTS.md"] }
+skills = { path = "$HOME/.claude/skills" }
+mcp    = { path = "$HOME/.mcp.json", format = "mcp-json" }
+creds  = ["$HOME/.claude/.credentials.json"]
