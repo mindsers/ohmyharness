@@ -8,6 +8,9 @@ install = "npm install -g @anthropic-ai/claude-code"
 creds   = ["$HOME/.claude/", "$HOME/.claude.json"]
 
 # A capability this harness cannot express is simply an absent key.
+# What proves a login: a harness fills its config dir just by starting.
+token   = ["$HOME/.claude/.credentials.json"]
+
 login   = "run `/login` inside Claude Code, then exit"
 
 [capabilities.rules]

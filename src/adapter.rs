@@ -21,9 +21,17 @@ pub struct Adapter {
     pub bin: String,
     /// Command that installs `bin` into the image.
     pub install: String,
-    /// Paths holding credentials, captured by `omh auth` and remounted on launch.
+    /// Paths holding credentials, captured by `omh auth` and remounted on
+    /// launch. **A trailing slash declares a directory** — load-bearing, because
+    /// a bind-mounted *file* cannot be replaced by rename and every tool saves
+    /// its token by writing a temp file and renaming over it.
     #[serde(default)]
     pub creds: Vec<String>,
+    /// The file(s) that prove a login happened. A harness fills its config
+    /// directory just by starting, so nothing else distinguishes a token from
+    /// telemetry.
+    #[serde(default)]
+    pub token: Vec<String>,
     /// What the user has to do once the harness opens. Every harness starts its
     /// login differently and none of them say so on the way in.
     #[serde(default)]

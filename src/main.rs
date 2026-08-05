@@ -255,6 +255,7 @@ fn session_up(
     profile: &Profile,
     adapter: &Adapter,
     session: &Session,
+    opts: container::Options,
 ) -> Result<(Box<dyn runtime::Runtime>, String)> {
     let backend = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))?;
     let name = paths.container(&session.id);
@@ -262,14 +263,10 @@ fn session_up(
         return Ok((backend, name));
     }
 
-    let plan = container::plan(
-        paths,
-        profile,
-        adapter,
-        session,
-        &[],
-        container::Options { tty: false, ..Default::default() },
-    )?;
+    // The account must reach *this* plan: this is the container that actually
+    // runs. Building it without credentials is how every session started
+    // logged out while `--dry-run` advertised the mounts.
+    let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate(&backend.caps())?;
     image::ensure(backend.program(), adapter)?;
     image::ensure_network(backend.program(), &plan.network)?;
@@ -278,7 +275,7 @@ fn session_up(
     let pubkey = std::fs::read_to_string(key.with_extension("pub"))?;
     let port = ssh::port(&paths.repo_name(), &session.id);
 
-    image::container_remove(backend.program(), &name); // a stopped one blocks --name
+    let _ = image::container_remove(backend.program(), &name); // a stopped one blocks --name
     let args = backend.up_args(&plan, &name, port, pubkey.trim());
     let out = Command::new(backend.program()).args(&args).output()?;
     if !out.status.success() {
@@ -304,7 +301,25 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
     let id = session::pick(&paths.worktrees(), id, false);
     let session = Session::new(&paths.worktrees(), id);
     session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
-    session_up(&paths, &profile, &adapter, &session)?;
+
+    let configured = policy_value(&paths, "account");
+    let account = auth::resolve_for_launch(&paths, &adapter, None, configured.as_deref())?
+        .map(|a| auth::dir(&paths, &adapter.name, &a));
+    if let Some(account_dir) = &account {
+        auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+    }
+    session_up(
+        &paths,
+        &profile,
+        &adapter,
+        &session,
+        container::Options {
+            staging: container::Staging::Apply,
+            persist: persist::Mode::None,
+            tty: false,
+            account_dir: account,
+        },
+    )?;
 
     // The integration point is a managed SSH config include, not an IDE plugin —
     // that is what keeps every editor working without omh knowing about any.
@@ -340,7 +355,15 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
         Some(ed) if runtime::installed(&ed.bin) => {
             let cmd = ed.command(&alias);
             println!("omh: opening {} in {}", ssh::url(&alias), ed.name);
-            Command::new(&cmd[0]).args(&cmd[1..]).status()?;
+            let ok = Command::new(&cmd[0]).args(&cmd[1..]).status().map(|s| s.success());
+            if !matches!(ok, Ok(true)) {
+                // Remote launches fail for ordinary reasons — missing extension,
+                // handshake refused. Printing nothing leaves the user waiting
+                // for a window that will never open.
+                eprintln!("omh: {} did not open the session", ed.name);
+                println!("\n  {}", ssh::url(&alias));
+                println!("  ssh {alias}");
+            }
         }
         other => {
             if let Some(ed) = other {
@@ -369,8 +392,10 @@ fn down(cwd: &std::path::Path, id: Option<&str>) -> Result<()> {
     for i in &ids {
         let name = paths.container(i);
         if image::container_running(backend.program(), &name) {
-            image::container_remove(backend.program(), &name);
-            println!("stopped {i}; worktree and branch survive");
+            match image::container_remove(backend.program(), &name) {
+                Ok(()) => println!("stopped {i}; worktree and branch survive"),
+                Err(e) => eprintln!("omh: {i} is still running: {e}"),
+            }
         } else {
             println!("{i} was not running");
         }
@@ -395,7 +420,17 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     };
     let adapter = Adapter::find(&paths.adapters(), &name)?;
 
-    let checks = doctor::checks(&profile, &adapter);
+    // Credentials are the half no in-process test can reach: whether a token
+    // saved here survives depends on how the runtime binds the path.
+    let configured = policy_value(&paths, "account");
+    let account = auth::resolve_for_launch(&paths, &adapter, None, configured.as_deref())
+        .unwrap_or(None)
+        .map(|a| auth::dir(&paths, &name, &a));
+
+    let mut checks = doctor::checks(&profile, &adapter);
+    if account.is_some() {
+        checks.extend(doctor::credential_checks(&adapter));
+    }
     if checks.is_empty() {
         println!("nothing to check: the profile is empty");
         return Ok(());
@@ -410,8 +445,11 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         // No dtach and no terminal: the probe's output has to be captured.
         persist: persist::Mode::None,
         tty: false,
-        account_dir: None,
+        account_dir: account.clone(),
     };
+    if let Some(account_dir) = &account {
+        auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+    }
     let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
     plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 
@@ -426,7 +464,17 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     image::ensure(backend.program(), &adapter)?;
     image::ensure_network(backend.program(), &plan.network)?;
 
-    println!("omh doctor: {name} (in {})\n", image::tag(&name));
+    match &account {
+        Some(a) => println!(
+            "omh doctor: {name} (in {}, account {})\n",
+            image::tag_for(&adapter),
+            a.file_name().unwrap_or_default().to_string_lossy()
+        ),
+        None => println!(
+            "omh doctor: {name} (in {}, no account — credentials unchecked)\n",
+            image::tag_for(&adapter)
+        ),
+    }
     let out = Command::new(backend.program()).args(backend.args(&plan)).output()?;
     let outcomes = doctor::parse(&String::from_utf8_lossy(&out.stdout));
     let _ = session.remove(&paths.repo); // diagnostic: leave no session behind
@@ -666,8 +714,17 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     // Which identity this session runs as. Ambiguity is an error rather than a
     // guess: silently using the wrong account is expensive and invisible.
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, name, cli.account.as_deref(), configured.as_deref())?
-        .map(|a| auth::dir(&paths, name, &a));
+    let account = auth::resolve_for_launch(
+        &paths,
+        &adapter,
+        cli.account.as_deref(),
+        configured.as_deref(),
+    )?
+    .map(|a| auth::dir(&paths, name, &a));
+    if let Some(account_dir) = &account {
+        // The mountpoints have to exist before docker binds over them.
+        auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+    }
 
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
@@ -693,7 +750,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         session.ensure(&paths.repo, &base)?;
     }
 
-    let plan = container::plan(&paths, &profile, &adapter, &session, &argv[1..], opts)?;
+    let plan = container::plan(&paths, &profile, &adapter, &session, &argv[1..], opts.clone())?;
 
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     plan.validate(&backend.caps())?;
@@ -717,7 +774,13 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     // The session is a running container many harnesses take turns inhabiting.
     // Exec into it rather than starting a throwaway, so switching harness is
     // instant, MCP daemons stay warm, and `omh code` has something to attach to.
-    let (backend, name) = session_up(&paths, &profile, &adapter, &session)?;
+    let (backend, name) = session_up(
+        &paths,
+        &profile,
+        &adapter,
+        &session,
+        container::Options { tty: false, ..opts.clone() },
+    )?;
     eprintln!("{status_line}");
     let status = Command::new(backend.program())
         .args(backend.exec_args(&name, &plan.argv, true))
@@ -825,12 +888,12 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     if let Some(h) = &harness {
         let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
-        if image::exists(backend.program(), &image::tag(h)) {
-            println!("  image      {} (already built)", image::tag(h));
+        if image::exists(backend.program(), &image::tag_for(&adapter)) {
+            println!("  image      {} (already built)", image::tag_for(&adapter));
         } else {
-            println!("\n  building {} — first run only\n", image::tag(h));
+            println!("\n  building {} — first run only\n", image::tag_for(&adapter));
             image::ensure(backend.program(), &adapter)?;
-            println!("\n  image      {}", image::tag(h));
+            println!("\n  image      {}", image::tag_for(&adapter));
         }
     }
 
@@ -859,7 +922,20 @@ fn install_bundled(dest: &std::path::Path, kind: &str) -> Result<Vec<String>> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "toml") {
-                std::fs::write(dest.join(entry.file_name()), std::fs::read_to_string(&path)?)?;
+                let shipped = std::fs::read_to_string(&path)?;
+                let target = dest.join(entry.file_name());
+                let existing = std::fs::read_to_string(&target).unwrap_or_default();
+                if !existing.is_empty() && existing != shipped {
+                    // Managed files are refreshed so shipped fixes land, but
+                    // silently discarding an edit is not acceptable.
+                    println!(
+                        "  replaced   {} (yours saved as {}.yours)",
+                        target.display(),
+                        entry.file_name().to_string_lossy()
+                    );
+                    std::fs::write(target.with_extension("toml.yours"), &existing)?;
+                }
+                std::fs::write(&target, shipped)?;
             }
         }
     }
@@ -910,8 +986,9 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
         );
     }
 
+    auth::validate_name(account)?;
     let account_dir = auth::dir(&paths, harness, account);
-    let already = auth::is_captured(&paths, harness, account);
+    let already = auth::is_captured(&paths, &adapter, account);
     auth::prepare(&adapter, &account_dir, "/home/agent")?;
 
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
@@ -948,30 +1025,30 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     }
     println!();
     let status = Command::new(backend.program()).args(backend.args(&plan)).status()?;
-    let _ = session.remove(&paths.repo);
-
-    // "Something was written" is too weak: a harness writes its default config
-    // just by starting, so an aborted login leaves a plausible-looking account
-    // with no token in it.
-    let unfilled = auth::unfilled(&adapter, &account_dir, "/home/agent");
-    if !unfilled.is_empty() {
-        anyhow::bail!(
-            "the login did not complete — still empty:\n{}\n  \
-             run `omh auth {harness} {account}` again and finish signing in",
-            unfilled
-                .iter()
-                .map(|p| format!("    {}", p.display()))
-                .collect::<Vec<_>>()
-                .join("\n")
-        );
+    if let Err(e) = session.remove(&paths.repo) {
+        // A leftover `auth` worktree wins `session::current()` and silently
+        // becomes the session the next launch runs in.
+        eprintln!("omh: warning: could not remove the auth worktree: {e}");
     }
+
+    // Host paths, not guest ones: the guest path names a container that has
+    // already been torn down and that the user cannot inspect.
+    let unfilled: Vec<std::path::PathBuf> = auth::unfilled(&adapter, &account_dir, auth::GUEST_HOME)
+        .iter()
+        .map(|guest| {
+            account_dir.join(
+                guest.strip_prefix(auth::GUEST_HOME).unwrap_or(guest.as_path()),
+            )
+        })
+        .collect();
+    auth::login_outcome(status.success(), &unfilled)
+        .map_err(|e| e.context(format!("run `omh auth {harness} {account}` again")))?;
     println!("\nomh: `{account}` captured for {harness}");
-    let all = auth::accounts(&paths, harness);
+    let all = auth::accounts(&paths, &adapter);
     if all.len() > 1 {
         println!("  accounts: {}", all.join(", "));
         println!("  choose per project with `omh config set account <name>`");
     }
-    let _ = status;
     Ok(())
 }
 
@@ -984,7 +1061,7 @@ fn ls(cwd: &std::path::Path) -> Result<()> {
         println!("  (none — add {}/<name>.toml)", paths.adapters().display());
     }
     for a in &adapters {
-        let accounts = auth::accounts(&paths, &a.name);
+        let accounts = auth::accounts(&paths, a);
         let creds = if accounts.is_empty() { "not authed".to_string() } else { accounts.join(", ") };
         println!("  {:<10} {}", a.name, creds);
     }

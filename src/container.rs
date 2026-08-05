@@ -65,17 +65,6 @@ pub struct Options {
     pub account_dir: Option<PathBuf>,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self {
-            staging: Staging::Apply,
-            persist: crate::persist::Mode::Dtach,
-            tty: true,
-            account_dir: None,
-        }
-    }
-}
-
 pub fn plan(
     paths: &Paths,
     profile: &Profile,
@@ -125,7 +114,7 @@ pub fn plan(
     }
 
     Ok(Plan {
-        image: format!("omh/{}:latest", adapter.name),
+        image: crate::image::tag_for(adapter),
         mounts,
         env: vec![("OMH_SESSION".into(), session.id.clone())],
         network: paths.network(),

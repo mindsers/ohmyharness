@@ -25,14 +25,23 @@ pub enum Expect {
     Mentions(Vec<String>),
     /// The directory holds an entry for each of these.
     Entries(Vec<String>),
+    /// A temp file can be renamed over this path.
+    ///
+    /// The one failure omh cannot see from the host: a bind-mounted *file* is a
+    /// mount point, so `rename()` onto it returns EBUSY. Every tool saves a
+    /// token that way, so this decides whether a login can persist at all.
+    AtomicWrite,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Check {
-    pub capability: Capability,
+    /// Label shown in the report.
+    pub name: String,
     /// Path **inside the sandbox**, never on the host.
     pub guest: PathBuf,
     pub expect: Expect,
+    /// Whether `guest` is a directory. Decides how the probe writes.
+    pub dir: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +49,26 @@ pub struct Outcome {
     pub name: String,
     pub ok: bool,
     pub detail: String,
+}
+
+/// What must be true of the credential mounts, given an account.
+///
+/// Nothing in process can answer this — it is a property of how the runtime
+/// binds the path, not of anything omh wrote.
+pub fn credential_checks(adapter: &Adapter) -> Vec<Check> {
+    // The *token* is what must survive. The account record beside it is written
+    // in place by every harness seen so far, and it sits directly in $HOME where
+    // there is no directory to mount — so it is deliberately not a hard check.
+    adapter
+        .token
+        .iter()
+        .map(|template| Check {
+            name: "token".into(),
+            guest: expand(template.trim_end_matches('/'), GUEST_HOME),
+            expect: Expect::AtomicWrite,
+            dir: template.ends_with('/'),
+        })
+        .collect()
 }
 
 /// What must be true inside the sandbox, given this profile and adapter.
@@ -69,7 +98,7 @@ pub fn checks(profile: &Profile, adapter: &Adapter) -> Vec<Check> {
             Render::ClaudeSettings => Expect::NonEmptyFile,
         };
 
-        out.push(Check { capability, guest, expect });
+        out.push(Check { name: capability.to_string(), guest, expect, dir: binding.render == Render::Dir });
     }
     out
 }
@@ -106,11 +135,26 @@ pub fn probe_script(checks: &[Check]) -> String {
     let mut out = String::from("#!/bin/sh\n");
     for check in checks {
         let path = check.guest.display();
-        let name = check.capability;
+        let name = &check.name;
         match &check.expect {
             Expect::NonEmptyFile => out.push_str(&format!(
                 "if [ -s '{path}' ]; then printf 'ok\\t{name}\\t{path}\\n'; \
                  else printf 'fail\\t{name}\\t{path} missing or empty\\n'; fi\n"
+            )),
+            // Preserve what is there: a probe that costs the user their token
+            // is worse than no probe. The directory case writes a scratch file
+            // and removes it; the file case renames byte-identical content back.
+            Expect::AtomicWrite if check.dir => out.push_str(&format!(
+                "if ( echo probe > '{path}/.omh-probe.tmp' && mv '{path}/.omh-probe.tmp' '{path}/.omh-probe' ) 2>/dev/null; \
+                 then printf 'ok\\t{name}\\t{path} (atomic write)\\n'; \
+                 else printf 'fail\\t{name}\\t{path} cannot be renamed over (EBUSY?)\\n'; fi; \
+                 rm -f '{path}/.omh-probe' '{path}/.omh-probe.tmp' 2>/dev/null\n"
+            )),
+            Expect::AtomicWrite => out.push_str(&format!(
+                "if ( cp '{path}' '{path}.omh-probe' && mv '{path}.omh-probe' '{path}' ) 2>/dev/null; \
+                 then printf 'ok\\t{name}\\t{path} (atomic write)\\n'; \
+                 else printf 'fail\\t{name}\\t{path} cannot be renamed over — a token saved here will not persist\\n'; fi; \
+                 rm -f '{path}.omh-probe' 2>/dev/null\n"
             )),
             Expect::Entries(names) => out.push_str(&format!(
                 "missing=''; for n in {}; do [ -e '{path}'/\"$n\" ] || missing=\"$missing $n\"; done; \
@@ -204,12 +248,9 @@ mod tests {
         let fx = fixture();
         let got: Vec<_> = checks(&fx.profile, &adapter("claude"))
             .into_iter()
-            .map(|c| c.capability)
+            .map(|c| c.name)
             .collect();
-        assert_eq!(
-            got,
-            vec![Capability::Rules, Capability::Skills, Capability::Mcp, Capability::Subagents]
-        );
+        assert_eq!(got, vec!["AGENTS", "skills", "mcp", "subagents"]);
     }
 
     /// A capability the harness cannot express is not a failure — it was
@@ -217,12 +258,12 @@ mod tests {
     #[test]
     fn capabilities_the_harness_cannot_express_are_not_checked() {
         let fx = fixture();
-        let caps: Vec<_> = checks(&fx.profile, &adapter("opencode"))
+        let caps: Vec<String> = checks(&fx.profile, &adapter("opencode"))
             .into_iter()
-            .map(|c| c.capability)
+            .map(|c| c.name)
             .collect();
-        assert!(!caps.contains(&Capability::Subagents), "opencode has no subagents");
-        assert!(caps.contains(&Capability::Skills));
+        assert!(!caps.iter().any(|c| c == "subagents"), "opencode has no subagents");
+        assert!(caps.iter().any(|c| c == "skills"));
     }
 
     /// The entire point: doctor must inspect where the *harness* looks, not
@@ -244,10 +285,10 @@ mod tests {
         let fx = fixture();
         let cs = checks(&fx.profile, &adapter("claude"));
 
-        let skills = cs.iter().find(|c| c.capability == Capability::Skills).unwrap();
+        let skills = cs.iter().find(|c| c.name == "skills").unwrap();
         assert_eq!(skills.expect, Expect::Entries(vec!["graphify".into()]));
 
-        let mcp = cs.iter().find(|c| c.capability == Capability::Mcp).unwrap();
+        let mcp = cs.iter().find(|c| c.name == "mcp").unwrap();
         assert_eq!(mcp.expect, Expect::Mentions(vec!["codegraph".into()]));
     }
 
@@ -317,5 +358,77 @@ mod tests {
     #[test]
     fn all_ok_passes() {
         assert!(passed(&parse("ok\ta\t-\nok\tb\t-\n")));
+    }
+
+    // ── credentials ─────────────────────────────────────────────────────────
+
+    /// The failure that made every login silently fail to persist. It cannot be
+    /// reproduced on the host — only inside the sandbox, against the real mount.
+    #[test]
+    fn every_credential_mount_is_probed_for_atomic_writes() {
+        let cs = credential_checks(&adapter("claude"));
+        assert!(!cs.is_empty(), "an adapter with credentials must be probed");
+        assert!(
+            cs.iter().all(|c| c.expect == Expect::AtomicWrite),
+            "a credential check is about rename, not content: {cs:?}"
+        );
+        let guests: Vec<String> = cs.iter().map(|c| c.guest.display().to_string()).collect();
+        assert!(
+            guests.iter().any(|g| g.ends_with(".credentials.json")),
+            "the declared token must be probed: {guests:?}"
+        );
+    }
+
+    #[test]
+    fn an_adapter_without_credentials_is_not_probed() {
+        let bare: Adapter = toml::from_str(
+            r#"
+            name = "b"
+            bin = "b"
+            install = "x"
+            [capabilities.rules]
+            path = "/work/AGENTS.md"
+            render = "concat"
+            "#,
+        )
+        .unwrap();
+        assert!(credential_checks(&bare).is_empty());
+    }
+
+    /// Probing must not cost the user their login. For a file, the probe writes
+    /// back byte-identical content, so a successful rename changes nothing and a
+    /// failed one leaves the original untouched.
+    /// Every adapter that declares a token gets it probed — this is the check
+    /// that decides whether a login can persist at all.
+    #[test]
+    fn every_adapter_with_a_token_has_it_probed() {
+        for name in ["claude", "opencode"] {
+            let a = adapter(name);
+            assert_eq!(credential_checks(&a).len(), a.token.len(), "{name}");
+        }
+    }
+
+    #[test]
+    fn probing_a_credential_file_preserves_it() {
+        let cs = credential_checks(&adapter("claude"));
+        let script = probe_script(&cs);
+        assert!(script.contains("cp "), "must copy the original before renaming: {script}");
+        assert!(
+            !script.contains("> '/home/agent/.claude/.credentials.json'"),
+            "must never truncate a credential file: {script}"
+        );
+    }
+
+    #[test]
+    fn the_probe_cleans_up_after_itself() {
+        let script = probe_script(&credential_checks(&adapter("claude")));
+        assert!(script.contains("rm -f"), "the probe file must not be left behind: {script}");
+    }
+
+    #[test]
+    fn the_atomic_write_probe_reports_in_the_same_protocol() {
+        let script = probe_script(&credential_checks(&adapter("claude")));
+        assert!(script.contains("printf 'ok"), "got: {script}");
+        assert!(script.contains("printf 'fail"), "got: {script}");
     }
 }

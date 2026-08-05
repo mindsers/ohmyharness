@@ -586,65 +586,77 @@ omh auth claude work
 omh -a work claude              # or: omh config set account work
 ```
 
-An **account is a captured snapshot of a harness's own credential files**. It is
-keyed by *harness*, not by provider, because a harness is what can actually be
-captured — two harnesses talking to the same provider still each need their own
-login.
-
+An **account is a captured snapshot of a harness's own credential files**, keyed
+by *harness* rather than provider — a harness is what can actually be captured,
+and two harnesses talking to the same provider still each need their own login.
 Which account a session uses is a **project-level setting**, resolved through the
-usual three layers, because that is how it actually varies: this repo is work,
-that one is personal.
+usual three layers: this repo is work, that one is personal.
 
-```
-~/.omh/creds/<harness>/<account>/.claude/.credentials.json
-```
+### Mount the directory, never the token file
 
-Storage mirrors the guest path, so an account directory is legible rather than a
-pile of mangled names.
-
-### There is no capture step
-
-Credentials mount **writable at the paths the harness reads**, so the login
-writes straight through to the host. `omh auth` prepares and runs; nothing is
-copied afterwards.
-
-Two consequences that are easy to get wrong:
-
-- **Docker turns a mount of a non-existent host path into a directory**, so a
-  first login would write its token into a folder the harness cannot read.
-  `prepare` lays down empty placeholder files first.
-- **A placeholder is not a login.** `is_captured` requires non-empty files, or an
-  interrupted `omh auth` would leave something that reports as authenticated.
-
-### Ambiguity is refused, never guessed
-
-```
-$ omh claude
-Error: claude has several accounts: personal, work
-  pick one with `omh config set account <name>` or `-a <name>`
+```toml
+creds = ["$HOME/.claude/", "$HOME/.claude.json"]   # trailing slash = directory
+token = ["$HOME/.claude/.credentials.json"]        # what proves a login
 ```
 
-Not being logged in at all is fine — the harness prompts, which is what you want
-before your first `omh auth`. But an account you **named** and do not have stops
-the launch: silently running with no credentials produces a session that is
-logged out for reasons nothing explains.
+**You cannot `rename()` over a bind-mounted file** — it is a mount point, so the
+kernel returns `EBUSY`:
 
-Two identities and no stated preference is exactly when guessing is most
-expensive — you would send work traffic through a personal account and never
-notice.
+```
+mv: cannot move '.tmp1' to '.credentials.json': Device or resource busy
+```
+
+Every tool saves a token by writing a temp file and renaming over it, so mounting
+the token *file* means the login succeeds and silently never persists. Mounting
+the enclosing directory makes the rename an ordinary operation inside it.
+
+That collides with the capability mounts living in the same directory, because
+Docker refuses to create a mountpoint inside a bind-mounted host directory
+("is outside of rootfs"). `omh auth` therefore prepares those mountpoints on the
+host first — `.claude/skills`, `.claude/commands`, `.claude/agents`,
+`.claude/settings.json`.
+
+Docker also creates any missing mount parent as **root**, which leaves the agent
+unable to write beside its own config: transcripts fail with `EACCES` and atomic
+writes have nowhere to put their temp file. The harness image creates and owns
+every directory it will mount into, derived from the adapter.
+
+### `token` is what proves a login
+
+A harness fills its config directory just by starting — Claude Code writes
+`statsig/`, `projects/`, `todos/` on boot. Inferring the login from "does this
+directory hold anything" therefore reports success for a session with no token at
+all, which is exactly the bug it replaced. The adapter names the file instead,
+and `is_captured` is *defined* as `unfilled(...).is_empty()` so the two answers
+can never disagree.
+
+Placeholders must be **parseable**, not merely present: `prepare` writes `{}`
+into JSON files, because an empty file is valid TOML and YAML but not JSON, and a
+harness that parses its config on startup refuses to run. A placeholder is
+recognised as such, so it never counts as a login.
+
+### What stops a launch
+
+- **Not being logged in is fine** — the harness prompts, which is what you want
+  before your first `omh auth`.
+- **An account you named and do not have** stops the launch: running with no
+  credentials produces a session that is logged out for reasons nothing explains.
+- **Two identities and no stated preference** stops it too. Guessing would send
+  work traffic through a personal account and never say so.
+- **Account names are validated as single path components.** Credentials mount
+  writable, so `omh auth claude ../../..` would otherwise resolve to `~` and hand
+  the agent the user's real credential store.
+- **The runtime's exit status is checked before the filesystem.** A container that
+  failed to start leaves the previous credentials in place, which would otherwise
+  read as a successful re-authentication.
 
 ### The invariant this bends
 
-Credentials are writable, which the sandbox contract previously forbade. The
-contract is now stated precisely rather than quietly widened:
-
 > The worktree is writable because that is the work. Credentials are writable
-> because OAuth tokens refresh in place, and a read-only mount would discard
-> every refreshed token. **Nothing else is.**
+> because tokens refresh in place. **Nothing else is.**
 
-This remains weaker than `sbx`'s model, where secrets are injected at the egress
-proxy and the agent never holds its own token — see §14.2. Several accounts makes
-that gap wider, not narrower.
+Still weaker than `sbx`, where secrets are injected at the egress proxy and the
+agent never holds its own token (§14.2). Several accounts widens that gap.
 
 ---
 
@@ -830,6 +842,9 @@ Load-bearing invariants, each with a failing-without-it test:
 | each MCP format emits its harness's real schema | a wrong shape means zero servers and no complaint |
 | every renderer round-trips through its parser | else import silently drops data |
 | a probe with no output is never a pass | silence means the sandbox never ran it |
+| the declared token is atomically writable | a bind-mounted file returns EBUSY and the login never persists |
+| an account name is a single path component | otherwise credentials mount the user's real `~` writable |
+| a runtime failure is never a successful login | stale credentials would read as a fresh capture |
 | sshd publishes on 127.0.0.1 only | 0.0.0.0 exposes a shell in the sandbox to the LAN |
 | a session runs detached, never `--rm` | it must outlive the terminal, or nothing can attach |
 | a plan is rejected when the backend lacks a capability | else `sbx` fails mysteriously instead of loudly |
@@ -857,7 +872,28 @@ omh doctor: claude (in omh/claude:latest)
 ```
 
 Capabilities the harness cannot express are skipped, not failed — they were
-already reported as dropped at launch. **A probe that produces no output is never
+already reported as dropped at launch.
+
+**It probes credentials too**, which is the half no in-process test can reach:
+whether a token saved at a path survives depends on how the runtime binds it, not
+on anything omh wrote. The probe attempts the temp-file-plus-rename that every
+token save performs:
+
+```
+  ✓ token      /home/agent/.claude/.credentials.json (atomic write)
+```
+
+It is non-destructive by construction — the file case copies the original and
+renames byte-identical content back, so a successful probe changes nothing and a
+failed one touches nothing. A health check that costs the user their login would
+be worse than no check.
+
+Run against a file mount it reports the real defect:
+
+```
+  ✗ token      /home/agent/.claude.json cannot be renamed over —
+               a token saved here will not persist
+``` **A probe that produces no output is never
 a pass**: silence means the sandbox never ran it, and calling that success would
 make doctor worse than useless.
 

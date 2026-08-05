@@ -12,8 +12,16 @@ use std::path::Path;
 
 pub const BASE_TAG: &str = "omh/base:latest";
 
-pub fn tag(harness: &str) -> String {
-    format!("omh/{harness}:latest")
+/// Tag includes a digest of the recipe, so a Dockerfile omh ships actually
+/// reaches an install that already built the old one. With a fixed `:latest`,
+/// `ensure` saw the tag present and skipped the build — while `omh init`
+/// reported "already built".
+pub fn tag_for(adapter: &Adapter) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    harness_dockerfile(adapter).hash(&mut h);
+    base_dockerfile().hash(&mut h);
+    format!("omh/{}:{:x}", adapter.name, h.finish())
 }
 
 pub fn base_dockerfile() -> String {
@@ -86,7 +94,10 @@ pub fn harness_dockerfile(adapter: &Adapter) -> String {
     df
 }
 
-/// Every directory under the agent's home that omh will mount into.
+/// Parents of every mount target under the agent's home.
+///
+/// `/home/agent` itself is excluded — the base image already owns it — and
+/// `/work` is a mount omh controls rather than one the image prepares.
 fn mount_parents(adapter: &Adapter) -> Vec<String> {
     const HOME: &str = "/home/agent";
     let mut dirs: Vec<String> = adapter
@@ -94,6 +105,7 @@ fn mount_parents(adapter: &Adapter) -> Vec<String> {
         .values()
         .map(|b| b.path.clone())
         .chain(adapter.creds.iter().cloned())
+        .chain(adapter.token.iter().cloned())
         .filter_map(|template| {
             let path = crate::adapter::expand(template.trim_end_matches('/'), HOME);
             // `/work` is a mount omh owns; only the home side needs preparing.
@@ -129,7 +141,7 @@ pub fn ensure(program: &str, adapter: &Adapter) -> Result<()> {
         eprintln!("omh: building {BASE_TAG} (first run only)");
         build(program, BASE_TAG, &base_dockerfile())?;
     }
-    let t = tag(&adapter.name);
+    let t = tag_for(adapter);
     if !exists(program, &t) {
         eprintln!("omh: building {t}");
         build(program, &t, &harness_dockerfile(adapter))?;
@@ -198,10 +210,14 @@ pub fn container_running(program: &str, name: &str) -> bool {
 }
 
 /// Stopped-but-present containers block `run --name`, so clear them first.
-pub fn container_remove(program: &str, name: &str) {
-    let _ = std::process::Command::new(program)
-        .args(["rm", "-f", name])
-        .output();
+pub fn container_remove(program: &str, name: &str) -> Result<()> {
+    let out = std::process::Command::new(program).args(["rm", "-f", name]).output()?;
+    if !out.status.success() {
+        // A sandbox that is still running still has the credential directory
+        // mounted writable; reporting it stopped would be a lie that matters.
+        anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
 }
 
 pub fn exists(program: &str, tag: &str) -> bool {
@@ -216,18 +232,33 @@ pub fn exists(program: &str, tag: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn adapters() -> &'static Path {
+        Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/adapters"))
+    }
+
     fn claude() -> Adapter {
-        Adapter::find(
-            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/adapters")),
-            "claude",
-        )
-        .unwrap()
+        Adapter::find(adapters(), "claude").unwrap()
     }
 
     #[test]
-    fn tags_are_derived_from_the_harness_name() {
-        assert_eq!(tag("claude"), "omh/claude:latest");
-        assert_eq!(tag("opencode"), "omh/opencode:latest");
+    fn tags_name_their_harness() {
+        assert!(tag_for(&claude()).starts_with("omh/claude:"));
+    }
+
+    /// Regression: with a fixed `:latest`, `ensure` saw the tag present and
+    /// skipped the build, so a Dockerfile fix never reached an install that had
+    /// already built the old one — while `omh init` reported "already built".
+    #[test]
+    fn a_changed_recipe_is_a_different_tag() {
+        let mut a = claude();
+        let before = tag_for(&a);
+        a.install = "npm install -g @anthropic-ai/claude-code@next".into();
+        assert_ne!(tag_for(&a), before, "a changed recipe must force a rebuild");
+    }
+
+    #[test]
+    fn an_unchanged_recipe_keeps_its_tag() {
+        assert_eq!(tag_for(&claude()), tag_for(&claude()));
     }
 
     /// The four things `sbx` requires of a kit base image. Getting these wrong
@@ -310,13 +341,64 @@ mod tests {
         assert!(df.contains("chown"), "must be owned by agent, not root: {df}");
     }
 
+    /// Asserted on the parsed list, not a positional substring: the old form
+    /// checked `!df.contains("mkdir -p /work")`, which sorting guaranteed could
+    /// never appear even with the filter removed entirely.
     #[test]
     fn only_directories_under_the_agents_home_are_created() {
-        let df = harness_dockerfile(&claude());
-        // rules live in the worktree, which is a mount omh controls
-        assert!(!df.contains("mkdir -p /work"), "not ours to create: {df}");
+        for name in ["claude", "opencode"] {
+            let a = Adapter::find(adapters(), name).unwrap();
+            for dir in mount_parents(&a) {
+                assert!(dir.starts_with("/home/agent"), "{name}: {dir} is not ours to create");
+            }
+        }
     }
 
+    /// The load-bearing half of this fix is the credential paths, and the only
+    /// adapter that exercises it is opencode — deleting the `creds` chain left
+    /// the whole suite green.
+    #[test]
+    fn credential_directories_are_created_too() {
+        let a = Adapter::find(adapters(), "opencode").unwrap();
+        let dirs = mount_parents(&a);
+        assert!(
+            dirs.iter().any(|d| d.contains("/.local/share")),
+            "the creds parent must be created: {dirs:?}"
+        );
+    }
+
+    /// Every home-side mount omh makes needs its parent created, or docker
+    /// makes it root-owned and the agent cannot write beside its own config.
+    #[test]
+    fn every_home_side_mount_has_its_parent_created() {
+        for name in ["claude", "opencode"] {
+            let a = Adapter::find(adapters(), name).unwrap();
+            let created = mount_parents(&a);
+            let wanted = a
+                .capabilities
+                .values()
+                .map(|b| b.path.clone())
+                .chain(a.creds.iter().cloned())
+                .chain(a.token.iter().cloned());
+            for template in wanted {
+                let p = crate::adapter::expand(template.trim_end_matches('/'), "/home/agent");
+                if !p.starts_with("/home/agent") {
+                    continue;
+                }
+                let Some(parent) = p.parent().map(|x| x.display().to_string()) else { continue };
+                if parent == "/home/agent" {
+                    continue; // the base image already owns the home itself
+                }
+                assert!(
+                    created.iter().any(|d| parent == *d || parent.starts_with(&format!("{d}/"))),
+                    "{name}: nothing creates {parent} for {template}"
+                );
+            }
+        }
+    }
+
+    /// Installing needs root; running must not have it. An image that ends as
+    /// root hands the agent the sandbox's own escape hatch.
     #[test]
     fn images_end_as_the_unprivileged_user() {
         for df in [base_dockerfile(), harness_dockerfile(&claude())] {

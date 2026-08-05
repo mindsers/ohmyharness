@@ -43,14 +43,6 @@ impl Paths {
 
     /// Outside the repo on purpose: nested worktrees make your IDE index every
     /// session's full copy of the codebase.
-    /// Authed means credentials are actually *present*, not that a directory
-    /// exists. A failed `omh auth` must never look like a successful one.
-    pub fn is_authed(&self, harness: &str) -> bool {
-        std::fs::read_dir(self.creds(harness))
-            .map(|mut entries| entries.next().is_some())
-            .unwrap_or(false)
-    }
-
     pub fn worktrees(&self) -> PathBuf {
         self.root.join("worktrees").join(self.repo_id())
     }
@@ -233,28 +225,8 @@ mod tests {
         assert!(err.to_string().contains("git init"), "got: {err}");
     }
 
-    /// Regression: `omh auth` created the credential directory before bailing
-    /// "not implemented", so `omh ls` cheerfully reported the harness as authed.
-    #[test]
-    fn an_empty_credential_directory_is_not_authed() {
-        let f = fixture(&[]);
-        std::fs::create_dir_all(f.paths.creds("claude")).unwrap();
-        assert!(!f.paths.is_authed("claude"));
-    }
 
-    #[test]
-    fn credentials_present_means_authed() {
-        let f = fixture(&[]);
-        let dir = f.paths.creds("claude");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(".credentials.json"), "{}").unwrap();
-        assert!(f.paths.is_authed("claude"));
-    }
 
-    #[test]
-    fn a_missing_credential_directory_is_not_authed() {
-        assert!(!fixture(&[]).paths.is_authed("claude"));
-    }
 
     /// Regression: staging was keyed by session and harness only, so two repos
     /// both using session `s01` shared one rendered profile — repo A's MCP

@@ -2,6 +2,9 @@ name    = "opencode"
 bin     = "opencode"
 install = "npm install -g opencode-ai"
 creds   = ["$HOME/.local/share/opencode/"]
+# What proves a login: a harness fills its config dir just by starting.
+token   = ["$HOME/.local/share/opencode/auth.json"]
+
 login   = "run `/login` inside opencode, then exit"
 
 [capabilities.rules]
