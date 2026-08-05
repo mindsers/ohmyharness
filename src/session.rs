@@ -102,6 +102,25 @@ pub fn default_branch(repo: &Path) -> String {
         .unwrap_or_else(|_| "HEAD".into())
 }
 
+/// The session a bare `omh <harness>` or `omh attach` should land in: the most
+/// recently created one.
+pub fn current(worktrees_dir: &Path) -> Option<String> {
+    list(worktrees_dir).pop()
+}
+
+/// Resolve which session to use. Creating a fresh one on every launch would
+/// defeat persistence entirely — you would never reattach to the agent you left
+/// running — so a new session is something you ask for.
+pub fn pick(worktrees_dir: &Path, explicit: Option<&str>, new: bool) -> String {
+    if let Some(id) = explicit {
+        return id.to_string();
+    }
+    if new {
+        return next_id(worktrees_dir);
+    }
+    current(worktrees_dir).unwrap_or_else(|| next_id(worktrees_dir))
+}
+
 /// Human-readable, monotonic session ids: `s01`, `s02`, ...
 pub fn next_id(worktrees_dir: &Path) -> String {
     let used = std::fs::read_dir(worktrees_dir)
@@ -377,5 +396,57 @@ mod tests {
             git(&root, &["commit", "-q", "--allow-empty", "-m", m]).unwrap();
         }
         assert_eq!(s.behind(&root, "master"), 2);
+    }
+
+    // ── choosing a session ──────────────────────────────────────────────────
+
+    fn worktrees(ids: &[&str]) -> (tempfile::TempDir, PathBuf) {
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join("wt");
+        std::fs::create_dir_all(&wt).unwrap();
+        for id in ids {
+            std::fs::create_dir_all(wt.join(id)).unwrap();
+        }
+        (d, wt)
+    }
+
+    #[test]
+    fn there_is_no_current_session_before_any_exist() {
+        let (_d, wt) = worktrees(&[]);
+        assert_eq!(current(&wt), None);
+    }
+
+    #[test]
+    fn the_current_session_is_the_most_recent() {
+        let (_d, wt) = worktrees(&["s01", "s02", "s03"]);
+        assert_eq!(current(&wt).as_deref(), Some("s03"));
+    }
+
+    /// Regression: every bare launch called `next_id`, so `omh claude` twice
+    /// produced two sessions and you could never reattach to the agent you left
+    /// running — which makes dtach persistence pointless.
+    #[test]
+    fn a_bare_launch_resumes_rather_than_multiplying_sessions() {
+        let (_d, wt) = worktrees(&["s01"]);
+        assert_eq!(pick(&wt, None, false), "s01");
+    }
+
+    #[test]
+    fn the_first_launch_creates_the_first_session() {
+        let (_d, wt) = worktrees(&[]);
+        assert_eq!(pick(&wt, None, false), "s01");
+    }
+
+    #[test]
+    fn a_new_session_is_something_you_ask_for() {
+        let (_d, wt) = worktrees(&["s01", "s02"]);
+        assert_eq!(pick(&wt, None, true), "s03");
+    }
+
+    #[test]
+    fn an_explicit_id_always_wins() {
+        let (_d, wt) = worktrees(&["s01", "s02"]);
+        assert_eq!(pick(&wt, Some("s01"), false), "s01");
+        assert_eq!(pick(&wt, Some("s09"), true), "s09", "explicit beats --new");
     }
 }

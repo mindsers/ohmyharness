@@ -1,0 +1,3 @@
+name = "cursor"
+bin  = "cursor"
+args = ["--remote", "ssh-remote+$ALIAS", "/work"]

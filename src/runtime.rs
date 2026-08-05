@@ -30,6 +30,12 @@ pub trait Runtime: std::fmt::Debug {
     fn caps(&self) -> Caps;
     /// Arguments after the program name.
     fn args(&self, plan: &Plan) -> Vec<String>;
+
+    /// Start the session container detached, publishing sshd on loopback.
+    fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String>;
+
+    /// Run something inside an already-running session.
+    fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String>;
 }
 
 #[derive(Debug)]
@@ -52,7 +58,10 @@ impl Runtime for Docker {
     }
 
     fn args(&self, plan: &Plan) -> Vec<String> {
-        let mut a: Vec<String> = vec!["run".into(), "--rm".into(), "-it".into()];
+        let mut a: Vec<String> = vec!["run".into(), "--rm".into()];
+        if plan.tty {
+            a.push("-it".into());
+        }
         for m in &plan.mounts {
             a.push("-v".into());
             a.push(format!(
@@ -70,6 +79,54 @@ impl Runtime for Docker {
         a.extend(["-w".into(), plan.workdir.clone()]);
         a.push(plan.image.clone());
         a.extend(plan.argv.iter().cloned());
+        a
+    }
+
+    fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String> {
+        // Detached and unnamed by --rm: a session must outlive the terminal
+        // that started it, or `omh code` has nothing to attach to.
+        let mut a: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            "--name".into(),
+            name.into(),
+        ];
+        // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
+        // to the local network.
+        a.push("-p".into());
+        a.push(format!("127.0.0.1:{port}:22"));
+        for m in &plan.mounts {
+            a.push("-v".into());
+            a.push(format!(
+                "{}:{}{}",
+                m.host.display(),
+                m.guest.display(),
+                if m.read_only { ":ro" } else { "" }
+            ));
+        }
+        for (k, v) in &plan.env {
+            a.push("-e".into());
+            a.push(format!("{k}={v}"));
+        }
+        a.push("-e".into());
+        a.push(format!("OMH_PUBKEY={pubkey}"));
+        a.extend(["--network".into(), plan.network.clone()]);
+        a.extend(["-w".into(), plan.workdir.clone()]);
+        a.push(plan.image.clone());
+        a.push("omh-session".into());
+        a
+    }
+
+    fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String> {
+        let mut a: Vec<String> = vec!["exec".into()];
+        if tty {
+            a.push("-it".into());
+        }
+        // Never root: the session's PID 1 needs privilege to run sshd, the
+        // agent does not.
+        a.extend(["-u".into(), "agent".into(), "-w".into(), "/work".into()]);
+        a.push(name.into());
+        a.extend(argv.iter().cloned());
         a
     }
 }
@@ -110,6 +167,33 @@ impl Runtime for Sbx {
         }
         a.push("--".into());
         a.extend(plan.argv.iter().cloned());
+        a
+    }
+
+    fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String> {
+        // PROVISIONAL — sbx session semantics are part of the open spike.
+        let mut a: Vec<String> = vec!["run".into(), "--detach".into(), "--name".into(), name.into()];
+        a.push("--publish".into());
+        a.push(format!("127.0.0.1:{port}:22"));
+        for m in &plan.mounts {
+            a.push("--workspace".into());
+            a.push(format!("{}{}", m.host.display(), if m.read_only { ":ro" } else { "" }));
+        }
+        a.push("--env".into());
+        a.push(format!("OMH_PUBKEY={pubkey}"));
+        a.push("--".into());
+        a.push("omh-session".into());
+        a
+    }
+
+    fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String> {
+        let mut a: Vec<String> = vec!["exec".into()];
+        if tty {
+            a.push("-it".into());
+        }
+        a.push(name.into());
+        a.push("--".into());
+        a.extend(argv.iter().cloned());
         a
     }
 }
@@ -167,6 +251,7 @@ mod tests {
             workdir: "/work".into(),
             argv: vec!["claude".into()],
             dropped: vec![],
+            tty: true,
         }
     }
 
@@ -290,6 +375,20 @@ mod tests {
 
     // ── argument construction ───────────────────────────────────────────────
 
+    /// doctor captures the probe's output, so it must not request a terminal —
+    /// docker refuses `-it` when stdin is not a TTY, which would make the check
+    /// fail for reasons unrelated to the adapter.
+    #[test]
+    fn a_plan_without_a_tty_does_not_ask_for_one() {
+        let mut plan = sample_plan();
+        plan.tty = false;
+        let args = Docker.args(&plan);
+        assert!(!args.contains(&"-it".to_string()), "got: {args:?}");
+
+        plan.tty = true;
+        assert!(Docker.args(&plan).contains(&"-it".to_string()));
+    }
+
     #[test]
     fn docker_passes_every_mount_and_preserves_read_only() {
         let plan = sample_plan();
@@ -334,5 +433,57 @@ mod tests {
                 backend.name()
             );
         }
+    }
+
+    // ── session containers ──────────────────────────────────────────────────
+
+    /// sshd on 0.0.0.0 publishes a shell inside the sandbox to the local
+    /// network — the exact inverse of what this project is for.
+    #[test]
+    fn the_session_publishes_ssh_on_loopback_only() {
+        let joined = Docker.up_args(&sample_plan(), "omh-repo-s01", 49200, "ssh-ed25519 AAA").join(" ");
+        assert!(joined.contains("127.0.0.1:49200:22"), "got: {joined}");
+        assert!(!joined.contains("0.0.0.0"));
+    }
+
+    #[test]
+    fn the_session_runs_detached_and_named() {
+        let args = Docker.up_args(&sample_plan(), "omh-repo-s01", 49200, "k");
+        assert!(args.contains(&"-d".to_string()), "must outlive the terminal: {args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "--name" && w[1] == "omh-repo-s01"));
+        assert!(!args.contains(&"--rm".to_string()), "a session must survive its launch");
+    }
+
+    /// The session carries the same mounts as a one-shot launch, or the harness
+    /// execed into it later sees no profile.
+    #[test]
+    fn the_session_carries_every_mount() {
+        let plan = sample_plan();
+        let joined = Docker.up_args(&plan, "n", 1, "k").join(" ");
+        for m in &plan.mounts {
+            assert!(joined.contains(&m.host.display().to_string()), "missing {m:?}");
+        }
+        assert_eq!(joined.matches(":ro").count(), plan.mounts.len() - 1);
+    }
+
+    #[test]
+    fn the_public_key_reaches_the_session() {
+        let joined = Docker.up_args(&sample_plan(), "n", 1, "ssh-ed25519 AAAkey").join(" ");
+        assert!(joined.contains("ssh-ed25519 AAAkey"), "got: {joined}");
+    }
+
+    #[test]
+    fn exec_targets_the_named_session_and_runs_unprivileged() {
+        let args = Docker.exec_args("omh-repo-s01", &["claude".into()], true);
+        assert_eq!(args[0], "exec");
+        assert!(args.contains(&"omh-repo-s01".to_string()));
+        assert!(args.windows(2).any(|w| w[0] == "-u" && w[1] == "agent"), "got: {args:?}");
+        assert_eq!(args.last().unwrap(), "claude");
+    }
+
+    #[test]
+    fn exec_asks_for_a_terminal_only_when_there_is_one() {
+        assert!(Docker.exec_args("n", &["x".into()], true).contains(&"-it".to_string()));
+        assert!(!Docker.exec_args("n", &["x".into()], false).contains(&"-it".to_string()));
     }
 }

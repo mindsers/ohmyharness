@@ -40,6 +40,10 @@ struct CanonicalMcp {
 }
 
 /// Merge by server name; later layers win.
+pub fn parse_layers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
+    merge_servers(files)
+}
+
 fn merge_servers(files: &[PathBuf]) -> Result<BTreeMap<String, Server>> {
     let mut out = BTreeMap::new();
     for f in files {

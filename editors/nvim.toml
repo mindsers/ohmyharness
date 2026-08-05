@@ -1,0 +1,4 @@
+# Remote Neovim over ssh; adjust to taste.
+name = "nvim"
+bin  = "ssh"
+args = ["-t", "$ALIAS", "cd /work && nvim"]

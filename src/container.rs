@@ -23,6 +23,8 @@ pub struct Plan {
     pub argv: Vec<String>,
     /// Capabilities the profile carries that this harness cannot express.
     pub dropped: Vec<(Capability, usize)>,
+    /// Interactive harnesses need a terminal; a captured probe must not ask.
+    pub tty: bool,
 }
 
 #[derive(Debug)]
@@ -58,11 +60,12 @@ pub enum Staging {
 pub struct Options {
     pub staging: Staging,
     pub persist: crate::persist::Mode,
+    pub tty: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { staging: Staging::Apply, persist: crate::persist::Mode::Dtach }
+        Self { staging: Staging::Apply, persist: crate::persist::Mode::Dtach, tty: true }
     }
 }
 
@@ -124,6 +127,7 @@ pub fn plan(
                 .collect(),
         ),
         dropped,
+        tty: opts.tty,
     })
 }
 
@@ -318,7 +322,7 @@ mod tests {
 
     fn plan_for(fx: &Fx, harness: &str) -> Plan {
         let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
-        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None }).unwrap()
+        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true }).unwrap()
     }
 
     /// The security contract: the agent may write exactly one place, the
@@ -436,7 +440,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let err = plan(&fx.paths, &fx.profile, &bad, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None }).unwrap_err();
+        let err = plan(&fx.paths, &fx.profile, &bad, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true }).unwrap_err();
         assert!(format!("{err:#}").contains("/work/"), "got: {err:#}");
     }
 
@@ -468,7 +472,7 @@ mod tests {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let args = ["--resume".to_string(), "abc".to_string()];
-        let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &args, Options { staging: Staging::Apply, persist: crate::persist::Mode::None }).unwrap();
+        let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &args, Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true }).unwrap();
         assert_eq!(p.argv, ["claude", "--resume", "abc"]);
     }
 
@@ -478,7 +482,7 @@ mod tests {
     fn skipped_staging_writes_nothing() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None }).unwrap();
+        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true }).unwrap();
 
         assert!(!fx.paths.root.join("run").exists(), "no staging directory");
         for name in ["CLAUDE.md", "AGENTS.md"] {
@@ -494,8 +498,8 @@ mod tests {
     fn skipped_staging_still_reports_the_real_mounts() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let dry = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None }).unwrap();
-        let wet = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None }).unwrap();
+        let dry = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true }).unwrap();
+        let wet = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true }).unwrap();
 
         let paths_of = |p: &Plan| -> Vec<String> {
             p.mounts.iter().map(|m| format!("{}:{}", m.host.display(), m.guest.display())).collect()
@@ -510,7 +514,7 @@ mod tests {
     fn the_planned_command_survives_losing_the_terminal() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::Dtach };
+        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::Dtach, tty: true };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
         assert_eq!(p.argv[0], "dtach");
@@ -521,7 +525,7 @@ mod tests {
     fn persistence_can_be_turned_off() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::None };
+        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);
     }

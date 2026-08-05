@@ -22,7 +22,7 @@ pub fn base_dockerfile() -> String {
     r#"FROM node:22-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates git ripgrep dtach sudo curl less jq procps \
+      ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server \
  && rm -rf /var/lib/apt/lists/*
 
 RUN usermod -l agent -d /home/agent -m node \
@@ -38,6 +38,25 @@ RUN test "$(id -u agent)" = "1000" && test "$(getent passwd agent | cut -d: -f6)
 # Mount points the launcher expects to exist, owned by the unprivileged user.
 RUN mkdir -p /work /omh/sock /omh/cache /omh/layers \
  && chown -R agent:agent /work /omh
+
+# Session entrypoint: install the key, start sshd, then stay alive so the
+# container outlives the command that created it. The key arrives as an env var
+# because a bind-mounted authorized_keys lands with host ownership and sshd
+# silently refuses to read one it does not trust.
+RUN printf '%s\n' \
+  '#!/bin/sh' \
+  'set -e' \
+  'mkdir -p "$HOME/.ssh" && chmod 700 "$HOME/.ssh"' \
+  'if [ -n "$OMH_PUBKEY" ]; then' \
+  '  printf "%s\\n" "$OMH_PUBKEY" > "$HOME/.ssh/authorized_keys"' \
+  '  chmod 600 "$HOME/.ssh/authorized_keys"' \
+  'fi' \
+  'sudo ssh-keygen -A >/dev/null 2>&1 || true' \
+  'sudo mkdir -p /run/sshd' \
+  'sudo /usr/sbin/sshd' \
+  'exec sleep infinity' \
+  > /usr/local/bin/omh-session \
+ && chmod 0755 /usr/local/bin/omh-session
 
 # Proxy forwarding, for backends that filter egress through one.
 ENV HTTP_PROXY="" HTTPS_PROXY="" NO_PROXY=""
@@ -136,6 +155,22 @@ pub fn ensure_network(program: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Is the session container up right now?
+pub fn container_running(program: &str, name: &str) -> bool {
+    std::process::Command::new(program)
+        .args(["inspect", "-f", "{{.State.Running}}", name])
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
+/// Stopped-but-present containers block `run --name`, so clear them first.
+pub fn container_remove(program: &str, name: &str) {
+    let _ = std::process::Command::new(program)
+        .args(["rm", "-f", name])
+        .output();
+}
+
 pub fn exists(program: &str, tag: &str) -> bool {
     std::process::Command::new(program)
         .args(["image", "inspect", tag])
@@ -182,6 +217,32 @@ mod tests {
         for tool in ["git", "dtach", "ripgrep"] {
             assert!(df.contains(tool), "missing {tool}: {df}");
         }
+    }
+
+    /// `omh code` attaches an IDE over SSH, so the session has to serve it.
+    #[test]
+    fn the_base_can_serve_ssh() {
+        let df = base_dockerfile();
+        assert!(df.contains("openssh-server"), "got: {df}");
+        assert!(df.contains("omh-session"), "needs a session entrypoint");
+    }
+
+    /// The key arrives as an env var rather than a mount: a bind-mounted
+    /// authorized_keys lands with host ownership, and sshd silently refuses to
+    /// read one it does not trust.
+    #[test]
+    fn the_session_entrypoint_installs_the_key_with_permissions_sshd_accepts() {
+        let df = base_dockerfile();
+        assert!(df.contains("OMH_PUBKEY"), "key must come from the environment");
+        assert!(df.contains("chmod 700"), "~/.ssh perms");
+        assert!(df.contains("chmod 600"), "authorized_keys perms");
+    }
+
+    #[test]
+    fn the_session_entrypoint_outlives_the_command_that_started_it() {
+        let df = base_dockerfile();
+        assert!(df.contains("sshd"), "must start sshd");
+        assert!(df.contains("sleep infinity"), "PID 1 must not exit");
     }
 
     #[test]

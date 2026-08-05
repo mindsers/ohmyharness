@@ -10,12 +10,15 @@ mod adapter;
 mod config;
 mod container;
 mod detect;
+mod doctor;
+mod editor;
 mod image;
 mod persist;
 mod profile;
 mod render;
 mod runtime;
 mod session;
+mod ssh;
 
 use adapter::Adapter;
 use anyhow::Context;
@@ -40,40 +43,114 @@ struct Cli {
     #[arg(long, global = true)]
     from: Option<String>,
 
+    /// Start a fresh session instead of resuming the most recent one.
+    #[arg(long, global = true)]
+    new: bool,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
 
+/// Built-ins and their aliases always beat a harness name — otherwise an
+/// adapter called `s` or `config` would silently shadow a command.
+pub const RESERVED: [&str; 12] = [
+    "init", "doctor", "d", "auth", "ls", "attach", "a", "sessions", "s", "config", "c", "help",
+];
+
 #[derive(Subcommand)]
 enum Cmd {
-    /// Scaffold `.omh/` in this repo.
+    /// Set this repo up. Decides everything; asks nothing.
     Init,
-    /// Log a harness in once, capturing its credentials into a volume.
+    /// Verify a harness actually sees the profile, inside a real sandbox.
+    #[command(visible_alias = "d")]
+    Doctor { harness: Option<String> },
+    /// Log a harness in once, capturing its credentials.
     Auth { harness: String },
-    /// List sessions and the harnesses available.
+    /// What you have here: harnesses, editors, sessions.
     Ls,
-    /// Show what a session changed, against a base branch.
+    /// Open a session in an editor, over SSH.
+    #[command(visible_alias = "a")]
+    Attach {
+        /// Defaults to $OMH_EDITOR or $EDITOR.
+        editor: Option<String>,
+    },
+    /// Work with sessions.
+    #[command(visible_alias = "s")]
+    Sessions {
+        #[command(subcommand)]
+        cmd: SessionsCmd,
+    },
+    /// Show settings with provenance, or change them.
+    #[command(visible_alias = "c")]
+    Config {
+        #[command(subcommand)]
+        cmd: Option<ConfigCmd>,
+    },
+    /// Anything else is a harness: `omh claude`, `omh opencode`.
+    #[command(external_subcommand)]
+    Run(Vec<String>),
+}
+
+#[derive(Subcommand)]
+enum McpCmd {
+    /// Servers, with the layer each comes from.
+    Ls,
+    /// Add a server. Defaults to the gitignored layer, because MCP env holds tokens.
+    Add {
+        name: String,
+        command: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+        #[arg(long = "env", value_parser = parse_env)]
+        env: Vec<(String, String)>,
+        #[arg(long, value_parser = parse_layer)]
+        layer: Option<config::Layer>,
+    },
+    /// Remove a server from one layer.
+    Rm {
+        name: String,
+        #[arg(long, value_parser = parse_layer)]
+        layer: Option<config::Layer>,
+    },
+    /// Import servers you already configured in an installed harness.
+    Import {
+        harness: String,
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long, value_parser = parse_layer)]
+        layer: Option<config::Layer>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionsCmd {
+    /// Sessions, their branches, and how far they have drifted.
+    Ls,
+    /// Remove a worktree. The branch is always kept.
+    Rm { session: String },
+    /// Stop a sandbox. The worktree and branch survive.
+    Down { session: Option<String> },
+    /// What a session changed, against its base branch.
     Diff {
         session: String,
-        /// Defaults to the repo's own default branch, not an assumed `main`.
+        /// Defaults to the repo's own default branch.
         #[arg(long)]
         base: Option<String>,
     },
-    /// Remove a session's worktree. The branch is kept.
-    Rm { session: String },
-    /// Show effective settings and which layer each one comes from.
-    Config {
-        /// Limit to a section: `policy` or `mcp`.
-        section: Option<String>,
-    },
-    /// Set a setting. Defaults to the gitignored layer so secrets cannot leak.
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Set a value. Defaults to the gitignored layer so secrets cannot leak.
     Set {
         key: String,
         value: String,
         #[arg(long, value_parser = parse_layer)]
         layer: Option<config::Layer>,
     },
-    /// Remove a setting from one layer, letting any lower layer resurface.
+    /// Remove a value from one layer, letting any lower layer resurface.
     Unset {
         key: String,
         #[arg(long, value_parser = parse_layer)]
@@ -84,50 +161,10 @@ enum Cmd {
         #[arg(long, value_parser = parse_layer)]
         layer: Option<config::Layer>,
     },
-    /// Manage MCP servers.
+    /// MCP servers — configuration, so it lives here.
     Mcp {
         #[command(subcommand)]
         cmd: McpCmd,
-    },
-    /// Anything else is a harness name: `omh claude`, `omh opencode`.
-    #[command(external_subcommand)]
-    Run(Vec<String>),
-}
-
-#[derive(Subcommand)]
-enum McpCmd {
-    /// List servers with the layer each comes from.
-    Ls,
-    /// Add a server. Defaults to the gitignored layer, because MCP env holds tokens.
-    Add {
-        name: String,
-        command: String,
-        /// Arguments passed to the server command.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-        #[arg(long = "env", value_parser = parse_env)]
-        env: Vec<(String, String)>,
-        #[arg(long, value_parser = parse_layer)]
-        layer: Option<config::Layer>,
-    },
-    /// Remove a server from one layer, letting any lower layer resurface.
-    Rm {
-        name: String,
-        #[arg(long, value_parser = parse_layer)]
-        layer: Option<config::Layer>,
-    },
-    /// Import servers you already configured in an installed harness.
-    Import {
-        /// Harness to import from — determines both the format and where to look.
-        harness: String,
-        /// Override the file to read.
-        #[arg(long)]
-        file: Option<std::path::PathBuf>,
-        /// Overwrite servers that already exist with different settings.
-        #[arg(long)]
-        force: bool,
-        #[arg(long, value_parser = parse_layer)]
-        layer: Option<config::Layer>,
     },
 }
 
@@ -139,24 +176,294 @@ fn main() -> Result<()> {
         Cmd::Init => init(&cwd),
         Cmd::Auth { harness } => auth(&cwd, harness),
         Cmd::Ls => ls(&cwd),
-        Cmd::Diff { session, base } => diff(&cwd, session, base.as_deref()),
-        Cmd::Rm { session } => rm(&cwd, session),
-        Cmd::Config { section } => show_config(&cwd, section.as_deref()),
-        Cmd::Set { key, value, layer } => set(&cwd, key, value, *layer),
-        Cmd::Unset { key, layer } => unset(&cwd, key, *layer),
-        Cmd::Edit { layer } => edit(&cwd, *layer),
-        Cmd::Mcp { cmd } => mcp(&cwd, cmd, cli.dry_run),
+        Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run),
+        Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref()),
+
+        Cmd::Sessions { cmd } => match cmd {
+            SessionsCmd::Ls => sessions_ls(&cwd),
+            SessionsCmd::Rm { session } => rm(&cwd, session),
+            SessionsCmd::Down { session } => down(&cwd, session.as_deref()),
+            SessionsCmd::Diff { session, base } => diff(&cwd, session, base.as_deref()),
+        },
+
+        Cmd::Config { cmd } => match cmd {
+            None => show_config(&cwd, None),
+            Some(ConfigCmd::Set { key, value, layer }) => set(&cwd, key, value, *layer),
+            Some(ConfigCmd::Unset { key, layer }) => unset(&cwd, key, *layer),
+            Some(ConfigCmd::Edit { layer }) => edit(&cwd, *layer),
+            Some(ConfigCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run),
+        },
+
         Cmd::Run(argv) => run(&cwd, argv, &cli),
     }
 }
 
+
+/// What to tell someone whose word matched nothing. Pure so it can be tested:
+/// the message is the entire value of this path.
+fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
+    if editors.iter().any(|e| e == name) {
+        return format!("`{name}` is an editor — try `omh attach {name}`");
+    }
+    if RESERVED.contains(&name) {
+        return format!("`{name}` is a command — see `omh {name} --help`");
+    }
+    format!("unknown harness `{name}`\n  available: {}", harnesses.join(", "))
+}
+
+/// Neither a harness nor a reserved word — say what is available, since the
+/// user cannot tell from the name alone which kind they meant.
+fn unknown_tool(paths: &Paths, name: &str, original: anyhow::Error) -> anyhow::Error {
+    let harnesses: Vec<String> = Adapter::load_dir(&paths.adapters())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
+    if harnesses.is_empty() {
+        return original;
+    }
+    let editors: Vec<String> = editor::Editor::load_dir(&paths.editors())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    anyhow::anyhow!("{}", tool_hint(name, &harnesses, &editors))
+}
+
+/// Bring a session's sandbox up if it is not already. A session is a *running
+/// container*, not a launch — that is what lets an editor attach to the same
+/// place the agent is working.
+fn session_up(
+    paths: &Paths,
+    profile: &Profile,
+    adapter: &Adapter,
+    session: &Session,
+) -> Result<(Box<dyn runtime::Runtime>, String)> {
+    let backend = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))?;
+    let name = paths.container(&session.id);
+    if image::container_running(backend.program(), &name) {
+        return Ok((backend, name));
+    }
+
+    let plan = container::plan(
+        paths,
+        profile,
+        adapter,
+        session,
+        &[],
+        container::Options { tty: false, ..Default::default() },
+    )?;
+    plan.validate(&backend.caps())?;
+    image::ensure(backend.program(), adapter)?;
+    image::ensure_network(backend.program(), &plan.network)?;
+
+    let key = ssh::ensure_key(&paths.keys())?;
+    let pubkey = std::fs::read_to_string(key.with_extension("pub"))?;
+    let port = ssh::port(&paths.repo_name(), &session.id);
+
+    image::container_remove(backend.program(), &name); // a stopped one blocks --name
+    let args = backend.up_args(&plan, &name, port, pubkey.trim());
+    let out = Command::new(backend.program()).args(&args).output()?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "starting session {}: {}",
+            session.id,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok((backend, name))
+}
+
+fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let profile = Profile::resolve(&paths);
+    let names: Vec<String> =
+        Adapter::load_dir(&paths.adapters())?.into_iter().map(|a| a.name).collect();
+    let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
+        .context("no adapters installed — run `omh init`")?;
+    let adapter = Adapter::find(&paths.adapters(), &harness)?;
+
+    std::fs::create_dir_all(paths.worktrees())?;
+    let id = session::pick(&paths.worktrees(), id, false);
+    let session = Session::new(&paths.worktrees(), id);
+    session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
+    session_up(&paths, &profile, &adapter, &session)?;
+
+    // The integration point is a managed SSH config include, not an IDE plugin —
+    // that is what keeps every editor working without omh knowing about any.
+    let home = dirs::home_dir().context("no home directory")?;
+    let alias = ssh::host_alias(&paths.repo_name(), &session.id);
+    let key = ssh::ensure_key(&paths.keys())?;
+    let blocks: Vec<String> = session::list(&paths.worktrees())
+        .into_iter()
+        .map(|s| {
+            ssh::config_block(
+                &ssh::host_alias(&paths.repo_name(), &s),
+                ssh::port(&paths.repo_name(), &s),
+                &key,
+            )
+        })
+        .collect();
+    ssh::write_hosts(&home.join(".ssh/config.d/omh"), &blocks)?;
+    ssh::ensure_include(&home.join(".ssh/config"))?;
+
+    let fallback = std::env::var("OMH_EDITOR")
+        .or_else(|_| std::env::var("EDITOR"))
+        .ok()
+        .and_then(|e| {
+            let base = std::path::Path::new(&e).file_name()?.to_string_lossy().into_owned();
+            Some(base)
+        });
+    let wanted = chosen.map(str::to_string).or(fallback);
+    let ed = wanted.as_deref().and_then(|n| editor::Editor::find(&paths.editors(), n));
+
+    match ed {
+        // An editor that is not installed is not an error — the URL is still a
+        // good answer, and launching nothing silently would not be.
+        Some(ed) if runtime::installed(&ed.bin) => {
+            let cmd = ed.command(&alias);
+            println!("omh: opening {} in {}", ssh::url(&alias), ed.name);
+            Command::new(&cmd[0]).args(&cmd[1..]).status()?;
+        }
+        other => {
+            if let Some(ed) = other {
+                println!("omh: `{}` is not installed on this machine\n", ed.bin);
+            } else if let Some(w) = &wanted {
+                println!("omh: no editor named `{w}` — see `omh ls`\n");
+            }
+            println!("session {} is up\n", session.id);
+            println!("  {}", ssh::url(&alias));
+            println!("  ssh {alias}\n");
+            for e in editor::Editor::load_dir(&paths.editors())? {
+                println!("  {:<8} {}", e.name, e.command(&alias).join(" "));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn down(cwd: &std::path::Path, id: Option<&str>) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
+    let ids = match id {
+        Some(i) => vec![i.to_string()],
+        None => session::list(&paths.worktrees()),
+    };
+    for i in &ids {
+        let name = paths.container(i);
+        if image::container_running(backend.program(), &name) {
+            image::container_remove(backend.program(), &name);
+            println!("stopped {i}; worktree and branch survive");
+        } else {
+            println!("{i} was not running");
+        }
+    }
+    Ok(())
+}
+
+/// Launch the real image with the real mounts and ask the harness's own paths
+/// what they can see. Nothing in process can answer this: a green unit suite
+/// proves omh mounts a path, never that anything reads it.
+fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let profile = Profile::resolve(&paths);
+    let name = match harness {
+        Some(h) => h.to_string(),
+        None => {
+            let names: Vec<String> =
+                Adapter::load_dir(&paths.adapters())?.into_iter().map(|a| a.name).collect();
+            detect::preferred_harness(&names, &|h| runtime::installed(h))
+                .context("no adapters installed — run `omh init`")?
+        }
+    };
+    let adapter = Adapter::find(&paths.adapters(), &name)?;
+
+    let checks = doctor::checks(&profile, &adapter);
+    if checks.is_empty() {
+        println!("nothing to check: the profile is empty");
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(paths.worktrees())?;
+    let session = Session::new(&paths.worktrees(), "doctor".into());
+    session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
+
+    let opts = container::Options {
+        staging: container::Staging::Apply,
+        // No dtach and no terminal: the probe's output has to be captured.
+        persist: persist::Mode::None,
+        tty: false,
+    };
+    let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
+    plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
+
+    let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
+    plan.validate(&backend.caps())?;
+
+    if dry_run {
+        println!("{}", doctor::probe_script(&checks));
+        return Ok(());
+    }
+
+    image::ensure(backend.program(), &adapter)?;
+    image::ensure_network(backend.program(), &plan.network)?;
+
+    println!("omh doctor: {name} (in {})\n", image::tag(&name));
+    let out = Command::new(backend.program()).args(backend.args(&plan)).output()?;
+    let outcomes = doctor::parse(&String::from_utf8_lossy(&out.stdout));
+    let _ = session.remove(&paths.repo); // diagnostic: leave no session behind
+
+    for o in &outcomes {
+        println!("  {} {:<10} {}", if o.ok { "\u{2713}" } else { "\u{2717}" }, o.name, o.detail);
+    }
+
+    if outcomes.is_empty() {
+        anyhow::bail!(
+            "the probe produced no output — the sandbox did not run it\n{}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    if !doctor::passed(&outcomes) {
+        anyhow::bail!(
+            "{} of {} checks failed",
+            outcomes.iter().filter(|o| !o.ok).count(),
+            outcomes.len()
+        );
+    }
+    println!("\n  all {} checks passed — {name}'s adapter paths are verified", outcomes.len());
+    Ok(())
+}
+
+fn sessions_ls(cwd: &std::path::Path) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
+    let base = session::default_branch(&paths.repo);
+    let sessions = session::list(&paths.worktrees());
+    if sessions.is_empty() {
+        println!("no sessions");
+    }
+    for id in sessions {
+        let sess = Session::new(&paths.worktrees(), id.clone());
+        let up = backend
+            .as_ref()
+            .map(|b| image::container_running(b.program(), &paths.container(&id)))
+            .unwrap_or(false);
+        let drift = match sess.behind(&paths.repo, &base) {
+            0 => String::new(),
+            n => format!("  ({n} behind {base})"),
+        };
+        println!(
+            "  {id:<8} {:<14} {}{drift}",
+            sess.branch,
+            if up { "up" } else { "stopped" }
+        );
+    }
+    Ok(())
+}
+
 /// Read one policy key through the usual layer merge.
 fn policy_value(paths: &Paths, key: &str) -> Option<String> {
-    config::policy(paths)
-        .ok()?
-        .into_iter()
-        .find(|s| s.key == key)
-        .map(|s| s.value)
+    config::policy(paths).ok()?.into_iter().find(|s| s.key == key).map(|s| s.value)
 }
 
 fn runtime_preference(paths: &Paths) -> String {
@@ -331,8 +638,10 @@ fn edit(cwd: &std::path::Path, layer: Option<config::Layer>) -> Result<()> {
 
 fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let harness = &argv[0];
-    let adapter = Adapter::find(&paths.adapters(), harness)?;
+    let name = &argv[0];
+
+    let adapter = Adapter::find(&paths.adapters(), name)
+        .map_err(|e| unknown_tool(&paths, name, e))?;
     let profile = Profile::resolve(&paths);
 
     // A dry run must leave no trace: no branch, no worktree, no staged files.
@@ -343,13 +652,11 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
             .as_deref()
             .unwrap_or("dtach")
             .parse()?,
+        tty: true,
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
-    let id = cli
-        .session
-        .clone()
-        .unwrap_or_else(|| session::next_id(&paths.worktrees()));
+    let id = session::pick(&paths.worktrees(), cli.session.as_deref(), cli.new);
     // Branch from the trunk, not from wherever HEAD happens to be — a session
     // started on a feature branch produces a diff against the wrong baseline.
     let base = cli
@@ -363,35 +670,38 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
 
     let plan = container::plan(&paths, &profile, &adapter, &session, &argv[1..], opts)?;
 
-    // The backend is pluggable so the opinion stays escapable, and a plan the
-    // chosen runtime cannot honour must fail here rather than start a sandbox
-    // with the profile silently missing.
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     plan.validate(&backend.caps())?;
-    if opts.staging == container::Staging::Apply {
-        image::ensure(backend.program(), &adapter)?;
-        image::ensure_network(backend.program(), &plan.network)?;
-    }
-    let args = backend.args(&plan);
 
     let status_line = match plan.degradation() {
-        Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.branch, d = d),
+        Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.branch),
         None => format!("omh: {} on {}", adapter.name, session.branch),
     };
 
     if cli.dry_run {
         println!("{status_line}");
         println!("worktree {}", session.worktree.display());
-        println!("\n{} {}", backend.program(), args.join(" \\\n       "));
+        println!(
+            "\n{} {}",
+            backend.program(),
+            backend.args(&plan).join(" \\\n       ")
+        );
         return Ok(());
     }
 
+    // The session is a running container many harnesses take turns inhabiting.
+    // Exec into it rather than starting a throwaway, so switching harness is
+    // instant, MCP daemons stay warm, and `omh code` has something to attach to.
+    let (backend, name) = session_up(&paths, &profile, &adapter, &session)?;
     eprintln!("{status_line}");
-    let status = Command::new(backend.program()).args(&args).status()?;
+    let status = Command::new(backend.program())
+        .args(backend.exec_args(&name, &plan.argv, true))
+        .status()?;
     eprintln!("\nomh: review with  omh diff {}", session.id);
     std::process::exit(status.code().unwrap_or(1));
 }
 
+#[allow(dead_code)]
 fn init(cwd: &std::path::Path) -> Result<()> {
     // 1. Fail fast. Everything below is wasted work outside a repo.
     let paths = Paths::discover(cwd)?;
@@ -399,6 +709,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // 2. A fresh install has no adapters, so `omh <harness>` would fail no
     //    matter what else init did. Ship them before anything else.
     let adapters = install_bundled_adapters(&paths)?;
+    let editors = install_bundled(&paths.editors(), "editors")?;
     std::fs::create_dir_all(paths.root.join("profile/skills"))?;
     std::fs::create_dir_all(paths.worktrees())?;
 
@@ -443,7 +754,8 @@ fn init(cwd: &std::path::Path) -> Result<()> {
 
     // 5. Report every decision, so `omh why` has something to explain.
     println!("omh init — decided, asked nothing\n");
-    println!("  adapters   {} ({})", adapters.len(), adapters.join(", "));
+    println!("  harnesses  {} ({})", adapters.len(), adapters.join(", "));
+    println!("  editors    {} ({})", editors.len(), editors.join(", "));
     match &harness {
         Some(h) => println!("  harness    {h}{}", if runtime::installed(h) {
             "  (found on your host)"
@@ -505,18 +817,30 @@ fn init(cwd: &std::path::Path) -> Result<()> {
 /// Adapters ship with omh but live in `~/.omh`. Without this a fresh install
 /// cannot launch anything, which is the state the tool was in until now.
 fn install_bundled_adapters(paths: &Paths) -> Result<Vec<String>> {
-    let dir = paths.adapters();
-    std::fs::create_dir_all(&dir)?;
-    let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters");
+    install_bundled(&paths.adapters(), "adapters")?;
+    Ok(Adapter::load_dir(&paths.adapters())?.into_iter().map(|a| a.name).collect())
+}
+
+/// Copy definitions that ship with omh into `~/.omh`, never overwriting one the
+/// user has edited. Without this a fresh install can launch nothing at all.
+fn install_bundled(dest: &std::path::Path, kind: &str) -> Result<Vec<String>> {
+    std::fs::create_dir_all(dest)?;
+    let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(kind);
     if let Ok(entries) = std::fs::read_dir(&bundled) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "toml") {
-                write_if_absent(&dir.join(entry.file_name()), &std::fs::read_to_string(&path)?)?;
+                write_if_absent(&dest.join(entry.file_name()), &std::fs::read_to_string(&path)?)?;
             }
         }
     }
-    Ok(Adapter::load_dir(&dir)?.into_iter().map(|a| a.name).collect())
+    let mut names: Vec<String> = std::fs::read_dir(dest)?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
+        .map(|e| e.path().file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 /// Append a line if absent. Rewriting the file would eat anything you added.
@@ -576,6 +900,15 @@ fn ls(cwd: &std::path::Path) -> Result<()> {
         println!("  {:<10} {}", a.name, creds);
     }
 
+    let editors = editor::Editor::load_dir(&paths.editors())?;
+    if !editors.is_empty() {
+        println!("\neditors:");
+        for e in &editors {
+            let state = if runtime::installed(&e.bin) { "installed" } else { "not installed" };
+            println!("  {:<10} {state}", e.name);
+        }
+    }
+
     println!("\nsessions:");
     let sessions = session::list(&paths.worktrees());
     if sessions.is_empty() {
@@ -615,4 +948,68 @@ fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
     session.remove(&paths.repo)?;
     println!("removed session {id}; branch omh/{id} kept");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+    const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");
+
+    /// `omh <name>` treats any unknown word as a harness, so a command that is
+    /// not in RESERVED could be shadowed by an adapter of the same name. This
+    /// keeps the list honest without anyone remembering to update it.
+    #[test]
+    fn reserved_lists_every_command_and_alias() {
+        for sub in Cli::command().get_subcommands() {
+            let name = sub.get_name();
+            assert!(RESERVED.contains(&name), "command `{name}` missing from RESERVED");
+            for alias in sub.get_visible_aliases() {
+                assert!(RESERVED.contains(&alias), "alias `{alias}` missing from RESERVED");
+            }
+        }
+    }
+
+    #[test]
+    fn no_bundled_definition_shadows_a_command() {
+        for a in Adapter::load_dir(std::path::Path::new(BUNDLED_ADAPTERS)).unwrap() {
+            assert!(!RESERVED.contains(&a.name.as_str()), "adapter `{}` is a command", a.name);
+        }
+        for e in editor::Editor::load_dir(std::path::Path::new(BUNDLED_EDITORS)).unwrap() {
+            assert!(!RESERVED.contains(&e.name.as_str()), "editor `{}` is a command", e.name);
+        }
+    }
+
+    /// The grammar splits harnesses from editors, so the one mistake everybody
+    /// will make is typing an editor where a harness goes. Say the fix.
+    #[test]
+    fn naming_an_editor_where_a_harness_goes_names_the_fix() {
+        let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
+        assert!(hint.contains("omh attach zed"), "got: {hint}");
+    }
+
+    #[test]
+    fn an_unknown_word_lists_the_harnesses() {
+        let hint = tool_hint("emacs", &["claude".into(), "opencode".into()], &["zed".into()]);
+        assert!(hint.contains("claude") && hint.contains("opencode"), "got: {hint}");
+        assert!(!hint.contains("attach"), "not an editor: {hint}");
+    }
+
+    #[test]
+    fn a_command_typed_as_a_harness_points_at_its_help() {
+        let hint = tool_hint("config", &["claude".into()], &[]);
+        assert!(hint.contains("omh config --help"), "got: {hint}");
+    }
+
+    /// Aliases only earn their keep if they are actually short.
+    #[test]
+    fn every_alias_is_a_single_letter() {
+        for sub in Cli::command().get_subcommands() {
+            for alias in sub.get_visible_aliases() {
+                assert_eq!(alias.chars().count(), 1, "`{alias}` is not a shortcut");
+            }
+        }
+    }
 }

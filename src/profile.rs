@@ -33,6 +33,10 @@ impl Paths {
         self.root.join("adapters")
     }
 
+    pub fn editors(&self) -> PathBuf {
+        self.root.join("editors")
+    }
+
     pub fn creds(&self, harness: &str) -> PathBuf {
         self.root.join("creds").join(harness)
     }
@@ -77,6 +81,10 @@ impl Paths {
 
     pub fn container(&self, session: &str) -> String {
         format!("omh-{}-{session}", self.repo_id())
+    }
+
+    pub fn repo_name(&self) -> String {
+        self.repo_id()
     }
 
     fn repo_id(&self) -> String {

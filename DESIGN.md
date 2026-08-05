@@ -514,6 +514,68 @@ JetBrains Gateway, plain `ssh`. Dev servers come free: `omh fwd s01 3000`.
 **Bind sshd to `127.0.0.1` only.** On `0.0.0.0` you have published a shell inside
 your sandbox to the local network, inverting the point of the project.
 
+```
+$ omh code
+session s01 is up
+
+  ssh://omh-ohmyharness-s01/work
+  ssh omh-ohmyharness-s01
+
+  VS Code / Cursor   code --remote ssh-remote+omh-ohmyharness-s01 /work
+  Zed                zed ssh://omh-ohmyharness-s01/work
+  JetBrains          Gateway → SSH → omh-ohmyharness-s01
+```
+
+### Editors are data, like adapters
+
+`omh <name>` means *attach this tool to the session*. A harness runs inside it;
+an editor attaches from outside over SSH. Same gesture, so the same dispatch —
+and adding an editor stays a TOML file rather than a match arm, for exactly the
+reason adapters are data.
+
+```toml
+# ~/.omh/editors/zed.toml
+name = "zed"
+bin  = "zed"
+args = ["$URL"]
+
+# ~/.omh/editors/code.toml
+args = ["--remote", "ssh-remote+$ALIAS", "/work"]
+```
+
+```
+$ omh zed          # opens Zed on the session
+$ omh claude       # runs Claude Code inside that same session
+$ omh emacs
+Error: unknown tool `emacs`
+  harnesses: claude, opencode
+  editors:   code, cursor, nvim, zed
+```
+
+An editor that is not installed is not an error — omh says so and prints the
+URL. Launching nothing silently would be worse, and guessing a flag for an
+unknown editor would launch the wrong thing.
+
+`omh code` with no argument resolves `$OMH_EDITOR` / `$EDITOR` against the same
+registry, falling back to printing every attach recipe.
+
+Verified: `ssh omh-ohmyharness-s01` lands as `agent` (uid 1000) inside the
+sandbox with the worktree at `/work` and the profile in place. `$OMH_EDITOR` or
+`$EDITOR` opens it directly; an unknown editor is not an error, since guessing a
+flag would launch something wrong.
+
+Three details that are load-bearing:
+
+- **The public key arrives as an environment variable, not a mount.** A
+  bind-mounted `authorized_keys` lands with host ownership and sshd silently
+  refuses to read one it does not trust — a failure that looks like a wrong key.
+- **Ports are derived, not assigned.** An IDE bookmark points at the alias, which
+  resolves through the port; a port that moved between restarts would break every
+  saved window.
+- **The `Include` is prepended** to `~/.ssh/config`, never appended: ssh applies
+  the first matching block, so an include below someone's `Host *` would never
+  win. Everything else in that file is left untouched.
+
 ---
 
 ## 11. Carry-in
@@ -694,12 +756,41 @@ Load-bearing invariants, each with a failing-without-it test:
 | `rm` keeps the branch; `ensure` reattaches | unreviewed agent work must be unloseable |
 | each MCP format emits its harness's real schema | a wrong shape means zero servers and no complaint |
 | every renderer round-trips through its parser | else import silently drops data |
+| a probe with no output is never a pass | silence means the sandbox never ran it |
+| sshd publishes on 127.0.0.1 only | 0.0.0.0 exposes a shell in the sandbox to the LAN |
+| a session runs detached, never `--rm` | it must outlive the terminal, or nothing can attach |
 | a plan is rejected when the backend lacks a capability | else `sbx` fails mysteriously instead of loudly |
 
 **Factual correctness is not testable in process.** Adapters assert things about
 external software. A green suite proves omh mounts a path faithfully, never that
-anything reads it. That gap is `omh doctor`'s job, and until it exists every
-adapter path is an unverified claim.
+anything reads it.
+
+That gap is what `omh doctor` closes. It launches the real image with the real
+mounts and inspects the **guest** paths the adapter declares — checking anything
+host-side would re-test the staging directory omh wrote a moment earlier, which
+is circular.
+
+```
+$ omh doctor
+omh doctor: claude (in omh/claude:latest)
+
+  ✓ AGENTS     /work/CLAUDE.md
+  ✓ skills     /home/agent/.claude/skills
+  ✓ mcp        /home/agent/.mcp.json
+  ✓ commands   /home/agent/.claude/commands
+  ✓ hooks      /home/agent/.claude/settings.json
+
+  all 5 checks passed — claude's adapter paths are verified
+```
+
+Capabilities the harness cannot express are skipped, not failed — they were
+already reported as dropped at launch. **A probe that produces no output is never
+a pass**: silence means the sandbox never ran it, and calling that success would
+make doctor worse than useless.
+
+Both shipped adapters are verified this way — `claude` passes 5 checks,
+`opencode` 4 (subagents and hooks correctly skipped). The "unverified claim"
+caveat is retired for these two, and any third adapter inherits the same bar.
 
 ---
 
@@ -707,7 +798,7 @@ adapter path is an unverified claim.
 
 **v0 — the base set, one harness.** ✅ `omh init` that decides · ✅ images ·
 ✅ sandbox + worktree · ✅ persistence · ⬜ code graph · ⬜ memory · ⬜ `omh auth`
-· ⬜ `omh code` · ⬜ `omh doctor`.
+· ✅ `omh code` · ✅ `omh doctor`.
 Success criterion: `omh init && omh claude` is visibly better than raw `claude`,
 with zero questions asked.
 
