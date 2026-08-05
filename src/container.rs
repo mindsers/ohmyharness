@@ -56,16 +56,23 @@ pub enum Staging {
 }
 
 /// Launch options that are not part of the profile.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Options {
     pub staging: Staging,
     pub persist: crate::persist::Mode,
     pub tty: bool,
+    /// Resolved credential account. `None` means no login is mounted.
+    pub account_dir: Option<PathBuf>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { staging: Staging::Apply, persist: crate::persist::Mode::Dtach, tty: true }
+        Self {
+            staging: Staging::Apply,
+            persist: crate::persist::Mode::Dtach,
+            tty: true,
+            account_dir: None,
+        }
     }
 }
 
@@ -79,6 +86,7 @@ pub fn plan(
 ) -> Result<Plan> {
     let staging = opts.staging;
     let stage = paths.staging(&session.id, &adapter.name);
+    let opts = &opts;
     let mut mounts = Vec::new();
     let mut dropped = Vec::new();
 
@@ -102,14 +110,18 @@ pub fn plan(
         stage_capability(cap, binding, &sources, &stage, session, &mut mounts, staging)?;
     }
 
-    let creds = paths.creds(&adapter.name);
-    if creds.exists() {
-        mounts.push(Mount {
-            host: creds,
-            guest: expand("$HOME/.omh-creds", GUEST_HOME),
-            read_only: true,
-            file: false,
-        });
+    // Credentials mount at the paths the harness itself reads — anywhere else
+    // and the session starts logged out no matter what was captured. Writable,
+    // because OAuth tokens refresh in place.
+    if let Some(account) = &opts.account_dir {
+        for cred in crate::auth::mounts(adapter, account, GUEST_HOME) {
+            mounts.push(Mount {
+                host: cred.host,
+                guest: cred.guest,
+                read_only: false,
+                file: true,
+            });
+        }
     }
 
     Ok(Plan {
@@ -322,20 +334,77 @@ mod tests {
 
     fn plan_for(fx: &Fx, harness: &str) -> Plan {
         let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
-        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true }).unwrap()
+        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap()
     }
 
-    /// The security contract: the agent may write exactly one place, the
-    /// worktree. Everything else is read-only. A stray `rw` here is the
-    /// difference between a sandbox and a suggestion.
+    /// The security contract. The worktree is writable because that is the
+    /// work; credentials are writable because OAuth tokens refresh in place and
+    /// a read-only mount would discard every refreshed token. Nothing else is,
+    /// and a stray `rw` beyond those two is the difference between a sandbox
+    /// and a suggestion.
     #[test]
-    fn only_the_worktree_is_writable() {
+    fn nothing_beyond_the_worktree_and_credentials_is_writable() {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
         let writable: Vec<_> = p.mounts.iter().filter(|m| !m.read_only).collect();
-        assert_eq!(writable.len(), 1, "exactly one writable mount");
+        assert_eq!(writable.len(), 1, "no credentials in this fixture");
         assert_eq!(writable[0].guest, Path::new("/work"));
         assert_eq!(writable[0].host, fx.session.worktree);
+    }
+
+    fn plan_with_account(fx: &Fx, account: &std::path::Path) -> Plan {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Skip,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: Some(account.to_path_buf()),
+            },
+        )
+        .unwrap()
+    }
+
+    /// Regression: credentials mounted at `$HOME/.omh-creds`, which no harness
+    /// reads — so every session started logged out no matter what was captured.
+    #[test]
+    fn credentials_mount_where_the_harness_actually_looks() {
+        let fx = fixture();
+        let p = plan_with_account(&fx, Path::new("/host/creds/claude/work"));
+        let cred = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.to_string_lossy().contains(".credentials.json"))
+            .expect("credential mount");
+        assert_eq!(cred.guest, Path::new("/home/agent/.claude/.credentials.json"));
+        assert!(cred.host.starts_with("/host/creds/claude/work"));
+    }
+
+    /// OAuth tokens are rewritten as they refresh. Read-only here means every
+    /// session silently throws away its new token and re-authenticates.
+    #[test]
+    fn credentials_are_writable_so_refreshed_tokens_survive() {
+        let fx = fixture();
+        let p = plan_with_account(&fx, Path::new("/host/creds/claude/work"));
+        let cred = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.to_string_lossy().contains(".credentials.json"))
+            .unwrap();
+        assert!(!cred.read_only, "token refresh must persist");
+        assert!(cred.file, "a single file, not a directory");
+    }
+
+    #[test]
+    fn no_account_means_no_credential_mounts() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        assert!(!p.mounts.iter().any(|m| m.guest.to_string_lossy().contains("credentials")));
     }
 
     #[test]
@@ -440,7 +509,7 @@ mod tests {
             "#,
         )
         .unwrap();
-        let err = plan(&fx.paths, &fx.profile, &bad, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true }).unwrap_err();
+        let err = plan(&fx.paths, &fx.profile, &bad, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap_err();
         assert!(format!("{err:#}").contains("/work/"), "got: {err:#}");
     }
 
@@ -472,7 +541,7 @@ mod tests {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let args = ["--resume".to_string(), "abc".to_string()];
-        let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &args, Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true }).unwrap();
+        let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &args, Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap();
         assert_eq!(p.argv, ["claude", "--resume", "abc"]);
     }
 
@@ -482,7 +551,7 @@ mod tests {
     fn skipped_staging_writes_nothing() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true }).unwrap();
+        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap();
 
         assert!(!fx.paths.root.join("run").exists(), "no staging directory");
         for name in ["CLAUDE.md", "AGENTS.md"] {
@@ -498,8 +567,8 @@ mod tests {
     fn skipped_staging_still_reports_the_real_mounts() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let dry = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true }).unwrap();
-        let wet = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true }).unwrap();
+        let dry = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap();
+        let wet = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap();
 
         let paths_of = |p: &Plan| -> Vec<String> {
             p.mounts.iter().map(|m| format!("{}:{}", m.host.display(), m.guest.display())).collect()
@@ -514,7 +583,7 @@ mod tests {
     fn the_planned_command_survives_losing_the_terminal() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::Dtach, tty: true };
+        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::Dtach, tty: true, account_dir: None };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
         assert_eq!(p.argv[0], "dtach");
@@ -525,7 +594,7 @@ mod tests {
     fn persistence_can_be_turned_off() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true };
+        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true, account_dir: None };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);
     }

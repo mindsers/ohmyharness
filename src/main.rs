@@ -7,6 +7,7 @@
 //! the profile is *mounted* rather than copied, so there is no drift to fight.
 
 mod adapter;
+mod auth;
 mod config;
 mod container;
 mod detect;
@@ -47,6 +48,10 @@ struct Cli {
     #[arg(long, global = true)]
     new: bool,
 
+    /// Which captured account to log in as.
+    #[arg(long, short = 'a', global = true)]
+    account: Option<String>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -64,8 +69,13 @@ enum Cmd {
     /// Verify a harness actually sees the profile, inside a real sandbox.
     #[command(visible_alias = "d")]
     Doctor { harness: Option<String> },
-    /// Log a harness in once, capturing its credentials.
-    Auth { harness: String },
+    /// Log a harness in once. Repeat with different names for several accounts.
+    Auth {
+        harness: String,
+        /// Account name, e.g. `personal` or `work`.
+        #[arg(default_value = auth::DEFAULT_ACCOUNT)]
+        account: String,
+    },
     /// What you have here: harnesses, editors, sessions.
     Ls,
     /// Open a session in an editor, over SSH.
@@ -169,12 +179,19 @@ enum ConfigCmd {
 }
 
 fn main() -> Result<()> {
+    // A closed pipe (`omh ls | head`) is not a crash. Without this, Rust's
+    // default panics on the failed write and prints a backtrace.
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+
     let cli = Cli::parse();
     let cwd = std::env::current_dir()?;
 
     match &cli.cmd {
         Cmd::Init => init(&cwd),
-        Cmd::Auth { harness } => auth(&cwd, harness),
+        Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account),
         Cmd::Ls => ls(&cwd),
         Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run),
         Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref()),
@@ -393,6 +410,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         // No dtach and no terminal: the probe's output has to be captured.
         persist: persist::Mode::None,
         tty: false,
+        account_dir: None,
     };
     let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
     plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
@@ -645,6 +663,12 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     let profile = Profile::resolve(&paths);
 
     // A dry run must leave no trace: no branch, no worktree, no staged files.
+    // Which identity this session runs as. Ambiguity is an error rather than a
+    // guess: silently using the wrong account is expensive and invisible.
+    let configured = policy_value(&paths, "account");
+    let account = auth::resolve_for_launch(&paths, name, cli.account.as_deref(), configured.as_deref())?
+        .map(|a| auth::dir(&paths, name, &a));
+
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
         staging: if cli.dry_run { container::Staging::Skip } else { container::Staging::Apply },
@@ -653,6 +677,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
             .unwrap_or("dtach")
             .parse()?,
         tty: true,
+        account_dir: account,
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
@@ -867,24 +892,71 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-fn auth(cwd: &std::path::Path, harness: &str) -> Result<()> {
+/// Run the harness's own login inside a sandbox, with this account's credential
+/// files bind-mounted writable. There is no separate capture step: the login
+/// writes straight through to the host.
+fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     let paths = Paths::discover(cwd)?;
+    let profile = Profile::resolve(&paths);
     let adapter = Adapter::find(&paths.adapters(), harness)?;
-    let dest = paths.creds(&adapter.name);
-    // Deliberately not implemented rather than faked: this runs the harness's
-    // own login flow in a throwaway container and captures `adapter.creds` into
-    // `dest`. It is v0 scope — if `omh claude` re-prompts for login, the whole
-    // premise is dead.
-    anyhow::bail!(
-        "not implemented yet\n\
-         plan: docker run --rm -it -v {}:{} omh/{} {} /login\n\
-         capturing: {}",
-        dest.display(),
-        "/home/agent/.creds",
-        adapter.name,
-        adapter.bin,
-        adapter.creds.join(", ")
+
+    if adapter.creds.is_empty() {
+        anyhow::bail!(
+            "adapter {harness} declares no credential paths, so there is nothing to capture"
+        );
+    }
+
+    let account_dir = auth::dir(&paths, harness, account);
+    let already = auth::is_captured(&paths, harness, account);
+    auth::prepare(&adapter, &account_dir, "/home/agent")?;
+
+    let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
+    image::ensure(backend.program(), &adapter)?;
+
+    // A throwaway session: logging in must not create a branch or a worktree.
+    std::fs::create_dir_all(paths.worktrees())?;
+    let session = Session::new(&paths.worktrees(), "auth".into());
+    session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
+
+    let plan = container::plan(
+        &paths,
+        &profile,
+        &adapter,
+        &session,
+        &[],
+        container::Options {
+            staging: container::Staging::Apply,
+            persist: persist::Mode::None,
+            tty: true,
+            account_dir: Some(account_dir.clone()),
+        },
+    )?;
+    plan.validate(&backend.caps())?;
+    image::ensure_network(backend.program(), &plan.network)?;
+
+    println!(
+        "omh auth: logging {harness} in as `{account}`{}\n  credentials → {}\n",
+        if already { " (re-authenticating)" } else { "" },
+        account_dir.display()
     );
+    let status = Command::new(backend.program()).args(backend.args(&plan)).status()?;
+    let _ = session.remove(&paths.repo);
+
+    if !auth::is_captured(&paths, harness, account) {
+        anyhow::bail!(
+            "no credentials were written — the login did not complete\n  \
+             expected something under {}",
+            account_dir.display()
+        );
+    }
+    println!("\nomh: `{account}` captured for {harness}");
+    let all = auth::accounts(&paths, harness);
+    if all.len() > 1 {
+        println!("  accounts: {}", all.join(", "));
+        println!("  choose per project with `omh config set account <name>`");
+    }
+    let _ = status;
+    Ok(())
 }
 
 fn ls(cwd: &std::path::Path) -> Result<()> {
@@ -896,7 +968,8 @@ fn ls(cwd: &std::path::Path) -> Result<()> {
         println!("  (none — add {}/<name>.toml)", paths.adapters().display());
     }
     for a in &adapters {
-        let creds = if paths.is_authed(&a.name) { "authed" } else { "not authed" };
+        let accounts = auth::accounts(&paths, &a.name);
+        let creds = if accounts.is_empty() { "not authed".to_string() } else { accounts.join(", ") };
         println!("  {:<10} {}", a.name, creds);
     }
 
