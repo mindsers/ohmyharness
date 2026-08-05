@@ -8,6 +8,7 @@
 
 mod adapter;
 mod auth;
+mod base;
 mod carry;
 mod config;
 mod container;
@@ -844,7 +845,12 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     }
     std::fs::create_dir_all(shared.join("hooks"))?;
     write_if_absent(&shared.join("AGENTS.md"), &detect::agents_md(&stacks))?;
-    write_if_absent(&shared.join("mcp.json"), "{\n  \"mcpServers\": {}\n}\n")?;
+    // The base set: omh's opinion, seeded into the committed layer where it is
+    // visible, reviewable, and removable rather than hidden in the binary.
+    let base_mcp = serde_json::to_string_pretty(
+        &serde_json::json!({ "mcpServers": base::servers() }),
+    )? + "\n";
+    write_if_absent(&shared.join("mcp.json"), &base_mcp)?;
     write_if_absent(
         &shared.join("policy.toml"),
         "# Untracked files the worktree needs — a worktree holds only tracked\n\
@@ -931,7 +937,35 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         }
     }
 
-    println!("\nnot yet done: code graph, memory store.");
+    // The index lives in a container volume, so it has to be built inside the
+    // sandbox — one built on the host would land where no session can read it.
+    if let Some(h) = &harness {
+        let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
+        let adapter = Adapter::find(&paths.adapters(), h)?;
+        let args = base::index_args(
+            &image::tag_for(&adapter),
+            &paths.cache_volume(),
+            &paths.repo,
+            &paths.repo_name(),
+        );
+        match Command::new(backend.program())
+            .args(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            // Backgrounded: init returns now and the first launch waits only if
+            // this has not finished.
+            Ok(_) => println!("  graph      indexing in background → {}", paths.cache_volume()),
+            Err(e) => println!("  graph      could not start indexing: {e}"),
+        }
+    }
+
+    println!("\n  base set");
+    for (name, why) in base::rationale() {
+        println!("    {name:<10} {why}");
+    }
+    println!("\nnot yet done: memory store, omh bench.");
     println!("next: omh {}", harness.as_deref().unwrap_or("config"));
     Ok(())
 }

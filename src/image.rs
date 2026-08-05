@@ -43,9 +43,15 @@ RUN usermod -l agent -d /home/agent -m node \
 # inside a sandbox.
 RUN test "$(id -u agent)" = "1000" && test "$(getent passwd agent | cut -d: -f6)" = "/home/agent"
 
+# The base set lives here, not in a harness layer: a code graph is
+# harness-agnostic and every session should get the same one.
+RUN npm install -g codebase-memory-mcp
+
 # Mount points the launcher expects to exist, owned by the unprivileged user.
-RUN mkdir -p /work /omh/sock /omh/cache /omh/layers \
- && chown -R agent:agent /work /omh
+# The graph cache is a volume; the image only needs the directory to exist and
+# be owned by the agent, or docker creates it as root.
+RUN mkdir -p /work /omh/sock /omh/cache /omh/layers /home/agent/.cache/codebase-memory-mcp \
+ && chown -R agent:agent /work /omh /home/agent/.cache
 
 # Session entrypoint: install the key, start sshd, then stay alive so the
 # container outlives the command that created it. The key arrives as an env var
@@ -284,6 +290,22 @@ mod tests {
     }
 
     /// `omh code` attaches an IDE over SSH, so the session has to serve it.
+    /// The base set has to be *in* the image, or every session starts without
+    /// the thing that makes omh more than a launcher.
+    #[test]
+    fn the_base_image_carries_the_base_set() {
+        let df = base_dockerfile();
+        assert!(df.contains(crate::base::GRAPH_BIN), "no code graph: {df}");
+    }
+
+    /// The cache is a volume; the image only needs the directory to exist and
+    /// be owned by the agent, or docker creates it as root.
+    #[test]
+    fn the_base_owns_the_graph_cache_directory() {
+        let df = base_dockerfile();
+        assert!(df.contains(crate::base::GRAPH_CACHE), "got: {df}");
+    }
+
     #[test]
     fn the_base_can_serve_ssh() {
         let df = base_dockerfile();

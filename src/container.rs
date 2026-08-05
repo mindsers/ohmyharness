@@ -99,6 +99,15 @@ pub fn plan(
         stage_capability(cap, binding, &sources, &stage, session, &mut mounts, staging)?;
     }
 
+    // The graph index, keyed by repo rather than harness — that is what lets
+    // it survive a container rebuild and a switch from Claude Code to opencode.
+    mounts.push(Mount {
+        host: PathBuf::from(paths.cache_volume()),
+        guest: PathBuf::from(crate::base::GRAPH_CACHE),
+        read_only: false,
+        file: false,
+    });
+
     // Credentials mount at the paths the harness itself reads — anywhere else
     // and the session starts logged out no matter what was captured. Writable,
     // because OAuth tokens refresh in place.
@@ -327,7 +336,8 @@ mod tests {
     }
 
     /// The security contract. The worktree is writable because that is the
-    /// work; credentials are writable because OAuth tokens refresh in place and
+    /// work; the graph cache because it is an index omh owns; credentials
+    /// because OAuth tokens refresh in place and
     /// a read-only mount would discard every refreshed token. Nothing else is,
     /// and a stray `rw` beyond those two is the difference between a sandbox
     /// and a suggestion.
@@ -336,9 +346,10 @@ mod tests {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
         let writable: Vec<_> = p.mounts.iter().filter(|m| !m.read_only).collect();
-        assert_eq!(writable.len(), 1, "no credentials in this fixture");
-        assert_eq!(writable[0].guest, Path::new("/work"));
-        assert_eq!(writable[0].host, fx.session.worktree);
+        let guests: Vec<String> = writable.iter().map(|m| m.guest.display().to_string()).collect();
+        assert_eq!(guests.len(), 2, "worktree and graph cache only: {guests:?}");
+        assert!(guests.contains(&"/work".to_string()));
+        assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
     }
 
     fn plan_with_account(fx: &Fx, account: &std::path::Path) -> Plan {
@@ -394,6 +405,23 @@ mod tests {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
         assert!(!p.mounts.iter().any(|m| m.guest.to_string_lossy().ends_with(".claude.json")));
+    }
+
+    /// Keyed by repo, not by harness: a graph rebuilt on every switch would
+    /// make the switch expensive and the index perpetually cold.
+    #[test]
+    fn the_graph_cache_is_shared_across_harnesses() {
+        let fx = fixture();
+        let for_claude = plan_for(&fx, "claude");
+        let for_opencode = plan_for(&fx, "opencode");
+        let cache = |p: &Plan| {
+            p.mounts
+                .iter()
+                .find(|m| m.guest == Path::new(crate::base::GRAPH_CACHE))
+                .map(|m| m.host.display().to_string())
+                .expect("graph cache mount")
+        };
+        assert_eq!(cache(&for_claude), cache(&for_opencode));
     }
 
     #[test]
