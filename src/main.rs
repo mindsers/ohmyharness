@@ -8,6 +8,7 @@
 
 mod adapter;
 mod auth;
+mod carry;
 mod config;
 mod container;
 mod detect;
@@ -301,6 +302,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
     let id = session::pick(&paths.worktrees(), id, false);
     let session = Session::new(&paths.worktrees(), id);
     session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
+    carry_in(&paths, &session)?;
 
     let configured = policy_value(&paths, "account");
     let account = auth::resolve_for_launch(&paths, &adapter, None, configured.as_deref())?
@@ -436,9 +438,8 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         return Ok(());
     }
 
-    std::fs::create_dir_all(paths.worktrees())?;
-    let session = Session::new(&paths.worktrees(), "doctor".into());
-    session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
+    let session = Session::scratch(paths.scratch("doctor"), "doctor".into());
+    session.ensure(&paths.repo, "")?;
 
     let opts = container::Options {
         staging: container::Staging::Apply,
@@ -520,7 +521,7 @@ fn sessions_ls(cwd: &std::path::Path) -> Result<()> {
         };
         println!(
             "  {id:<8} {:<14} {}{drift}",
-            sess.branch,
+            sess.label(),
             if up { "up" } else { "stopped" }
         );
     }
@@ -702,6 +703,31 @@ fn edit(cwd: &std::path::Path, layer: Option<config::Layer>) -> Result<()> {
     Ok(())
 }
 
+/// Copy the checkout's untracked essentials into a worktree, and say what
+/// happened — a `.env` you thought you were carrying and are not is exactly the
+/// failure that wastes an hour inside the sandbox.
+fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
+    // omh stages CLAUDE.md / AGENTS.md into the worktree; left untracked, the
+    // agent is invited to commit omh's own staging onto the session branch.
+    carry::hide_staged_rules(&session.worktree)?;
+
+    let patterns = config::policy_list(paths, "carry_in");
+    if patterns.is_empty() {
+        return Ok(());
+    }
+    for item in carry::apply(&paths.repo, &session.worktree, &patterns)? {
+        match item.action {
+            carry::Action::Copied => eprintln!("omh: carried {}", item.path),
+            carry::Action::Refreshed => eprintln!("omh: refreshed {}", item.path),
+            carry::Action::Missing => {
+                eprintln!("omh: warning: carry_in lists {} — not in this checkout", item.path)
+            }
+            carry::Action::Unchanged => {}
+        }
+    }
+    Ok(())
+}
+
 fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let name = &argv[0];
@@ -738,6 +764,9 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
+    if let Some(explicit) = cli.session.as_deref() {
+        session::validate_id(explicit)?;
+    }
     let id = session::pick(&paths.worktrees(), cli.session.as_deref(), cli.new);
     // Branch from the trunk, not from wherever HEAD happens to be — a session
     // started on a feature branch produces a diff against the wrong baseline.
@@ -748,6 +777,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;
+        carry_in(&paths, &session)?;
     }
 
     let plan = container::plan(&paths, &profile, &adapter, &session, &argv[1..], opts.clone())?;
@@ -756,8 +786,8 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     plan.validate(&backend.caps())?;
 
     let status_line = match plan.degradation() {
-        Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.branch),
-        None => format!("omh: {} on {}", adapter.name, session.branch),
+        Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.label()),
+        None => format!("omh: {} on {}", adapter.name, session.label()),
     };
 
     if cli.dry_run {
@@ -817,8 +847,12 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     write_if_absent(&shared.join("mcp.json"), "{\n  \"mcpServers\": {}\n}\n")?;
     write_if_absent(
         &shared.join("policy.toml"),
-        "# Untracked files the worktree needs. This is the ONLY path by which a\n\
-         # secret reaches the agent, so keep it short and explicit.\n\
+        "# Untracked files the worktree needs — a worktree holds only tracked\n\
+         # files, so without this the agent lands somewhere that cannot run your\n\
+         # app. This is the ONLY path by which a secret reaches the agent, so\n\
+         # keep it short and explicit. node_modules belongs in the image, not here.\n\
+         #\n\
+         # carry_in = [\".env.local\", \"certs/\"]\n\
          carry_in = []\n",
     )?;
     for stack in &stacks {
@@ -994,10 +1028,9 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     image::ensure(backend.program(), &adapter)?;
 
-    // A throwaway session: logging in must not create a branch or a worktree.
-    std::fs::create_dir_all(paths.worktrees())?;
-    let session = Session::new(&paths.worktrees(), "auth".into());
-    session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
+    // A throwaway: logging in must not leave a branch behind.
+    let session = Session::scratch(paths.scratch("auth"), "auth".into());
+    session.ensure(&paths.repo, "")?;
 
     let plan = container::plan(
         &paths,
@@ -1087,7 +1120,7 @@ fn ls(cwd: &std::path::Path) -> Result<()> {
             0 => String::new(),
             n => format!("  ({n} behind {base})"),
         };
-        println!("  {id:<10} {}{drift}", sess.branch);
+        println!("  {id:<10} {}{drift}", sess.label());
     }
     Ok(())
 }
@@ -1101,7 +1134,7 @@ fn diff(cwd: &std::path::Path, id: &str, base: Option<&str>) -> Result<()> {
     let out = session.diff(&paths.repo, &base)?;
     if out.trim().is_empty() {
         // Silence reads as breakage. Say which comparison came up empty.
-        println!("no changes on {} (against {base})", session.branch);
+        println!("no changes on {} (against {base})", session.label());
     } else {
         print!("{out}");
     }
@@ -1109,6 +1142,7 @@ fn diff(cwd: &std::path::Path, id: &str, base: Option<&str>) -> Result<()> {
 }
 
 fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
+    session::validate_id(id)?;
     let paths = Paths::discover(cwd)?;
     let session = Session::new(&paths.worktrees(), id.to_string());
     session.remove(&paths.repo)?;

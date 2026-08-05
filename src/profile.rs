@@ -57,6 +57,12 @@ impl Paths {
             .join(harness)
     }
 
+    /// A throwaway working directory, deliberately outside `worktrees/` so a
+    /// login never appears in `omh s ls` as a session you could resume.
+    pub fn scratch(&self, name: &str) -> PathBuf {
+        self.root.join("scratch").join(self.repo_id()).join(name)
+    }
+
     pub fn keys(&self) -> PathBuf {
         self.root.join("keys").join(self.repo_id())
     }

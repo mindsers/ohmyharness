@@ -255,6 +255,19 @@ fn write_servers(path: &Path, servers: &BTreeMap<String, Server>) -> Result<()> 
     Ok(())
 }
 
+/// A policy value that is a list. `policy()` renders values for display, so an
+/// array arrives as its TOML text and has to be parsed back.
+pub fn policy_list(paths: &Paths, key: &str) -> Vec<String> {
+    let Some(repr) = policy(paths).ok().and_then(|s| s.into_iter().find(|s| s.key == key)) else {
+        return Vec::new();
+    };
+    toml::from_str::<toml::Table>(&format!("v = {}", repr.value))
+        .ok()
+        .and_then(|t| t.get("v").and_then(|v| v.as_array()).cloned())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,5 +586,28 @@ mod tests {
             mcp_import(&paths, Layer::Local, BTreeMap::new(), false, false).unwrap(),
             Imported::default()
         );
+    }
+
+    #[test]
+    fn a_list_setting_comes_back_as_a_list() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Shared, "policy.toml", "carry_in = [\".env\", \"certs/\"]");
+        assert_eq!(policy_list(&paths, "carry_in"), vec![".env", "certs/"]);
+    }
+
+    #[test]
+    fn an_absent_list_is_empty_not_an_error() {
+        let (_d, paths) = fixture();
+        assert!(policy_list(&paths, "carry_in").is_empty());
+    }
+
+    /// Layers merge as usual, so a project can narrow or widen what a personal
+    /// default carries.
+    #[test]
+    fn a_later_layer_replaces_the_list() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Personal, "policy.toml", "carry_in = [\".env\"]");
+        seed(&paths, Layer::Local, "policy.toml", "carry_in = [\".env.local\"]");
+        assert_eq!(policy_list(&paths, "carry_in"), vec![".env.local"]);
     }
 }
