@@ -1,9 +1,14 @@
 name    = "claude"
 bin     = "claude"
 install = "npm install -g @anthropic-ai/claude-code"
-creds   = ["$HOME/.claude/.credentials.json"]
+# The whole config directory, not the token file: a bind-mounted *file* cannot
+# be replaced by rename, and every tool saves its token by writing a temp file
+# and renaming over it. omh prepares mountpoints for the capabilities that live
+# inside this directory.
+creds   = ["$HOME/.claude/", "$HOME/.claude.json"]
 
 # A capability this harness cannot express is simply an absent key.
+login   = "run `/login` inside Claude Code, then exit"
 
 [capabilities.rules]
 path   = "/work/CLAUDE.md"

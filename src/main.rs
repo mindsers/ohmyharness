@@ -846,8 +846,12 @@ fn install_bundled_adapters(paths: &Paths) -> Result<Vec<String>> {
     Ok(Adapter::load_dir(&paths.adapters())?.into_iter().map(|a| a.name).collect())
 }
 
-/// Copy definitions that ship with omh into `~/.omh`, never overwriting one the
-/// user has edited. Without this a fresh install can launch nothing at all.
+/// Copy definitions that ship with omh into `~/.omh`.
+///
+/// Bundled files are **managed**: they are refreshed on every `init`, because a
+/// fix omh ships has to reach people who already ran it once. The one that
+/// mattered was a wrong credential path, which made `omh auth` capture nothing
+/// while reporting success. Definitions you add yourself are left alone.
 fn install_bundled(dest: &std::path::Path, kind: &str) -> Result<Vec<String>> {
     std::fs::create_dir_all(dest)?;
     let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(kind);
@@ -855,7 +859,7 @@ fn install_bundled(dest: &std::path::Path, kind: &str) -> Result<Vec<String>> {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "toml") {
-                write_if_absent(&dest.join(entry.file_name()), &std::fs::read_to_string(&path)?)?;
+                std::fs::write(dest.join(entry.file_name()), std::fs::read_to_string(&path)?)?;
             }
         }
     }
@@ -935,18 +939,30 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     image::ensure_network(backend.program(), &plan.network)?;
 
     println!(
-        "omh auth: logging {harness} in as `{account}`{}\n  credentials → {}\n",
-        if already { " (re-authenticating)" } else { "" },
-        account_dir.display()
+        "omh auth: logging {harness} in as `{account}`{}",
+        if already { " (re-authenticating)" } else { "" }
     );
+    println!("  credentials → {}", account_dir.display());
+    if let Some(hint) = &adapter.login {
+        println!("  next        → {hint}");
+    }
+    println!();
     let status = Command::new(backend.program()).args(backend.args(&plan)).status()?;
     let _ = session.remove(&paths.repo);
 
-    if !auth::is_captured(&paths, harness, account) {
+    // "Something was written" is too weak: a harness writes its default config
+    // just by starting, so an aborted login leaves a plausible-looking account
+    // with no token in it.
+    let unfilled = auth::unfilled(&adapter, &account_dir, "/home/agent");
+    if !unfilled.is_empty() {
         anyhow::bail!(
-            "no credentials were written — the login did not complete\n  \
-             expected something under {}",
-            account_dir.display()
+            "the login did not complete — still empty:\n{}\n  \
+             run `omh auth {harness} {account}` again and finish signing in",
+            unfilled
+                .iter()
+                .map(|p| format!("    {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
     println!("\nomh: `{account}` captured for {harness}");
@@ -1074,6 +1090,38 @@ mod tests {
     fn a_command_typed_as_a_harness_points_at_its_help() {
         let hint = tool_hint("config", &["claude".into()], &[]);
         assert!(hint.contains("omh config --help"), "got: {hint}");
+    }
+
+    /// Regression: bundled definitions were written only if absent, so a fix
+    /// omh shipped never reached anyone who had already run `init`. The one
+    /// that mattered was a wrong credential path, which made auth silently
+    /// capture nothing.
+    #[test]
+    fn bundled_definitions_are_refreshed_not_just_seeded() {
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("adapters");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("claude.toml"), "name = \"stale\"\n").unwrap();
+
+        install_bundled(&dest, "adapters").unwrap();
+
+        let shipped = std::fs::read_to_string(
+            std::path::Path::new(BUNDLED_ADAPTERS).join("claude.toml"),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read_to_string(dest.join("claude.toml")).unwrap(), shipped);
+    }
+
+    /// Definitions you add yourself are yours; omh only manages its own.
+    #[test]
+    fn definitions_omh_does_not_ship_are_left_alone() {
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("adapters");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("mine.toml"), "name = \"mine\"\n").unwrap();
+
+        install_bundled(&dest, "adapters").unwrap();
+        assert_eq!(std::fs::read_to_string(dest.join("mine.toml")).unwrap(), "name = \"mine\"\n");
     }
 
     /// Aliases only earn their keep if they are actually short.

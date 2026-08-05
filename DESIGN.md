@@ -412,7 +412,7 @@ for services you do not watch) is unresolved. Recorded rather than answered.
   profile/                    layer 1 — personal, every project
   adapters/*.toml             one file per harness (data, not code)
   base/                       the curated base set, versioned
-  creds/<harness>/            credential store, seeded by `omh auth`
+  creds/<harness>/<account>/  captured logins, one directory per account
   worktrees/<repo>/<session>/ agent's working directory
   keys/<repo>/                per-repo ed25519 keypair
   run/<session>/<harness>/    staged profile, regenerated per launch
@@ -578,6 +578,76 @@ Three details that are load-bearing:
 
 ---
 
+## 10b. Accounts
+
+```
+omh auth claude personal
+omh auth claude work
+omh -a work claude              # or: omh config set account work
+```
+
+An **account is a captured snapshot of a harness's own credential files**. It is
+keyed by *harness*, not by provider, because a harness is what can actually be
+captured — two harnesses talking to the same provider still each need their own
+login.
+
+Which account a session uses is a **project-level setting**, resolved through the
+usual three layers, because that is how it actually varies: this repo is work,
+that one is personal.
+
+```
+~/.omh/creds/<harness>/<account>/.claude/.credentials.json
+```
+
+Storage mirrors the guest path, so an account directory is legible rather than a
+pile of mangled names.
+
+### There is no capture step
+
+Credentials mount **writable at the paths the harness reads**, so the login
+writes straight through to the host. `omh auth` prepares and runs; nothing is
+copied afterwards.
+
+Two consequences that are easy to get wrong:
+
+- **Docker turns a mount of a non-existent host path into a directory**, so a
+  first login would write its token into a folder the harness cannot read.
+  `prepare` lays down empty placeholder files first.
+- **A placeholder is not a login.** `is_captured` requires non-empty files, or an
+  interrupted `omh auth` would leave something that reports as authenticated.
+
+### Ambiguity is refused, never guessed
+
+```
+$ omh claude
+Error: claude has several accounts: personal, work
+  pick one with `omh config set account <name>` or `-a <name>`
+```
+
+Not being logged in at all is fine — the harness prompts, which is what you want
+before your first `omh auth`. But an account you **named** and do not have stops
+the launch: silently running with no credentials produces a session that is
+logged out for reasons nothing explains.
+
+Two identities and no stated preference is exactly when guessing is most
+expensive — you would send work traffic through a personal account and never
+notice.
+
+### The invariant this bends
+
+Credentials are writable, which the sandbox contract previously forbade. The
+contract is now stated precisely rather than quietly widened:
+
+> The worktree is writable because that is the work. Credentials are writable
+> because OAuth tokens refresh in place, and a read-only mount would discard
+> every refreshed token. **Nothing else is.**
+
+This remains weaker than `sbx`'s model, where secrets are injected at the egress
+proxy and the agent never holds its own token — see §14.2. Several accounts makes
+that gap wider, not narrower.
+
+---
+
 ## 11. Carry-in
 
 A worktree contains only tracked files — no `.env`, no certs. Without help both
@@ -715,8 +785,9 @@ it makes curation nearly free, since we inherit Anthropic's taste and port it.
 
 ## 14. Risks, named
 
-1. **Auth is the whole UX risk.** If `omh claude` re-prompts for login, the promise
-   is dead.
+1. **Auth is done, and the OAuth flow is still unverified.** Everything in §10b is
+   tested against fixtures; no real login has been completed end to end. That is
+   the one part of omh that cannot be checked without a terminal.
 2. **The current credential model is weaker than `sbx`'s.** Mounting a creds
    volume lets a compromised agent read its own token. Adopt proxy injection.
 3. **A sandbox protects the host, not the repo.** The worktree branch is what makes
@@ -749,7 +820,9 @@ Load-bearing invariants, each with a failing-without-it test:
 
 | Invariant | Why |
 |---|---|
-| exactly one writable mount, and it is the worktree | a stray `rw` is the difference between a sandbox and a suggestion |
+| nothing beyond the worktree and credentials is writable | a stray `rw` is the difference between a sandbox and a suggestion |
+| credentials mount where the harness reads, writable | anywhere else and the session is logged out; read-only and refreshed tokens vanish |
+| a named-but-missing account stops the launch | otherwise the session runs logged out and says nothing |
 | staged links resolve under `/omh/layers/…` | host paths don't exist in the sandbox; skills silently vanish |
 | staging is keyed by session **and** harness | else a second harness overwrites the first's mounted config |
 | unknown adapter fields are rejected | else a stale adapter degrades everything, silently |
@@ -797,7 +870,7 @@ caveat is retired for these two, and any third adapter inherits the same bar.
 ## 16. Milestones
 
 **v0 — the base set, one harness.** ✅ `omh init` that decides · ✅ images ·
-✅ sandbox + worktree · ✅ persistence · ⬜ code graph · ⬜ memory · ⬜ `omh auth`
+✅ sandbox + worktree · ✅ persistence · ✅ `omh auth` · ⬜ code graph · ⬜ memory
 · ✅ `omh code` · ✅ `omh doctor`.
 Success criterion: `omh init && omh claude` is visibly better than raw `claude`,
 with zero questions asked.

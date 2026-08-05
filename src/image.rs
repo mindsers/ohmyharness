@@ -70,10 +70,43 @@ WORKDIR /work
 pub fn harness_dockerfile(adapter: &Adapter) -> String {
     // Install as root, run as agent: an image that ends privileged would hand
     // the agent the sandbox's own escape hatch.
-    format!(
-        "FROM {BASE_TAG}\nUSER root\nRUN {}\nUSER agent\nWORKDIR /work\n",
-        adapter.install
-    )
+    let mut df = format!("FROM {BASE_TAG}\nUSER root\nRUN {}\n", adapter.install);
+
+    // Docker creates a missing mount parent as root, leaving the agent unable
+    // to write beside its own config — atomic credential writes and transcripts
+    // both fail, the first of them silently.
+    let dirs = mount_parents(adapter);
+    if !dirs.is_empty() {
+        df.push_str(&format!(
+            "RUN mkdir -p {0} && chown -R agent:agent {0}\n",
+            dirs.join(" ")
+        ));
+    }
+    df.push_str("USER agent\nWORKDIR /work\n");
+    df
+}
+
+/// Every directory under the agent's home that omh will mount into.
+fn mount_parents(adapter: &Adapter) -> Vec<String> {
+    const HOME: &str = "/home/agent";
+    let mut dirs: Vec<String> = adapter
+        .capabilities
+        .values()
+        .map(|b| b.path.clone())
+        .chain(adapter.creds.iter().cloned())
+        .filter_map(|template| {
+            let path = crate::adapter::expand(template.trim_end_matches('/'), HOME);
+            // `/work` is a mount omh owns; only the home side needs preparing.
+            if !path.starts_with(HOME) {
+                return None;
+            }
+            path.parent().map(|p| p.display().to_string())
+        })
+        .filter(|d| d != HOME)
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// `docker build` arguments. The Dockerfile arrives on stdin, so nothing is
@@ -262,6 +295,28 @@ mod tests {
 
     /// Installing needs root; running must not have it. A base that ends as
     /// root hands the agent the sandbox's own escape hatch.
+    /// Docker creates a missing mount parent as **root**. That makes
+    /// `~/.claude` unwritable for the agent, which breaks anything writing a
+    /// new file there — transcripts fail with EACCES, and an atomic credential
+    /// write (temp file + rename, which needs write permission on the
+    /// directory) fails while the login itself reports success.
+    ///
+    /// The harness layer knows every path it will mount into, so it can create
+    /// them up front with the right owner.
+    #[test]
+    fn the_harness_layer_owns_the_directories_it_mounts_into() {
+        let df = harness_dockerfile(&claude());
+        assert!(df.contains("/home/agent/.claude"), "config dir: {df}");
+        assert!(df.contains("chown"), "must be owned by agent, not root: {df}");
+    }
+
+    #[test]
+    fn only_directories_under_the_agents_home_are_created() {
+        let df = harness_dockerfile(&claude());
+        // rules live in the worktree, which is a mount omh controls
+        assert!(!df.contains("mkdir -p /work"), "not ours to create: {df}");
+    }
+
     #[test]
     fn images_end_as_the_unprivileged_user() {
         for df in [base_dockerfile(), harness_dockerfile(&claude())] {

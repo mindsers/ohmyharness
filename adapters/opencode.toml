@@ -1,7 +1,8 @@
 name    = "opencode"
 bin     = "opencode"
 install = "npm install -g opencode-ai"
-creds   = ["$HOME/.local/share/opencode/auth.json"]
+creds   = ["$HOME/.local/share/opencode/"]
+login   = "run `/login` inside opencode, then exit"
 
 [capabilities.rules]
 path   = "/work/AGENTS.md"

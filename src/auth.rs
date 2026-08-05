@@ -18,6 +18,9 @@ use std::path::PathBuf;
 pub struct CredMount {
     pub host: PathBuf,
     pub guest: PathBuf,
+    /// A single file rather than a directory. Docker needs to know, and a
+    /// directory mounted as a file (or vice versa) fails in confusing ways.
+    pub file: bool,
 }
 
 pub const DEFAULT_ACCOUNT: &str = "default";
@@ -44,19 +47,7 @@ pub fn accounts(paths: &Paths, harness: &str) -> Vec<String> {
 /// Captured means credentials are actually present. An empty directory left by
 /// an interrupted login must never look like a successful one.
 pub fn is_captured(paths: &Paths, harness: &str, account: &str) -> bool {
-    // Non-empty specifically: `prepare` leaves empty placeholders so bind
-    // mounts land as files, and a placeholder is not a login.
-    fn has_content(dir: &std::path::Path) -> bool {
-        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
-            let p = e.path();
-            if p.is_dir() {
-                has_content(&p)
-            } else {
-                std::fs::metadata(&p).map(|m| m.len() > 0).unwrap_or(false)
-            }
-        })
-    }
-    has_content(&dir(paths, harness, account))
+    has_real_content(&dir(paths, harness, account))
 }
 
 /// Which account to use. Ambiguity is an error, never a guess — silently
@@ -108,11 +99,16 @@ pub fn mounts(
         .creds
         .iter()
         .map(|template| {
-            let guest = crate::adapter::expand(template, guest_home);
+            // A trailing slash claims a whole config directory. Naming
+            // individual files means guessing which one holds the login, and
+            // that guess is different on every platform.
+            let is_dir = template.ends_with('/');
+            let trimmed = template.trim_end_matches('/');
+            let guest = crate::adapter::expand(trimmed, guest_home);
             // Storage mirrors the guest path, so the account directory is
             // legible rather than a pile of mangled names.
-            let relative = template.trim_start_matches("$HOME/");
-            CredMount { host: account_dir.join(relative), guest }
+            let relative = trimmed.trim_start_matches("$HOME/");
+            CredMount { host: account_dir.join(relative), guest, file: !is_dir }
         })
         .collect()
 }
@@ -123,12 +119,44 @@ pub fn mounts(
 /// first login would write its token into a folder the harness cannot read.
 /// Existing credentials are never touched.
 pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &str) -> Result<()> {
-    for cred in mounts(adapter, account_dir, guest_home) {
-        if let Some(parent) = cred.host.parent() {
-            std::fs::create_dir_all(parent)?;
+    let creds = mounts(adapter, account_dir, guest_home);
+
+    // Docker refuses to create a mountpoint inside a bind-mounted host
+    // directory, so anything omh will mount *inside* a credential directory has
+    // to exist on the host first or the launch fails outright.
+    for (cap, binding) in &adapter.capabilities {
+        let guest = crate::adapter::expand(&binding.path, guest_home);
+        let Some(cred) = creds.iter().find(|c| !c.file && guest.starts_with(&c.guest)) else {
+            continue;
+        };
+        let Ok(relative) = guest.strip_prefix(&cred.guest) else { continue };
+        let point = cred.host.join(relative);
+        let _ = cap;
+        if binding.render == crate::adapter::Render::Dir {
+            std::fs::create_dir_all(&point)?;
+        } else {
+            if let Some(parent) = point.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            if !point.exists() {
+                std::fs::write(&point, placeholder(&point))?;
+            }
         }
-        if !cred.host.exists() {
-            std::fs::write(&cred.host, "")?;
+    }
+
+    for cred in creds {
+        if cred.file {
+            if let Some(parent) = cred.host.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            // Empty counts as absent: it is not a login, and an empty JSON file
+            // is what makes a harness refuse to start.
+            let empty = std::fs::metadata(&cred.host).map(|m| m.len() == 0).unwrap_or(true);
+            if empty {
+                std::fs::write(&cred.host, placeholder(&cred.host))?;
+            }
+        } else {
+            std::fs::create_dir_all(&cred.host)?;
         }
     }
     Ok(())
@@ -152,6 +180,59 @@ pub fn resolve_for_launch(
     resolve(paths, harness, explicit, configured).map(Some)
 }
 
+/// Content a placeholder must have to be parseable. Empty is already valid TOML
+/// and YAML; it is not valid JSON, and a harness that parses its config on
+/// startup will refuse to run rather than treat it as absent.
+/// Any file below `dir` holding more than what `prepare` put there.
+fn has_real_content(dir: &std::path::Path) -> bool {
+    std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+        let p = e.path();
+        if p.is_dir() {
+            has_real_content(&p)
+        } else {
+            std::fs::read_to_string(&p).map(|c| !is_placeholder(&c)).unwrap_or(false)
+        }
+    })
+}
+
+/// Whether a file holds nothing but what `prepare` put there.
+fn is_placeholder(content: &str) -> bool {
+    matches!(content.trim(), "" | "{}")
+}
+
+fn placeholder(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("json") => "{}",
+        _ => "",
+    }
+}
+
+/// Declared credential files that still hold nothing but a placeholder.
+///
+/// "Something was written" is too weak a success test: a harness writes its
+/// default config just by *starting*, so an aborted login leaves a plausible
+/// looking account with no token in it. Every file the adapter declares has to
+/// have been filled in.
+pub fn unfilled(
+    adapter: &Adapter,
+    account_dir: &std::path::Path,
+    guest_home: &str,
+) -> Vec<PathBuf> {
+    mounts(adapter, account_dir, guest_home)
+        .into_iter()
+        .filter(|c| {
+            if c.file {
+                std::fs::read_to_string(&c.host).map(|b| is_placeholder(&b)).unwrap_or(true)
+            } else {
+                // A directory omh prepared holds only mountpoints and
+                // placeholders until something actually logs in.
+                !has_real_content(&c.host)
+            }
+        })
+        .map(|c| c.guest)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +254,22 @@ mod tests {
 
     fn claude() -> Adapter {
         Adapter::find(Path::new(ADAPTERS), "claude").unwrap()
+    }
+
+    fn adapter_with(creds: &[&str]) -> Adapter {
+        let list = creds.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>().join(", ");
+        toml::from_str(&format!(
+            r#"
+            name = "t"
+            bin = "t"
+            install = "x"
+            creds = [{list}]
+            [capabilities.rules]
+            path = "/work/AGENTS.md"
+            render = "concat"
+            "#
+        ))
+        .unwrap()
     }
 
     // ── listing ─────────────────────────────────────────────────────────────
@@ -267,8 +364,8 @@ mod tests {
     fn credentials_mount_where_the_harness_actually_looks() {
         let account = PathBuf::from("/host/creds/claude/work");
         let m = mounts(&claude(), &account, "/home/agent");
-        assert_eq!(m.len(), 1);
-        assert_eq!(m[0].guest, Path::new("/home/agent/.claude/.credentials.json"));
+        assert!(m.iter().all(|c| c.guest.starts_with("/home/agent")), "got: {m:?}");
+        assert!(m.iter().any(|c| c.guest.ends_with(".claude")), "config dir: {m:?}");
     }
 
     /// Storage mirrors the guest path, so `ls ~/.omh/creds/claude/work` is
@@ -277,7 +374,7 @@ mod tests {
     fn stored_credentials_mirror_the_path_they_came_from() {
         let account = PathBuf::from("/host/creds/claude/work");
         let m = mounts(&claude(), &account, "/home/agent");
-        assert_eq!(m[0].host, account.join(".claude/.credentials.json"));
+        assert_eq!(m[0].host, account.join(".claude"));
     }
 
     #[test]
@@ -299,26 +396,73 @@ mod tests {
     // ── preparing for a first login ─────────────────────────────────────────
 
     #[test]
-    fn preparing_creates_the_files_a_bind_mount_needs() {
+    fn preparing_creates_the_paths_a_bind_mount_needs() {
         let d = tempfile::tempdir().unwrap();
         let account = d.path().join("work");
-        prepare(&claude(), &account, "/home/agent").unwrap();
+        prepare(&adapter_with(&["$HOME/.cfg/", "$HOME/.cfg.json"]), &account, "/home/agent")
+            .unwrap();
 
-        let f = account.join(".claude/.credentials.json");
-        assert!(f.exists(), "missing {f:?}");
+        assert!(account.join(".cfg").is_dir());
+        let f = account.join(".cfg.json");
         assert!(f.is_file(), "must be a file, or docker mounts a directory over it");
+    }
+
+    /// An empty file is valid TOML and valid YAML but *not* valid JSON, and a
+    /// harness that parses its config on startup refuses to run:
+    ///
+    ///   Claude configuration file at /home/agent/.claude.json is corrupted:
+    ///   JSON Parse error: Unexpected EOF
+    ///
+    /// A placeholder has to be parseable, not merely present.
+    #[test]
+    fn json_placeholders_are_parseable() {
+        let d = tempfile::tempdir().unwrap();
+        prepare(&adapter_with(&["$HOME/.cfg.json"]), d.path(), "/home/agent").unwrap();
+        let body = std::fs::read_to_string(d.path().join(".cfg.json")).unwrap();
+        serde_json::from_str::<serde_json::Value>(&body)
+            .unwrap_or_else(|e| panic!("placeholder is not valid JSON ({e}): {body:?}"));
+    }
+
+    /// Empty is already valid for these, and inventing content could look like
+    /// configuration the user did not write.
+    #[test]
+    fn non_json_placeholders_stay_empty() {
+        let d = tempfile::tempdir().unwrap();
+        prepare(&adapter_with(&["$HOME/.cfg.toml"]), d.path(), "/home/agent").unwrap();
+        assert_eq!(std::fs::read_to_string(d.path().join(".cfg.toml")).unwrap(), "");
+    }
+
+    /// The empty file a previous omh left behind is exactly what breaks the
+    /// harness, and it is not a login, so replacing it loses nothing.
+    #[test]
+    fn an_empty_placeholder_left_by_an_older_omh_is_repaired() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".cfg.json"), "").unwrap();
+        prepare(&adapter_with(&["$HOME/.cfg.json"]), d.path(), "/home/agent").unwrap();
+        assert_eq!(std::fs::read_to_string(d.path().join(".cfg.json")).unwrap(), "{}");
     }
 
     #[test]
     fn preparing_never_clobbers_an_existing_login() {
         let d = tempfile::tempdir().unwrap();
         let account = d.path().join("work");
-        let f = account.join(".claude/.credentials.json");
+        let f = account.join(".claude.json");
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();
         std::fs::write(&f, "{\"token\":\"keep-me\"}").unwrap();
 
         prepare(&claude(), &account, "/home/agent").unwrap();
         assert_eq!(std::fs::read_to_string(&f).unwrap(), "{\"token\":\"keep-me\"}");
+    }
+
+    #[test]
+    fn a_parseable_placeholder_is_still_not_a_login() {
+        let (_d, paths) = fixture();
+        let account = dir(&paths, "claude", "work");
+        prepare(&claude(), &account, "/home/agent").unwrap();
+        assert!(
+            !is_captured(&paths, "claude", "work"),
+            "`{{}}` is something the harness can parse, not something you logged into"
+        );
     }
 
     #[test]
@@ -375,5 +519,128 @@ mod tests {
         capture(&paths, "claude", "work");
         capture(&paths, "claude", "personal");
         assert!(resolve_for_launch(&paths, "claude", None, None).is_err());
+    }
+
+    // ── directories vs files ────────────────────────────────────────────────
+
+    /// Guessing which single file holds a login is how omh got this wrong:
+    /// Claude Code keeps tokens in one place and the account record in another,
+    /// and neither is the same on every platform. A trailing slash lets an
+    /// adapter claim a whole config directory instead of naming files.
+    #[test]
+    fn a_trailing_slash_declares_a_directory() {
+        let a = adapter_with(&["$HOME/.claude/", "$HOME/.claude.json"]);
+        let m = mounts(&a, Path::new("/acct"), "/home/agent");
+
+        assert_eq!(m[0].guest, Path::new("/home/agent/.claude"));
+        assert!(!m[0].file, "a directory, so docker must not treat it as a file");
+        assert_eq!(m[1].guest, Path::new("/home/agent/.claude.json"));
+        assert!(m[1].file);
+    }
+
+    #[test]
+    fn preparing_creates_directories_as_directories() {
+        let d = tempfile::tempdir().unwrap();
+        let a = adapter_with(&["$HOME/.claude/", "$HOME/.claude.json"]);
+        prepare(&a, d.path(), "/home/agent").unwrap();
+
+        assert!(d.path().join(".claude").is_dir(), "must be a directory");
+        assert!(d.path().join(".claude.json").is_file(), "must be a file");
+    }
+
+    #[test]
+    fn storage_still_mirrors_the_guest_path_for_directories() {
+        let a = adapter_with(&["$HOME/.claude/"]);
+        let m = mounts(&a, Path::new("/acct"), "/home/agent");
+        assert_eq!(m[0].host, Path::new("/acct/.claude"));
+    }
+
+    /// The shipped adapter must capture the account record as well as the
+    /// tokens. Claude Code keeps them in two different files, and mounting only
+    /// one leaves a session that starts logged out.
+    #[test]
+    fn the_claude_adapter_captures_tokens_and_the_account_record() {
+        let guests: Vec<String> = mounts(&claude(), Path::new("/acct"), "/home/agent")
+            .iter()
+            .map(|c| c.guest.display().to_string())
+            .collect();
+        assert!(guests.iter().any(|g| g.ends_with(".claude")), "tokens: {guests:?}");
+        assert!(guests.iter().any(|g| g.ends_with(".claude.json")), "account: {guests:?}");
+    }
+
+    /// Credentials must be a *directory*, because a bind-mounted file cannot be
+    /// replaced by rename:
+    ///
+    ///   mv: cannot move '.tmp1' to '.credentials.json': Device or resource busy
+    ///
+    /// Every tool that saves a token writes a temp file and renames over it, so
+    /// mounting the file itself means the login succeeds and never persists.
+    #[test]
+    fn the_token_store_is_a_directory_not_a_file() {
+        let m = mounts(&claude(), Path::new("/acct"), "/home/agent");
+        let store = m
+            .iter()
+            .find(|c| c.guest.ends_with(".claude"))
+            .expect("the config directory must be mounted");
+        assert!(!store.file, "a mounted file cannot be renamed over");
+    }
+
+    /// Docker refuses to *create* a mountpoint inside a bind-mounted host
+    /// directory ("is outside of rootfs"), so every capability that lands
+    /// inside a credential directory needs its mountpoint prepared on the host
+    /// first — otherwise the whole launch fails.
+    #[test]
+    fn capabilities_nested_in_a_credential_directory_get_mountpoints() {
+        let d = tempfile::tempdir().unwrap();
+        prepare(&claude(), d.path(), "/home/agent").unwrap();
+
+        assert!(d.path().join(".claude/skills").is_dir(), "skills mountpoint");
+        assert!(d.path().join(".claude/commands").is_dir(), "commands mountpoint");
+        assert!(d.path().join(".claude/agents").is_dir(), "subagents mountpoint");
+        assert!(d.path().join(".claude/settings.json").is_file(), "hooks mountpoint");
+    }
+
+    #[test]
+    fn capabilities_outside_a_credential_directory_are_left_alone() {
+        let d = tempfile::tempdir().unwrap();
+        prepare(&claude(), d.path(), "/home/agent").unwrap();
+        // rules live in the worktree, which omh mounts itself
+        assert!(!d.path().join("work").exists());
+    }
+
+    // ── did the login actually happen ───────────────────────────────────────
+
+    /// Regression: `omh auth` reported success after the harness merely wrote
+    /// its default config on startup. The token file was still empty and the
+    /// next session was logged out.
+    #[test]
+    fn a_config_written_by_merely_starting_is_not_a_login() {
+        let d = tempfile::tempdir().unwrap();
+        prepare(&claude(), d.path(), "/home/agent").unwrap();
+        // what Claude Code writes just by booting
+        std::fs::write(d.path().join(".claude.json"), r#"{"userID":"abc"}"#).unwrap();
+
+        let missing = unfilled(&claude(), d.path(), "/home/agent");
+        assert!(
+            missing.iter().any(|p| p.ends_with(".claude")),
+            "the token store holds nothing but mountpoints: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn a_completed_login_leaves_nothing_unfilled() {
+        let d = tempfile::tempdir().unwrap();
+        prepare(&claude(), d.path(), "/home/agent").unwrap();
+        std::fs::write(d.path().join(".claude.json"), r#"{"userID":"abc"}"#).unwrap();
+        std::fs::write(d.path().join(".claude/.credentials.json"), r#"{"token":"t"}"#).unwrap();
+
+        assert!(unfilled(&claude(), d.path(), "/home/agent").is_empty());
+    }
+
+    #[test]
+    fn an_untouched_account_reports_every_file_unfilled() {
+        let d = tempfile::tempdir().unwrap();
+        prepare(&claude(), d.path(), "/home/agent").unwrap();
+        assert_eq!(unfilled(&claude(), d.path(), "/home/agent").len(), 2);
     }
 }

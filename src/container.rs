@@ -119,7 +119,7 @@ pub fn plan(
                 host: cred.host,
                 guest: cred.guest,
                 read_only: false,
-                file: true,
+                file: cred.file,
             });
         }
     }
@@ -379,9 +379,9 @@ mod tests {
         let cred = p
             .mounts
             .iter()
-            .find(|m| m.guest.to_string_lossy().contains(".credentials.json"))
+            .find(|m| m.guest.ends_with(".claude"))
             .expect("credential mount");
-        assert_eq!(cred.guest, Path::new("/home/agent/.claude/.credentials.json"));
+        assert_eq!(cred.guest, Path::new("/home/agent/.claude"));
         assert!(cred.host.starts_with("/host/creds/claude/work"));
     }
 
@@ -394,7 +394,7 @@ mod tests {
         let cred = p
             .mounts
             .iter()
-            .find(|m| m.guest.to_string_lossy().contains(".credentials.json"))
+            .find(|m| m.guest.to_string_lossy().ends_with(".claude.json"))
             .unwrap();
         assert!(!cred.read_only, "token refresh must persist");
         assert!(cred.file, "a single file, not a directory");
@@ -404,7 +404,7 @@ mod tests {
     fn no_account_means_no_credential_mounts() {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
-        assert!(!p.mounts.iter().any(|m| m.guest.to_string_lossy().contains("credentials")));
+        assert!(!p.mounts.iter().any(|m| m.guest.to_string_lossy().ends_with(".claude.json")));
     }
 
     #[test]

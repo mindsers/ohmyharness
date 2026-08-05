@@ -24,6 +24,10 @@ pub struct Adapter {
     /// Paths holding credentials, captured by `omh auth` and remounted on launch.
     #[serde(default)]
     pub creds: Vec<String>,
+    /// What the user has to do once the harness opens. Every harness starts its
+    /// login differently and none of them say so on the way in.
+    #[serde(default)]
+    pub login: Option<String>,
     #[serde(default)]
     pub capabilities: BTreeMap<Capability, Binding>,
 }
@@ -234,6 +238,18 @@ install="x""#);
         let err = Adapter::find(Path::new(REAL), "nope").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("claude") && msg.contains("opencode"), "got: {msg}");
+    }
+
+    /// `omh auth` drops you into the harness and it is not obvious what to do
+    /// next — Claude Code just shows "Not logged in" in the status bar. An
+    /// adapter that declares credentials has to say how to fill them.
+    #[test]
+    fn every_adapter_with_credentials_says_how_to_log_in() {
+        for a in Adapter::load_dir(Path::new(REAL)).unwrap() {
+            if !a.creds.is_empty() {
+                assert!(a.login.is_some(), "{} does not say how to log in", a.name);
+            }
+        }
     }
 
     #[test]
