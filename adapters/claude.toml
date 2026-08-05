@@ -1,11 +1,32 @@
-# An adapter is four facts. That is the whole reason adding a harness is cheap.
 name    = "claude"
 bin     = "claude"
 install = "npm install -g @anthropic-ai/claude-code"
+creds   = ["$HOME/.claude/.credentials.json"]
 
-# Claude Code reads AGENTS.md natively now, but CLAUDE.md still takes precedence
-# where both exist — so point both at the same staged bytes.
-rules  = { path = "/work/CLAUDE.md", also = ["/work/AGENTS.md"] }
-skills = { path = "$HOME/.claude/skills" }
-mcp    = { path = "$HOME/.mcp.json", format = "mcp-json" }
-creds  = ["$HOME/.claude/.credentials.json"]
+# A capability this harness cannot express is simply an absent key.
+
+[capabilities.rules]
+path   = "/work/CLAUDE.md"
+also   = ["/work/AGENTS.md"]  # CLAUDE.md wins where both exist; same bytes either way
+render = "concat"
+
+[capabilities.skills]
+path   = "$HOME/.claude/skills"
+render = "dir"
+
+[capabilities.mcp]
+path   = "$HOME/.mcp.json"
+render = "mcp-json"
+import = "$REPO/.mcp.json"   # project-scoped; ~/.claude.json nests by project
+
+[capabilities.commands]
+path   = "$HOME/.claude/commands"
+render = "dir"
+
+[capabilities.subagents]
+path   = "$HOME/.claude/agents"
+render = "dir"
+
+[capabilities.hooks]
+path   = "$HOME/.claude/settings.json"
+render = "claude-settings"

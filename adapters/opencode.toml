@@ -1,8 +1,23 @@
 name    = "opencode"
 bin     = "opencode"
 install = "npm install -g opencode-ai"
+creds   = ["$HOME/.local/share/opencode/auth.json"]
 
-rules  = { path = "/work/AGENTS.md" }
-skills = { path = "$HOME/.config/opencode/skills" }
-mcp    = { path = "$HOME/.config/opencode/opencode.json", format = "opencode-json" }
-creds  = ["$HOME/.local/share/opencode/auth.json"]
+[capabilities.rules]
+path   = "/work/AGENTS.md"
+render = "concat"
+
+[capabilities.skills]
+path   = "$HOME/.config/opencode/skills"
+render = "dir"
+
+[capabilities.mcp]
+path   = "$HOME/.config/opencode/opencode.json"
+render = "opencode-json"
+import = "$HOME/.config/opencode/opencode.json"
+
+[capabilities.commands]
+path   = "$HOME/.config/opencode/command"
+render = "dir"
+
+# no `subagents`, no `hooks` — omh reports these as dropped at launch
