@@ -23,20 +23,30 @@ It is roughly an afternoon, and it decides whether `sbx` becomes the default or
 stays opt-in hardening. Until it runs, **Docker is the only verified runtime**
 and the [credential weakness](risks.md#security) stays unaddressed.
 
-## v1 — evidence
+## v1 — accountability
 
-[`omh bench`](trust.md), then `omh why` reading from it.
+[`omh why`](trust.md) and cost accounting: what each base-set entry injects,
+measured in bytes, deterministically and without an LLM in the loop.
 
-This gates every subsequent base-set decision, which is exactly why it comes
-before more features rather than after them. Adding a seventh base-set entry
-before `bench` exists means adding it on the same evidence as the first six —
-none — and the [weak spot](distribution.md#the-honest-weak-spot) gets wider
-instead of narrower.
+This is deliberately *not* a benchmark. The reasoning is in
+[measure the cost, argue the benefit](trust.md#measure-the-cost-argue-the-benefit)
+— briefly, an eval suite over a stochastic metric costs real money per decision,
+measures tokens rather than correctness, and becomes the thing the base set is
+tuned to pass. Distributions have never earned legitimacy that way.
+
+What cost accounting buys instead is the one thing genuinely missing: a reason
+for the base set to ever **shrink**. Arguments for adding are always available;
+*"this now costs 4.1 KB before you type anything, up from 2.3"* is the fact that
+forces the other conversation, and it is free to produce.
 
 ## v2 — portability
 
 Second adapter driven for real work, [`omh eject`](trust.md), full `omh import`
 covering rules, skills, hooks and commands rather than MCP alone.
+
+None of these were ever gated on evidence — an earlier version of this roadmap
+put them behind a benchmark, which parked three cheap, useful deliverables
+behind a research project.
 
 ## v3 — the unique capability
 
@@ -49,8 +59,9 @@ second adapter and v1's evidence.
 
 ## v4 — memory and graph, re-justified
 
-Both are in the product on argument. Once `bench` exists they are measured, and
-either earn their place or are dropped.
+Both are in the product on argument. The re-justification is a real review
+against their measured cost and a stated criterion — not a p-value — and either
+they earn their place or they go.
 
 A distribution that cannot retire its own choices is just an opinion with a
 changelog.
@@ -61,8 +72,8 @@ changelog.
 
 - **The spike fails badly.** If `sbx` forces host-path mounts, the staging model
   needs rework rather than a tweak, and v0.5 grows.
-- **`bench` says the graph does not pay.** Then v4 happens early and subtracts,
-  which is the system working.
+- **The graph's cost grows faster than its usefulness.** Then v4 happens early
+  and subtracts, which is the system working.
 - **Someone actually uses this besides its author.** Real usage reorders roadmaps
   more reliably than reasoning does — every item on this list that has shipped
   was reordered at least once by running the tool.

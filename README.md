@@ -9,7 +9,7 @@ $ omh attach       # open that same session in your editor
 $ omh graph        # browse your codebase as a graph
 ```
 
-**Status: early.** v0, one harness verified end to end, 314 tests. Useful today
+**Status: early.** v0, one harness verified end to end, 315 tests. Useful today
 if you want a sandboxed agent with your config in it; not yet the finished
 distribution described in [the docs](docs/). See
 [What isn't done](#what-isnt-done) — it is a real list, not a modesty ritual.
@@ -281,7 +281,7 @@ whether anything reads it. That gap is what `doctor` closes.
 | | |
 |---|---|
 | **Memory** | [designed](docs/design/memory.md), not built. Layered like the profile: personal facts, project facts. |
-| **`omh bench`** | the base set is currently justified by argument, not measurement. Until this exists, "opinionated" and "arbitrary" are hard to tell apart. |
+| **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
 | **`omh why` / `omh eject`** | provenance extended to *why*, and a credible exit. |
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |
 | **Egress allowlist** | designed, not wired. |
@@ -298,7 +298,7 @@ See [`docs/contributing.md`](docs/contributing.md) for the full rules and the
 invariant list.
 
 ```console
-$ cargo test            # 314 tests
+$ cargo test            # 315 tests
 $ ./scripts/smoke.sh    # end-to-end walkthrough in a throwaway repo
 $ omh doctor            # the only thing that verifies an adapter
 ```

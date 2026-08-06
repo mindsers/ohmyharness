@@ -73,18 +73,24 @@ unearned** — the base set is one MCP server plus four hooks, justified by
 argument rather than measurement.
 
 The name promises curation. The verified, defensible half of the product today
-is isolation. Closing that gap is what [`omh bench`](trust.md) is for, and it is
-the reason `bench` sits ahead of new features on the [roadmap](roadmap.md)
-rather than behind them.
+is isolation.
+
+There is no benchmark coming to fix that, and pretending otherwise would be its
+own kind of dishonesty — see
+[measure the cost, argue the benefit](trust.md#measure-the-cost-argue-the-benefit).
+What closes the gap is the ordinary work of a distribution: more entries that
+earn their place, each with stated criteria, a measured cost, and a one-line
+way to remove it.
 
 Stating this here rather than discovering it in an issue thread is the point of
 writing it down.
 
 ## What follows from being a distribution
 
-- **The shortlist must be earned.** Every base-set entry needs a sentence like
-  *"cut tokens-to-first-correct-edit by N% across the task suite."* Anything that
-  can't say that is taste pretending to be curation.
+- **The shortlist must be earned.** Every base-set entry states what it costs
+  (measured, in bytes and seconds), what it buys (argued, in a sentence), what
+  was considered instead, and how to remove it. An entry that cannot fill in all
+  four is taste pretending to be curation.
 - **The shortlist expires.** A distribution's real work is re-choosing quarterly
   as the catalog churns. The base set is therefore versioned (`omh 2026.08`) and
   `omh upgrade` shows a changelog of what entered, what left, and why.

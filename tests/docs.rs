@@ -121,6 +121,73 @@ fn every_relative_link_resolves() {
     assert!(dead.is_empty(), "dead links:\n  {}", dead.join("\n  "));
 }
 
+/// GitHub's heading slug: lowercase, drop punctuation, spaces become hyphens.
+/// Inline markdown is stripped first — `` `omh bench` `` renders as a heading
+/// whose anchor contains no backticks, and half the headings here are code.
+fn slug(heading: &str) -> String {
+    let text: String = heading
+        .trim_start_matches('#')
+        .trim()
+        .chars()
+        // `_` is emphasis syntax, but in these headings it is almost always an
+        // identifier (`carry_in`, `idle_timeout`) and GitHub keeps it either way.
+        .filter(|c| !matches!(c, '`' | '*' | '[' | ']' | '(' | ')'))
+        .collect();
+    // Underscores survive: GitHub strips punctuation but keeps `-` and `_`, so
+    // a `carry_in` heading anchors at #carry_in, not #carryin.
+    text.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+        .map(|c| if c == ' ' { '-' } else { c })
+        .collect()
+}
+
+fn anchors(body: &str) -> BTreeSet<String> {
+    body.lines()
+        .filter(|l| l.starts_with('#'))
+        .map(|l| slug(l))
+        .collect()
+}
+
+/// An anchor is the half of a link the file check cannot see, and it is the
+/// half that breaks during exactly the kind of edit that renames a section —
+/// the link still resolves, so nothing complains, and the reader lands at the
+/// top of a long page with no idea what they were meant to be looking at.
+#[test]
+fn every_anchor_resolves() {
+    let mut dead: Vec<String> = Vec::new();
+
+    for file in markdown_files() {
+        let body = fs::read_to_string(&file).unwrap();
+        let dir = file.parent().unwrap();
+        let shown = file.strip_prefix(repo()).unwrap().display().to_string();
+
+        for target in links(&body) {
+            if target.starts_with("http") || target.starts_with("mailto:") {
+                continue;
+            }
+            let Some((path_part, anchor)) = target.split_once('#') else { continue };
+            if anchor.is_empty() {
+                continue;
+            }
+
+            // A bare `#anchor` addresses this file; otherwise the target file.
+            let target_body = if path_part.is_empty() {
+                Some(body.clone())
+            } else {
+                fs::read_to_string(dir.join(path_part)).ok()
+            };
+            let Some(target_body) = target_body else { continue }; // dead file: the other test owns that
+
+            if !anchors(&target_body).contains(anchor) {
+                dead.push(format!("{shown} → {target}"));
+            }
+        }
+    }
+
+    assert!(dead.is_empty(), "anchors pointing at no heading:\n  {}", dead.join("\n  "));
+}
+
 /// A page nothing links to is a page nobody reads. When docs were one file that
 /// was impossible by construction; in a tree it is the default outcome of
 /// adding a file and forgetting the index, which is how documentation quietly

@@ -177,6 +177,15 @@ go wrong.
 ## The honest caveat
 
 None of the token numbers above are a benchmark. They are measurements of
-individual operations, not evidence that the graph makes an agent better at
-tasks. That evidence is what `omh bench` is for, and until it exists the base
-set is justified by argument rather than by data — see [trust](design/trust.md).
+individual operations — what the graph **costs** and what a single lookup
+replaces — not evidence that it makes an agent better at tasks overall.
+
+That distinction is deliberate and permanent. omh measures cost and argues
+benefit, rather than running an eval suite over a stochastic metric that would
+cost real money per decision and become the thing the base set is tuned to pass:
+[measure the cost, argue the benefit](design/trust.md#measure-the-cost-argue-the-benefit).
+
+So the honest claim for the graph is *"it costs 2.3 KB per context rebuild and
+0.14s per turn, and structural questions beat re-grepping"* — the first half
+measured, the second half a judgment you are free to disagree with, and to
+[remove](design/trust.md) in one command.
