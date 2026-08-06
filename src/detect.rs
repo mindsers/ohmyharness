@@ -88,10 +88,18 @@ pub fn seeds(repo: &Path) -> Vec<Seed> {
 
     // First non-heading, non-empty line of the README is the project in one line.
     if let Ok(readme) = std::fs::read_to_string(repo.join("README.md")) {
+        // A tagline under the title is the commonest README shape, and it is
+        // usually a blockquote. Badges sit in the same place and say nothing.
         if let Some(line) = readme
             .lines()
-            .map(str::trim)
-            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .map(|l| l.trim().trim_start_matches('>').trim())
+            .find(|l| {
+                !l.is_empty()
+                    && !l.starts_with('#')
+                    && !l.starts_with("[!")
+                    && !l.starts_with("![")
+                    && !l.starts_with("---")
+            })
         {
             out.push(Seed { source: "README.md".into(), fact: line.to_string() });
         }
@@ -243,6 +251,29 @@ mod tests {
 
     /// Every seed must name where it came from, or `omh why` cannot explain it
     /// and the memory becomes unfalsifiable folklore.
+    /// A tagline under the title is the commonest README shape there is, and a
+    /// derived fact should be the sentence, not the markdown around it.
+    #[test]
+    fn a_blockquote_tagline_is_read_as_prose() {
+        let (_d, r) = repo(&[("README.md", "# omh\n\n> Launch any coding harness.\n")]);
+        let s = seeds(&r);
+        let fact = &s.iter().find(|x| x.source == "README.md").expect("README seed").fact;
+        assert_eq!(fact, "Launch any coding harness.", "markdown syntax is not the fact");
+    }
+
+    /// Badges are the other thing that sits under a title, and they say nothing
+    /// about the project.
+    #[test]
+    fn a_badge_line_is_not_mistaken_for_a_description() {
+        let (_d, r) = repo(&[(
+            "README.md",
+            "# p\n\n[![CI](https://img.shields.io/x)](https://ci)\n\nA real description.\n",
+        )]);
+        let s = seeds(&r);
+        let fact = &s.iter().find(|x| x.source == "README.md").expect("README seed").fact;
+        assert_eq!(fact, "A real description.");
+    }
+
     #[test]
     fn every_seed_cites_its_source() {
         let (_d, r) = repo(&[("README.md", "# p\n\nA thing.\n"), ("go.mod", "module x")]);

@@ -3,6 +3,12 @@ name = "omh"
 version = "0.0.1"
 edition = "2021"
 description = "Launch any coding harness, in a sandbox, with your setup already there."
+license = "MIT"
+authors = ["Nathanaël Cherrier <nathanael@cherrier.dev>"]
+repository = "https://github.com/mindsers/ohmyharness"
+readme = "README.md"
+keywords = ["agent", "sandbox", "claude", "mcp", "devtools"]
+categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
