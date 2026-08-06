@@ -10,7 +10,16 @@ use crate::adapter::Adapter;
 use anyhow::Result;
 use std::path::Path;
 
-pub const BASE_TAG: &str = "omh/base:latest";
+/// The base tag carries a digest of its own recipe, for the same reason the
+/// harness tag does: with a mutable `:latest`, `ensure` sees the tag present and
+/// skips the build, so a base change never reaches an install that already
+/// built it. Adding `socat` to the base silently did nothing until this.
+pub fn base_tag() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    base_dockerfile().hash(&mut h);
+    format!("omh/base:{:x}", h.finish())
+}
 
 /// Tag includes a digest of the recipe, so a Dockerfile omh ships actually
 /// reaches an install that already built the old one. With a fixed `:latest`,
@@ -27,10 +36,10 @@ pub fn tag_for(adapter: &Adapter) -> String {
 pub fn base_dockerfile() -> String {
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
-    r#"FROM node:22-bookworm-slim
+    format!(r#"FROM node:22-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server \
+      ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server socat \
  && rm -rf /var/lib/apt/lists/*
 
 RUN usermod -l agent -d /home/agent -m node \
@@ -45,7 +54,8 @@ RUN test "$(id -u agent)" = "1000" && test "$(getent passwd agent | cut -d: -f6)
 
 # The base set lives here, not in a harness layer: a code graph is
 # harness-agnostic and every session should get the same one.
-RUN npm install -g codebase-memory-mcp
+ARG TARGETARCH
+RUN __GRAPH_INSTALL__
 
 # Mount points the launcher expects to exist, owned by the unprivileged user.
 # The graph cache is a volume; the image only needs the directory to exist and
@@ -77,14 +87,13 @@ ENV HTTP_PROXY="" HTTPS_PROXY="" NO_PROXY=""
 
 USER agent
 WORKDIR /work
-"#
-    .to_string()
+"#).replace("__GRAPH_INSTALL__", &crate::base::graph_install())
 }
 
 pub fn harness_dockerfile(adapter: &Adapter) -> String {
     // Install as root, run as agent: an image that ends privileged would hand
     // the agent the sandbox's own escape hatch.
-    let mut df = format!("FROM {BASE_TAG}\nUSER root\nRUN {}\n", adapter.install);
+    let mut df = format!("FROM {}\nUSER root\nRUN {}\n", base_tag(), adapter.install);
 
     // Docker creates a missing mount parent as root, leaving the agent unable
     // to write beside its own config — atomic credential writes and transcripts
@@ -143,9 +152,10 @@ pub fn build_args(tag: &str, context: &Path) -> Vec<String> {
 /// Build the base and the harness layer if they are missing. Progress goes
 /// straight to the terminal: a multi-minute silent step reads as a hang.
 pub fn ensure(program: &str, adapter: &Adapter) -> Result<()> {
-    if !exists(program, BASE_TAG) {
-        eprintln!("omh: building {BASE_TAG} (first run only)");
-        build(program, BASE_TAG, &base_dockerfile())?;
+    let base = base_tag();
+    if !exists(program, &base) {
+        eprintln!("omh: building {base} (first run only)");
+        build(program, &base, &base_dockerfile())?;
     }
     let t = tag_for(adapter);
     if !exists(program, &t) {
@@ -254,6 +264,24 @@ mod tests {
     /// Regression: with a fixed `:latest`, `ensure` saw the tag present and
     /// skipped the build, so a Dockerfile fix never reached an install that had
     /// already built the old one — while `omh init` reported "already built".
+    /// Regression: the base tag was a mutable `:latest`, so `ensure` skipped
+    /// rebuilding it and a base change — adding `socat` — silently never shipped.
+    #[test]
+    fn a_changed_base_recipe_is_a_different_base_tag() {
+        let before = base_tag();
+        assert!(before.starts_with("omh/base:"));
+        assert_ne!(before, "omh/base:latest", "a mutable tag never rebuilds");
+    }
+
+    /// The harness layer must pin the base it was built against, or a rebuilt
+    /// base leaves the harness image referencing something that no longer exists.
+    #[test]
+    fn the_harness_layer_pins_an_exact_base() {
+        let df = harness_dockerfile(&claude());
+        assert!(df.contains(&base_tag()), "got: {df}");
+        assert!(!df.contains("omh/base:latest"), "got: {df}");
+    }
+
     #[test]
     fn a_changed_recipe_is_a_different_tag() {
         let mut a = claude();
@@ -342,7 +370,7 @@ mod tests {
     #[test]
     fn the_harness_layer_extends_the_base_and_installs_the_harness() {
         let df = harness_dockerfile(&claude());
-        assert!(df.contains(&format!("FROM {BASE_TAG}")), "got: {df}");
+        assert!(df.contains(&format!("FROM {}", base_tag())), "got: {df}");
         assert!(df.contains("@anthropic-ai/claude-code"), "install command: {df}");
     }
 

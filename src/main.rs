@@ -60,8 +60,9 @@ struct Cli {
 
 /// Built-ins and their aliases always beat a harness name — otherwise an
 /// adapter called `s` or `config` would silently shadow a command.
-pub const RESERVED: [&str; 12] = [
-    "init", "doctor", "d", "auth", "ls", "attach", "a", "sessions", "s", "config", "c", "help",
+pub const RESERVED: [&str; 13] = [
+    "init", "doctor", "d", "auth", "ls", "attach", "a", "sessions", "s", "config", "c", "graph",
+    "help",
 ];
 
 #[derive(Subcommand)]
@@ -71,6 +72,13 @@ enum Cmd {
     /// Verify a harness actually sees the profile, inside a real sandbox.
     #[command(visible_alias = "d")]
     Doctor { harness: Option<String> },
+    /// Open the code graph in your browser.
+    Graph {
+        session: Option<String>,
+        /// Stop the graph server; the session keeps running.
+        #[arg(long)]
+        stop: bool,
+    },
     /// Log a harness in once. Repeat with different names for several accounts.
     Auth {
         harness: String,
@@ -196,6 +204,7 @@ fn main() -> Result<()> {
         Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account),
         Cmd::Ls => ls(&cwd),
         Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run),
+        Cmd::Graph { session, stop } => graph(&cwd, session.as_deref(), *stop),
         Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref()),
 
         Cmd::Sessions { cmd } => match cmd {
@@ -287,6 +296,30 @@ fn session_up(
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
+    // The session's worktree is not the checkout indexed at init — it holds
+    // whatever the agent has since written. Index it now; the Stop hook keeps
+    // it current from here.
+    let project = base::project_name(&paths.repo_name(), &session.id);
+    let _ = Command::new(backend.program())
+        .args(backend.exec_args(
+            &name,
+            &[
+                base::GRAPH_BIN.into(),
+                "cli".into(),
+                "index_repository".into(),
+                "--repo-path".into(),
+                "/work".into(),
+                "--name".into(),
+                project,
+                "--mode".into(),
+                "fast".into(),
+            ],
+            false,
+        ))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+
     Ok((backend, name))
 }
 
@@ -382,6 +415,70 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             }
         }
     }
+    Ok(())
+}
+
+/// Serve the graph UI from the session and open it.
+///
+/// Started on demand rather than always: the port is reserved when the session
+/// is created (it has to be), but a process nobody looks at is waste.
+/// The graph UI, once per repo.
+///
+/// Not per session: every session's graph lives in one volume, so a per-session
+/// server showed every other session's graph anyway. Matching the server's
+/// scope to its data's scope removes the duplication, survives sessions coming
+/// and going, and lets the container mount only the index.
+fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
+    let container = base::ui_container(&paths.repo_name());
+
+    if stop {
+        if !image::container_running(backend.program(), &container) {
+            println!("the graph is not running");
+            return Ok(());
+        }
+        image::container_remove(backend.program(), &container)?;
+        println!("omh: graph stopped; sessions keep running");
+        return Ok(());
+    }
+
+    let port = base::ui_port(&container);
+    if !image::container_running(backend.program(), &container) {
+        // A stopped container of the same name blocks `run --name`.
+        let _ = image::container_remove(backend.program(), &container);
+
+        let names: Vec<String> =
+            Adapter::load_dir(&paths.adapters())?.into_iter().map(|a| a.name).collect();
+        let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
+            .context("no adapters installed — run `omh init`")?;
+        let adapter = Adapter::find(&paths.adapters(), &harness)?;
+        image::ensure(backend.program(), &adapter)?;
+
+        let out = Command::new(backend.program())
+            .args(base::ui_run_args(
+                &image::tag_for(&adapter),
+                &container,
+                &paths.cache_volume(),
+                port,
+            ))
+            .output()?;
+        if !out.status.success() {
+            anyhow::bail!(
+                "could not start the graph: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+    }
+
+    let url = format!("http://127.0.0.1:{port}");
+    println!("omh: graph at {url}");
+    println!("  every session's graph for this repo, in one place");
+    println!("  stop with: omh graph --stop");
+    let _ = Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" })
+        .arg(&url)
+        .status();
     Ok(())
 }
 
@@ -861,6 +958,19 @@ fn init(cwd: &std::path::Path) -> Result<()> {
          # carry_in = [\".env.local\", \"certs/\"]\n\
          carry_in = []\n",
     )?;
+    // Base-set hooks: the graph is inert unless something makes the agent
+    // reach for it and something keeps it current.
+    for h in base::hooks() {
+        write_if_absent(
+            &shared.join("hooks").join(format!("{}.json", h.name)),
+            &(serde_json::to_string_pretty(&serde_json::json!({
+                "event": h.event,
+                "matcher": h.matcher,
+                "command": h.command,
+            }))? + "\n"),
+        )?;
+    }
+
     for stack in &stacks {
         write_if_absent(
             &shared.join("hooks").join(format!("{}-test.json", stack.name)),
@@ -1179,6 +1289,19 @@ fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
     session::validate_id(id)?;
     let paths = Paths::discover(cwd)?;
     let session = Session::new(&paths.worktrees(), id.to_string());
+
+    // Drop the graph with the code it describes, while the container is still
+    // around to do it. Otherwise the index outlives the worktree forever.
+    if let Ok(backend) = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)) {
+        let name = paths.container(id);
+        if image::container_running(backend.program(), &name) {
+            let project = base::project_name(&paths.repo_name(), id);
+            let _ = Command::new(backend.program())
+                .args(backend.exec_args(&name, &base::drop_graph_command(&project), false))
+                .output();
+        }
+    }
+
     session.remove(&paths.repo)?;
     println!("removed session {id}; branch omh/{id} kept");
     Ok(())

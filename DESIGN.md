@@ -5,7 +5,7 @@
 ```
 $ omh init         # detects your stack, decides, reports. no questions.
 $ omh claude       # sandboxed, curated, your setup already inside
-$ omh code         # attach any IDE to the same session
+$ omh attach       # open the same session in your IDE
 ```
 
 The promise is **the best agentic coding environment without the hassle of
@@ -113,22 +113,57 @@ promised to remove; an unavoidable question means a missing default.
 ```
 omh init          → base system. no questions.
 omh add rust      → stack profile. a small curated delta.
-omh mcp add …     → the archive is still there, one command away, not in your face.
+omh config mcp add … → the archive is still there, one command away, not in your face.
 ```
 
-Straw-man base — deliberately small enough to argue about:
+| Component | Status | Justification |
+|---|---|---|
+| sandbox + worktree branch | ✅ | safety; non-negotiable |
+| `AGENTS.md` from detected stack | ✅ | the thing everyone writes badly |
+| `omh attach` | ✅ | IDE attach |
+| **`codegraph`** | ✅ | structural queries instead of re-grepping every task |
+| test-on-stop + format-on-edit hooks | ⬜ | `init` detects the commands and does not yet wire them |
+| memory | ⬜ | survives harness switches |
+| egress allowlist | ⬜ | inherited from the runtime |
 
-| Component | Justification owed |
-|---|---|
-| sandbox + worktree branch | safety; non-negotiable |
-| one code-graph MCP | must show a token win on `omh bench` |
-| `omh-mcp memory` | survives harness switches |
-| `AGENTS.md` from detected stack | the thing everyone writes badly |
-| test-on-stop + format-on-edit hooks | catches the most common agent failure |
-| `omh code` | IDE attach |
-| egress allowlist | inherited from the runtime |
+If an eighth needs a paragraph to justify, it belongs in a profile.
 
-Seven. If an eighth needs a paragraph to justify, it belongs in a profile.
+### Choosing the code graph
+
+Six candidates surveyed. What eliminated most of them was not quality:
+
+| | licence | external deps | verdict |
+|---|---|---|---|
+| gitnexus | **PolyForm-Noncommercial** | — | most users, deepest integration, **disqualified** |
+| codegraphcontext | MIT | **Neo4j** | a service to run is a decision to make |
+| codegraph (npm), mcp-code-graph | — | — | a year stale |
+| **codebase-memory-mcp** | MIT | **none** | chosen |
+| @sdsrs/code-graph | MIT | node | close second |
+
+**A noncommercial licence cannot be a default.** Every omh user writing code at
+work would be in violation of a dependency they never chose — a distro doing that
+is doing something *to* its users. gitnexus is a legitimate opt-in profile and
+never a base-set entry.
+
+What remained decided itself: a single static binary, no runtime and no database,
+`linux/arm64`, 158 languages. Measured on this repo: **0.46s to index, 3.4MB on
+disk, 821 nodes / 3813 edges.**
+
+Three design consequences:
+
+- **The graph lives in the base image**, not a harness layer — it is
+  harness-agnostic and every session should get the same one.
+- **The cache volume is keyed by repo, not harness.** That is what keeps the
+  index warm across a switch from Claude Code to opencode. Tested.
+- **The checkout mounts read-only while indexing.** An indexer that can write
+  into your repo is a sandbox hole for no benefit.
+
+Indexing runs *inside* the sandbox, because the cache is a container volume — an
+index built on the host lands where no session can read it.
+
+**Known gap:** the graph indexes the main checkout, not the session worktree. For
+a session that has been working a while, the graph describes code the agent has
+since changed, and nothing surfaces that staleness.
 
 ### What `omh init` does
 
@@ -340,7 +375,7 @@ which many harnesses take turns inhabiting.
 ```
        omh claude ──┐
        omh opencode ┼── exec ──┐
-       omh code ────┘  (ssh)   │
+       omh attach ──┘  (ssh)   │
                                ▼
  ┌──────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │
@@ -355,15 +390,25 @@ which many harnesses take turns inhabiting.
  └──────────────────────────────────────────────────────┘
 ```
 
-| Command | Effect |
-|---|---|
-| `omh <harness>` | ensure the session is up, then exec the harness into it |
-| `omh code [s]` | ensure up, open `ssh://omh-s01/work` |
-| `omh fwd [s] 3000` | forward a port to the host |
-| `omh ls` | sessions, branches, state, ports |
-| `omh diff [s]` | `git diff main...omh/s01` |
-| `omh down [s]` | stop; worktree and branch survive |
-| `omh rm [s]` | remove the worktree; **the branch is always kept** |
+```
+omh init
+omh doctor [harness]              d
+omh auth <harness> [account]
+omh ls                            harnesses · editors · sessions
+omh <harness> [args…]             claude · opencode   ← bare = run an agent
+omh attach [editor]               a
+omh sessions ls|rm|down|diff      s
+omh config [set|unset|edit|mcp]   c
+```
+
+Noun-verb groups with single-letter aliases: `omh s ls`, `omh c mcp ls`,
+`omh d claude`. A bare name means a **harness only**; editors moved under
+`attach`, which frees the bare slot from meaning two unrelated things.
+
+Since `omh <anything>` is a harness, a command name could be shadowed by an
+adapter. `RESERVED` prevents it — and rather than trusting anyone to keep that
+list current, a test introspects clap and fails if a command or alias is missing
+from it.
 
 Idle sessions auto-stop after `policy.idle_timeout`. N sessions means N sandboxes.
 
@@ -386,7 +431,7 @@ second agent. The socket is a pure function of session and harness; anything
 variable in that path would silently fork a duplicate.
 
 **Why not tmux.** tmux is a multiplexer *and* a persistence tool, and omh needs
-only the second half — `omh code` means SSH already gives you as many shells
+only the second half — `omh attach` means SSH already gives you as many shells
 against a session as you want. Adopting tmux buys one feature we need and one we
 have, while importing costs that land exactly where this project is most fragile:
 a prefix key competing with harness TUI bindings, nested tmux for anyone running
@@ -459,7 +504,7 @@ render = "concat"
 [capabilities.mcp]
 path   = "$HOME/.mcp.json"
 render = "mcp-json"
-import = "$REPO/.mcp.json"     # host-side, for `omh mcp import`
+import = "$REPO/.mcp.json"     # host-side, for `omh config mcp import`
 ```
 
 **An absent key means the harness cannot do it.** Degradation is a missing map
@@ -515,7 +560,7 @@ JetBrains Gateway, plain `ssh`. Dev servers come free: `omh fwd s01 3000`.
 your sandbox to the local network, inverting the point of the project.
 
 ```
-$ omh code
+$ omh attach
 session s01 is up
 
   ssh://omh-ohmyharness-s01/work
@@ -556,7 +601,7 @@ An editor that is not installed is not an error — omh says so and prints the
 URL. Launching nothing silently would be worse, and guessing a flag for an
 unknown editor would launch the wrong thing.
 
-`omh code` with no argument resolves `$OMH_EDITOR` / `$EDITOR` against the same
+`omh attach` with no argument resolves `$OMH_EDITOR` / `$EDITOR` against the same
 registry, falling back to printing every attach recipe.
 
 Verified: `ssh omh-ohmyharness-s01` lands as `agent` (uid 1000) inside the
@@ -669,15 +714,43 @@ the agent *and* your IDE land somewhere that cannot run your app.
 carry_in = [".env.local", "certs/"]
 ```
 
-Copied at session creation and added to `.git/info/exclude`. `node_modules` is
-deliberately not carried; it is built in the sandbox, for the sandbox's platform.
+```
+$ omh claude
+omh: carried .env.local
+omh: carried certs/
+omh: warning: carry_in lists .env.missing — not in this checkout
+```
 
 Copy, not symlink: a symlink's target would have to resolve inside the sandbox,
 which would mean mounting your main checkout — exposing the uncommitted work the
-worktree model exists to protect.
+worktree model exists to protect. `node_modules` is deliberately not carried; it
+is built in the sandbox, for the sandbox's platform.
 
 **`carry_in` is the only path by which a secret reaches the agent.** That is why
-it is an explicit allowlist and why omh prints what it carried.
+it is an explicit allowlist, why omh prints what it carried, and why patterns are
+validated: `carry_in` is read from a *committed* layer, so `../../.ssh` would copy
+host secrets into a sandbox the agent controls.
+
+A **missing** path is reported rather than skipped — a `.env` you believe you are
+carrying and are not is exactly what wastes an hour inside the sandbox.
+Re-running copies only what changed; the checkout is the source of truth.
+
+### Keeping the agent's `git status` clean
+
+Carried files must not appear as untracked, or the agent is invited to commit
+your `.env` onto the session branch. omh's own staged `CLAUDE.md` / `AGENTS.md`
+are hidden the same way.
+
+Two traps, both found by running it rather than reasoning about it:
+
+- **`<worktree>/.git` is a *file***, not a directory — it points at the admin
+  directory. A test that builds a fake `.git/info` passes while the real thing
+  does nothing.
+- **git reads `info/exclude` from the *common* git dir**, not the per-worktree
+  one. Checked empirically: a per-worktree exclude leaves `?? .env.local`; the
+  common one hides it. Consequence worth naming — that file is shared with the
+  main checkout. It is never committed, and carried paths are untracked there by
+  definition, so the effect is invisible, but it is not scoped to the worktree.
 
 ---
 
@@ -738,7 +811,7 @@ $ omh why codegraph
   in the base set since 2026.06
   cut tokens-to-first-correct-edit 41% across 12 tasks
   alternatives considered: CodeGraph, custom tree-sitter
-  remove with: omh mcp rm codegraph
+  remove with: omh config mcp rm codegraph
 ```
 
 **`omh bench` — evidence.** A fixed task suite measuring tokens-to-first-correct-
@@ -758,21 +831,25 @@ overridden because it never decided anything.
 ## 13. Settings
 
 ```
-omh config [policy|mcp]        effective settings, with provenance
-omh set <key> <value>          → local layer (gitignored) by default
-omh unset <key> [--layer]      lets the layer beneath resurface
-omh edit [--layer]             $EDITOR escape hatch
+omh config                            effective settings, with provenance
+omh config set <key> <value>          → local layer (gitignored) by default
+omh config unset <key> [--layer]      lets the layer beneath resurface
+omh config edit [--layer]             $EDITOR escape hatch
 
-omh mcp ls
-omh mcp add <name> <cmd> [args…] [--env K=V]
-omh mcp rm <name> [--layer]
-omh mcp import <harness> [--file] [--force]
+omh config mcp ls
+omh config mcp add <name> <cmd> [args…] [--env K=V]
+omh config mcp rm <name> [--layer]
+omh config mcp import <harness> [--file] [--force]
 ```
+
+MCP lives under `config` because MCP servers *are* configuration, resolved
+through the same three layers as everything else. `omh c mcp ls` when that is
+too long.
 
 Writes default to the gitignored layer; writing to the committed one says so:
 
 ```
-$ omh set carry_in '[".env"]' --layer shared
+$ omh config set carry_in '[".env"]' --layer shared
 warning: the shared layer is COMMITTED — never put a secret here
 ```
 
@@ -797,9 +874,9 @@ it makes curation nearly free, since we inherit Anthropic's taste and port it.
 
 ## 14. Risks, named
 
-1. **Auth is done, and the OAuth flow is still unverified.** Everything in §10b is
-   tested against fixtures; no real login has been completed end to end. That is
-   the one part of omh that cannot be checked without a terminal.
+1. **Auth is done and verified** — a real `omh auth claude <account>` login has
+   completed and persisted. Five bugs preceded that, every one at the boundary
+   between omh and a real harness, and *not one* was catchable by the suite.
 2. **The current credential model is weaker than `sbx`'s.** Mounting a creds
    volume lets a compromised agent read its own token. Adopt proxy injection.
 3. **A sandbox protects the host, not the repo.** The worktree branch is what makes
@@ -893,9 +970,10 @@ Run against a file mount it reports the real defect:
 ```
   ✗ token      /home/agent/.claude.json cannot be renamed over —
                a token saved here will not persist
-``` **A probe that produces no output is never
-a pass**: silence means the sandbox never ran it, and calling that success would
-make doctor worse than useless.
+```
+
+**A probe that produces no output is never a pass**: silence means the sandbox
+never ran it, and calling that success would make doctor worse than useless.
 
 Both shipped adapters are verified this way — `claude` passes 5 checks,
 `opencode` 4 (subagents and hooks correctly skipped). The "unverified claim"
@@ -906,8 +984,8 @@ caveat is retired for these two, and any third adapter inherits the same bar.
 ## 16. Milestones
 
 **v0 — the base set, one harness.** ✅ `omh init` that decides · ✅ images ·
-✅ sandbox + worktree · ✅ persistence · ✅ `omh auth` · ⬜ code graph · ⬜ memory
-· ✅ `omh code` · ✅ `omh doctor`.
+✅ sandbox + worktree · ✅ persistence · ✅ `omh auth` · ✅ `omh attach` ·
+✅ `omh doctor` · ✅ `carry_in` · ✅ **code graph** · ⬜ stack hooks · ⬜ memory.
 Success criterion: `omh init && omh claude` is visibly better than raw `claude`,
 with zero questions asked.
 

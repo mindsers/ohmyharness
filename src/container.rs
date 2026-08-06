@@ -125,7 +125,15 @@ pub fn plan(
     Ok(Plan {
         image: crate::image::tag_for(adapter),
         mounts,
-        env: vec![("OMH_SESSION".into(), session.id.clone())],
+        env: vec![
+            ("OMH_SESSION".into(), session.id.clone()),
+            // Hooks run inside the sandbox and must name the project they
+            // refresh; an env var keeps the hook file shared across sessions.
+            (
+                crate::base::PROJECT_ENV.into(),
+                crate::base::project_name(&paths.repo_name(), &session.id),
+            ),
+        ],
         network: paths.network(),
         workdir: "/work".into(),
         argv: crate::persist::wrap(

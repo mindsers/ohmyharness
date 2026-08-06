@@ -34,8 +34,16 @@ pub trait Runtime: std::fmt::Debug {
     /// Start the session container detached, publishing sshd on loopback.
     fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String>;
 
+
     /// Run something inside an already-running session.
     fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String>;
+
+    /// Run something inside the session that must outlive the caller.
+    ///
+    /// A process started by a `docker exec` we spawn and abandon dies with the
+    /// client — verified: the backgrounded server survived and the foreground
+    /// bridge did not.
+    fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String>;
 }
 
 #[derive(Debug)]
@@ -93,6 +101,8 @@ impl Runtime for Docker {
         ];
         // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
         // to the local network.
+        // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
+        // to the local network.
         a.push("-p".into());
         a.push(format!("127.0.0.1:{port}:22"));
         for m in &plan.mounts {
@@ -114,6 +124,14 @@ impl Runtime for Docker {
         a.extend(["-w".into(), plan.workdir.clone()]);
         a.push(plan.image.clone());
         a.push("omh-session".into());
+        a
+    }
+
+    fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String> {
+        let mut a: Vec<String> =
+            vec!["exec".into(), "-d".into(), "-u".into(), "agent".into(), "-w".into(), "/work".into()];
+        a.push(name.into());
+        a.extend(argv.iter().cloned());
         a
     }
 
@@ -183,6 +201,13 @@ impl Runtime for Sbx {
         a.push(format!("OMH_PUBKEY={pubkey}"));
         a.push("--".into());
         a.push("omh-session".into());
+        a
+    }
+
+    fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String> {
+        // PROVISIONAL, like the rest of the sbx backend.
+        let mut a: Vec<String> = vec!["exec".into(), "--detach".into(), name.into(), "--".into()];
+        a.extend(argv.iter().cloned());
         a
     }
 
@@ -446,6 +471,15 @@ mod tests {
         assert!(!joined.contains("0.0.0.0"));
     }
 
+
+
+    #[test]
+    fn published_ports_are_loopback_only() {
+        let joined = Docker.up_args(&sample_plan(), "n", 49200, "k").join(" ");
+        assert!(!joined.contains("0.0.0.0"), "got: {joined}");
+        assert_eq!(joined.matches("127.0.0.1:").count(), 1, "ssh only: {joined}");
+    }
+
     #[test]
     fn the_session_runs_detached_and_named() {
         let args = Docker.up_args(&sample_plan(), "omh-repo-s01", 49200, "k");
@@ -479,6 +513,16 @@ mod tests {
         assert!(args.contains(&"omh-repo-s01".to_string()));
         assert!(args.windows(2).any(|w| w[0] == "-u" && w[1] == "agent"), "got: {args:?}");
         assert_eq!(args.last().unwrap(), "claude");
+    }
+
+    /// Regression: a service started through a spawned-and-abandoned
+    /// `docker exec` dies with the client. The server survived because it was
+    /// backgrounded inside the shell; the foreground bridge did not.
+    #[test]
+    fn a_detached_exec_outlives_the_caller() {
+        let args = Docker.exec_detached_args("omh-repo-s01", &["sh".into()]);
+        assert!(args.contains(&"-d".to_string()), "got: {args:?}");
+        assert!(args.contains(&"omh-repo-s01".to_string()));
     }
 
     #[test]

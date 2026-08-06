@@ -1,0 +1,5 @@
+{
+  "command": "codebase-memory-mcp cli index_repository --repo-path /work --name \"$OMH_GRAPH_PROJECT\" --mode fast >/dev/null 2>&1 || true",
+  "event": "Stop",
+  "matcher": ""
+}
