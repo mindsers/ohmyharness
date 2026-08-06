@@ -34,7 +34,6 @@ pub trait Runtime: std::fmt::Debug {
     /// Start the session container detached, publishing sshd on loopback.
     fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String>;
 
-
     /// Run something inside an already-running session.
     fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String>;
 
@@ -62,7 +61,10 @@ impl Runtime for Docker {
         "docker"
     }
     fn caps(&self) -> Caps {
-        Caps { file_mounts: true, free_guest_paths: true }
+        Caps {
+            file_mounts: true,
+            free_guest_paths: true,
+        }
     }
 
     fn args(&self, plan: &Plan) -> Vec<String> {
@@ -93,12 +95,7 @@ impl Runtime for Docker {
     fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String> {
         // Detached and unnamed by --rm: a session must outlive the terminal
         // that started it, or `omh code` has nothing to attach to.
-        let mut a: Vec<String> = vec![
-            "run".into(),
-            "-d".into(),
-            "--name".into(),
-            name.into(),
-        ];
+        let mut a: Vec<String> = vec!["run".into(), "-d".into(), "--name".into(), name.into()];
         // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
         // to the local network.
         // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
@@ -128,8 +125,14 @@ impl Runtime for Docker {
     }
 
     fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String> {
-        let mut a: Vec<String> =
-            vec!["exec".into(), "-d".into(), "-u".into(), "agent".into(), "-w".into(), "/work".into()];
+        let mut a: Vec<String> = vec![
+            "exec".into(),
+            "-d".into(),
+            "-u".into(),
+            "agent".into(),
+            "-w".into(),
+            "/work".into(),
+        ];
         a.push(name.into());
         a.extend(argv.iter().cloned());
         a
@@ -162,7 +165,10 @@ impl Runtime for Sbx {
         // host path and say nothing about single files, so assume neither until
         // the spike proves otherwise. A wrong `true` here would start a sandbox
         // with the profile silently missing.
-        Caps { file_mounts: false, free_guest_paths: false }
+        Caps {
+            file_mounts: false,
+            free_guest_paths: false,
+        }
     }
 
     fn args(&self, plan: &Plan) -> Vec<String> {
@@ -190,12 +196,21 @@ impl Runtime for Sbx {
 
     fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String> {
         // PROVISIONAL — sbx session semantics are part of the open spike.
-        let mut a: Vec<String> = vec!["run".into(), "--detach".into(), "--name".into(), name.into()];
+        let mut a: Vec<String> = vec![
+            "run".into(),
+            "--detach".into(),
+            "--name".into(),
+            name.into(),
+        ];
         a.push("--publish".into());
         a.push(format!("127.0.0.1:{port}:22"));
         for m in &plan.mounts {
             a.push("--workspace".into());
-            a.push(format!("{}{}", m.host.display(), if m.read_only { ":ro" } else { "" }));
+            a.push(format!(
+                "{}{}",
+                m.host.display(),
+                if m.read_only { ":ro" } else { "" }
+            ));
         }
         a.push("--env".into());
         a.push(format!("OMH_PUBKEY={pubkey}"));
@@ -240,11 +255,17 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Box<
                 return Ok(build(name).expect("name from the known list"));
             }
         }
-        anyhow::bail!("no container runtime found — install one of: {}", NAMES.join(", "));
+        anyhow::bail!(
+            "no container runtime found — install one of: {}",
+            NAMES.join(", ")
+        );
     }
 
     let Some(runtime) = build(preference) else {
-        anyhow::bail!("unknown runtime `{preference}` — expected one of: {}", NAMES.join(", "));
+        anyhow::bail!(
+            "unknown runtime `{preference}` — expected one of: {}",
+            NAMES.join(", ")
+        );
     };
     if !available(preference) {
         anyhow::bail!("runtime `{preference}` is not installed");
@@ -312,7 +333,10 @@ mod tests {
     fn sbx_capabilities_stay_conservative_until_verified() {
         let c = Sbx.caps();
         assert!(!c.file_mounts, "unverified: assume no");
-        assert!(!c.free_guest_paths, "sbx mounts workspaces at their host path");
+        assert!(
+            !c.free_guest_paths,
+            "sbx mounts workspaces at their host path"
+        );
     }
 
     // ── selection ───────────────────────────────────────────────────────────
@@ -365,7 +389,13 @@ mod tests {
 
     #[test]
     fn a_directory_only_plan_passes_on_any_backend() {
-        for caps in [Docker.caps(), Caps { file_mounts: false, free_guest_paths: true }] {
+        for caps in [
+            Docker.caps(),
+            Caps {
+                file_mounts: false,
+                free_guest_paths: true,
+            },
+        ] {
             sample_plan().validate(&caps).unwrap();
         }
     }
@@ -384,16 +414,23 @@ mod tests {
             },
         ]);
 
-        plan.validate(&Docker.caps()).expect("docker supports file mounts");
+        plan.validate(&Docker.caps())
+            .expect("docker supports file mounts");
 
         let err = plan.validate(&Sbx.caps()).unwrap_err();
         let msg = format!("{err:#}");
-        assert!(msg.contains(".mcp.json"), "must name the offending mount: {msg}");
+        assert!(
+            msg.contains(".mcp.json"),
+            "must name the offending mount: {msg}"
+        );
     }
 
     #[test]
     fn a_plan_relocating_guest_paths_is_refused_when_paths_are_not_free() {
-        let caps = Caps { file_mounts: true, free_guest_paths: false };
+        let caps = Caps {
+            file_mounts: true,
+            free_guest_paths: false,
+        };
         let err = sample_plan().validate(&caps).unwrap_err();
         assert!(format!("{err:#}").contains("/work"), "got: {err:#}");
     }
@@ -419,7 +456,10 @@ mod tests {
         let plan = sample_plan();
         let args = Docker.args(&plan).join(" ");
         for m in &plan.mounts {
-            assert!(args.contains(&m.host.display().to_string()), "missing {m:?}");
+            assert!(
+                args.contains(&m.host.display().to_string()),
+                "missing {m:?}"
+            );
         }
         assert_eq!(args.matches(":ro").count(), 1);
         assert!(args.contains("-w /work"));
@@ -434,7 +474,10 @@ mod tests {
         let plan = sample_plan();
         let args = Sbx.args(&plan).join(" ");
         for m in &plan.mounts {
-            assert!(args.contains(&m.host.display().to_string()), "missing {m:?}");
+            assert!(
+                args.contains(&m.host.display().to_string()),
+                "missing {m:?}"
+            );
         }
         assert!(args.contains(":ro"), "read-only mounts must stay read-only");
         assert!(args.ends_with("claude"), "harness argv comes last: {args}");
@@ -466,26 +509,38 @@ mod tests {
     /// network — the exact inverse of what this project is for.
     #[test]
     fn the_session_publishes_ssh_on_loopback_only() {
-        let joined = Docker.up_args(&sample_plan(), "omh-repo-s01", 49200, "ssh-ed25519 AAA").join(" ");
+        let joined = Docker
+            .up_args(&sample_plan(), "omh-repo-s01", 49200, "ssh-ed25519 AAA")
+            .join(" ");
         assert!(joined.contains("127.0.0.1:49200:22"), "got: {joined}");
         assert!(!joined.contains("0.0.0.0"));
     }
-
-
 
     #[test]
     fn published_ports_are_loopback_only() {
         let joined = Docker.up_args(&sample_plan(), "n", 49200, "k").join(" ");
         assert!(!joined.contains("0.0.0.0"), "got: {joined}");
-        assert_eq!(joined.matches("127.0.0.1:").count(), 1, "ssh only: {joined}");
+        assert_eq!(
+            joined.matches("127.0.0.1:").count(),
+            1,
+            "ssh only: {joined}"
+        );
     }
 
     #[test]
     fn the_session_runs_detached_and_named() {
         let args = Docker.up_args(&sample_plan(), "omh-repo-s01", 49200, "k");
-        assert!(args.contains(&"-d".to_string()), "must outlive the terminal: {args:?}");
-        assert!(args.windows(2).any(|w| w[0] == "--name" && w[1] == "omh-repo-s01"));
-        assert!(!args.contains(&"--rm".to_string()), "a session must survive its launch");
+        assert!(
+            args.contains(&"-d".to_string()),
+            "must outlive the terminal: {args:?}"
+        );
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--name" && w[1] == "omh-repo-s01"));
+        assert!(
+            !args.contains(&"--rm".to_string()),
+            "a session must survive its launch"
+        );
     }
 
     /// The session carries the same mounts as a one-shot launch, or the harness
@@ -495,14 +550,19 @@ mod tests {
         let plan = sample_plan();
         let joined = Docker.up_args(&plan, "n", 1, "k").join(" ");
         for m in &plan.mounts {
-            assert!(joined.contains(&m.host.display().to_string()), "missing {m:?}");
+            assert!(
+                joined.contains(&m.host.display().to_string()),
+                "missing {m:?}"
+            );
         }
         assert_eq!(joined.matches(":ro").count(), plan.mounts.len() - 1);
     }
 
     #[test]
     fn the_public_key_reaches_the_session() {
-        let joined = Docker.up_args(&sample_plan(), "n", 1, "ssh-ed25519 AAAkey").join(" ");
+        let joined = Docker
+            .up_args(&sample_plan(), "n", 1, "ssh-ed25519 AAAkey")
+            .join(" ");
         assert!(joined.contains("ssh-ed25519 AAAkey"), "got: {joined}");
     }
 
@@ -511,7 +571,10 @@ mod tests {
         let args = Docker.exec_args("omh-repo-s01", &["claude".into()], true);
         assert_eq!(args[0], "exec");
         assert!(args.contains(&"omh-repo-s01".to_string()));
-        assert!(args.windows(2).any(|w| w[0] == "-u" && w[1] == "agent"), "got: {args:?}");
+        assert!(
+            args.windows(2).any(|w| w[0] == "-u" && w[1] == "agent"),
+            "got: {args:?}"
+        );
         assert_eq!(args.last().unwrap(), "claude");
     }
 
@@ -527,7 +590,11 @@ mod tests {
 
     #[test]
     fn exec_asks_for_a_terminal_only_when_there_is_one() {
-        assert!(Docker.exec_args("n", &["x".into()], true).contains(&"-it".to_string()));
-        assert!(!Docker.exec_args("n", &["x".into()], false).contains(&"-it".to_string()));
+        assert!(Docker
+            .exec_args("n", &["x".into()], true)
+            .contains(&"-it".to_string()));
+        assert!(!Docker
+            .exec_args("n", &["x".into()], false)
+            .contains(&"-it".to_string()));
     }
 }

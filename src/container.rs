@@ -96,7 +96,15 @@ pub fn plan(
             dropped.push((cap, count_entries(&sources)));
             continue;
         };
-        stage_capability(cap, binding, &sources, &stage, session, &mut mounts, staging)?;
+        stage_capability(
+            cap,
+            binding,
+            &sources,
+            &stage,
+            session,
+            &mut mounts,
+            staging,
+        )?;
     }
 
     // The graph index, keyed by repo rather than harness — that is what lets
@@ -179,7 +187,9 @@ fn stage_capability(
                 if staging == Staging::Skip {
                     continue;
                 }
-                let Ok(entries) = std::fs::read_dir(src) else { continue };
+                let Ok(entries) = std::fs::read_dir(src) else {
+                    continue;
+                };
                 for entry in entries.flatten() {
                     let link = dst.join(entry.file_name());
                     let _ = std::fs::remove_file(&link);
@@ -204,9 +214,9 @@ fn stage_capability(
                 .collect::<Vec<_>>()
                 .join("\n\n");
             for target in std::iter::once(&binding.path).chain(binding.also.iter()) {
-                let rel = target.strip_prefix("/work/").with_context(|| {
-                    format!("`concat` target {target} must live under /work/")
-                })?;
+                let rel = target
+                    .strip_prefix("/work/")
+                    .with_context(|| format!("`concat` target {target} must live under /work/"))?;
                 if staging == Staging::Apply {
                     std::fs::write(session.worktree.join(rel), &merged)
                         .with_context(|| format!("staging {cap} at {rel}"))?;
@@ -260,10 +270,7 @@ impl Plan {
         let mut problems = Vec::new();
         for m in &self.mounts {
             if !caps.file_mounts && m.file {
-                problems.push(format!(
-                    "{} is a single-file mount",
-                    m.guest.display()
-                ));
+                problems.push(format!("{} is a single-file mount", m.guest.display()));
             }
             if !caps.free_guest_paths && m.guest != m.host {
                 problems.push(format!(
@@ -313,7 +320,10 @@ mod tests {
     /// Shared layer:   skills(shared, graphify-override), rules, mcp.
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths { root: dir.path().join("home"), repo: dir.path().join("repo") };
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -321,26 +331,53 @@ mod tests {
 
         let personal = paths.root.join("profile");
         write(personal.join("AGENTS.md"), "personal rules");
-        write(personal.join("skills/graphify/SKILL.md"), "personal graphify");
+        write(
+            personal.join("skills/graphify/SKILL.md"),
+            "personal graphify",
+        );
         write(personal.join("subagents/explorer.md"), "explorer");
-        write(personal.join("hooks/fmt.json"), r#"{"event":"Stop","command":"fmt"}"#);
+        write(
+            personal.join("hooks/fmt.json"),
+            r#"{"event":"Stop","command":"fmt"}"#,
+        );
 
         let shared = paths.repo.join(".omh/profile");
         write(shared.join("AGENTS.md"), "shared rules");
         write(shared.join("skills/graphify/SKILL.md"), "shared graphify");
         write(shared.join("skills/only-shared/SKILL.md"), "only shared");
-        write(shared.join("mcp.json"), r#"{"mcpServers":{"m":{"command":"m"}}}"#);
+        write(
+            shared.join("mcp.json"),
+            r#"{"mcpServers":{"m":{"command":"m"}}}"#,
+        );
 
         let session = Session::new(&paths.root.join("worktrees"), "s01".into());
         std::fs::create_dir_all(&session.worktree).unwrap();
 
         let profile = Profile::resolve(&paths);
-        Fx { _dir: dir, paths, profile, session }
+        Fx {
+            _dir: dir,
+            paths,
+            profile,
+            session,
+        }
     }
 
     fn plan_for(fx: &Fx, harness: &str) -> Plan {
         let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
-        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap()
+        plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+            },
+        )
+        .unwrap()
     }
 
     /// The security contract. The worktree is writable because that is the
@@ -354,7 +391,10 @@ mod tests {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
         let writable: Vec<_> = p.mounts.iter().filter(|m| !m.read_only).collect();
-        let guests: Vec<String> = writable.iter().map(|m| m.guest.display().to_string()).collect();
+        let guests: Vec<String> = writable
+            .iter()
+            .map(|m| m.guest.display().to_string())
+            .collect();
         assert_eq!(guests.len(), 2, "worktree and graph cache only: {guests:?}");
         assert!(guests.contains(&"/work".to_string()));
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
@@ -412,7 +452,10 @@ mod tests {
     fn no_account_means_no_credential_mounts() {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
-        assert!(!p.mounts.iter().any(|m| m.guest.to_string_lossy().ends_with(".claude.json")));
+        assert!(!p
+            .mounts
+            .iter()
+            .any(|m| m.guest.to_string_lossy().ends_with(".claude.json")));
     }
 
     /// Keyed by repo, not by harness: a graph rebuilt on every switch would
@@ -439,7 +482,8 @@ mod tests {
         for m in &p.mounts {
             assert!(
                 !m.host.starts_with(fx.paths.repo.join("src")),
-                "must not expose the host checkout: {}", m.host.display()
+                "must not expose the host checkout: {}",
+                m.host.display()
             );
         }
     }
@@ -461,17 +505,24 @@ mod tests {
             let target = std::fs::read_link(entry.path()).unwrap();
             assert!(
                 target.starts_with("/omh/layers"),
-                "link must resolve inside the container, got {}", target.display()
+                "link must resolve inside the container, got {}",
+                target.display()
             );
             names.push(entry.file_name().to_string_lossy().into_owned());
         }
         names.sort();
-        assert_eq!(names, ["graphify", "only-shared"], "layers union by entry name");
+        assert_eq!(
+            names,
+            ["graphify", "only-shared"],
+            "layers union by entry name"
+        );
 
         // Every layer a link can point into must actually be mounted.
         for i in 0..fx.profile.sources(Capability::Skills).len() {
             assert!(
-                p.mounts.iter().any(|m| m.guest == guest_layer(i, Capability::Skills)),
+                p.mounts
+                    .iter()
+                    .any(|m| m.guest == guest_layer(i, Capability::Skills)),
                 "layer {i} skills must be mounted for its links to resolve"
             );
         }
@@ -486,8 +537,13 @@ mod tests {
         let opencode = plan_for(&fx, "opencode");
 
         let mcp_of = |p: &Plan| {
-            let m = p.mounts.iter().find(|m| m.guest.to_string_lossy().contains("mcp")
-                || m.guest.ends_with("opencode.json")).expect("mcp mount");
+            let m = p
+                .mounts
+                .iter()
+                .find(|m| {
+                    m.guest.to_string_lossy().contains("mcp") || m.guest.ends_with("opencode.json")
+                })
+                .expect("mcp mount");
             std::fs::read_to_string(&m.host).unwrap()
         };
 
@@ -495,7 +551,10 @@ mod tests {
         let o = mcp_of(&opencode);
         assert!(c.contains("mcpServers"), "claude schema: {c}");
         assert!(o.contains("\"mcp\""), "opencode schema: {o}");
-        assert!(!c.contains("opencode.ai"), "claude config must not be clobbered by opencode");
+        assert!(
+            !c.contains("opencode.ai"),
+            "claude config must not be clobbered by opencode"
+        );
     }
 
     #[test]
@@ -507,7 +566,10 @@ mod tests {
         let dropped: Vec<_> = oc.dropped.iter().map(|(c, _)| *c).collect();
         assert_eq!(dropped, vec![Capability::Subagents, Capability::Hooks]);
         let msg = oc.degradation().unwrap();
-        assert!(msg.contains("subagents") && msg.contains("hooks"), "got: {msg}");
+        assert!(
+            msg.contains("subagents") && msg.contains("hooks"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -534,7 +596,20 @@ mod tests {
             "#,
         )
         .unwrap();
-        let err = plan(&fx.paths, &fx.profile, &bad, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap_err();
+        let err = plan(
+            &fx.paths,
+            &fx.profile,
+            &bad,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+            },
+        )
+        .unwrap_err();
         assert!(format!("{err:#}").contains("/work/"), "got: {err:#}");
     }
 
@@ -566,7 +641,20 @@ mod tests {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let args = ["--resume".to_string(), "abc".to_string()];
-        let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &args, Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &args,
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+            },
+        )
+        .unwrap();
         assert_eq!(p.argv, ["claude", "--resume", "abc"]);
     }
 
@@ -576,7 +664,20 @@ mod tests {
     fn skipped_staging_writes_nothing() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap();
+        plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Skip,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+            },
+        )
+        .unwrap();
 
         assert!(!fx.paths.root.join("run").exists(), "no staging directory");
         for name in ["CLAUDE.md", "AGENTS.md"] {
@@ -592,11 +693,40 @@ mod tests {
     fn skipped_staging_still_reports_the_real_mounts() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let dry = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap();
-        let wet = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], Options { staging: Staging::Apply, persist: crate::persist::Mode::None, tty: true, account_dir: None }).unwrap();
+        let dry = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Skip,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+            },
+        )
+        .unwrap();
+        let wet = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+            },
+        )
+        .unwrap();
 
         let paths_of = |p: &Plan| -> Vec<String> {
-            p.mounts.iter().map(|m| format!("{}:{}", m.host.display(), m.guest.display())).collect()
+            p.mounts
+                .iter()
+                .map(|m| format!("{}:{}", m.host.display(), m.guest.display()))
+                .collect()
         };
         assert_eq!(paths_of(&dry), paths_of(&wet));
         assert_eq!(dry.argv, wet.argv);
@@ -608,7 +738,12 @@ mod tests {
     fn the_planned_command_survives_losing_the_terminal() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::Dtach, tty: true, account_dir: None };
+        let opts = Options {
+            staging: Staging::Skip,
+            persist: crate::persist::Mode::Dtach,
+            tty: true,
+            account_dir: None,
+        };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
         assert_eq!(p.argv[0], "dtach");
@@ -619,7 +754,12 @@ mod tests {
     fn persistence_can_be_turned_off() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let opts = Options { staging: Staging::Skip, persist: crate::persist::Mode::None, tty: true, account_dir: None };
+        let opts = Options {
+            staging: Staging::Skip,
+            persist: crate::persist::Mode::None,
+            tty: true,
+            account_dir: None,
+        };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);
     }

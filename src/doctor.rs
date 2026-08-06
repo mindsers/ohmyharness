@@ -81,7 +81,9 @@ pub fn checks(profile: &Profile, adapter: &Adapter) -> Vec<Check> {
         }
         // A capability the harness cannot express was already reported as
         // dropped at launch; checking it would fail forever.
-        let Some(binding) = adapter.supports(capability) else { continue };
+        let Some(binding) = adapter.supports(capability) else {
+            continue;
+        };
 
         let guest = match binding.render {
             // `concat` writes into the worktree, which is mounted at /work.
@@ -98,7 +100,12 @@ pub fn checks(profile: &Profile, adapter: &Adapter) -> Vec<Check> {
             Render::ClaudeSettings => Expect::NonEmptyFile,
         };
 
-        out.push(Check { name: capability.to_string(), guest, expect, dir: binding.render == Render::Dir });
+        out.push(Check {
+            name: capability.to_string(),
+            guest,
+            expect,
+            dir: binding.render == Render::Dir,
+        });
     }
     out
 }
@@ -199,7 +206,11 @@ pub fn parse(output: &str) -> Vec<Outcome> {
                 "fail" => false,
                 _ => return None,
             };
-            Some(Outcome { name: name.to_string(), ok, detail: detail.to_string() })
+            Some(Outcome {
+                name: name.to_string(),
+                ok,
+                detail: detail.to_string(),
+            })
         })
         .collect()
 }
@@ -223,7 +234,10 @@ mod tests {
 
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths { root: dir.path().join("home"), repo: dir.path().join("repo") };
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
         let write = |p: PathBuf, body: &str| {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
@@ -236,7 +250,10 @@ mod tests {
             personal.join("mcp.json"),
             r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
         );
-        Fx { _dir: dir, profile: Profile::resolve(&paths) }
+        Fx {
+            _dir: dir,
+            profile: Profile::resolve(&paths),
+        }
     }
 
     fn adapter(name: &str) -> Adapter {
@@ -262,7 +279,10 @@ mod tests {
             .into_iter()
             .map(|c| c.name)
             .collect();
-        assert!(!caps.iter().any(|c| c == "subagents"), "opencode has no subagents");
+        assert!(
+            !caps.iter().any(|c| c == "subagents"),
+            "opencode has no subagents"
+        );
         assert!(caps.iter().any(|c| c == "skills"));
     }
 
@@ -304,7 +324,10 @@ mod tests {
         std::fs::write(commands.join("ship.md"), "x").unwrap();
         std::fs::create_dir_all(commands.join("nested")).unwrap();
 
-        assert_eq!(entry_names(&[commands]), vec!["nested".to_string(), "ship.md".to_string()]);
+        assert_eq!(
+            entry_names(&[commands]),
+            vec!["nested".to_string(), "ship.md".to_string()]
+        );
     }
 
     // ── probe ───────────────────────────────────────────────────────────────
@@ -412,7 +435,10 @@ mod tests {
     fn probing_a_credential_file_preserves_it() {
         let cs = credential_checks(&adapter("claude"));
         let script = probe_script(&cs);
-        assert!(script.contains("cp "), "must copy the original before renaming: {script}");
+        assert!(
+            script.contains("cp "),
+            "must copy the original before renaming: {script}"
+        );
         assert!(
             !script.contains("> '/home/agent/.claude/.credentials.json'"),
             "must never truncate a credential file: {script}"
@@ -422,7 +448,10 @@ mod tests {
     #[test]
     fn the_probe_cleans_up_after_itself() {
         let script = probe_script(&credential_checks(&adapter("claude")));
-        assert!(script.contains("rm -f"), "the probe file must not be left behind: {script}");
+        assert!(
+            script.contains("rm -f"),
+            "the probe file must not be left behind: {script}"
+        );
     }
 
     #[test]

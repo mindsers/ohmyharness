@@ -36,7 +36,8 @@ pub fn tag_for(adapter: &Adapter) -> String {
 pub fn base_dockerfile() -> String {
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
-    format!(r#"FROM node:22-bookworm-slim
+    format!(
+        r#"FROM node:22-bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server socat \
@@ -87,7 +88,9 @@ ENV HTTP_PROXY="" HTTPS_PROXY="" NO_PROXY=""
 
 USER agent
 WORKDIR /work
-"#).replace("__GRAPH_INSTALL__", &crate::base::graph_install())
+"#
+    )
+    .replace("__GRAPH_INSTALL__", &crate::base::graph_install())
 }
 
 pub fn harness_dockerfile(adapter: &Adapter) -> String {
@@ -227,7 +230,9 @@ pub fn container_running(program: &str, name: &str) -> bool {
 
 /// Stopped-but-present containers block `run --name`, so clear them first.
 pub fn container_remove(program: &str, name: &str) -> Result<()> {
-    let out = std::process::Command::new(program).args(["rm", "-f", name]).output()?;
+    let out = std::process::Command::new(program)
+        .args(["rm", "-f", name])
+        .output()?;
     if !out.status.success() {
         // A sandbox that is still running still has the credential directory
         // mounted writable; reporting it stopped would be a lie that matters.
@@ -301,7 +306,10 @@ mod tests {
     #[test]
     fn the_base_satisfies_the_sandbox_contract() {
         let df = base_dockerfile();
-        assert!(df.contains("-u 1000") || df.contains("1000"), "UID 1000: {df}");
+        assert!(
+            df.contains("-u 1000") || df.contains("1000"),
+            "UID 1000: {df}"
+        );
         assert!(df.contains("agent"), "agent user");
         assert!(df.contains("/home/agent"), "home directory");
         assert!(df.contains("NOPASSWD"), "passwordless sudo");
@@ -347,7 +355,10 @@ mod tests {
     #[test]
     fn the_session_entrypoint_installs_the_key_with_permissions_sshd_accepts() {
         let df = base_dockerfile();
-        assert!(df.contains("OMH_PUBKEY"), "key must come from the environment");
+        assert!(
+            df.contains("OMH_PUBKEY"),
+            "key must come from the environment"
+        );
         assert!(df.contains("chmod 700"), "~/.ssh perms");
         assert!(df.contains("chmod 600"), "authorized_keys perms");
     }
@@ -371,7 +382,10 @@ mod tests {
     fn the_harness_layer_extends_the_base_and_installs_the_harness() {
         let df = harness_dockerfile(&claude());
         assert!(df.contains(&format!("FROM {}", base_tag())), "got: {df}");
-        assert!(df.contains("@anthropic-ai/claude-code"), "install command: {df}");
+        assert!(
+            df.contains("@anthropic-ai/claude-code"),
+            "install command: {df}"
+        );
     }
 
     /// Installing needs root; running must not have it. A base that ends as
@@ -388,7 +402,10 @@ mod tests {
     fn the_harness_layer_owns_the_directories_it_mounts_into() {
         let df = harness_dockerfile(&claude());
         assert!(df.contains("/home/agent/.claude"), "config dir: {df}");
-        assert!(df.contains("chown"), "must be owned by agent, not root: {df}");
+        assert!(
+            df.contains("chown"),
+            "must be owned by agent, not root: {df}"
+        );
     }
 
     /// Asserted on the parsed list, not a positional substring: the old form
@@ -399,7 +416,10 @@ mod tests {
         for name in ["claude", "opencode"] {
             let a = Adapter::find(adapters(), name).unwrap();
             for dir in mount_parents(&a) {
-                assert!(dir.starts_with("/home/agent"), "{name}: {dir} is not ours to create");
+                assert!(
+                    dir.starts_with("/home/agent"),
+                    "{name}: {dir} is not ours to create"
+                );
             }
         }
     }
@@ -435,12 +455,16 @@ mod tests {
                 if !p.starts_with("/home/agent") {
                     continue;
                 }
-                let Some(parent) = p.parent().map(|x| x.display().to_string()) else { continue };
+                let Some(parent) = p.parent().map(|x| x.display().to_string()) else {
+                    continue;
+                };
                 if parent == "/home/agent" {
                     continue; // the base image already owns the home itself
                 }
                 assert!(
-                    created.iter().any(|d| parent == *d || parent.starts_with(&format!("{d}/"))),
+                    created
+                        .iter()
+                        .any(|d| parent == *d || parent.starts_with(&format!("{d}/"))),
                     "{name}: nothing creates {parent} for {template}"
                 );
             }

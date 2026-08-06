@@ -30,7 +30,11 @@ impl Session {
 
     /// A throwaway working directory with no branch and no git registration.
     pub fn scratch(dir: PathBuf, id: String) -> Self {
-        Self { branch: None, worktree: dir, id }
+        Self {
+            branch: None,
+            worktree: dir,
+            id,
+        }
     }
 
     /// What to call this session in output.
@@ -69,13 +73,14 @@ impl Session {
             // which produces a session whose diff has the wrong baseline.
             vec!["worktree", "add", "-b", &branch, &path, base]
         };
-        git(repo, &args)
-            .with_context(|| format!("creating worktree for session {}", self.id))?;
+        git(repo, &args).with_context(|| format!("creating worktree for session {}", self.id))?;
         Ok(())
     }
 
     fn branch_exists(&self, repo: &Path) -> bool {
-        let Some(branch) = &self.branch else { return false };
+        let Some(branch) = &self.branch else {
+            return false;
+        };
         git(repo, &["rev-parse", "--verify", "--quiet", branch]).is_ok()
     }
 
@@ -90,7 +95,17 @@ impl Session {
     }
 
     pub fn remove(&self, repo: &Path) -> Result<()> {
-        if git(repo, &["worktree", "remove", "--force", &self.worktree.to_string_lossy()]).is_ok() {
+        if git(
+            repo,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                &self.worktree.to_string_lossy(),
+            ],
+        )
+        .is_ok()
+        {
             // The branch outlives the worktree on purpose: removing a session
             // must not be able to destroy work that was never reviewed.
             return Ok(());
@@ -108,7 +123,10 @@ impl Session {
     }
 
     pub fn diff(&self, repo: &Path, base: &str) -> Result<String> {
-        let branch = self.branch.as_deref().context("a scratch session has no branch")?;
+        let branch = self
+            .branch
+            .as_deref()
+            .context("a scratch session has no branch")?;
         git(repo, &["diff", "--stat", &format!("{base}...{branch}")])
     }
 }
@@ -132,7 +150,10 @@ pub fn validate_id(id: &str) -> Result<()> {
 /// at review time, after the agent has already done the work.
 pub fn default_branch(repo: &Path) -> String {
     // What the remote says is authoritative when there is one.
-    if let Ok(head) = git(repo, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+    if let Ok(head) = git(
+        repo,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
         if let Some(name) = head.trim().strip_prefix("origin/") {
             if !name.is_empty() {
                 return name.to_string();
@@ -209,7 +230,11 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         .output()
         .context("running git")?;
     if !out.status.success() {
-        anyhow::bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -318,7 +343,8 @@ mod tests {
 
         std::fs::remove_dir_all(&s.worktree).unwrap();
 
-        s.ensure(&root, "main").expect("must recover rather than fail forever");
+        s.ensure(&root, "main")
+            .expect("must recover rather than fail forever");
         assert!(s.worktree.join(".git").exists());
     }
 
@@ -335,7 +361,10 @@ mod tests {
         std::fs::remove_dir_all(&lose.worktree).unwrap();
         lose.ensure(&root, "main").unwrap();
 
-        assert!(keep.worktree.join(".git").exists(), "untouched session survived");
+        assert!(
+            keep.worktree.join(".git").exists(),
+            "untouched session survived"
+        );
         assert!(lose.worktree.join(".git").exists());
     }
 
@@ -383,8 +412,15 @@ mod tests {
     #[test]
     fn a_new_session_branches_from_the_named_base_not_from_head() {
         let (d, root) = repo_on("master");
-        git(&root, &["commit", "-q", "--allow-empty", "-m", "trunk work"]).unwrap();
-        let trunk_tip = git(&root, &["rev-parse", "master"]).unwrap().trim().to_string();
+        git(
+            &root,
+            &["commit", "-q", "--allow-empty", "-m", "trunk work"],
+        )
+        .unwrap();
+        let trunk_tip = git(&root, &["rev-parse", "master"])
+            .unwrap()
+            .trim()
+            .to_string();
 
         // wander off somewhere unrelated before creating the session
         git(&root, &["checkout", "-q", "-b", "feature"]).unwrap();
@@ -393,7 +429,10 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "master").unwrap();
 
-        let started_at = git(&s.worktree, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+        let started_at = git(&s.worktree, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
         assert_eq!(started_at, trunk_tip, "must start from master, not feature");
     }
 
@@ -401,13 +440,23 @@ mod tests {
     fn an_explicit_base_is_honoured() {
         let (d, root) = repo_on("master");
         git(&root, &["checkout", "-q", "-b", "feature"]).unwrap();
-        git(&root, &["commit", "-q", "--allow-empty", "-m", "feature work"]).unwrap();
-        let tip = git(&root, &["rev-parse", "feature"]).unwrap().trim().to_string();
+        git(
+            &root,
+            &["commit", "-q", "--allow-empty", "-m", "feature work"],
+        )
+        .unwrap();
+        let tip = git(&root, &["rev-parse", "feature"])
+            .unwrap()
+            .trim()
+            .to_string();
         git(&root, &["checkout", "-q", "master"]).unwrap();
 
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "feature").unwrap();
-        assert_eq!(git(&s.worktree, &["rev-parse", "HEAD"]).unwrap().trim(), tip);
+        assert_eq!(
+            git(&s.worktree, &["rev-parse", "HEAD"]).unwrap().trim(),
+            tip
+        );
     }
 
     /// Resuming must never move a branch that already holds work — rebasing an
@@ -420,14 +469,23 @@ mod tests {
         std::fs::write(s.worktree.join("work.txt"), "agent output").unwrap();
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
-        let agent_tip = git(&root, &["rev-parse", s.branch.as_deref().unwrap()]).unwrap().trim().to_string();
+        let agent_tip = git(&root, &["rev-parse", s.branch.as_deref().unwrap()])
+            .unwrap()
+            .trim()
+            .to_string();
 
-        git(&root, &["commit", "-q", "--allow-empty", "-m", "trunk moved on"]).unwrap();
+        git(
+            &root,
+            &["commit", "-q", "--allow-empty", "-m", "trunk moved on"],
+        )
+        .unwrap();
         s.remove(&root).unwrap();
         s.ensure(&root, "master").unwrap();
 
         assert_eq!(
-            git(&root, &["rev-parse", s.branch.as_deref().unwrap()]).unwrap().trim(),
+            git(&root, &["rev-parse", s.branch.as_deref().unwrap()])
+                .unwrap()
+                .trim(),
             agent_tip,
             "the agent's commit must survive"
         );
@@ -512,7 +570,8 @@ mod tests {
         std::fs::remove_dir_all(root.join(".git/worktrees")).unwrap();
         assert!(s.worktree.exists());
 
-        s.remove(&root).expect("must clean up what is actually there");
+        s.remove(&root)
+            .expect("must clean up what is actually there");
         assert!(!s.worktree.exists(), "the directory must be gone");
         assert!(s.branch_exists(&root), "and the branch still kept");
     }
@@ -554,7 +613,9 @@ mod tests {
 
         assert!(s.worktree.is_dir(), "it still needs a writable /work");
         assert_eq!(
-            git(&root, &["branch", "--list", "omh/auth"]).unwrap().trim(),
+            git(&root, &["branch", "--list", "omh/auth"])
+                .unwrap()
+                .trim(),
             "",
             "no branch may be created"
         );
@@ -568,7 +629,10 @@ mod tests {
         s.remove(&root).unwrap();
 
         assert!(!s.worktree.exists());
-        assert_eq!(git(&root, &["branch", "--list", "omh/*"]).unwrap().trim(), "");
+        assert_eq!(
+            git(&root, &["branch", "--list", "omh/*"]).unwrap().trim(),
+            ""
+        );
     }
 
     /// A scratch directory must not live among the worktrees, or `omh s ls`
@@ -577,7 +641,9 @@ mod tests {
     fn scratch_sessions_are_not_listed_as_sessions() {
         let (d, root) = repo();
         let wt = d.path().join("wt");
-        Session::new(&wt, "s01".into()).ensure(&root, "main").unwrap();
+        Session::new(&wt, "s01".into())
+            .ensure(&root, "main")
+            .unwrap();
         Session::scratch(d.path().join("scratch/auth"), "auth".into())
             .ensure(&root, "main")
             .unwrap();

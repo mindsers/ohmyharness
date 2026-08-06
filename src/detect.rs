@@ -19,10 +19,30 @@ pub struct Stack {
 }
 
 const KNOWN: [Stack; 4] = [
-    Stack { name: "rust", marker: "Cargo.toml", test: "cargo test", format: "cargo fmt" },
-    Stack { name: "node", marker: "package.json", test: "npm test", format: "npm run format" },
-    Stack { name: "python", marker: "pyproject.toml", test: "pytest", format: "ruff format ." },
-    Stack { name: "go", marker: "go.mod", test: "go test ./...", format: "gofmt -w ." },
+    Stack {
+        name: "rust",
+        marker: "Cargo.toml",
+        test: "cargo test",
+        format: "cargo fmt",
+    },
+    Stack {
+        name: "node",
+        marker: "package.json",
+        test: "npm test",
+        format: "npm run format",
+    },
+    Stack {
+        name: "python",
+        marker: "pyproject.toml",
+        test: "pytest",
+        format: "ruff format .",
+    },
+    Stack {
+        name: "go",
+        marker: "go.mod",
+        test: "go test ./...",
+        format: "gofmt -w .",
+    },
 ];
 
 /// A derived fact, with the source that produced it. The source is not
@@ -34,7 +54,10 @@ pub struct Seed {
 }
 
 pub fn stacks(repo: &Path) -> Vec<Stack> {
-    KNOWN.into_iter().filter(|s| repo.join(s.marker).exists()).collect()
+    KNOWN
+        .into_iter()
+        .filter(|s| repo.join(s.marker).exists())
+        .collect()
 }
 
 /// Which harness to default to. Host evidence is only a *hint*: the harness
@@ -101,14 +124,20 @@ pub fn seeds(repo: &Path) -> Vec<Seed> {
                     && !l.starts_with("---")
             })
         {
-            out.push(Seed { source: "README.md".into(), fact: line.to_string() });
+            out.push(Seed {
+                source: "README.md".into(),
+                fact: line.to_string(),
+            });
         }
     }
 
     for s in stacks(repo) {
         out.push(Seed {
             source: s.marker.into(),
-            fact: format!("stack: {} (test `{}`, format `{}`)", s.name, s.test, s.format),
+            fact: format!(
+                "stack: {} (test `{}`, format `{}`)",
+                s.name, s.test, s.format
+            ),
         });
     }
 
@@ -195,7 +224,10 @@ mod tests {
     fn generated_rules_explain_the_code_graph() {
         let body = agents_md(&[]);
         assert!(body.contains("search_graph"), "must name the tools: {body}");
-        assert!(body.to_lowercase().contains("grep"), "and when not to use them: {body}");
+        assert!(
+            body.to_lowercase().contains("grep"),
+            "and when not to use them: {body}"
+        );
         assert!(
             body.contains("OMH_GRAPH_PROJECT"),
             "and which project is its own — the store holds every session's: {body}"
@@ -246,7 +278,10 @@ mod tests {
             s.iter().any(|x| x.fact.contains("oh-my-zsh")),
             "README should seed the project description: {s:?}"
         );
-        assert!(s.iter().any(|x| x.fact.contains("rust")), "stack should be seeded: {s:?}");
+        assert!(
+            s.iter().any(|x| x.fact.contains("rust")),
+            "stack should be seeded: {s:?}"
+        );
     }
 
     /// Every seed must name where it came from, or `omh why` cannot explain it
@@ -257,8 +292,15 @@ mod tests {
     fn a_blockquote_tagline_is_read_as_prose() {
         let (_d, r) = repo(&[("README.md", "# omh\n\n> Launch any coding harness.\n")]);
         let s = seeds(&r);
-        let fact = &s.iter().find(|x| x.source == "README.md").expect("README seed").fact;
-        assert_eq!(fact, "Launch any coding harness.", "markdown syntax is not the fact");
+        let fact = &s
+            .iter()
+            .find(|x| x.source == "README.md")
+            .expect("README seed")
+            .fact;
+        assert_eq!(
+            fact, "Launch any coding harness.",
+            "markdown syntax is not the fact"
+        );
     }
 
     /// Badges are the other thing that sits under a title, and they say nothing
@@ -270,7 +312,11 @@ mod tests {
             "# p\n\n[![CI](https://img.shields.io/x)](https://ci)\n\nA real description.\n",
         )]);
         let s = seeds(&r);
-        let fact = &s.iter().find(|x| x.source == "README.md").expect("README seed").fact;
+        let fact = &s
+            .iter()
+            .find(|x| x.source == "README.md")
+            .expect("README seed")
+            .fact;
         assert_eq!(fact, "A real description.");
     }
 
@@ -292,6 +338,9 @@ mod tests {
     fn existing_rules_are_seeded_so_conventions_survive() {
         let (_d, r) = repo(&[("AGENTS.md", "# Rules\n\nTDD always.\n")]);
         let s = seeds(&r);
-        assert!(s.iter().any(|x| x.source.contains("AGENTS.md")), "got: {s:?}");
+        assert!(
+            s.iter().any(|x| x.source.contains("AGENTS.md")),
+            "got: {s:?}"
+        );
     }
 }

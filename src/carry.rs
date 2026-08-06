@@ -44,7 +44,10 @@ pub fn validate_pattern(pattern: &str) -> Result<()> {
     if p.starts_with('/') || p.starts_with('~') {
         anyhow::bail!("carry_in is relative to the repository: `{pattern}`");
     }
-    if Path::new(p).components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+    if Path::new(p)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
         anyhow::bail!("carry_in cannot reach outside the repository: `{pattern}`");
     }
     Ok(())
@@ -70,7 +73,10 @@ pub fn apply(repo: &Path, worktree: &Path, patterns: &[String]) -> Result<Vec<Ca
         } else {
             copy_file(&src, &dst)?
         };
-        out.push(Carried { path: pattern.clone(), action });
+        out.push(Carried {
+            path: pattern.clone(),
+            action,
+        });
     }
 
     exclude(worktree, patterns)?;
@@ -81,7 +87,10 @@ pub fn apply(repo: &Path, worktree: &Path, patterns: &[String]) -> Result<Vec<Ca
 /// the agent's — so a changed source replaces the copy.
 fn copy_file(src: &Path, dst: &Path) -> Result<Action> {
     let incoming = std::fs::read(src).with_context(|| format!("reading {}", src.display()))?;
-    if std::fs::read(dst).map(|existing| existing == incoming).unwrap_or(false) {
+    if std::fs::read(dst)
+        .map(|existing| existing == incoming)
+        .unwrap_or(false)
+    {
         return Ok(Action::Unchanged);
     }
     let existed = dst.exists();
@@ -89,7 +98,11 @@ fn copy_file(src: &Path, dst: &Path) -> Result<Action> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(dst, incoming).with_context(|| format!("writing {}", dst.display()))?;
-    Ok(if existed { Action::Refreshed } else { Action::Copied })
+    Ok(if existed {
+        Action::Refreshed
+    } else {
+        Action::Copied
+    })
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> Result<Action> {
@@ -98,7 +111,11 @@ fn copy_dir(src: &Path, dst: &Path) -> Result<Action> {
     for entry in std::fs::read_dir(src)?.flatten() {
         let from = entry.path();
         let to = dst.join(entry.file_name());
-        let result = if from.is_dir() { copy_dir(&from, &to)? } else { copy_file(&from, &to)? };
+        let result = if from.is_dir() {
+            copy_dir(&from, &to)?
+        } else {
+            copy_file(&from, &to)?
+        };
         // The directory as a whole is as changed as its most-changed member.
         if result != Action::Unchanged && action == Action::Unchanged {
             action = result;
@@ -133,7 +150,10 @@ pub fn exclude_path(worktree: &Path) -> Option<PathBuf> {
 /// Hide the rules omh stages into the worktree. Left untracked, the agent is
 /// invited to commit omh's own staging onto the session branch.
 pub fn hide_staged_rules(worktree: &Path) -> Result<()> {
-    exclude(worktree, &["CLAUDE.md".to_string(), "AGENTS.md".to_string()])
+    exclude(
+        worktree,
+        &["CLAUDE.md".to_string(), "AGENTS.md".to_string()],
+    )
 }
 
 /// Keep carried files out of the agent's `git status`, so they never show up as
@@ -192,7 +212,10 @@ mod tests {
         let (_d, repo, wt) = repo(&[(".env.local", "SECRET=1")]);
         let out = carry(&repo, &wt, &[".env.local"]);
 
-        assert_eq!(std::fs::read_to_string(wt.join(".env.local")).unwrap(), "SECRET=1");
+        assert_eq!(
+            std::fs::read_to_string(wt.join(".env.local")).unwrap(),
+            "SECRET=1"
+        );
         assert_eq!(out[0].action, Action::Copied);
     }
 
@@ -201,8 +224,14 @@ mod tests {
         let (_d, repo, wt) = repo(&[("certs/dev.pem", "cert"), ("certs/nested/ca.pem", "ca")]);
         carry(&repo, &wt, &["certs/"]);
 
-        assert_eq!(std::fs::read_to_string(wt.join("certs/dev.pem")).unwrap(), "cert");
-        assert_eq!(std::fs::read_to_string(wt.join("certs/nested/ca.pem")).unwrap(), "ca");
+        assert_eq!(
+            std::fs::read_to_string(wt.join("certs/dev.pem")).unwrap(),
+            "cert"
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.join("certs/nested/ca.pem")).unwrap(),
+            "ca"
+        );
     }
 
     /// A `.env` you thought you were carrying and are not is exactly the
@@ -255,14 +284,25 @@ mod tests {
         let repo = d.path().join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let git = |args: &[&str]| {
-            std::process::Command::new("git").current_dir(&repo).args(args).output().unwrap()
+            std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap()
         };
         git(&["init", "-q", "-b", "main"]);
         git(&["config", "user.email", "t@e.com"]);
         git(&["config", "user.name", "t"]);
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
         let wt = d.path().join("wt");
-        git(&["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "omh/s01"]);
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "omh/s01",
+        ]);
         std::fs::write(repo.join(".env.local"), "SECRET").unwrap();
         (d, repo, wt)
     }
@@ -308,7 +348,10 @@ mod tests {
         carry(&repo, &wt, &[".env.local"]);
 
         let body = std::fs::read_to_string(&path).unwrap();
-        assert!(body.contains("*.swp"), "the user's rules must survive: {body}");
+        assert!(
+            body.contains("*.swp"),
+            "the user's rules must survive: {body}"
+        );
     }
 
     /// omh writes CLAUDE.md and AGENTS.md into the worktree itself; left
@@ -338,7 +381,13 @@ mod tests {
     /// host secrets into a sandbox the agent controls.
     #[test]
     fn a_pattern_cannot_escape_the_checkout() {
-        for p in ["../secrets", "../../.ssh", "a/../../b", "/etc/passwd", "~/.ssh"] {
+        for p in [
+            "../secrets",
+            "../../.ssh",
+            "a/../../b",
+            "/etc/passwd",
+            "~/.ssh",
+        ] {
             assert!(validate_pattern(p).is_err(), "`{p}` must be rejected");
         }
     }
@@ -347,6 +396,9 @@ mod tests {
     fn an_escaping_pattern_copies_nothing() {
         let (_d, repo, wt) = repo(&[]);
         let owned = vec!["../../.ssh".to_string()];
-        assert!(apply(&repo, &wt, &owned).is_err(), "must refuse, not silently skip");
+        assert!(
+            apply(&repo, &wt, &owned).is_err(),
+            "must refuse, not silently skip"
+        );
     }
 }

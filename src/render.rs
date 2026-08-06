@@ -107,8 +107,7 @@ fn mcp(render: Render, servers: &BTreeMap<String, Server>) -> Result<String> {
 pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
     match format {
         Render::McpJson => {
-            let doc: serde_json::Value =
-                serde_json::from_str(raw).context("parsing MCP JSON")?;
+            let doc: serde_json::Value = serde_json::from_str(raw).context("parsing MCP JSON")?;
             if doc.get("mcpServers").is_none() && doc.get("projects").is_some() {
                 anyhow::bail!(
                     "this config nests servers under `projects` — importing all of \
@@ -184,11 +183,16 @@ struct Hook {
 fn merge_hooks(dirs: &[PathBuf]) -> Result<BTreeMap<String, Hook>> {
     let mut out = BTreeMap::new();
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else { continue };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json") {
-                out.insert(entry.file_name().to_string_lossy().into_owned(), read_json(&path)?);
+                out.insert(
+                    entry.file_name().to_string_lossy().into_owned(),
+                    read_json(&path)?,
+                );
             }
         }
     }
@@ -198,10 +202,13 @@ fn merge_hooks(dirs: &[PathBuf]) -> Result<BTreeMap<String, Hook>> {
 fn claude_settings(hooks: &BTreeMap<String, Hook>) -> Result<String> {
     let mut by_event: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
     for h in hooks.values() {
-        by_event.entry(&h.event).or_default().push(serde_json::json!({
-            "matcher": h.matcher,
-            "hooks": [{ "type": "command", "command": h.command }],
-        }));
+        by_event
+            .entry(&h.event)
+            .or_default()
+            .push(serde_json::json!({
+                "matcher": h.matcher,
+                "hooks": [{ "type": "command", "command": h.command }],
+            }));
     }
     pretty(serde_json::json!({ "hooks": by_event }))
 }
@@ -209,8 +216,8 @@ fn claude_settings(hooks: &BTreeMap<String, Hook>) -> Result<String> {
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
-    let raw = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
@@ -261,7 +268,10 @@ mod tests {
     fn later_layers_shadow_earlier_ones() {
         let (_d, files) = servers(&[("", L1), ("", L2_SHADOW)]);
         let merged = merge_servers(&files).unwrap();
-        assert_eq!(merged["a"].command, "overridden", "layer 3 must win over layer 1");
+        assert_eq!(
+            merged["a"].command, "overridden",
+            "layer 3 must win over layer 1"
+        );
     }
 
     /// A wrong schema means the harness silently sees zero MCP servers, so each
@@ -286,7 +296,10 @@ mod tests {
         assert!(codex.contains("[mcp_servers.a]"), "got: {codex}");
         assert!(codex.contains(r#"command = "a-cmd""#), "got: {codex}");
         let reparsed: toml::Value = codex.parse().expect("codex output must be valid TOML");
-        assert_eq!(reparsed["mcp_servers"]["a"]["args"][0].as_str(), Some("--x"));
+        assert_eq!(
+            reparsed["mcp_servers"]["a"]["args"][0].as_str(),
+            Some("--x")
+        );
     }
 
     #[test]
@@ -294,18 +307,35 @@ mod tests {
         let mut m = BTreeMap::new();
         m.insert(
             "q".to_string(),
-            Server { command: r#"say "hi""#.into(), args: vec![], env: BTreeMap::new() },
+            Server {
+                command: r#"say "hi""#.into(),
+                args: vec![],
+                env: BTreeMap::new(),
+            },
         );
         let out = mcp(Render::CodexToml, &m).unwrap();
-        out.parse::<toml::Value>().expect("must stay valid TOML when values contain quotes");
+        out.parse::<toml::Value>()
+            .expect("must stay valid TOML when values contain quotes");
     }
 
     #[test]
     fn hooks_group_by_event() {
         let dir = tempfile::tempdir().unwrap();
-        file(dir.path(), "h/a.json", r#"{"event":"Stop","command":"one"}"#);
-        file(dir.path(), "h/b.json", r#"{"event":"Stop","command":"two"}"#);
-        file(dir.path(), "h/c.json", r#"{"event":"PostToolUse","matcher":"Edit","command":"three"}"#);
+        file(
+            dir.path(),
+            "h/a.json",
+            r#"{"event":"Stop","command":"one"}"#,
+        );
+        file(
+            dir.path(),
+            "h/b.json",
+            r#"{"event":"Stop","command":"two"}"#,
+        );
+        file(
+            dir.path(),
+            "h/c.json",
+            r#"{"event":"PostToolUse","matcher":"Edit","command":"three"}"#,
+        );
 
         let hooks = merge_hooks(&[dir.path().join("h")]).unwrap();
         let out = claude_settings(&hooks).unwrap();
@@ -334,14 +364,22 @@ mod tests {
 
     fn canonical() -> BTreeMap<String, Server> {
         let mut m = BTreeMap::new();
-        m.insert("plain".to_string(), Server {
-            command: "plain-cmd".into(), args: vec![], env: BTreeMap::new(),
-        });
-        m.insert("rich".to_string(), Server {
-            command: "rich-cmd".into(),
-            args: vec!["--root".into(), "/work".into()],
-            env: BTreeMap::from([("TOKEN".to_string(), "abc".to_string())]),
-        });
+        m.insert(
+            "plain".to_string(),
+            Server {
+                command: "plain-cmd".into(),
+                args: vec![],
+                env: BTreeMap::new(),
+            },
+        );
+        m.insert(
+            "rich".to_string(),
+            Server {
+                command: "rich-cmd".into(),
+                args: vec!["--root".into(), "/work".into()],
+                env: BTreeMap::from([("TOKEN".to_string(), "abc".to_string())]),
+            },
+        );
         m
     }
 
@@ -378,7 +416,8 @@ mod tests {
 
     #[test]
     fn parses_a_hand_written_codex_toml() {
-        let raw = "[mcp_servers.g]\ncommand = \"c\"\nargs = [\"x\"]\n\n[mcp_servers.g.env]\nK = \"v\"\n";
+        let raw =
+            "[mcp_servers.g]\ncommand = \"c\"\nargs = [\"x\"]\n\n[mcp_servers.g.env]\nK = \"v\"\n";
         let back = parse(Render::CodexToml, raw).unwrap();
         assert_eq!(back["g"].command, "c");
         assert_eq!(back["g"].env["K"], "v");

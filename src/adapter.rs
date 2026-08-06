@@ -78,7 +78,11 @@ impl Capability {
 
 impl std::fmt::Display for Capability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.source().trim_end_matches(".md").trim_end_matches(".json"))
+        f.write_str(
+            self.source()
+                .trim_end_matches(".md")
+                .trim_end_matches(".json"),
+        )
     }
 }
 
@@ -143,7 +147,11 @@ impl Adapter {
             let known: Vec<_> = Self::load_dir(dir)?.into_iter().map(|a| a.name).collect();
             anyhow::bail!(
                 "unknown harness `{name}`\nknown: {}\nadd one by dropping {}",
-                if known.is_empty() { "(none)".into() } else { known.join(", ") },
+                if known.is_empty() {
+                    "(none)".into()
+                } else {
+                    known.join(", ")
+                },
                 path.display()
             );
         }
@@ -188,20 +196,32 @@ mod tests {
     #[test]
     fn shipped_adapters_parse() {
         let all = Adapter::load_dir(Path::new(REAL)).unwrap();
-        assert_eq!(all.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["claude", "opencode"]);
+        assert_eq!(
+            all.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+            ["claude", "opencode"]
+        );
     }
 
     #[test]
     fn capability_support_matches_reality() {
         let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
         for cap in Capability::ALL {
-            assert!(claude.supports(cap).is_some(), "claude should support {cap}");
+            assert!(
+                claude.supports(cap).is_some(),
+                "claude should support {cap}"
+            );
         }
 
         let oc = Adapter::find(Path::new(REAL), "opencode").unwrap();
         assert!(oc.supports(Capability::Skills).is_some());
-        assert!(oc.supports(Capability::Hooks).is_none(), "opencode has no hooks");
-        assert!(oc.supports(Capability::Subagents).is_none(), "opencode has no subagents");
+        assert!(
+            oc.supports(Capability::Hooks).is_none(),
+            "opencode has no hooks"
+        );
+        assert!(
+            oc.supports(Capability::Subagents).is_none(),
+            "opencode has no subagents"
+        );
     }
 
     fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -228,15 +248,22 @@ mod tests {
             "#,
         );
         let err = Adapter::find(d.path(), "old").unwrap_err();
-        assert!(format!("{err:#}").contains("rules"), "must name the stray key: {err:#}");
+        assert!(
+            format!("{err:#}").contains("rules"),
+            "must name the stray key: {err:#}"
+        );
     }
 
     #[test]
     fn zero_capability_adapter_is_rejected() {
         let d = tempfile::tempdir().unwrap();
-        write(d.path(), "empty.toml", r#"name="e"
+        write(
+            d.path(),
+            "empty.toml",
+            r#"name="e"
 bin="e"
-install="x""#);
+install="x""#,
+        );
         let err = Adapter::find(d.path(), "empty").unwrap_err();
         assert!(err.to_string().contains("no capabilities"), "got: {err}");
     }
@@ -245,7 +272,10 @@ install="x""#);
     fn unknown_harness_lists_known_ones() {
         let err = Adapter::find(Path::new(REAL), "nope").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("claude") && msg.contains("opencode"), "got: {msg}");
+        assert!(
+            msg.contains("claude") && msg.contains("opencode"),
+            "got: {msg}"
+        );
     }
 
     /// `omh auth` drops you into the harness and it is not obvious what to do
@@ -262,8 +292,14 @@ install="x""#);
 
     #[test]
     fn expand_substitutes_guest_home() {
-        assert_eq!(expand("$HOME/.claude/skills", "/home/agent"), Path::new("/home/agent/.claude/skills"));
-        assert_eq!(expand("/work/CLAUDE.md", "/home/agent"), Path::new("/work/CLAUDE.md"));
+        assert_eq!(
+            expand("$HOME/.claude/skills", "/home/agent"),
+            Path::new("/home/agent/.claude/skills")
+        );
+        assert_eq!(
+            expand("/work/CLAUDE.md", "/home/agent"),
+            Path::new("/work/CLAUDE.md")
+        );
     }
 
     #[test]
@@ -275,8 +311,14 @@ install="x""#);
             expand_host("$HOME/.config/opencode/opencode.json", home, repo),
             Path::new("/Users/me/.config/opencode/opencode.json")
         );
-        assert_eq!(expand_host("$REPO/.mcp.json", home, repo), repo.join(".mcp.json"));
-        assert_eq!(expand_host("/absolute/path", home, repo), Path::new("/absolute/path"));
+        assert_eq!(
+            expand_host("$REPO/.mcp.json", home, repo),
+            repo.join(".mcp.json")
+        );
+        assert_eq!(
+            expand_host("/absolute/path", home, repo),
+            Path::new("/absolute/path")
+        );
     }
 
     /// The trap: `expand` targets the container home, `expand_host` the real one.

@@ -55,7 +55,6 @@ pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
     unfilled(adapter, &dir(paths, &adapter.name, account), GUEST_HOME).is_empty()
 }
 
-
 /// Which account to use. Ambiguity is an error, never a guess — silently
 /// picking the wrong identity is worse than stopping.
 pub fn resolve(
@@ -115,7 +114,11 @@ pub fn mounts(
             // Storage mirrors the guest path, so the account directory is
             // legible rather than a pile of mangled names.
             let relative = trimmed.trim_start_matches("$HOME/");
-            CredMount { host: account_dir.join(relative), guest, file: !is_dir }
+            CredMount {
+                host: account_dir.join(relative),
+                guest,
+                file: !is_dir,
+            }
         })
         .collect()
 }
@@ -138,10 +141,15 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
     // to exist on the host first or the launch fails outright.
     for binding in adapter.capabilities.values() {
         let guest = crate::adapter::expand(&binding.path, guest_home);
-        let Some(cred) = creds.iter().find(|c| !c.file && guest.starts_with(&c.guest)) else {
+        let Some(cred) = creds
+            .iter()
+            .find(|c| !c.file && guest.starts_with(&c.guest))
+        else {
             continue;
         };
-        let Ok(relative) = guest.strip_prefix(&cred.guest) else { continue };
+        let Ok(relative) = guest.strip_prefix(&cred.guest) else {
+            continue;
+        };
         let point = cred.host.join(relative);
         if binding.render == crate::adapter::Render::Dir {
             std::fs::create_dir_all(&point)?;
@@ -162,7 +170,9 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
             }
             // Empty counts as absent: it is not a login, and an empty JSON file
             // is what makes a harness refuse to start.
-            let empty = std::fs::metadata(&cred.host).map(|m| m.len() == 0).unwrap_or(true);
+            let empty = std::fs::metadata(&cred.host)
+                .map(|m| m.len() == 0)
+                .unwrap_or(true);
             if empty {
                 std::fs::write(&cred.host, placeholder(&cred.host))?;
             }
@@ -206,14 +216,18 @@ fn holds_content(path: &std::path::Path) -> bool {
 
 /// Any file below `dir` holding more than what `prepare` put there.
 fn has_real_content(dir: &std::path::Path) -> bool {
-    std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
-        let p = e.path();
-        if p.is_dir() {
-            has_real_content(&p)
-        } else {
-            holds_content(&p)
-        }
-    })
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                has_real_content(&p)
+            } else {
+                holds_content(&p)
+            }
+        })
 }
 
 /// Whether a file holds nothing but what `prepare` put there.
@@ -264,7 +278,13 @@ pub fn unfilled(
 
     mounts(adapter, account_dir, guest_home)
         .into_iter()
-        .filter(|c| if c.file { !holds_content(&c.host) } else { !has_real_content(&c.host) })
+        .filter(|c| {
+            if c.file {
+                !holds_content(&c.host)
+            } else {
+                !has_real_content(&c.host)
+            }
+        })
         .map(|c| c.guest)
         .collect()
 }
@@ -300,7 +320,11 @@ pub fn login_outcome(runtime_ok: bool, unfilled: &[PathBuf]) -> Result<()> {
     if !unfilled.is_empty() {
         anyhow::bail!(
             "the login did not complete — still empty:\n{}",
-            unfilled.iter().map(|p| format!("    {}", p.display())).collect::<Vec<_>>().join("\n")
+            unfilled
+                .iter()
+                .map(|p| format!("    {}", p.display()))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
     Ok(())
@@ -315,16 +339,22 @@ mod tests {
 
     fn fixture() -> (tempfile::TempDir, Paths) {
         let d = tempfile::tempdir().unwrap();
-        let paths = Paths { root: d.path().join("home"), repo: d.path().join("repo") };
+        let paths = Paths {
+            root: d.path().join("home"),
+            repo: d.path().join("repo"),
+        };
         (d, paths)
     }
 
     /// Write what the adapter declares as proof of a login.
     fn capture(paths: &Paths, harness: &str, account: &str) {
-        let adapter = if harness == "claude" { claude() } else { opencode() };
+        let adapter = if harness == "claude" {
+            claude()
+        } else {
+            opencode()
+        };
         for token in &adapter.token {
-            let p = dir(paths, harness, account)
-                .join(token.trim_start_matches("$HOME/"));
+            let p = dir(paths, harness, account).join(token.trim_start_matches("$HOME/"));
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "{\"token\":\"x\"}").unwrap();
         }
@@ -339,7 +369,11 @@ mod tests {
     }
 
     fn adapter_with(creds: &[&str]) -> Adapter {
-        let list = creds.iter().map(|c| format!("{c:?}")).collect::<Vec<_>>().join(", ");
+        let list = creds
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
         toml::from_str(&format!(
             r#"
             name = "t"
@@ -384,7 +418,10 @@ mod tests {
         let (_d, paths) = fixture();
         std::fs::create_dir_all(dir(&paths, "claude", "work")).unwrap();
         assert!(!is_captured(&paths, &claude(), "work"));
-        assert!(accounts(&paths, &claude()).is_empty(), "and it is not listed");
+        assert!(
+            accounts(&paths, &claude()).is_empty(),
+            "and it is not listed"
+        );
     }
 
     // ── choosing ────────────────────────────────────────────────────────────
@@ -394,7 +431,10 @@ mod tests {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
         capture(&paths, "claude", "personal");
-        assert_eq!(resolve(&paths, &claude(), Some("work"), Some("personal")).unwrap(), "work");
+        assert_eq!(
+            resolve(&paths, &claude(), Some("work"), Some("personal")).unwrap(),
+            "work"
+        );
     }
 
     #[test]
@@ -402,7 +442,10 @@ mod tests {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
         capture(&paths, "claude", "personal");
-        assert_eq!(resolve(&paths, &claude(), None, Some("personal")).unwrap(), "personal");
+        assert_eq!(
+            resolve(&paths, &claude(), None, Some("personal")).unwrap(),
+            "personal"
+        );
     }
 
     #[test]
@@ -420,15 +463,25 @@ mod tests {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
         capture(&paths, "claude", "personal");
-        let err = resolve(&paths, &claude(), None, None).unwrap_err().to_string();
-        assert!(err.contains("work") && err.contains("personal"), "got: {err}");
-        assert!(err.contains("omh config set account"), "must say how to fix it: {err}");
+        let err = resolve(&paths, &claude(), None, None)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("work") && err.contains("personal"),
+            "got: {err}"
+        );
+        assert!(
+            err.contains("omh config set account"),
+            "must say how to fix it: {err}"
+        );
     }
 
     #[test]
     fn no_accounts_at_all_points_at_omh_auth() {
         let (_d, paths) = fixture();
-        let err = resolve(&paths, &claude(), None, None).unwrap_err().to_string();
+        let err = resolve(&paths, &claude(), None, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("omh auth claude"), "got: {err}");
     }
 
@@ -436,7 +489,9 @@ mod tests {
     fn naming_an_account_that_was_never_captured_is_an_error() {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
-        let err = resolve(&paths, &claude(), Some("nope"), None).unwrap_err().to_string();
+        let err = resolve(&paths, &claude(), Some("nope"), None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("nope"), "got: {err}");
     }
 
@@ -446,8 +501,14 @@ mod tests {
     fn credentials_mount_where_the_harness_actually_looks() {
         let account = PathBuf::from("/host/creds/claude/work");
         let m = mounts(&claude(), &account, "/home/agent");
-        assert!(m.iter().all(|c| c.guest.starts_with("/home/agent")), "got: {m:?}");
-        assert!(m.iter().any(|c| c.guest.ends_with(".claude")), "config dir: {m:?}");
+        assert!(
+            m.iter().all(|c| c.guest.starts_with("/home/agent")),
+            "got: {m:?}"
+        );
+        assert!(
+            m.iter().any(|c| c.guest.ends_with(".claude")),
+            "config dir: {m:?}"
+        );
     }
 
     /// Storage mirrors the guest path, so `ls ~/.omh/creds/claude/work` is
@@ -482,12 +543,19 @@ mod tests {
     fn preparing_creates_the_paths_a_bind_mount_needs() {
         let d = tempfile::tempdir().unwrap();
         let account = d.path().join("work");
-        prepare(&adapter_with(&["$HOME/.cfg/", "$HOME/.cfg.json"]), &account, "/home/agent")
-            .unwrap();
+        prepare(
+            &adapter_with(&["$HOME/.cfg/", "$HOME/.cfg.json"]),
+            &account,
+            "/home/agent",
+        )
+        .unwrap();
 
         assert!(account.join(".cfg").is_dir());
         let f = account.join(".cfg.json");
-        assert!(f.is_file(), "must be a file, or docker mounts a directory over it");
+        assert!(
+            f.is_file(),
+            "must be a file, or docker mounts a directory over it"
+        );
     }
 
     /// An empty file is valid TOML and valid YAML but *not* valid JSON, and a
@@ -512,7 +580,10 @@ mod tests {
     fn non_json_placeholders_stay_empty() {
         let d = tempfile::tempdir().unwrap();
         prepare(&adapter_with(&["$HOME/.cfg.toml"]), d.path(), "/home/agent").unwrap();
-        assert_eq!(std::fs::read_to_string(d.path().join(".cfg.toml")).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join(".cfg.toml")).unwrap(),
+            ""
+        );
     }
 
     /// The empty file a previous omh left behind is exactly what breaks the
@@ -522,7 +593,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(".cfg.json"), "").unwrap();
         prepare(&adapter_with(&["$HOME/.cfg.json"]), d.path(), "/home/agent").unwrap();
-        assert_eq!(std::fs::read_to_string(d.path().join(".cfg.json")).unwrap(), "{}");
+        assert_eq!(
+            std::fs::read_to_string(d.path().join(".cfg.json")).unwrap(),
+            "{}"
+        );
     }
 
     #[test]
@@ -534,7 +608,10 @@ mod tests {
         std::fs::write(&f, "{\"token\":\"keep-me\"}").unwrap();
 
         prepare(&claude(), &account, "/home/agent").unwrap();
-        assert_eq!(std::fs::read_to_string(&f).unwrap(), "{\"token\":\"keep-me\"}");
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "{\"token\":\"keep-me\"}"
+        );
     }
 
     #[test]
@@ -565,7 +642,10 @@ mod tests {
     #[test]
     fn launching_without_any_account_is_allowed() {
         let (_d, paths) = fixture();
-        assert_eq!(resolve_for_launch(&paths, &claude(), None, None).unwrap(), None);
+        assert_eq!(
+            resolve_for_launch(&paths, &claude(), None, None).unwrap(),
+            None
+        );
     }
 
     /// Regression: `-a work` for an account that does not exist silently ran
@@ -591,7 +671,9 @@ mod tests {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "personal");
         assert_eq!(
-            resolve_for_launch(&paths, &claude(), None, None).unwrap().as_deref(),
+            resolve_for_launch(&paths, &claude(), None, None)
+                .unwrap()
+                .as_deref(),
             Some("personal")
         );
     }
@@ -616,8 +698,14 @@ mod tests {
         let m = mounts(&a, Path::new("/acct"), "/home/agent");
 
         let d = m.iter().find(|c| c.guest.ends_with(".claude")).unwrap();
-        assert!(!d.file, "a directory, so docker must not treat it as a file");
-        let f = m.iter().find(|c| c.guest.ends_with(".claude.json")).unwrap();
+        assert!(
+            !d.file,
+            "a directory, so docker must not treat it as a file"
+        );
+        let f = m
+            .iter()
+            .find(|c| c.guest.ends_with(".claude.json"))
+            .unwrap();
         assert!(f.file);
     }
 
@@ -647,8 +735,14 @@ mod tests {
             .iter()
             .map(|c| c.guest.display().to_string())
             .collect();
-        assert!(guests.iter().any(|g| g.ends_with(".claude")), "tokens: {guests:?}");
-        assert!(guests.iter().any(|g| g.ends_with(".claude.json")), "account: {guests:?}");
+        assert!(
+            guests.iter().any(|g| g.ends_with(".claude")),
+            "tokens: {guests:?}"
+        );
+        assert!(
+            guests.iter().any(|g| g.ends_with(".claude.json")),
+            "account: {guests:?}"
+        );
     }
 
     /// Credentials must be a *directory*, because a bind-mounted file cannot be
@@ -677,10 +771,22 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         prepare(&claude(), d.path(), "/home/agent").unwrap();
 
-        assert!(d.path().join(".claude/skills").is_dir(), "skills mountpoint");
-        assert!(d.path().join(".claude/commands").is_dir(), "commands mountpoint");
-        assert!(d.path().join(".claude/agents").is_dir(), "subagents mountpoint");
-        assert!(d.path().join(".claude/settings.json").is_file(), "hooks mountpoint");
+        assert!(
+            d.path().join(".claude/skills").is_dir(),
+            "skills mountpoint"
+        );
+        assert!(
+            d.path().join(".claude/commands").is_dir(),
+            "commands mountpoint"
+        );
+        assert!(
+            d.path().join(".claude/agents").is_dir(),
+            "subagents mountpoint"
+        );
+        assert!(
+            d.path().join(".claude/settings.json").is_file(),
+            "hooks mountpoint"
+        );
     }
 
     #[test]
@@ -715,7 +821,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         prepare(&claude(), d.path(), "/home/agent").unwrap();
         std::fs::write(d.path().join(".claude.json"), r#"{"userID":"abc"}"#).unwrap();
-        std::fs::write(d.path().join(".claude/.credentials.json"), r#"{"token":"t"}"#).unwrap();
+        std::fs::write(
+            d.path().join(".claude/.credentials.json"),
+            r#"{"token":"t"}"#,
+        )
+        .unwrap();
 
         assert!(unfilled(&claude(), d.path(), "/home/agent").is_empty());
     }
@@ -812,7 +922,10 @@ mod tests {
             !unfilled(&claude(), &account, "/home/agent").is_empty(),
             "no token was written, so the login is not complete"
         );
-        assert!(!is_captured(&paths, &claude(), "work"), "and the account is not usable");
+        assert!(
+            !is_captured(&paths, &claude(), "work"),
+            "and the account is not usable"
+        );
         assert!(accounts(&paths, &claude()).is_empty(), "nor listed");
     }
 
@@ -834,7 +947,10 @@ mod tests {
     fn shipped_adapters_declare_what_proves_a_login() {
         for name in ["claude", "opencode"] {
             let a = Adapter::find(Path::new(ADAPTERS), name).unwrap();
-            assert!(!a.token.is_empty(), "{name} does not say what proves a login");
+            assert!(
+                !a.token.is_empty(),
+                "{name} does not say what proves a login"
+            );
         }
     }
 
@@ -867,7 +983,11 @@ mod tests {
         let (_d, paths) = fixture();
         let account = dir(&paths, "claude", "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
-        std::fs::write(account.join(".claude/.credentials.json"), [0xff, 0xfe, 0x00]).unwrap();
+        std::fs::write(
+            account.join(".claude/.credentials.json"),
+            [0xff, 0xfe, 0x00],
+        )
+        .unwrap();
 
         assert!(
             unfilled(&claude(), &account, "/home/agent").is_empty(),

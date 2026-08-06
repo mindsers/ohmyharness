@@ -24,7 +24,9 @@ fn repo() -> PathBuf {
 /// silently stops covering new files.
 fn markdown_files() -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = fs::read_dir(dir) else { return };
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
         for e in entries.flatten() {
             let p = e.path();
             let name = e.file_name();
@@ -166,7 +168,9 @@ fn every_anchor_resolves() {
             if target.starts_with("http") || target.starts_with("mailto:") {
                 continue;
             }
-            let Some((path_part, anchor)) = target.split_once('#') else { continue };
+            let Some((path_part, anchor)) = target.split_once('#') else {
+                continue;
+            };
             if anchor.is_empty() {
                 continue;
             }
@@ -177,7 +181,9 @@ fn every_anchor_resolves() {
             } else {
                 fs::read_to_string(dir.join(path_part)).ok()
             };
-            let Some(target_body) = target_body else { continue }; // dead file: the other test owns that
+            let Some(target_body) = target_body else {
+                continue;
+            }; // dead file: the other test owns that
 
             if !anchors(&target_body).contains(anchor) {
                 dead.push(format!("{shown} → {target}"));
@@ -185,7 +191,11 @@ fn every_anchor_resolves() {
         }
     }
 
-    assert!(dead.is_empty(), "anchors pointing at no heading:\n  {}", dead.join("\n  "));
+    assert!(
+        dead.is_empty(),
+        "anchors pointing at no heading:\n  {}",
+        dead.join("\n  ")
+    );
 }
 
 /// A page nothing links to is a page nobody reads. When docs were one file that
@@ -215,11 +225,19 @@ fn every_docs_page_is_reachable() {
         .into_iter()
         .filter(|f| f.starts_with(&docs))
         .filter(|f| f.file_name().is_some_and(|n| n != "README.md"))
-        .filter(|f| !f.canonicalize().map(|c| linked.contains(&c)).unwrap_or(false))
+        .filter(|f| {
+            !f.canonicalize()
+                .map(|c| linked.contains(&c))
+                .unwrap_or(false)
+        })
         .map(|f| f.strip_prefix(repo()).unwrap().display().to_string())
         .collect();
 
-    assert!(orphans.is_empty(), "unreachable pages:\n  {}", orphans.join("\n  "));
+    assert!(
+        orphans.is_empty(),
+        "unreachable pages:\n  {}",
+        orphans.join("\n  ")
+    );
 }
 
 /// The README is the entry point, so a link out of it that dies is the most

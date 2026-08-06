@@ -31,8 +31,7 @@ impl Editor {
                 let raw = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
                 out.push(
-                    toml::from_str(&raw)
-                        .with_context(|| format!("parsing {}", path.display()))?,
+                    toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?,
                 );
             }
         }
@@ -42,16 +41,20 @@ impl Editor {
 
     pub fn find(dir: &Path, name: &str) -> Option<Self> {
         let path = dir.join(format!("{name}.toml"));
-        std::fs::read_to_string(path).ok().and_then(|raw| toml::from_str(&raw).ok())
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| toml::from_str(&raw).ok())
     }
 
     /// The command to run on the host.
     pub fn command(&self, alias: &str) -> Vec<String> {
         let url = format!("ssh://{alias}/work");
         std::iter::once(self.bin.clone())
-            .chain(self.args.iter().map(|a| {
-                a.replace("$ALIAS", alias).replace("$URL", &url)
-            }))
+            .chain(
+                self.args
+                    .iter()
+                    .map(|a| a.replace("$ALIAS", alias).replace("$URL", &url)),
+            )
             .collect()
     }
 }
@@ -68,8 +71,11 @@ mod tests {
 
     #[test]
     fn the_bundled_editors_parse() {
-        let names: Vec<_> =
-            Editor::load_dir(Path::new(BUNDLED)).unwrap().into_iter().map(|e| e.name).collect();
+        let names: Vec<_> = Editor::load_dir(Path::new(BUNDLED))
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
         assert!(names.contains(&"zed".to_string()), "got: {names:?}");
         assert!(names.contains(&"code".to_string()), "got: {names:?}");
     }
@@ -82,19 +88,29 @@ mod tests {
             cmd.iter().any(|a| a.contains("omh-repo-s01")),
             "alias never reached the command: {cmd:?}"
         );
-        assert!(!cmd.iter().any(|a| a.contains('$')), "unsubstituted placeholder: {cmd:?}");
+        assert!(
+            !cmd.iter().any(|a| a.contains('$')),
+            "unsubstituted placeholder: {cmd:?}"
+        );
     }
 
     #[test]
     fn vscode_uses_its_remote_syntax() {
-        let cmd = Editor::find(Path::new(BUNDLED), "code").unwrap().command("omh-x-s01");
-        assert!(cmd.contains(&"ssh-remote+omh-x-s01".to_string()), "got: {cmd:?}");
+        let cmd = Editor::find(Path::new(BUNDLED), "code")
+            .unwrap()
+            .command("omh-x-s01");
+        assert!(
+            cmd.contains(&"ssh-remote+omh-x-s01".to_string()),
+            "got: {cmd:?}"
+        );
         assert!(cmd.contains(&"/work".to_string()));
     }
 
     #[test]
     fn cursor_is_its_own_entry_not_a_special_case() {
-        let cmd = Editor::find(Path::new(BUNDLED), "cursor").unwrap().command("omh-x-s01");
+        let cmd = Editor::find(Path::new(BUNDLED), "cursor")
+            .unwrap()
+            .command("omh-x-s01");
         assert_eq!(cmd[0], "cursor");
     }
 

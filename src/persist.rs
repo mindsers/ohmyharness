@@ -128,7 +128,10 @@ mod tests {
     fn the_socket_lives_inside_the_sandbox() {
         let s = socket("s01", "claude");
         assert!(s.is_absolute(), "guest path: {s:?}");
-        assert!(s.starts_with("/omh"), "must not collide with the workspace: {s:?}");
+        assert!(
+            s.starts_with("/omh"),
+            "must not collide with the workspace: {s:?}"
+        );
     }
 
     #[test]
