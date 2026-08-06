@@ -9,9 +9,9 @@ $ omh attach       # open that same session in your editor
 $ omh graph        # browse your codebase as a graph
 ```
 
-**Status: early.** v0, one harness verified end to end, 311 tests. Useful today
+**Status: early.** v0, one harness verified end to end, 314 tests. Useful today
 if you want a sandboxed agent with your config in it; not yet the finished
-distribution described in [`DESIGN.md`](DESIGN.md). See
+distribution described in [the docs](docs/). See
 [What isn't done](#what-isnt-done) — it is a real list, not a modesty ritual.
 
 ---
@@ -280,7 +280,7 @@ whether anything reads it. That gap is what `doctor` closes.
 
 | | |
 |---|---|
-| **Memory** | designed ([§11b](DESIGN.md)), not built. Layered like the profile: personal facts, project facts. |
+| **Memory** | [designed](docs/design/memory.md), not built. Layered like the profile: personal facts, project facts. |
 | **`omh bench`** | the base set is currently justified by argument, not measurement. Until this exists, "opinionated" and "arbitrary" are hard to tell apart. |
 | **`omh why` / `omh eject`** | provenance extended to *why*, and a credible exit. |
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |
@@ -294,31 +294,39 @@ keeps a branch even when the session produced no commits.
 
 ## Contributing
 
-**TDD, always** — see [`.omh/profile/AGENTS.md`](.omh/profile/AGENTS.md). Write
-the failing test, watch it fail, then implement. For a bug fix the regression
-test must go red *before* the fix lands.
-
-A green suite is not evidence on its own. Reintroduce the bug and confirm the
-guarding test turns red, or the test is decoration.
+See [`docs/contributing.md`](docs/contributing.md) for the full rules and the
+invariant list.
 
 ```console
-$ cargo test            # 311 tests
+$ cargo test            # 314 tests
 $ ./scripts/smoke.sh    # end-to-end walkthrough in a throwaway repo
+$ omh doctor            # the only thing that verifies an adapter
 ```
 
-Prefer asserting invariants over output shape: *exactly one writable mount, and
-it is the worktree* survives refactoring; *the 4th argument equals "…"* does not.
+**TDD, always** — write the failing test, watch it fail, then implement. For a
+bug fix the regression test must go red *before* the fix lands, and a green
+suite is not evidence on its own: reintroduce the bug and confirm the guarding
+test turns red, or the test is decoration.
 
 One caveat worth internalising before you trust anything here: adapters assert
 facts about **external software**. Almost every bug this project has shipped
 lived at that boundary, and none was catchable in-process. If you change an
 adapter, run `omh doctor`.
 
-## Design
+## Documentation
 
-[`DESIGN.md`](DESIGN.md) is the spec and is kept current — the thesis, the
-competitive position, every decision with its reasoning, and an honest record of
-what verification cost. Read it before changing architecture.
+Full docs live in [`docs/`](docs/README.md).
+
+| | |
+|---|---|
+| [Getting started](docs/getting-started.md) | install, `omh init`, your first session |
+| [Commands](docs/commands.md) · [Configuration](docs/configuration.md) | the surface, and the three profile layers |
+| [Sessions](docs/sessions.md) · [Accounts](docs/accounts.md) · [Editors](docs/editors.md) | how the sandbox, logins and IDE attach work |
+| [Code graph](docs/code-graph.md) · [Troubleshooting](docs/troubleshooting.md) | the graph and its hooks; `omh doctor` |
+| [Design](docs/README.md#understanding-omh) | the thesis, every decision with its reasoning, and an honest record of what verification cost |
+
+Read the design pages before changing architecture — most of them record
+something that was tried and cost something.
 
 ## Licence
 

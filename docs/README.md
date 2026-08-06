@@ -1,0 +1,62 @@
+# omh documentation
+
+> oh-my-zsh for agentic coding — the best agentic coding environment without the
+> hassle of understanding, installing, and configuring everything.
+
+**Status: early.** v0. One harness (`claude`) has been driven for real work;
+`opencode` passes `omh doctor` but has not. Docker is the only verified runtime.
+Several things described in the design pages are **designed and not built** —
+each says so at the top. See the [roadmap](design/roadmap.md).
+
+## Start here
+
+If you have five minutes and a repo, read [Getting started](getting-started.md).
+It goes from nothing to a sandboxed agent with your setup already inside it.
+
+## Using omh
+
+| | |
+|---|---|
+| [Getting started](getting-started.md) | install, `omh init`, your first session |
+| [Commands](commands.md) | every command, what it does, what it prints |
+| [Configuration](configuration.md) | the three profile layers, provenance, `policy.toml`, `carry_in` |
+| [Sessions](sessions.md) | what a session actually is, persistence, worktrees |
+| [Accounts](accounts.md) | `omh auth`, several logins per harness |
+| [Editors](editors.md) | attaching VS Code, Zed, Cursor or Neovim over SSH |
+| [Code graph](code-graph.md) | the graph, the four hooks, `omh graph` |
+| [Troubleshooting](troubleshooting.md) | `omh doctor`, and the failures it exists to catch |
+
+## Understanding omh
+
+These explain *why*, and are worth reading before proposing an architectural
+change — most of them record something that was tried and cost something.
+
+| | |
+|---|---|
+| [Why a distribution](design/distribution.md) | the thesis, why not an app store, who else is in this space |
+| [Decisions](design/decisions.md) | every load-bearing choice with its reasoning |
+| [Architecture](design/architecture.md) | images, runtime backends, on-disk layout |
+| [Adapters](design/adapters.md) | harnesses and editors as data, and how to add one |
+| [Memory](design/memory.md) | *designed, not built* — why memory is layered |
+| [Trust](design/trust.md) | provenance, evidence, and a credible exit |
+| [Risks](design/risks.md) | what is weak, stated plainly |
+| [Roadmap](design/roadmap.md) | what ships when, and what gates what |
+
+## Contributing
+
+[Contributing](contributing.md) — the testing rules, the invariants that must
+keep holding, and the one thing about this codebase that will mislead you if
+nobody tells you first.
+
+---
+
+### A note on how these pages are written
+
+Claims here are meant to be checkable. Where a number appears it was measured on
+this repo and says so; where something is unverified it is marked unverified.
+
+That is not modesty. Almost every bug this project has shipped lived at the
+boundary between omh and external software, where a confident sentence in a
+document and a green test suite are equally worthless — see
+[Troubleshooting](troubleshooting.md) for why `omh doctor` exists and what it
+can prove that nothing else can.

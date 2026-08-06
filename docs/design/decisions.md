@@ -1,0 +1,82 @@
+# Decisions
+
+Every load-bearing choice, with the reason. If you are about to change one of
+these, the reason is what you need to argue with.
+
+| Decision | Choice | Why |
+|---|---|---|
+| Category | **distribution** | the parts exist; assembly and subtraction are the value |
+| Runtime | **pluggable backend** | `sbx` where available, Docker as fallback; no vendor lock |
+| Repo exposure | **git worktree, auto-branch** | the agent cannot reach your checkout or `main`; review is `git diff` |
+| Code graph | **wire an existing MCP server** | distributions package, they don't reinvent |
+| Language | **Rust** | single binary; `omh` wraps every invocation, so startup is felt |
+| LLM routing | **not ours** | one env var in `policy.toml` |
+| Unit of work | **long-lived session** | keeps the index warm, makes harness switching instant |
+| Session persistence | **`dtach`, not tmux** | omh needs detach/reattach; SSH already provides multiplexing |
+| IDE access | **SSH into the session** | one dependency tree, shared with the agent |
+| Untracked files | **`carry_in` allowlist** | worktrees are pure git; secrets enter only by declaration |
+| Capability floor | **superset, adapters degrade** | omh must never cost you a feature you already had |
+| Profile scope | **3 layers: personal / shared / local** | team sharing without leaking secrets |
+| Write default | **the gitignored layer** | a mistyped key must not be committable |
+
+Each is expanded where it applies: [architecture](architecture.md) for runtime
+and images, [sessions](../sessions.md) for the session model and persistence,
+[configuration](../configuration.md) for the layers, [adapters](adapters.md) for
+the capability floor.
+
+## The base set
+
+This is the product. Everything else is a place to put it.
+
+```
+omh init             → base system. no questions.
+omh add rust         → stack profile. a small curated delta.
+omh config mcp add … → the archive is still there, one command away,
+                       and not in your face.
+```
+
+| Component | Status | Justification |
+|---|---|---|
+| sandbox + worktree branch | ✅ | safety; non-negotiable |
+| `AGENTS.md` from detected stack | ✅ | the thing everyone writes badly |
+| `omh attach` | ✅ | IDE attach |
+| **`codegraph`** | ✅ | structural queries instead of re-grepping every task |
+| test-on-stop + format-on-edit hooks | ✅ | `init` detects the commands and wires them |
+| memory | ⬜ | survives harness switches |
+| egress allowlist | ⬜ | inherited from the runtime |
+
+**If an eighth entry needs a paragraph to justify, it belongs in a profile, not
+the base set.**
+
+The base set is also the part of omh with the least evidence behind it. See
+[the honest weak spot](distribution.md#the-honest-weak-spot).
+
+## Decisions deliberately not made
+
+- **Which model you use.** One env var. Routing is a solved problem with several
+  good solutions and no reason for omh to have an opinion.
+- **Which editor you use.** [Editors are data](../editors.md#editors-are-data),
+  and the integration point is an SSH config include rather than a plugin, so
+  editors omh has never heard of work anyway.
+- **Whether to trust the sandbox over the branch.** Both. A sandbox protects the
+  host; the worktree branch protects the repo. They are not substitutes, and
+  conflating them is how people end up surprised.
+
+## Reversals worth knowing about
+
+Two decisions were made, shipped, and undone. Both are more instructive than the
+choices that held.
+
+**Per-session graph website → one per repo.** Every session's graph lives in one
+volume, so a per-session server displayed every other session's graph anyway — N
+identical websites on N ports, each running inside a container that held a
+writable worktree and live credentials. Scoping the service to the repo removed
+the duplication, removed the exposure, and deleted the `pgrep` guard, detached
+`exec` and `pkill` that the per-session version needed — each of which had been a
+bug before it worked. **Choosing the right scope removed them rather than fixing
+them.**
+
+**Credentials mounted at a private path → mounted where the harness reads.** The
+first version mounted a credential volume at `$HOME/.omh-creds`, which no
+harness has ever read. It tested green. See
+[accounts](../accounts.md#mount-the-directory-never-the-token-file).
