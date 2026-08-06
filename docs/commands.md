@@ -7,6 +7,7 @@ omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
+omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
 omh sessions ls|rm|down|diff  s   omh s ls, omh s diff s01
 omh config [set|unset|edit|mcp] c omh c mcp import claude
@@ -110,6 +111,46 @@ See [Accounts](accounts.md).
 Launches the real image with the real mounts and checks the guest paths the
 adapter claims. The only thing that can verify an adapter. See
 [Troubleshooting](troubleshooting.md).
+
+## `omh why <thing>`
+
+Who put this here, and on what grounds. Needs no session and no container.
+
+```console
+$ omh why codegraph
+codegraph — omh's choice, in the base set since 2026.06
+
+  because     structural queries instead of re-grepping the repo every task
+  costs       0.46s to index this repo, cold   measured 2026-08-04
+              3.4 MB on disk                   measured 2026-08-04
+  instead of  gitnexus            PolyForm-Noncommercial licence
+              codegraphcontext    needs a Neo4j service running
+              @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
+  installed   shared
+  remove      omh config mcp rm codegraph
+```
+
+**Cost is measured; benefit is argued.** Every cost line carries the date it was
+taken, and a measurement older than the entry itself is marked stale. The
+`because` line is a judgment you are free to disagree with — see
+[measure the cost, argue the benefit](design/trust.md#measure-the-cost-argue-the-benefit).
+
+### Six answers, because authorship differs
+
+| | |
+|---|---|
+| **omh's choice** | in the base set, and your copy matches what omh ships |
+| **modified by you** | omh's entry, changed — both values are shown |
+| **not installed here** | in the base set, absent from your profile. Not an error |
+| **written by omh init** | derived from your repo, like `rust-format` from `Cargo.toml`. omh's writing, not omh's opinion |
+| **your choice** | you added it. **No rationale is offered** — omh does not have one and will not invent one |
+| **considered, not in the base set** | rejected, with the reasoning. `omh why gitnexus` explains the licence problem |
+
+That last row is why rejections are recorded at all: without them the same
+candidate gets re-litigated every time somebody rediscovers it.
+
+A name matching nothing prints what *is* known rather than guessing — the same
+rule as `omh attach emacs`.
 
 ## `omh ls`
 

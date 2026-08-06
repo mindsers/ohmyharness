@@ -1,0 +1,155 @@
+# The base set — omh's opinion, as data.
+#
+# This file is the single source of truth: `omh init` seeds from it and
+# `omh why` explains from it, so the two cannot disagree about what is
+# installed or why.
+#
+# Every entry states what it buys, what it costs, what was considered instead,
+# and how to remove it. That is enforced by a test, not by good intentions —
+# see `every_base_set_entry_states_its_case` in src/base.rs.
+#
+# Costs are MEASURED. Benefits are ARGUED. They are different kinds of claim
+# and are never printed as though they were the same one.
+
+version = "2026.08"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The code graph
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[entry]]
+name    = "codegraph"
+kind    = "mcp"
+since   = "2026.06"
+because = "structural queries instead of re-grepping the repo every task"
+remove  = "omh config mcp rm codegraph"
+command = "codebase-memory-mcp"
+
+  [[entry.measured]]
+  what  = "to index this repo, cold"
+  value = "0.46s"
+  how   = "index_repository --mode fast, 821 nodes / 3813 edges"
+  on    = "2026-08-04"
+
+  [[entry.measured]]
+  what  = "on disk"
+  value = "3.4 MB"
+  how   = "the graph volume after a cold index of this repo"
+  on    = "2026-08-04"
+
+  [[entry.instead_of]]
+  name = "gitnexus"
+  why  = "PolyForm-Noncommercial licence"
+
+  [[entry.instead_of]]
+  name = "codegraphcontext"
+  why  = "needs a Neo4j service running"
+
+  [[entry.instead_of]]
+  name = "@sdsrs/code-graph"
+  why  = "close second; needs a node runtime rather than a static binary"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The hooks that make the graph something used rather than merely installed
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[entry]]
+name    = "graph-orient"
+kind    = "hook"
+since   = "2026.08"
+because = "the agent is given the module map instead of discovering it by reading files"
+remove  = "rm .omh/profile/hooks/graph-orient.json"
+
+  [[entry.measured]]
+  what  = "per context rebuild"
+  value = "2,300 B"
+  how   = "get_architecture with four targeted aspects; SessionStart re-fires on resume and compact"
+  on    = "2026-08-04"
+
+  [[entry.instead_of]]
+  name = "the `overview` aspect"
+  why  = "6,173 B for the same orientation the four targeted aspects give in 2,138"
+
+[[entry]]
+name    = "graph-first"
+kind    = "hook"
+since   = "2026.08"
+because = "structural questions answer in one call instead of an iterative grep"
+remove  = "rm .omh/profile/hooks/graph-first.json"
+
+  [[entry.measured]]
+  what  = "per grep"
+  value = "~40 B"
+  how   = "the nudge string, injected as additionalContext before Grep or Glob"
+  on    = "2026-08-04"
+
+  [[entry.instead_of]]
+  name = "blocking grep outright"
+  why  = "grep is right for a literal string, and a hook that blocks correct work gets disabled"
+
+[[entry]]
+name    = "graph-read"
+kind    = "hook"
+since   = "2026.08"
+because = "one symbol instead of a whole file, when the file is big enough for that to matter"
+remove  = "rm .omh/profile/hooks/graph-read.json"
+
+  [[entry.measured]]
+  what  = "when it fires"
+  value = "35,814 → 1,511 B"
+  how   = "src/auth.rs read whole, versus get_code_snippet for one symbol"
+  on    = "2026-08-04"
+
+  [[entry.measured]]
+  what  = "when it does not"
+  value = "0 B"
+  how   = "silent unless the target is source over 8,000 bytes"
+  on    = "2026-08-04"
+
+  [[entry.instead_of]]
+  name = "nudging on every Read"
+  why  = "Read is the most frequent tool there is; a nudge on every call becomes noise the model tunes out"
+
+[[entry]]
+name    = "graph-refresh"
+kind    = "hook"
+since   = "2026.08"
+because = "the graph describes the code as it is now, not as the session found it"
+remove  = "rm .omh/profile/hooks/graph-refresh.json"
+
+  [[entry.measured]]
+  what  = "per turn"
+  value = "0.14s"
+  how   = "incremental re-index of a session worktree at Stop"
+  on    = "2026-08-04"
+
+  [[entry.instead_of]]
+  name = "indexing once at init"
+  why  = "a session's worktree is not the checkout it started from; the graph would describe code the agent has since changed"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Considered and rejected.
+#
+# Recorded so the same candidate is not re-litigated every time someone
+# rediscovers it. `omh why <name>` answers for these too.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[rejected]]
+name       = "gitnexus"
+considered = "2026.06"
+because    = "PolyForm-Noncommercial. Every omh user writing code at work would be in violation of a dependency they never chose — a distribution doing that is doing something to its users. Legitimate as an opt-in profile, never as a default."
+
+[[rejected]]
+name       = "codegraphcontext"
+considered = "2026.06"
+because    = "MIT, but requires a running Neo4j. A service to stand up is a decision to make, and the base set exists to remove decisions."
+
+[[rejected]]
+name       = "mcp-code-graph"
+considered = "2026.06"
+because    = "unmaintained for roughly a year at the time of review."
+
+[[rejected]]
+name       = "search_code"
+considered = "2026.08"
+because    = "looks like a cheaper grep, but `--pattern 'fn unfilled' --mode compact` returned zero results against a symbol that demonstrably exists. Routing literal search through it would make things worse, and the claim stays unverified until that is explained."

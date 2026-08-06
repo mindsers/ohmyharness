@@ -37,6 +37,12 @@ impl Paths {
         self.root.join("editors")
     }
 
+    /// The base set as shipped: what `init` seeds and what `omh why` explains.
+    /// Versioned files, oldest kept, so an upgrade can eventually diff two.
+    pub fn base(&self) -> PathBuf {
+        self.root.join("base")
+    }
+
     pub fn creds(&self, harness: &str) -> PathBuf {
         self.root.join("creds").join(harness)
     }
@@ -161,7 +167,10 @@ mod tests {
 
     fn fixture(layers: &[(&str, &str, &str)]) -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths { root: dir.path().join("home"), repo: dir.path().join("repo") };
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
         for (layer, name, body) in layers {
             let base = match *layer {
                 "personal" => paths.root.join("profile"),
@@ -184,7 +193,10 @@ mod tests {
             ("local", "AGENTS.md", "three"),
         ]);
         let sources = Profile::resolve(&f.paths).sources(Capability::Rules);
-        let bodies: Vec<_> = sources.iter().map(|p| std::fs::read_to_string(p).unwrap()).collect();
+        let bodies: Vec<_> = sources
+            .iter()
+            .map(|p| std::fs::read_to_string(p).unwrap())
+            .collect();
         assert_eq!(bodies, ["one", "two", "three"], "local must apply last");
     }
 
@@ -205,7 +217,10 @@ mod tests {
             ("shared", "skills/x/SKILL.md", "s"),
         ]);
         let declared = Profile::resolve(&f.paths).declared();
-        assert_eq!(declared, vec![Capability::Rules, Capability::Skills, Capability::Mcp]);
+        assert_eq!(
+            declared,
+            vec![Capability::Rules, Capability::Skills, Capability::Mcp]
+        );
     }
 
     /// Worktrees live outside the repo so an IDE opened on the repo root does not
@@ -231,17 +246,20 @@ mod tests {
         assert!(err.to_string().contains("git init"), "got: {err}");
     }
 
-
-
-
     /// Regression: staging was keyed by session and harness only, so two repos
     /// both using session `s01` shared one rendered profile — repo A's MCP
     /// config could be mounted into repo B's sandbox.
     #[test]
     fn staging_is_keyed_by_repo() {
         let dir = tempfile::tempdir().unwrap();
-        let a = Paths { root: dir.path().into(), repo: dir.path().join("alpha") };
-        let b = Paths { root: dir.path().into(), repo: dir.path().join("beta") };
+        let a = Paths {
+            root: dir.path().into(),
+            repo: dir.path().join("alpha"),
+        };
+        let b = Paths {
+            root: dir.path().into(),
+            repo: dir.path().join("beta"),
+        };
         assert_ne!(a.staging("s01", "claude"), b.staging("s01", "claude"));
     }
 

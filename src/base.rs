@@ -4,12 +4,161 @@
 //! not its machinery; it is what it chooses, and choosing is the part a
 //! marketplace structurally cannot do.
 //!
-//! Entries earn their place by measurement, not taste. Until `omh bench`
-//! exists, each one carries the argument that put it here and should be read as
-//! provisional.
+//! Entries earn their place by stating what they cost, what they buy, what was
+//! considered instead, and how to remove them. **Cost is measured; benefit is
+//! argued.** Those are different kinds of claim and are never presented as the
+//! same one — a benchmark over a stochastic metric would have dressed the second
+//! as the first, which is why there isn't one.
+//!
+//! The manifest is the single source of truth: `omh init` seeds from it and
+//! `omh why` explains from it, so they cannot disagree.
 
 use crate::render::Server;
+use anyhow::{Context, Result};
+use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::path::Path;
+
+/// The base set as data.
+///
+/// `omh init` seeds from this and `omh why` explains from it, so the two cannot
+/// disagree about what is installed or why. Keeping the rationale in a shipped
+/// file rather than in the binary also means the opinion is reviewable by the
+/// people it is imposed on.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Manifest {
+    /// The base set is versioned because it expires — a distribution's real
+    /// work is re-choosing as the catalogue churns.
+    pub version: String,
+    #[serde(default, rename = "entry")]
+    pub entries: Vec<Entry>,
+    /// Candidates considered and turned down. Recorded so the same one is not
+    /// re-litigated every time somebody rediscovers it.
+    #[serde(default)]
+    pub rejected: Vec<Rejected>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Entry {
+    pub name: String,
+    pub kind: Kind,
+    pub since: String,
+    /// Argued, not measured. The honest half.
+    pub because: String,
+    /// A default nobody can leave is a cage.
+    pub remove: String,
+    /// For `mcp` entries: what `init` seeds. Also the baseline that decides
+    /// whether the user's copy counts as modified.
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub measured: Vec<Measured>,
+    #[serde(default)]
+    pub instead_of: Vec<Alternative>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Kind {
+    Mcp,
+    Hook,
+}
+
+/// A cost, with the date it was taken and how.
+///
+/// Never rendered in the same shape as a computed value: one is a fact about
+/// this machine right now, the other is a recording that can go stale, and
+/// blurring them is how a document starts claiming more than it can support.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Measured {
+    pub what: String,
+    pub value: String,
+    pub how: String,
+    pub on: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Alternative {
+    pub name: String,
+    pub why: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rejected {
+    pub name: String,
+    pub considered: String,
+    pub because: String,
+}
+
+impl Manifest {
+    /// Load the newest manifest in `dir`.
+    ///
+    /// Newest by filename, since versions are `YYYY.MM`. Older ones are kept
+    /// rather than deleted so `omh upgrade` can eventually diff two of them and
+    /// say what entered, what left, and why.
+    pub fn load_dir(dir: &Path) -> Result<Self> {
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .with_context(|| format!("reading {}", dir.display()))?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .collect();
+        files.sort();
+
+        let path = files
+            .last()
+            .with_context(|| format!("no base manifest in {} — run `omh init`", dir.display()))?;
+        let raw =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    /// The MCP servers `omh init` seeds, built from the manifest.
+    ///
+    /// There is no second definition in code to disagree with this one — that
+    /// was the point of moving the base set into a file.
+    pub fn servers(&self) -> BTreeMap<String, Server> {
+        self.entries
+            .iter()
+            .filter(|e| e.kind == Kind::Mcp)
+            .filter_map(|e| {
+                Some((
+                    e.name.clone(),
+                    Server {
+                        command: e.command.clone()?,
+                        args: e.args.clone(),
+                        env: BTreeMap::new(),
+                    },
+                ))
+            })
+            .collect()
+    }
+
+    /// One line per entry, for `omh init` to print. The full answer is
+    /// `omh why <name>`.
+    pub fn rationale(&self) -> Vec<(&str, &str)> {
+        self.entries
+            .iter()
+            .filter(|e| e.kind == Kind::Mcp)
+            .map(|e| (e.name.as_str(), e.because.as_str()))
+            .collect()
+    }
+
+    pub fn entry(&self, name: &str) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.name == name)
+    }
+
+    pub fn rejection(&self, name: &str) -> Option<&Rejected> {
+        self.rejected.iter().find(|r| r.name == name)
+    }
+}
 
 /// Where the graph server keeps its index inside the sandbox.
 ///
@@ -32,31 +181,10 @@ pub const GRAPH_UI_INTERNAL: u16 = 9748;
 
 pub const GRAPH_BIN: &str = "codebase-memory-mcp";
 
-/// MCP servers every project gets.
-pub fn servers() -> BTreeMap<String, Server> {
-    BTreeMap::from([(
-        "codegraph".to_string(),
-        Server {
-            command: GRAPH_BIN.to_string(),
-            // No arguments: with no args the binary is an MCP server on stdio,
-            // and it finds its index in the cache omh mounts.
-            args: Vec::new(),
-            env: BTreeMap::new(),
-        },
-    )])
-}
-
-/// One line per entry, explaining why it is here. `omh init` prints these, and
-/// `omh why` will read them — a default nobody can interrogate is
-/// indistinguishable from an arbitrary one.
-pub fn rationale() -> Vec<(&'static str, &'static str)> {
-    vec![(
-        "codegraph",
-        "structural queries instead of re-grepping the repo every task; \
-         MIT, a static binary with no runtime or database. Provisional until \
-         `omh bench` measures it.",
-    )]
-}
+// The MCP servers and their rationale used to live here as two hardcoded
+// functions. They are `Manifest::servers()` and `Manifest::rationale()` now:
+// one file that `init` seeds from and `why` explains from, which cannot
+// disagree with itself the way two definitions can.
 
 /// The graph UI runs **once per repo**, not once per session.
 ///
@@ -303,12 +431,147 @@ pub fn index_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::path::Path;
+
+    /// The manifest as shipped. Tested through the real file rather than a
+    /// fixture: a manifest that parses in a test and not in the wild is the
+    /// failure this whole module exists to prevent.
+    const BUNDLED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/base");
+
+    fn shipped() -> Manifest {
+        Manifest::load_dir(Path::new(BUNDLED)).expect("bundled base manifest")
+    }
+
+    /// `docs/design/distribution.md` says every base-set entry states what it
+    /// costs, what it buys, what was considered instead, and how to remove it —
+    /// and that anything unable to fill in all four is taste pretending to be
+    /// curation.
+    ///
+    /// That was aspiration written in a document nothing enforced. Here it is a
+    /// test, so a future entry cannot be added without its reasoning: the
+    /// cheapest moment to demand a justification is before it ships, and the
+    /// only moment anyone reliably does is when something turns red.
+    #[test]
+    fn every_base_set_entry_states_its_case() {
+        let manifest = shipped();
+        assert!(
+            !manifest.entries.is_empty(),
+            "a base set with no entries is not a distribution"
+        );
+
+        for e in &manifest.entries {
+            assert!(!e.because.trim().is_empty(), "{}: no `because`", e.name);
+            assert!(
+                !e.remove.trim().is_empty(),
+                "{}: no way to remove it",
+                e.name
+            );
+            assert!(
+                !e.instead_of.is_empty(),
+                "{}: nothing recorded as considered-instead. An entry with no \
+                 alternatives was not chosen, it was defaulted to.",
+                e.name
+            );
+            assert!(
+                !e.measured.is_empty(),
+                "{}: no measured cost. Benefit is argued here, but cost is the \
+                 half that must be measured — it is what creeps.",
+                e.name
+            );
+        }
+    }
+
+    /// A rejection is a product artifact. Without one recorded, the same
+    /// candidate gets re-litigated every time someone rediscovers it.
+    #[test]
+    fn rejections_say_why_they_were_rejected() {
+        for r in &shipped().rejected {
+            assert!(
+                !r.because.trim().is_empty(),
+                "{}: rejected with no reason",
+                r.name
+            );
+        }
+    }
+
+    /// The manifest carries the *reasoning*; hook commands stay in code, because
+    /// they are intricate shell that interpolates `GRAPH_BIN` and `PROJECT_ENV`
+    /// and would lose that coupling flattened into TOML.
+    ///
+    /// Two sources describing one base set can drift, and the drift is silent in
+    /// the worst direction: `omh why` confidently explaining an entry that is no
+    /// longer installed, or an entry shipping with no explanation at all. So the
+    /// name sets must match exactly, in both directions.
+    #[test]
+    fn the_manifest_and_the_code_describe_the_same_base_set() {
+        let manifest = shipped();
+
+        let declared: BTreeSet<&str> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind == Kind::Hook)
+            .map(|e| e.name.as_str())
+            .collect();
+        let shipped_hooks: BTreeSet<&str> = hooks().iter().map(|h| h.name).collect();
+        assert_eq!(
+            declared, shipped_hooks,
+            "hooks in the manifest vs hooks in the code"
+        );
+
+        // MCP servers are not checked here: since `Manifest::servers()` derives
+        // from the manifest there is no second definition to disagree with, and
+        // asserting it would only prove that a filter works. The hook half is
+        // real because hook *commands* genuinely still live in code.
+    }
+
+    /// `Manifest::servers()` drops an entry whose `command` is missing, so an
+    /// mcp entry without one is installed nowhere while still being listed in
+    /// the base set and explained by `omh why` — present in every account of
+    /// itself except the one that matters.
+    #[test]
+    fn an_mcp_entry_without_a_command_is_not_silently_dropped() {
+        let manifest = shipped();
+        let declared = manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind == Kind::Mcp)
+            .count();
+        assert_eq!(
+            declared,
+            manifest.servers().len(),
+            "an mcp entry is missing its `command` and would seed nothing"
+        );
+    }
+
+    /// Exactly the document `init` writes into the shared layer.
+    ///
+    /// A manifest that parses but yields an empty server map is silent on both
+    /// sides: init reports success, and every new sandbox simply comes up
+    /// without a graph. Nothing downstream notices, because "no MCP servers
+    /// configured" is a legitimate state.
+    #[test]
+    fn the_document_init_seeds_actually_contains_the_base_set() {
+        let manifest = shipped();
+        let body = serde_json::to_string_pretty(
+            &serde_json::json!({ "mcpServers": manifest.servers() }),
+        )
+        .unwrap();
+
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let servers = parsed["mcpServers"].as_object().expect("an mcpServers object");
+        assert!(!servers.is_empty(), "init would seed an empty base set");
+        assert_eq!(servers["codegraph"]["command"], GRAPH_BIN);
+    }
 
     #[test]
     fn the_base_set_ships_a_code_graph() {
-        let s = servers();
-        assert!(s.contains_key("codegraph"), "got: {:?}", s.keys().collect::<Vec<_>>());
+        let s = shipped().servers();
+        assert!(
+            s.contains_key("codegraph"),
+            "got: {:?}",
+            s.keys().collect::<Vec<_>>()
+        );
         assert_eq!(s["codegraph"].command, GRAPH_BIN);
     }
 
@@ -316,23 +579,33 @@ mod tests {
     /// work on the machine that wrote it and nowhere else.
     #[test]
     fn base_servers_reference_nothing_on_the_host() {
-        for (name, server) in servers() {
-            assert!(!server.command.contains('/'), "{name}: {} is a host path", server.command);
+        for (name, server) in shipped().servers() {
+            assert!(
+                !server.command.contains('/'),
+                "{name}: {} is a host path",
+                server.command
+            );
             for arg in &server.args {
                 assert!(
-                    !arg.starts_with("/Users") && !arg.starts_with("/home/") || arg.starts_with("/home/agent"),
+                    !arg.starts_with("/Users") && !arg.starts_with("/home/")
+                        || arg.starts_with("/home/agent"),
                     "{name}: {arg} is not a sandbox path"
                 );
             }
         }
     }
 
-    /// Every entry has to be able to answer "why is this here".
+    /// Every entry has to be able to answer "why is this here", and the answer
+    /// has to be an actual sentence. `every_base_set_entry_states_its_case`
+    /// checks a `because` exists; this checks it says something.
     #[test]
     fn every_entry_carries_its_argument() {
-        let reasons: BTreeMap<_, _> = rationale().into_iter().collect();
-        for name in servers().keys() {
-            let why = reasons.get(name.as_str()).unwrap_or_else(|| panic!("{name} has no rationale"));
+        let manifest = shipped();
+        let reasons: BTreeMap<_, _> = manifest.rationale().into_iter().collect();
+        for name in manifest.servers().keys() {
+            let why = reasons
+                .get(name.as_str())
+                .unwrap_or_else(|| panic!("{name} has no rationale"));
             assert!(why.len() > 20, "{name}: `{why}` explains nothing");
         }
     }
@@ -341,11 +614,25 @@ mod tests {
 
     #[test]
     fn indexing_runs_inside_the_sandbox_with_the_cache_mounted() {
-        let args = index_args("omh/base:x", "omh-cache-repo", Path::new("/host/repo"), "repo");
+        let args = index_args(
+            "omh/base:x",
+            "omh-cache-repo",
+            Path::new("/host/repo"),
+            "repo",
+        );
         let joined = args.join(" ");
-        assert!(joined.contains("omh-cache-repo:"), "the cache volume must be mounted: {joined}");
-        assert!(joined.contains(GRAPH_CACHE), "at the path the server uses: {joined}");
-        assert!(joined.contains("/host/repo:"), "the code must be readable: {joined}");
+        assert!(
+            joined.contains("omh-cache-repo:"),
+            "the cache volume must be mounted: {joined}"
+        );
+        assert!(
+            joined.contains(GRAPH_CACHE),
+            "at the path the server uses: {joined}"
+        );
+        assert!(
+            joined.contains("/host/repo:"),
+            "the code must be readable: {joined}"
+        );
     }
 
     /// The repo is mounted read-only: indexing reads code, and an indexer that
@@ -400,7 +687,10 @@ mod tests {
     // ── hooks ───────────────────────────────────────────────────────────────
 
     fn hook(name: &str) -> Hook {
-        hooks().into_iter().find(|h| h.name == name).unwrap_or_else(|| panic!("no {name} hook"))
+        hooks()
+            .into_iter()
+            .find(|h| h.name == name)
+            .unwrap_or_else(|| panic!("no {name} hook"))
     }
 
     /// A graph that describes the code as it was when the session started is
@@ -411,7 +701,10 @@ mod tests {
         let h = hook("graph-refresh");
         assert_eq!(h.event, "Stop");
         assert!(h.command.contains("index_repository"), "got: {}", h.command);
-        assert!(h.command.contains("/work"), "it indexes the session, not the checkout");
+        assert!(
+            h.command.contains("/work"),
+            "it indexes the session, not the checkout"
+        );
     }
 
     /// The whole point. An MCP server the agent never reaches for is installed
@@ -434,7 +727,11 @@ mod tests {
     fn the_nudge_never_blocks_the_tool() {
         let h = hook("graph-first");
         for forbidden in ["exit 1", "deny", "block"] {
-            assert!(!h.command.contains(forbidden), "must not block: {}", h.command);
+            assert!(
+                !h.command.contains(forbidden),
+                "must not block: {}",
+                h.command
+            );
         }
     }
 
@@ -489,8 +786,10 @@ mod tests {
     #[test]
     fn the_download_follows_the_build_architecture() {
         let cmd = graph_install();
-        assert!(cmd.contains("TARGETARCH") || cmd.contains("dpkg --print-architecture"),
-            "arch must be derived: {cmd}");
+        assert!(
+            cmd.contains("TARGETARCH") || cmd.contains("dpkg --print-architecture"),
+            "arch must be derived: {cmd}"
+        );
     }
 
     /// Verified in a container: backgrounded with stdin closed, the server logs
@@ -499,7 +798,10 @@ mod tests {
     #[test]
     fn serving_the_ui_holds_stdin_open() {
         let cmd = ui_command(GRAPH_UI_PORT);
-        assert!(cmd.contains("sleep infinity |"), "stdin must stay open: {cmd}");
+        assert!(
+            cmd.contains("sleep infinity |"),
+            "stdin must stay open: {cmd}"
+        );
         assert!(cmd.contains("--ui=true"), "got: {cmd}");
     }
 
@@ -519,10 +821,6 @@ mod tests {
             "and forward to where the server binds: {cmd}"
         );
     }
-
-
-
-
 
     /// Regression: removing a session left its graph behind, so the cache grew
     /// with dead sessions and the agent could query code that no longer exists.
@@ -558,8 +856,13 @@ mod tests {
     #[test]
     fn the_ui_container_mounts_only_the_index() {
         let args = ui_run_args("omh/base:x", "omh-graph-r", "omh-cache-r", 50000);
-        let mounts: Vec<&String> =
-            args.iter().skip_while(|a| *a != "-v").step_by(2).skip(1).take(1).collect();
+        let mounts: Vec<&String> = args
+            .iter()
+            .skip_while(|a| *a != "-v")
+            .step_by(2)
+            .skip(1)
+            .take(1)
+            .collect();
         assert_eq!(mounts.len(), 1, "exactly one mount: {args:?}");
         let joined = args.join(" ");
         assert!(joined.contains("omh-cache-r"), "the index: {joined}");
@@ -581,7 +884,9 @@ mod tests {
     fn the_ui_runs_detached_under_its_own_name() {
         let args = ui_run_args("i", "omh-graph-r", "v", 1);
         assert!(args.contains(&"-d".to_string()), "got: {args:?}");
-        assert!(args.windows(2).any(|w| w[0] == "--name" && w[1] == "omh-graph-r"));
+        assert!(args
+            .windows(2)
+            .any(|w| w[0] == "--name" && w[1] == "omh-graph-r"));
     }
 
     /// A hook talks to the model through `hookSpecificOutput.additionalContext`,
@@ -593,8 +898,18 @@ mod tests {
             if h.event == "Stop" {
                 continue; // refreshes the index, says nothing to the model
             }
-            assert!(h.command.contains("additionalContext"), "{}: {}", h.name, h.command);
-            assert!(h.command.contains("hookSpecificOutput"), "{}: {}", h.name, h.command);
+            assert!(
+                h.command.contains("additionalContext"),
+                "{}: {}",
+                h.name,
+                h.command
+            );
+            assert!(
+                h.command.contains("hookSpecificOutput"),
+                "{}: {}",
+                h.name,
+                h.command
+            );
         }
     }
 
@@ -634,7 +949,10 @@ mod tests {
     #[test]
     fn orientation_is_kept_small_because_it_repeats() {
         let cmd = hook("graph-orient").command.clone();
-        assert!(!cmd.contains("overview"), "too broad for something that repeats: {cmd}");
+        assert!(
+            !cmd.contains("overview"),
+            "too broad for something that repeats: {cmd}"
+        );
         for aspect in ["layers", "packages", "boundaries", "entry_points"] {
             assert!(cmd.contains(aspect), "missing {aspect}: {cmd}");
         }
@@ -645,7 +963,10 @@ mod tests {
     #[test]
     fn aspects_are_passed_as_repeated_flags() {
         let cmd = hook("graph-orient").command.clone();
-        assert!(!cmd.contains("layers,packages"), "comma form returns empty: {cmd}");
+        assert!(
+            !cmd.contains("layers,packages"),
+            "comma form returns empty: {cmd}"
+        );
         assert_eq!(cmd.matches("--aspects").count(), 4, "got: {cmd}");
     }
 }

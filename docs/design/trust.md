@@ -6,7 +6,7 @@ understand."*
 
 That is the failure mode omh is most exposed to, because it makes more decisions
 on your behalf than oh-my-zsh ever did — and some of them are security
-decisions. Four commands exist to prevent it. Two are built.
+decisions. Four commands exist to prevent it. Three are built.
 
 The shape of the answer matters as much as the commands: omh's curation is
 legitimate because it is **stated, visible, and reversible**, not because it is
@@ -35,25 +35,49 @@ Proves an adapter's claims against a real container. Covered in
 Belongs in this list because it is the answer to *"how do I know omh actually
 did what it said?"* — and because the answer is not "the tests pass."
 
-## `omh why <thing>` — justification ⬜
+## `omh why <thing>` — justification ✅
 
 Provenance extended from *where* to *why*.
 
 ```console
 $ omh why codegraph
-  in the base set since 2026.06
-  costs  2,300 B at session start
-         ~40 B per grep
-         0.14s per turn
-  because structural queries beat re-grepping the repo every task
-  alternatives  gitnexus (noncommercial — disqualified)
-                codegraphcontext (needs Neo4j)
-  remove with: omh config mcp rm codegraph
+codegraph — omh's choice, in the base set since 2026.06
+
+  because     structural queries instead of re-grepping the repo every task
+  costs       0.46s to index this repo, cold   measured 2026-08-04
+              3.4 MB on disk                   measured 2026-08-04
+  instead of  gitnexus            PolyForm-Noncommercial licence
+              codegraphcontext    needs a Neo4j service running
+  installed   shared
+  remove      omh config mcp rm codegraph
 ```
 
 Read the shape of that output carefully, because it encodes the whole position:
 **the cost is measured and the benefit is argued.** Those are different kinds of
-claim and the command does not blur them.
+claim and the command does not blur them — every cost carries the date it was
+taken, and one older than the entry itself is marked stale.
+
+### Authorship is the point
+
+The base set is *seeded* into your profile at `init` and then lives as ordinary
+config, so an omh entry and one you added are byte-identical in the same file.
+`why` recovers the difference by comparing against the manifest — derived, never
+recorded, so there is no marker to go stale.
+
+Six answers, and the two negatives matter most:
+
+- **your choice** — omh offers **no rationale**. A tool that answers "because it
+  is in the base set" about something you added is lying about its own
+  authorship, and telling the two apart is the whole feature.
+- **written by omh init** — a `rust-format` hook derived from your `Cargo.toml`
+  is omh's writing but not omh's opinion. Disowning it would be the same false
+  claim pointing the other way.
+
+The rest: *omh's choice*, *modified by you* (both values shown), *not installed
+here*, and *considered, not in the base set* — which is how a rejection stops
+being re-litigated every time somebody rediscovers it.
+
+Full output in [Commands](../commands.md#omh-why-thing).
 
 ## Measure the cost, argue the benefit
 

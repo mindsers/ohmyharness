@@ -109,6 +109,7 @@ omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
+omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
 omh sessions ls|rm|down|diff  s   omh s ls, omh s diff s01
 omh config [set|unset|edit|mcp] c omh c mcp import claude

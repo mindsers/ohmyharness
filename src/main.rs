@@ -22,6 +22,7 @@ mod render;
 mod runtime;
 mod session;
 mod ssh;
+mod why;
 
 use adapter::Adapter;
 use anyhow::Context;
@@ -60,9 +61,9 @@ struct Cli {
 
 /// Built-ins and their aliases always beat a harness name — otherwise an
 /// adapter called `s` or `config` would silently shadow a command.
-pub const RESERVED: [&str; 13] = [
+pub const RESERVED: [&str; 14] = [
     "init", "doctor", "d", "auth", "ls", "attach", "a", "sessions", "s", "config", "c", "graph",
-    "help",
+    "why", "help",
 ];
 
 #[derive(Subcommand)]
@@ -72,6 +73,11 @@ enum Cmd {
     /// Verify a harness actually sees the profile, inside a real sandbox.
     #[command(visible_alias = "d")]
     Doctor { harness: Option<String> },
+    /// Who put this here, and on what grounds.
+    Why {
+        /// A base-set entry, something you added, or something omh rejected.
+        thing: String,
+    },
     /// Open the code graph in your browser.
     Graph {
         session: Option<String>,
@@ -204,6 +210,7 @@ fn main() -> Result<()> {
         Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account),
         Cmd::Ls => ls(&cwd),
         Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run),
+        Cmd::Why { thing } => why_cmd(&cwd, thing),
         Cmd::Graph { session, stop } => graph(&cwd, session.as_deref(), *stop),
         Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref()),
 
@@ -226,7 +233,6 @@ fn main() -> Result<()> {
     }
 }
 
-
 /// What to tell someone whose word matched nothing. Pure so it can be tested:
 /// the message is the entire value of this path.
 fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
@@ -236,7 +242,10 @@ fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
     if RESERVED.contains(&name) {
         return format!("`{name}` is a command — see `omh {name} --help`");
     }
-    format!("unknown harness `{name}`\n  available: {}", harnesses.join(", "))
+    format!(
+        "unknown harness `{name}`\n  available: {}",
+        harnesses.join(", ")
+    )
 }
 
 /// Neither a harness nor a reserved word — say what is available, since the
@@ -326,8 +335,10 @@ fn session_up(
 fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let profile = Profile::resolve(&paths);
-    let names: Vec<String> =
-        Adapter::load_dir(&paths.adapters())?.into_iter().map(|a| a.name).collect();
+    let names: Vec<String> = Adapter::load_dir(&paths.adapters())?
+        .into_iter()
+        .map(|a| a.name)
+        .collect();
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
         .context("no adapters installed — run `omh init`")?;
     let adapter = Adapter::find(&paths.adapters(), &harness)?;
@@ -379,11 +390,16 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
         .or_else(|_| std::env::var("EDITOR"))
         .ok()
         .and_then(|e| {
-            let base = std::path::Path::new(&e).file_name()?.to_string_lossy().into_owned();
+            let base = std::path::Path::new(&e)
+                .file_name()?
+                .to_string_lossy()
+                .into_owned();
             Some(base)
         });
     let wanted = chosen.map(str::to_string).or(fallback);
-    let ed = wanted.as_deref().and_then(|n| editor::Editor::find(&paths.editors(), n));
+    let ed = wanted
+        .as_deref()
+        .and_then(|n| editor::Editor::find(&paths.editors(), n));
 
     match ed {
         // An editor that is not installed is not an error — the URL is still a
@@ -391,7 +407,10 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
         Some(ed) if runtime::installed(&ed.bin) => {
             let cmd = ed.command(&alias);
             println!("omh: opening {} in {}", ssh::url(&alias), ed.name);
-            let ok = Command::new(&cmd[0]).args(&cmd[1..]).status().map(|s| s.success());
+            let ok = Command::new(&cmd[0])
+                .args(&cmd[1..])
+                .status()
+                .map(|s| s.success());
             if !matches!(ok, Ok(true)) {
                 // Remote launches fail for ordinary reasons — missing extension,
                 // handshake refused. Printing nothing leaves the user waiting
@@ -448,8 +467,10 @@ fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool) -> Result<()> {
         // A stopped container of the same name blocks `run --name`.
         let _ = image::container_remove(backend.program(), &container);
 
-        let names: Vec<String> =
-            Adapter::load_dir(&paths.adapters())?.into_iter().map(|a| a.name).collect();
+        let names: Vec<String> = Adapter::load_dir(&paths.adapters())?
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
         let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
             .context("no adapters installed — run `omh init`")?;
         let adapter = Adapter::find(&paths.adapters(), &harness)?;
@@ -476,9 +497,13 @@ fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool) -> Result<()> {
     println!("omh: graph at {url}");
     println!("  every session's graph for this repo, in one place");
     println!("  stop with: omh graph --stop");
-    let _ = Command::new(if cfg!(target_os = "macos") { "open" } else { "xdg-open" })
-        .arg(&url)
-        .status();
+    let _ = Command::new(if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    })
+    .arg(&url)
+    .status();
     Ok(())
 }
 
@@ -512,8 +537,10 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     let name = match harness {
         Some(h) => h.to_string(),
         None => {
-            let names: Vec<String> =
-                Adapter::load_dir(&paths.adapters())?.into_iter().map(|a| a.name).collect();
+            let names: Vec<String> = Adapter::load_dir(&paths.adapters())?
+                .into_iter()
+                .map(|a| a.name)
+                .collect();
             detect::preferred_harness(&names, &|h| runtime::installed(h))
                 .context("no adapters installed — run `omh init`")?
         }
@@ -574,12 +601,19 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
             image::tag_for(&adapter)
         ),
     }
-    let out = Command::new(backend.program()).args(backend.args(&plan)).output()?;
+    let out = Command::new(backend.program())
+        .args(backend.args(&plan))
+        .output()?;
     let outcomes = doctor::parse(&String::from_utf8_lossy(&out.stdout));
     let _ = session.remove(&paths.repo); // diagnostic: leave no session behind
 
     for o in &outcomes {
-        println!("  {} {:<10} {}", if o.ok { "\u{2713}" } else { "\u{2717}" }, o.name, o.detail);
+        println!(
+            "  {} {:<10} {}",
+            if o.ok { "\u{2713}" } else { "\u{2717}" },
+            o.name,
+            o.detail
+        );
     }
 
     if outcomes.is_empty() {
@@ -595,7 +629,10 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
             outcomes.len()
         );
     }
-    println!("\n  all {} checks passed — {name}'s adapter paths are verified", outcomes.len());
+    println!(
+        "\n  all {} checks passed — {name}'s adapter paths are verified",
+        outcomes.len()
+    );
     Ok(())
 }
 
@@ -628,7 +665,11 @@ fn sessions_ls(cwd: &std::path::Path) -> Result<()> {
 
 /// Read one policy key through the usual layer merge.
 fn policy_value(paths: &Paths, key: &str) -> Option<String> {
-    config::policy(paths).ok()?.into_iter().find(|s| s.key == key).map(|s| s.value)
+    config::policy(paths)
+        .ok()?
+        .into_iter()
+        .find(|s| s.key == key)
+        .map(|s| s.value)
 }
 
 fn runtime_preference(paths: &Paths) -> String {
@@ -650,7 +691,13 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
     match cmd {
         McpCmd::Ls => show_config(cwd, Some("mcp")),
 
-        McpCmd::Add { name, command, args, env, layer } => {
+        McpCmd::Add {
+            name,
+            command,
+            args,
+            env,
+            layer,
+        } => {
             let server = render::Server {
                 command: command.clone(),
                 args: args.clone(),
@@ -682,7 +729,12 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
             Ok(())
         }
 
-        McpCmd::Import { harness, file, force, layer } => {
+        McpCmd::Import {
+            harness,
+            file,
+            force,
+            layer,
+        } => {
             let adapter = Adapter::find(&paths.adapters(), harness)?;
             let binding = adapter
                 .supports(adapter::Capability::Mcp)
@@ -700,7 +752,10 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
             };
 
             let raw = std::fs::read_to_string(&source).with_context(|| {
-                format!("reading {} — pass --file to point somewhere else", source.display())
+                format!(
+                    "reading {} — pass --file to point somewhere else",
+                    source.display()
+                )
             })?;
             let incoming = render::parse(binding.render, &raw)?;
 
@@ -764,18 +819,21 @@ fn show_config(cwd: &std::path::Path, section: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn set(
-    cwd: &std::path::Path,
-    key: &str,
-    value: &str,
-    layer: Option<config::Layer>,
-) -> Result<()> {
+fn set(cwd: &std::path::Path, key: &str, value: &str, layer: Option<config::Layer>) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let w = config::set(&paths, key, value, layer.unwrap_or(config::Layer::DEFAULT_WRITE))?;
+    let w = config::set(
+        &paths,
+        key,
+        value,
+        layer.unwrap_or(config::Layer::DEFAULT_WRITE),
+    )?;
     println!("wrote → {}", w.path.display());
     if w.committed {
         // The one mistake git makes unrecoverable.
-        println!("warning: the {} layer is COMMITTED — never put a secret here", w.layer);
+        println!(
+            "warning: the {} layer is COMMITTED — never put a secret here",
+            w.layer
+        );
     }
     Ok(())
 }
@@ -818,7 +876,10 @@ fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
             carry::Action::Copied => eprintln!("omh: carried {}", item.path),
             carry::Action::Refreshed => eprintln!("omh: refreshed {}", item.path),
             carry::Action::Missing => {
-                eprintln!("omh: warning: carry_in lists {} — not in this checkout", item.path)
+                eprintln!(
+                    "omh: warning: carry_in lists {} — not in this checkout",
+                    item.path
+                )
             }
             carry::Action::Unchanged => {}
         }
@@ -830,8 +891,8 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let name = &argv[0];
 
-    let adapter = Adapter::find(&paths.adapters(), name)
-        .map_err(|e| unknown_tool(&paths, name, e))?;
+    let adapter =
+        Adapter::find(&paths.adapters(), name).map_err(|e| unknown_tool(&paths, name, e))?;
     let profile = Profile::resolve(&paths);
 
     // A dry run must leave no trace: no branch, no worktree, no staged files.
@@ -852,7 +913,11 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
 
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
-        staging: if cli.dry_run { container::Staging::Skip } else { container::Staging::Apply },
+        staging: if cli.dry_run {
+            container::Staging::Skip
+        } else {
+            container::Staging::Apply
+        },
         persist: policy_value(&paths, "persistence")
             .as_deref()
             .unwrap_or("dtach")
@@ -878,7 +943,14 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         carry_in(&paths, &session)?;
     }
 
-    let plan = container::plan(&paths, &profile, &adapter, &session, &argv[1..], opts.clone())?;
+    let plan = container::plan(
+        &paths,
+        &profile,
+        &adapter,
+        &session,
+        &argv[1..],
+        opts.clone(),
+    )?;
 
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     plan.validate(&backend.caps())?;
@@ -907,7 +979,10 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         &profile,
         &adapter,
         &session,
-        container::Options { tty: false, ..opts.clone() },
+        container::Options {
+            tty: false,
+            ..opts.clone()
+        },
     )?;
     eprintln!("{status_line}");
     let status = Command::new(backend.program())
@@ -915,6 +990,52 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         .status()?;
     eprintln!("\nomh: review with  omh diff {}", session.id);
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// `omh why <thing>` — who put this here, and on what grounds.
+///
+/// Needs no container and no session: it is a pure function of the manifest and
+/// the resolved profile, which is why it can answer even for something you have
+/// removed.
+fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+
+    // Servers and hooks are the same kind of thing here: installed, from a
+    // layer, chosen by omh or by you.
+    let mut installed = config::servers(&paths)?;
+    installed.extend(config::hooks(&paths)?);
+
+    // What omh ships, for deciding whether your copy has been changed. MCP
+    // baselines come from the manifest; a hook's command lives in code, so it
+    // comes from there — the split the drift test keeps honest.
+    let mut baselines: std::collections::BTreeMap<String, String> = manifest
+        .entries
+        .iter()
+        .filter_map(|e| e.command.clone().map(|c| (e.name.clone(), c)))
+        .collect();
+    for h in base::hooks() {
+        baselines.insert(h.name.to_string(), h.command.clone());
+    }
+
+    // Hooks init generates from stack detection are omh's writing but not omh's
+    // opinion. Reported as neither the base set nor yours, because claiming
+    // either would be false in a way this command exists to prevent.
+    let mut derived = std::collections::BTreeMap::new();
+    for s in detect::stacks(&paths.repo) {
+        let from = format!("{}, detected from {}", s.name, s.marker);
+        derived.insert(format!("{}-test", s.name), from.clone());
+        derived.insert(format!("{}-format", s.name), from);
+    }
+
+    let catalog = why::Catalog {
+        manifest: &manifest,
+        baselines,
+        installed,
+        derived,
+    };
+    print!("{}", why::render(&catalog.why(thing)));
+    Ok(())
 }
 
 #[allow(dead_code)]
@@ -926,6 +1047,11 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     //    matter what else init did. Ship them before anything else.
     let adapters = install_bundled_adapters(&paths)?;
     let editors = install_bundled(&paths.editors(), "editors")?;
+    // The base set ships as data next to the adapters, for the same reason: the
+    // opinion should be reviewable by the people it is imposed on, not buried
+    // in the binary. `omh why` reads the same file init seeds from.
+    install_bundled(&paths.base(), "base")?;
+    let manifest = base::Manifest::load_dir(&paths.base())?;
     std::fs::create_dir_all(paths.root.join("profile/skills"))?;
     std::fs::create_dir_all(paths.worktrees())?;
 
@@ -944,9 +1070,9 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     write_if_absent(&shared.join("AGENTS.md"), &detect::agents_md(&stacks))?;
     // The base set: omh's opinion, seeded into the committed layer where it is
     // visible, reviewable, and removable rather than hidden in the binary.
-    let base_mcp = serde_json::to_string_pretty(
-        &serde_json::json!({ "mcpServers": base::servers() }),
-    )? + "\n";
+    let base_mcp =
+        serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": manifest.servers() }))?
+            + "\n";
     write_if_absent(&shared.join("mcp.json"), &base_mcp)?;
     write_if_absent(
         &shared.join("policy.toml"),
@@ -973,7 +1099,9 @@ fn init(cwd: &std::path::Path) -> Result<()> {
 
     for stack in &stacks {
         write_if_absent(
-            &shared.join("hooks").join(format!("{}-test.json", stack.name)),
+            &shared
+                .join("hooks")
+                .join(format!("{}-test.json", stack.name)),
             &format!(
                 "{{ \"event\": \"Stop\", \"matcher\": \"\", \"command\": \"{}\" }}\n",
                 stack.test
@@ -995,19 +1123,24 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     println!("  harnesses  {} ({})", adapters.len(), adapters.join(", "));
     println!("  editors    {} ({})", editors.len(), editors.join(", "));
     match &harness {
-        Some(h) => println!("  harness    {h}{}", if runtime::installed(h) {
-            "  (found on your host)"
-        } else {
-            "  (default; nothing detected on host)"
-        }),
+        Some(h) => println!(
+            "  harness    {h}{}",
+            if runtime::installed(h) {
+                "  (found on your host)"
+            } else {
+                "  (default; nothing detected on host)"
+            }
+        ),
         None => println!("  harness    none — no adapters available"),
     }
     if stacks.is_empty() {
         println!("  stack      none detected — add commands to .omh/profile/AGENTS.md");
     } else {
         for s in &stacks {
-            println!("  stack      {} (from {}) → test `{}`, format `{}`",
-                s.name, s.marker, s.test, s.format);
+            println!(
+                "  stack      {} (from {}) → test `{}`, format `{}`",
+                s.name, s.marker, s.test, s.format
+            );
         }
     }
 
@@ -1015,8 +1148,11 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     if seeds.is_empty() {
         println!("  memory     nothing to derive yet");
     } else {
-        println!("  memory     seeded from {} source{}:", seeds.len(),
-            if seeds.len() == 1 { "" } else { "s" });
+        println!(
+            "  memory     seeded from {} source{}:",
+            seeds.len(),
+            if seeds.len() == 1 { "" } else { "s" }
+        );
         for seed in &seeds {
             println!("               {:<12} {}", seed.source, seed.fact);
         }
@@ -1041,7 +1177,10 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         if image::exists(backend.program(), &image::tag_for(&adapter)) {
             println!("  image      {} (already built)", image::tag_for(&adapter));
         } else {
-            println!("\n  building {} — first run only\n", image::tag_for(&adapter));
+            println!(
+                "\n  building {} — first run only\n",
+                image::tag_for(&adapter)
+            );
             image::ensure(backend.program(), &adapter)?;
             println!("\n  image      {}", image::tag_for(&adapter));
         }
@@ -1066,16 +1205,22 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         {
             // Backgrounded: init returns now and the first launch waits only if
             // this has not finished.
-            Ok(_) => println!("  graph      indexing in background → {}", paths.cache_volume()),
+            Ok(_) => println!(
+                "  graph      indexing in background → {}",
+                paths.cache_volume()
+            ),
             Err(e) => println!("  graph      could not start indexing: {e}"),
         }
     }
 
-    println!("\n  base set");
-    for (name, why) in base::rationale() {
+    println!("\n  base set  ({})", manifest.version);
+    for (name, why) in manifest.rationale() {
         println!("    {name:<10} {why}");
     }
-    println!("\nnot yet done: memory store, omh bench.");
+    // Named here because this is the moment somebody wonders what that is and
+    // why it was installed without being asked.
+    println!("\n  omh why <name>  what it costs, what was considered instead, how to remove it");
+    println!("\nnot yet done: memory store, cost accounting.");
     println!("next: omh {}", harness.as_deref().unwrap_or("config"));
     Ok(())
 }
@@ -1084,7 +1229,10 @@ fn init(cwd: &std::path::Path) -> Result<()> {
 /// cannot launch anything, which is the state the tool was in until now.
 fn install_bundled_adapters(paths: &Paths) -> Result<Vec<String>> {
     install_bundled(&paths.adapters(), "adapters")?;
-    Ok(Adapter::load_dir(&paths.adapters())?.into_iter().map(|a| a.name).collect())
+    Ok(Adapter::load_dir(&paths.adapters())?
+        .into_iter()
+        .map(|a| a.name)
+        .collect())
 }
 
 /// Copy definitions that ship with omh into `~/.omh`.
@@ -1201,7 +1349,9 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
         println!("  next        → {hint}");
     }
     println!();
-    let status = Command::new(backend.program()).args(backend.args(&plan)).status()?;
+    let status = Command::new(backend.program())
+        .args(backend.args(&plan))
+        .status()?;
     if let Err(e) = session.remove(&paths.repo) {
         // A leftover `auth` worktree wins `session::current()` and silently
         // becomes the session the next launch runs in.
@@ -1210,14 +1360,17 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
 
     // Host paths, not guest ones: the guest path names a container that has
     // already been torn down and that the user cannot inspect.
-    let unfilled: Vec<std::path::PathBuf> = auth::unfilled(&adapter, &account_dir, auth::GUEST_HOME)
-        .iter()
-        .map(|guest| {
-            account_dir.join(
-                guest.strip_prefix(auth::GUEST_HOME).unwrap_or(guest.as_path()),
-            )
-        })
-        .collect();
+    let unfilled: Vec<std::path::PathBuf> =
+        auth::unfilled(&adapter, &account_dir, auth::GUEST_HOME)
+            .iter()
+            .map(|guest| {
+                account_dir.join(
+                    guest
+                        .strip_prefix(auth::GUEST_HOME)
+                        .unwrap_or(guest.as_path()),
+                )
+            })
+            .collect();
     auth::login_outcome(status.success(), &unfilled)
         .map_err(|e| e.context(format!("run `omh auth {harness} {account}` again")))?;
     println!("\nomh: `{account}` captured for {harness}");
@@ -1239,7 +1392,11 @@ fn ls(cwd: &std::path::Path) -> Result<()> {
     }
     for a in &adapters {
         let accounts = auth::accounts(&paths, a);
-        let creds = if accounts.is_empty() { "not authed".to_string() } else { accounts.join(", ") };
+        let creds = if accounts.is_empty() {
+            "not authed".to_string()
+        } else {
+            accounts.join(", ")
+        };
         println!("  {:<10} {}", a.name, creds);
     }
 
@@ -1247,7 +1404,11 @@ fn ls(cwd: &std::path::Path) -> Result<()> {
     if !editors.is_empty() {
         println!("\neditors:");
         for e in &editors {
-            let state = if runtime::installed(&e.bin) { "installed" } else { "not installed" };
+            let state = if runtime::installed(&e.bin) {
+                "installed"
+            } else {
+                "not installed"
+            };
             println!("  {:<10} {state}", e.name);
         }
     }
@@ -1322,9 +1483,15 @@ mod tests {
     fn reserved_lists_every_command_and_alias() {
         for sub in Cli::command().get_subcommands() {
             let name = sub.get_name();
-            assert!(RESERVED.contains(&name), "command `{name}` missing from RESERVED");
+            assert!(
+                RESERVED.contains(&name),
+                "command `{name}` missing from RESERVED"
+            );
             for alias in sub.get_visible_aliases() {
-                assert!(RESERVED.contains(&alias), "alias `{alias}` missing from RESERVED");
+                assert!(
+                    RESERVED.contains(&alias),
+                    "alias `{alias}` missing from RESERVED"
+                );
             }
         }
     }
@@ -1332,10 +1499,18 @@ mod tests {
     #[test]
     fn no_bundled_definition_shadows_a_command() {
         for a in Adapter::load_dir(std::path::Path::new(BUNDLED_ADAPTERS)).unwrap() {
-            assert!(!RESERVED.contains(&a.name.as_str()), "adapter `{}` is a command", a.name);
+            assert!(
+                !RESERVED.contains(&a.name.as_str()),
+                "adapter `{}` is a command",
+                a.name
+            );
         }
         for e in editor::Editor::load_dir(std::path::Path::new(BUNDLED_EDITORS)).unwrap() {
-            assert!(!RESERVED.contains(&e.name.as_str()), "editor `{}` is a command", e.name);
+            assert!(
+                !RESERVED.contains(&e.name.as_str()),
+                "editor `{}` is a command",
+                e.name
+            );
         }
     }
 
@@ -1349,8 +1524,15 @@ mod tests {
 
     #[test]
     fn an_unknown_word_lists_the_harnesses() {
-        let hint = tool_hint("emacs", &["claude".into(), "opencode".into()], &["zed".into()]);
-        assert!(hint.contains("claude") && hint.contains("opencode"), "got: {hint}");
+        let hint = tool_hint(
+            "emacs",
+            &["claude".into(), "opencode".into()],
+            &["zed".into()],
+        );
+        assert!(
+            hint.contains("claude") && hint.contains("opencode"),
+            "got: {hint}"
+        );
         assert!(!hint.contains("attach"), "not an editor: {hint}");
     }
 
@@ -1373,11 +1555,13 @@ mod tests {
 
         install_bundled(&dest, "adapters").unwrap();
 
-        let shipped = std::fs::read_to_string(
-            std::path::Path::new(BUNDLED_ADAPTERS).join("claude.toml"),
-        )
-        .unwrap();
-        assert_eq!(std::fs::read_to_string(dest.join("claude.toml")).unwrap(), shipped);
+        let shipped =
+            std::fs::read_to_string(std::path::Path::new(BUNDLED_ADAPTERS).join("claude.toml"))
+                .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("claude.toml")).unwrap(),
+            shipped
+        );
     }
 
     /// Definitions you add yourself are yours; omh only manages its own.
@@ -1389,7 +1573,10 @@ mod tests {
         std::fs::write(dest.join("mine.toml"), "name = \"mine\"\n").unwrap();
 
         install_bundled(&dest, "adapters").unwrap();
-        assert_eq!(std::fs::read_to_string(dest.join("mine.toml")).unwrap(), "name = \"mine\"\n");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("mine.toml")).unwrap(),
+            "name = \"mine\"\n"
+        );
     }
 
     /// Aliases only earn their keep if they are actually short.

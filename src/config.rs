@@ -5,8 +5,8 @@
 //! reports origin alongside every value, the way `git config --show-origin`
 //! does — otherwise a three-layer merge is undebuggable.
 
-use crate::profile::Paths;
 use crate::adapter::Render;
+use crate::profile::Paths;
 use crate::render::Server;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
@@ -86,11 +86,47 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::ALL {
         let path = layer.dir(paths).join("policy.toml");
-        let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-        let table: toml::Table = toml::from_str(&raw)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let table: toml::Table =
+            toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         for (key, value) in table {
             found.push((key, repr(&value), layer));
+        }
+    }
+    Ok(resolve(found))
+}
+
+/// Every hook across all layers, resolved with provenance.
+///
+/// Same shape as [`servers`] deliberately: `omh why` treats an MCP server and a
+/// hook as the same kind of thing — something installed, from some layer, that
+/// omh either chose or you did. `render::merge_hooks` merges for *rendering*
+/// and drops the layer, which is the one fact this needs.
+pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
+    let mut found = Vec::new();
+    for layer in Layer::ALL {
+        let dir = layer.dir(paths).join("hooks");
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.extension().is_some_and(|e| e == "json") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let doc: serde_json::Value = serde_json::from_str(&raw)
+                .with_context(|| format!("parsing {}", path.display()))?;
+            let name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            let command = doc.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            found.push((name, command.to_string(), layer));
         }
     }
     Ok(resolve(found))
@@ -101,10 +137,14 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::ALL {
         let path = layer.dir(paths).join("mcp.json");
-        let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-        let doc: serde_json::Value = serde_json::from_str(&raw)
-            .with_context(|| format!("parsing {}", path.display()))?;
-        let Some(servers) = doc.get("mcpServers").and_then(|v| v.as_object()) else { continue };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let doc: serde_json::Value =
+            serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        let Some(servers) = doc.get("mcpServers").and_then(|v| v.as_object()) else {
+            continue;
+        };
         for (name, spec) in servers {
             let command = spec.get("command").and_then(|c| c.as_str()).unwrap_or("");
             found.push((name.clone(), command.to_string(), layer));
@@ -119,7 +159,11 @@ pub fn set(paths: &Paths, key: &str, raw: &str, layer: Layer) -> Result<Written>
     table.insert(key.to_string(), parse_value(raw));
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::write(&path, toml::to_string_pretty(&table)?)?;
-    Ok(Written { path, layer, committed: layer.is_committed() })
+    Ok(Written {
+        path,
+        layer,
+        committed: layer.is_committed(),
+    })
 }
 
 pub fn unset(paths: &Paths, key: &str, layer: Layer) -> Result<bool> {
@@ -143,7 +187,12 @@ fn resolve(found: Vec<(String, String, Layer)>) -> Vec<Setting> {
         .into_iter()
         .map(|(key, mut hits)| {
             let (value, layer) = hits.pop().expect("entry exists because it was inserted");
-            Setting { key, value, layer, shadows: hits.into_iter().map(|(_, l)| l).collect() }
+            Setting {
+                key,
+                value,
+                layer,
+                shadows: hits.into_iter().map(|(_, l)| l).collect(),
+            }
         })
         .collect()
 }
@@ -171,7 +220,6 @@ fn repr(value: &toml::Value) -> String {
     }
 }
 
-
 // ── MCP servers ─────────────────────────────────────────────────────────────
 
 /// What an import did, or would do. Reported rather than assumed, because
@@ -190,7 +238,11 @@ pub fn mcp_add(paths: &Paths, layer: Layer, name: &str, server: Server) -> Resul
     let mut all = read_servers(&path)?;
     all.insert(name.to_string(), server);
     write_servers(&path, &all)?;
-    Ok(Written { path, layer, committed: layer.is_committed() })
+    Ok(Written {
+        path,
+        layer,
+        committed: layer.is_committed(),
+    })
 }
 
 pub fn mcp_remove(paths: &Paths, layer: Layer, name: &str) -> Result<bool> {
@@ -258,13 +310,20 @@ fn write_servers(path: &Path, servers: &BTreeMap<String, Server>) -> Result<()> 
 /// A policy value that is a list. `policy()` renders values for display, so an
 /// array arrives as its TOML text and has to be parsed back.
 pub fn policy_list(paths: &Paths, key: &str) -> Vec<String> {
-    let Some(repr) = policy(paths).ok().and_then(|s| s.into_iter().find(|s| s.key == key)) else {
+    let Some(repr) = policy(paths)
+        .ok()
+        .and_then(|s| s.into_iter().find(|s| s.key == key))
+    else {
         return Vec::new();
     };
     toml::from_str::<toml::Table>(&format!("v = {}", repr.value))
         .ok()
         .and_then(|t| t.get("v").and_then(|v| v.as_array()).cloned())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -289,7 +348,10 @@ mod tests {
     }
 
     fn get<'a>(settings: &'a [Setting], key: &str) -> &'a Setting {
-        settings.iter().find(|s| s.key == key).unwrap_or_else(|| panic!("no key {key}"))
+        settings
+            .iter()
+            .find(|s| s.key == key)
+            .unwrap_or_else(|| panic!("no key {key}"))
     }
 
     // ── layers ──────────────────────────────────────────────────────────────
@@ -322,7 +384,12 @@ mod tests {
     #[test]
     fn policy_reports_the_winning_layer() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Personal, "policy.toml", "idle_timeout = \"30m\"");
+        seed(
+            &paths,
+            Layer::Personal,
+            "policy.toml",
+            "idle_timeout = \"30m\"",
+        );
         let settings = policy(&paths).unwrap();
         assert_eq!(get(&settings, "idle_timeout").layer, Layer::Personal);
     }
@@ -330,8 +397,18 @@ mod tests {
     #[test]
     fn later_layers_win_and_the_loser_is_named() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Personal, "policy.toml", "idle_timeout = \"30m\"");
-        seed(&paths, Layer::Shared, "policy.toml", "idle_timeout = \"5m\"");
+        seed(
+            &paths,
+            Layer::Personal,
+            "policy.toml",
+            "idle_timeout = \"30m\"",
+        );
+        seed(
+            &paths,
+            Layer::Shared,
+            "policy.toml",
+            "idle_timeout = \"5m\"",
+        );
         seed(&paths, Layer::Local, "policy.toml", "idle_timeout = \"2h\"");
 
         let s = policy(&paths).unwrap();
@@ -348,7 +425,12 @@ mod tests {
     #[test]
     fn unshadowed_settings_report_no_losers() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Shared, "policy.toml", "carry_in = [\".env\"]");
+        seed(
+            &paths,
+            Layer::Shared,
+            "policy.toml",
+            "carry_in = [\".env\"]",
+        );
         assert!(get(&policy(&paths).unwrap(), "carry_in").shadows.is_empty());
     }
 
@@ -362,10 +444,18 @@ mod tests {
     #[test]
     fn mcp_servers_resolve_with_provenance() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Shared, "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#);
-        seed(&paths, Layer::Local, "mcp.json",
-            r#"{"mcpServers":{"omh-memory":{"command":"omh-mcp"}}}"#);
+        seed(
+            &paths,
+            Layer::Shared,
+            "mcp.json",
+            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
+        );
+        seed(
+            &paths,
+            Layer::Local,
+            "mcp.json",
+            r#"{"mcpServers":{"omh-memory":{"command":"omh-mcp"}}}"#,
+        );
 
         let s = servers(&paths).unwrap();
         assert_eq!(s.len(), 2);
@@ -377,10 +467,18 @@ mod tests {
     #[test]
     fn a_local_server_can_shadow_a_shared_one() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Shared, "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"old"}}}"#);
-        seed(&paths, Layer::Local, "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"new"}}}"#);
+        seed(
+            &paths,
+            Layer::Shared,
+            "mcp.json",
+            r#"{"mcpServers":{"codegraph":{"command":"old"}}}"#,
+        );
+        seed(
+            &paths,
+            Layer::Local,
+            "mcp.json",
+            r#"{"mcpServers":{"codegraph":{"command":"new"}}}"#,
+        );
 
         let s = servers(&paths).unwrap();
         assert_eq!(s.len(), 1);
@@ -419,13 +517,21 @@ mod tests {
     #[test]
     fn set_preserves_unrelated_keys() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Local, "policy.toml",
-            "carry_in = [\".env\"]\nidle_timeout = \"5m\"");
+        seed(
+            &paths,
+            Layer::Local,
+            "policy.toml",
+            "carry_in = [\".env\"]\nidle_timeout = \"5m\"",
+        );
         set(&paths, "idle_timeout", "1h", Layer::Local).unwrap();
 
         let s = policy(&paths).unwrap();
         assert_eq!(get(&s, "idle_timeout").value, "1h");
-        assert_eq!(get(&s, "carry_in").value, "[\".env\"]", "must not clobber siblings");
+        assert_eq!(
+            get(&s, "carry_in").value,
+            "[\".env\"]",
+            "must not clobber siblings"
+        );
     }
 
     #[test]
@@ -441,7 +547,12 @@ mod tests {
     #[test]
     fn unset_touches_only_the_named_layer() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Personal, "policy.toml", "idle_timeout = \"30m\"");
+        seed(
+            &paths,
+            Layer::Personal,
+            "policy.toml",
+            "idle_timeout = \"30m\"",
+        );
         seed(&paths, Layer::Local, "policy.toml", "idle_timeout = \"2h\"");
 
         assert!(unset(&paths, "idle_timeout", Layer::Local).unwrap());
@@ -461,7 +572,11 @@ mod tests {
     // ── mcp add / rm ────────────────────────────────────────────────────────
 
     fn server(command: &str) -> Server {
-        Server { command: command.into(), args: vec![], env: BTreeMap::new() }
+        Server {
+            command: command.into(),
+            args: vec![],
+            env: BTreeMap::new(),
+        }
     }
 
     fn names(paths: &Paths) -> Vec<String> {
@@ -489,7 +604,11 @@ mod tests {
     #[test]
     fn mcp_add_to_the_shared_layer_is_flagged_as_committed() {
         let (_d, paths) = fixture();
-        assert!(mcp_add(&paths, Layer::Shared, "g", server("c")).unwrap().committed);
+        assert!(
+            mcp_add(&paths, Layer::Shared, "g", server("c"))
+                .unwrap()
+                .committed
+        );
     }
 
     #[test]
@@ -565,7 +684,11 @@ mod tests {
         let r = mcp_import(&paths, Layer::Local, incoming(), false, false).unwrap();
         assert_eq!(r.conflicts, ["a"]);
         assert_eq!(r.added, ["b"], "unconflicted servers still import");
-        assert_eq!(get(&servers(&paths).unwrap(), "a").value, "mine", "kept, not clobbered");
+        assert_eq!(
+            get(&servers(&paths).unwrap(), "a").value,
+            "mine",
+            "kept, not clobbered"
+        );
     }
 
     #[test]
@@ -591,7 +714,12 @@ mod tests {
     #[test]
     fn a_list_setting_comes_back_as_a_list() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Shared, "policy.toml", "carry_in = [\".env\", \"certs/\"]");
+        seed(
+            &paths,
+            Layer::Shared,
+            "policy.toml",
+            "carry_in = [\".env\", \"certs/\"]",
+        );
         assert_eq!(policy_list(&paths, "carry_in"), vec![".env", "certs/"]);
     }
 
@@ -606,8 +734,18 @@ mod tests {
     #[test]
     fn a_later_layer_replaces_the_list() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Personal, "policy.toml", "carry_in = [\".env\"]");
-        seed(&paths, Layer::Local, "policy.toml", "carry_in = [\".env.local\"]");
+        seed(
+            &paths,
+            Layer::Personal,
+            "policy.toml",
+            "carry_in = [\".env\"]",
+        );
+        seed(
+            &paths,
+            Layer::Local,
+            "policy.toml",
+            "carry_in = [\".env.local\"]",
+        );
         assert_eq!(policy_list(&paths, "carry_in"), vec![".env.local"]);
     }
 }
