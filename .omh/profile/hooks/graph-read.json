@@ -1,0 +1,5 @@
+{
+  "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.rs|*.ts|*.tsx|*.js|*.jsx|*.py|*.go|*.java|*.rb|*.php|*.c|*.h|*.cc|*.cpp|*.hpp|*.cs|*.swift|*.kt|*.scala) ;; *) exit 0 ;; esac; [ -f \"$f\" ] || exit 0; [ \"$(wc -c < \"$f\")\" -gt 8000 ] || exit 0; jq -nc --arg p \"$OMH_GRAPH_PROJECT\" --arg f \"$f\" '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":($f + \" is large. For one symbol rather than the whole file: get_code_snippet --project \" + $p + \" --qualified-name <name>, and search_graph finds the name.\")}}'",
+  "event": "PreToolUse",
+  "matcher": "Read"
+}

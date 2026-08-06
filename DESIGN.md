@@ -161,9 +161,134 @@ Three design consequences:
 Indexing runs *inside* the sandbox, because the cache is a container volume — an
 index built on the host lands where no session can read it.
 
-**Known gap:** the graph indexes the main checkout, not the session worktree. For
-a session that has been working a while, the graph describes code the agent has
-since changed, and nothing surfaces that staleness.
+### Current, used, and visible
+
+An MCP server on its own is inert — indexed once, never refreshed, never reached
+for. Four hooks turn it into a base-set entry rather than an installed package.
+
+| Hook | Event | Cost | Buys |
+|---|---|---|---|
+| `graph-orient` | `SessionStart` | 2,300 B per context rebuild | modules, layers, boundaries, entry points |
+| `graph-first` | `PreToolUse` Grep\|Glob | ~40 B per grep | structural questions in one call |
+| `graph-read` | `PreToolUse` Read | 0 unless it speaks | **35,814 → 1,511 bytes** on a large source file |
+| `graph-refresh` | `Stop` | 0.14s per turn | a graph that describes the code as it is now |
+
+**Kept current.** A session's worktree is not the checkout it started from; it
+holds whatever the agent has since written. Each session indexes its own, and
+`graph-refresh` re-indexes when a turn ends. Measured: **0.45s cold, 0.14s
+incremental** — cheap enough that a stale graph is a choice, not a constraint.
+
+**Orientation beats interception.** `graph-orient` is the only graph tool that
+costs nothing per tool call: the agent is *given* the module map instead of
+discovering it by reading files. Everything else only fires when the agent is
+already about to do something more expensive.
+
+**Nudges, never walls.** Grep is right for a literal string and a hook that
+blocks correct work gets disabled. `graph-read` goes further and stays **silent**
+unless a symbol lookup would actually be cheaper — a source file large enough to
+be worth not reading whole. `Read` is the most frequent tool there is, and a
+nudge on every call becomes noise the model tunes out.
+
+Hooks reference `$OMH_GRAPH_PROJECT` rather than baking a session in, so the
+files stay shared and reviewable, and the agent is told *which* graph is its own
+at the moment it is choosing.
+
+### What the hook contract cost
+
+Three things, none of them guessable:
+
+- **A hook reaches the model through `hookSpecificOutput.additionalContext`**,
+  injected as a system reminder. Bare stdout on exit 0 is not that channel — the
+  first nudge shipped that way and **may never have been seen**. Found by reading
+  the spec, not by anything failing.
+- **`SessionStart` re-fires on resume and compact**, so orientation is paid every
+  time context is rebuilt, not once. That is why it sends four targeted aspects
+  (2,138 B) instead of `overview` (6,173 B).
+- **`--aspects` does not take a comma-separated list** — that form returns
+  *empty*, silently, which looks exactly like a hook that did not fire. The flag
+  repeats. Pinned by a test.
+
+### `omh graph` — one website per repo
+
+```
+$ omh graph
+omh: graph at http://127.0.0.1:56286
+  every session's graph for this repo, in one place
+  stop with: omh graph --stop
+```
+
+**Scope follows the data.** Every session's graph lives in one volume, so a
+per-session server showed every other session's graph anyway — N identical
+websites on N ports. A repo-scoped service removes the duplication, survives
+sessions coming and going, and needs no session to exist at all.
+
+It also mounts **only the index** — no worktree, no credentials, no profile. The
+per-session version ran inside a container holding a writable worktree and live
+credentials, which was exposure for no purpose.
+
+And lifecycle became `docker run` / `docker rm`, idempotent by construction. That
+deleted the `pgrep` guard, the detached `exec`, and the `pkill` the per-session
+version needed — each of which had been a bug before it worked. Choosing the
+right scope removed them rather than fixing them.
+
+### What verifying cost
+
+Five things were wrong, none of them findable from the documentation:
+
+- **The npm package cannot deliver the UI.** `CBM_VARIANT=ui` is documented, but
+  the published 0.9.0 installer hardcodes the variant and never reads it —
+  verified in a container, which still reported *"built without the embedded
+  UI"*. omh fetches the release tarball directly, checksum-verified, arch from
+  `TARGETARCH`.
+- **The UI dies with stdio.** Backgrounded with stdin closed it logs
+  `ui.serving` then `server.shutdown`. It runs behind `sleep infinity |`.
+- **It binds container loopback** with no bind-address flag, so a published port
+  forwards to nothing: `HTTP 200` inside, no response outside. `socat` bridges it.
+- **A detached service cannot be spawned and abandoned.** `A & exec B` left the
+  server running and the bridge dead.
+- **The base image tag was a mutable `:latest`**, so `ensure` skipped rebuilding
+  it and base recipe changes had *never* shipped. Adding `socat` silently did
+  nothing until the base tag got its own recipe digest — the same fix already
+  applied to harness images, left half-done. Harness layers now pin an exact base.
+
+### Which tools earn a hook
+
+The build ships **14** tools (`check_index_coverage` from the marketing copy is
+not among them). Most are plumbing omh drives; a few are worth intercepting.
+
+| Hooked | Because |
+|---|---|
+| `get_architecture` | orientation, and the only one free per call |
+| `search_graph` | replaces iterative grepping |
+| `get_code_snippet` | replaces reading a whole file for one symbol |
+| `index_repository` | keeps the rest honest |
+
+| Candidate | Trigger |
+|---|---|
+| `trace_path` | "how does A reach B" — the alternative is reading every file in the chain |
+| `detect_changes` | reviewing a diff: structural impact rather than changed lines |
+
+**`search_code` is deliberately not hooked.** It looks like a cheaper grep, but
+`--pattern 'fn unfilled' --mode compact` returned `total_results: 0` against a
+symbol that demonstrably exists. Routing literal search through it would make
+things worse, and the claim stays unverified until that is explained.
+
+`query_graph` (Cypher) is a power tool the agent should reach for deliberately;
+`manage_adr`, `ingest_traces`, `get_graph_schema`, `index_status`,
+`list_projects` and `delete_project` are plumbing.
+
+### What the agent can still see
+
+All graphs for one repo share the volume — that is what keeps the index warm
+across a Claude Code → opencode switch, and cross-*repo* isolation is intact.
+But `list_projects` shows a session every other session's graph, and querying the
+wrong one answers confidently about code that is not in this worktree.
+
+Three mitigations, no guarantee: `AGENTS.md` names the project, the hook repeats
+it at the moment of choosing, and `omh s rm` drops a session's graph with the
+code it describes. Hard isolation would need a volume per session — a full
+re-index each time, and no comparing branches. Worth doing only if this is
+observed to actually go wrong.
 
 ### What `omh init` does
 
@@ -399,6 +524,7 @@ omh <harness> [args…]             claude · opencode   ← bare = run an agent
 omh attach [editor]               a
 omh sessions ls|rm|down|diff      s
 omh config [set|unset|edit|mcp]   c
+omh graph [--stop]                one website per repo, all sessions' graphs
 ```
 
 Noun-verb groups with single-letter aliases: `omh s ls`, `omh c mcp ls`,
@@ -985,7 +1111,8 @@ caveat is retired for these two, and any third adapter inherits the same bar.
 
 **v0 — the base set, one harness.** ✅ `omh init` that decides · ✅ images ·
 ✅ sandbox + worktree · ✅ persistence · ✅ `omh auth` · ✅ `omh attach` ·
-✅ `omh doctor` · ✅ `carry_in` · ✅ **code graph** · ⬜ stack hooks · ⬜ memory.
+✅ `omh doctor` · ✅ `carry_in` · ✅ **code graph** · ✅ `omh graph` ·
+✅ stack hooks · ⬜ memory.
 Success criterion: `omh init && omh claude` is visibly better than raw `claude`,
 with zero questions asked.
 

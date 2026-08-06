@@ -35,6 +35,9 @@ Prefer asserting invariants over asserting output shape. `exactly one writable
 mount, and it is the worktree` survives refactoring; `the 4th mount string equals
 "..."` does not.
 
+This rule exists because ~950 lines shipped untested and carried four bugs, all
+in pure, cheaply-testable code, all caught by a human reading tool output.
+
 ## Honesty about coverage
 
 Adapter paths assert facts about *external software*. A passing suite proves omh

@@ -1,5 +1,5 @@
 {
-  "command": "echo \"This repo has a code graph: project $OMH_GRAPH_PROJECT. For 'where is X defined', 'what calls Y', or 'what does this module depend on', search_graph --project $OMH_GRAPH_PROJECT answers in one call. Grep is right for literal text.\"",
+  "command": "jq -nc --arg p \"$OMH_GRAPH_PROJECT\" '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":(\"This repo has a code graph: project \" + $p + \". For structural questions — where is X defined, what calls Y, what does this module depend on — search_graph --project \" + $p + \" answers in one call. Grep is right for literal text.\")}}'",
   "event": "PreToolUse",
   "matcher": "Grep|Glob"
 }

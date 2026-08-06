@@ -176,6 +176,16 @@ pub fn project_name(repo: &str, session: &str) -> String {
 /// Hooks that make the graph actually get used. Without them the server is
 /// installed and never called, which is how most of these end up.
 pub fn hooks() -> Vec<Hook> {
+    // Nudges speak through `hookSpecificOutput.additionalContext` — the
+    // documented channel a hook uses to reach the model. Bare stdout on exit 0
+    // is not, and the first version of the grep nudge may never have been seen.
+    let nudge = |body: &str| {
+        format!(
+            "jq -nc --arg p \"${PROJECT_ENV}\" '{{\"hookSpecificOutput\":{{\
+             \"hookEventName\":\"PreToolUse\",\"additionalContext\":{body}}}}}'"
+        )
+    };
+
     vec![
         Hook {
             name: "graph-refresh",
@@ -190,20 +200,62 @@ pub fn hooks() -> Vec<Hook> {
             ),
         },
         Hook {
+            name: "graph-orient",
+            event: "SessionStart",
+            matcher: "",
+            // The only graph tool that costs nothing per tool call: orientation
+            // the agent is given once instead of discovering by reading files.
+            //
+            // SessionStart re-fires on resume and compact, so this is paid every
+            // time context is rebuilt, not once. `overview` is 6,173 bytes; the
+            // four aspects that actually orient are 2,138. The flag repeats — a
+            // comma-separated list returns empty, verified against the binary.
+            command: format!(
+                "a=$({GRAPH_BIN} cli get_architecture --project \"${PROJECT_ENV}\" \
+                 --aspects layers --aspects packages --aspects boundaries \
+                 --aspects entry_points 2>/dev/null | tail -1); \
+                 [ -n \"$a\" ] || exit 0; \
+                 jq -nc --arg a \"$a\" --arg p \"${PROJECT_ENV}\" \
+                 '{{\"hookSpecificOutput\":{{\"hookEventName\":\"SessionStart\",\
+                 \"additionalContext\":(\"Code graph for project \" + $p + \
+                 \" — modules, layers, boundaries and entry points. Query it with \
+                 search_graph/trace_path/get_code_snippet rather than exploring by \
+                 hand:\\n\" + $a)}}}}'"
+            ),
+        },
+        Hook {
             name: "graph-first",
             event: "PreToolUse",
             matcher: "Grep|Glob",
-            // A nudge, not a wall. Grep is the right tool for a literal string,
-            // and a hook that blocks correct work gets disabled.
-            // Names the project, because the store holds every session's graph
-            // for this repo and querying the wrong one answers confidently
-            // about code that is not in this worktree. The hook fires when the
-            // agent is deciding, which is where that lands.
+            // A nudge, not a wall: grep is right for a literal string, and a
+            // hook that blocks correct work gets disabled.
+            command: nudge(
+                r#"("This repo has a code graph: project " + $p + ". For structural questions — where is X defined, what calls Y, what does this module depend on — search_graph --project " + $p + " answers in one call. Grep is right for literal text.")"#,
+            ),
+        },
+        Hook {
+            name: "graph-read",
+            event: "PreToolUse",
+            matcher: "Read",
+            // The largest avoidable cost in a session: src/auth.rs is 35,814
+            // bytes and get_code_snippet answers the same question in 1,511.
+            //
+            // Read is also the most frequent tool there is, so this speaks only
+            // when a symbol lookup would actually be cheaper — a source file big
+            // enough to be worth not reading whole. Otherwise silent: a nudge on
+            // every call becomes noise the model tunes out.
             command: format!(
-                "echo \"This repo has a code graph: project ${PROJECT_ENV}. \
-                 For 'where is X defined', 'what calls Y', or 'what does this \
-                 module depend on', search_graph --project ${PROJECT_ENV} answers \
-                 in one call. Grep is right for literal text.\""
+                "f=$(jq -r '.tool_input.file_path // empty'); \
+                 case \"$f\" in \
+                 *.rs|*.ts|*.tsx|*.js|*.jsx|*.py|*.go|*.java|*.rb|*.php|*.c|*.h|*.cc|\
+                 *.cpp|*.hpp|*.cs|*.swift|*.kt|*.scala) ;; *) exit 0 ;; esac; \
+                 [ -f \"$f\" ] || exit 0; \
+                 [ \"$(wc -c < \"$f\")\" -gt 8000 ] || exit 0; \
+                 jq -nc --arg p \"${PROJECT_ENV}\" --arg f \"$f\" \
+                 '{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\
+                 \"additionalContext\":($f + \" is large. For one symbol rather than the \
+                 whole file: get_code_snippet --project \" + $p + \" --qualified-name \
+                 <name>, and search_graph finds the name.\")}}}}'"
             ),
         },
     ]
@@ -530,5 +582,70 @@ mod tests {
         let args = ui_run_args("i", "omh-graph-r", "v", 1);
         assert!(args.contains(&"-d".to_string()), "got: {args:?}");
         assert!(args.windows(2).any(|w| w[0] == "--name" && w[1] == "omh-graph-r"));
+    }
+
+    /// A hook talks to the model through `hookSpecificOutput.additionalContext`,
+    /// injected as a system reminder. Bare stdout on exit 0 is not that
+    /// mechanism — the first nudge shipped that way and may never have been seen.
+    #[test]
+    fn nudges_speak_through_additional_context() {
+        for h in hooks() {
+            if h.event == "Stop" {
+                continue; // refreshes the index, says nothing to the model
+            }
+            assert!(h.command.contains("additionalContext"), "{}: {}", h.name, h.command);
+            assert!(h.command.contains("hookSpecificOutput"), "{}: {}", h.name, h.command);
+        }
+    }
+
+    /// Reading a 35KB file to see one function is the largest avoidable cost in
+    /// a session: `src/auth.rs` is 35,814 bytes and `get_code_snippet` answers
+    /// the same question in 1,511.
+    #[test]
+    fn reading_a_file_points_at_the_symbol_lookup() {
+        let h = hook("graph-read");
+        assert_eq!(h.event, "PreToolUse");
+        assert_eq!(h.matcher, "Read");
+        assert!(h.command.contains("get_code_snippet"), "got: {}", h.command);
+    }
+
+    /// `Read` is the most frequent tool there is. A nudge on every call is
+    /// recurring cost and becomes noise the model tunes out, so it speaks only
+    /// when a symbol lookup would actually be cheaper.
+    #[test]
+    fn the_read_nudge_stays_silent_when_it_has_nothing_to_say() {
+        let cmd = hook("graph-read").command.clone();
+        assert!(cmd.contains("file_path"), "must inspect the target: {cmd}");
+        assert!(cmd.contains("wc -c"), "and its size: {cmd}");
+    }
+
+    /// Orientation the agent gets once, instead of discovering it by reading
+    /// files. The only graph tool that costs nothing per tool call.
+    #[test]
+    fn a_session_starts_with_the_module_map() {
+        let h = hook("graph-orient");
+        assert_eq!(h.event, "SessionStart");
+        assert!(h.command.contains("get_architecture"), "got: {}", h.command);
+    }
+
+    /// SessionStart re-fires on resume and compact, so this is not paid once —
+    /// it is paid every time context is rebuilt. `overview` costs 6,173 bytes;
+    /// the four aspects that actually orient cost 2,138.
+    #[test]
+    fn orientation_is_kept_small_because_it_repeats() {
+        let cmd = hook("graph-orient").command.clone();
+        assert!(!cmd.contains("overview"), "too broad for something that repeats: {cmd}");
+        for aspect in ["layers", "packages", "boundaries", "entry_points"] {
+            assert!(cmd.contains(aspect), "missing {aspect}: {cmd}");
+        }
+    }
+
+    /// A comma-separated list yields nothing; the flag repeats. Verified
+    /// against the real binary.
+    #[test]
+    fn aspects_are_passed_as_repeated_flags() {
+        let cmd = hook("graph-orient").command.clone();
+        assert!(!cmd.contains("layers,packages"), "comma form returns empty: {cmd}");
+        assert_eq!(cmd.matches("--aspects").count(), 4, "got: {cmd}");
     }
 }
