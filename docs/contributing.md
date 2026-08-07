@@ -30,8 +30,30 @@ something that was already true.
 **A green suite is not evidence on its own.** Reintroduce the original bug and
 confirm the guarding test turns red, or the test is decoration.
 
-This rule exists for a specific reason: roughly 950 lines shipped untested in
-this repo and carried four bugs, all in pure, cheaply-testable code, all
+### Do not fix the defect before the guard is red against it
+
+The order is not a formality, and reintroducing the bug afterwards is a weaker
+substitute than it looks — **you choose the mutation, and you will reliably
+choose one your test already catches.**
+
+Three guards written in this repo were too weak for exactly this reason, all
+three written after their bug was already fixed:
+
+| Guard | Written against | Missed |
+|---|---|---|
+| measurement dates | a manifest already corrected | compared by month, so it passed `2026-08-04`, the fabricated date that shipped |
+| staleness | `is_stale` already switched to the manifest version | asserted "stale" appeared *anywhere*; two call sites satisfy that, so mutating one stayed green |
+| cost carries its date | the render code being written beside it | checked a date was *present*, never that it was true — seven invented dates walked through it |
+
+Each was then "verified" by a mutation chosen from memory, and twice the
+remembered bug was easier than the real one: blanking a date rather than making
+it plausible-but-false, mutating the call site the assertion did not read.
+
+**The original defect is the best mutation you will ever have.** Fix it before
+the guard is red and you have thrown away the only one you did not invent.
+
+This whole rule exists for a specific reason: roughly 950 lines shipped untested
+in this repo and carried four bugs, all in pure, cheaply-testable code, all
 eventually caught by a human reading tool output.
 
 ### Assert invariants, not output shape
