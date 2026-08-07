@@ -329,14 +329,99 @@ notes whose source moved, whose symbol vanished, or that predate the current
 base-set version, and removing one is deleting one file. One idea per note is
 what buys that — a wrong paragraph inside a long document has no such affordance.
 
-## Still open
+## Ingestion happens on hooks
 
-- **Ingestion cadence.** `docs/` becomes notes at `init` — but what re-ingests
-  when a doc changes? A hook on write, or a pass at session start?
-- **Note identity.** Filename, frontmatter `id`, or title? It has to survive a
-  rename, or every link breaks the first time the agent tidies up.
-- **Conflict.** Two notes making opposite claims is the failure unattended
-  writing produces most naturally. Nothing above detects it.
+Two, mirroring the pattern the code graph already proved:
+
+| Hook | When | Does |
+|---|---|---|
+| `notes-ingest` | `PostToolUse` on `Write`\|`Edit` | re-ingests **the one file** just changed, and only if it is an ingested path |
+| `notes-reconcile` | `SessionStart` | hash-compares the ingested set and re-ingests whatever moved |
+
+Neither alone is enough. `PostToolUse` catches only what the *agent* writes — a
+`git pull`, a branch switch, or a human editing a doc in their editor would go
+unnoticed. `SessionStart` alone leaves a doc edited mid-session stale for the
+rest of that session.
+
+`Write`/`Edit` is a hot path, so `notes-ingest` follows `graph-read`'s
+discipline: check the path first, exit immediately when it is not an ingested
+file, and never re-ingest the whole set. A hook that costs something on every
+edit is a hook that gets removed.
+
+## Identity is solved by the tool, not by an id
+
+iwe provides **LSP refactoring semantics over notes** — go to definition, find
+references, rename symbol — plus link-title synchronisation that keeps link text
+in step with the target's title. Renaming a note updates what points at it.
+
+So the risk this question was really about — *the agent tidies up and every link
+breaks* — is handled upstream, and by a better mechanism than a frontmatter
+`id`: referential integrity maintained by the thing that owns the graph, rather
+than a convention every writer has to honour.
+
+Two caveats worth carrying:
+
+- **This holds for renames made through iwe.** A `mv`, or a human renaming a
+  file in an editor with no LSP running, updates nothing. That makes *"rename
+  notes through the tool, never with `mv`"* an **imperative** — it is a rule the
+  agent needs before it acts, so by the boundary rule above it belongs in
+  `AGENTS.md` rather than in the graph.
+- Frontmatter support specifically was **not confirmed** from source. What was
+  confirmed is rename-safety, which is what the question needed.
+
+## Conflict: never let retrieval pick a winner
+
+iwe does not resolve contradictions, and no markdown indexer will — detecting
+that two notes disagree is a semantic judgement, not an indexing one.
+
+But the framing was wrong, and inverting it dissolves most of the problem.
+**Two contradicting notes are only dangerous when retrieval returns one and
+hides the other.** If a query surfaces both, the agent holds both in context,
+with their layers and dates, and reconciles with full information — which is
+exactly what an LLM is good at and an indexer is not.
+
+That is already the decided behaviour, for an unrelated reason: layer is part of
+a note's identity, so `team/deploy` and `local/deploy` both retrieve rather than
+one shadowing the other. It was chosen so a teammate's note could not be hidden
+behind yours. It turns out to be the conflict answer too.
+
+### When the agent must still choose
+
+**Layer outranks recency.** A promoted note has been through human review; a
+local note was written unattended by something that, in a single session,
+produced seven fabricated dates with complete confidence. Recency is not
+correctness, and "newest wins" would let a fresh hallucination overwrite a
+reviewed fact.
+
+**Within one layer, recency and context decide** — the newer note, read against
+what the task actually needs. This is where dates earn their place.
+
+**Ask only when it matters.** Two *promoted* notes disagreeing, or a conflict
+that blocks the task. Not on every disagreement: `omh init` asks nothing, and a
+memory that interrogates you would be the same failure in a new place.
+
+### Prevention beats resolution
+
+**Search before writing a note.** If one exists on the topic, update it rather
+than adding a contradicting sibling. That removes most conflicts at the source,
+and it is another `AGENTS.md` imperative — nothing prompts an agent to wonder
+whether it is about to duplicate something.
+
+### What this still does not catch
+
+Two notes on topics that never co-occur in a query can contradict indefinitely.
+Nothing here finds them, and a periodic semantic sweep over the whole graph
+would cost an LLM pass per run. Recorded rather than solved.
+
+## A cost worth naming
+
+iwe exposes **13 MCP tools**. Every one of them carries a schema into every
+session's context, alongside the code graph's own set. That is a real per-session
+cost against a feature whose entire argument is context efficiency.
+
+Worth measuring before adopting, and worth checking whether the surface can be
+narrowed to the four operations this design actually needs: find, retrieve,
+create, link.
 
 ## An alternative worth considering
 
