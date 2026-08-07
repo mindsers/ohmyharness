@@ -78,11 +78,39 @@ building a server and for choosing one.
 | [linksee-memory](https://github.com/michielinksee/linksee-memory) | local-first cross-agent memory with a token-saving file diff cache |
 | [Obsidian Memory MCP](https://lobehub.com/mcp/yunaga224-obsidian-memory-mcp) · [mcp-obsidian](https://github.com/Piotr1215/mcp-obsidian) | the read side against an existing vault |
 
-**None is evaluated yet.** The criteria that actually decided codegraph were
-licence, external dependencies, maintenance and whether it runs unattended in a
-container — not features. `mwe-mcp` being AGPL raises the same class of question
-that disqualified gitnexus, and Meshnote's licence is reported as Apache-2.0 in
-a third-party listing rather than confirmed at source.
+### Evaluated on the criteria that decided codegraph
+
+Not on features — features were never what disqualified a candidate there.
+
+| | licence | runtime | storage | active | writes? |
+|---|---|---|---|---|---|
+| **[iwe](https://github.com/iwe-org/iwe)** | **Apache-2.0** | **none — Rust, single binary** | plain `.md`, **no database** | 308 commits, current | yes: `new`, `extract`, `inline`, `rename`, `delete` |
+| [Basic Memory](https://github.com/basicmachines-co/basic-memory) | **AGPL-3.0** | **Python 3.12+** | `.md` + **SQLite** | 1,649 commits, 3.6k stars | yes |
+| [mwe-mcp](https://github.com/Fr4nZ82/mwe-mcp) | **AGPL-3.0** | not checked | not checked | not checked | yes |
+| others | not checked | | | | |
+
+**iwe is the provisional pick**, and it is not close on the criteria this
+project actually uses:
+
+- **Apache-2.0.** No repeat of the gitnexus problem, where a noncommercial
+  default would have put every user writing code at work in violation.
+- **Rust, single static binary, no database.** Exactly what won it for
+  codegraph — *"a service to run is a decision `omh init` promised to remove"*.
+  Basic Memory needs a Python runtime in the base image and carries SQLite.
+- **It is also an LSP.** The editor [attached to the session](../editors.md) and
+  the agent read the same graph. Nothing else on the list does this, and it fits
+  omh's model unusually well.
+
+Basic Memory is the more established project by a wide margin — 3.6k stars
+against a few hundred commits — and that is a real argument. But AGPL as a
+*distribution default* is the shape of decision omh has already refused once,
+and a Python runtime is a cost the base image does not currently pay.
+
+**This is reading, not running.** Every claim above comes from documentation,
+which is precisely the class of claim this project treats as unverified: the
+graph server's own docs advertised a `CBM_VARIANT=ui` switch its published
+installer ignored. Before adopting, iwe has to be run in a container,
+unattended, and shown to write notes an agent can then retrieve.
 
 ## The server is the commodity; the integration is the product
 
@@ -129,21 +157,53 @@ where it came from and when**, so it can be judged rather than trusted. A note
 without provenance reintroduces exactly the problem [`omh why`](trust.md) exists
 to remove.
 
-## Open questions
+## Decided
 
-1. **Write access.** Does the agent write notes unattended, or propose them for
-   review? Unattended is the whole feature and the whole risk.
-2. **Build or adopt.** Meshnote in particular is very close to this description.
-   Does omh package one of these, or is there a reason none fits?
-3. **Contents.** Purely accumulated memory, or does the graph also ingest what
-   the repo already documents — `docs/`, ADRs, existing notes?
-4. **Layering.** Does the [three-layer profile](../configuration.md#the-three-layers)
+**The agent writes unattended.** It records what it learns without asking. This
+is the feature — a memory you have to approve is a notebook, and nobody keeps
+one. It is also the risk, and the risk is not hypothetical: in a single session
+this project produced seven fabricated dates, a byte count wrong on arrival and
+a deprecated config key, each stated with complete confidence. Unattended
+writing turns that into notes loaded into every future session.
+
+So the mitigations are not optional extras, they are the price of this choice:
+
+- **one idea per file**, so a wrong fact is one deletion
+- **provenance on every note** — what produced it, when, from what. A fact that
+  cannot say where it came from cannot be judged, and the whole
+  [trust](trust.md) argument is that omh does not state things it cannot support
+- **`git log` as the audit trail**, which comes free from notes being files
+- **expiry**, hardest and least designed: a note true in June and false in
+  September looks identical to one still true
+
+**The graph ingests what the repo already documents.** `docs/`, ADRs and
+existing notes become part of it, not just what the agent accumulates. Two
+reasons: it is useful on day one rather than after weeks of use — which is when
+somebody decides whether omh is worth keeping — and the answers are already
+written. *"Why was gitnexus rejected?"* has lived in `code-graph.md` since
+August; the agent simply has no way to find it.
+
+This also closes a loop: `detect::seeds()` already derives the README tagline
+and stack facts and currently throws them away in a `println!`. They become the
+graph's first notes.
+
+**Adopt if something fits; build only with a documented reason.** The next step
+is the pass that decided codegraph — licence, external dependencies,
+maintenance, and whether it runs unattended in a container. Features were never
+what disqualified a candidate there, and are unlikely to be what disqualifies
+one here.
+
+## Still open
+
+1. **Layering.** Does the [three-layer profile](../configuration.md#the-three-layers)
    apply — personal notes, committed team notes, gitignored local notes — and can
-   a link cross layers?
-5. **One graph or two.** codegraph is code-shaped (symbols, calls, imports).
+   a link cross layers? Unattended writing makes this sharper: a wrong note in a
+   committed layer reaches teammates.
+2. **One graph or two.** codegraph is code-shaped (symbols, calls, imports).
    Notes are concept-shaped. Separate stores, or one?
-6. **Boundary.** Which of today's `AGENTS.md` is an imperative that stays, and
+3. **Boundary.** Which of today's `AGENTS.md` is an imperative that stays, and
    which is a fact that moves?
+4. **Expiry.** How does a note stop being true, and what notices?
 
 ## An alternative worth considering
 
