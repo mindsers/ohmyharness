@@ -86,7 +86,7 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::ALL {
         let path = layer.dir(paths).join("policy.toml");
-        let Ok(raw) = std::fs::read_to_string(&path) else {
+        let Some(raw) = read_layer(&path)? else {
             continue;
         };
         let table: toml::Table =
@@ -96,6 +96,24 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
         }
     }
     Ok(resolve(found))
+}
+
+/// Read a layer's file, distinguishing "this layer declares nothing" from
+/// "this layer could not be read".
+///
+/// `let Ok(..) else { continue }` conflated them, and the second case is
+/// unrecoverable from the outside: `chmod 000` on `mcp.json` made `omh why`
+/// answer "not installed here" about an installed server and advise `omh init`
+/// — which does nothing, because `write_if_absent` sees the file exists. A
+/// closed loop, exit 0, no error anywhere.
+fn read_layer(path: &Path) -> Result<Option<String>> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Ok(Some(raw)),
+        // Absent is a normal, expected state: most layers declare most things
+        // not at all.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
 }
 
 /// Every hook across all layers, resolved with provenance.
@@ -108,8 +126,10 @@ pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::ALL {
         let dir = layer.dir(paths).join("hooks");
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            continue;
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -152,7 +172,7 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::ALL {
         let path = layer.dir(paths).join("mcp.json");
-        let Ok(raw) = std::fs::read_to_string(&path) else {
+        let Some(raw) = read_layer(&path)? else {
             continue;
         };
         let doc: serde_json::Value =
@@ -437,6 +457,46 @@ mod tests {
         let err = hooks(&paths).unwrap_err().to_string();
         assert!(err.contains("broken.json"), "must name the file: {err}");
         assert!(err.contains("command"), "must say what is missing: {err}");
+    }
+
+    /// A layer that cannot be read is not a layer that declares nothing.
+    ///
+    /// Conflating them produced a closed loop: `chmod 000` on `mcp.json` made
+    /// `omh why` report an installed server as "not installed here" and advise
+    /// `omh init`, which does nothing because `write_if_absent` sees the file.
+    /// Exit 0, no error, and no way out from the outside.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_layer_is_an_error_not_an_absent_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, paths) = fixture();
+        seed(
+            &paths,
+            Layer::Shared,
+            "mcp.json",
+            r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
+        );
+        let path = Layer::Shared.dir(&paths).join("mcp.json");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = servers(&paths);
+        // Restore before asserting, so a failure does not leave a locked file.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = result
+            .expect_err("an unreadable layer must not read as empty")
+            .to_string();
+        assert!(err.contains("mcp.json"), "must name the file: {err}");
+    }
+
+    /// The other half: absent really is normal, and must stay silent. Most
+    /// layers declare most things not at all.
+    #[test]
+    fn an_absent_layer_is_not_an_error() {
+        let (_d, paths) = fixture();
+        assert!(servers(&paths).unwrap().is_empty());
+        assert!(policy(&paths).unwrap().is_empty());
+        assert!(hooks(&paths).unwrap().is_empty());
     }
 
     #[test]
