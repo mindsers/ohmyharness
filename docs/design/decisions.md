@@ -30,7 +30,7 @@ This is the product. Everything else is a place to put it.
 
 ```
 omh init             → base system. no questions.
-omh add rust         → stack profile. a small curated delta.
+                     → stack rules and hooks, derived from what init detected.
 omh config mcp add … → the archive is still there, one command away,
                        and not in your face.
 ```

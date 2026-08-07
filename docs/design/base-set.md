@@ -93,8 +93,8 @@ than a quality judgement, has to be reconstructed from memory.
 
 The base set **expires**. A distribution's real work is re-choosing as the
 catalogue churns, so the file is versioned and older ones are kept rather than
-deleted — eventually `omh upgrade` can diff two and say what entered, what left,
-and why.
+deleted: re-cutting it marks every carried-over measurement stale, which is the
+prompt to re-take or re-affirm each one.
 
 Selection is by **parsed version**, not filename sort. Sorting filenames was
 three silent wrong answers at once:

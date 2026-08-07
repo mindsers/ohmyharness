@@ -41,8 +41,7 @@ $ zed ssh://omh-ohmyharness-s01/work
 $ ssh omh-ohmyharness-s01
 ```
 
-JetBrains Gateway works through the same alias. Dev servers come free:
-`omh fwd s01 3000`.
+JetBrains Gateway works through the same alias.
 
 Choosing an include over a plugin is what makes "any editor" true rather than
 aspirational — the editors omh ships descriptions for are a convenience, not the

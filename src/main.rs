@@ -15,6 +15,7 @@ mod container;
 mod detect;
 mod doctor;
 mod editor;
+mod idle;
 mod image;
 mod persist;
 mod profile;
@@ -42,10 +43,6 @@ struct Cli {
     /// Reuse an existing session instead of creating a new one.
     #[arg(long, short, global = true)]
     session: Option<String>,
-
-    /// Branch a new session from this ref instead of the default branch.
-    #[arg(long, global = true)]
-    from: Option<String>,
 
     /// Start a fresh session instead of resuming the most recent one.
     #[arg(long, global = true)]
@@ -348,6 +345,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
     let session = Session::new(&paths.worktrees(), id);
     session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
     carry_in(&paths, &session)?;
+    let _ = idle::touch(&paths.runs(), &session.id);
 
     let configured = policy_value(&paths, "account");
     let account = auth::resolve_for_launch(&paths, &adapter, None, configured.as_deref())?
@@ -505,6 +503,48 @@ fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool) -> Result<()> {
     .arg(&url)
     .status();
     Ok(())
+}
+
+/// Stop sessions nobody has used for longer than `policy.idle_timeout`.
+///
+/// N sessions is N containers — the sprawl `docs/design/risks.md` names. Only
+/// the container stops; the worktree and branch survive, so relaunching resumes
+/// exactly where you left off.
+///
+/// Best-effort by design: this runs on the way to starting a session, and a
+/// failure to reap must never stop you working.
+fn reap_idle(paths: &Paths, launching: &str) {
+    let Some(raw) = policy_value(paths, "idle_timeout") else {
+        return;
+    };
+    let Some(timeout) = idle::parse_duration(&raw) else {
+        // Say so rather than ignoring silently — a setting that resolves with
+        // provenance and then does nothing is exactly what this feature was.
+        eprintln!("omh: ignoring idle_timeout `{raw}` — expected a duration like 30m, 2h, 90s");
+        return;
+    };
+    let Ok(backend) = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))
+    else {
+        return;
+    };
+
+    let running: Vec<(String, Option<std::time::SystemTime>)> = session::list(&paths.worktrees())
+        .into_iter()
+        .filter(|id| image::container_running(backend.program(), &paths.container(id)))
+        .map(|id| {
+            let last = idle::last_used(&paths.runs(), &id);
+            (id, last)
+        })
+        .collect();
+
+    for id in idle::expired(&running, timeout, std::time::SystemTime::now(), launching) {
+        match image::container_remove(backend.program(), &paths.container(&id)) {
+            Ok(()) => {
+                eprintln!("omh: stopped {id} — idle over {raw} (worktree and branch survive)")
+            }
+            Err(e) => eprintln!("omh: could not stop idle session {id}: {e}"),
+        }
+    }
 }
 
 fn down(cwd: &std::path::Path, id: Option<&str>) -> Result<()> {
@@ -931,16 +971,18 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         session::validate_id(explicit)?;
     }
     let id = session::pick(&paths.worktrees(), cli.session.as_deref(), cli.new);
-    // Branch from the trunk, not from wherever HEAD happens to be — a session
-    // started on a feature branch produces a diff against the wrong baseline.
-    let base = cli
-        .from
-        .clone()
-        .unwrap_or_else(|| session::default_branch(&paths.repo));
+    // Always the trunk, never wherever HEAD happens to be: a session started on
+    // a feature branch produces a diff against the wrong baseline. You attach to
+    // a session, not to a branch — choosing a base was a knob nobody needed.
+    let base = session::default_branch(&paths.repo);
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;
         carry_in(&paths, &session)?;
+        // Reap before starting another container, and record that this one is
+        // in use so it is not reaped by the next launch.
+        reap_idle(&paths, &session.id);
+        let _ = idle::touch(&paths.runs(), &session.id);
     }
 
     let plan = container::plan(

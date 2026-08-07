@@ -104,8 +104,19 @@ $ omh s down s01          # stop the container, keep worktree and branch
 $ omh s rm s01            # remove the session — branch survives
 ```
 
-Idle sessions stop themselves after `policy.idle_timeout`. N sessions means N
-containers, so this is not a nicety — see [risks](design/risks.md).
+Sessions idle longer than `policy.idle_timeout` are stopped on the next launch.
+N sessions means N containers, so this is not a nicety — see
+[risks](design/risks.md).
+
+Only the **container** stops; the worktree and branch survive, so
+`omh <harness>` resumes exactly where you left off. The clock measures when you
+last *launched into* or *attached to* a session, not the agent's own writes — a
+session left running after you walked away is what this exists to reap, and one
+where an agent is working unattended is one you started recently.
+
+Unset by default: nothing is stopped unless you ask for it. A session that has
+no recorded use — from before this existed, or after clearing `~/.omh/run` — is
+left alone rather than stopped on a guess.
 
 `down` and `rm` differ in what they leave behind, and both leave the branch. To
 actually discard agent work you delete the branch yourself, deliberately, with

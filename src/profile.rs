@@ -56,11 +56,13 @@ impl Paths {
     /// Per-launch staging. Keyed by repo as well as session and harness: two
     /// checkouts both on `s01` must not share a rendered profile.
     pub fn staging(&self, session: &str, harness: &str) -> PathBuf {
-        self.root
-            .join("run")
-            .join(self.repo_id())
-            .join(session)
-            .join(harness)
+        self.runs().join(session).join(harness)
+    }
+
+    /// Per-repo run state: staged profiles, and the marker recording when each
+    /// session was last used.
+    pub fn runs(&self) -> PathBuf {
+        self.root.join("run").join(self.repo_id())
     }
 
     /// A throwaway working directory, deliberately outside `worktrees/` so a

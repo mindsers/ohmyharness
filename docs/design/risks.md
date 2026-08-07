@@ -45,7 +45,10 @@ forget that you are both in there.
 
 ## Operational
 
-**9. Sandbox sprawl.** One container per session. Idle auto-stop is not a nicety.
+**9. Sandbox sprawl.** One container per session. `policy.idle_timeout` stops
+sessions nobody has used, on the next launch — but it is **unset by default**,
+so sprawl is opt-out rather than prevented, and a machine that never launches
+again never reaps.
 
 **10. Curation is a recurring commitment, not a one-time choice.** The base set
 goes stale; re-choosing quarterly is the real ongoing cost of a distribution and

@@ -92,8 +92,8 @@ writing it down.
   was considered instead, and how to remove it. An entry that cannot fill in all
   four is taste pretending to be curation.
 - **The shortlist expires.** A distribution's real work is re-choosing quarterly
-  as the catalog churns. The base set is therefore versioned (`omh 2026.08`) and
-  `omh upgrade` shows a changelog of what entered, what left, and why.
+  as the catalog churns, so the base set is versioned (`2026.08`) and re-cutting
+  it marks every carried-over measurement for re-affirmation.
 - **Curation is a recurring commitment**, which is the honest reason a solo
   distribution is hard. See [risks](risks.md).
 - **The opinion must be escapable.** A distribution whose opinion cannot be

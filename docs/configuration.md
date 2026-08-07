@@ -76,7 +76,7 @@ are overriding a team default temporarily.
 | Key | Values | Meaning |
 |---|---|---|
 | `carry_in` | list of paths | untracked files copied into the worktree |
-| `idle_timeout` | duration | when an unused session stops itself |
+| `idle_timeout` | duration (`30m`, `2h`, `90s`) | stop a session nobody has used for this long. Unset means never |
 | `runtime` | `auto` \| `docker` \| `sbx` | which backend to use; `auto` prefers `sbx` when present |
 | `persistence` | `dtach` \| `none` | whether harnesses survive the terminal closing |
 | `account` | account name | which captured login this project uses |
