@@ -317,7 +317,7 @@ whether anything reads it. That gap is what `doctor` closes.
 
 | | |
 |---|---|
-| **Memory** | [designed](docs/design/memory.md), not built. Layered like the profile: personal facts, project facts. |
+| **Memory** | [specified](docs/design/memory.md), not built. A graph of linked notes the agent queries and grows, so what one session learned survives the session. |
 | **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
 | **`omh eject`** | a credible exit: write out the raw per-harness config and step aside. |
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |

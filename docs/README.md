@@ -38,7 +38,8 @@ change — most of them record something that was tried and cost something.
 | [The base set](design/base-set.md) | omh's opinion as a versioned data file, and the test that makes an entry earn its place |
 | [Architecture](design/architecture.md) | images, runtime backends, on-disk layout |
 | [Adapters](design/adapters.md) | harnesses and editors as data, and how to add one |
-| [Memory](design/memory.md) | *designed, not built* — why memory is layered |
+| [Memory](design/memory.md) | *specified, not built* — the note graph, its guards, and the build order |
+| [Memory: how the design got here](design/memory-rationale.md) | the survey, the benchmark that reversed six choices, and the alternatives not taken |
 | [Trust](design/trust.md) | provenance, evidence, and a credible exit |
 | [Risks](design/risks.md) | what is weak, stated plainly |
 | [Roadmap](design/roadmap.md) | what ships when, and what gates what |
