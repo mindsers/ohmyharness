@@ -1,6 +1,6 @@
 [package]
 name = "omh"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 description = "Launch any coding harness, in a sandbox, with your setup already there."
 license = "MIT"
