@@ -149,7 +149,8 @@ into every future session**.
 The Obsidian shape helps more than a monolith would:
 
 - one idea per file means a wrong fact is **one file to delete**, not a
-  paragraph buried in a document
+  paragraph buried in a document — where the convention is actually followed;
+  nothing verifies it
 - `git log` shows when a note appeared and what it replaced
 - links make an unsupported claim visible: a note nothing links to, and which
   links to nothing, is a fact with no context
@@ -171,7 +172,9 @@ writing turns that into notes loaded into every future session.
 
 So the mitigations are not optional extras, they are the price of this choice:
 
-- **one idea per file**, so a wrong fact is one deletion
+- **one idea per file**, so a wrong fact is one deletion — a convention, not a
+  guarantee: nothing can verify a note holds a single claim, and a note holding
+  three with one wrong cannot be cleanly removed
 - **provenance on every note** — what produced it, when, from what. A fact that
   cannot say where it came from cannot be judged, and the whole
   [trust](trust.md) argument is that omh does not state things it cannot support
@@ -339,10 +342,26 @@ must be earned"* from a sentence in a document into a test that fails the build.
 The lesson there was that an unenforced convention is not a convention, and it
 cost seven fabricated dates to learn.
 
-`maxTokens` does the same for the property this whole feature rests on. **One
-idea per note stops being a guideline** — a note that grows past its budget is
-invalid. Without it, notes drift back toward being a long document, which is the
-failure being escaped.
+`maxTokens` bounds **size**, which is not the same as one idea per note and
+should not be confused with it. A twenty-token note can carry three claims; an
+eight-hundred-token note can explain one carefully. **No schema can count
+ideas.**
+
+What the budget does buy is real but narrower:
+
+- **retrieval stays cheap** — a note has a known worst case
+- **notes cannot drift back into being documents**, which is the failure this
+  feature exists to escape
+- **it creates pressure to split**, because staying under budget means
+  extracting — and `extract` is an operation iwe already has
+
+Structure gets closer to atomicity than size does. A schema can require exactly
+one top-level section with `maxContains: 1` and `additionalSections: false`,
+which pushes a note toward one topic. Still not a guarantee — one section holds
+as many claims as you put in it — but nearer than a token count.
+
+**One idea per note stays a convention.** It has mechanical pressure behind it
+now, and no enforcement.
 
 Schemas bind by glob and **compose**, so layers can differ in strictness:
 
