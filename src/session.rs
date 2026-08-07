@@ -9,6 +9,18 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// What `remove` did with the branch, so the caller can report it truthfully
+/// rather than always claiming the branch was kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removed {
+    /// Commits nobody has reviewed; the branch outlives the session.
+    BranchKept,
+    /// Nothing was committed, so the branch preserved nothing.
+    BranchDropped,
+    /// A scratch session (`omh auth`, `omh doctor`) never had one.
+    NoBranch,
+}
+
 pub struct Session {
     pub id: String,
     /// `None` for a scratch session. `omh auth` and `omh doctor` need a
@@ -94,7 +106,27 @@ impl Session {
             .unwrap_or(0)
     }
 
-    pub fn remove(&self, repo: &Path) -> Result<()> {
+    /// Commits on this session's branch that are not already in `base`.
+    ///
+    /// The question `remove` needs answered: whether keeping the branch would
+    /// preserve anything.
+    pub fn commits(&self, repo: &Path, base: &str) -> usize {
+        let Some(branch) = &self.branch else { return 0 };
+        git(repo, &["rev-list", "--count", &format!("{base}..{branch}")])
+            .ok()
+            .and_then(|out| out.trim().parse().ok())
+            .unwrap_or(0)
+    }
+
+    pub fn remove(&self, repo: &Path, base: &str) -> Result<Removed> {
+        // Decided before the worktree goes, because afterwards the branch is
+        // the only thing left to ask.
+        let outcome = match &self.branch {
+            None => Removed::NoBranch,
+            Some(_) if self.commits(repo, base) > 0 => Removed::BranchKept,
+            Some(_) => Removed::BranchDropped,
+        };
+
         if git(
             repo,
             &[
@@ -104,22 +136,29 @@ impl Session {
                 &self.worktree.to_string_lossy(),
             ],
         )
-        .is_ok()
+        .is_err()
         {
-            // The branch outlives the worktree on purpose: removing a session
-            // must not be able to destroy work that was never reviewed.
-            return Ok(());
+            // git can lose the registration while the directory survives, and
+            // then refuses with "is not a working tree" — leaving a session
+            // that can never be removed. Clean up whatever is on disk.
+            if self.worktree.exists() {
+                std::fs::remove_dir_all(&self.worktree)
+                    .with_context(|| format!("removing {}", self.worktree.display()))?;
+            }
+            let _ = git(repo, &["worktree", "prune"]);
         }
 
-        // git can lose the registration while the directory survives, and then
-        // refuses with "is not a working tree" — leaving a session that can
-        // never be removed. Clean up whatever is actually on disk.
-        if self.worktree.exists() {
-            std::fs::remove_dir_all(&self.worktree)
-                .with_context(|| format!("removing {}", self.worktree.display()))?;
+        // A branch carrying commits outlives its worktree on purpose: removing
+        // a session must never destroy work nobody has reviewed. A branch
+        // carrying none holds nothing to review — `--force` above has already
+        // discarded anything uncommitted — so keeping it only leaves a dead ref
+        // behind after every abandoned session.
+        if outcome == Removed::BranchDropped {
+            if let Some(branch) = &self.branch {
+                let _ = git(repo, &["branch", "-D", branch]);
+            }
         }
-        let _ = git(repo, &["worktree", "prune"]);
-        Ok(())
+        Ok(outcome)
     }
 
     pub fn diff(&self, repo: &Path, base: &str) -> Result<String> {
@@ -259,6 +298,56 @@ mod tests {
     }
 
     #[test]
+    /// `rm` keeps a branch so unreviewed work is unloseable. A branch with no
+    /// commits holds no work to lose — `worktree remove --force` has already
+    /// discarded anything uncommitted — so keeping it preserves nothing and
+    /// leaves a dead ref behind after every abandoned session.
+    #[test]
+    fn removing_a_session_that_produced_nothing_drops_its_branch() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+
+        let outcome = s.remove(&root, "main").unwrap();
+        assert_eq!(outcome, Removed::BranchDropped);
+        assert!(
+            git(&root, &["rev-parse", "--verify", "omh/s01"]).is_err(),
+            "an empty branch should not survive its session"
+        );
+    }
+
+    /// The load-bearing half: a branch carrying commits must survive, because
+    /// `rm` must never be able to destroy work nobody has reviewed.
+    #[test]
+    fn removing_a_session_that_committed_keeps_its_branch() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s02".into());
+        s.ensure(&root, "main").unwrap();
+
+        std::fs::write(s.worktree.join("work.txt"), "agent output").unwrap();
+        git(&s.worktree, &["add", "."]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
+
+        let outcome = s.remove(&root, "main").unwrap();
+        assert_eq!(outcome, Removed::BranchKept);
+        assert!(
+            git(&root, &["rev-parse", "--verify", "omh/s02"]).is_ok(),
+            "unreviewed work must be unloseable"
+        );
+    }
+
+    /// A scratch session (`omh auth`, `omh doctor`) has no branch at all, and
+    /// asking git about one would error rather than report nothing to keep.
+    #[test]
+    fn removing_a_scratch_session_reports_no_branch() {
+        let (dir, root) = repo();
+        let mut s = Session::new(&dir.path().join("wt"), "s03".into());
+        s.branch = None;
+        s.ensure(&root, "main").unwrap();
+        assert_eq!(s.remove(&root, "main").unwrap(), Removed::NoBranch);
+    }
+
+    #[test]
     fn ensure_creates_worktree_on_its_own_branch() {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s01".into());
@@ -289,7 +378,7 @@ mod tests {
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
 
-        s.remove(&root).unwrap();
+        s.remove(&root, "main").unwrap();
         assert!(!s.worktree.exists(), "worktree gone");
         assert!(s.branch_exists(&root), "branch must survive rm");
 
@@ -479,7 +568,7 @@ mod tests {
             &["commit", "-q", "--allow-empty", "-m", "trunk moved on"],
         )
         .unwrap();
-        s.remove(&root).unwrap();
+        s.remove(&root, "master").unwrap();
         s.ensure(&root, "master").unwrap();
 
         assert_eq!(
@@ -566,11 +655,17 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
 
+        // Commit first, so this still exercises the branch-survives path in
+        // the degraded case rather than the drop-an-empty-branch path.
+        std::fs::write(s.worktree.join("w.txt"), "x").unwrap();
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
+
         // git forgets, the directory stays
         std::fs::remove_dir_all(root.join(".git/worktrees")).unwrap();
         assert!(s.worktree.exists());
 
-        s.remove(&root)
+        s.remove(&root, "main")
             .expect("must clean up what is actually there");
         assert!(!s.worktree.exists(), "the directory must be gone");
         assert!(s.branch_exists(&root), "and the branch still kept");
@@ -580,7 +675,8 @@ mod tests {
     fn removing_a_session_that_was_never_created_is_not_an_error() {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s09".into());
-        s.remove(&root).expect("nothing to do is not a failure");
+        s.remove(&root, "main")
+            .expect("nothing to do is not a failure");
     }
 
     // ── session ids are path components ─────────────────────────────────────
@@ -626,7 +722,7 @@ mod tests {
         let (d, root) = repo();
         let s = Session::scratch(d.path().join("scratch/doctor"), "doctor".into());
         s.ensure(&root, "main").unwrap();
-        s.remove(&root).unwrap();
+        s.remove(&root, "main").unwrap();
 
         assert!(!s.worktree.exists());
         assert_eq!(

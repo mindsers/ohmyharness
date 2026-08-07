@@ -327,7 +327,7 @@ whether anything reads it. That gap is what `doctor` closes.
 Known rough edges: the graph store is shared across sessions of one repo, so an
 agent can query another session's graph (mitigated, not prevented);
 `.claude.json` is a file mount that cannot be atomically replaced; `omh s rm`
-keeps a branch even when the session produced no commits.
+drops a session branch only when it has no commits.
 
 ## Contributing
 

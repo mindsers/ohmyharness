@@ -605,7 +605,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         .args(backend.args(&plan))
         .output()?;
     let outcomes = doctor::parse(&String::from_utf8_lossy(&out.stdout));
-    let _ = session.remove(&paths.repo); // diagnostic: leave no session behind
+    let _ = session.remove(&paths.repo, ""); // diagnostic: leave no session behind
 
     for o in &outcomes {
         println!(
@@ -1370,7 +1370,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     let status = Command::new(backend.program())
         .args(backend.args(&plan))
         .status()?;
-    if let Err(e) = session.remove(&paths.repo) {
+    if let Err(e) = session.remove(&paths.repo, "") {
         // A leftover `auth` worktree wins `session::current()` and silently
         // becomes the session the next launch runs in.
         eprintln!("omh: warning: could not remove the auth worktree: {e}");
@@ -1481,8 +1481,23 @@ fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
         }
     }
 
-    session.remove(&paths.repo)?;
-    println!("removed session {id}; branch omh/{id} kept");
+    // The branch is reported honestly rather than always claimed as kept: one
+    // that never received a commit preserves nothing, and saying otherwise
+    // trains people to ignore a namespace filling with dead refs.
+    let base = session::default_branch(&paths.repo);
+    match session.remove(&paths.repo, &base)? {
+        session::Removed::BranchKept => {
+            let n = session.commits(&paths.repo, &base);
+            let s = if n == 1 { "commit" } else { "commits" };
+            println!("removed session {id}; branch omh/{id} kept ({n} {s} to review)");
+            println!("  review with  git log {base}..omh/{id}");
+            println!("  discard with git branch -D omh/{id}");
+        }
+        session::Removed::BranchDropped => {
+            println!("removed session {id}; branch omh/{id} dropped (no commits)");
+        }
+        session::Removed::NoBranch => println!("removed session {id}"),
+    }
     Ok(())
 }
 

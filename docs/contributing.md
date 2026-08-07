@@ -86,7 +86,8 @@ product, not fixing a test.
 | staged links resolve under `/omh/layers/…` | host paths do not exist in the sandbox; skills silently vanish |
 | staging is keyed by session **and** harness | else a second harness overwrites the first's mounted config |
 | unknown adapter fields are rejected | else a stale adapter degrades everything, silently |
-| `rm` keeps the branch; `ensure` reattaches | unreviewed agent work must be unloseable |
+| `rm` keeps a branch that has commits; `ensure` reattaches | unreviewed agent work must be unloseable |
+| `rm` drops a branch with no commits | it preserves nothing, and dead refs hide the live ones |
 | each MCP format emits its harness's real schema | a wrong shape means zero servers and no complaint |
 | every renderer round-trips through its parser | else `import` silently drops data |
 | a probe with no output is never a pass | silence means the sandbox never ran it |

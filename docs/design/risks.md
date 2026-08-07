@@ -59,9 +59,6 @@ project, and it is not a technical one.
   [code graph](../code-graph.md#what-the-agent-can-still-see).
 - **`.claude.json` is a single-file mount** that cannot be atomically replaced.
   `doctor` reports it rather than pretending otherwise.
-- **`omh s rm` keeps a branch even when the session produced no commits**, which
-  litters the namespace. Erring toward keeping unreviewed work was deliberate;
-  keeping empty branches was not.
 - **Only `claude` has been driven for real work.** `opencode` passes `doctor`,
   which proves its paths and nothing about its behaviour.
 - **A seeded profile and the shipped base set drift by design.** `init` copies

@@ -168,12 +168,23 @@ Everything omh knows about: harnesses, editors, sessions and their state.
 omh s ls              sessions, their branches and state
 omh s diff [id]       what the agent changed
 omh s down [id]       stop the container, keep the worktree and branch
-omh s rm [id]         remove the session — the branch is kept on purpose
+omh s rm [id]         remove the session — a branch with commits is kept
 ```
 
-**`rm` never deletes the branch.** Unreviewed agent work must be unloseable, so
-the branch outlives the session that produced it. (It is kept even when the
-session produced no commits, which is [a known rough edge](design/risks.md).)
+**`rm` never deletes a branch that has commits.** Unreviewed agent work must be
+unloseable, so the branch outlives the session that produced it, and `rm` tells
+you how to review or discard it:
+
+```console
+$ omh s rm s01
+removed session s01; branch omh/s01 kept (3 commits to review)
+  review with  git log main..omh/s01
+  discard with git branch -D omh/s01
+```
+
+A branch with **no** commits is dropped. Keeping it preserved nothing —
+`worktree remove --force` has already discarded anything uncommitted — while a
+namespace filling with dead refs trains you to ignore the ones that matter.
 
 ## `omh config …` · `c`
 
