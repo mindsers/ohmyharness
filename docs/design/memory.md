@@ -498,14 +498,25 @@ Worth measuring before adopting, and worth checking whether the surface can be
 narrowed to the four operations this design actually needs: find, retrieve,
 create, link.
 
-## An alternative worth considering
+## Skills are the precedent, not the alternative
 
-**Skills are already progressive-disclosure Markdown.** A harness loads a
-skill's name and description up front and its body only when relevant — the
-exact mechanism this feature wants, already implemented, already layered by
-omh, already portable across every harness that supports skills.
+**Skills already do progressive disclosure in Markdown.** A harness loads a
+skill's name and description up front and its body only when relevant. That is
+the retrieval half of this feature, already implemented, already layered by omh,
+already portable across every harness that supports skills.
 
-Notes-as-skills would need no MCP server at all. Against it: skills are
-procedures by convention rather than facts, there is no link graph, and the
-agent cannot *write* one mid-session. But it sets the bar a new subsystem has to
-clear.
+**They cannot be the implementation, because they only go one way.** Skills are
+a *distribution* mechanism — an author writes, the agent reads. Memory is a
+*feedback* mechanism — the agent writes what it learns and reads it back. An
+agent can drop a `SKILL.md` on disk, but there is no tool for it, no validation,
+no index to update, and the harness has already loaded its list: the write is
+blind and invisible until restart.
+
+That is categorical, and it settles the question more cleanly than the softer
+objections do — that skills hold procedures rather than facts, and have no link
+graph. Both are conventions. The write direction is not.
+
+What skills are good for here is **evidence that the mechanism works**. The
+index-at-session-start design above is not speculative: it is what a harness
+already does with skills, at scale, in production. What is missing from skills
+is only the write path — which is exactly what an MCP server supplies.
