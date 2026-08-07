@@ -9,7 +9,7 @@ $ omh attach       # open that same session in your editor
 $ omh graph        # browse your codebase as a graph
 ```
 
-**Status: early.** `0.1.0`, one harness verified end to end, 355 tests. Useful today
+**Status: early.** `0.1.0`, one harness verified end to end. Useful today
 if you want a sandboxed agent with your config in it; not yet the finished
 distribution described in [the docs](docs/). See
 [What isn't done](#what-isnt-done) — it is a real list, not a modesty ritual.
@@ -335,7 +335,7 @@ See [`docs/contributing.md`](docs/contributing.md) for the full rules and the
 invariant list.
 
 ```console
-$ cargo test            # 355 tests
+$ cargo test
 $ ./scripts/smoke.sh    # end-to-end walkthrough in a throwaway repo
 $ omh doctor            # the only thing that verifies an adapter
 ```
