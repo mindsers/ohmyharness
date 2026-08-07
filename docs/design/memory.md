@@ -134,6 +134,11 @@ memory**, with the answering agents, the curator and the judge all running
 through `claude -p`. The harness, prompts, judge and full run ledger are
 published alongside it.
 
+A companion piece, *Designing edit operations for AI agents* (1 August 2026),
+gives the mechanism behind the guards — and is the more directly useful of the
+two, because it shows which disciplines became **configuration** rather than
+prompt text.
+
 These are the vendor's own numbers, on the vendor's own product, and that is
 normally where this project stops reading. Three things make it an exception:
 
@@ -269,12 +274,94 @@ and rephrasing a fresh identity, and *"the store quietly accumulated
 near-duplicates that no prompt admonition prevented."*
 
 The guarantee is only as strong as the derivation is canonical — their first run
-created `joanna-and-nate` and `nate-and-joanna` as two pages, fixed by requiring
-alphabetical order. **A uniqueness constraint dedups identities, not
-intentions.**
+created `joanna-and-nate` and `nate-and-joanna` as two pages, because a pair of
+names has two spellings and nothing pinned one. **Both keys were unique; the
+identity wasn't.** Fixed by requiring alphabetical order, for the same reason
+compound database keys fix a column order: a uniqueness constraint dedups
+identities, not intentions.
 
 So the imperative stays, demoted to a backstop, and the real mechanism is
 derived keys plus a conflict error.
+
+**And the derivation is configuration, which is what makes this cheap for omh.**
+A `key_template` in project config — `journal/{{today}}`, `people/{{slug}}` —
+mints the key from metadata, so the canonicalization rule *"lives in project
+config where the agent cannot re-decide it"*. Collisions fail by default, and
+`--if-exists` turns the retry policy into an argument: `skip` for idempotent
+ingest, `suffix` or `override` only when named. Their phrasing is the point —
+**skip-if-exists is an explicit mode, not a fallback you hope for.**
+
+That converts the strongest guard in this design from something omh must build
+or prompt for into **a config file `omh init` writes**, alongside the schemas.
+Which is exactly the shape a distribution wants: the opinion ships as data.
+
+### Enforcement lives at the surface, not the grammar
+
+The rule they close on, and it fits omh better than it fits most consumers:
+
+> Humans get freedom, agents get strictness, the language means the same thing
+> everywhere.
+
+Concretely: `expect` guards are opt-in on the CLI (`--strict`), because *"a human
+with git behind them shouldn't pay ceremony"*, and **always on over MCP**,
+because *"the population most likely to skip the guard is exactly the one that
+needs it"*. `--strict` also refuses any write violating the document's bound
+schema.
+
+This matters here because omh has **both audiences on one store, by design**. The
+[editor is SSH'd into the same session](../editors.md) as the agent, so a human
+edits notes by hand in exactly the directory the agent is writing to over MCP. A
+tool that enforced uniformly would have to pick which of those two to annoy.
+
+It also settles a question this page had not asked: **what happens when the user
+edits a note by hand.** Nothing special. Same grammar, same store, no ceremony,
+and no separate human-facing path for omh to build or keep in sync.
+
+The workflow the guards create on the agent side is worth naming, because it is
+what `remember` should feel like: **locate, count, pin, mutate** — find the
+targets, learn the count, write the count into the edit, and the store refuses an
+edit whose shape surprises you.
+
+### Fail toward the recoverable mistake
+
+Their first draft gave update operators subtree semantics: replace a header,
+replace its whole section. Hands-on testing showed a data-loss trap — an agent
+"renaming" a header by replacing it silently destroys everything beneath.
+
+Shipped semantics follow text-editing intuition instead: a header selection is
+the heading *line*, its contents re-attach and re-level. **Destroying a section
+requires naming the section.**
+
+> The failure modes now point in the safe direction — the recoverable mistake
+> (leftover visible content) instead of the silent one (a vanished subtree).
+
+That principle is already load-bearing in omh, under other names, and it is worth
+recognising as one rule rather than three coincidences:
+
+- [`omh s rm`](../sessions.md) keeps a branch that holds commits — an extra
+  branch is recoverable, a deleted one is not
+- [idle reaping](risks.md) leaves a session with no recorded use alone, because
+  *"stopping a container on a guess is worse than one extra container"*
+- only the worktree and credentials mount writable; everything else is read-only
+
+For memory specifically it decides how deletion behaves: `omh memory rm` removes
+one note and reports what linked to it, rather than cascading. A dangling link is
+visible and fixable; a silently pruned neighbourhood is neither — and the lint
+already catches dangling links, so the recoverable failure is the one the system
+is built to find.
+
+### A safety result worth carrying, with its footnote
+
+Across answering sessions where the agent **held a mutation-capable tool**, the
+store diff showed **zero stray writes** — strict mode held in the field, not just
+in tests. That is directly relevant here, because this design hands an unattended
+agent a write tool and then worries about what it writes.
+
+The footnote: the two posts disagree on the sample. The benchmark says *forty*
+answering sessions, the edit-operations post says *hundreds*. Nothing else
+conflicts, and the claim is qualitative either way — but this page cites the
+**smaller** figure, because a number that grew between two tellings is exactly the
+kind this project has learned to distrust in its own writing.
 
 ### Retrieval is one call, not a walk
 
@@ -433,6 +520,14 @@ as much as to editing.
 exists, which is what let their hub lines link to a dated page that had not been
 written yet. Titles would make every link a lookup and every rephrasing a new
 [identity](#identity-is-a-guard-not-a-discipline).
+
+Note what `remember` therefore does *not* need: a rule telling the agent how to
+name things, or one telling it to search first. Both are
+[`key_template` and a collision error](#identity-is-a-guard-not-a-discipline) —
+config omh writes at `init`, which the agent cannot re-decide. **Every discipline
+that can become a config file should**, and this design should be re-read
+periodically asking which of its remaining prompt rules are still prompt rules
+only because nobody moved them.
 
 **Reading.** One tool, one call, returning a neighbourhood rather than a list:
 
