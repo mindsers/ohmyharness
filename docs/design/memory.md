@@ -1,8 +1,13 @@
 # Memory
 
-> **Status: in design.** Nothing here ships. This page is being rewritten as the
-> shape of the feature changes — it currently records a reframing, a survey, and
-> the questions still open, rather than a settled design.
+> **Status: in design.** Nothing here ships. This page is rewritten as the shape
+> of the feature changes, and it records superseded reasoning rather than
+> deleting it — several sections below are amended by later ones, and say so.
+>
+> If you read one section, read
+> [what the benchmark changed](#what-the-benchmark-changed): it corrects four
+> decisions taken earlier on this page. [The shape this suggests](#the-shape-this-suggests)
+> is where those corrections land, including what the user would actually type.
 
 ## The reframing
 
@@ -394,6 +399,250 @@ here so it does not have to be rediscovered.
 - **Nothing here was run in an omh container**, which is still the bar
   [`doctor`](../troubleshooting.md) exists to enforce.
 
+## The shape this suggests
+
+Everything in this section follows from the benchmark rather than from the
+original sketch. **None of it is built**, and two items are deliberate scope
+cuts, so it is recorded as proposal rather than decision.
+
+### The surface: two tools
+
+**Writing.** Not `create_note(title, body)` — a signature shaped like the
+discipline:
+
+```
+remember(
+  expected,         # what you thought would happen
+  observed,         # what actually happened
+  evidence,         # the command, the error, the file
+  relates_to[],     # keys of notes this connects to
+  invalidated_by,   # what would make this false: a file hash, an image, a version
+)
+```
+
+[Record on surprise](#record-on-surprise-not-on-schedule) is currently a sentence
+in `AGENTS.md`, and sentences [decay](#guards-beat-instructions-measured). A
+signature does not. An agent with nothing to put in `expected` has learned
+nothing worth recording, so the filter runs for free; and provenance stops being
+a schema rule that can be violated and becomes a parameter that cannot be
+omitted. Their observation that a small model *"follows structural recipes
+faithfully… because the workflow makes [failure] impossible"* applies to writing
+as much as to editing.
+
+`relates_to` takes **keys, not titles** — a key is computable before its target
+exists, which is what let their hub lines link to a dated page that had not been
+written yet. Titles would make every link a lookup and every rephrasing a new
+[identity](#identity-is-a-guard-not-a-discipline).
+
+**Reading.** One tool, one call, returning a neighbourhood rather than a list:
+
+```
+credentials-are-a-named-volume              team · 2026-06-12
+├─ credentials-file-mount-returns-ebusy     local · 2026-08-07   ← the why
+├─ accounts-are-single-path-components      team · 2026-06-14
+└─ the-image-ends-unprivileged              team · 2026-07-02
+```
+
+Rank, expand one hop, stamp every result with its date and layer. That is the
+[one-shot dossier](#retrieval-is-one-call-not-a-walk), and the stamping is why
+omh has to own the surface.
+
+### Why omh should own the retrieval surface
+
+The invariant this page calls
+[trust-deciding](#the-invariant-that-decides-whether-this-is-trustworthy) — *a
+note is never retrieved without its date and its source* — **is unenforceable if
+the agent talks to iwe directly.** Whatever the server returns is what the agent
+sees.
+
+A thin omh MCP server, proxying iwe, buys three things at once:
+
+- the provenance envelope becomes structural rather than hoped-for
+- the per-session tool tax drops from 13 to 2, which is the answer to
+  [a cost worth naming](#a-cost-worth-naming)
+- the one-shot dossier gets implemented rather than prompted
+- it can front [both graphs](#two-graphs-not-one), which softens the two-tool-set
+  objection there
+
+The cost, plainly: it puts omh **in the request path** — a new failure mode and a
+permanent maintenance burden — and it is a step toward the abstraction layer
+[distribution.md](distribution.md) says omh is not. The defence is that a proxy
+adding provenance is not a knowledge graph; it is the integration this page
+already calls [the product](#the-server-is-the-commodity-the-integration-is-the-product).
+If that defence stops holding, this is the first thing to cut.
+
+### The graph is structure, not an interface
+
+Worth stating, because the one-shot result reads like an argument against graphs
+and is the opposite.
+
+| | verdict |
+|---|---|
+| agent walks node → node over 8 turns | **measured worst arm** — 0.735, $0.153/question |
+| one call ranks, then expands what the top pages link to | the shipped architecture |
+| linter audits topology — dangling, orphans, near-duplicates | largest single improvement |
+
+Links stay load-bearing in three places: `recall`'s expansion (without edges it
+is grep with extra steps), the lint's checks, and the
+[committed-links-only invariant](#links-may-cross-layers-in-one-direction),
+which is a reachability constraint with nothing to constrain if there is no
+graph.
+
+What died is the graph as something the agent *browses*. Their account of why:
+*"the graph already encodes which pages belong together"* — so the traversal
+happens once, on the agent's behalf, instead of being handed over as eight turns
+of exploration.
+
+### Hub pages: the construct this design is missing
+
+Their multi-hop answers came from pages whose only job is to **join threads that
+live apart** — a relationship page recording what two people have in common,
+created because the answer was scattered across two person pages.
+
+The coding analogue is a `credentials` hub, a `sandbox` hub: a page saying how a
+subsystem hangs together, linking to the notes underneath it. Nothing in a flat
+note collection expresses that.
+
+Two things to carry before adopting it:
+
+- **This is where their entire remaining quality gap lived.** Hub bloat survived
+  three prompt versions; capping it moved the bloat to the relationship page;
+  demanding terseness made the agent squeeze out the dates and collapsed the
+  temporal category. It was fixed by a lint, not by wording.
+- **Copy the pattern that closed their last gap exactly:** the event's date as
+  the *link text*, the page as the *target* — `finished the migration on
+  [2026-06-12]` — so the hub line answers *when* without opening anything, and
+  the link still points at the evidence.
+
+### Two scope cuts
+
+**Do not distil the repo's docs — point at them.** Ingestion is currently
+described as [the floor](#the-floor-when-the-agent-writes-nothing). Distilling is
+the wrong way to build it: their curated store lost single-hop questions
+**0.802 against grep's 0.893**, the category probing verbatim detail *"that
+curation had summarized away"* — which is precisely what a coding agent needs
+(the flag, the path, the error string). A distilled copy also drifts from `docs/`
+with nothing to detect it.
+
+Ingest **stubs**: one note per document, one line, a link, the questions it
+answers. Day-one usefulness survives — a queryable index of what the repo
+documents — and the content stays in the file git tracks. This narrows the floor,
+and narrows it in the right direction: the graph's unique value is
+[what is written nowhere else](#the-headline-is-uncomfortable-and-it-should-stay-that-way).
+
+**Drop the personal layer.** Three layers of notes is machinery, and the product
+is subtraction. What people want from `~/.omh/notes` is mostly preferences, which
+`~/.omh/profile` already carries as instructions. Two layers — committed and
+gitignored. Add the third when somebody can name a note that needs it. This
+supersedes the three-layer mapping under [layering](#layering).
+
+### Expiry from events omh already owns
+
+[Expiry](#expiry) is this page's weakest section, and most of it is bookkeeping
+omh is already holding: when the image was rebuilt, when the base set was re-cut,
+when an adapter changed, when a file's hash moved, when a symbol left the code
+graph.
+
+`invalidated_by` takes one of those. `omh memory stale` becomes a join against
+facts omh already has, rather than a judgement. What is left over — a note
+carrying nothing but a date, because its source was an experience — is the honest
+residue, and it is much smaller than the section currently implies.
+
+### Build order: write and lint before retrieval
+
+Their arc says store quality dominated and tooling came second, and that
+[schema violations ranked three stores exactly as their scores did](#this-is-observable-not-testable).
+So:
+
+1. `remember`, the schemas, and `omh memory lint`. Run it on this repo for two
+   weeks.
+2. Read what it produced. **If the store is bad, no retrieval architecture
+   rescues it** — and that is a cheap failure to discover at this point.
+3. `recall`, and the index that goes with it.
+
+### Measuring it
+
+[`base-set.md`](base-set.md) will demand a measured cost before this can ship as
+an entry. The smallest honest version is **this repo's own history** as the
+question set — `EBUSY` on a bind-mounted token file, the installer ignoring
+`CBM_VARIANT`, `--aspects` on a comma list, `info/exclude` in the common git dir
+— asked of a session with the graph and a session without.
+
+With their retraction as the warning: **whoever writes the questions must not
+write the curation prompt.** Knowing the answers while authoring the instructions
+is exactly the contamination that cost them 0.15 J, and it is invisible until
+somebody re-reads the prompt against the corpus.
+
+### What the user actually does
+
+The test of all of the above is whether it adds decisions, since
+[the metric is decisions removed](distribution.md). It adds two: promoting a note
+and deleting a bad one. Everything else is invisible.
+
+**`omh init`** asks nothing new. It creates the gitignored notes layer, writes
+stubs from what `detect` found, and the store is live.
+
+**During work**, the agent records without asking:
+
+```
+⏺ remember(expected: "a bind mount of the token file persists the login",
+           observed: "EBUSY — the harness rewrites in place, a file mount is one inode",
+           evidence: "omh claude → login loop; docker logs",
+           invalidated_by: "image:sha256-4f2a…")
+  → recorded local/credentials-file-mount-returns-ebusy
+```
+
+One line in the transcript. No approval, no interruption — a memory you have to
+approve is a notebook, and nobody keeps one. A file appears, editable in the
+[editor already attached](../editors.md) to the session.
+
+**Days later**, in a different harness, the payoff looks like nothing at all: the
+agent calls `recall` once and does not repeat last week's mistake. That is the
+correct amount of visible feature.
+
+**The review moment rides on something already happening** rather than being a
+ritual nobody performs:
+
+```console
+$ omh s rm s03
+removed s03 (2 commits, merged)
+3 notes recorded during this session — `omh memory` to review
+```
+
+```console
+$ omh memory
+local (3 new)
+  credentials-file-mount-returns-ebusy    2026-08-07  ★ referenced 2×
+  cargo-test-needs-the-tempfile-feature   2026-08-07
+  the-parser-handles-crlf                 2026-08-06    orphan, never referenced
+
+team (14)
+  credentials-are-a-named-volume          2026-06-12
+```
+
+Two verbs from there — and `promote` is the only place a human gates anything,
+because it is the only place a wrong note
+[reaches somebody else](#the-agent-writes-to-local-and-only-there):
+
+```console
+$ omh memory promote credentials-file-mount-returns-ebusy
+  local → team. this becomes a committed file your teammates get.
+  + .omh/notes/credentials-file-mount-returns-ebusy.md
+  links checked: [[credentials-are-a-named-volume]] is committed ✓
+
+$ omh memory rm the-parser-handles-crlf
+  removed. 0 notes linked to it.
+```
+
+**Maintenance is two commands**, `omh memory stale` and `omh memory lint` — the
+first a join against events omh already knows, the second the store-quality
+meter.
+
+What the user will see and dislike: **junk notes.** The surprise filter will let
+through *"the parser handles CRLF"*. The mitigation is not prevention — it is
+that removal costs one command, and that an orphan nothing ever referenced is the
+strongest available signal it should not have been written.
+
 ## The server is the commodity; the integration is the product
 
 Worth stating before choosing, because it changes what "build it ourselves"
@@ -416,6 +665,13 @@ omh would have written.
 What remains is still larger than the server, and none of it comes free with any
 candidate. Building the server too would add the one part of this that several
 projects have already solved.
+
+The benchmark sharpened one item on that list into an architectural commitment:
+the provenance envelope cannot be *placed* on top of a server the agent talks to
+directly, so omh has to own the tool surface and proxy. That is the largest open
+question on this page — see
+[why omh should own the retrieval surface](#why-omh-should-own-the-retrieval-surface),
+including the case for cutting it.
 
 ## The poisoning problem, and why the format helps
 
@@ -476,6 +732,10 @@ This also closes a loop: `detect::seeds()` already derives the README tagline
 and stack facts and currently throws them away in a `println!`. They become the
 graph's first notes.
 
+**Amended by the benchmark:** ingest *stubs*, not summaries. Distillation loses
+exactly the verbatim detail a coding agent needs, and creates a copy that drifts
+from `docs/` undetectably — see [the scope cuts](#two-scope-cuts).
+
 **Adopt if something fits; build only with a documented reason.** The next step
 is the pass that decided codegraph — licence, external dependencies,
 maintenance, and whether it runs unattended in a container. Features were never
@@ -491,6 +751,12 @@ The three layers map straight across:
 <repo>/.omh/notes/         shared   — COMMITTED, your team sees these
 <repo>/.omh/local/notes/   local    — GITIGNORED, yours alone
 ```
+
+> **Proposed cut:** drop the personal layer and ship two. Most of what would go
+> there is preferences, which `~/.omh/profile` already carries as instructions,
+> and three layers of notes is machinery bought before anyone named a note that
+> needs it. See [the scope cuts](#two-scope-cuts). The rest of this section holds
+> either way — it is about how layers behave, not how many there are.
 
 But **notes do not merge the way the profile does**, and the difference is not
 cosmetic. `policy.toml` merges key by key with later layers winning, because a
@@ -544,7 +810,11 @@ a session, or a code graph that outlives the code it describes.
 
 The cost is real and worth stating: two MCP servers means two tool sets in every
 session's context. That argues for keeping the notes server's surface small —
-search, retrieve, create, link — rather than exposing everything iwe can do.
+and the benchmark says [smaller than four](#the-surface-two-tools): one read tool
+and one write tool. If omh
+[fronts both graphs](#why-omh-should-own-the-retrieval-surface) behind one
+proxy, the two-tool-set objection mostly dissolves, because the agent sees omh's
+surface rather than each server's.
 
 One consequence is useful rather than costly: **the code graph can check notes
 about code.** A note naming a symbol that no longer exists is detectably stale.
@@ -722,22 +992,56 @@ already watching.
 Hooks were the wrong layer for this. The code graph needs one only because
 `codebase-memory-mcp` indexes on command rather than on change.
 
-### The index rides in the staged `AGENTS.md`
+### The index rides in the tool description
 
-The agent has to know *what exists* before it can query anything, and
-`SessionStart` was how the design delivered that. Hookless harnesses need
-another carrier, and there already is one: **omh regenerates the staged rules
-file on every launch.** Putting the note index there makes it fresh at session
-start, in every harness, with no hook.
+Three things must not be confused, and an earlier version of this page ran them
+together:
 
-`AGENTS.md` already carries exactly this kind of content — its `## Code graph`
-section is routing, not instruction: *here is a tool, here is when to prefer it*.
-A `## What is in your notes` section is the same shape.
+| | where it lives | size | how the agent gets it |
+|---|---|---|---|
+| **the notes** | on disk, behind the server | unbounded | `recall(…)` — a tool call, any time, mid-task |
+| **that notes exist** | in context | bounded | a few lines |
+| **when to reach for them** | in context | 1–2 lines | tool description, plus one rule |
 
-It does mean the index is unconditionally in context rather than fetched. That
-is acceptable because the index is bounded by design — titles and one-liners —
-while the thing it replaces is unbounded. A generated index that grows with the
-graph is still a fixed cost per note, and a far smaller one than the note.
+**The agent has direct access.** Only the middle row is injected, and it is a
+pointer, never content — injecting content would rebuild the four-hundred-line
+`AGENTS.md` this feature exists to escape. The pointer exists solely for
+[the trigger problem](#the-hard-problem-retrieval-requires-knowing-to-retrieve):
+access with nothing prompting its use is the inert server the code graph already
+taught us about.
+
+This page previously put that pointer in the staged `AGENTS.md`, on the grounds
+that omh regenerates it every launch, so it is fresh everywhere with no hook.
+That works. **There is a better carrier**, and it falls out of
+[omh owning the server](#why-omh-should-own-the-retrieval-surface): an MCP server
+declares its tools — names *and descriptions* — when a session connects, so omh
+can generate the description per repo, at launch.
+
+> `recall(question)` — search this repo's accumulated notes. The store holds 31
+> notes: 9 credentials, 8 sandbox, 6 code graph, 8 other. Most exist because an
+> assumption turned out wrong. Query before assuming how something here works.
+
+That carries the index **and** the trigger in one string, in every harness, with
+no rules file involved — and it arrives attached to the call rather than
+competing with everything else in a document that
+[decays as context grows](#guards-beat-instructions-measured).
+
+Counts, not titles: the injected cost then stops growing with the graph and
+settles once the categories do.
+
+If this holds, **`AGENTS.md` needs nothing at all for retrieval**. It keeps only
+genuine imperatives — *record what surprised you*, *rename through the tool,
+never `mv`* — which are precisely the things no tool description can carry,
+because they apply when you are not calling the tool. The
+[instructions/knowledge boundary](#the-agentsmd-boundary) turns out to also be
+the boundary between the rules file and the tool surface.
+
+**Unverified, and it decides which carrier ships:** that each harness reads the
+description per session rather than caching it across launches. That is harness
+behaviour, so it is [`doctor`](../troubleshooting.md) territory rather than a
+unit test — the same class of claim as *"the harness reads this path"*, which
+this project has already been [burned by once](../accounts.md#mount-the-directory-never-the-token-file).
+The staged `AGENTS.md` remains the fallback if the check fails.
 
 ### Hooks stay, as an enhancement
 
