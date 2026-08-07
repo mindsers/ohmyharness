@@ -25,8 +25,9 @@ pub struct CredMount {
 
 pub const DEFAULT_ACCOUNT: &str = "default";
 
-/// Home inside the sandbox. Mirrors `container::GUEST_HOME`.
-pub const GUEST_HOME: &str = "/home/agent";
+/// Home inside the sandbox. Re-exported so callers here need not reach into
+/// `image`, but there is exactly one definition.
+pub use crate::image::GUEST_HOME;
 
 pub fn dir(paths: &Paths, harness: &str, account: &str) -> PathBuf {
     paths.creds(harness).join(account)

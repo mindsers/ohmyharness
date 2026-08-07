@@ -40,7 +40,7 @@ pub struct Mount {
 }
 
 /// Home directory *inside* the container. Adapters template `$HOME` against it.
-const GUEST_HOME: &str = "/home/agent";
+use crate::image::GUEST_HOME;
 
 /// Where profile layer `i`'s copy of `cap` is mounted inside the container.
 fn guest_layer(i: usize, cap: Capability) -> PathBuf {

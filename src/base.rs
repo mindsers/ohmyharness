@@ -219,6 +219,9 @@ impl Manifest {
 ///
 /// Mounted from a volume keyed by **repo**, not by harness, so the index
 /// survives a container rebuild and a switch from Claude Code to opencode.
+/// Const concatenation of a `&str` const is not available without a macro
+/// crate, so this repeats the home rather than deriving it — and
+/// `the_graph_cache_lives_under_the_agents_home` fails if the two drift.
 pub const GRAPH_CACHE: &str = "/home/agent/.cache/codebase-memory-mcp";
 
 pub const GRAPH_VERSION: &str = "0.9.0";

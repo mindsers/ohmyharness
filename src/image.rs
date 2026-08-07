@@ -7,6 +7,7 @@
 //! backend and an sbx kit becomes a two-line file rather than a port.
 
 use crate::adapter::Adapter;
+use crate::base::GRAPH_CACHE;
 use anyhow::Result;
 use std::path::Path;
 
@@ -33,6 +34,18 @@ pub fn tag_for(adapter: &Adapter) -> String {
     format!("omh/{}:{:x}", adapter.name, h.finish())
 }
 
+/// The agent's home inside the sandbox.
+///
+/// Defined here because this is where it is *established* — the Dockerfile's
+/// `usermod -d` below — and the same constant is interpolated into that
+/// Dockerfile, so the image and the code that mounts into it cannot disagree.
+///
+/// It used to be declared separately in `auth`, `container` and `doctor`, two
+/// of them carrying a comment saying they mirrored a third, plus a bare literal
+/// here and another inside `base::GRAPH_CACHE`. Consistent by copying, which is
+/// consistent until it isn't.
+pub const GUEST_HOME: &str = "/home/agent";
+
 pub fn base_dockerfile() -> String {
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
@@ -43,7 +56,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server socat \
  && rm -rf /var/lib/apt/lists/*
 
-RUN usermod -l agent -d /home/agent -m node \
+RUN usermod -l agent -d {GUEST_HOME} -m node \
  && groupmod -n agent node \
  && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent \
  && chmod 0440 /etc/sudoers.d/agent
@@ -51,7 +64,7 @@ RUN usermod -l agent -d /home/agent -m node \
 # Assert the sbx kit contract at build time rather than assuming it. If a future
 # base image moves UID 1000, this fails here instead of failing mysteriously
 # inside a sandbox.
-RUN test "$(id -u agent)" = "1000" && test "$(getent passwd agent | cut -d: -f6)" = "/home/agent"
+RUN test "$(id -u agent)" = "1000" && test "$(getent passwd agent | cut -d: -f6)" = "{GUEST_HOME}"
 
 # The base set lives here, not in a harness layer: a code graph is
 # harness-agnostic and every session should get the same one.
@@ -61,8 +74,8 @@ RUN __GRAPH_INSTALL__
 # Mount points the launcher expects to exist, owned by the unprivileged user.
 # The graph cache is a volume; the image only needs the directory to exist and
 # be owned by the agent, or docker creates it as root.
-RUN mkdir -p /work /omh/sock /omh/cache /omh/layers /home/agent/.cache/codebase-memory-mcp \
- && chown -R agent:agent /work /omh /home/agent/.cache
+RUN mkdir -p /work /omh/sock /omh/cache /omh/layers {GRAPH_CACHE} \
+ && chown -R agent:agent /work /omh {GUEST_HOME}/.cache
 
 # Session entrypoint: install the key, start sshd, then stay alive so the
 # container outlives the command that created it. The key arrives as an env var
@@ -114,10 +127,9 @@ pub fn harness_dockerfile(adapter: &Adapter) -> String {
 
 /// Parents of every mount target under the agent's home.
 ///
-/// `/home/agent` itself is excluded — the base image already owns it — and
+/// The home itself is excluded — the base image already owns it — and
 /// `/work` is a mount omh controls rather than one the image prepares.
 fn mount_parents(adapter: &Adapter) -> Vec<String> {
-    const HOME: &str = "/home/agent";
     let mut dirs: Vec<String> = adapter
         .capabilities
         .values()
@@ -125,14 +137,14 @@ fn mount_parents(adapter: &Adapter) -> Vec<String> {
         .chain(adapter.creds.iter().cloned())
         .chain(adapter.token.iter().cloned())
         .filter_map(|template| {
-            let path = crate::adapter::expand(template.trim_end_matches('/'), HOME);
+            let path = crate::adapter::expand(template.trim_end_matches('/'), GUEST_HOME);
             // `/work` is a mount omh owns; only the home side needs preparing.
-            if !path.starts_with(HOME) {
+            if !path.starts_with(GUEST_HOME) {
                 return None;
             }
             path.parent().map(|p| p.display().to_string())
         })
-        .filter(|d| d != HOME)
+        .filter(|d| d != GUEST_HOME)
         .collect();
     dirs.sort();
     dirs.dedup();
@@ -311,8 +323,69 @@ mod tests {
             "UID 1000: {df}"
         );
         assert!(df.contains("agent"), "agent user");
-        assert!(df.contains("/home/agent"), "home directory");
+        assert!(df.contains(GUEST_HOME), "home directory");
         assert!(df.contains("NOPASSWD"), "passwordless sudo");
+    }
+
+    /// The image is what *establishes* the home, and everything that mounts
+    /// into a session assumes it. Those were separate literals in four files —
+    /// consistent by copying, which holds until somebody changes one.
+    ///
+    /// The Dockerfile now interpolates the constant, so this asserts the build
+    /// really does create and verify that path rather than a similar-looking
+    /// one.
+    #[test]
+    fn the_image_creates_the_home_the_code_mounts_into() {
+        let df = base_dockerfile();
+        assert!(
+            df.contains(&format!("usermod -l agent -d {GUEST_HOME}")),
+            "the image must create the home the launcher mounts into:\n{df}"
+        );
+        assert!(
+            df.contains(&format!("cut -d: -f6)\" = \"{GUEST_HOME}\"")),
+            "and assert it at build time, not trust it:\n{df}"
+        );
+    }
+
+    /// `GRAPH_CACHE` repeats the home rather than deriving it, because const
+    /// concatenation of a `&str` const needs a macro crate. This is the guard
+    /// that makes the repetition safe.
+    #[test]
+    fn the_graph_cache_lives_under_the_agents_home() {
+        assert!(
+            GRAPH_CACHE.starts_with(&format!("{GUEST_HOME}/")),
+            "graph cache {GRAPH_CACHE} is not under {GUEST_HOME}"
+        );
+        assert!(
+            base_dockerfile().contains(GRAPH_CACHE),
+            "the image must create the cache directory, or docker makes it root-owned"
+        );
+    }
+
+    /// One definition, and no file quietly reintroducing its own.
+    #[test]
+    fn the_guest_home_is_defined_once() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut declarations = Vec::new();
+        for entry in std::fs::read_dir(&src).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "rs") {
+                let body = std::fs::read_to_string(&path).unwrap();
+                for line in body.lines() {
+                    let l = line.trim();
+                    let is_const = l.starts_with("const ") || l.starts_with("pub const ");
+                    if is_const && l.contains("= \"/home/agent\"") {
+                        declarations.push(format!("{}: {l}", path.display()));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            declarations.len(),
+            1,
+            "the agent's home should be declared once:\n  {}",
+            declarations.join("\n  ")
+        );
     }
 
     /// Everything a session needs regardless of harness. `dtach` in particular:
@@ -452,13 +525,13 @@ mod tests {
                 .chain(a.token.iter().cloned());
             for template in wanted {
                 let p = crate::adapter::expand(template.trim_end_matches('/'), "/home/agent");
-                if !p.starts_with("/home/agent") {
+                if !p.starts_with(GUEST_HOME) {
                     continue;
                 }
                 let Some(parent) = p.parent().map(|x| x.display().to_string()) else {
                     continue;
                 };
-                if parent == "/home/agent" {
+                if parent == GUEST_HOME {
                     continue; // the base image already owns the home itself
                 }
                 assert!(

@@ -14,8 +14,7 @@ use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::profile::Profile;
 use std::path::PathBuf;
 
-/// Home inside the sandbox. Mirrors `container::GUEST_HOME`.
-const GUEST_HOME: &str = "/home/agent";
+use crate::image::GUEST_HOME;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expect {
