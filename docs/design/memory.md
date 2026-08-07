@@ -193,17 +193,150 @@ maintenance, and whether it runs unattended in a container. Features were never
 what disqualified a candidate there, and are unlikely to be what disqualifies
 one here.
 
+## Layering
+
+The three layers map straight across:
+
+```
+~/.omh/notes/              personal — facts about you, every project
+<repo>/.omh/notes/         shared   — COMMITTED, your team sees these
+<repo>/.omh/local/notes/   local    — GITIGNORED, yours alone
+```
+
+But **notes do not merge the way the profile does**, and the difference is not
+cosmetic. `policy.toml` merges key by key with later layers winning, because a
+setting has one value. A note is a *claim*, and two claims about one topic are
+two facts, not one overriding the other.
+
+So **the layer is part of a note's identity**, not a precedence order:
+`team/deploy` and `local/deploy` are different notes and both are retrievable.
+Shadowing would silently hide a teammate's note behind yours — the reader would
+never learn the other existed.
+
+### The agent writes to `local`, and only there
+
+Same rule as `omh config set` defaulting to the gitignored layer, for a stronger
+reason. An unattended writer that can reach the committed layer pushes wrong
+facts to teammates **through git**, where they arrive with the authority of a
+reviewed change and nobody remembers approving them.
+
+Promotion is a human act — `omh memory promote <note> --to shared|personal`. That
+puts review at exactly the boundary where it matters and nowhere else: the
+proposed-not-written model, applied only where the blast radius leaves you.
+
+Personal is promotion-only for the same reason, inverted. A wrong personal fact
+poisons every repo you own, and a client's detail that should never have been
+global is worse than a global fact that should have been local.
+
+### Links may cross layers, in one direction
+
+A committed note may link **only to committed notes**. Anything else dangles for
+a teammate who does not have your local layer or your home directory — a
+reference to a note they can never open.
+
+Local and personal notes may link anywhere, because only you can follow them.
+
+That is a testable invariant, and belongs with the others in
+[contributing](../contributing.md): *a committed note links only to committed
+notes.*
+
+## Two graphs, not one
+
+Not because the schemas differ — though they do, one being symbols and calls and
+the other concepts — but because the **lifecycles are incompatible**.
+
+The code graph indexes *this session's worktree*, is refreshed after every turn,
+and is dropped with the session: `omh s rm` deletes it along with the code it
+described. Notes must **survive session removal**; that is what makes them
+memory. They are scoped to a repo and to you, never to a session.
+
+Merging them would force one of two bad outcomes: notes that die when you remove
+a session, or a code graph that outlives the code it describes.
+
+The cost is real and worth stating: two MCP servers means two tool sets in every
+session's context. That argues for keeping the notes server's surface small —
+search, retrieve, create, link — rather than exposing everything iwe can do.
+
+One consequence is useful rather than costly: **the code graph can check notes
+about code.** A note naming a symbol that no longer exists is detectably stale.
+See below.
+
+## The `AGENTS.md` boundary
+
+The test is not "is this a fact" but **"does the agent need it before it acts,
+with nothing to prompt a lookup?"**
+
+- *"Write the failing test first"* — **imperative**. Nothing prompts an agent to
+  ask whether it should test first; by the time a question could arise, the code
+  is written.
+- *"gitnexus was rejected for its licence"* — **fact**. A question reaches it.
+- *"test with `cargo test`"* — **fact, but carried anyway**. Needed most sessions,
+  and fetching costs a round trip every time. Frequency beats purity.
+
+### What this actually changes, which is not what it sounds like
+
+Today's shared `AGENTS.md` is **52 lines in four sections — and all four are
+imperatives or routing instructions**: prefer the graph for structural
+questions, the stack's commands, TDD always, honesty about coverage.
+
+There is almost nothing to move out.
+
+So the win is **not shrinking the file**. It is preventing the growth that
+happens when knowledge has nowhere else to go. Without a graph, every fact the
+agent learns gets appended here until it is four hundred lines and the middle is
+unread — which is precisely the failure this feature exists to avoid. The graph
+is where that growth goes instead.
+
+Stated as a rule: **`AGENTS.md` is a closed set of instructions, not an open
+ledger.** If it is growing, something belongs in the graph.
+
+## Expiry
+
+Start with the honest part: **there is no general solution.** A team convention
+that quietly changed cannot be detected by any mechanism available here. What
+can be done is to separate the staleness that *is* checkable from the staleness
+that is not, and to never present the second as certain.
+
+**Checkable — derived from a file.** A note records what it was derived from and
+that source's content hash. A note derived from `Cargo.toml` is suspect the
+moment `Cargo.toml` changes. Free, deterministic, and loud.
+
+**Checkable — derived from code.** A note naming a symbol the code graph no
+longer contains is stale. This is the payoff of running two graphs: one can
+validate the other's claims about the thing it indexes.
+
+**Not checkable — derived from experience.** *"The staging deploy needs the
+VPN"* has no source to watch. It carries a date, and that is all.
+
+### The invariant that decides whether this is trustworthy
+
+**A note is never retrieved without its date and its source.**
+
+This is the same discipline the base set already runs on: `measured 2026-08-06`
+appears on every cost because a number printed bare reads as a fact about right
+now. A six-month-old note is not necessarily wrong — but presenting it as
+equally current as one written today is the fabricated-authority pattern, and
+this project has already shipped that failure once, with seven invented dates
+that a test walked past because it only checked a date was *present*.
+
+If retrieval surfaces age and origin, the agent can weigh a note. If it does
+not, unattended writing becomes a machine for laundering guesses into facts.
+
+### Making deletion cheap
+
+Detection only matters if acting on it is trivial: `omh memory stale` lists
+notes whose source moved, whose symbol vanished, or that predate the current
+base-set version, and removing one is deleting one file. One idea per note is
+what buys that — a wrong paragraph inside a long document has no such affordance.
+
 ## Still open
 
-1. **Layering.** Does the [three-layer profile](../configuration.md#the-three-layers)
-   apply — personal notes, committed team notes, gitignored local notes — and can
-   a link cross layers? Unattended writing makes this sharper: a wrong note in a
-   committed layer reaches teammates.
-2. **One graph or two.** codegraph is code-shaped (symbols, calls, imports).
-   Notes are concept-shaped. Separate stores, or one?
-3. **Boundary.** Which of today's `AGENTS.md` is an imperative that stays, and
-   which is a fact that moves?
-4. **Expiry.** How does a note stop being true, and what notices?
+- **Ingestion cadence.** `docs/` becomes notes at `init` — but what re-ingests
+  when a doc changes? A hook on write, or a pass at session start?
+- **Note identity.** Filename, frontmatter `id`, or title? It has to survive a
+  rename, or every link breaks the first time the agent tidies up.
+- **Conflict.** Two notes making opposite claims is the failure unattended
+  writing produces most naturally. Nothing above detects it.
 
 ## An alternative worth considering
 
