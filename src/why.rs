@@ -181,6 +181,19 @@ fn alternatives(entry: &Entry, out: &mut String) {
     }
 }
 
+/// Every answer names the manifest that produced it.
+///
+/// Four separate wrong answers — a stray file becoming the base set, omh
+/// disowning its own entries after an upgrade, an untouched hook read as an
+/// edit, a permissions error read as "not installed" — were all invisible for
+/// the same reason: nothing said which manifest, at which version, answered.
+/// One line turns each of them from a confident wrong answer into a visible one.
+pub fn render_with_source(verdict: &Verdict, source: &str) -> String {
+    let mut out = render(verdict);
+    out.push_str(&format!("\n  answered from {source}\n"));
+    out
+}
+
 pub fn render(verdict: &Verdict) -> String {
     let mut out = String::new();
     match verdict {
@@ -540,6 +553,25 @@ why = "w"
         let out = render(&c.why("codegraph"));
         assert!(out.contains("codebase-memory-mcp"), "{out}");
         assert!(out.contains("my-fork"), "{out}");
+    }
+
+    /// The line that converts four silent wrong answers into visible ones. A
+    /// stray manifest, a post-upgrade drift, an unreadable layer — each of them
+    /// produces a confident answer, and the only way a reader can tell is by
+    /// seeing which manifest was consulted.
+    #[test]
+    fn every_answer_names_the_manifest_that_produced_it() {
+        let m = manifest();
+        let c = catalog(
+            &m,
+            vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
+        );
+        let out = render_with_source(
+            &c.why("codegraph"),
+            "/home/x/.omh/base/2026.08.toml · 2026.08",
+        );
+        assert!(out.contains("answered from"), "{out}");
+        assert!(out.contains("2026.08.toml"), "{out}");
     }
 
     #[test]

@@ -1028,13 +1028,14 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
         derived.insert(format!("{}-format", s.name), from);
     }
 
+    let source = manifest.source();
     let catalog = why::Catalog {
         manifest: &manifest,
         baselines,
         installed,
         derived,
     };
-    print!("{}", why::render(&catalog.why(thing)));
+    print!("{}", why::render_with_source(&catalog.why(thing), &source));
     Ok(())
 }
 

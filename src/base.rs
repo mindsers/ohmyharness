@@ -17,7 +17,7 @@ use crate::render::Server;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The base set as data.
 ///
@@ -37,6 +37,10 @@ pub struct Manifest {
     /// re-litigated every time somebody rediscovers it.
     #[serde(default)]
     pub rejected: Vec<Rejected>,
+    /// Where this was loaded from. Not part of the file — set by `load_dir`, so
+    /// every answer can name the manifest that produced it.
+    #[serde(skip)]
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,26 +112,67 @@ pub struct Rejected {
 }
 
 impl Manifest {
-    /// Load the newest manifest in `dir`.
+    /// Load the newest manifest in `dir`, newest by **parsed version**.
     ///
-    /// Newest by filename, since versions are `YYYY.MM`. Older ones are kept
-    /// rather than deleted so `omh upgrade` can eventually diff two of them and
-    /// say what entered, what left, and why.
+    /// Not by filename sort. That was three silent wrong answers at once: any
+    /// stray `.toml` sorting after the real one became the base set, `2027.2`
+    /// beat `2027.10`, and nothing checked a file's declared `version` at all.
+    /// One stray file made `omh init` seed `{}` and report success, and made
+    /// `omh why` call omh's own entries the user's.
+    ///
+    /// Older manifests are kept rather than deleted, so `omh upgrade` can
+    /// eventually diff two and say what entered, what left, and why.
     pub fn load_dir(dir: &Path) -> Result<Self> {
-        let mut files: Vec<_> = std::fs::read_dir(dir)
+        let mut newest: Option<((u32, u32), PathBuf, Self)> = None;
+
+        for entry in std::fs::read_dir(dir)
             .with_context(|| format!("reading {}", dir.display()))?
             .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
-            .collect();
-        files.sort();
+        {
+            let path = entry.path();
+            if !path.extension().is_some_and(|x| x == "toml") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            let manifest: Self =
+                toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
 
-        let path = files
-            .last()
-            .with_context(|| format!("no base manifest in {} — run `omh init`", dir.display()))?;
-        let raw =
-            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+            // A file whose declared version is unreadable is not a candidate.
+            // Accepting one on filename alone is what let `zz-notes.toml` win.
+            let Some(version) = parse_ym(&manifest.version) else {
+                continue;
+            };
+            if newest.as_ref().is_none_or(|(best, _, _)| version > *best) {
+                newest = Some((version, path, manifest));
+            }
+        }
+
+        let (_, path, mut manifest) = newest.with_context(|| {
+            format!(
+                "no usable base manifest in {} — run `omh init`",
+                dir.display()
+            )
+        })?;
+
+        // A manifest that parses but names nothing seeds an empty base set and
+        // reports success, leaving every session running hooks that point at a
+        // server which is not installed. Fail here rather than there.
+        if manifest.entries.is_empty() {
+            anyhow::bail!("{} declares no base-set entries", path.display());
+        }
+        manifest.path = Some(path);
+        Ok(manifest)
+    }
+
+    /// Which manifest answered, and at what version.
+    ///
+    /// Four separate wrong answers reduced to `omh why` never saying this.
+    pub fn source(&self) -> String {
+        match &self.path {
+            Some(p) => format!("{} · {}", p.display(), self.version),
+            None => format!("(unsaved) · {}", self.version),
+        }
     }
 
     /// The MCP servers `omh init` seeds, built from the manifest.
@@ -595,6 +640,82 @@ mod tests {
             "the manifest claims {declared} B; the nudge it ships is {actual} B for project \
              `{project}`. Re-measure rather than adjusting the string to fit."
         );
+    }
+
+    // ── load_dir ────────────────────────────────────────────────────────────
+    //
+    // This had no tests, which is how it shipped three ways to silently choose
+    // the wrong base set. All of them were found by running the binary in a
+    // scratch HOME, none by reading it.
+
+    fn manifest_dir(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in files {
+            std::fs::write(dir.path().join(name), body).unwrap();
+        }
+        dir
+    }
+
+    const ONE_ENTRY: &str = r#"
+[[entry]]
+name = "codegraph"
+kind = "mcp"
+since = "2026.06"
+because = "b"
+remove = "r"
+command = "c"
+"#;
+
+    /// A stray `.toml` sorting after the real manifest used to *become* the
+    /// base set: `init` seeded `{}` and reported success, and `omh why` called
+    /// omh's own entries the user's.
+    #[test]
+    fn a_stray_toml_cannot_become_the_base_set() {
+        let dir = manifest_dir(&[
+            ("2026.08.toml", &format!("version = \"2026.08\"{ONE_ENTRY}")),
+            ("zz-notes.toml", "version = \"notes\"\n"),
+        ]);
+        let m = Manifest::load_dir(dir.path()).unwrap();
+        assert_eq!(m.version, "2026.08");
+        assert_eq!(m.servers().len(), 1, "the real manifest must win");
+    }
+
+    /// Filename sort made `2027.2` beat `2027.10`, silently serving an older
+    /// base set. Zero-padding was load-bearing and unenforced.
+    #[test]
+    fn versions_are_compared_numerically_not_lexicographically() {
+        let dir = manifest_dir(&[
+            ("z.toml", &format!("version = \"2027.2\"{ONE_ENTRY}")),
+            ("a.toml", &format!("version = \"2027.10\"{ONE_ENTRY}")),
+        ]);
+        assert_eq!(Manifest::load_dir(dir.path()).unwrap().version, "2027.10");
+    }
+
+    /// The failure `the_document_init_seeds_actually_contains_the_base_set`
+    /// describes, arriving through the runtime path that test cannot see: a
+    /// manifest that parses but names nothing seeds an empty base set while
+    /// hooks still point at a server that is not installed.
+    #[test]
+    fn a_manifest_naming_nothing_is_an_error_not_an_empty_base_set() {
+        let dir = manifest_dir(&[("2026.08.toml", "version = \"2026.08\"\n")]);
+        let err = Manifest::load_dir(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("no base-set entries"), "got: {err}");
+    }
+
+    #[test]
+    fn an_empty_directory_says_what_to_do() {
+        let dir = manifest_dir(&[]);
+        let err = Manifest::load_dir(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("omh init"), "got: {err}");
+    }
+
+    /// Every answer has to be able to name the manifest that produced it.
+    #[test]
+    fn a_loaded_manifest_knows_where_it_came_from() {
+        let dir = manifest_dir(&[("2026.08.toml", &format!("version = \"2026.08\"{ONE_ENTRY}"))]);
+        let source = Manifest::load_dir(dir.path()).unwrap().source();
+        assert!(source.contains("2026.08.toml"), "got: {source}");
+        assert!(source.contains("2026.08"), "got: {source}");
     }
 
     /// A rejection is a product artifact. Without one recorded, the same
