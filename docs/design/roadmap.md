@@ -25,8 +25,19 @@ and the [credential weakness](risks.md#security) stays unaddressed.
 
 ## v1 — accountability
 
-[`omh why`](trust.md) and cost accounting: what each base-set entry injects,
-measured in bytes, deterministically and without an LLM in the loop.
+✅ [`omh why`](trust.md) · ⬜ cost accounting
+
+`why` ships: every base-set entry answers who installed it, what it costs, what
+was considered instead and how to remove it — and the four fields are enforced
+by a test rather than by convention, so an entry cannot be added without its
+reasoning. The base set moved out of the binary into a versioned manifest to
+make that possible; `init` seeds from it and `why` explains from it.
+
+What remains is the rollup: what the **whole** set injects, measured in bytes,
+deterministically and without an LLM in the loop. Per-entry costs are recorded
+in the manifest today, and one of them — the grep nudge — is computed by a test
+rather than typed, which is the shape the rest should take. The ones needing a
+live MCP connection are `doctor` territory rather than a pure function.
 
 This is deliberately *not* a benchmark. The reasoning is in
 [measure the cost, argue the benefit](trust.md#measure-the-cost-argue-the-benefit)

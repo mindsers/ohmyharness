@@ -109,6 +109,35 @@ Worktree registration and the directory on disk disagreed. omh prunes before
 adding and falls back to removing the directory outright; if you hit this,
 `git worktree prune` in the main checkout clears it.
 
+### `no usable base manifest` or `declares no base-set entries`
+
+omh could not find a readable [base set](design/base-set.md) in `~/.omh/base`,
+or the newest one names nothing. `omh init` reinstalls it.
+
+This is deliberately loud. It used to be silent: a stray `.toml` in that
+directory became the base set, `init` seeded no MCP servers and reported success
+anyway, and every session came up running hooks that pointed at a server which
+was not installed.
+
+### `has no command string — it is not a usable hook`
+
+A file in a `hooks/` directory is not valid: truncated, half-written, or edited
+with the wrong key. The message names it.
+
+Also loud on purpose. An unreadable hook used to be reported as *"modified by
+you"* with a blank value — a false accusation from the one command whose job is
+telling authorship straight.
+
+### `omh why` says something is not installed when it is
+
+Check the message for a path. A layer that cannot be **read** — wrong
+permissions, a broken symlink — is now an error naming the file rather than an
+empty layer.
+
+If you hit the old behaviour on an older build, the tell is that `omh init`
+appears to do nothing: it uses `write_if_absent`, sees the file exists, and
+leaves it alone, so the advice and the problem never meet.
+
 ### Sessions are piling up
 
 ```console

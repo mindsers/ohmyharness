@@ -38,11 +38,18 @@ omh init — decided, asked nothing
   image      omh/claude:a1240cb9 (built)
   graph      indexing in background → omh-cache-your-project
 
-  base set
+  base set  (2026.08)
     codegraph  structural queries instead of re-grepping the repo every task
 
+  omh why <name>  what it costs, what was considered instead, how to remove it
+
+not yet done: memory store, cost accounting.
 next: omh claude
 ```
+
+The base set is [a versioned file](design/base-set.md), not something buried in
+the binary — `init` seeds from it and `omh why` explains from it, which is why
+they cannot disagree about what you just got.
 
 `init` **decides and reports — it never asks.** Every question is hassle omh
 promised to remove, so the bar for asking one is high enough that nothing has

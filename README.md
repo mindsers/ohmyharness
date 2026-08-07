@@ -9,7 +9,7 @@ $ omh attach       # open that same session in your editor
 $ omh graph        # browse your codebase as a graph
 ```
 
-**Status: early.** v0, one harness verified end to end, 315 tests. Useful today
+**Status: early.** v0, one harness verified end to end, 355 tests. Useful today
 if you want a sandboxed agent with your config in it; not yet the finished
 distribution described in [the docs](docs/). See
 [What isn't done](#what-isnt-done) — it is a real list, not a modesty ritual.
@@ -83,9 +83,12 @@ omh init — decided, asked nothing
   image      omh/claude:a1240cb9 (built)
   graph      indexing in background → omh-cache-your-project
 
-  base set
+  base set  (2026.08)
     codegraph  structural queries instead of re-grepping the repo every task
 
+  omh why <name>  what it costs, what was considered instead, how to remove it
+
+not yet done: memory store, cost accounting.
 next: omh claude
 ```
 
@@ -175,6 +178,39 @@ mcp:
 
 Writes default to the **gitignored** layer, so a mistyped API key can't be
 committed by accident. Writing to the committed one says so out loud.
+
+### The base set is data too, and it has to justify itself
+
+omh's opinion lives in a versioned file, not in the binary — `init` seeds from
+it and `omh why` explains from it, so the two can't disagree about what is
+installed or why:
+
+```console
+$ omh why codegraph
+codegraph — omh's choice, in the base set since 2026.06
+
+  because     structural queries instead of re-grepping the repo every task
+  costs       0.46s to index this repo, cold   measured 2026-08-06
+              index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
+  instead of  gitnexus            PolyForm-Noncommercial licence
+  remove      omh config mcp rm codegraph
+
+  answered from ~/.omh/base/2026.08.toml · 2026.08
+```
+
+**Cost is measured; benefit is argued.** Those are different kinds of claim and
+the output never blurs them — every number carries the date it was taken and the
+method, while `because` is a judgement you're free to reject.
+
+The four fields aren't a convention, they're a **test**: an entry that can't say
+what it costs, what it buys, what was considered instead and how to remove it
+fails the build. And `omh why` answers for things omh *rejected* too, so a
+candidate turned down over its licence doesn't get re-litigated every time
+someone rediscovers it.
+
+Ask about something you added and omh offers no rationale at all — it doesn't
+have one, and telling that apart from its own choices is the entire point. See
+[Commands](docs/commands.md#omh-why-thing).
 
 ### Adapters are data
 
@@ -283,7 +319,7 @@ whether anything reads it. That gap is what `doctor` closes.
 |---|---|
 | **Memory** | [designed](docs/design/memory.md), not built. Layered like the profile: personal facts, project facts. |
 | **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
-| **`omh why` / `omh eject`** | provenance extended to *why*, and a credible exit. |
+| **`omh eject`** | a credible exit: write out the raw per-harness config and step aside. |
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |
 | **Egress allowlist** | designed, not wired. |
 | **Second harness** | `opencode` passes `doctor`, but only `claude` has been driven for real work. |
@@ -299,7 +335,7 @@ See [`docs/contributing.md`](docs/contributing.md) for the full rules and the
 invariant list.
 
 ```console
-$ cargo test            # 315 tests
+$ cargo test            # 355 tests
 $ ./scripts/smoke.sh    # end-to-end walkthrough in a throwaway repo
 $ omh doctor            # the only thing that verifies an adapter
 ```

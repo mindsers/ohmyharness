@@ -48,6 +48,10 @@ omh config mcp add … → the archive is still there, one command away,
 **If an eighth entry needs a paragraph to justify, it belongs in a profile, not
 the base set.**
 
+The set lives in a versioned manifest rather than in the binary, and the
+justification is enforced by a test rather than by convention — see
+[the base set](base-set.md).
+
 The base set is also the part of omh with the least evidence behind it. See
 [the honest weak spot](distribution.md#the-honest-weak-spot).
 

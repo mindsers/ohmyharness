@@ -64,3 +64,12 @@ project, and it is not a technical one.
   keeping empty branches was not.
 - **Only `claude` has been driven for real work.** `opencode` passes `doctor`,
   which proves its paths and nothing about its behaviour.
+- **A seeded profile and the shipped base set drift by design.** `init` copies
+  the [base set](base-set.md) into your profile once and never rewrites it, so
+  your edits survive — but an upgrade moves the manifest and not your copy.
+  `omh why` reports the difference and deliberately does **not** say who caused
+  it, because it cannot tell an edit from an upgrade. Recording the version a
+  profile was seeded from would close this; nothing does yet.
+- **`omh why` answers about one repo's profile.** It reads the layers resolved
+  for the current repo, so the same entry can legitimately answer differently in
+  two checkouts. That is correct and occasionally surprising.

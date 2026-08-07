@@ -35,6 +35,7 @@ change — most of them record something that was tried and cost something.
 |---|---|
 | [Why a distribution](design/distribution.md) | the thesis, why not an app store, who else is in this space |
 | [Decisions](design/decisions.md) | every load-bearing choice with its reasoning |
+| [The base set](design/base-set.md) | omh's opinion as a versioned data file, and the test that makes an entry earn its place |
 | [Architecture](design/architecture.md) | images, runtime backends, on-disk layout |
 | [Adapters](design/adapters.md) | harnesses and editors as data, and how to add one |
 | [Memory](design/memory.md) | *designed, not built* — why memory is layered |
