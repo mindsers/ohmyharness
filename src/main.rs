@@ -1042,13 +1042,17 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
     }
 
     let source = manifest.source();
+    let version = manifest.version.clone();
     let catalog = why::Catalog {
         manifest: &manifest,
         baselines,
         installed,
         derived,
     };
-    print!("{}", why::render_with_source(&catalog.why(thing), &source));
+    print!(
+        "{}",
+        why::render_with_source(&catalog.why(thing), &version, &source)
+    );
     Ok(())
 }
 

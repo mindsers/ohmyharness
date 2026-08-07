@@ -145,20 +145,30 @@ impl<'a> Catalog<'a> {
     }
 }
 
-/// A measurement taken before the entry's own version describes an older thing.
-/// Still worth printing — it is the only number there is — but not worth
-/// presenting as current.
-fn is_stale(measured_on: &str, since: &str) -> bool {
+/// Whether a measurement predates the base set it is shipped in.
+///
+/// Compared against the **manifest version**, not the entry's `since`. Against
+/// `since` this could essentially never fire: a measurement is taken at or
+/// after the entry was added, and `since` never moves, so no shipped number was
+/// flaggable in 2027 or 2035. The proof it was inert is in this repo's history
+/// — a byte count went wrong within a day of being written and staleness said
+/// nothing, because it was structurally incapable of saying anything.
+///
+/// The manifest version moves every time the base set is re-cut, which is
+/// exactly when measurements should be re-taken or re-affirmed.
+fn is_stale(measured_on: &str, manifest_version: &str) -> bool {
     use crate::base::parse_ym as ym;
-    match (ym(measured_on), ym(since)) {
+    match (ym(measured_on), ym(manifest_version)) {
         // Unparseable dates are not evidence of staleness. Saying nothing beats
-        // labelling a good measurement stale because a format changed.
-        (Some(on), Some(since)) => on < since,
+        // labelling a good measurement stale because a format changed — and the
+        // curation test rejects an unreadable date at load, so this arm is a
+        // fallback rather than the guard.
+        (Some(on), Some(version)) => on < version,
         _ => false,
     }
 }
 
-fn costs(entry: &Entry, out: &mut String) {
+fn costs(entry: &Entry, version: &str, out: &mut String) {
     // Pad the value and its subject as one unit. Padding only the subject makes
     // the `measured` column wander, which reads as sloppiness in the exact place
     // the output is asking to be trusted.
@@ -171,7 +181,7 @@ fn costs(entry: &Entry, out: &mut String) {
 
     let mut label = "costs";
     for (m, claim) in entry.measured.iter().zip(&claims) {
-        let stale = if is_stale(&m.on, &entry.since) {
+        let stale = if is_stale(&m.on, version) {
             "  (stale)"
         } else {
             ""
@@ -183,15 +193,20 @@ fn costs(entry: &Entry, out: &mut String) {
             "  {label:<11} {claim:<width$}   measured {}{stale}\n",
             m.on
         ));
+        // How it was taken, always — not only when stale, as before. On a
+        // command whose thesis is that cost is measured and benefit argued,
+        // hiding the method on the happy path leaves the reader with a bare
+        // number and no way to check it, which is the shape of the claim this
+        // command was built to replace.
+        out.push_str(&format!("  {:<11} {}\n", "", m.how));
         label = "";
     }
-    for m in &entry.measured {
-        if is_stale(&m.on, &entry.since) {
-            out.push_str(&format!(
-                "              taken before {} — {}\n",
-                entry.since, m.how
-            ));
-        }
+    // `how` now prints on every line, so a stale measurement needs only to say
+    // that the base set has been re-cut since it was taken.
+    if entry.measured.iter().any(|m| is_stale(&m.on, version)) {
+        out.push_str(&format!(
+            "              (stale: taken before base set {version} — re-measure or re-affirm)\n"
+        ));
     }
 }
 
@@ -216,13 +231,13 @@ fn alternatives(entry: &Entry, out: &mut String) {
 /// edit, a permissions error read as "not installed" — were all invisible for
 /// the same reason: nothing said which manifest, at which version, answered.
 /// One line turns each of them from a confident wrong answer into a visible one.
-pub fn render_with_source(verdict: &Verdict, source: &str) -> String {
-    let mut out = render(verdict);
+pub fn render_with_source(verdict: &Verdict, version: &str, source: &str) -> String {
+    let mut out = render(verdict, version);
     out.push_str(&format!("\n  answered from {source}\n"));
     out
 }
 
-pub fn render(verdict: &Verdict) -> String {
+pub fn render(verdict: &Verdict, version: &str) -> String {
     let mut out = String::new();
     match verdict {
         Verdict::Omh { entry, yours } => {
@@ -231,7 +246,7 @@ pub fn render(verdict: &Verdict) -> String {
                 entry.name, entry.since
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
-            costs(entry, &mut out);
+            costs(entry, version, &mut out);
             alternatives(entry, &mut out);
             out.push_str(&format!("  {:<11} {}\n", "installed", yours.layer));
             out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
@@ -251,7 +266,7 @@ pub fn render(verdict: &Verdict) -> String {
                 "on disk", yours.value, yours.layer
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
-            costs(entry, &mut out);
+            costs(entry, version, &mut out);
             out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
             // Which of the two it is, omh does not know — so it says so rather
             // than picking the flattering guess or the accusing one.
@@ -266,7 +281,7 @@ pub fn render(verdict: &Verdict) -> String {
                 entry.name
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
-            costs(entry, &mut out);
+            costs(entry, version, &mut out);
             alternatives(entry, &mut out);
             out.push_str(&format!("  {:<11} omh init\n", "restore"));
         }
@@ -455,7 +470,7 @@ mod tests {
             &m,
             vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
         );
-        let out = render(&c.why("codegraph"));
+        let out = render(&c.why("codegraph"), "2026.08");
 
         assert!(out.contains("omh's choice"), "{out}");
         assert!(
@@ -480,7 +495,7 @@ mod tests {
     fn every_measured_cost_carries_the_date_it_was_taken() {
         let m = manifest();
         for entry in &m.entries {
-            let out = render(&Verdict::Removed { entry });
+            let out = render(&Verdict::Removed { entry }, "2026.08");
             for measured in &entry.measured {
                 let line = out
                     .lines()
@@ -521,13 +536,88 @@ why = "w"
 "#,
         )
         .unwrap();
-        let out = render(&Verdict::Removed {
-            entry: &m.entries[0],
-        });
+        // Measured in 2026-01, shipped in a base set cut in 2026.08: the number
+        // predates the version it is being presented as evidence for.
+        let out = render(
+            &Verdict::Removed {
+                entry: &m.entries[0],
+            },
+            "2026.08",
+        );
         assert!(
             out.contains("stale"),
             "an outdated measurement must say so:\n{out}"
         );
+
+        // The same measurement, in the base set it was actually taken for, is
+        // not stale. Without this the check could be `=> true` and stay green —
+        // which it was, and did.
+        let fresh = render(
+            &Verdict::Removed {
+                entry: &m.entries[0],
+            },
+            "2026.01",
+        );
+        assert!(
+            !fresh.contains("stale"),
+            "a current measurement must not be flagged:\n{fresh}"
+        );
+    }
+
+    /// Staleness used to compare against the entry's own `since`, which never
+    /// moves — so no shipped measurement could ever be flagged, in 2027 or in
+    /// 2035. The proof it was inert is in this repo: a byte count went wrong
+    /// within a day of being written and this said nothing.
+    ///
+    /// Against the manifest version it fires exactly when the base set is
+    /// re-cut, which is when numbers should be re-taken or re-affirmed.
+    #[test]
+    fn staleness_is_measured_against_the_base_set_not_the_entrys_own_age() {
+        let m = manifest();
+        let entry = m.entry("codegraph").unwrap();
+
+        let current = render(&Verdict::Removed { entry }, &m.version);
+        assert!(
+            !current.contains("stale"),
+            "shipped numbers are current:\n{current}"
+        );
+
+        // A later cut of the base set, with the same measurements carried over.
+        let later = render(&Verdict::Removed { entry }, "2027.01");
+
+        // Assert the marker on the cost line itself, not merely the word
+        // "stale" somewhere in the output. There are two call sites — the
+        // per-measurement marker and the trailing summary — and a bare
+        // `contains` is satisfied by either, so it cannot tell which one is
+        // wired to the wrong comparison. Mutating one call site left this test
+        // green until the assertion was tightened.
+        let first = entry.measured.first().expect("codegraph has measurements");
+        let cost_line = later
+            .lines()
+            .find(|l| l.contains(&first.value) && l.contains("measured"))
+            .unwrap_or_else(|| panic!("no cost line in:\n{later}"));
+        assert!(
+            cost_line.contains("(stale)"),
+            "re-cutting the base set must flag every carried-over number:\n{cost_line}"
+        );
+    }
+
+    /// `how` is the entire evidence for a number. It used to print only when a
+    /// measurement was stale — which, given the bug above, meant never. A bare
+    /// figure with no method is the shape of claim this command replaced.
+    #[test]
+    fn the_method_is_shown_for_every_cost_not_only_stale_ones() {
+        let m = manifest();
+        let entry = m.entry("codegraph").unwrap();
+        let out = render(&Verdict::Removed { entry }, &m.version);
+
+        for measured in &entry.measured {
+            assert!(
+                out.contains(&measured.how),
+                "cost `{}` printed without how it was taken:\n{out}",
+                measured.value
+            );
+        }
     }
 
     /// `init` generates `<stack>-test` and `<stack>-format` hooks from what it
@@ -590,7 +680,7 @@ why = "w"
             other => panic!("expected Derived, got {other:?}"),
         }
 
-        let out = render(&c.why("rust-format"));
+        let out = render(&c.why("rust-format"), "2026.08");
         assert!(!out.contains("base set"), "claims it is curated:\n{out}");
         assert!(
             !out.contains("your choice"),
@@ -608,7 +698,7 @@ why = "w"
     fn your_own_choice_never_borrows_omhs_authority() {
         let m = manifest();
         let c = catalog(&m, vec![setting("linear", "npx", Layer::Local)]);
-        let out = render(&c.why("linear"));
+        let out = render(&c.why("linear"), "2026.08");
 
         assert!(out.contains("your choice"), "{out}");
         assert!(!out.contains("base set"), "claims omh installed it:\n{out}");
@@ -629,7 +719,7 @@ why = "w"
     fn a_differing_entry_pairs_each_value_with_its_own_label() {
         let m = manifest();
         let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
-        let out = render(&c.why("codegraph"));
+        let out = render(&c.why("codegraph"), "2026.08");
 
         let line = |label: &str| {
             out.lines()
@@ -650,7 +740,7 @@ why = "w"
     fn a_difference_never_claims_who_caused_it() {
         let m = manifest();
         let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
-        let out = render(&c.why("codegraph"));
+        let out = render(&c.why("codegraph"), "2026.08");
         assert!(
             !out.contains("modified by you") && !out.contains("you set"),
             "omh does not know who changed it:\n{out}"
@@ -671,17 +761,54 @@ why = "w"
         );
         let out = render_with_source(
             &c.why("codegraph"),
+            "2026.08",
             "/home/x/.omh/base/2026.08.toml · 2026.08",
         );
         assert!(out.contains("answered from"), "{out}");
         assert!(out.contains("2026.08.toml"), "{out}");
     }
 
+    /// The whole `Rejected` arm could be emptied and the suite stayed green —
+    /// and it carries the highest-consequence string the command emits. The
+    /// gitnexus entry is a *licence* warning: a user who installs it at work is
+    /// in violation of a dependency they never chose.
+    #[test]
+    fn a_rejection_prints_its_reasoning_and_when_it_was_considered() {
+        let m = manifest();
+        let c = catalog(&m, vec![]);
+        let out = render(&c.why("gitnexus"), &m.version);
+
+        let r = m.rejection("gitnexus").unwrap();
+        assert!(
+            out.contains(&r.because),
+            "the reasoning is the whole point:\n{out}"
+        );
+        assert!(
+            out.contains(&r.considered),
+            "when it was considered:\n{out}"
+        );
+        assert!(
+            out.contains("Noncommercial"),
+            "the licence problem must survive:\n{out}"
+        );
+    }
+
+    /// "A default nobody can leave is a cage" is enforced for `Omh` and was not
+    /// for `Removed` — its way back could be deleted green.
+    #[test]
+    fn a_removed_entry_says_how_to_get_it_back() {
+        let m = manifest();
+        let c = catalog(&m, vec![]);
+        let out = render(&c.why("codegraph"), &m.version);
+        assert!(out.contains("not installed here"), "{out}");
+        assert!(out.contains("omh init"), "no way back:\n{out}");
+    }
+
     #[test]
     fn an_unknown_name_prints_the_alternatives_it_does_know() {
         let m = manifest();
         let c = catalog(&m, vec![]);
-        let out = render(&c.why("lienar"));
+        let out = render(&c.why("lienar"), "2026.08");
         assert!(out.contains("codegraph"), "{out}");
         assert!(!out.contains("omh's choice"), "guessed at a match:\n{out}");
     }
