@@ -127,8 +127,12 @@ impl Profile {
             .collect()
     }
 
-    /// Capabilities the profile actually carries — used to report what an
-    /// adapter had to drop.
+    /// Capabilities the profile actually carries.
+    ///
+    /// Not currently called outside tests: the launcher reports dropped
+    /// capabilities from the adapter side instead. Kept because it is the
+    /// profile-side half of that answer and `omh eject` will need it.
+    #[allow(dead_code)]
     pub fn declared(&self) -> Vec<Capability> {
         Capability::ALL
             .into_iter()

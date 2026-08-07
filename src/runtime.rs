@@ -24,6 +24,9 @@ pub struct Caps {
 }
 
 pub trait Runtime: std::fmt::Debug {
+    /// Backend identity, for error messages that name which runtime refused a
+    /// plan. Implemented by both backends and unused until `sbx` is selectable.
+    #[allow(dead_code)]
     fn name(&self) -> &'static str;
     /// Executable to invoke.
     fn program(&self) -> &'static str;
@@ -42,6 +45,10 @@ pub trait Runtime: std::fmt::Debug {
     /// A process started by a `docker exec` we spawn and abandon dies with the
     /// client — verified: the backgrounded server survived and the foreground
     /// bridge did not.
+    /// Detached exec into a running session. Both backends implement it and
+    /// the launcher does not yet call it — harnesses go through `dtach`, which
+    /// owns detachment today.
+    #[allow(dead_code)]
     fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String>;
 }
 

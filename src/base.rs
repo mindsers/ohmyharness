@@ -375,6 +375,10 @@ const GREP_NUDGE: [&str; 3] = [
 
 /// What the nudge actually injects, for a given project name. This is the thing
 /// the cost in the manifest is a claim about.
+/// Test-only: the hook builds its jq expression from `GREP_NUDGE` directly,
+/// since `$p` is interpolated by jq at run time rather than by Rust. This is
+/// the same string in the form a test can measure.
+#[cfg(test)]
 pub fn grep_nudge(project: &str) -> String {
     format!(
         "{}{project}{}{project}{}",
