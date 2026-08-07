@@ -1021,11 +1021,24 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
     // Hooks init generates from stack detection are omh's writing but not omh's
     // opinion. Reported as neither the base set nor yours, because claiming
     // either would be false in a way this command exists to prevent.
+    //
+    // The command and layer travel with the name, so the claim is checkable:
+    // init writes these only into the shared layer, and only with the command
+    // detection produced. A name match alone proved nothing — anyone can write
+    // a file called `rust-test.json`.
     let mut derived = std::collections::BTreeMap::new();
     for s in detect::stacks(&paths.repo) {
         let from = format!("{}, detected from {}", s.name, s.marker);
-        derived.insert(format!("{}-test", s.name), from.clone());
-        derived.insert(format!("{}-format", s.name), from);
+        for (suffix, command) in [("test", s.test), ("format", s.format)] {
+            derived.insert(
+                format!("{}-{suffix}", s.name),
+                why::Derived {
+                    from: from.clone(),
+                    command: command.to_string(),
+                    layer: config::Layer::Shared,
+                },
+            );
+        }
     }
 
     let source = manifest.source();

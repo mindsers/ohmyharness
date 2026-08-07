@@ -18,7 +18,7 @@
 //! about: that they are running a modified default.
 
 use crate::base::{Entry, Manifest, Rejected};
-use crate::config::Setting;
+use crate::config::{Layer, Setting};
 use std::collections::BTreeMap;
 
 /// What omh knows, assembled from the manifest and the resolved profile.
@@ -30,10 +30,24 @@ pub struct Catalog<'a> {
     pub baselines: BTreeMap<String, String>,
     /// What is actually installed, with the layer it won in.
     pub installed: Vec<Setting>,
-    /// Name → what it was derived from. `init` writes `<stack>-test` and
-    /// `<stack>-format` hooks out of what it detected in your repo: omh's
+    /// Name → what `init` would have written for a detected stack: omh's
     /// writing, but not omh's opinion.
-    pub derived: BTreeMap<String, String>,
+    ///
+    /// Carries the command and layer, not just a label, because the name alone
+    /// proves nothing — anyone can create `rust-test.json`.
+    pub derived: BTreeMap<String, Derived>,
+}
+
+/// What `init` writes for a detected stack, and where.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Derived {
+    /// e.g. "rust, detected from Cargo.toml"
+    pub from: String,
+    /// The command `init` would have written — `stack.test` or `stack.format`.
+    pub command: String,
+    /// Always the shared layer. `init` writes nowhere else, so a hook in
+    /// `local` was not written by `init` whatever it is called.
+    pub layer: Layer,
 }
 
 #[derive(Debug)]
@@ -91,12 +105,18 @@ impl<'a> Catalog<'a> {
                 _ => Verdict::Omh { entry, yours },
             },
             (Some(entry), None) => Verdict::Removed { entry },
+            // A name match alone is not evidence omh wrote this. `init` writes
+            // stack hooks only into the *shared* layer and only with the
+            // command detection produced, so both are checkable — and a
+            // hand-written `rust-test.json` in `local` was being reported as
+            // "written by omh init", which is the same lie about authorship
+            // this module exists to prevent, pointing the other way.
             (None, Some(yours)) => match self.derived.get(name) {
-                Some(from) => Verdict::Derived {
+                Some(d) if d.layer == yours.layer && d.command == yours.value => Verdict::Derived {
                     yours,
-                    from: from.clone(),
+                    from: d.from.clone(),
                 },
-                None => Verdict::Yours { yours },
+                _ => Verdict::Yours { yours },
             },
             (None, None) => match self.manifest.rejection(name) {
                 Some(rejection) => Verdict::Rejected { rejection },
@@ -517,14 +537,53 @@ why = "w"
     /// Calling them "your choice" is the same false claim of authorship as
     /// calling your own entry omh's, just pointing the other way, and it was the
     /// answer this command gave until running it revealed otherwise.
+    fn rust_format() -> Derived {
+        Derived {
+            from: "rust, detected from Cargo.toml".into(),
+            command: "cargo fmt".into(),
+            layer: Layer::Shared,
+        }
+    }
+
+    #[test]
+
+    /// `init` writes stack hooks only into the shared layer, so one sitting in
+    /// `local` was not written by `init` whatever it is called. Claiming
+    /// otherwise is the same authorship lie this module exists to prevent,
+    /// aimed the other way — reproduced with a hand-written `rust-test.json`.
+    #[test]
+    fn a_hook_in_a_layer_init_never_writes_to_is_yours() {
+        let m = manifest();
+        let mut c = catalog(&m, vec![setting("rust-format", "cargo fmt", Layer::Local)]);
+        c.derived.insert("rust-format".into(), rust_format());
+        assert!(
+            matches!(c.why("rust-format"), Verdict::Yours { .. }),
+            "init does not write to local, so this is not init's"
+        );
+    }
+
+    /// Right name, right layer, different command: you rewrote it, and omh must
+    /// not print "there is nothing to argue about" over your own work.
+    #[test]
+    fn a_rewritten_stack_hook_is_yours() {
+        let m = manifest();
+        let mut c = catalog(
+            &m,
+            vec![setting(
+                "rust-format",
+                "cargo +nightly fmt --all",
+                Layer::Shared,
+            )],
+        );
+        c.derived.insert("rust-format".into(), rust_format());
+        assert!(matches!(c.why("rust-format"), Verdict::Yours { .. }));
+    }
+
     #[test]
     fn a_hook_derived_from_your_stack_is_neither_omhs_opinion_nor_yours() {
         let m = manifest();
         let mut c = catalog(&m, vec![setting("rust-format", "cargo fmt", Layer::Shared)]);
-        c.derived.insert(
-            "rust-format".into(),
-            "rust, detected from Cargo.toml".into(),
-        );
+        c.derived.insert("rust-format".into(), rust_format());
 
         match c.why("rust-format") {
             Verdict::Derived { from, .. } => assert!(from.contains("Cargo.toml"), "{from}"),
