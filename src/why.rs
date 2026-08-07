@@ -43,9 +43,17 @@ pub enum Verdict<'a> {
         entry: &'a Entry,
         yours: &'a Setting,
     },
-    /// omh chose it; you changed it. Both values are reported, because "have I
-    /// drifted from the defaults" is the question worth answering here.
-    Modified {
+    /// omh chose it, and the copy on disk is not what omh ships **now**.
+    ///
+    /// Deliberately not called "modified by you". omh cannot tell who changed
+    /// it: `init` seeds the profile with `write_if_absent` and never revisits
+    /// it, while the shipped baseline moves with every release. So the first
+    /// omh upgrade that touches a hook command makes every existing profile
+    /// differ — and the previous version of this verdict told all those users
+    /// they had edited a file they never opened.
+    ///
+    /// Naming the difference is honest and useful. Naming a culprit is neither.
+    Differs {
         entry: &'a Entry,
         ships: String,
         yours: &'a Setting,
@@ -75,7 +83,7 @@ impl<'a> Catalog<'a> {
                 // A baseline that matches means untouched. A baseline omh does
                 // not have means it cannot claim you changed anything, so the
                 // quiet answer is the honest one.
-                Some(ships) if ships != &yours.value => Verdict::Modified {
+                Some(ships) if ships != &yours.value => Verdict::Differs {
                     entry,
                     ships: ships.clone(),
                     yours,
@@ -208,23 +216,29 @@ pub fn render(verdict: &Verdict) -> String {
             out.push_str(&format!("  {:<11} {}\n", "installed", yours.layer));
             out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
         }
-        Verdict::Modified {
+        Verdict::Differs {
             entry,
             ships,
             yours,
         } => {
             out.push_str(&format!(
-                "{} — omh's choice, modified by you\n\n",
+                "{} — omh's choice, and your copy is not what omh ships now\n\n",
                 entry.name
             ));
             out.push_str(&format!("  {:<11} {ships}\n", "omh ships"));
             out.push_str(&format!(
                 "  {:<11} {}   in {}\n",
-                "you set", yours.value, yours.layer
+                "on disk", yours.value, yours.layer
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
             costs(entry, &mut out);
             out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
+            // Which of the two it is, omh does not know — so it says so rather
+            // than picking the flattering guess or the accusing one.
+            out.push_str(
+                "\n  Either you changed it, or omh did in a later version:\n  \
+                 `init` seeds your profile once and never rewrites it.\n",
+            );
         }
         Verdict::Removed { entry } => {
             out.push_str(&format!(
@@ -338,12 +352,12 @@ mod tests {
         let m = manifest();
         let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
         match c.why("codegraph") {
-            Verdict::Modified { ships, yours, .. } => {
+            Verdict::Differs { ships, yours, .. } => {
                 assert_eq!(ships, "codebase-memory-mcp");
                 assert_eq!(yours.value, "my-fork");
                 assert_eq!(yours.layer, Layer::Local);
             }
-            other => panic!("expected Modified, got {other:?}"),
+            other => panic!("expected Differs, got {other:?}"),
         }
     }
 
@@ -546,13 +560,43 @@ why = "w"
         );
     }
 
+    /// Asserts the label→value **pairing**, not that both strings appear
+    /// somewhere. The previous version passed with the two values swapped —
+    /// output reading `omh ships my-fork` / `on disk codebase-memory-mcp` — which
+    /// is the exact inversion this whole module exists to prevent.
+    ///
+    /// Pairing survives reformatting; column positions would not.
     #[test]
-    fn a_modified_entry_shows_what_omh_ships_beside_what_you_set() {
+    fn a_differing_entry_pairs_each_value_with_its_own_label() {
         let m = manifest();
         let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
         let out = render(&c.why("codegraph"));
-        assert!(out.contains("codebase-memory-mcp"), "{out}");
-        assert!(out.contains("my-fork"), "{out}");
+
+        let line = |label: &str| {
+            out.lines()
+                .find(|l| l.trim_start().starts_with(label))
+                .unwrap_or_else(|| panic!("no `{label}` line in:\n{out}"))
+        };
+        assert!(line("omh ships").contains("codebase-memory-mcp"), "{out}");
+        assert!(!line("omh ships").contains("my-fork"), "{out}");
+        assert!(line("on disk").contains("my-fork"), "{out}");
+        assert!(!line("on disk").contains("codebase-memory-mcp"), "{out}");
+    }
+
+    /// omh cannot tell an edit from an upgrade — `init` seeds once and never
+    /// revisits, while the shipped baseline moves every release. Claiming "you"
+    /// accused every user of an edit they never made, the first time a hook
+    /// command changed.
+    #[test]
+    fn a_difference_never_claims_who_caused_it() {
+        let m = manifest();
+        let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
+        let out = render(&c.why("codegraph"));
+        assert!(
+            !out.contains("modified by you") && !out.contains("you set"),
+            "omh does not know who changed it:\n{out}"
+        );
+        assert!(out.contains("Either you changed it, or omh did"), "{out}");
     }
 
     /// The line that converts four silent wrong answers into visible ones. A

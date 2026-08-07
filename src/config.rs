@@ -125,7 +125,22 @@ pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            let command = doc.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            // Not `unwrap_or("")`. An empty command compares unequal to every
+            // baseline, so a hook file that is truncated, half-written, or
+            // hand-edited with the wrong key was reported to the user as
+            // "modified by you" — a false accusation, with a blank value as the
+            // only tell, from the one command whose job is telling authorship
+            // straight. `render.rs` treats the same file as a hard error, so
+            // two subsystems told two stories about it.
+            let command = doc
+                .get("command")
+                .and_then(|c| c.as_str())
+                .with_context(|| {
+                    format!(
+                        "{} has no `command` string — it is not a usable hook",
+                        path.display()
+                    )
+                })?;
             found.push((name, command.to_string(), layer));
         }
     }
@@ -345,6 +360,99 @@ mod tests {
         let p = layer.dir(paths).join(name);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
+    }
+
+    // ── hooks ───────────────────────────────────────────────────────────────
+    //
+    // `hooks()` shipped with no tests at all while being the sole input to
+    // `omh why`'s hook answers. Its body could be replaced with
+    // `Ok(Vec::new())` and the whole suite stayed green — at which point every
+    // installed hook reports as "not installed here".
+
+    #[test]
+    fn hooks_resolve_with_the_layer_they_came_from() {
+        let (_d, paths) = fixture();
+        seed(
+            &paths,
+            Layer::Shared,
+            "hooks/graph-read.json",
+            r#"{"command":"a"}"#,
+        );
+        seed(
+            &paths,
+            Layer::Local,
+            "hooks/mine.json",
+            r#"{"command":"b"}"#,
+        );
+
+        let found = hooks(&paths).unwrap();
+        let by = |k: &str| {
+            found
+                .iter()
+                .find(|s| s.key == k)
+                .unwrap_or_else(|| panic!("{k}"))
+        };
+        assert_eq!(by("graph-read").value, "a");
+        assert_eq!(by("graph-read").layer, Layer::Shared);
+        assert_eq!(by("mine").layer, Layer::Local);
+    }
+
+    #[test]
+    fn a_later_layer_wins_and_names_what_it_shadowed() {
+        let (_d, paths) = fixture();
+        seed(
+            &paths,
+            Layer::Shared,
+            "hooks/x.json",
+            r#"{"command":"shared"}"#,
+        );
+        seed(
+            &paths,
+            Layer::Local,
+            "hooks/x.json",
+            r#"{"command":"local"}"#,
+        );
+
+        let found = hooks(&paths).unwrap();
+        let x = found.iter().find(|s| s.key == "x").unwrap();
+        assert_eq!(x.value, "local");
+        assert_eq!(x.shadows, vec![Layer::Shared]);
+    }
+
+    /// A hook file with no `command` used to become an empty string, which
+    /// compares unequal to every baseline — so a truncated or hand-edited file
+    /// was reported to the user as their own edit, with a blank value as the
+    /// only tell. `render.rs` treats the same file as a hard error, so the two
+    /// subsystems told two different stories about it.
+    #[test]
+    fn a_hook_without_a_command_is_an_error_not_an_empty_string() {
+        let (_d, paths) = fixture();
+        seed(
+            &paths,
+            Layer::Shared,
+            "hooks/broken.json",
+            r#"{"event":"Stop"}"#,
+        );
+
+        let err = hooks(&paths).unwrap_err().to_string();
+        assert!(err.contains("broken.json"), "must name the file: {err}");
+        assert!(err.contains("command"), "must say what is missing: {err}");
+    }
+
+    #[test]
+    fn a_non_json_file_in_the_hooks_directory_is_ignored() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Shared, "hooks/notes.md", "not a hook");
+        seed(
+            &paths,
+            Layer::Shared,
+            "hooks/real.json",
+            r#"{"command":"c"}"#,
+        );
+
+        let found = hooks(&paths).unwrap();
+        assert_eq!(found.len(), 1, "got: {found:?}");
+        assert_eq!(found[0].key, "real");
     }
 
     fn get<'a>(settings: &'a [Setting], key: &str) -> &'a Setting {
