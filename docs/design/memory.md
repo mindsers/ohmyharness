@@ -11,9 +11,12 @@ personal facts, project facts, team facts, merged with provenance like
 `omh config`. That answered the wrong question.
 
 The actual idea is closer to the code graph, pointed at everything that is not
-code: **a graph of small linked Markdown notes — Obsidian-shaped — that the
-agent can query and grow.** One note, one idea. Concepts, definitions,
-decisions, conventions, things learned the hard way, each linked to the others.
+code: **a graph of linked Markdown notes — Obsidian-shaped — that the agent can
+query and grow.** Concepts, definitions, decisions, conventions, things learned
+the hard way, each linked to the others.
+
+*This section originally said "one note, one idea". A measured result argues
+that is wrong — see [co-location beats atomicity](#the-rule-this-design-imported-and-should-drop).*
 
 Two things it buys:
 
@@ -25,8 +28,11 @@ every session and models attend poorly to the middle of long text. A graph is
 queried: three relevant notes instead of four hundred lines, and the cost scales
 with the question rather than with the size of what you know.
 
-That second point is the real argument, and it is the same one that justified
-the code graph — structural queries instead of re-reading files.
+That second point was written as the real argument, and it is the same one that
+justified the code graph — structural queries instead of re-reading files. It
+now needs qualifying: measured against a competent agent with `grep`, a curated
+graph wins on **cost, latency and growth**, not on accuracy. See
+[what the benchmark changed](#what-the-benchmark-changed).
 
 ## Instructions are not knowledge
 
@@ -112,6 +118,282 @@ graph server's own docs advertised a `CBM_VARIANT=ui` switch its published
 installer ignored. Before adopting, iwe has to be run in a container,
 unattended, and shown to write notes an agent can then retrieve.
 
+That stays true. But there is now one body of evidence worth reading closely,
+and it changes several decisions below.
+
+## What the benchmark changed
+
+iwe published *The benchmark that built the tools* ([iwe.md](https://iwe.md),
+12 July 2026): a LOCOMO run measuring a markdown knowledge graph **as agent
+memory**, with the answering agents, the curator and the judge all running
+through `claude -p`. The harness, prompts, judge and full run ledger are
+published alongside it.
+
+These are the vendor's own numbers, on the vendor's own product, and that is
+normally where this project stops reading. Three things make it an exception:
+
+- **its own baseline beats it.** Plain `grep` over the raw source outscores the
+  knowledge graph on accuracy, and the post leads with that rather than burying
+  it.
+- **it retracts its best number.** A worked example in the curation prompt had
+  been lifted from the corpus and contained a gold answer. They quarantined the
+  run, re-curated, and watched 0.90 fall to 0.75 — *after* drafting conclusions
+  from it. This repo shipped seven fabricated dates in a single session; a team
+  that catches its own contamination and publishes the quarantined runs is
+  making the same argument omh makes with `measured … on`.
+- **it separates what survived reruns from what did not**, explicitly.
+
+What it is *not* is evidence about our setting. LOCOMO is months of text
+messages between two friends. Coding work is a different corpus, a different
+question distribution, and a different write cadence. Every number below
+transfers as a **hypothesis**, not a result.
+
+### The headline is uncomfortable, and it should stay that way
+
+On sealed test data, 351 questions:
+
+| arm | J |
+|---|---|
+| grep over the raw transcripts | **0.812** |
+| grep over the curated notes | 0.764 |
+| the multi-turn graph-tool agent | 0.735 |
+
+The knowledge graph lost to `grep`, and lost again to `grep over its own notes`.
+Rebuilding retrieval as a single search-and-expand call closed the accuracy gap
+but never opened one: the final defensible claim is **parity on accuracy, an
+order of magnitude on economics**.
+
+| | one-shot over notes | grep agent |
+|---|---|---|
+| turns per question | 1.0 | 4.6 |
+| context read | 20.8k tok | 77.8k tok |
+| latency p50 | 1.9 s | 11.6 s |
+| growth as history grows | **bounded by construction** | linear |
+
+That last row is the whole argument, and it is the one a 199-question benchmark
+is structurally unable to show.
+
+**What this means here is a split the design did not have.** omh's graph has two
+halves, and only one of them has a `grep` baseline to lose to:
+
+- **Ingested repo docs** — `docs/`, ADRs, `detect::seeds()`. An agent in an omh
+  session *has the repo*. It can grep it. Per this benchmark it would do about as
+  well that way, at four times the turns. The graph's value over this half is
+  cost and latency, not answers.
+- **What the agent learned** — `EBUSY` on a bind-mounted token file, an installer
+  ignoring its documented variant. **There is no source to grep.** The session is
+  removed; the transcript is gone. Without a note this is simply lost.
+
+So the [floor argument](#the-floor-when-the-agent-writes-nothing) is weaker than
+it was written, and the growth path is stronger. Ingestion makes the graph useful
+on day one and cheaper than grepping. **The experiential half is where the
+feature is irreplaceable**, which puts more weight, not less, on
+[making the agent write](#making-the-agent-actually-write).
+
+### Guards beat instructions, measured
+
+The design already argued this from
+[document schemas](#document-schemas-make-the-invariant-enforceable). The
+benchmark priced it.
+
+A **store lint** — per-page-kind token budgets plus store-wide checks for
+dangling links, orphan pages and near-duplicates, with violations riding back on
+every write — moved the score 0.70 → 0.77 in one run. Three successive prompt
+revisions had failed to move it at all. The page the prompt could not keep under
+control went from 2,408 words to 770; the hand-built reference is 767.
+
+The mechanism is not obedience. The curator **argued with about half the
+warnings** — *"these are expected here"*, *"this is the intended architecture"* —
+and partial compliance was still enough, because:
+
+> A linter differs from an instruction in one decisive way: it re-fires every
+> session. Prompts decay as context grows; pressure that reapplies itself
+> doesn't.
+
+That sentence is the reason this feature cannot rest on `AGENTS.md` wording
+alone, and it generalises well past memory.
+
+**The enforcement taxonomy**, which is the reusable part:
+
+| layer | owns | failure mode |
+|---|---|---|
+| **schemas** | shape — required sections, budgets per section, block types | hard gate: the write is refused |
+| **graph hygiene** | links — dangling, orphans, near-duplicates | warning that re-fires until fixed |
+| **prompts** | semantics — which date is the event's, what deserves a line | nothing can check it |
+
+With a rule attached: *agents negotiate with warnings but cannot negotiate with a
+refused write.* Put what you cannot afford to lose behind a gate; let the rest
+apply pressure.
+
+**And a calibration law this repo has already paid for twice.** Every numeric
+threshold they tried flagged the *known-good* store first — line-length caps had
+to be dropped for exactly that reason. Structural rules were robust on arrival;
+numeric ones were not.
+
+> A budget that cannot separate a known-good store from a known-bad one doesn't
+> ship.
+
+That is [the weak-guard problem](../contributing.md) in a new costume: a check
+that passes everything and a check that flags everything are the same failure.
+The counterpart discipline is to validate against a store you already believe in
+before trusting the number.
+
+One free result worth stealing outright: validating three generations of stores
+against the same schema **ranked them exactly as their benchmark scores had** —
+zero violations / 0.81, 22 / 0.77, 272 / 0.70. A store-quality signal available
+at write time, with no questions asked and no LLM pass. That is what
+`omh memory lint` should be, and it is a far better answer than the periodic
+semantic sweep this page currently
+[records as unsolved](#what-this-still-does-not-catch).
+
+### Identity is a guard, not a discipline
+
+This page says, under [prevention beats resolution](#prevention-beats-resolution),
+that *"search before writing a note"* is an `AGENTS.md` imperative. The benchmark
+says that exact discipline does not hold as a prompt, and shows the fix:
+
+**A note's key is a primary key.** Creating at an existing key is a conflict
+error whose message says *update instead* — not a silent second copy. Let the
+agent derive the key from metadata rather than from title wording, and a whole
+failure class disappears structurally: the same event cannot be recorded twice, a
+crashed ingest retries idempotently, and links become computable before their
+target exists.
+
+They learned it from its absence: keys minted from title wording made every retry
+and rephrasing a fresh identity, and *"the store quietly accumulated
+near-duplicates that no prompt admonition prevented."*
+
+The guarantee is only as strong as the derivation is canonical — their first run
+created `joanna-and-nate` and `nate-and-joanna` as two pages, fixed by requiring
+alphabetical order. **A uniqueness constraint dedups identities, not
+intentions.**
+
+So the imperative stays, demoted to a backstop, and the real mechanism is
+derived keys plus a conflict error.
+
+### Retrieval is one call, not a walk
+
+The multi-turn tool agent was the **worst and most expensive arm** — 8.1 turns,
+176k tokens, $0.153 a question, 0.735. Replacing it with a **one-shot dossier**
+— rank once, take the top pages, expand what they link to, inline it, answer in
+one turn holding zero tools — cost a nickel a question and scored higher.
+
+> Everything graph-aware moves to write time and to that one retrieval call;
+> nothing agentic remains at answer time.
+
+This lands directly on [the 13-tool cost](#a-cost-worth-naming). That section
+guessed the surface could narrow to four operations. The evidence says the *read*
+side wants to be **one**: search-and-expand, returning a dossier. Write needs
+more, but write is not what sits in every session's context.
+
+It is a partial fit, and the difference matters. Their agent answers a question
+and stops; an omh agent is doing a coding task where retrieval is incidental, and
+cannot pre-fetch a dossier for a question nobody asked. What transfers is the
+shape: **one call should return enough that a second is rarely needed** — the
+neighbourhood, not the node.
+
+### The curation rules that moved the number
+
+Prompt rules were not useless — they were where *semantics* lived, and they took
+the temporal category from 0.60 to 1.00 on their own. Three earned it:
+
+- **Store uncertainty, not false precision.** Record the relative wording *with*
+  its resolution — *"the Sunday before 25 May 2023 (21 May 2023)"* — and never
+  invent day-precision the source did not give. Baked-in date errors were the
+  single largest failure class in round one, permanent because they were stamped
+  in at write time.
+- **Date by occurrence, not by mention.** An event is dated by when it happened,
+  never by when it came up. Their curator had been writing pages dated by the
+  conversation, and those dates shadowed the facts' own.
+- **Record evolving state as dated status lines**, rather than rewriting a fact
+  in place.
+
+All three transfer cleanly. *"`--aspects` returns empty on a comma list"* has a
+date it was discovered and a version it was true of; a note that says only
+*"`--aspects` is broken"* is the false-precision failure in another form.
+
+### The rule this design imported, and should drop
+
+The design currently praises `maxTokens: 400` for *"creating pressure to split"*.
+The benchmark ran that experiment and reversed it.
+
+Their v2 prompt capped every page at 300 words, because title-only search could
+not find facts inside big pages. Once BM25 searched bodies and block operations
+could read and edit a page section by section, **the cap became a fossil — a
+prompt rule compensating for a tool weakness that no longer existed, and the
+cause of the newest failure class**: facts that belong together (why Gina started
+her store: passion *and* job loss) split across pages to satisfy a word count.
+
+The replacement rule is the opposite of what this page assumed:
+
+> Keep related facts together. A rich page is fine — the tools read and edit it
+> block by block. Never split one thought across pages.
+
+And from the summary: **"facts that answer questions together must live
+together."**
+
+So *"one note, one idea"* was an aesthetic inherited from Obsidian, where a human
+reads whole pages, and it does not survive contact with an agent that retrieves
+by ranking. The unit is **one topic per page, richly filled and
+block-addressable** — which is also why the deletion argument in
+[the poisoning problem](#the-poisoning-problem-and-why-the-format-helps) needs
+re-reading: a wrong *fact* is a block operation, not a file deletion. A wrong
+*topic* is still one file.
+
+Budgets do not disappear — they move. Per-*section* budgets and structural rules
+(bullets only where prose would mean re-narration) shipped and worked; the flat
+per-page cap and the line-length cap did not.
+
+### When compliance looks random, suspect the product
+
+The defect that survived every guard: hub entries kept carrying the full title of
+the page they linked to, where the curator had been told — in three successive
+prompt versions — to write just the date. It was classified as an
+instruction-following failure and the rule was tightened each time.
+
+It was the renderer. iwe regenerated link text from the graph on every write that
+touched a page, overwriting what the curator wrote, on every save, whatever the
+prompt said. The tell was there the whole time: *"the only links the renderer
+couldn't rewrite were the ones pointing at pages that didn't exist yet.
+Obedience correlated with broken links."*
+
+> A unit test checks what you thought to assert; this defect was invisible to
+> every test because the renderer was doing what it was designed to do.
+
+This repo keeps relearning the same shape — a date guard that checked a date was
+*present*, a `GUEST_HOME` guard that matched `const` but not `pub const`, a
+staleness test satisfied by the wrong call site. **Model non-compliance that
+looks random is the signal to go and read the write path**, and it is worth
+carrying into `AGENTS.md` as an imperative rather than leaving it here.
+
+### Write cheap, read well
+
+Haiku curated nineteen sessions for **$2.37** — 4.6× cheaper than Sonnet — with
+*"the same perfect structural hygiene: zero malformed pages, zero broken
+headings"*. Answering from that store, Haiku dropped only ~2.5 points but spent a
+median of ~640 thinking tokens per answer against Sonnet's 10.
+
+> Structural curation quality is model-insensitive when the tools enforce it.
+
+Half of that conclusion was drafted before the retraction and did not survive the
+rerun — the half about where synthesis lives. The half that did is the half
+above, and it is the useful one: **writing memory tolerates a cheap model once
+guards keep it honest; reading it is where a strong model earns its cost.**
+
+Not actionable today — omh
+[does not choose your model](decisions.md#decisions-deliberately-not-made) — but
+it is the argument that would justify a cheap curator later, and it is recorded
+here so it does not have to be rediscovered.
+
+### What this does not settle
+
+- **The corpus is wrong for us.** Personal-relationship messages, not a codebase.
+  Every transfer above is a hypothesis.
+- **The one-shot architecture assumes a question.** omh's agent has a task.
+- **The numbers are the vendor's**, however honestly reported.
+- **Nothing here was run in an omh container**, which is still the bar
+  [`doctor`](../troubleshooting.md) exists to enforce.
+
 ## The server is the commodity; the integration is the product
 
 Worth stating before choosing, because it changes what "build it ourselves"
@@ -148,12 +430,13 @@ into every future session**.
 
 The Obsidian shape helps more than a monolith would:
 
-- one idea per file means a wrong fact is **one file to delete**, not a
-  paragraph buried in a document — where the convention is actually followed;
-  nothing verifies it
+- removal is **surgical**: a wrong topic is one file to delete, and a wrong fact
+  inside a good page is one [block operation](#the-rule-this-design-imported-and-should-drop)
+  — not a hand-edit of a document nobody dares touch
 - `git log` shows when a note appeared and what it replaced
 - links make an unsupported claim visible: a note nothing links to, and which
-  links to nothing, is a fact with no context
+  links to nothing, is a fact with no context — and an
+  [orphan check](#guards-beat-instructions-measured) finds it mechanically
 
 What it does not solve is a confidently wrong note being *retrieved and
 believed*. That needs the same answer the base set got: **every fact carries
@@ -172,9 +455,9 @@ writing turns that into notes loaded into every future session.
 
 So the mitigations are not optional extras, they are the price of this choice:
 
-- **one idea per file**, so a wrong fact is one deletion — a convention, not a
-  guarantee: nothing can verify a note holds a single claim, and a note holding
-  three with one wrong cannot be cleanly removed
+- **surgical removal** — a wrong topic is one file, a wrong fact inside a sound
+  page is one block operation. This replaces an earlier "one idea per file" rule;
+  see [co-location](#the-rule-this-design-imported-and-should-drop)
 - **provenance on every note** — what produced it, when, from what. A fact that
   cannot say where it came from cannot be judged, and the whole
   [trust](trust.md) argument is that omh does not state things it cannot support
@@ -333,7 +616,6 @@ frontmatter:
   properties:
     source:   { type: string }                            # what produced this
     recorded: { type: string, pattern: "^\\d{4}-\\d{2}-\\d{2}$" }
-maxTokens: 400
 ```
 
 A note without provenance **fails validation**. This is the same move the base
@@ -342,26 +624,36 @@ must be earned"* from a sentence in a document into a test that fails the build.
 The lesson there was that an unenforced convention is not a convention, and it
 cost seven fabricated dates to learn.
 
-`maxTokens` bounds **size**, which is not the same as one idea per note and
-should not be confused with it. A twenty-token note can carry three claims; an
-eight-hundred-token note can explain one carefully. **No schema can count
-ideas.**
+### Budgets: where they go, and where they backfired
 
-What the budget does buy is real but narrower:
+An earlier version of this section set a whole-page `maxTokens: 400` and praised
+it for *"creating pressure to split"*. That is exactly the rule the benchmark
+[ran and reversed](#the-rule-this-design-imported-and-should-drop): a flat page
+cap forced apart facts that answer questions together, and did so to compensate
+for a search weakness that no longer exists.
 
-- **retrieval stays cheap** — a note has a known worst case
-- **notes cannot drift back into being documents**, which is the failure this
-  feature exists to escape
-- **it creates pressure to split**, because staying under budget means
-  extracting — and `extract` is an operation iwe already has
+Size bounds are not atomicity anyway. A twenty-token note can carry three claims;
+an eight-hundred-token note can explain one carefully. **No schema can count
+ideas** — and it turns out it should not try, because the thing worth optimising
+is co-location, not cardinality.
 
-Structure gets closer to atomicity than size does. A schema can require exactly
-one top-level section with `maxContains: 1` and `additionalSections: false`,
-which pushes a note toward one topic. Still not a guarantee — one section holds
-as many claims as you put in it — but nearer than a token count.
+What survived their calibration, and is what this design should adopt:
 
-**One idea per note stays a convention.** It has mechanical pressure behind it
-now, and no enforcement.
+- **budgets per *section*, not per page.** A hub can sit legally under a page
+  budget while its timeline is 92% of it — big-because-it-aggregates and
+  big-because-it-re-tells look identical to a flat cap.
+- **structural rules over numeric ones.** *Bullets only in a timeline, no prose
+  blocks* turned out to be the real re-narration detector; the token cap per
+  entry flagged the hand-built store's best lines. Shape rules were robust on
+  arrival; every threshold needed calibrating first.
+- **required sections by name, and a title pattern** that keeps dated pages
+  dated.
+
+The general form is worth stating on its own, because it is not specific to
+notes: **prefer the check that has no number in it.** A structural rule is either
+satisfied or not; a threshold has to be tuned against something you already
+believe is good, and if you have not done that tuning you have shipped a guess
+with the authority of a gate.
 
 Schemas bind by glob and **compose**, so layers can differ in strictness:
 
@@ -476,6 +768,19 @@ description says *when* to reach for it is a prompt that arrives at exactly the
 moment of decision. This is the most underused lever available and the only one
 that is both universal and contextual.
 
+**And a third, which this page had missed entirely: the error message.** A
+refused write is read, in full, by the model that just made the mistake —
+
+> `$replaceText` expects 1 block, selected 2
+> hint: narrow with `$within` or `$matches`, or raise `expect`
+
+— and they watched agents recover in a single turn from nothing but the message.
+*Error messages are the documentation agents actually read.* Unlike a rule in
+`AGENTS.md`, which competes with everything else in context and
+[decays as context grows](#guards-beat-instructions-measured), an error arrives
+with no competition at the moment it is relevant. Whatever omh builds around
+this server, its failure text is part of the interface, not an afterthought.
+
 ### Record on surprise, not on schedule
 
 The obvious trigger — write a note at the end of every turn — produces noise.
@@ -498,6 +803,46 @@ assumption it corrects is one the next agent will make too.
 **Surprise is a better trigger than time**, and it is a trigger the model can
 recognise without a hook: it knows when it expected one thing and got another.
 
+### The alternative the benchmark actually used: a curator pass
+
+Worth naming, because it sidesteps the behaviour problem rather than mitigating
+it. Their notes are not written by the agent doing the work. A **separate,
+question-blind curator** replays sessions one at a time, in order, and distils
+them — and then the raw material is deleted.
+
+omh could do this without any harness capability at all, because **omh owns the
+session lifecycle**. At session end, or on `omh s rm`, it spawns a headless pass
+whose only job is to write notes. No hook, no rule, no reliance on the working
+agent noticing anything.
+
+| | in-task writing | curator pass |
+|---|---|---|
+| depends on | agent behaviour | omh's own lifecycle |
+| harness support needed | none (tool description + rule) | none |
+| sees | the moment of surprise | the whole session, in hindsight |
+| costs | nothing extra | a model pass per session |
+| misses | what the agent didn't notice | what the transcript didn't show |
+
+The honest comparison is not either/or. In-task writing catches the *reason* —
+an agent that just hit `EBUSY` knows why it matters, and a curator reading the
+transcript afterwards sees an error and a workaround with no expectation
+attached. The curator catches everything the agent forgot to record, which,
+given that compliance is
+[not guaranteed](#this-is-observable-not-testable), is most of it.
+
+Two cautions before this looks free:
+
+- **Their curator is append-only per session**, structurally: it never revisits,
+  so it cannot merge an arc spanning sessions. The hindsight pass meant to fix
+  that failed twice.
+- **omh has no transcript to replay.** Reconstructing one means capturing session
+  output, which is a new and much larger commitment than anything else on this
+  page — and one with obvious secret-handling consequences, since a transcript
+  contains everything the agent saw.
+
+That second point may sink it. Recorded as the strongest alternative to a
+behavioural lever, not as a decision.
+
 ### The floor, when the agent writes nothing
 
 Because the graph [ingests what the repo already documents](#decided), it is
@@ -513,6 +858,16 @@ test — it is a claim about a model's behaviour, in the same class as *"the
 harness reads this path"*, which is why [`omh doctor`](../troubleshooting.md)
 exists. The honest check is to run it for a week and look at whether the graph
 grew, and whether what it grew is worth keeping.
+
+Half of that is more mechanical than it looked. *Whether* the graph grew is
+countable, and **whether what it grew is well-formed** turns out to be a decent
+proxy for whether it is any good: schema violation counts ranked three stores in
+exactly the order their benchmark scores did. That is a signal available at write
+time, for free, without asking a single question — and it is what makes
+`omh memory lint` worth building before any of the harder judgement.
+
+What stays purely observable is whether the *content* is worth having. No count
+reaches that.
 
 Until that has been done, the correct status for this feature is **unverified**,
 however good the design reads.
@@ -574,15 +929,31 @@ memory that interrogates you would be the same failure in a new place.
 ### Prevention beats resolution
 
 **Search before writing a note.** If one exists on the topic, update it rather
-than adding a contradicting sibling. That removes most conflicts at the source,
-and it is another `AGENTS.md` imperative — nothing prompts an agent to wonder
-whether it is about to duplicate something.
+than adding a contradicting sibling. That removes most conflicts at the source.
+
+It was written here as an `AGENTS.md` imperative. It is a poor one — measured,
+the same discipline let near-duplicates accumulate that *"no prompt admonition
+prevented"*. The mechanism that works is
+[identity as a guard](#identity-is-a-guard-not-a-discipline): derive the key,
+and a second write to the same topic is a conflict error telling the agent to
+update instead. The imperative stays as a backstop, not as the answer.
 
 ### What this still does not catch
 
 Two notes on topics that never co-occur in a query can contradict indefinitely.
-Nothing here finds them, and a periodic semantic sweep over the whole graph
-would cost an LLM pass per run. Recorded rather than solved.
+
+The obvious remedy — a periodic semantic sweep with hindsight over the whole
+graph — was tried and **failed twice**, and is kept in their repo as a negative
+result: an editor pass rewrites wording, search matches words, so every rewrite
+risks breaking a question→page match the original phrasing carried.
+
+> Guards during writing beat editing after writing.
+
+What is left is cheaper and partial: a **near-duplicate check** in the store
+lint catches the pages that are *about* the same thing, which is where
+contradictions actually cluster. Two genuinely unrelated notes that happen to
+disagree remain unfound. Recorded rather than solved — but the recommended fix
+has been downgraded from "not yet designed" to "measured, and it doesn't work".
 
 ## A cost worth naming
 
@@ -590,9 +961,18 @@ iwe exposes **13 MCP tools**. Every one of them carries a schema into every
 session's context, alongside the code graph's own set. That is a real per-session
 cost against a feature whose entire argument is context efficiency.
 
-Worth measuring before adopting, and worth checking whether the surface can be
-narrowed to the four operations this design actually needs: find, retrieve,
-create, link.
+Worth measuring before adopting, and worth narrowing. This section originally
+guessed at four operations — find, retrieve, create, link. The benchmark's
+[one-shot result](#retrieval-is-one-call-not-a-walk) says the *read* side wants
+to be **one**: a single search-and-expand returning a neighbourhood. The multi-
+turn agent that walked the graph with the full tool set was the worst arm they
+measured, on both accuracy and cost.
+
+The write side is where the remaining tools earn their place — `$set`, `$append`
+and friends exist so that adding one fact does not mean re-emitting a whole
+document, which is how 9% of pages ended up structurally malformed in their first
+round. **Read tools are a per-session tax; write tools are paid only when
+writing.** Narrowing should be asymmetric for that reason.
 
 ## Skills are the precedent, not the alternative
 
