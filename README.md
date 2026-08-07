@@ -215,7 +215,7 @@ the agent uses rather than something merely installed:
 |---|---|---|---|
 | `graph-orient` | session start | 2.3 KB | modules, layers, boundaries, entry points |
 | `graph-first` | before Grep/Glob | ~40 B | structural questions in one call |
-| `graph-read` | before Read | 0 unless it speaks | **35,814 → 1,511 bytes** for one symbol |
+| `graph-read` | before Read | 0 unless it speaks | **1,511 bytes** for one symbol, not the whole module |
 | `graph-refresh` | end of turn | 0.14s | a graph describing the code as it is *now* |
 
 They are nudges, never walls: grep is right for a literal string, and a hook that

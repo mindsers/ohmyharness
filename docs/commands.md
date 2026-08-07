@@ -121,18 +121,24 @@ $ omh why codegraph
 codegraph — omh's choice, in the base set since 2026.06
 
   because     structural queries instead of re-grepping the repo every task
-  costs       0.46s to index this repo, cold   measured 2026-08-04
-              3.4 MB on disk                   measured 2026-08-04
+  costs       0.46s to index this repo, cold   measured 2026-08-06
+              index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
+              3.4 MB on disk                   measured 2026-08-06
+              the graph volume after a cold index of this repo
   instead of  gitnexus            PolyForm-Noncommercial licence
               codegraphcontext    needs a Neo4j service running
               @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
   installed   shared
   remove      omh config mcp rm codegraph
+
+  answered from ~/.omh/base/2026.08.toml · 2026.08
 ```
 
-**Cost is measured; benefit is argued.** Every cost line carries the date it was
-taken, and a measurement older than the entry itself is marked stale. The
-`because` line is a judgment you are free to disagree with — see
+**Cost is measured; benefit is argued.** Every cost carries the date it was
+taken *and how*, and one predating the current base-set version is marked stale
+— so re-cutting the base set puts every carried-over number up for
+re-affirmation. The `because` line is a judgment you are free to disagree with —
+see
 [measure the cost, argue the benefit](design/trust.md#measure-the-cost-argue-the-benefit).
 
 ### Six answers, because authorship differs
@@ -140,7 +146,7 @@ taken, and a measurement older than the entry itself is marked stale. The
 | | |
 |---|---|
 | **omh's choice** | in the base set, and your copy matches what omh ships |
-| **modified by you** | omh's entry, changed — both values are shown |
+| **not what omh ships now** | omh's entry, and your copy differs. Both values shown, and **no claim about who changed it** — omh cannot tell an edit from an upgrade |
 | **not installed here** | in the base set, absent from your profile. Not an error |
 | **written by omh init** | derived from your repo, like `rust-format` from `Cargo.toml`. omh's writing, not omh's opinion |
 | **your choice** | you added it. **No rationale is offered** — omh does not have one and will not invent one |

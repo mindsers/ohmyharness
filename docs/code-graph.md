@@ -49,7 +49,7 @@ package.
 |---|---|---|---|
 | `graph-orient` | `SessionStart` | 2,300 B per context rebuild | modules, layers, boundaries, entry points |
 | `graph-first` | `PreToolUse` Grep\|Glob | ~40 B per grep | structural questions in one call |
-| `graph-read` | `PreToolUse` Read | 0 unless it speaks | **35,814 → 1,511 bytes** on a large source file |
+| `graph-read` | `PreToolUse` Read | 0 unless it speaks | **1,511 bytes** for one symbol instead of a whole module |
 | `graph-refresh` | `Stop` | 0.14s per turn | a graph describing the code as it is *now* |
 
 **Kept current.** A session's worktree is not the checkout it started from; it

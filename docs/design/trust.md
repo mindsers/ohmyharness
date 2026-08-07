@@ -44,18 +44,29 @@ $ omh why codegraph
 codegraph — omh's choice, in the base set since 2026.06
 
   because     structural queries instead of re-grepping the repo every task
-  costs       0.46s to index this repo, cold   measured 2026-08-04
-              3.4 MB on disk                   measured 2026-08-04
+  costs       0.46s to index this repo, cold   measured 2026-08-06
+              index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
+              3.4 MB on disk                   measured 2026-08-06
+              the graph volume after a cold index of this repo
   instead of  gitnexus            PolyForm-Noncommercial licence
               codegraphcontext    needs a Neo4j service running
+              @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
   installed   shared
   remove      omh config mcp rm codegraph
+
+  answered from ~/.omh/base/2026.08.toml · 2026.08
 ```
 
 Read the shape of that output carefully, because it encodes the whole position:
 **the cost is measured and the benefit is argued.** Those are different kinds of
 claim and the command does not blur them — every cost carries the date it was
-taken, and one older than the entry itself is marked stale.
+taken and the method it was taken by, and one predating the current base-set
+version is marked stale.
+
+An earlier version compared against the entry's own `since`, which never moves —
+so no shipped measurement could ever be flagged. A byte count in this repo went
+wrong within a day and the check said nothing, because it was structurally
+incapable of saying anything.
 
 ### Authorship is the point
 
@@ -73,9 +84,15 @@ Six answers, and the two negatives matter most:
   is omh's writing but not omh's opinion. Disowning it would be the same false
   claim pointing the other way.
 
-The rest: *omh's choice*, *modified by you* (both values shown), *not installed
-here*, and *considered, not in the base set* — which is how a rejection stops
-being re-litigated every time somebody rediscovers it.
+A third: **not what omh ships now**. `init` seeds your profile once and never
+rewrites it, while the shipped baseline moves every release — so omh genuinely
+cannot tell an edit from an upgrade, and says so rather than picking the
+accusing guess. An earlier version called this *"modified by you"* and told
+every user they had edited a file they never opened.
+
+The rest: *omh's choice*, *not installed here*, and *considered, not in the base
+set* — which is how a rejection stops being re-litigated every time somebody
+rediscovers it.
 
 Full output in [Commands](../commands.md#omh-why-thing).
 
@@ -126,8 +143,10 @@ you notice.** It also produces the retirement trigger that was actually wanted �
 that forces a conversation, and it is free to produce.
 
 The numbers already in [code graph](../code-graph.md#current-used-and-visible)
-are exactly this shape: 2,300 B for orientation, 35,814 → 1,511 bytes on a large
-file, 0.14s to re-index. All real, none of them requiring an eval harness.
+are exactly this shape: 2,300 B for orientation, 1,511 bytes for one symbol
+instead of a whole file, 0.14s to re-index. All real, none of them requiring an
+eval harness — and the one that used to name a specific file's byte count is
+gone, because it was stale within a day of being written.
 
 This does mean the [weak spot](distribution.md#the-honest-weak-spot) is answered
 by transparency rather than by proof. That is the honest position, and claiming

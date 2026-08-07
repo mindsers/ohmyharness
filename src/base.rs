@@ -1150,9 +1150,10 @@ command = "c"
         }
     }
 
-    /// Reading a 35KB file to see one function is the largest avoidable cost in
-    /// a session: `src/auth.rs` is 35,814 bytes and `get_code_snippet` answers
-    /// the same question in 1,511.
+    /// Reading a whole module to see one function is the largest avoidable cost
+    /// in a session: `get_code_snippet` answers the same question in ~1,500
+    /// bytes. No file size named — the figure that used to be here was stale on
+    /// the commit that wrote it, and it appeared in four places.
     #[test]
     fn reading_a_file_points_at_the_symbol_lookup() {
         let h = hook("graph-read");
