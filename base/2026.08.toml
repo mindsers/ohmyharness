@@ -28,14 +28,14 @@ command = "codebase-memory-mcp"
   [[entry.measured]]
   what  = "to index this repo, cold"
   value = "0.46s"
-  how   = "index_repository --mode fast, 821 nodes / 3813 edges"
-  on    = "2026-08-04"
+  how   = "index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox"
+  on    = "2026-08-06"
 
   [[entry.measured]]
   what  = "on disk"
   value = "3.4 MB"
   how   = "the graph volume after a cold index of this repo"
-  on    = "2026-08-04"
+  on    = "2026-08-06"
 
   [[entry.instead_of]]
   name = "gitnexus"
@@ -63,8 +63,8 @@ remove  = "rm .omh/profile/hooks/graph-orient.json"
   [[entry.measured]]
   what  = "per context rebuild"
   value = "2,300 B"
-  how   = "get_architecture with four targeted aspects; SessionStart re-fires on resume and compact"
-  on    = "2026-08-04"
+  how   = "get_architecture with four targeted aspects (2,138 B of payload) plus the hook's own framing prose"
+  on    = "2026-08-06"
 
   [[entry.instead_of]]
   name = "the `overview` aspect"
@@ -79,9 +79,9 @@ remove  = "rm .omh/profile/hooks/graph-first.json"
 
   [[entry.measured]]
   what  = "per grep"
-  value = "~40 B"
-  how   = "the nudge string, injected as additionalContext before Grep or Glob"
-  on    = "2026-08-04"
+  value = "243 B"
+  how   = "the nudge string for a `repo-sNN` project name, computed from the literals the hook ships — see the_grep_nudges_declared_cost_matches_the_string_it_ships"
+  on    = "2026-08-07"
 
   [[entry.instead_of]]
   name = "blocking grep outright"
@@ -96,15 +96,15 @@ remove  = "rm .omh/profile/hooks/graph-read.json"
 
   [[entry.measured]]
   what  = "when it fires"
-  value = "35,814 → 1,511 B"
-  how   = "src/auth.rs read whole, versus get_code_snippet for one symbol"
-  on    = "2026-08-04"
+  value = "1,511 B"
+  how   = "get_code_snippet for one symbol, against reading the enclosing source file whole — this repo's largest was over 20x that. The file size is deliberately not recorded: it moves on every edit, and an earlier version of this line was already stale on the commit that wrote it."
+  on    = "2026-08-06"
 
   [[entry.measured]]
   what  = "when it does not"
   value = "0 B"
   how   = "silent unless the target is source over 8,000 bytes"
-  on    = "2026-08-04"
+  on    = "2026-08-06"
 
   [[entry.instead_of]]
   name = "nudging on every Read"
@@ -121,7 +121,7 @@ remove  = "rm .omh/profile/hooks/graph-refresh.json"
   what  = "per turn"
   value = "0.14s"
   how   = "incremental re-index of a session worktree at Stop"
-  on    = "2026-08-04"
+  on    = "2026-08-06"
 
   [[entry.instead_of]]
   name = "indexing once at init"

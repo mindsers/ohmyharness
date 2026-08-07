@@ -121,10 +121,7 @@ impl<'a> Catalog<'a> {
 /// Still worth printing — it is the only number there is — but not worth
 /// presenting as current.
 fn is_stale(measured_on: &str, since: &str) -> bool {
-    fn ym(s: &str) -> Option<(u32, u32)> {
-        let mut parts = s.split(['.', '-']);
-        Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
-    }
+    use crate::base::parse_ym as ym;
     match (ym(measured_on), ym(since)) {
         // Unparseable dates are not evidence of staleness. Saying nothing beats
         // labelling a good measurement stale because a format changed.

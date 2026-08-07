@@ -82,6 +82,16 @@ pub struct Measured {
     pub on: String,
 }
 
+/// `YYYY.MM` or `YYYY-MM-DD` → (year, month). One parser, so a date that the
+/// staleness check cannot read is the same date the curation test rejects at
+/// load — rather than one silently tolerating what the other would refuse.
+pub fn parse_ym(s: &str) -> Option<(u32, u32)> {
+    let mut parts = s.split(['.', '-']);
+    let year: u32 = parts.next()?.parse().ok()?;
+    let month: u32 = parts.next()?.parse().ok()?;
+    (year >= 2000 && (1..=12).contains(&month)).then_some((year, month))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Alternative {
@@ -301,6 +311,29 @@ pub fn project_name(repo: &str, session: &str) -> String {
     format!("{repo}-{session}")
 }
 
+/// The grep nudge, in the three literal pieces `$p` is spliced between.
+///
+/// Kept as data rather than one string so its cost can be **computed** instead
+/// of typed into the manifest. The manifest declared `~40 B` for this for its
+/// whole life; the real figure is over five times that, and nothing could
+/// notice, because a hand-written number and the string it describes had no
+/// relationship a test could check.
+const GREP_NUDGE: [&str; 3] = [
+    "This repo has a code graph: project ",
+    ". For structural questions — where is X defined, what calls Y, what does \
+     this module depend on — search_graph --project ",
+    " answers in one call. Grep is right for literal text.",
+];
+
+/// What the nudge actually injects, for a given project name. This is the thing
+/// the cost in the manifest is a claim about.
+pub fn grep_nudge(project: &str) -> String {
+    format!(
+        "{}{project}{}{project}{}",
+        GREP_NUDGE[0], GREP_NUDGE[1], GREP_NUDGE[2]
+    )
+}
+
 /// Hooks that make the graph actually get used. Without them the server is
 /// installed and never called, which is how most of these end up.
 pub fn hooks() -> Vec<Hook> {
@@ -357,16 +390,21 @@ pub fn hooks() -> Vec<Hook> {
             matcher: "Grep|Glob",
             // A nudge, not a wall: grep is right for a literal string, and a
             // hook that blocks correct work gets disabled.
-            command: nudge(
-                r#"("This repo has a code graph: project " + $p + ". For structural questions — where is X defined, what calls Y, what does this module depend on — search_graph --project " + $p + " answers in one call. Grep is right for literal text.")"#,
-            ),
+            // Built from GREP_NUDGE so the string the agent sees and the cost
+            // the manifest claims cannot drift apart.
+            command: nudge(&format!(
+                r#"("{}" + $p + "{}" + $p + "{}")"#,
+                GREP_NUDGE[0], GREP_NUDGE[1], GREP_NUDGE[2]
+            )),
         },
         Hook {
             name: "graph-read",
             event: "PreToolUse",
             matcher: "Read",
-            // The largest avoidable cost in a session: src/auth.rs is 35,814
-            // bytes and get_code_snippet answers the same question in 1,511.
+            // The largest avoidable cost in a session: reading a whole module to
+            // see one function, when get_code_snippet answers in ~1,500 bytes.
+            // No file size named on purpose — the figure that used to be here
+            // was stale on the commit that wrote it.
             //
             // Read is also the most frequent tool there is, so this speaks only
             // when a symbol lookup would actually be cheaper — a source file big
@@ -439,6 +477,10 @@ mod tests {
     /// failure this whole module exists to prevent.
     const BUNDLED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/base");
 
+    /// `git log --reverse --date=short | head -1`. Nothing in this repo could
+    /// have been measured before it existed.
+    const FIRST_COMMIT: (u32, u32, u32) = (2026, 8, 5);
+
     fn shipped() -> Manifest {
         Manifest::load_dir(Path::new(BUNDLED)).expect("bundled base manifest")
     }
@@ -479,7 +521,80 @@ mod tests {
                  half that must be measured — it is what creeps.",
                 e.name
             );
+            assert!(!e.since.trim().is_empty(), "{}: no `since`", e.name);
+
+            for m in &e.measured {
+                for (field, value) in [
+                    ("what", &m.what),
+                    ("value", &m.value),
+                    ("how", &m.how),
+                    ("on", &m.on),
+                ] {
+                    assert!(
+                        !value.trim().is_empty(),
+                        "{}: measured `{field}` is blank",
+                        e.name
+                    );
+                }
+                // A date the tool cannot read is a manifest defect, not a
+                // measurement. Left unchecked it silently disables staleness
+                // for that cost and prints itself to the user verbatim.
+                parse_ym(&m.on).unwrap_or_else(|| panic!("{}: `{}` is not a date", e.name, m.on));
+
+                // Day precision, not month. Every `on` in this manifest once
+                // read 2026-08-04 — one day before this repository's first
+                // commit, so no measurement of this repo could have been taken
+                // then. A month-granular check passes that date happily, which
+                // is how the first version of this very assertion failed to
+                // catch the thing it was written for.
+                let day: Vec<u32> = m.on.split('-').filter_map(|p| p.parse().ok()).collect();
+                assert_eq!(day.len(), 3, "{}: `{}` needs YYYY-MM-DD", e.name, m.on);
+                assert!(
+                    (day[0], day[1], day[2]) >= FIRST_COMMIT,
+                    "{}: measured {} predates this repository ({}-{:02}-{:02})",
+                    e.name,
+                    m.on,
+                    FIRST_COMMIT.0,
+                    FIRST_COMMIT.1,
+                    FIRST_COMMIT.2
+                );
+            }
         }
+    }
+
+    /// A hand-written cost and the thing it measures have no relationship a
+    /// test can check — which is how `~40 B` sat in the manifest describing a
+    /// 243-byte string, through a review that read it twice.
+    ///
+    /// Where a cost is computable it gets computed, and the manifest has to
+    /// agree. This is the only measurement in the base set that can be checked
+    /// in-process; the rest need a container, and are the reason `omh doctor`
+    /// exists for adapter claims.
+    #[test]
+    fn the_grep_nudges_declared_cost_matches_the_string_it_ships() {
+        // A representative session project name — `repo-sNN`, and it appears
+        // twice in the nudge, so the length is not incidental.
+        let project = project_name("ohmyharness", "s01");
+        let actual = grep_nudge(&project).len();
+
+        let entry = shipped()
+            .entry("graph-first")
+            .expect("graph-first in the manifest")
+            .measured[0]
+            .value
+            .clone();
+        let declared: usize = entry
+            .trim_end_matches(" B")
+            .replace(',', "")
+            .trim()
+            .parse()
+            .unwrap_or_else(|_| panic!("graph-first cost `{entry}` is not a byte count"));
+
+        assert_eq!(
+            declared, actual,
+            "the manifest claims {declared} B; the nudge it ships is {actual} B for project \
+             `{project}`. Re-measure rather than adjusting the string to fit."
+        );
     }
 
     /// A rejection is a product artifact. Without one recorded, the same
@@ -553,13 +668,14 @@ mod tests {
     #[test]
     fn the_document_init_seeds_actually_contains_the_base_set() {
         let manifest = shipped();
-        let body = serde_json::to_string_pretty(
-            &serde_json::json!({ "mcpServers": manifest.servers() }),
-        )
-        .unwrap();
+        let body =
+            serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": manifest.servers() }))
+                .unwrap();
 
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        let servers = parsed["mcpServers"].as_object().expect("an mcpServers object");
+        let servers = parsed["mcpServers"]
+            .as_object()
+            .expect("an mcpServers object");
         assert!(!servers.is_empty(), "init would seed an empty base set");
         assert_eq!(servers["codegraph"]["command"], GRAPH_BIN);
     }
