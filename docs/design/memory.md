@@ -402,24 +402,120 @@ notes whose source moved, whose symbol vanished, or that predate the current
 base-set version, and removing one is deleting one file. One idea per note is
 what buys that — a wrong paragraph inside a long document has no such affordance.
 
-## Ingestion happens on hooks
+## Hooks are not harness-agnostic, and this feature cannot rest on them
 
-Two, mirroring the pattern the code graph already proved:
+The requirement is that the agent fills the graph **whatever harness is
+running**. Checking what the shipped adapters actually declare:
 
-| Hook | When | Does |
-|---|---|---|
-| `notes-ingest` | `PostToolUse` on `Write`\|`Edit` | re-ingests **the one file** just changed, and only if it is an ingested path |
-| `notes-reconcile` | `SessionStart` | hash-compares the ingested set and re-ingests whatever moved |
+| | rules | mcp | hooks |
+|---|---|---|---|
+| claude | ✅ | ✅ | ✅ |
+| opencode | ✅ | ✅ | **✗** |
 
-Neither alone is enough. `PostToolUse` catches only what the *agent* writes — a
-`git pull`, a branch switch, or a human editing a doc in their editor would go
-unnoticed. `SessionStart` alone leaves a doc edited mid-session stale for the
-rest of that session.
+Only **rules and MCP are universal**. An earlier version of this design put
+ingestion, index injection *and* write-prompting on hooks — which would have
+worked on Claude Code and degraded, on opencode, to precisely the inert server
+the [code graph](../code-graph.md#current-used-and-visible) lesson warns about:
+indexed once, never reached for, and nobody notices.
 
-`Write`/`Edit` is a hot path, so `notes-ingest` follows `graph-read`'s
-discipline: check the path first, exit immediately when it is not an ingested
-file, and never re-ingest the whole set. A hook that costs something on every
-edit is a hook that gets removed.
+So each mechanism has to be placed on the lowest layer that can carry it.
+
+### Ingestion belongs in the server, not in a hook
+
+iwe watches a directory. If it reconciles on start and on query, **no hook is
+needed at all** — a `git pull`, a branch switch, a human editing in their editor
+and the agent's own writes are all just files changing under a server that is
+already watching.
+
+Hooks were the wrong layer for this. The code graph needs one only because
+`codebase-memory-mcp` indexes on command rather than on change.
+
+### The index rides in the staged `AGENTS.md`
+
+The agent has to know *what exists* before it can query anything, and
+`SessionStart` was how the design delivered that. Hookless harnesses need
+another carrier, and there already is one: **omh regenerates the staged rules
+file on every launch.** Putting the note index there makes it fresh at session
+start, in every harness, with no hook.
+
+`AGENTS.md` already carries exactly this kind of content — its `## Code graph`
+section is routing, not instruction: *here is a tool, here is when to prefer it*.
+A `## What is in your notes` section is the same shape.
+
+It does mean the index is unconditionally in context rather than fetched. That
+is acceptable because the index is bounded by design — titles and one-liners —
+while the thing it replaces is unbounded. A generated index that grows with the
+graph is still a fixed cost per note, and a far smaller one than the note.
+
+### Hooks stay, as an enhancement
+
+Where a harness has them, they sharpen the timing: a `Stop` hook can prompt for
+what was learned at the end of a turn rather than relying on the agent to
+remember mid-task. That is better on Claude Code and absent on opencode, which
+is the correct shape for an [optional capability](adapters.md) — the feature
+works everywhere and is *better* where the harness allows.
+
+What must never depend on a hook is whether memory works at all.
+
+## Making the agent actually write
+
+Retrieval can be engineered. Writing is a **behaviour**, and behaviour is not
+guaranteed by anything omh can build. This is the weakest link in the feature
+and worth saying so before designing around it.
+
+Two levers work in every harness:
+
+**The rule.** *"When something did not work the way you expected, record why."*
+This is an imperative — nothing prompts an agent to wonder whether it has
+learned something — so by the [boundary rule](#the-agentsmd-boundary) it belongs
+in `AGENTS.md`.
+
+**The tool description.** Every MCP tool carries a description the model reads,
+in every harness, with no hook involved. A tool called `remember` whose
+description says *when* to reach for it is a prompt that arrives at exactly the
+moment of decision. This is the most underused lever available and the only one
+that is both universal and contextual.
+
+### Record on surprise, not on schedule
+
+The obvious trigger — write a note at the end of every turn — produces noise.
+Most turns teach nothing, and an agent asked to summarise one anyway will
+produce *"fixed a typo in the parser"*, which is worth less than nothing once it
+is in the graph forever.
+
+The notes actually worth having all share a shape. Every one of the valuable
+facts in this repo came from an expectation being violated:
+
+- mounting a token file returns `EBUSY`, so the login never persists
+- the published installer ignores the `CBM_VARIANT` it documents
+- `--aspects` with a comma-separated list returns empty, silently
+- `info/exclude` is read from the *common* git dir, not the per-worktree one
+
+None of those came from routine work. Each came from something not behaving as
+assumed — which is also precisely when a fact is worth recording, because the
+assumption it corrects is one the next agent will make too.
+
+**Surprise is a better trigger than time**, and it is a trigger the model can
+recognise without a hook: it knows when it expected one thing and got another.
+
+### The floor, when the agent writes nothing
+
+Because the graph [ingests what the repo already documents](#decided), it is
+useful on day one whether or not the agent ever writes a note. That matters:
+compliance is not guaranteed, so the feature must not be worthless without it.
+
+Agent writing is the *growth* path. Ingestion is the *floor*.
+
+### This is observable, not testable
+
+Whether an agent reliably records what it learns cannot be asserted in a unit
+test — it is a claim about a model's behaviour, in the same class as *"the
+harness reads this path"*, which is why [`omh doctor`](../troubleshooting.md)
+exists. The honest check is to run it for a week and look at whether the graph
+grew, and whether what it grew is worth keeping.
+
+Until that has been done, the correct status for this feature is **unverified**,
+however good the design reads.
 
 ## Identity is solved by the tool, not by an id
 
