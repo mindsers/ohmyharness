@@ -1,65 +1,158 @@
 # Memory
 
-> **Status: designed, not built.** This page describes intent, not behaviour.
-> Nothing here ships in v0 except the derived seeds `omh init` writes.
+> **Status: in design.** Nothing here ships. This page is being rewritten as the
+> shape of the feature changes — it currently records a reframing, a survey, and
+> the questions still open, rather than a settled design.
 
-Memory is **layered like the profile**, not stored in one bucket. Global-only
-and per-project-only are both wrong, for opposite reasons.
+## The reframing
 
-| Scope | Location | Holds | Example |
-|---|---|---|---|
-| personal | `~/.omh/memory` | facts about **you** | prefers TDD; dislikes defensive comments |
-| project | repo-keyed volume | facts about **this codebase** | the sbx spike is unresolved; hooks live in layer 2 |
-| team *(later)* | committed in the repo | facts the whole team should share | deploys need the VPN |
+An earlier version of this page described memory as a **layered fact store**:
+personal facts, project facts, team facts, merged with provenance like
+`omh config`. That answered the wrong question.
 
-A query merges the layers and reports which one answered, exactly as
-[`omh config`](../configuration.md#provenance) does for settings.
+The actual idea is closer to the code graph, pointed at everything that is not
+code: **a graph of small linked Markdown notes — Obsidian-shaped — that the
+agent can query and grow.** One note, one idea. Concepts, definitions,
+decisions, conventions, things learned the hard way, each linked to the others.
 
-## Why not global-only
+Two things it buys:
 
-A single store accumulates thousands of repo-specific facts and retrieval
-degrades into noise — you pay tokens loading facts about repo B while working in
-repo A.
+**A smaller `AGENTS.md`, holding only instructions.** Everything that is a
+*fact* moves out; what stays is what the agent must know before it acts.
 
-It also carries one client's context into another's session, which is a
-confidentiality problem before it is a quality one.
+**Retrieval instead of recitation.** A large `AGENTS.md` is loaded whole into
+every session and models attend poorly to the middle of long text. A graph is
+queried: three relevant notes instead of four hundred lines, and the cost scales
+with the question rather than with the size of what you know.
 
-## Why not project-only
+That second point is the real argument, and it is the same one that justified
+the code graph — structural queries instead of re-reading files.
 
-You are one person across every repo. How you work, what you have already
-learned the hard way, and what you keep correcting do not reset when you `cd`.
-Re-teaching those per project is precisely the hassle omh exists to remove.
+## Instructions are not knowledge
 
-## Writes default to the narrower scope
+The word "replace" hides a boundary that has to be drawn explicitly.
 
-Project unless promoted, mirroring `omh config set` defaulting to the gitignored
-layer. The asymmetry is the point: a fact that should have been global is a mild
-annoyance, and a client detail that should not have been global is not.
+**Instructions must already be in context**, because the agent cannot look up a
+rule it does not know it needs. *"Write the failing test first"* has to arrive
+before it starts writing code; nothing will prompt it to go and ask.
 
-Promotion is deliberate — `omh memory promote <fact>`.
+**Knowledge can be fetched**, because a question triggers it. *"What does
+`carry_in` do?"*, *"why was gitnexus rejected?"*, *"how does staging work?"* —
+all reachable on demand.
 
-## Surviving a harness switch is orthogonal
+So `AGENTS.md` does not disappear. It shrinks to imperatives, which is a smaller
+and much sharper document than it is today.
 
-Both layers survive a switch, because neither is keyed by harness. That property
-comes from what memory is *not* keyed by, not from being repo-keyed — worth
-stating because it is easy to attribute to the wrong design decision and then
-"preserve" it by preserving the wrong thing.
+## The hard problem: retrieval requires knowing to retrieve
 
-## Seeding
+This repo already learned this once. From
+[code graph](../code-graph.md#current-used-and-visible): *"An MCP server on its
+own is inert — indexed once, never refreshed, never reached for."* Four hooks
+were what turned it into something used.
 
-`omh init` already derives facts rather than asking for them — from the README,
-manifests, git log and any existing rules files. Same principle as everywhere
-else: [derive, never interrogate](../getting-started.md#derive-never-interrogate).
+Knowledge is **harder** than code, because the trigger is less obvious. An agent
+about to grep knows it is looking something up. An agent that does not know a
+convention exists has no reason to ask whether one does.
 
-Derived seeds also refresh when the repo changes, instead of going stale in a
-config file nobody revisits.
+The pattern that already works here is `graph-orient`: inject the **index**, not
+the content. Fifty note titles with a one-line summary each is a few kilobytes —
+cheap enough to send at session start, and it tells the agent *what exists* so it
+can decide what to fetch. The notes themselves stay out of context until asked
+for.
 
-## The unsolved part
+## What already exists
 
-A wrong **global** fact poisons every project, so global memory needs expiry and
-an [`omh why`](trust.md) story more urgently than project memory does. Neither
-exists yet.
+The base set was chosen by surveying candidates and disqualifying most of them
+([code graph](../code-graph.md#why-this-one)). Memory gets the same treatment.
 
-Until they do, a memory store that accumulates confident wrong facts is worse
-than no memory store — which is the honest reason this is designed and not
-built.
+This space is **crowded**, which is itself a finding — it argues against
+building a server and for choosing one.
+
+| | What it claims |
+|---|---|
+| [Meshnote](https://github.com/TensorBlock/awesome-mcp-servers/blob/main/docs/knowledge-management--memory.md) | agent-maintained wiki for coding agents: Markdown, YAML frontmatter, `[[wikilinks]]`, BM25 search, backlink graph, per-topic "brains" each seeded with a `schema.md` telling the agent how to maintain it, version history, valid Obsidian vault on disk |
+| [iwe](https://github.com/iwe-org/iwe) | Markdown knowledge graph exposed as **both an LSP and an MCP** — the editor and the agent read the same graph, which fits omh's "your editor attached to the same session" model unusually well |
+| [Basic Memory](https://mcpmarket.com/server/basic-memory) | persistent knowledge graph from conversations, Markdown on disk, LLM reads and writes |
+| [mwe-mcp](https://github.com/Fr4nZ82/mwe-mcp) | Markdown wiki, multi-user with per-fragment ACL, self-organising overnight. **AGPL** |
+| [agent-wiki](https://github.com/xinhuagu/agent-wiki) | turns documents, code and project context into portable retrievable memory |
+| [linksee-memory](https://github.com/michielinksee/linksee-memory) | local-first cross-agent memory with a token-saving file diff cache |
+| [Obsidian Memory MCP](https://lobehub.com/mcp/yunaga224-obsidian-memory-mcp) · [mcp-obsidian](https://github.com/Piotr1215/mcp-obsidian) | the read side against an existing vault |
+
+**None is evaluated yet.** The criteria that actually decided codegraph were
+licence, external dependencies, maintenance and whether it runs unattended in a
+container — not features. `mwe-mcp` being AGPL raises the same class of question
+that disqualified gitnexus, and Meshnote's licence is reported as Apache-2.0 in
+a third-party listing rather than confirmed at source.
+
+## The server is the commodity; the integration is the product
+
+Worth stating before choosing, because it changes what "build it ourselves"
+would even mean. Whichever server wins, **omh still has to build**:
+
+- **three-layer note storage** — personal notes that follow you, committed notes
+  the team shares, gitignored notes that are yours alone, merged the way the
+  [profile](../configuration.md#the-three-layers) already is
+- **index injection at session start**, so the agent knows what exists without
+  loading it
+- **the hooks that make retrieval happen** — the lesson from the code graph is
+  that a server nothing reaches for is inert
+- **provenance on every fact**, so a note can be judged rather than trusted
+- **the `AGENTS.md` boundary** — deciding what is an imperative and what is a
+  fact, and moving the second out
+
+That list is larger than the server, and none of it comes free with any
+candidate. Building the server too would add the one part of this that several
+projects have already solved.
+
+## The poisoning problem, and why the format helps
+
+The previous version of this page said it plainly: *a memory store that
+accumulates confident wrong facts is worse than no memory store.*
+
+That is not hypothetical. In one session this project shipped seven fabricated
+measurement dates, a byte count that was wrong on arrival, and a deprecated
+config key — each stated with complete confidence, none caught by a test. An
+agent with unattended write access does that **into a store that is then loaded
+into every future session**.
+
+The Obsidian shape helps more than a monolith would:
+
+- one idea per file means a wrong fact is **one file to delete**, not a
+  paragraph buried in a document
+- `git log` shows when a note appeared and what it replaced
+- links make an unsupported claim visible: a note nothing links to, and which
+  links to nothing, is a fact with no context
+
+What it does not solve is a confidently wrong note being *retrieved and
+believed*. That needs the same answer the base set got: **every fact carries
+where it came from and when**, so it can be judged rather than trusted. A note
+without provenance reintroduces exactly the problem [`omh why`](trust.md) exists
+to remove.
+
+## Open questions
+
+1. **Write access.** Does the agent write notes unattended, or propose them for
+   review? Unattended is the whole feature and the whole risk.
+2. **Build or adopt.** Meshnote in particular is very close to this description.
+   Does omh package one of these, or is there a reason none fits?
+3. **Contents.** Purely accumulated memory, or does the graph also ingest what
+   the repo already documents — `docs/`, ADRs, existing notes?
+4. **Layering.** Does the [three-layer profile](../configuration.md#the-three-layers)
+   apply — personal notes, committed team notes, gitignored local notes — and can
+   a link cross layers?
+5. **One graph or two.** codegraph is code-shaped (symbols, calls, imports).
+   Notes are concept-shaped. Separate stores, or one?
+6. **Boundary.** Which of today's `AGENTS.md` is an imperative that stays, and
+   which is a fact that moves?
+
+## An alternative worth considering
+
+**Skills are already progressive-disclosure Markdown.** A harness loads a
+skill's name and description up front and its body only when relevant — the
+exact mechanism this feature wants, already implemented, already layered by
+omh, already portable across every harness that supports skills.
+
+Notes-as-skills would need no MCP server at all. Against it: skills are
+procedures by convention rather than facts, there is no link graph, and the
+agent cannot *write* one mid-session. But it sets the bar a new subsystem has to
+clear.
