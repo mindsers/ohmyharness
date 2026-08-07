@@ -118,17 +118,20 @@ Worth stating before choosing, because it changes what "build it ourselves"
 would even mean. Whichever server wins, **omh still has to build**:
 
 - **three-layer note storage** — personal notes that follow you, committed notes
-  the team shares, gitignored notes that are yours alone, merged the way the
-  [profile](../configuration.md#the-three-layers) already is
+  the team shares, gitignored notes that are yours alone
 - **index injection at session start**, so the agent knows what exists without
   loading it
 - **the hooks that make retrieval happen** — the lesson from the code graph is
   that a server nothing reaches for is inert
-- **provenance on every fact**, so a note can be judged rather than trusted
 - **the `AGENTS.md` boundary** — deciding what is an imperative and what is a
   fact, and moving the second out
 
-That list is larger than the server, and none of it comes free with any
+Provenance was on this list until iwe's
+[document schemas](#document-schemas-make-the-invariant-enforceable) turned out
+to enforce it, which is one fewer thing to build and a better mechanism than
+omh would have written.
+
+What remains is still larger than the server, and none of it comes free with any
 candidate. Building the server too would add the one part of this that several
 projects have already solved.
 
@@ -308,6 +311,57 @@ validate the other's claims about the thing it indexes.
 **Not checkable — derived from experience.** *"The staging deploy needs the
 VPN"* has no source to watch. It carries a date, and that is all.
 
+### Document schemas make the invariant enforceable
+
+iwe has [document schemas](https://github.com/iwe-org/iwe/blob/master/crates/iwe/docs/schema.md):
+a JSON-Schema-aligned declaration of the shape a note must have — which
+frontmatter fields it carries, which sections in what order, and how large each
+part may grow. `iwe schema validate` checks them, so in its own words *"a
+store's conventions become machine-checked policy in the loop write → validate →
+fix."*
+
+That converts the central invariant from a hope into a check:
+
+```yaml
+# .iwe/schemas/note.yaml
+frontmatter:
+  type: object
+  required: [source, recorded]
+  properties:
+    source:   { type: string }                            # what produced this
+    recorded: { type: string, pattern: "^\\d{4}-\\d{2}-\\d{2}$" }
+maxTokens: 400
+```
+
+A note without provenance **fails validation**. This is the same move the base
+set already made: `every_base_set_entry_states_its_case` turned *"the shortlist
+must be earned"* from a sentence in a document into a test that fails the build.
+The lesson there was that an unenforced convention is not a convention, and it
+cost seven fabricated dates to learn.
+
+`maxTokens` does the same for the property this whole feature rests on. **One
+idea per note stops being a guideline** — a note that grows past its budget is
+invalid. Without it, notes drift back toward being a long document, which is the
+failure being escaped.
+
+Schemas bind by glob and **compose**, so layers can differ in strictness:
+
+```toml
+[schemas.note]        # everything the agent writes
+match = "**"
+
+[schemas.shared]      # additionally, for the committed layer
+match = ".omh/notes/**"
+```
+
+A committed note can be required to carry more than a local one — which is the
+layering decision, enforced rather than trusted.
+
+Most usefully: **write → validate → fix is a feedback loop around unattended
+writing**, which is what the design was missing. The agent writes a note, the
+schema rejects it for having no source, the agent supplies one. Nothing here
+depends on the agent choosing to be careful.
+
 ### The invariant that decides whether this is trustworthy
 
 **A note is never retrieved without its date and its source.**
@@ -366,8 +420,10 @@ Two caveats worth carrying:
   notes through the tool, never with `mv`"* an **imperative** — it is a rule the
   agent needs before it acts, so by the boundary rule above it belongs in
   `AGENTS.md` rather than in the graph.
-- Frontmatter support specifically was **not confirmed** from source. What was
-  confirmed is rename-safety, which is what the question needed.
+- Frontmatter is supported and, better, **validated** — see
+  [document schemas](#document-schemas-make-the-invariant-enforceable). An
+  earlier version of this page recorded it as unconfirmed; the schema
+  documentation settles it.
 
 ## Conflict: never let retrieval pick a winner
 
