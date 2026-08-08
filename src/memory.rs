@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub mod recall;
 pub mod tools;
 
 // ── layers ──────────────────────────────────────────────────────────────────
@@ -267,7 +268,7 @@ pub fn render(note: &Note) -> String {
 /// `\d{4}-\d{2}-\d{2}` is the rule §5 states, and it is the weak version: it
 /// accepts `2026-13-45`. A note's date is the only thing an unverified claim
 /// can be judged by, so it has to be a date that exists.
-fn is_calendar_date(s: &str) -> bool {
+pub(crate) fn is_calendar_date(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
         return false;
