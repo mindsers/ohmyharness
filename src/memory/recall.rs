@@ -6,9 +6,20 @@
 //! needed** — the neighbourhood, not the node. The graph is structure here,
 //! never an interface the agent drives.
 //!
-//! Ranking has no calibrated number in it. Notes are ordered by how many
-//! distinct terms of the question they match, where a match in the key counts
-//! ahead of one in the body, then by recency, then by key for determinism.
+//! Ranking has no calibrated number in it. Notes are ordered by the **rarity**
+//! of the question's terms that they match — a word in every note cannot tell
+//! two notes apart, so it barely counts, while a word in one note counts a lot.
+//! That is what stands in for a stopword list, which would be a list to
+//! maintain, one per language, stale by construction, and carrying a length
+//! cutoff to calibrate at its edge. A term matched in the key counts double,
+//! then recency, then key for determinism.
+//!
+//! Matching is on **whole tokens**. The first version compared substrings, and
+//! it was not marginally wrong: `key.contains("a")` is true of nearly every key
+//! ever written, so one stray letter in a question dragged the entire store
+//! back. Measured on a ten-note store, `"a"` retrieved all ten and a real
+//! question retrieved nine.
+//!
 //! **Layer is not a tiebreak.** Retrieval never picks a winner; reconciling a
 //! contradiction is the agent's job, done with layers and dates in hand.
 
@@ -60,33 +71,82 @@ impl Default for Budget {
     }
 }
 
-fn terms(question: &str) -> Vec<String> {
-    question
-        .split(|c: char| !c.is_alphanumeric())
+/// Whole words, lowercased.
+///
+/// Tokens rather than substrings, because substrings were the original defect
+/// and it was not marginal: `key.contains("a")` is true of almost every key
+/// ever written, so one stray letter in a question dragged the whole store
+/// back. Measured before this changed, `"a"` retrieved a ten-note store in
+/// full.
+fn tokens(text: &str) -> BTreeSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
         .map(str::to_lowercase)
-        .collect::<BTreeSet<String>>()
-        .into_iter()
         .collect()
 }
 
-/// Distinct terms matched, weighted by where. Not a threshold — nothing is
-/// compared against a constant; this only orders.
-fn score(note: &Note, terms: &[String]) -> usize {
-    let key = note.key.to_lowercase();
-    let body = note.body.to_lowercase();
-    terms
+/// The tokens of one note, split by where they appear.
+struct Indexed<'a> {
+    note: &'a Note,
+    key: BTreeSet<String>,
+    all: BTreeSet<String>,
+}
+
+fn index(notes: &[Note]) -> Vec<Indexed<'_>> {
+    notes
         .iter()
-        .map(|t| {
-            if key.contains(t) {
-                2
-            } else if body.contains(t) {
-                1
-            } else {
-                0
-            }
+        .map(|note| {
+            let key = tokens(&note.key);
+            let mut all = tokens(&note.body);
+            all.extend(key.iter().cloned());
+            Indexed { note, key, all }
         })
-        .sum()
+        .collect()
+}
+
+/// How many notes contain each term.
+///
+/// This is what replaces a stopword list — which would be a list to maintain,
+/// one per language, stale by construction, and carrying a length cutoff to
+/// calibrate at its edge. A word in every note cannot tell two notes apart,
+/// and rarity says so without anybody deciding which words those are.
+fn document_frequency<'a>(indexed: &'a [Indexed<'_>]) -> BTreeMap<&'a str, usize> {
+    let mut df: BTreeMap<&str, usize> = BTreeMap::new();
+    for doc in indexed {
+        for term in &doc.all {
+            *df.entry(term.as_str()).or_insert(0) += 1;
+        }
+    }
+    df
+}
+
+/// Rarity of a matched term, weighted by where it matched.
+///
+/// Smoothed so that rarity **orders but never excludes**: with a bare
+/// `ln(n/df)` a term in every note scores zero, and a store where every note
+/// is about the same subject becomes unsearchable for that subject — exactly
+/// as it gets good. `ln((n+1)/df)` stays positive, so a universal term still
+/// retrieves; it simply cannot rank.
+///
+/// Returned in thousandths as an integer: the ordering has to be total and
+/// reproducible, and floats give neither for free.
+fn score(doc: &Indexed<'_>, terms: &BTreeSet<String>, df: &BTreeMap<&str, usize>, n: usize) -> u64 {
+    let mut total = 0.0_f64;
+    for term in terms {
+        if !doc.all.contains(term) {
+            continue;
+        }
+        let Some(seen) = df.get(term.as_str()) else {
+            continue;
+        };
+        let rarity = ((n as f64 + 1.0) / *seen as f64).ln();
+        // A term in the key is a term about the note's subject rather than one
+        // that merely occurs in it. A weight, not a threshold: it orders, and
+        // nothing is compared against it.
+        let where_it_matched = if doc.key.contains(term) { 2.0 } else { 1.0 };
+        total += rarity * where_it_matched;
+    }
+    (total * 1000.0) as u64
 }
 
 fn cite(note: &Note) -> Cite {
@@ -98,11 +158,13 @@ fn cite(note: &Note) -> Cite {
 }
 
 pub fn search(notes: &[Note], question: &str, budget: Budget) -> Neighbourhood {
-    let terms = terms(question);
+    let terms = tokens(question);
+    let indexed = index(notes);
+    let df = document_frequency(&indexed);
 
-    let mut scored: Vec<(usize, &Note)> = notes
+    let mut scored: Vec<(u64, &Note)> = indexed
         .iter()
-        .map(|n| (score(n, &terms), n))
+        .map(|doc| (score(doc, &terms, &df, notes.len()), doc.note))
         .filter(|(s, _)| *s > 0)
         .collect();
 
@@ -287,7 +349,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn note(layer: Layer, key: &str, recorded: &str, links: &[&str]) -> Note {
-        let mut body = format!("# {key}\n\n## Expected\na\n\n## Observed\nb\n\n## Evidence\nc\n");
+        // No single-letter filler: those are whole tokens, and they made every
+        // note match every question by accident.
+        let mut body = format!(
+            "# {key}\n\n## Expected\nsomething predictable\n\n## Observed\nsomething else\n\n## Evidence\nthe recorded output\n"
+        );
         if !links.is_empty() {
             body.push_str("\n## Related\n\n");
             for target in links {
@@ -608,6 +674,165 @@ mod tests {
         let found = search(&store(), "kubernetes", Budget::default());
         assert!(found.hits.is_empty(), "no match is not every note");
         assert!(!render(&found).trim().is_empty());
+    }
+
+    // ── ranking ─────────────────────────────────────────────────────────────
+
+    /// Substring matching was the original defect, and it was not subtle:
+    /// `key.contains("a")` is true of almost every key ever written, so a
+    /// single stray letter in a question dragged the whole store back.
+    ///
+    /// Measured before this changed: asking `"a"` of a ten-note store returned
+    /// all ten, and `"why does a credential mount fail"` returned nine.
+    #[test]
+    fn a_question_matches_whole_tokens_not_fragments_of_them() {
+        // `named-volume-mounts` contains the letter `a` only *inside* words.
+        // `a-thing` carries it as a word of its own.
+        let notes = vec![
+            note(Layer::Local, "named-volume-mounts", "2026-01-01", &[]),
+            note(Layer::Local, "a-thing", "2026-01-02", &[]),
+        ];
+
+        let hits = search(&notes, "a", Budget::default()).hits;
+        let keys: Vec<&str> = hits.iter().map(|h| h.cite.key.as_str()).collect();
+        assert!(
+            keys.contains(&"a-thing"),
+            "`a` is a whole token there: {keys:?}"
+        );
+        assert!(
+            !keys.contains(&"named-volume-mounts"),
+            "`a` inside `named` is not a match: {keys:?}"
+        );
+    }
+
+    /// A word in every note cannot tell two notes apart, so it must not decide
+    /// the order. Rarity does that without a stopword list — which would be a
+    /// list to maintain, per language, stale by construction, and a number to
+    /// calibrate at the edge of it.
+    ///
+    /// The discriminating note is made the **oldest** deliberately: if rarity
+    /// is not doing the work, recency puts it last and this fails.
+    #[test]
+    fn a_word_in_every_note_cannot_decide_the_ranking() {
+        // The fixture has to separate *weighting by rarity* from *counting
+        // matched terms*, and the first version did not: its answer also
+        // matched more terms, so plain counting produced the same order and
+        // deleting rarity outright left the suite green.
+        //
+        // So the note that should win matches **one rare** term while its
+        // rivals match **two common** ones. Counting puts a rival first; only
+        // rarity puts the answer first. It is also the oldest, so recency
+        // cannot explain the win either.
+        let mut notes: Vec<Note> = (0..9)
+            .map(|i| {
+                note(
+                    Layer::Local,
+                    &format!("the-note-about-things-{i}"),
+                    &format!("2026-02-0{}", i + 1),
+                    &[],
+                )
+            })
+            .collect();
+        notes.push(note(
+            Layer::Local,
+            "ebusy-on-file-mounts",
+            "2026-01-01",
+            &[],
+        ));
+
+        let hits = search(&notes, "the note ebusy", Budget::default()).hits;
+        assert_eq!(
+            hits[0].cite.key,
+            "ebusy-on-file-mounts",
+            "one rare term beats two common ones, and beats recency: {:?}",
+            hits.iter().map(|h| &h.cite.key).collect::<Vec<_>>()
+        );
+    }
+
+    /// The question from the probe that exposed the problem, kept as a
+    /// regression: the note that actually answers it must lead.
+    #[test]
+    fn a_real_question_puts_the_note_that_answers_it_first() {
+        let notes = vec![
+            note(
+                Layer::Local,
+                "mounting-a-credential-file-returns-ebusy",
+                "2026-01-01",
+                &[],
+            ),
+            note(
+                Layer::Local,
+                "the-graph-cache-is-keyed-by-repo",
+                "2026-06-01",
+                &[],
+            ),
+            note(
+                Layer::Local,
+                "a-latest-tag-skips-the-rebuild",
+                "2026-06-02",
+                &[],
+            ),
+            note(
+                Layer::Local,
+                "the-image-ends-unprivileged",
+                "2026-06-03",
+                &[],
+            ),
+        ];
+
+        let hits = search(
+            &notes,
+            "why does a credential mount fail",
+            Budget::default(),
+        )
+        .hits;
+        assert_eq!(hits[0].cite.key, "mounting-a-credential-file-returns-ebusy");
+        assert!(
+            !hits
+                .iter()
+                .any(|h| h.cite.key == "the-graph-cache-is-keyed-by-repo"),
+            "a note sharing only filler words is not a match: {:?}",
+            hits.iter().map(|h| &h.cite.key).collect::<Vec<_>>()
+        );
+    }
+
+    /// A term nothing in the store contains must not quietly become a match
+    /// for everything, and must not crash the weighting either.
+    #[test]
+    fn a_term_the_store_has_never_seen_matches_nothing() {
+        let notes = vec![note(Layer::Local, "credentials", "2026-01-01", &[])];
+        assert!(search(&notes, "kubernetes", Budget::default())
+            .hits
+            .is_empty());
+        // …and it does not poison a question that also carries a real term.
+        let hits = search(&notes, "kubernetes credentials", Budget::default()).hits;
+        assert_eq!(hits.len(), 1);
+    }
+
+    /// Rarity orders; it never excludes. In a store where every note is about
+    /// the same thing, asking about that thing must still answer — otherwise a
+    /// focused store becomes unsearchable exactly as it gets good.
+    #[test]
+    fn a_store_where_every_note_shares_a_term_is_still_searchable() {
+        let notes = vec![
+            note(
+                Layer::Local,
+                "credentials-are-a-named-volume",
+                "2026-01-01",
+                &[],
+            ),
+            note(
+                Layer::Local,
+                "credentials-refresh-in-place",
+                "2026-01-02",
+                &[],
+            ),
+        ];
+        assert_eq!(
+            search(&notes, "credentials", Budget::default()).hits.len(),
+            2,
+            "a universal term still retrieves; it just cannot rank"
+        );
     }
 
     /// Same store, same question, same answer — or a store that grew an
