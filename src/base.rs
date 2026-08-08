@@ -822,6 +822,87 @@ command = "c"
     /// Base servers run in the sandbox. A command carrying a host path would
     /// work on the machine that wrote it and nowhere else.
     #[test]
+    /// The manifest's arguments and the launcher's mounts have to name the
+    /// same directories. A server that starts, finds nothing, and reports "0
+    /// notes" is the failure this prevents — it looks exactly like an empty
+    /// store, so nobody investigates.
+    ///
+    /// Asserted against the constants rather than against literals, so moving
+    /// a mount without updating the manifest cannot stay green.
+    #[test]
+    fn the_memory_server_is_pointed_at_the_directories_omh_mounts() {
+        let servers = shipped().servers();
+        let memory = servers
+            .get(crate::memory::tools::SERVER_KEY)
+            .expect("the base set must declare the memory server");
+
+        assert!(
+            memory
+                .args
+                .iter()
+                .any(|a| a == crate::memory::GUEST_LOCAL_NOTES),
+            "the local store is mounted at {}, args say {:?}",
+            crate::memory::GUEST_LOCAL_NOTES,
+            memory.args
+        );
+        // The committed layer is tracked, so it arrives inside the worktree —
+        // there is no mount for it, and its path is /work-relative.
+        assert!(
+            memory.args.iter().any(|a| a == "/work/.omh/notes"),
+            "the team store lives in the checkout: {:?}",
+            memory.args
+        );
+        // Nothing that pins a session: one manifest serves every session, and
+        // the server reads $OMH_SESSION for provenance.
+        assert!(
+            !memory.args.iter().any(|a| a.contains("--session")),
+            "a session baked into the base set would be wrong for every other one"
+        );
+    }
+
+    /// A hand-typed byte count in this file has already been wrong by 5x — the
+    /// grep nudge declared ~40 B and shipped 243. Anything computable in
+    /// process is computed, and this is.
+    #[test]
+    fn the_memory_surfaces_declared_cost_matches_what_it_ships() {
+        let mut server = crate::memory::tools::Server {
+            team: std::path::PathBuf::from("/nonexistent-team"),
+            local: std::path::PathBuf::from("/nonexistent-local"),
+            templates: crate::memory::shipped_templates(),
+            session: "s01".into(),
+            client: None,
+            today: || "2026-08-08".to_string(),
+        };
+        let listed = crate::mcp::Tools::list(&mut server);
+        let actual: usize = listed
+            .iter()
+            .map(|t| {
+                t.name.len()
+                    + t.description.len()
+                    + serde_json::to_string(&t.input_schema).unwrap().len()
+            })
+            .sum();
+
+        let declared = shipped()
+            .entries
+            .iter()
+            .find(|e| e.name == "memory")
+            .expect("the memory entry")
+            .measured
+            .iter()
+            .find(|m| m.what.contains("injected"))
+            .expect("an injected-cost measurement")
+            .value
+            .trim_end_matches(" B")
+            .parse::<usize>()
+            .expect("a byte count");
+
+        assert_eq!(
+            actual, declared,
+            "re-measure rather than adjusting the surface to fit"
+        );
+    }
+
     fn base_servers_reference_nothing_on_the_host() {
         for (name, server) in shipped().servers() {
             assert!(

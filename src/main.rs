@@ -242,9 +242,11 @@ enum MemoryCmd {
         team: std::path::PathBuf,
         #[arg(long)]
         local: std::path::PathBuf,
-        /// Provenance for everything written this session.
-        #[arg(long, default_value = "unknown session")]
-        source: String,
+        /// The session this server serves. Defaults to `$OMH_SESSION`, which
+        /// omh already sets in the sandbox — so the base set can declare
+        /// static arguments and still record real provenance.
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Schema and hygiene violations, across both layers.
     Lint,
@@ -301,8 +303,8 @@ fn main() -> Result<()> {
             Some(MemoryCmd::Serve {
                 team,
                 local,
-                source,
-            }) => memory_serve(team.clone(), local.clone(), source.clone()),
+                session,
+            }) => memory_serve(team.clone(), local.clone(), session.clone()),
             Some(MemoryCmd::Rm { key, layer, at }) => memory_rm(&cwd, key, *layer, at.as_deref()),
             Some(MemoryCmd::Remember {
                 expected,
@@ -380,6 +382,18 @@ fn session_up(
     let name = paths.container(&session.id);
     if image::container_running(backend.program(), &name) {
         return Ok((backend, name));
+    }
+
+    // Before planning, because the plan mounts the memory server only if a
+    // binary exists. Degraded rather than fatal: a session without memory is
+    // still a session, and refusing to launch over it would be the tail
+    // wagging the dog — the same rule as a capability a harness cannot express.
+    if let Err(e) = memory::deliver::ensure(
+        backend.program(),
+        paths,
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+    ) {
+        eprintln!("omh: memory server unavailable — {e:#}");
     }
 
     // The account must reach *this* plan: this is the container that actually
@@ -700,6 +714,16 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
+    // Only if the resolved profile actually declares it: a check for a server
+    // nobody configured would fail honestly and mean nothing.
+    //
+    // Read through `render::parse_layers` rather than `config::servers`, which
+    // returns only each server's *command* — the arguments are what say which
+    // directories it will look in, and those are the whole point of the check.
+    let declared = render::parse_layers(&profile.sources(adapter::Capability::Mcp))?;
+    if let Some(server) = declared.get(memory::tools::SERVER_KEY) {
+        checks.extend(doctor::memory_checks(server));
+    }
     if checks.is_empty() {
         println!("nothing to check: the profile is empty");
         return Ok(());
@@ -921,12 +945,21 @@ fn seed_store(paths: &Paths) -> Result<String> {
 /// Nothing but protocol may reach stdout — this binary is full of `println!`,
 /// and one stray line breaks the very first handshake. Diagnostics go to
 /// stderr, which the harness shows as server logs.
-fn memory_serve(team: std::path::PathBuf, local: std::path::PathBuf, source: String) -> Result<()> {
+fn memory_serve(
+    team: std::path::PathBuf,
+    local: std::path::PathBuf,
+    session: Option<String>,
+) -> Result<()> {
     let mut server = memory::tools::Server {
         team,
         local,
         templates: memory::shipped_templates(),
-        source,
+        // omh already sets `OMH_SESSION` in the sandbox, so the base set can
+        // declare static arguments and still record real provenance.
+        session: session
+            .or_else(|| std::env::var("OMH_SESSION").ok())
+            .unwrap_or_else(|| "unknown".into()),
+        client: None,
         today: memory::today,
     };
     let stdin = std::io::stdin().lock();

@@ -363,9 +363,49 @@ A `--at` that names no note is an error, never a fall-through to a different
 one: it is the flag you reach for to be careful, so it is the one input that
 must not be quietly ignored.
 
+### What the agent sees
+
+Inside a session the store is two MCP tools, not a command. omh runs the server
+itself rather than pointing the harness at a graph server directly, because the
+guarantee below cannot be enforced on a server the agent talks to on its own.
+
+**`recall(question)`** ranks, expands one hop, and returns the neighbourhood in
+one call. Every line carries the note's date and layer:
+
+```
+credentials-are-a-named-volume            team · 2026-06-12
+└─ mounting-a-credential-file-returns-ebusy  local · 2026-08-07
+```
+
+Ranking is by how *rare* the question's words are in this store — a word in
+every note cannot tell two notes apart, so it barely counts. Ties break on
+recency, then on what the rest of the store points at. **Layer is never a
+tiebreak**: contradicting notes both come back, and reconciling them is the
+agent's job, done with dates and layers in hand.
+
+**`remember(expected, observed, evidence)`** records a surprise. The three
+arguments are the filter — something with nothing to put in `expected` has
+learned nothing. It cannot pass a layer, a source, or an override: writes go to
+`local`, provenance is omh's (the session from its environment, the harness
+from the MCP handshake), and strict mode has no off switch over MCP.
+
+The tool description carries a census of the store — counts, never titles, so
+what it costs stops growing with the graph. It is recomputed on every
+`tools/list`, so a note written this session is advertised in it.
+
+### `omh memory serve`
+
+Hidden, and not for you to run: it speaks JSON-RPC on stdin and waits, which is
+indistinguishable from a hang. The harness spawns it inside the sandbox.
+
+That means an `omh` binary has to exist *in there*. On Linux the running binary
+is mounted as-is; elsewhere omh cross-builds one into `~/.omh/bin` on first
+launch and mounts it read-only. A **released** omh carries no sources and
+cannot do this — that needs a published Linux build, and until then the server
+degrades to absent with one line at launch rather than failing it.
+
 ### What is not here yet
 
-`recall`, `promote` and `stale` arrive with the milestones that give them
-something to act on — see [the design](design/memory.md). A subcommand that
-printed "not implemented" would be worse than its absence, because `--help`
-advertises it.
+`promote` and `stale` arrive with the milestones that give them something to act
+on — see [the design](design/memory.md). A subcommand that printed "not
+implemented" would be worse than its absence, because `--help` advertises it.

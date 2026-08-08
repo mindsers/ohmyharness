@@ -334,8 +334,19 @@ guards in `cargo test`; the rest are honest about not being.
 | 6 | key derivation is canonical: one input, one key | unit test over spelling variants |
 | 7 | `rm` never cascades | unit test |
 | 8 | every schema threshold was calibrated against a known-good store | **process**, recorded in the entry |
-| 9 | the harness reads the tool description per session | **`omh doctor`** — not testable in-process |
+| 9 | the harness reads the tool description per session | **`omh doctor` proves the precondition only** — see below |
 | 10 | the agent actually writes notes worth keeping | **observable only.** See [§13](#13-measurement) |
+
+**Invariant 9 was overstated, corrected during M2.** `doctor` *cannot* enforce
+it: it replaces the launch command with its probe, so no harness ever starts,
+and a tool description is consumed by a model rather than written anywhere
+inspectable. What `doctor` does prove is that the server omh configured
+actually starts where the harness will spawn it, answers `tools/list`, and
+names both tools — reporting the store's own census, because `0 notes` is what
+a wrong mount looks like and a blank detail hides it. Whether a *harness*
+re-reads the description per session is [§15.2](#15-open-questions), and it is
+a dated measurement per harness, not a check. Claiming more than `doctor` can
+prove is the failure [contributing](../contributing.md) names.
 
 Invariants 8–10 are the ones that will be tempting to fake with a weak test. This
 repo has shipped that failure — a date guard that only checked a date was
@@ -430,6 +441,29 @@ deferrals *process, recorded in the entry* rather than a silence:
   no path can leave the store — but nothing distinguishes a canonical key from
   arbitrary text in a signature. M2 adds a second key-minting writer (`stub =
   "docs/{{path}}"`), which is where this stops being cosmetic.
+
+**What M2 actually shipped**, with the deviations named:
+
+- **Retrieval is omh's own**, not a proxy over iwe. §9 said "proxying iwe";
+  [M0](memory-m0.md) found iwe will not run on omh's base image, that `rename`
+  produces notes omh's schema refuses, and that it structurally cannot carry a
+  note's layer. `recall::search` is the seam an iwe-backed retriever would
+  replace without touching the tool surface or invariant 1, so the choice stays
+  open — and §13 is what should settle it.
+- **`recall` returns the tree, not note bodies.** §9.2's own example is a tree.
+  Prose cannot pass the strict, total parser that guards invariant 1, and
+  weakening that parser to admit it would make the guard vacuous. If a second
+  call turns out to be common, that is evidence to add bodies — not a guess.
+- **The stub key template is `{{path}}`, not §6's `docs/{{path}}`.** The path
+  already carries its directory; the latter keys `docs/design/memory.md` as
+  `docs/docs/design/memory`.
+- **Ranking is by term rarity over whole words.** The first version compared
+  substrings and retrieved a ten-note store in full for the question `"a"`.
+  No stopword list: rarity is derived from the store, so nobody decides which
+  words are noise.
+- **Not done: the §15.2 caching experiment**, which needs a real harness launch
+  to measure, and **§13's benchmark**, which needs a question set written by
+  somebody who did not write the store.
 
 ## 15. Open questions
 

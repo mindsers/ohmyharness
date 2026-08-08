@@ -14,7 +14,14 @@ use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+/// What the server calls itself in the MCP handshake.
 pub const SERVER_NAME: &str = "omh-memory";
+
+/// What the base set and every `mcp.json` call it. Deliberately a separate
+/// constant from `SERVER_NAME`: one is a protocol identity, the other is a
+/// configuration key, and deriving one from the other by string surgery is how
+/// a rename silently stops matching.
+pub const SERVER_KEY: &str = "memory";
 
 pub struct Server {
     /// Read for `recall`, never written. `promote` is the only path into the
@@ -23,9 +30,13 @@ pub struct Server {
     /// The only directory this server writes to.
     pub local: PathBuf,
     pub templates: BTreeMap<Kind, String>,
-    /// Provenance, supplied by omh. Not a parameter the agent can reach —
-    /// a writer that names its own source can launder a guess into a fact.
-    pub source: String,
+    /// The session this server was launched for, from omh's own environment.
+    /// Not a parameter the agent can reach: a writer that names its own
+    /// provenance can launder a guess into a fact.
+    pub session: String,
+    /// The harness, learned from the `initialize` handshake. `None` until it
+    /// introduces itself, and recorded as unknown rather than guessed.
+    pub client: Option<String>,
     /// Injected so the server is testable without a clock.
     pub today: fn() -> String,
 }
@@ -44,6 +55,16 @@ fn string(args: &Value, name: &str) -> String {
 }
 
 impl Server {
+    /// `session <id>, <harness>` — the shape `from_session` parses, so
+    /// `omh s rm` can report what a session recorded.
+    fn provenance(&self) -> String {
+        format!(
+            "session {}, {}",
+            self.session,
+            self.client.as_deref().unwrap_or("unknown harness")
+        )
+    }
+
     /// Both layers, never merged. A note that will not parse is a lint
     /// violation, not a note — counting it would advertise a store omh cannot
     /// serve, and returning it would answer from bytes nobody validated.
@@ -121,7 +142,7 @@ impl Server {
                 .map(str::to_string),
             // Never read from `args`. This is the line that makes §9.1's
             // "provenance cannot be omitted" true rather than aspirational.
-            source: self.source.clone(),
+            source: self.provenance(),
             recorded: (self.today)(),
         };
 
@@ -154,6 +175,10 @@ impl Server {
 impl Tools for Server {
     fn server_name(&self) -> &str {
         SERVER_NAME
+    }
+
+    fn client_connected(&mut self, name: &str) {
+        self.client = Some(name.to_string());
     }
 
     fn list(&mut self) -> Vec<Tool> {
@@ -212,7 +237,8 @@ mod tests {
             team: dir.path().join("team"),
             local: dir.path().join("local"),
             templates: memory::shipped_templates(),
-            source: "session s03, claude".into(),
+            session: "s03".into(),
+            client: Some("claude".into()),
             today: || "2026-08-07".to_string(),
         };
         Fx { dir, server }
@@ -251,6 +277,46 @@ mod tests {
             ToolResult::Text(t) => (t, false),
             ToolResult::Refused(t) => (t, true),
         }
+    }
+
+    /// §9.1 makes provenance omh's to supply. omh knows the session from its
+    /// own environment; the harness names itself in the handshake. Neither
+    /// comes from the agent, which is what makes the guarantee hold.
+    ///
+    /// The recorded form has to be the one `from_session` parses, or
+    /// `omh s rm` cannot report what a session recorded.
+    #[test]
+    fn provenance_names_the_session_and_the_harness_that_connected() {
+        let mut fx = fixture();
+        fx.server.session = "s07".into();
+        fx.server.client_connected("claude");
+
+        assert!(!text(fx.server.call("remember", &observation())).1);
+        let notes = memory::notes_in(&fx.server.local, Layer::Local).unwrap();
+        assert_eq!(notes[0].source, "session s07, claude");
+        assert_eq!(
+            memory::from_session(&notes, "s07").len(),
+            1,
+            "the shape `omh s rm` parses"
+        );
+    }
+
+    /// A harness that never introduced itself still produces a usable note —
+    /// but one that says so, rather than naming a harness omh invented.
+    #[test]
+    fn an_unnamed_harness_is_recorded_as_unknown_not_guessed() {
+        let mut fx = fixture();
+        fx.server.session = "s07".into();
+        fx.server.client = None; // never introduced itself
+
+        assert!(!text(fx.server.call("remember", &observation())).1);
+        let notes = memory::notes_in(&fx.server.local, Layer::Local).unwrap();
+        assert!(notes[0].source.contains("s07"), "{}", notes[0].source);
+        assert!(
+            !notes[0].source.contains("claude"),
+            "no harness is named that never connected: {}",
+            notes[0].source
+        );
     }
 
     /// Invariant 3, re-asserted at the **new** call site. M1's test guards
@@ -444,7 +510,8 @@ mod tests {
             team: dir.path().join("nonexistent-team"),
             local: dir.path().join("nonexistent-local"),
             templates: BTreeMap::new(),
-            source: "session s01, claude".into(),
+            session: "s01".into(),
+            client: None,
             today: || "2026-08-07".to_string(),
         };
         // No templates at all is a real failure, reported rather than panicked.

@@ -30,6 +30,18 @@ pub enum Expect {
     /// mount point, so `rename()` onto it returns EBUSY. Every tool saves a
     /// token that way, so this decides whether a login can persist at all.
     AtomicWrite,
+    /// `guest` answers an MCP handshake and names each of these tools.
+    ///
+    /// The other thing invisible from the host: whether a server omh
+    /// *configured* can actually start where the harness will spawn it. Every
+    /// host-side test proves the tool list is right about a host directory,
+    /// which is circular in exactly the way this module exists to break.
+    ///
+    /// It does **not** prove invariant 9. `doctor` replaces the launch command
+    /// with this probe, so no harness ever runs, and a tool description is
+    /// consumed by a model rather than written anywhere inspectable. What this
+    /// proves is the precondition.
+    Speaks(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +60,23 @@ pub struct Outcome {
     pub name: String,
     pub ok: bool,
     pub detail: String,
+}
+
+/// What must be true of the memory server, given the base set declares one.
+///
+/// Built from the declared command rather than from a literal, so a manifest
+/// that changes what it launches changes what gets probed.
+pub fn memory_checks(server: &crate::render::Server) -> Vec<Check> {
+    let argv = std::iter::once(server.command.clone())
+        .chain(server.args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    vec![Check {
+        name: "memory".into(),
+        guest: PathBuf::from(argv),
+        expect: Expect::Speaks(vec!["recall".into(), "remember".into()]),
+        dir: false,
+    }]
 }
 
 /// What must be true of the credential mounts, given an account.
@@ -166,6 +195,14 @@ pub fn probe_script(checks: &[Check]) -> String {
                 "missing=''; for n in {}; do [ -e '{path}'/\"$n\" ] || missing=\"$missing $n\"; done; \
                  if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t{path}\\n'; \
                  else printf 'fail\\t{name}\\tmissing:%s\\n' \"$missing\"; fi\n",
+                shell_list(names)
+            )),
+            // Three frames down a pipe: initialize, the notification the
+            // protocol requires after it, then tools/list. Reading the reply
+            // with grep rather than a parser keeps the probe a shell script,
+            // which is the only thing that can run in there.
+            Expect::Speaks(names) => out.push_str(&format!(
+                "out=$( {{ printf '%s\\n'                  '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"omh-doctor\",\"version\":\"0\"}}}}}}'                  '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}'                  '{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{{}}}}'; }} | {path} 2>/dev/null );                  missing=''; for n in {}; do printf '%s' \"$out\" | grep -q \"$n\" || missing=\"$missing $n\"; done;                  if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t%s\\n' \"$(printf '%s' \"$out\" | grep -o 'The store [^.]*' | head -1)\";                  else printf 'fail\\t{name}\\tno reply naming:%s\\n' \"$missing\"; fi\n",
                 shell_list(names)
             )),
             Expect::Mentions(names) => out.push_str(&format!(
@@ -458,5 +495,64 @@ mod tests {
         let script = probe_script(&credential_checks(&adapter("claude")));
         assert!(script.contains("printf 'ok"), "got: {script}");
         assert!(script.contains("printf 'fail"), "got: {script}");
+    }
+
+    /// A server omh configured but that cannot start is invisible from the
+    /// host: every host-side test proves the tool list is right about a host
+    /// directory, which is circular in the way this module exists to break.
+    #[test]
+    fn the_memory_probe_asks_the_server_it_was_configured_with() {
+        let server = crate::render::Server {
+            command: "omh".into(),
+            args: vec![
+                "memory".into(),
+                "serve".into(),
+                "--local".into(),
+                "/omh/notes/local".into(),
+            ],
+            env: Default::default(),
+        };
+        let script = probe_script(&memory_checks(&server));
+
+        assert!(
+            script.contains("omh memory serve --local /omh/notes/local"),
+            "{script}"
+        );
+        assert!(script.contains("tools/list"), "it has to ask: {script}");
+        assert!(
+            script.contains("initialize"),
+            "and handshake first: {script}"
+        );
+        for tool in ["recall", "remember"] {
+            assert!(script.contains(tool), "must require `{tool}`: {script}");
+        }
+    }
+
+    /// `0 notes` is the signature of a store mounted at the wrong path — the
+    /// server starts, answers, and knows nothing. Reporting the count is what
+    /// makes that visible instead of looking like success.
+    #[test]
+    fn the_memory_probe_reports_how_many_notes_the_server_found() {
+        let server = crate::render::Server {
+            command: "omh".into(),
+            args: vec!["memory".into(), "serve".into()],
+            env: Default::default(),
+        };
+        let script = probe_script(&memory_checks(&server));
+        assert!(
+            script.contains("The store "),
+            "the count has to reach the report: {script}"
+        );
+        // Both phrasings, because an empty store is the interesting one: it is
+        // what a wrong mount looks like, and a blank detail hides it.
+        for phrasing in [
+            crate::memory::index::describe(&crate::memory::index::Index::of(&[])),
+            crate::memory::index::describe(&crate::memory::index::Index::of(&[])),
+        ] {
+            assert!(
+                phrasing.contains("The store "),
+                "the probe greps for a phrase the description does not use: {phrasing}"
+            );
+        }
     }
 }

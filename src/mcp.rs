@@ -80,6 +80,11 @@ pub enum ToolResult {
 
 pub trait Tools {
     fn server_name(&self) -> &str;
+    /// The harness introduced itself. `initialize` is the only place omh can
+    /// learn which agent is on the other end, and provenance has to record it:
+    /// one store is shared across harnesses by design, so "which one wrote
+    /// this" is not answerable any other way.
+    fn client_connected(&mut self, _name: &str) {}
     /// `&mut` on purpose: the description is computed from the store at the
     /// moment it is asked for, so a note written this session is advertised
     /// this session.
@@ -111,6 +116,14 @@ pub fn dispatch(req: &Request, tools: &mut dyn Tools) -> Option<Value> {
 
     Some(match req.method.as_str() {
         "initialize" => {
+            if let Some(client) = req
+                .params
+                .get("clientInfo")
+                .and_then(|c| c.get("name"))
+                .and_then(|n| n.as_str())
+            {
+                tools.client_connected(client);
+            }
             let want = req.params.get("protocolVersion").and_then(|v| v.as_str());
             ok(
                 &id,
@@ -196,6 +209,7 @@ mod tests {
         listed: usize,
         called: Vec<(String, Value)>,
         refuse: bool,
+        client: Option<String>,
     }
 
     impl Fake {
@@ -204,6 +218,7 @@ mod tests {
                 listed: 0,
                 called: Vec::new(),
                 refuse: false,
+                client: None,
             }
         }
     }
@@ -211,6 +226,9 @@ mod tests {
     impl Tools for Fake {
         fn server_name(&self) -> &str {
             "omh-memory"
+        }
+        fn client_connected(&mut self, name: &str) {
+            self.client = Some(name.to_string());
         }
         fn list(&mut self) -> Vec<Tool> {
             self.listed += 1;
@@ -243,6 +261,28 @@ mod tests {
 
     fn answer(raw: &str) -> Value {
         dispatch(&request(raw), &mut Fake::new()).expect("expected a reply")
+    }
+
+    /// The harness names itself in the handshake, and that is the only place
+    /// omh can learn which one is writing. Provenance has to say *which agent*
+    /// recorded a note, and a server told nothing can only guess.
+    #[test]
+    fn the_harness_names_itself_and_the_server_is_told() {
+        let mut tools = Fake::new();
+        let req = request(
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","clientInfo":{"name":"claude","version":"9"}}}"#,
+        );
+        dispatch(&req, &mut tools);
+        assert_eq!(tools.client.as_deref(), Some("claude"));
+    }
+
+    /// A client that names nothing must not be recorded as one that did.
+    #[test]
+    fn a_handshake_with_no_client_name_leaves_provenance_alone() {
+        let mut tools = Fake::new();
+        let req = request(r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#);
+        dispatch(&req, &mut tools);
+        assert_eq!(tools.client, None);
     }
 
     /// An id is a string *or* a number, and it must come back exactly as it

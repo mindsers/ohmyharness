@@ -127,6 +127,23 @@ pub fn plan(
         file: false,
     });
 
+    // The memory server is `omh` itself, and the harness spawns MCP servers
+    // inside the sandbox — so the base set's `command = "omh"` resolves to
+    // nothing unless a binary is put there. Read-only: a program the agent
+    // could rewrite is not a sandbox.
+    //
+    // Only when one exists. A bind mount of a missing host path makes docker
+    // create a *directory*, and the failure then arrives as a permission error
+    // about something nobody created.
+    if let Some(bin) = crate::memory::deliver::available(paths) {
+        mounts.push(Mount {
+            host: bin,
+            guest: PathBuf::from(crate::memory::deliver::GUEST_BIN),
+            read_only: true,
+            file: true,
+        });
+    }
+
     // Credentials mount at the paths the harness itself reads — anywhere else
     // and the session starts logged out no matter what was captured. Writable,
     // because OAuth tokens refresh in place.
@@ -441,6 +458,60 @@ mod tests {
             !notes.host.starts_with(&fx.paths.repo),
             "a store inside the checkout dies with the worktree: {}",
             notes.host.display()
+        );
+    }
+
+    fn fake_server_binary(fx: &Fx) -> std::path::PathBuf {
+        let arch = crate::memory::deliver::target_arch(std::env::consts::ARCH).unwrap();
+        let at = if std::env::consts::OS == "linux" {
+            std::env::current_exe().unwrap()
+        } else {
+            crate::memory::deliver::cached_at(&fx.paths.root, arch)
+        };
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        if !at.exists() {
+            std::fs::write(&at, b"#!/bin/sh\n").unwrap();
+        }
+        at
+    }
+
+    /// The base set declares `command = "omh"`, and the harness spawns MCP
+    /// servers *inside* the container — so that resolves to nothing unless a
+    /// binary is put there. Without this the server is configured, advertised
+    /// by `omh why`, and silently absent.
+    #[test]
+    fn the_memory_server_binary_reaches_the_sandbox() {
+        let fx = fixture();
+        let host = fake_server_binary(&fx);
+        let p = plan_for(&fx, "claude");
+
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN))
+            .expect("the server binary must be mounted");
+
+        assert_eq!(mount.host, host);
+        assert!(
+            mount.read_only,
+            "a program the agent could rewrite is not a sandbox"
+        );
+        assert!(mount.file, "one file, not the directory around it");
+    }
+
+    /// A bind mount of a host path that does not exist makes docker create a
+    /// **directory** there, and the harness then reports a permission error
+    /// about something nobody created. Absent is absent.
+    #[test]
+    fn a_missing_server_binary_is_left_out_rather_than_mounted_as_a_directory() {
+        let fx = fixture();
+        // deliberately not created
+        let p = plan_for(&fx, "claude");
+        assert!(
+            !p.mounts
+                .iter()
+                .any(|m| m.guest == Path::new(crate::memory::deliver::GUEST_BIN)),
+            "nothing is mounted where nothing exists"
         );
     }
 
