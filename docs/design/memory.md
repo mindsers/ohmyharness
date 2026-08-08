@@ -375,9 +375,16 @@ Two block the build. The rest are recorded so they are not rediscovered.
 
 **Blocking**
 
-1. **iwe has never been run in an omh container**, unattended, writing notes an
-   agent then retrieves. Everything about it here comes from documentation — the
-   class of claim that produced the `CBM_VARIANT` bug. This is M0.
+1. ~~**iwe has never been run in an omh container**~~ — **answered 2026-08-08**,
+   in [M0](memory-m0.md). It was worth running: four of the survey's claims did
+   not survive it. iwe **does not run on omh's base image at all** (needs glibc
+   2.39, bookworm ships 2.36, and no musl build is published); it is three
+   dynamic binaries totalling 64 MB rather than one static one; `iwe rename`
+   produces notes omh's schema refuses, breaking the identity model in §6; and
+   the tool count is 14, not 13. Apache-2.0 and the no-service claim hold. The
+   decision this gates is *whether to adopt iwe*, not whether to build — the
+   store is plain files omh owns, and `recall::search` is the seam a different
+   retriever would replace.
 2. **Does each harness read MCP tool descriptions per session, or cache them?**
    §9.3 fails if they cache. Fallback: the index returns to the staged
    `AGENTS.md`, which omh regenerates every launch anyway.
