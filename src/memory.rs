@@ -10,6 +10,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub mod tools;
+
 // ── layers ──────────────────────────────────────────────────────────────────
 
 /// `team` (committed) or `local` (gitignored).
@@ -807,10 +809,15 @@ fn contained(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn load_layer(paths: &Paths, layer: Layer) -> Result<Vec<Note>> {
-    let root = layer.dir(paths);
+/// Every note in one directory, stamped with the layer that directory *is*.
+///
+/// Takes a directory rather than `Paths` because the MCP server runs inside
+/// the sandbox, where there is no git repo to discover and the two stores
+/// arrive as mount points. `Paths` is the host's way of naming them, not the
+/// only way.
+pub fn notes_in(root: &Path, layer: Layer) -> Result<Vec<Note>> {
     let mut files = Vec::new();
-    markdown_files(&root, &mut files)?;
+    markdown_files(root, &mut files)?;
     files.sort();
 
     files
@@ -823,6 +830,10 @@ pub fn load_layer(paths: &Paths, layer: Layer) -> Result<Vec<Note>> {
             parse(&raw, layer, path)
         })
         .collect()
+}
+
+pub fn load_layer(paths: &Paths, layer: Layer) -> Result<Vec<Note>> {
+    notes_in(&layer.dir(paths), layer)
 }
 
 /// What a layer holds: the keys it already claims, and the files it could
@@ -839,12 +850,16 @@ struct LayerRead {
     opaque: Vec<PathBuf>,
 }
 
-fn read_layer(paths: &Paths, layer: Layer) -> Result<LayerRead> {
+/// Takes a directory rather than `Paths` for the same reason `notes_in` does:
+/// `remember_in` runs against a mount point inside the sandbox, where there is
+/// no repo to derive a layer directory from — and it is the caller that most
+/// needs `opaque`, because it is about to write.
+fn read_layer(root: &Path, layer: Layer) -> Result<LayerRead> {
     let mut files = Vec::new();
     // Traversal errors stay fatal: a directory omh cannot list may hold the
     // key a write is about to take, and guessing is the failure this whole
     // function exists to avoid.
-    markdown_files(&layer.dir(paths), &mut files)?;
+    markdown_files(root, &mut files)?;
     files.sort();
 
     let mut notes = Vec::new();
@@ -885,6 +900,13 @@ topic    = \"{{slug}}\"
 stub     = \"docs/{{path}}\"
 ";
 
+/// What omh ships, parsed. Infallible by construction — a shipped constant
+/// that does not parse is a build-time defect, and the test that says so is
+/// `the_shipped_key_templates_cover_every_note_type`.
+pub fn shipped_templates() -> BTreeMap<Kind, String> {
+    parse_templates(SHIPPED_KEYS).expect("the shipped key templates must parse")
+}
+
 fn parse_templates(raw: &str) -> Result<BTreeMap<Kind, String>> {
     #[derive(serde::Deserialize)]
     struct File {
@@ -924,7 +946,7 @@ pub fn lint(paths: &Paths) -> Result<Vec<Violation>> {
     let mut notes = Vec::new();
     let mut found = Vec::new();
     for layer in Layer::ALL {
-        let read = read_layer(paths, layer)?;
+        let read = read_layer(&layer.dir(paths), layer)?;
         for path in read.opaque {
             found.push(Violation {
                 key: path
@@ -1045,12 +1067,31 @@ fn body_of(input: &Remembered) -> String {
 /// validating after writing leaves a refused note on disk, where `lint` blames
 /// a writer that believes it never created one.
 pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Result<Wrote> {
+    remember_in(
+        &Layer::AGENT_WRITE.dir(paths),
+        &templates(paths)?,
+        input,
+        if_exists,
+    )
+}
+
+/// `remember`, against an explicit directory.
+///
+/// `root` is where the note lands, and it is always the writable layer's
+/// directory — the caller cannot pass the committed one, because no caller is
+/// given the choice. In the sandbox this is a mount point rather than a path
+/// derived from a repo.
+pub fn remember_in(
+    root: &Path,
+    templates: &BTreeMap<Kind, String>,
+    input: &Remembered,
+    if_exists: IfExists,
+) -> Result<Wrote> {
     non_blank(&input.expected, "expected")?;
     non_blank(&input.observed, "observed")?;
     non_blank(&input.evidence, "evidence")?;
     non_blank(&input.source, "source")?;
 
-    let templates = templates(paths)?;
     let template = templates
         .get(&Kind::Surprise)
         .context("no key template for `surprise`")?;
@@ -1063,14 +1104,13 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
     // could reach the committed layer would push wrong facts to teammates
     // through git, where they arrive with the authority of a reviewed change.
     let layer = Layer::AGENT_WRITE;
-    let root = layer.dir(paths);
 
     // §6 makes the key the primary key, so the conflict is on the *key*, not
     // on `{key}.md`. Those differ whenever a note sits somewhere other than
     // its own key — which nothing prevents, because `KeyDisagreesWithPath`
     // compares only the leaf. Checking the path let a second note land under
     // a key that was already taken, and `rm` could then separate neither.
-    let taken = read_layer(paths, layer)?;
+    let taken = read_layer(root, layer)?;
     // A note omh cannot read may hold the key this write wants. Refusing is
     // the recoverable half of that choice — the other half is a second note
     // under a key that already existed, which is unrecoverable through the

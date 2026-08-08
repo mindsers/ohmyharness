@@ -230,6 +230,20 @@ enum MemoryCmd {
         #[arg(long, value_parser = parse_if_exists, default_value = "error")]
         if_exists: memory::IfExists,
     },
+    /// Speak MCP on stdin/stdout. Launched by the harness, not by you.
+    ///
+    /// Hidden because it is a wire protocol, not a command: it prints JSON-RPC
+    /// frames and waits, which is indistinguishable from a hang if you run it
+    /// by hand. Paths arrive as arguments because this runs inside the
+    /// sandbox, where there is no repo to discover.
+    #[command(hide = true)]
+    Serve {
+        #[arg(long)]
+        local: std::path::PathBuf,
+        /// Provenance for everything written this session.
+        #[arg(long, default_value = "unknown session")]
+        source: String,
+    },
     /// Schema and hygiene violations, across both layers.
     Lint,
     /// Remove one note. Never a neighbour; reports what linked to it.
@@ -282,6 +296,7 @@ fn main() -> Result<()> {
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
             Some(MemoryCmd::Lint) => memory_lint(&cwd),
+            Some(MemoryCmd::Serve { local, source }) => memory_serve(local.clone(), source.clone()),
             Some(MemoryCmd::Rm { key, layer, at }) => memory_rm(&cwd, key, *layer, at.as_deref()),
             Some(MemoryCmd::Remember {
                 expected,
@@ -850,6 +865,23 @@ fn memory_remember(
         memory::Wrote::Skipped(key) => println!("`{key}` is already recorded; left alone"),
     }
     Ok(())
+}
+
+/// Speak MCP until stdin closes.
+///
+/// Nothing but protocol may reach stdout — this binary is full of `println!`,
+/// and one stray line breaks the very first handshake. Diagnostics go to
+/// stderr, which the harness shows as server logs.
+fn memory_serve(local: std::path::PathBuf, source: String) -> Result<()> {
+    let mut server = memory::tools::Server {
+        local,
+        templates: memory::shipped_templates(),
+        source,
+        today: memory::today,
+    };
+    let stdin = std::io::stdin().lock();
+    let stdout = std::io::stdout().lock();
+    mcp::serve(stdin, stdout, &mut server)
 }
 
 /// The store, by layer, with what points at each note.
