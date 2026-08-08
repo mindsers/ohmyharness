@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub mod index;
+pub mod ingest;
 pub mod recall;
 pub mod tools;
 
@@ -899,7 +900,7 @@ pub const SHIPPED_KEYS: &str = "\
 [keys]
 surprise = \"surprise/{{slug}}\"
 topic    = \"{{slug}}\"
-stub     = \"docs/{{path}}\"
+stub     = \"{{path}}\"
 ";
 
 /// What omh ships, parsed. Infallible by construction — a shipped constant

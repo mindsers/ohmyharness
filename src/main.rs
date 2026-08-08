@@ -873,6 +873,49 @@ fn memory_remember(
     Ok(())
 }
 
+/// Write one note per tracked document, plus one for what `init` derived.
+///
+/// Into the **committed** layer: a stub is reproducible from a document every
+/// teammate already has, so it is not a claim from experience and does not need
+/// a human to vouch for it. `promote` stays reserved for what an agent
+/// observed.
+fn seed_store(paths: &Paths) -> Result<String> {
+    let templates = memory::templates(paths)?;
+    let today = memory::today();
+    let dir = memory::Layer::Team.dir(paths);
+
+    let mut written = 0;
+    let mut skipped = 0;
+    let mut stubs = Vec::new();
+    for doc in memory::ingest::documents(&paths.repo)? {
+        let note = memory::ingest::stub(&doc, &templates, &today)?;
+        stubs.push(note.key.clone());
+        match memory::ingest::write(&dir, &note, memory::IfExists::Skip)? {
+            true => written += 1,
+            false => skipped += 1,
+        }
+    }
+
+    let seeds = detect::seeds(&paths.repo);
+    if let Some(note) =
+        memory::ingest::overview(&paths.repo_name(), &seeds, &stubs, &templates, &today)?
+    {
+        if memory::ingest::write(&dir, &note, memory::IfExists::Skip)? {
+            written += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    if written == 0 && skipped == 0 {
+        return Ok("nothing to derive yet".into());
+    }
+    Ok(format!(
+        "{written} note{} written, {skipped} already there",
+        if written == 1 { "" } else { "s" }
+    ))
+}
+
 /// Speak MCP until stdin closes.
 ///
 /// Nothing but protocol may reach stdout — this binary is full of `println!`,
@@ -1469,18 +1512,15 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         }
     }
 
-    let seeds = detect::seeds(&paths.repo);
-    if seeds.is_empty() {
-        println!("  memory     nothing to derive yet");
-    } else {
-        println!(
-            "  memory     seeded from {} source{}:",
-            seeds.len(),
-            if seeds.len() == 1 { "" } else { "s" }
-        );
-        for seed in &seeds {
-            println!("               {:<12} {}", seed.source, seed.fact);
-        }
+    // What the repo already documents becomes notes that *point* at it. The
+    // seeds used to be printed here and thrown away — derived every run,
+    // read once, kept nowhere.
+    match seed_store(&paths) {
+        Ok(report) => println!("  memory     {report}"),
+        // Never fatal. A repo that cannot be ingested is still a repo omh set
+        // up, and failing `init` over the note store would be the tail
+        // wagging the dog.
+        Err(e) => println!("  memory     not seeded: {e:#}"),
     }
 
     // Derive, then confirm: a hypothesis worth correcting is not a questionnaire.
