@@ -17,6 +17,7 @@ mod doctor;
 mod editor;
 mod idle;
 mod image;
+mod mcp;
 mod memory;
 mod persist;
 mod profile;
