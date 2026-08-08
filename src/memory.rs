@@ -10,6 +10,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub mod index;
 pub mod recall;
 pub mod tools;
 

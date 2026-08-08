@@ -7,7 +7,9 @@
 //! reason.
 
 use crate::mcp::{Tool, ToolResult, Tools};
-use crate::memory::{self, IfExists, Kind, Remembered, Wrote};
+use crate::memory::index::{describe, Index};
+use crate::memory::recall::{render, search, Budget};
+use crate::memory::{self, IfExists, Kind, Layer, Remembered, Wrote};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -15,10 +17,10 @@ use std::path::PathBuf;
 pub const SERVER_NAME: &str = "omh-memory";
 
 pub struct Server {
-    /// The only directory this server writes to. There is no `team` field
-    /// yet, deliberately: nothing here reads the committed layer until
-    /// `recall` does, and a field carried "for later" is a field nobody
-    /// notices going stale.
+    /// Read for `recall`, never written. `promote` is the only path into the
+    /// committed layer, and it is a human's command.
+    pub team: PathBuf,
+    /// The only directory this server writes to.
     pub local: PathBuf,
     pub templates: BTreeMap<Kind, String>,
     /// Provenance, supplied by omh. Not a parameter the agent can reach —
@@ -42,6 +44,33 @@ fn string(args: &Value, name: &str) -> String {
 }
 
 impl Server {
+    /// Both layers, never merged. A note that will not parse is a lint
+    /// violation, not a note — counting it would advertise a store omh cannot
+    /// serve, and returning it would answer from bytes nobody validated.
+    fn notes(&self) -> Vec<memory::Note> {
+        let mut all = Vec::new();
+        for (dir, layer) in [(&self.team, Layer::Team), (&self.local, Layer::Local)] {
+            match memory::notes_in(dir, layer) {
+                Ok(notes) => all.extend(notes),
+                // Reported where a human will see it, not swallowed and not
+                // fatal: half a store still answers questions, and a server
+                // that exits here takes the session's memory with it.
+                Err(e) => eprintln!("omh-mcp: {layer} store unreadable: {e:#}"),
+            }
+        }
+        all
+    }
+
+    fn recall(&self, args: &Value) -> ToolResult {
+        let question = string(args, "question");
+        if question.trim().is_empty() {
+            return ToolResult::Refused("`question` is required".into());
+        }
+        // Rendered through the one function that owns the provenance envelope.
+        // There is deliberately no second path from a Note to text here.
+        ToolResult::Text(render(&search(&self.notes(), &question, Budget::default())))
+    }
+
     fn remember_schema(&self) -> Value {
         json!({
             "type": "object",
@@ -128,18 +157,35 @@ impl Tools for Server {
     }
 
     fn list(&mut self) -> Vec<Tool> {
-        vec![Tool {
-            name: "remember".into(),
-            description: "Record something that surprised you — you expected one \
+        vec![
+            Tool {
+                name: "recall".into(),
+                // Computed now, from the store as it is now. Cached at
+                // startup, a note written this session stays unadvertised for
+                // the rest of it.
+                description: describe(&Index::of(&self.notes())),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "question": { "type": "string", "description": "what you want to know" },
+                    },
+                    "required": ["question"],
+                }),
+            },
+            Tool {
+                name: "remember".into(),
+                description: "Record something that surprised you — you expected one \
                           thing and this repo did another. Not what you did; what \
                           you were wrong about. Survives this session."
-                .into(),
-            input_schema: self.remember_schema(),
-        }]
+                    .into(),
+                input_schema: self.remember_schema(),
+            },
+        ]
     }
 
     fn call(&mut self, name: &str, args: &Value) -> ToolResult {
         match name {
+            "recall" => self.recall(args),
             "remember" => self.remember(args),
             other => ToolResult::Refused(format!("no tool named `{other}`")),
         }
@@ -163,6 +209,7 @@ mod tests {
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let server = Server {
+            team: dir.path().join("team"),
             local: dir.path().join("local"),
             templates: memory::shipped_templates(),
             source: "session s03, claude".into(),
@@ -234,7 +281,12 @@ mod tests {
     #[test]
     fn strict_mode_cannot_be_turned_off_over_mcp() {
         let mut fx = fixture();
-        let schema = &fx.server.list()[0].input_schema;
+        let tools = fx.server.list();
+        let schema = &tools
+            .iter()
+            .find(|t| t.name == "remember")
+            .unwrap()
+            .input_schema;
         let properties = schema["properties"].as_object().unwrap();
         for escape in ["strict", "layer", "if_exists", "force", "override"] {
             assert!(
@@ -293,7 +345,12 @@ mod tests {
     fn provenance_over_mcp_is_omhs_to_supply_not_the_agents() {
         let mut fx = fixture();
         assert!(
-            !fx.server.list()[0].input_schema["properties"]
+            !fx.server
+                .list()
+                .iter()
+                .find(|t| t.name == "remember")
+                .unwrap()
+                .input_schema["properties"]
                 .as_object()
                 .unwrap()
                 .contains_key("source"),
@@ -364,7 +421,14 @@ mod tests {
     #[test]
     fn the_remember_tool_says_when_to_call_it() {
         let mut fx = fixture();
-        let description = fx.server.list()[0].description.to_lowercase();
+        let description = fx
+            .server
+            .list()
+            .iter()
+            .find(|t| t.name == "remember")
+            .unwrap()
+            .description
+            .to_lowercase();
         assert!(
             description.contains("surprise") || description.contains("expected"),
             "the trigger belongs in the description: {description}"
@@ -377,6 +441,7 @@ mod tests {
     fn the_server_needs_only_the_two_directories_it_was_given() {
         let dir = tempfile::tempdir().unwrap();
         let mut server = Server {
+            team: dir.path().join("nonexistent-team"),
             local: dir.path().join("nonexistent-local"),
             templates: BTreeMap::new(),
             source: "session s01, claude".into(),

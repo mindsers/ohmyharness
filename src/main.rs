@@ -239,6 +239,8 @@ enum MemoryCmd {
     #[command(hide = true)]
     Serve {
         #[arg(long)]
+        team: std::path::PathBuf,
+        #[arg(long)]
         local: std::path::PathBuf,
         /// Provenance for everything written this session.
         #[arg(long, default_value = "unknown session")]
@@ -296,7 +298,11 @@ fn main() -> Result<()> {
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
             Some(MemoryCmd::Lint) => memory_lint(&cwd),
-            Some(MemoryCmd::Serve { local, source }) => memory_serve(local.clone(), source.clone()),
+            Some(MemoryCmd::Serve {
+                team,
+                local,
+                source,
+            }) => memory_serve(team.clone(), local.clone(), source.clone()),
             Some(MemoryCmd::Rm { key, layer, at }) => memory_rm(&cwd, key, *layer, at.as_deref()),
             Some(MemoryCmd::Remember {
                 expected,
@@ -872,8 +878,9 @@ fn memory_remember(
 /// Nothing but protocol may reach stdout — this binary is full of `println!`,
 /// and one stray line breaks the very first handshake. Diagnostics go to
 /// stderr, which the harness shows as server logs.
-fn memory_serve(local: std::path::PathBuf, source: String) -> Result<()> {
+fn memory_serve(team: std::path::PathBuf, local: std::path::PathBuf, source: String) -> Result<()> {
     let mut server = memory::tools::Server {
+        team,
         local,
         templates: memory::shipped_templates(),
         source,

@@ -13,6 +13,7 @@
 //! contradiction is the agent's job, done with layers and dates in hand.
 
 use crate::memory::{Layer, Note};
+#[cfg(test)]
 use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -32,10 +33,10 @@ pub struct Cite {
 pub struct Hit {
     pub cite: Cite,
     /// 0 for a note the question matched, 1 for one hop out.
+    ///
+    /// There is no `rank` field: position in `hits` is the ranking, and a
+    /// second copy of it is a second thing to keep in step.
     pub depth: u8,
-    /// Position in the ranking, so a caller can see what the ordering was
-    /// without re-deriving it.
-    pub rank: usize,
 }
 
 #[derive(Debug)]
@@ -134,21 +135,20 @@ pub fn search(notes: &[Note], question: &str, budget: Budget) -> Neighbourhood {
     let mut seen: BTreeSet<(Layer, String)> = BTreeSet::new();
     let mut hits: Vec<Hit> = Vec::new();
 
-    for (rank, note) in roots.iter().enumerate() {
+    for note in &roots {
         if !seen.insert((note.layer, note.key.clone())) {
             continue;
         }
         hits.push(Hit {
             cite: cite(note),
             depth: 0,
-            rank,
         });
     }
 
     // One hop, and only one. A visited set rather than a depth guard alone:
     // without it a note reachable from two roots is listed twice and a cycle
     // never terminates.
-    for (rank, note) in roots.iter().enumerate() {
+    for note in &roots {
         for target in crate::memory::links(&note.body) {
             // A link resolves into either layer — §4 says both retrieve — so a
             // neighbour may appear in both, and each keeps its own provenance.
@@ -162,7 +162,6 @@ pub fn search(notes: &[Note], question: &str, budget: Budget) -> Neighbourhood {
                 hits.push(Hit {
                     cite: cite(child),
                     depth: 1,
-                    rank,
                 });
             }
         }
@@ -189,22 +188,34 @@ pub fn render(n: &Neighbourhood) -> String {
         );
     }
 
-    let width = n
-        .hits
-        .iter()
-        .map(|h| h.cite.key.len() + 3)
-        .max()
-        .unwrap_or(0);
-    let mut out = String::new();
-
-    for (i, hit) in n.hits.iter().enumerate() {
+    let label_of = |i: usize, hit: &Hit| {
         let last = n.hits.get(i + 1).is_none_or(|next| next.depth == 0);
         let prefix = match (hit.depth, last) {
             (0, _) => "",
             (_, false) => "├─ ",
             (_, true) => "└─ ",
         };
-        let label = format!("{prefix}{}", hit.cite.key);
+        format!("{prefix}{}", hit.cite.key)
+    };
+
+    // Width comes from the rendered label — tree prefix included — plus a gap
+    // that cannot close. Deriving it from the bare key let a long child's key
+    // run straight into its layer (`…-returns-ebusylocal · 2026-08-08`), which
+    // is invariant 1 broken in the only text an agent ever reads. Counted in
+    // characters, not bytes, because the tree glyphs are multi-byte and
+    // `{:width$}` pads by character.
+    let width = n
+        .hits
+        .iter()
+        .enumerate()
+        .map(|(i, h)| label_of(i, h).chars().count())
+        .max()
+        .unwrap_or(0)
+        + 2;
+
+    let mut out = String::new();
+    for (i, hit) in n.hits.iter().enumerate() {
+        let label = label_of(i, hit);
         out.push_str(&format!(
             "{label:width$}{}{SEP}{}\n",
             hit.cite.layer, hit.cite.recorded
@@ -470,6 +481,42 @@ mod tests {
             .filter(|h| h.cite.key == "credentials-file-mount-returns-ebusy")
             .collect();
         assert_eq!(seen.len(), 1, "reached twice, listed once: {seen:?}");
+    }
+
+    /// Found by running the server, not by the suite: a child whose key is the
+    /// longest in the neighbourhood got zero padding, because the column width
+    /// was computed from bare key lengths while the label also carries a tree
+    /// prefix. The rendered line read
+    /// `surprise/…-returns-ebusylocal · 2026-08-08` — key and layer fused,
+    /// which is invariant 1 broken in the output an agent actually reads.
+    ///
+    /// The fixture in `store()` could never catch it: its keys were similar
+    /// enough that the padding happened to work. So this one is built the
+    /// other way round — the **child** holds the longest key.
+    #[test]
+    fn a_long_key_never_runs_into_its_provenance() {
+        let notes = vec![
+            note(
+                Layer::Team,
+                "short",
+                "2026-01-01",
+                &["a-very-much-longer-key-than-its-parent"],
+            ),
+            note(
+                Layer::Local,
+                "a-very-much-longer-key-than-its-parent",
+                "2026-02-02",
+                &[],
+            ),
+        ];
+        let rendered = render(&search(&notes, "short", Budget::default()));
+
+        parse_rendered(&rendered)
+            .unwrap_or_else(|e| panic!("provenance must stay separable: {e}\n{rendered}"));
+
+        for line in rendered.lines().filter(|l| !l.trim().is_empty()) {
+            assert!(line.contains("  "), "key and layer must not fuse: {line:?}");
+        }
     }
 
     #[test]
