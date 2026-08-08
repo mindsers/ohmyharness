@@ -99,6 +99,10 @@ product, not fixing a test.
 | a plan is rejected when the backend lacks a capability | else `sbx` fails mysteriously instead of loudly |
 | no command name can be shadowed by an adapter | `omh <anything>` is a harness, so `RESERVED` is load-bearing |
 | every relative link in the docs resolves | a doc tree rots silently; nothing else notices |
+| the note store outlives the worktree that wrote it | a store under /work dies with `git worktree remove --force` |
+| a note is never listed without its date and its layer | an undated, unattributed claim cannot be judged |
+| `omh memory rm` never touches a neighbour | a pruned neighbourhood is invisible; a dangling link is not |
+| the note template in the staged rules parses | it teaches a shape the store then refuses, silently |
 
 Notice how many of them are about **failing loudly**. That is the recurring
 lesson of this codebase: the expensive bugs were not crashes, they were things

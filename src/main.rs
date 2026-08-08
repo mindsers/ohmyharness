@@ -17,6 +17,7 @@ mod doctor;
 mod editor;
 mod idle;
 mod image;
+mod memory;
 mod persist;
 mod profile;
 mod render;
@@ -58,9 +59,9 @@ struct Cli {
 
 /// Built-ins and their aliases always beat a harness name — otherwise an
 /// adapter called `s` or `config` would silently shadow a command.
-pub const RESERVED: [&str; 14] = [
+pub const RESERVED: [&str; 15] = [
     "init", "doctor", "d", "auth", "ls", "attach", "a", "sessions", "s", "config", "c", "graph",
-    "why", "help",
+    "why", "memory", "help",
 ];
 
 #[derive(Subcommand)]
@@ -108,6 +109,11 @@ enum Cmd {
     Config {
         #[command(subcommand)]
         cmd: Option<ConfigCmd>,
+    },
+    /// The note store: what is in it, and what is wrong with it.
+    Memory {
+        #[command(subcommand)]
+        cmd: Option<MemoryCmd>,
     },
     /// Anything else is a harness: `omh claude`, `omh opencode`.
     #[command(external_subcommand)]
@@ -191,6 +197,48 @@ enum ConfigCmd {
     },
 }
 
+/// Deliberately short. `promote` and `stale` arrive with the layers and the
+/// expiry events they act on; a subcommand that prints "not implemented" is
+/// worse than its absence, because `--help` advertises it.
+#[derive(Subcommand)]
+enum MemoryCmd {
+    /// Record what surprised you. Writes to the gitignored layer, always.
+    Remember {
+        /// What you thought would happen.
+        #[arg(long)]
+        expected: String,
+        /// What actually happened.
+        #[arg(long)]
+        observed: String,
+        /// The command, the error, the file.
+        #[arg(long)]
+        evidence: String,
+        /// Keys of notes this connects to. Keys, not titles: a key is
+        /// computable before its target exists.
+        #[arg(long = "relates-to")]
+        relates_to: Vec<String>,
+        /// One of the closed set omh can evaluate itself.
+        #[arg(long)]
+        invalidated_by: Option<String>,
+        /// Who observed it. Defaults to this session when there is one.
+        #[arg(long)]
+        source: Option<String>,
+        /// What to do when the derived key is taken. Skipping is a mode you
+        /// ask for, never a fallback — as a fallback every real conflict
+        /// disappears silently.
+        #[arg(long, value_parser = parse_if_exists, default_value = "error")]
+        if_exists: memory::IfExists,
+    },
+    /// Schema and hygiene violations, across both layers.
+    Lint,
+    /// Remove one note. Never a neighbour; reports what linked to it.
+    Rm {
+        key: String,
+        #[arg(long, value_parser = parse_note_layer)]
+        layer: Option<memory::Layer>,
+    },
+}
+
 fn main() -> Result<()> {
     // A closed pipe (`omh ls | head`) is not a crash. Without this, Rust's
     // default panics on the failed write and prints a backtrace.
@@ -224,6 +272,34 @@ fn main() -> Result<()> {
             Some(ConfigCmd::Unset { key, layer }) => unset(&cwd, key, *layer),
             Some(ConfigCmd::Edit { layer }) => edit(&cwd, *layer),
             Some(ConfigCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run),
+        },
+
+        Cmd::Memory { cmd } => match cmd {
+            None => memory_ls(&cwd),
+            Some(MemoryCmd::Lint) => memory_lint(&cwd),
+            Some(MemoryCmd::Rm { key, layer }) => memory_rm(&cwd, key, *layer),
+            Some(MemoryCmd::Remember {
+                expected,
+                observed,
+                evidence,
+                relates_to,
+                invalidated_by,
+                source,
+                if_exists,
+            }) => memory_remember(
+                &cwd,
+                memory::Remembered {
+                    expected: expected.clone(),
+                    observed: observed.clone(),
+                    evidence: evidence.clone(),
+                    relates_to: relates_to.clone(),
+                    invalidated_by: invalidated_by.clone(),
+                    source: source.clone().unwrap_or_default(),
+                    recorded: memory::today(),
+                },
+                *if_exists,
+                cli.session.as_deref(),
+            ),
         },
 
         Cmd::Run(argv) => run(&cwd, argv, &cli),
@@ -720,6 +796,107 @@ fn parse_layer(s: &str) -> std::result::Result<config::Layer, String> {
     s.parse().map_err(|e: anyhow::Error| e.to_string())
 }
 
+/// A note's layer, which is a different set from a profile's: notes have no
+/// personal layer, and the two they do have never merge.
+fn parse_note_layer(s: &str) -> std::result::Result<memory::Layer, String> {
+    s.parse().map_err(|e: anyhow::Error| e.to_string())
+}
+
+fn parse_if_exists(s: &str) -> std::result::Result<memory::IfExists, String> {
+    match s {
+        "error" => Ok(memory::IfExists::Error),
+        "skip" => Ok(memory::IfExists::Skip),
+        "suffix" => Ok(memory::IfExists::Suffix),
+        "override" => Ok(memory::IfExists::Override),
+        other => Err(format!(
+            "unknown --if-exists `{other}` (error, skip, suffix, override)"
+        )),
+    }
+}
+
+/// Record an observation. The key is derived, never chosen: an agent that picks
+/// its own cannot be stopped from recording one event twice.
+fn memory_remember(
+    cwd: &std::path::Path,
+    mut input: memory::Remembered,
+    if_exists: memory::IfExists,
+    session: Option<&str>,
+) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    if input.source.trim().is_empty() {
+        // Provenance is omh's to supply, so that it cannot be omitted. On the
+        // CLI there may be no session, and saying `cli` is honest where
+        // inventing a session id would not be.
+        input.source = match session {
+            Some(id) => format!("session {id}, cli"),
+            None => "cli".into(),
+        };
+    }
+    match memory::remember(&paths, &input, if_exists)? {
+        memory::Wrote::Created(path) => println!("recorded {}", path.display()),
+        memory::Wrote::Skipped(key) => println!("`{key}` is already recorded; left alone"),
+    }
+    Ok(())
+}
+
+/// The store, by layer, with what points at each note.
+fn memory_ls(cwd: &std::path::Path) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let notes = memory::load(&paths)?;
+    if notes.is_empty() {
+        println!("no notes yet — the store fills as work surprises the agent");
+        return Ok(());
+    }
+    print!("{}", memory::render_list(&notes));
+    Ok(())
+}
+
+/// The store-quality meter. Violations are grouped by rule rather than listed
+/// flat, because the count per rule is the signal and the individual lines are
+/// how you act on it.
+fn memory_lint(cwd: &std::path::Path) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let found = memory::lint(&paths)?;
+    if found.is_empty() {
+        println!("no violations");
+        return Ok(());
+    }
+    for v in &found {
+        let mark = match v.rule.severity() {
+            memory::Severity::Refused => "refused",
+            memory::Severity::Warning => "warning",
+        };
+        println!("{mark:<8} {:<6} {}", v.layer.to_string(), v.detail);
+    }
+    println!();
+    for (rule, count) in memory::tally(&found) {
+        println!("  {count:>3}  {rule:?}");
+    }
+    Ok(())
+}
+
+/// One note, and a report of what pointed at it. Deletion never cascades: a
+/// dangling link is visible and the lint finds it, while a silently pruned
+/// neighbourhood is neither.
+fn memory_rm(cwd: &std::path::Path, key: &str, layer: Option<memory::Layer>) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let removed = memory::remove(&paths, layer, key)?;
+    println!("removed {key} ({})", removed.layer);
+    if removed.layer.is_committed() {
+        // The file is gone here, but a teammate still has it until the
+        // deletion is committed. Saying so beats letting someone believe a
+        // shared note disappeared for everybody.
+        println!("  it was committed — teammates keep it until you commit the deletion");
+    }
+    if !removed.inbound.is_empty() {
+        println!(
+            "  still linked from {} — those links now dangle, and `omh memory lint` lists them",
+            removed.inbound.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn parse_env(s: &str) -> std::result::Result<(String, String), String> {
     s.split_once('=')
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -1127,6 +1304,17 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         std::fs::create_dir_all(dir.join("skills"))?;
     }
     std::fs::create_dir_all(shared.join("hooks"))?;
+    // Both halves of the note store. The committed half lives in the repo
+    // because that is what makes it reach a teammate; the local half lives
+    // under `~/.omh`, because a worktree holds only tracked files and
+    // `omh s rm` removes it with `--force`.
+    for layer in memory::Layer::ALL {
+        std::fs::create_dir_all(layer.dir(&paths))?;
+    }
+    // `write_if_absent`, never the refresh path the adapters use: a shipped
+    // template that changed under an existing store would silently re-key
+    // every note in it, and every existing key would stop being derivable.
+    write_if_absent(&paths.repo.join(".omh/keys.toml"), memory::SHIPPED_KEYS)?;
     write_if_absent(&shared.join("AGENTS.md"), &detect::agents_md(&stacks))?;
     // The base set: omh's opinion, seeded into the committed layer where it is
     // visible, reviewable, and removable rather than hidden in the binary.
@@ -1280,7 +1468,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // Named here because this is the moment somebody wonders what that is and
     // why it was installed without being asked.
     println!("\n  omh why <name>  what it costs, what was considered instead, how to remove it");
-    println!("\nnot yet done: memory store, cost accounting.");
+    println!("\nnot yet done: recall, cost accounting.");
     println!("next: omh {}", harness.as_deref().unwrap_or("config"));
     Ok(())
 }
@@ -1539,6 +1727,16 @@ fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
             println!("removed session {id}; branch omh/{id} dropped (no commits)");
         }
         session::Removed::NoBranch => println!("removed session {id}"),
+    }
+
+    // The review moment rides on something already happening rather than a
+    // ritual nobody performs. Best-effort on purpose: a store omh cannot read
+    // is a reason to say nothing, never a reason to leave a session that
+    // cannot be removed.
+    if let Ok(notes) = memory::load(&paths) {
+        if let Some(line) = memory::session_nudge(&notes, id) {
+            println!("{line}");
+        }
     }
     Ok(())
 }

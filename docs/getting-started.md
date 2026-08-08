@@ -43,7 +43,7 @@ omh init — decided, asked nothing
 
   omh why <name>  what it costs, what was considered instead, how to remove it
 
-not yet done: memory store, cost accounting.
+not yet done: recall, cost accounting.
 next: omh claude
 ```
 

@@ -212,3 +212,111 @@ policy:
 MCP lives under `config` because MCP servers **are** configuration, resolved
 through the same three layers as everything else. See
 [Configuration](configuration.md).
+
+## `omh memory …`
+
+The note store: a graph of linked Markdown notes, scoped to this repo, that
+survives session removal and a switch from one harness to another. That
+survival is what makes it memory rather than context.
+
+Two layers, and they **do not merge**. A setting has one value; a note is a
+claim, and two claims about one topic are two facts — so the layer is part of a
+note's identity, and `team/deploy` and `local/deploy` are different notes that
+both retrieve.
+
+| layer | where | who sees it |
+|---|---|---|
+| `team` | `<repo>/.omh/notes/` — committed | everyone who clones |
+| `local` | `~/.omh/notes/<repo>/local/` | you, on this machine |
+
+The local layer lives outside the checkout on purpose. A session is a git
+worktree holding tracked files only, and removing one runs `git worktree remove
+--force`, so a store inside the repo would be invisible to the sandbox and
+destroyed by `omh s rm`. Inside the sandbox it is mounted at `/omh/notes/local`.
+
+```console
+$ omh memory
+credentials-are-a-named-volume            team   2026-06-12  1 ref
+mounting-a-credential-file-returns-ebusy  local  2026-08-07  1 ref
+```
+
+**Every line carries its date and its layer.** A note presented without age and
+origin cannot be judged, and a store the agent writes to unattended would
+otherwise become a machine for laundering guesses into facts.
+
+### `omh memory remember`
+
+```console
+$ omh memory remember \
+    --expected "A bind mount of the token file would persist the login." \
+    --observed "Mounting a credential file returns EBUSY; the harness rewrites in place." \
+    --evidence 'EBUSY from the mount syscall'
+recorded ~/.omh/notes/omh/local/surprise/mounting-a-credential-file-returns-ebusy.md
+```
+
+The three arguments are the discipline. Something with nothing to put in
+`--expected` has learned nothing worth recording, so the filter runs for free.
+
+**The key is derived, never chosen.** It comes from a template in
+`.omh/keys.toml`, so the same observation cannot be recorded twice under two
+spellings — `Mounting a credential FILE returns EBUSY.` and `mounting a
+credential  file returns ebusy` produce one key, and the second write is a
+conflict that says *update that note instead*:
+
+```console
+$ omh memory remember --observed "mounting a  credential FILE returns ebusy." …
+Error: `surprise/mounting-a-credential-file-returns-ebusy` is already recorded;
+       update that note instead
+```
+
+`--if-exists skip|suffix|override` makes retry policy an argument. Skipping is a
+mode you ask for, never a fallback: as a fallback, every genuine conflict
+disappears silently.
+
+Writes go to **`local` only**, always. A writer that could reach the committed
+layer would push wrong facts to teammates through git, where they arrive with
+the authority of a reviewed change.
+
+### `omh memory lint`
+
+Schema violations and graph hygiene, and the store-quality meter: a count per
+rule, with no questions asked and no model pass.
+
+```console
+$ omh memory lint
+refused  local  a `surprise` note needs a `## Evidence` section
+warning  team   `deploy` links to `rollback`, which is not in the store
+
+    1  MissingSection
+    1  DanglingLink
+```
+
+The two words are not decoration. **Schemas refuse and hygiene warns**, because
+agents negotiate with warnings and cannot negotiate with a refused write — and
+because a store-wide problem must never fail somebody else's write.
+
+### `omh memory rm <key> [--layer team|local]`
+
+Removes one note and reports what pointed at it.
+
+```console
+$ omh memory rm credentials-are-a-named-volume
+removed credentials-are-a-named-volume
+  still linked from mounting-a-credential-file-returns-ebusy — those links now
+  dangle, and `omh memory lint` lists them
+```
+
+**Deletion never cascades**, and neighbours are never rewritten. A dangling link
+is visible and the lint finds it; a silently pruned neighbourhood is neither.
+This is the same rule that makes `omh s rm` keep a branch holding commits.
+
+`--layer` is needed only when one key exists in both layers, which is a
+disagreement rather than a duplicate. Without it, `rm` names both and removes
+neither.
+
+### What is not here yet
+
+`recall`, `promote` and `stale` arrive with the milestones that give them
+something to act on — see [the design](design/memory.md). A subcommand that
+printed "not implemented" would be worse than its absence, because `--help`
+advertises it.

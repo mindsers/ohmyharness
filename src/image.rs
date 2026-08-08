@@ -47,6 +47,9 @@ pub fn tag_for(adapter: &Adapter) -> String {
 pub const GUEST_HOME: &str = "/home/agent";
 
 pub fn base_dockerfile() -> String {
+    // Interpolated rather than written out, so the directory the image
+    // prepares and the directory the launcher mounts into cannot drift.
+    let notes = crate::memory::GUEST_LOCAL_NOTES;
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
     format!(
@@ -74,7 +77,7 @@ RUN __GRAPH_INSTALL__
 # Mount points the launcher expects to exist, owned by the unprivileged user.
 # The graph cache is a volume; the image only needs the directory to exist and
 # be owned by the agent, or docker creates it as root.
-RUN mkdir -p /work /omh/sock /omh/cache /omh/layers {GRAPH_CACHE} \
+RUN mkdir -p /work /omh/sock /omh/cache /omh/layers {notes} {GRAPH_CACHE} \
  && chown -R agent:agent /work /omh {GUEST_HOME}/.cache
 
 # Session entrypoint: install the key, start sshd, then stay alive so the
@@ -359,6 +362,37 @@ mod tests {
         assert!(
             base_dockerfile().contains(GRAPH_CACHE),
             "the image must create the cache directory, or docker makes it root-owned"
+        );
+    }
+
+    /// A bind mount whose guest directory does not exist is created by docker
+    /// as **root**, and the agent then cannot write the note it was told to
+    /// record — the same failure the graph cache and every credential mount
+    /// already pay for.
+    ///
+    /// Asserted against the mount constant rather than a literal, so moving
+    /// the mount without preparing its new home cannot stay green.
+    #[test]
+    fn the_image_creates_the_note_store_the_launcher_mounts_into() {
+        let df = base_dockerfile();
+        let notes = crate::memory::GUEST_LOCAL_NOTES;
+        assert!(
+            df.contains(notes),
+            "the image must create {notes}, or docker makes it root-owned"
+        );
+
+        // Created is not enough — it has to be handed to the agent. `/omh` is
+        // chowned wholesale, so the real requirement is that the store stays
+        // under a prefix that chown covers.
+        let owned = df
+            .lines()
+            .find(|l| l.contains("chown -R agent:agent"))
+            .expect("the image must chown its mount points");
+        assert!(
+            owned
+                .split_whitespace()
+                .any(|dir| notes == dir || notes.starts_with(&format!("{dir}/"))),
+            "{notes} is not covered by: {owned}"
         );
     }
 
