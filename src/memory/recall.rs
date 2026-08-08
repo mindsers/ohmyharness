@@ -12,7 +12,12 @@
 //! That is what stands in for a stopword list, which would be a list to
 //! maintain, one per language, stale by construction, and carrying a length
 //! cutoff to calibrate at its edge. A term matched in the key counts double,
-//! then recency, then key for determinism.
+//! then recency, then how many notes point at it, then key for determinism.
+//!
+//! Connectedness is a **tie-break, never a weight**. As a weight it would need
+//! a damping constant calibrated against a store that does not exist, and it
+//! would rank a note written five minutes ago last — nothing points at a new
+//! observation yet, and a new observation is what this feature exists for.
 //!
 //! Matching is on **whole tokens**. The first version compared substrings, and
 //! it was not marginally wrong: `key.contains("a")` is true of nearly every key
@@ -149,6 +154,25 @@ fn score(doc: &Indexed<'_>, terms: &BTreeSet<String>, df: &BTreeMap<&str, usize>
     (total * 1000.0) as u64
 }
 
+/// How many notes point at each key, from either layer.
+///
+/// A tie-break, never a weight. Alphabetical order carries no information about
+/// which of two equally-rare, equally-recent notes answers the question; what
+/// the rest of the store points at does.
+fn inbound_counts(notes: &[Note]) -> BTreeMap<&str, usize> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for note in notes {
+        for target in crate::memory::links(&note.body) {
+            // Keyed by the note that exists, so a dangling link inflates
+            // nothing: the lint reports those, the ranking ignores them.
+            if let Some(existing) = notes.iter().find(|n| n.key == target) {
+                *counts.entry(existing.key.as_str()).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
 fn cite(note: &Note) -> Cite {
     Cite {
         key: note.key.clone(),
@@ -168,13 +192,26 @@ pub fn search(notes: &[Note], question: &str, budget: Budget) -> Neighbourhood {
         .filter(|(s, _)| *s > 0)
         .collect();
 
-    // Recency then key. Layer is deliberately absent: sorting the committed
-    // layer above the local one would present a reconciliation the ranking is
-    // not entitled to make.
+    // How many notes point at each one. Used only to break a tie rarity and
+    // recency could not — never as a weight, because a weight needs a constant
+    // calibrated against a store that does not exist, and because centrality
+    // ranks a note written five minutes ago last. Nothing links to a new
+    // observation yet, and a new observation is what this feature is for.
+    let inbound = inbound_counts(notes);
+
+    // Recency, then connectedness, then key. Layer is deliberately absent:
+    // sorting the committed layer above the local one would present a
+    // reconciliation the ranking is not entitled to make.
     scored.sort_by(|(a_score, a), (b_score, b)| {
         b_score
             .cmp(a_score)
             .then(b.recorded.cmp(&a.recorded))
+            .then(
+                inbound
+                    .get(b.key.as_str())
+                    .unwrap_or(&0)
+                    .cmp(inbound.get(a.key.as_str()).unwrap_or(&0)),
+            )
             .then(a.key.cmp(&b.key))
             .then(a.layer.cmp(&b.layer))
     });
@@ -832,6 +869,49 @@ mod tests {
             search(&notes, "credentials", Budget::default()).hits.len(),
             2,
             "a universal term still retrieves; it just cannot rank"
+        );
+    }
+
+    /// When rarity and recency both tie, the note the rest of the store points
+    /// at is the better answer — and connectedness is the only signal left that
+    /// carries information. Alphabetical order carries none.
+    ///
+    /// Asserted in both directions: the linked note must *overtake* one that
+    /// alphabetical order would otherwise put first, and with the link removed
+    /// the original order must come back. Without the second half this passes
+    /// on any implementation that happens to sort the other way.
+    #[test]
+    fn a_note_the_store_points_at_wins_a_tie() {
+        let tied = || {
+            vec![
+                note(Layer::Local, "alpha-topic", "2026-01-01", &[]),
+                note(Layer::Local, "beta-topic", "2026-01-01", &[]),
+            ]
+        };
+        let position = |notes: &[Note], key: &str| {
+            search(notes, "topic", Budget::default())
+                .hits
+                .iter()
+                .position(|h| h.cite.key == key)
+                .unwrap_or_else(|| panic!("`{key}` must be retrieved"))
+        };
+
+        // Nothing links to either: the tie falls through to the key, so the
+        // alphabetically first one leads.
+        let alone = tied();
+        assert!(position(&alone, "alpha-topic") < position(&alone, "beta-topic"));
+
+        // Now one of them is pointed at, and it overtakes.
+        let mut linked = tied();
+        linked.push(note(
+            Layer::Local,
+            "referrer",
+            "2026-01-01",
+            &["beta-topic"],
+        ));
+        assert!(
+            position(&linked, "beta-topic") < position(&linked, "alpha-topic"),
+            "the note the store points at leads once the tie is broken"
         );
     }
 
