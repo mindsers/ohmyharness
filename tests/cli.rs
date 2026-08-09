@@ -68,7 +68,12 @@ fn note(key: &str, body: &str) -> String {
     )
 }
 
-const WHOLE: &str = "## Expected\na\n\n## Observed\nb\n\n## Evidence\nc\n";
+/// A note the schema has nothing to refuse, so what `lint` reports about it is
+/// warnings and only warnings. Every required `surprise` section is here —
+/// including `## Answers`, without which this fixture would be testing a
+/// refusal rather than the warning it is named for.
+const WHOLE: &str =
+    "## Expected\na\n\n## Observed\nb\n\n## Evidence\nc\n\n## Answers\n\n- what happens here\n";
 
 /// §14 makes this exit code M1's entire stand-in for the refused write the
 /// agent does not get yet. A gate that cannot fail gates nothing: no hook, no

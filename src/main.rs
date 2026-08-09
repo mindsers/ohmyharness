@@ -214,6 +214,10 @@ enum MemoryCmd {
         /// The command, the error, the file.
         #[arg(long)]
         evidence: String,
+        /// A question this note answers, as somebody would later ask it.
+        /// Repeat for several. A note nobody can find is a note nobody wrote.
+        #[arg(long = "answers")]
+        answers: Vec<String>,
         /// Keys of notes this connects to. Keys, not titles: a key is
         /// computable before its target exists.
         #[arg(long = "relates-to")]
@@ -310,6 +314,7 @@ fn main() -> Result<()> {
                 expected,
                 observed,
                 evidence,
+                answers,
                 relates_to,
                 invalidated_by,
                 source,
@@ -320,6 +325,7 @@ fn main() -> Result<()> {
                     expected: expected.clone(),
                     observed: observed.clone(),
                     evidence: evidence.clone(),
+                    answers: answers.clone(),
                     relates_to: relates_to.clone(),
                     invalidated_by: invalidated_by.clone(),
                     source: source.clone().unwrap_or_default(),

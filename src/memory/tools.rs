@@ -8,7 +8,7 @@
 
 use crate::mcp::{Tool, ToolResult, Tools};
 use crate::memory::index::{describe, Index};
-use crate::memory::recall::{render, search, Budget};
+use crate::memory::recall::{render, search_phrased, Budget};
 use crate::memory::{self, IfExists, Kind, Layer, Remembered, Wrote};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -45,7 +45,19 @@ pub struct Server {
 /// observation worth keeping. An agent with nothing to put in `expected` has
 /// learned nothing, so the filter runs for free — but only while these stay
 /// required.
-const REQUIRED: [&str; 3] = ["expected", "observed", "evidence"];
+pub const REQUIRED: [&str; 4] = ["expected", "observed", "evidence", "answers"];
+
+fn strings(args: &Value, name: &str) -> Vec<String> {
+    args.get(name)
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 fn string(args: &Value, name: &str) -> String {
     args.get(name)
@@ -87,9 +99,21 @@ impl Server {
         if question.trim().is_empty() {
             return ToolResult::Refused("`question` is required".into());
         }
+        // One call, several phrasings. The agent paraphrases far better than
+        // this ranker does, and it already has the question in context.
+        let mut phrasings = vec![question];
+        phrasings.extend(
+            strings(args, "also_phrased_as")
+                .into_iter()
+                .filter(|p| !p.trim().is_empty()),
+        );
         // Rendered through the one function that owns the provenance envelope.
         // There is deliberately no second path from a Note to text here.
-        ToolResult::Text(render(&search(&self.notes(), &question, Budget::default())))
+        ToolResult::Text(render(&search_phrased(
+            &self.notes(),
+            &phrasings,
+            Budget::default(),
+        )))
     }
 
     fn remember_schema(&self) -> Value {
@@ -99,6 +123,14 @@ impl Server {
                 "expected": { "type": "string", "description": "what you thought would happen" },
                 "observed": { "type": "string", "description": "what actually happened" },
                 "evidence": { "type": "string", "description": "the command, the error, the file" },
+                "answers": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    // The one thing no ranker can supply: only the writer knows
+                    // what it was trying to find out. A later question is
+                    // matched against these, not against the prose.
+                    "description": "questions this note answers, as somebody would later ask them",
+                },
                 "relates_to": {
                     "type": "array",
                     "items": { "type": "string" },
@@ -116,8 +148,13 @@ impl Server {
     }
 
     fn remember(&self, args: &Value) -> ToolResult {
+        let answers = strings(args, "answers");
         for name in REQUIRED {
-            if string(args, name).trim().is_empty() {
+            let missing = match name {
+                "answers" => answers.iter().all(|q| q.trim().is_empty()),
+                _ => string(args, name).trim().is_empty(),
+            };
+            if missing {
                 return ToolResult::Refused(format!("`{name}` is required and must say something"));
             }
         }
@@ -126,16 +163,8 @@ impl Server {
             expected: string(args, "expected"),
             observed: string(args, "observed"),
             evidence: string(args, "evidence"),
-            relates_to: args
-                .get("relates_to")
-                .and_then(|v| v.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|v| v.as_str().map(str::to_string))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            answers,
+            relates_to: strings(args, "relates_to"),
             invalidated_by: args
                 .get("invalidated_by")
                 .and_then(|v| v.as_str())
@@ -193,6 +222,12 @@ impl Tools for Server {
                     "type": "object",
                     "properties": {
                         "question": { "type": "string", "description": "what you want to know" },
+                        "also_phrased_as": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "the same question in other words — a note is found by \
+                                            the wording it was written in, which is rarely yours",
+                        },
                     },
                     "required": ["question"],
                 }),
@@ -269,6 +304,7 @@ mod tests {
             "expected": "A bind mount of the token file would persist the login.",
             "observed": "Mounting a credential file returns EBUSY.",
             "evidence": "`EBUSY` from the mount syscall",
+            "answers": ["why does my login not persist between sessions"],
         })
     }
 
@@ -393,7 +429,7 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert_eq!(required, ["expected", "observed", "evidence"]);
+        assert_eq!(required, REQUIRED, "the schema and the check must agree");
 
         for missing in &required {
             let mut partial = observation();

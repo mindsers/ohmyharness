@@ -203,7 +203,16 @@ fn tokens(text: &str) -> BTreeSet<String> {
 /// The tokens of one note, split by where they appear.
 struct Indexed<'a> {
     note: &'a Note,
-    key: BTreeSet<String>,
+    /// Text written to *be matched* rather than to be read.
+    ///
+    /// The key, and **not** the declared questions — measured, and it was the
+    /// wrong call. Weighting `## Answers` like the key cost 10 points of P@1
+    /// on a 40-note store whose declared questions were mediocre, while
+    /// indexing them at ordinary weight was exactly neutral. The weight was an
+    /// uncalibrated constant, and §7 does not let one ship. It can be
+    /// revisited against a store of real agent-written questions, which is the
+    /// only thing that could justify it.
+    asked: BTreeSet<String>,
     all: BTreeSet<String>,
 }
 
@@ -211,10 +220,12 @@ fn index(notes: &[Note]) -> Vec<Indexed<'_>> {
     notes
         .iter()
         .map(|note| {
-            let key = tokens(&note.key);
+            let asked = tokens(&note.key);
+            // The declared questions are still indexed — they are part of the
+            // body — they simply do not outrank it.
             let mut all = tokens(&note.body);
-            all.extend(key.iter().cloned());
-            Indexed { note, key, all }
+            all.extend(asked.iter().cloned());
+            Indexed { note, asked, all }
         })
         .collect()
 }
@@ -258,7 +269,7 @@ fn score(doc: &Indexed<'_>, terms: &BTreeSet<String>, df: &BTreeMap<&str, usize>
         // A term in the key is a term about the note's subject rather than one
         // that merely occurs in it. A weight, not a threshold: it orders, and
         // nothing is compared against it.
-        let where_it_matched = if doc.key.contains(term) { 2.0 } else { 1.0 };
+        let where_it_matched = if doc.asked.contains(term) { 2.0 } else { 1.0 };
         total += rarity * where_it_matched;
     }
     (total * 1000.0) as u64
@@ -292,13 +303,34 @@ fn cite(note: &Note) -> Cite {
 }
 
 pub fn search(notes: &[Note], question: &str, budget: Budget) -> Neighbourhood {
-    let terms = tokens(question);
+    search_phrased(notes, &[question.to_string()], budget)
+}
+
+/// The same question, asked several ways, in one call.
+///
+/// The agent is better at paraphrase than any ranker here and already has the
+/// question in context — so the paraphrasing is done by the thing that is good
+/// at it, without becoming the multi-turn walk §9.2 rejects.
+///
+/// Each phrasing is scored separately and a note keeps its **best** one.
+/// Pooling the words instead would let two vague phrasings outweigh a precise
+/// one, so adding a phrasing could make the answer worse — and no agent can be
+/// asked to reason about that before calling.
+pub fn search_phrased(notes: &[Note], phrasings: &[String], budget: Budget) -> Neighbourhood {
+    let asked: Vec<BTreeSet<String>> = phrasings.iter().map(|p| tokens(p)).collect();
     let indexed = index(notes);
     let df = document_frequency(&indexed);
 
     let mut scored: Vec<(u64, &Note)> = indexed
         .iter()
-        .map(|doc| (score(doc, &terms, &df, notes.len()), doc.note))
+        .map(|doc| {
+            let best = asked
+                .iter()
+                .map(|terms| score(doc, terms, &df, notes.len()))
+                .max()
+                .unwrap_or(0);
+            (best, doc.note)
+        })
         .filter(|(s, _)| *s > 0)
         .collect();
 
@@ -377,7 +409,7 @@ pub fn search(notes: &[Note], question: &str, budget: Budget) -> Neighbourhood {
     }
 
     Neighbourhood {
-        question: question.to_string(),
+        question: phrasings.join(" / "),
         hits,
         omitted,
     }
@@ -897,6 +929,188 @@ mod tests {
         ] {
             assert_ne!(stem(a), stem(b), "{a:?} and {b:?} collapsed");
         }
+    }
+
+    // ── question-shaped text ────────────────────────────────────────────────
+
+    fn asking(layer: Layer, key: &str, recorded: &str, answers: &[&str], prose: &str) -> Note {
+        let mut body = format!(
+            "# {key}\n\n## Expected\nsomething\n\n## Observed\n{prose}\n\n## Evidence\nc\n"
+        );
+        body.push_str("\n## Answers\n\n");
+        for a in answers {
+            body.push_str(&format!("- {a}\n"));
+        }
+        Note {
+            key: key.to_string(),
+            kind: Kind::Surprise,
+            source: "session s01, claude".into(),
+            recorded: recorded.to_string(),
+            invalidated_by: None,
+            body,
+            layer,
+            path: PathBuf::from(format!("{key}.md")),
+        }
+    }
+
+    /// The measured reason this exists: a stub index of nothing but titles and
+    /// headings scored 95.9% P@1 on heading-shaped questions, where the full
+    /// 180 KB text scored 56%. Matching question-shaped text against a
+    /// question-shaped query is what closes the gap a paraphrase opens — and
+    /// the agent writing the note is the only thing in the loop that can
+    /// phrase the question.
+    #[test]
+    fn a_note_is_found_by_the_question_it_says_it_answers() {
+        let notes = vec![
+            asking(
+                Layer::Local,
+                "one-inode",
+                "2026-01-01",
+                &["why does my login not persist"],
+                "the harness rewrites the file in place",
+            ),
+            asking(
+                Layer::Local,
+                "unrelated",
+                "2026-01-02",
+                &["how do I attach an editor"],
+                "editors connect over ssh",
+            ),
+        ];
+        // Nothing in this question appears in the prose. Only the declared
+        // question matches.
+        let hits = search(&notes, "login does not persist", Budget::default()).hits;
+        assert_eq!(
+            hits.first().map(|h| h.cite.key.as_str()),
+            Some("one-inode"),
+            "got: {:?}",
+            hits.iter().map(|h| &h.cite.key).collect::<Vec<_>>()
+        );
+    }
+
+    /// A declared question is text written to be matched; prose is text written
+    /// to be read. Weighting them the same throws away the distinction the
+    /// whole change rests on.
+    #[test]
+    fn a_declared_question_outweighs_the_same_words_buried_in_prose() {
+        let notes = vec![
+            asking(
+                Layer::Local,
+                "declared",
+                "2026-01-01",
+                &["how does caching behave"],
+                "unrelated observation about mounting",
+            ),
+            asking(
+                Layer::Local,
+                "buried",
+                "2026-01-02",
+                &["something else entirely"],
+                "a long observation that mentions how caching behaves in passing",
+            ),
+        ];
+        let hits = search(&notes, "how does caching behave", Budget::default()).hits;
+        assert_eq!(hits.first().map(|h| h.cite.key.as_str()), Some("declared"));
+    }
+
+    // ── several phrasings, one call ─────────────────────────────────────────
+
+    /// The agent is better at paraphrase than any ranker here, and it already
+    /// has the question in context. Asking two ways costs one call, which is
+    /// the shape §9.2 requires — not the multi-turn walk that was measured to
+    /// be the worst arm.
+    #[test]
+    fn an_alternative_phrasing_finds_what_the_first_one_missed() {
+        let notes = vec![
+            asking(
+                Layer::Local,
+                "ebusy",
+                "2026-01-01",
+                &["why does mounting a token file fail"],
+                "one inode, so the write fails",
+            ),
+            asking(
+                Layer::Local,
+                "other",
+                "2026-01-02",
+                &["how do sessions end"],
+                "sessions stop",
+            ),
+        ];
+        let miss = search_phrased(
+            &notes,
+            &["credential persistence".into()],
+            Budget::default(),
+        );
+        assert!(
+            miss.hits.first().map(|h| h.cite.key.as_str()) != Some("ebusy"),
+            "the fixture must actually miss on the first phrasing"
+        );
+
+        let found = search_phrased(
+            &notes,
+            &[
+                "credential persistence".into(),
+                "mounting a token file fails".into(),
+            ],
+            Budget::default(),
+        );
+        assert_eq!(
+            found.hits.first().map(|h| h.cite.key.as_str()),
+            Some("ebusy")
+        );
+    }
+
+    /// Scored per phrasing, best one wins. Unioning the words instead would let
+    /// two vague phrasings drown a precise one, so adding a phrasing could make
+    /// the answer worse — and an agent cannot be asked to reason about that.
+    #[test]
+    fn adding_a_phrasing_never_demotes_what_a_better_one_found() {
+        let notes = vec![
+            asking(
+                Layer::Local,
+                "target",
+                "2026-01-01",
+                &["why does mounting a token file fail"],
+                "one inode",
+            ),
+            asking(
+                Layer::Local,
+                "noise",
+                "2026-01-02",
+                &[
+                    "what is a session",
+                    "how do I start work",
+                    "where does state live",
+                ],
+                "sessions and state and work and starting",
+            ),
+        ];
+        let precise = "mounting a token file fail".to_string();
+        let alone = search_phrased(&notes, &[precise.clone()], Budget::default());
+        assert_eq!(
+            alone.hits.first().map(|h| h.cite.key.as_str()),
+            Some("target")
+        );
+
+        let with_noise = search_phrased(
+            &notes,
+            &[precise, "session state work".into()],
+            Budget::default(),
+        );
+        assert_eq!(
+            with_noise.hits.first().map(|h| h.cite.key.as_str()),
+            Some("target"),
+            "a vague second phrasing must not outvote a precise first one"
+        );
+    }
+
+    #[test]
+    fn one_phrasing_is_the_same_as_asking_once() {
+        let notes = vec![asking(Layer::Local, "k", "2026-01-01", &["why"], "prose")];
+        let a = render(&search(&notes, "why", Budget::default()));
+        let b = render(&search_phrased(&notes, &["why".into()], Budget::default()));
+        assert_eq!(a, b);
     }
 
     // ── ranking ─────────────────────────────────────────────────────────────

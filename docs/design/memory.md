@@ -479,6 +479,23 @@ deferrals *process, recorded in the entry* rather than a silence:
   half-remembered question is — so the mitigation is §9.2's, returning the
   neighbourhood rather than the node, and 90% of the time the answer is inside
   the budget.
+- **The paraphrase gap is the real limit, and it is not an engine problem.** A
+  half-remembered question shares roughly half its words with the note that
+  answers it, and no lexical ranker — omh's or BM25 — handles that well. Two
+  changes exploit the one thing in the loop that *is* good at paraphrase, the
+  agent itself. `recall` takes `also_phrased_as`, scoring each phrasing and
+  keeping a note's best, so a second wording can only help and never dilutes a
+  precise first one. And a `surprise` now records `## Answers` — the questions
+  it answers, in the writer's words — because only the writer knows what it was
+  trying to find out.
+- **Ranking those declared questions above prose was tried and reverted.** It
+  cost 10 points of P@1 on a 40-note store, because a weight applies whether or
+  not the declared question is any good; at ordinary weight the same store was
+  exactly neutral. The weight was an uncalibrated constant and §7 does not let
+  one ship. What the change buys for retrieval is therefore **unmeasured**: it
+  needs a store of real agent-written questions, which does not exist yet. The
+  text ships because it is discipline and it is information a reader wants; the
+  weight waits for evidence.
 - **Not done: the §15.2 caching experiment**, which needs a real harness launch
   to measure, and **§13's benchmark**, which needs a question set written by
   somebody who did not write the store.

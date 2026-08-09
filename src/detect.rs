@@ -151,9 +151,14 @@ pub fn memory_rules() -> String {
          ## Expected\n\n\
          ## Observed\n\n\
          ## Evidence\n\n\
+         ## Answers\n\n\
+         - <the question somebody would later ask to find this>\n\n\
          ## Related\n\n\
          - [[another-notes-key]]\n\
          ```\n\n\
+         **Answers** is what makes the note findable later, and only you know it:\n\
+         write the question you would have asked five minutes ago, in the words you\n\
+         would have used. A note nobody can find is a note nobody wrote.\n\n\
          Store uncertainty rather than false precision, and date by when the thing\n\
          happened rather than when you mentioned it. If you have nothing to put\n\
          under **Expected**, there is nothing here worth recording.\n\n\
