@@ -302,6 +302,10 @@ fn cite(note: &Note) -> Cite {
     }
 }
 
+/// One phrasing. Test-only: everything in production arrives through
+/// `search_phrased`, because the tool always has at least the agent's own
+/// wording and may have more.
+#[cfg(test)]
 pub fn search(notes: &[Note], question: &str, budget: Budget) -> Neighbourhood {
     search_phrased(notes, &[question.to_string()], budget)
 }

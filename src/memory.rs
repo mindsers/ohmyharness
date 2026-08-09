@@ -133,16 +133,6 @@ impl Kind {
     /// standing in for a length budget: a budget needs a number calibrated
     /// against a store that does not exist yet, and *bullets only, no prose
     /// block* needs none.
-    /// Sections whose text is a question rather than a description. Weighted
-    /// like the key when ranking, because both are somebody naming the thing
-    /// — which is what a later question is too.
-    pub fn answer_sections(&self) -> &'static [&'static str] {
-        match self {
-            Self::Surprise | Self::Stub => &["Answers"],
-            Self::Topic => &[],
-        }
-    }
-
     pub fn list_sections(&self) -> &'static [&'static str] {
         match self {
             Self::Surprise => &["Related", "Answers"],
