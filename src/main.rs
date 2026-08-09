@@ -252,6 +252,13 @@ enum MemoryCmd {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Share a note with the repo: local → team. The only human gate there is.
+    Promote {
+        /// One or more keys. Notes that link to each other must be named
+        /// together, or each would leave the other dangling for a teammate.
+        #[arg(required = true)]
+        keys: Vec<String>,
+    },
     /// Schema and hygiene violations, across both layers.
     Lint,
     /// Remove one note. Never a neighbour; reports what linked to it.
@@ -304,6 +311,7 @@ fn main() -> Result<()> {
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
             Some(MemoryCmd::Lint) => memory_lint(&cwd),
+            Some(MemoryCmd::Promote { keys }) => memory_promote(&cwd, keys),
             Some(MemoryCmd::Serve {
                 team,
                 local,
@@ -971,6 +979,32 @@ fn memory_serve(
     let stdin = std::io::stdin().lock();
     let stdout = std::io::stdout().lock();
     mcp::serve(stdin, stdout, &mut server)
+}
+
+/// local → team. §12's one human gate, because it is the one place a wrong
+/// note reaches somebody else.
+fn memory_promote(cwd: &std::path::Path, keys: &[String]) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let notes = memory::load(&paths)?;
+    let repo = paths.repo.clone();
+
+    let steps = match memory::promote::plan(&notes, &paths, keys, &|p: &std::path::Path| {
+        memory::promote::git_ignores(&repo, p)
+    }) {
+        Ok(steps) => steps,
+        Err(blocked) => {
+            // Nothing moved. A partial promotion would leave a store nobody
+            // planned, and the human who ran the gate would have to work out
+            // which half landed.
+            for b in &blocked {
+                eprintln!("omh: {}", b.say());
+            }
+            anyhow::bail!("promoted nothing");
+        }
+    };
+    memory::promote::apply(&steps)?;
+    print!("{}", memory::promote::report(&steps));
+    Ok(())
 }
 
 /// The store, by layer, with what points at each note.

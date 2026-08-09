@@ -330,6 +330,47 @@ does not mean what it looks like. `DuplicateKey` warns when one key is claimed
 by two files in one layer — §6 makes a key a primary key, `remember` refuses to
 create a second, and this is how one that arrived by hand becomes visible.
 
+### `omh memory promote <key>…`
+
+local → team. **The only place a human gates anything**, because it is the only
+place a wrong note reaches somebody else. Everything else is invisible: a memory
+you have to approve is a notebook, and nobody keeps one.
+
+```console
+$ omh memory promote surprise/credentials-live-in-a-volume
+omh: `surprise/credentials-live-in-a-volume` links to
+     surprise/ebusy-on-a-file-mount, which is not committed — promote it too,
+     or drop the link
+Error: promoted nothing
+```
+
+That refusal is **invariant 2**: a committed note may only link to committed
+notes, because a teammate's clone has no gitignored layer to follow the link
+into. The lint warns about it; `promote` refuses, since a warning is negotiable
+and this is the last point at which it can be caught.
+
+Name them together and both go:
+
+```console
+$ omh memory promote surprise/credentials-live-in-a-volume surprise/ebusy-on-a-file-mount
+promoted surprise/credentials-live-in-a-volume → .omh/notes/…
+promoted surprise/ebusy-on-a-file-mount → .omh/notes/…
+
+not shared until committed:
+  git add .omh/notes && git commit
+```
+
+Two notes that link to each other are unpromotable one at a time, which is why
+the check knows what else is in the batch.
+
+**One blocked key stops the whole batch.** A half-finished promotion leaves a
+store nobody planned, and you would have to work out which half landed.
+
+**The key never changes** — identity is `(layer, key)`, so promotion moves a
+note between layers rather than renaming it — and nothing else is rewritten.
+Notes that pointed at it keep working, because from `local` a key resolves into
+either layer.
+
 ### `omh memory rm <key> [--layer team|local] [--at <path>]`
 
 Removes one note and reports what pointed at it.

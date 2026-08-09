@@ -499,6 +499,18 @@ deferrals *process, recorded in the entry* rather than a silence:
 - **Not done: the §15.2 caching experiment**, which needs a real harness launch
   to measure, and **§13's benchmark**, which needs a question set written by
   somebody who did not write the store.
+**M3 shipped, and the gate was met against real git**: a promoted note is
+committed, cloned, and retrieved with its date and layer, while the gitignored
+layer does not travel. Both halves are asserted — without the second, the test
+passes on an implementation that commits everything, which is worse than
+shipping no `promote` at all.
+
+Invariant 2 is expressed as a **return type** rather than as a rule.
+`resolve(key, from)` gives the layers a link actually reaches, and from `team`
+that can only be `team`. A rule can be forgotten at a second call site; the
+asymmetry cannot. The lint and `promote` then share one predicate,
+`uncommitted_links`, because two implementations of "what would dangle for a
+teammate" is how two subsystems come to tell two stories about one file.
 
 ## 15. Open questions
 
