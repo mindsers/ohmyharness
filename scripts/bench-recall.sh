@@ -104,6 +104,28 @@ with open(out+'/req.jsonl','w') as f:
             "params":{"name":"recall","arguments":{"question":q['query']}}})+'\n')
 PY
 
+# How many notes actually declare their questions. Reported every run: a corpus
+# nobody has filled in scores exactly like one with no `## Answers` at all, and
+# that must not be mistakable for the experiment having been run.
+CORPUS="$CORPUS" python3 - <<'PY'
+import os, glob
+corpus = os.environ['CORPUS']
+notes = glob.glob(os.path.join(corpus, '**', '*.md'), recursive=True)
+filled = 0
+for p in notes:
+    body = open(p).read()
+    if '## Answers' in body and body.split('## Answers', 1)[1].strip():
+        filled += 1
+if filled == 0:
+    print(f"  ! 0/{len(notes)} notes declare any questions - this is the BASELINE,")
+    print("    not the write-side experiment. Fill `## Answers` first;")
+    print("    see scripts/answers-prompt.md.")
+elif filled < len(notes):
+    print(f"  ! only {filled}/{len(notes)} notes declare questions - partial corpus")
+else:
+    print(f"  {filled}/{len(notes)} notes declare their questions")
+PY
+
 "$OMH" memory serve --team "$CORPUS" --local "$OUT/scratch-local" \
   < "$OUT/req.jsonl" > "$OUT/omh.jsonl" 2>/dev/null
 
