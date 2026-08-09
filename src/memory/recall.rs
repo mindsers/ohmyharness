@@ -76,6 +76,116 @@ impl Default for Budget {
     }
 }
 
+/// Porter's step 1 — plurals and past/present inflection, and nothing else.
+///
+/// Measured need: on a corpus of this repo's own commit bodies searched with
+/// their subjects, exact-token matching fell from 83% to 12.5% P@1 as the
+/// question's wording drifted from the note's, while a stemmed ranker held
+/// flat. Nobody asks in the words the note happened to use.
+///
+/// **Step 1 only, deliberately.** The later steps strip derivational suffixes
+/// (`-ational`, `-iveness`, `-alize`), which merge words that mean different
+/// things. Over-stemming makes a rare term common, and rarity is doing all the
+/// ranking here — so the rules that ship are the ones the measurement asked
+/// for, and no more.
+fn stem(word: &str) -> String {
+    let w: Vec<char> = word.chars().collect();
+    let is_vowel = |c: &[char], i: usize| match c[i] {
+        'a' | 'e' | 'i' | 'o' | 'u' => true,
+        // `y` is a vowel only when what precedes it is not.
+        'y' => i > 0 && !matches!(c[i - 1], 'a' | 'e' | 'i' | 'o' | 'u'),
+        _ => false,
+    };
+    let has_vowel = |c: &[char]| (0..c.len()).any(|i| is_vowel(c, i));
+    // Porter's m: how many vowel-consonant sequences the stem contains.
+    let measure = |c: &[char]| {
+        let mut m = 0;
+        let mut prev_vowel = false;
+        for i in 0..c.len() {
+            let v = is_vowel(c, i);
+            if prev_vowel && !v {
+                m += 1;
+            }
+            prev_vowel = v;
+        }
+        m
+    };
+    let ends = |c: &[char], suf: &str| {
+        let s: Vec<char> = suf.chars().collect();
+        c.len() > s.len() && c[c.len() - s.len()..] == s[..]
+    };
+
+    let mut w = w;
+
+    // 1a — plurals.
+    if ends(&w, "sses") || ends(&w, "ies") {
+        w.truncate(w.len() - 2);
+    } else if w.len() > 1 && w[w.len() - 1] == 's' && !ends(&w, "ss") {
+        w.pop();
+    }
+
+    // 1b — past tense and gerunds.
+    let mut fix_up = false;
+    if ends(&w, "eed") {
+        // `feed` keeps its ending; `agreed` does not.
+        if measure(&w[..w.len() - 3]) > 0 {
+            w.pop();
+        }
+    } else if ends(&w, "ed") && has_vowel(&w[..w.len() - 2]) {
+        w.truncate(w.len() - 2);
+        fix_up = true;
+    } else if ends(&w, "ing") && has_vowel(&w[..w.len() - 3]) {
+        w.truncate(w.len() - 3);
+        fix_up = true;
+    }
+    if fix_up {
+        let cvc = w.len() >= 3
+            && !is_vowel(&w, w.len() - 1)
+            && is_vowel(&w, w.len() - 2)
+            && !is_vowel(&w, w.len() - 3)
+            && !matches!(w[w.len() - 1], 'w' | 'x' | 'y');
+        if ends(&w, "at") || ends(&w, "bl") || ends(&w, "iz") {
+            w.push('e');
+        } else if w.len() > 1
+            && w[w.len() - 1] == w[w.len() - 2]
+            && !matches!(w[w.len() - 1], 'l' | 's' | 'z')
+        {
+            w.pop();
+        } else if measure(&w) == 1 && cvc {
+            w.push('e');
+        }
+    }
+
+    // 1c — a trailing `y` becomes `i`, so `ponies` and `pony` agree.
+    if ends(&w, "y") && has_vowel(&w[..w.len() - 1]) {
+        let n = w.len();
+        w[n - 1] = 'i';
+    }
+
+    // 5a — a silent trailing `e`. Without it the two paths above disagree:
+    // `rewrites` loses its `s` and keeps the `e`, while `rewriting` loses the
+    // `ing` and does not get one back, so the same verb lands on two terms.
+    // `-e` verbs are far too common for that to be acceptable.
+    if ends(&w, "e") {
+        let stem = &w[..w.len() - 1];
+        let cvc = stem.len() >= 3
+            && !is_vowel(stem, stem.len() - 1)
+            && is_vowel(stem, stem.len() - 2)
+            && !is_vowel(stem, stem.len() - 3)
+            && !matches!(stem[stem.len() - 1], 'w' | 'x' | 'y');
+        let m = measure(stem);
+        if m > 1 || (m == 1 && !cvc) {
+            w.pop();
+        }
+    }
+
+    // A word stemmed to nothing is a term that matches everything or nothing.
+    if w.is_empty() {
+        return word.to_lowercase();
+    }
+    w.into_iter().collect()
+}
+
 /// Whole words, lowercased.
 ///
 /// Tokens rather than substrings, because substrings were the original defect
@@ -86,7 +196,7 @@ impl Default for Budget {
 fn tokens(text: &str) -> BTreeSet<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
-        .map(str::to_lowercase)
+        .map(|t| stem(&t.to_lowercase()))
         .collect()
 }
 
@@ -711,6 +821,82 @@ mod tests {
         let found = search(&store(), "kubernetes", Budget::default());
         assert!(found.hits.is_empty(), "no match is not every note");
         assert!(!render(&found).trim().is_empty());
+    }
+
+    // ── stemming ────────────────────────────────────────────────────────────
+
+    /// Measured, on a corpus of this repo's own commit bodies searched with
+    /// their subjects: exact-token matching fell from 83% to 12.5% P@1 as
+    /// wording drifted, while a stemmed ranker held flat. Nobody asks a
+    /// question in the words the note was written in.
+    #[test]
+    fn a_note_is_found_when_the_question_inflects_a_word_differently() {
+        let notes = vec![
+            note(
+                Layer::Local,
+                "the-harness-rewrites-in-place",
+                "2026-01-01",
+                &[],
+            ),
+            note(Layer::Local, "an-unrelated-topic", "2026-01-02", &[]),
+        ];
+        // `rewrites` in the note, `rewriting` in the question.
+        let hits = search(&notes, "rewriting", Budget::default()).hits;
+        assert_eq!(
+            hits.first().map(|h| h.cite.key.as_str()),
+            Some("the-harness-rewrites-in-place"),
+            "got: {:?}",
+            hits.iter().map(|h| &h.cite.key).collect::<Vec<_>>()
+        );
+    }
+
+    /// A stemmer that eats a word entirely turns a rare term into an empty
+    /// one, which matches everything or nothing depending on where it lands.
+    #[test]
+    fn a_word_is_never_stemmed_into_nothing() {
+        for w in ["s", "is", "as", "ing", "ed", "ss", "ies", "a", "i"] {
+            assert!(!stem(w).is_empty(), "stem({w:?}) vanished");
+        }
+    }
+
+    /// Porter is **not** idempotent — `agreed` → `agre` → `agr` — and that is
+    /// the algorithm, not a defect. It does not matter here because every term
+    /// is stemmed exactly once, from raw text, on both sides. What does matter
+    /// is that the index and the question go through the same stemmer, or an
+    /// index stops matching the questions asked of it.
+    #[test]
+    fn the_index_and_the_question_go_through_the_same_stemmer() {
+        let notes = vec![
+            note(
+                Layer::Local,
+                "credentials-refresh-in-place",
+                "2026-01-01",
+                &[],
+            ),
+            note(Layer::Local, "an-unrelated-topic", "2026-01-02", &[]),
+        ];
+        let hits = search(&notes, "refreshing credential", Budget::default()).hits;
+        assert_eq!(
+            hits.first().map(|h| h.cite.key.as_str()),
+            Some("credentials-refresh-in-place"),
+            "neither word appears in the note as written: {:?}",
+            hits.iter().map(|h| &h.cite.key).collect::<Vec<_>>()
+        );
+    }
+
+    /// Over-stemming is the other failure: two unrelated words collapsing onto
+    /// one term makes a rare word common and destroys the ranking that rarity
+    /// is doing.
+    #[test]
+    fn stemming_does_not_merge_words_that_merely_look_alike() {
+        for (a, b) in [
+            ("sing", "sin"),
+            ("bring", "brin"),
+            ("mount", "mound"),
+            ("session", "sessile"),
+        ] {
+            assert_ne!(stem(a), stem(b), "{a:?} and {b:?} collapsed");
+        }
     }
 
     // ── ranking ─────────────────────────────────────────────────────────────

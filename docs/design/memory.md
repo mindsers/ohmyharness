@@ -461,6 +461,24 @@ deferrals *process, recorded in the entry* rather than a silence:
   substrings and retrieved a ten-note store in full for the question `"a"`.
   No stopword list: rarity is derived from the store, so nobody decides which
   words are noise.
+- **Retrieval was measured against iwe, twice.** The first benchmark asked the
+  wrong question and is recorded because getting it wrong was instructive.
+  Queries were lifted verbatim from document bodies, which is exact-token
+  matching's home turf; omh "won" 83% to 66% P@1, and the number was useless.
+  Inflecting the wording collapsed omh to **12.5%** while iwe's BM25 held flat
+  at 65.9% — it stems, and nobody asks a question in the words a note was
+  written in. Porter step 1 (plus 5a) now ships, and omh's curve is **flat at
+  77.3%**, above iwe at every level of drift. It costs 6 points on verbatim
+  queries, which is the right trade.
+- **On the use case itself, the two engines are indistinguishable.** Measured on
+  40 notes built from this repo's own commit bodies and searched with the
+  commit subjects — a real paraphrase, ~50% word overlap, and nothing in the
+  corpus or the queries authored by whoever wrote the ranker. omh 47.5% P@1 /
+  90% top-8 in 8 results; iwe 52.5% / 95% in 25.9 results. McNemar p ≥ 0.5 at
+  every cutoff. **Neither is good at paraphrase**, which is what a
+  half-remembered question is — so the mitigation is §9.2's, returning the
+  neighbourhood rather than the node, and 90% of the time the answer is inside
+  the budget.
 - **Not done: the §15.2 caching experiment**, which needs a real harness launch
   to measure, and **§13's benchmark**, which needs a question set written by
   somebody who did not write the store.

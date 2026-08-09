@@ -177,7 +177,7 @@ args    = [
 
   [[entry.measured]]
   what  = "injected per session"
-  value = "1013 B"
+  value = "1143 B"
   how   = "two tool names, descriptions and schemas as the server emits them, recomputed from the shipped code by the_memory_surfaces_declared_cost_matches_what_it_ships"
   on    = "2026-08-08"
 

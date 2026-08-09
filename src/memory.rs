@@ -3301,6 +3301,49 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
+    /// Two graphs reach the agent, and they answer different questions. The
+    /// code graph knows what the code *is* — where a symbol lives, how one
+    /// module reaches another — and is re-derived from the code every turn.
+    /// Memory knows what nobody could re-derive: why it is that way, what was
+    /// tried and failed, what surprised somebody at 2am.
+    ///
+    /// Without a rule for choosing, an agent asks the wrong one and concludes
+    /// the answer does not exist. The rule cannot live in a tool description
+    /// either — a description is attached to one tool and cannot say "prefer
+    /// the other one", so this is the part that has to be in the rules file.
+    #[test]
+    fn the_rules_say_which_of_the_two_graphs_answers_which_question() {
+        let rules = crate::detect::agents_md(&[]);
+        let lower = rules.to_lowercase();
+
+        assert!(
+            lower.contains("search_graph"),
+            "the code graph must be named"
+        );
+        assert!(lower.contains("recall"), "memory must be named");
+
+        // Naming both is not a rule. There has to be a sentence that tells them
+        // apart, and it has to survive somebody rewording the prose around it.
+        let has_rule = lower.contains("what the code is") && lower.contains("why");
+        assert!(
+            has_rule,
+            "the rules name both graphs but never say how to choose:\n{rules}"
+        );
+    }
+
+    /// The trigger is the half a rules file carries badly — it decays as
+    /// context grows — so it also rides on the call. A description that only
+    /// says what the tool searches leaves the agent to guess when.
+    #[test]
+    fn recalls_description_says_when_to_reach_for_it_not_only_what_it_holds() {
+        let text =
+            crate::memory::index::describe(&crate::memory::index::Index::of(&[])).to_lowercase();
+        assert!(
+            text.contains("code"),
+            "it has to distinguish itself from the code graph: {text}"
+        );
+    }
+
     /// The agent writes into the sandbox, so the path it is given must be the
     /// one omh mounts. A rules file naming the host path sends every note to a
     /// directory that does not exist in the container.

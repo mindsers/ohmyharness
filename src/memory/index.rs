@@ -72,9 +72,11 @@ impl Index {
 /// The sentence that rides in `recall`'s description.
 pub fn describe(index: &Index) -> String {
     if index.total == 0 {
-        return "Search this repo's accumulated notes. The store is empty so far — \
-                it fills as work turns up things that were not obvious. Ask anyway: \
-                an empty answer is itself a fact about what has been learned here."
+        return "Why this repo is the way it is: what was tried, what failed, what \
+                surprised somebody. Not what the code *is* — the code graph answers \
+                that, and is never out of date. The store is empty so far; it fills \
+                as work turns up things that were not obvious. Ask anyway — an empty \
+                answer is itself a fact about what has been learned here."
             .to_string();
     }
 
@@ -85,9 +87,10 @@ pub fn describe(index: &Index) -> String {
         .collect();
 
     format!(
-        "Search this repo's accumulated notes. The store holds {} note{}: {}. \
-         Most exist because an assumption turned out wrong. Query before assuming \
-         how something here works.",
+        "Why this repo is the way it is: what was tried, what failed, what surprised \
+         somebody. Not what the code *is* — the code graph answers that. {} note{}: \
+         {}. Most exist because an assumption turned out wrong, so query before \
+         assuming how something here behaves.",
         index.total,
         if index.total == 1 { "" } else { "s" },
         breakdown.join(", "),
