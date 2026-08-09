@@ -83,11 +83,36 @@ $ # fill in each note's `## Answers` with scripts/answers-prompt.md
 $ ./scripts/bench-recall.sh --answers <that dir>
 ```
 
-The number to beat is **47.5%**, which is where the store sits with no declared
-questions at all. Above it, weighting them becomes justifiable and the
-measurement goes in the entry. At or below, the write side stays as discipline
-and documentation, and the honest conclusion is that paraphrase needs
-embeddings rather than cleverness.
+### Result, 2026-08-09 — directionally positive, and underpowered
+
+Questions written by an agent that had not seen the ranker, using
+`scripts/answers-prompt.md`:
+
+| | P@1 | top-3 | top-8 |
+|---|---|---|---|
+| no declared questions | 47.5% | 65.0% | **90.0%** |
+| with declared questions | **55.0%** | **67.5%** | 87.5% |
+
+Paired, the P@1 gain is **3 questions fixed and 0 broken**. That direction is
+clean — a change that only helps looks different from a wash, where fixes and
+breaks come out roughly symmetric — but three disagreements out of forty gives
+p = 0.25, and top-8 moved slightly the *wrong* way (1 fixed, 2 broken), which
+is what extra text pushing a marginal hit out of the budget looks like.
+
+**This corpus cannot settle it.** Forty-one notes is everything the repo's
+history affords; lowering the body-length threshold gains one. Detecting an
+effect this size needs several hundred questions. The bar of "beat 47.5%" was
+set without regard for statistical power, and clearing it is not the same as
+demonstrating anything.
+
+So the resting position is unchanged and, on this evidence, correct: **the
+declared questions are recorded and indexed, and not weighted.** They cost
+nothing, they are discipline, and a human reading the store wants them. The
+weight stays out until a store exists that can justify it — which is what M1's
+two-week gate produces, and what §13 wants for the real measurement anyway.
+
+Two ways to get power, when it matters: run this against another repo with a
+substantial commit history, or wait for a real store of agent-written notes.
 
 ## What this does not measure
 
