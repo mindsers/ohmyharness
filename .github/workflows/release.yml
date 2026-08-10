@@ -161,10 +161,12 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Plain file names, no `./` prefix, so a downloader can run
+      # `sha256sum -c SHA256SUMS` against them unchanged.
       - name: checksum them
         run: |
           cd dist
-          sha256sum ./*.tar.gz > SHA256SUMS
+          sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
       - name: create the release

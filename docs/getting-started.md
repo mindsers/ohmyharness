@@ -8,11 +8,34 @@ servers. Roughly five minutes, most of it the first image build.
 - **Docker**, running. It is currently the only verified runtime — see
   [runtime backends](design/architecture.md#runtime-backends).
 - **git**, and a repository to work in. omh refuses to run outside one.
-- **Rust 1.85+**, to build omh itself. Declared as `rust-version` in
+- **Rust 1.85+**, but only to build from source. Declared as `rust-version` in
   `Cargo.toml` and checked by CI, so it is a tested floor rather than the
   version that happened to be on the maintainer's machine.
 
 ## Install
+
+```console
+$ curl -fsSL https://raw.githubusercontent.com/mindsers/ohmyharness/main/install.sh | sh
+```
+
+The script resolves the latest release, picks the build matching your OS and
+architecture, verifies it against the published `SHA256SUMS`, and installs to
+`~/.local/bin`. It refuses rather than guesses: an unverified download, a
+checksum that does not match, or a binary that will not run on your machine all
+stop the install, and a failed install never replaces a working `omh`.
+
+| | |
+|---|---|
+| `OMH_VERSION` | tag to install, instead of the latest |
+| `OMH_BIN_DIR` | where the binary goes (default `~/.local/bin`) |
+| `OMH_BASE_URL` | where to fetch from — for mirrors |
+
+Linux builds are static musl, so one build covers every distribution.
+
+*No release is tagged yet. Until one is, the script says so and points at the
+source build below.*
+
+### From source
 
 ```console
 $ git clone https://github.com/mindsers/ohmyharness && cd ohmyharness

@@ -55,7 +55,19 @@ the agent, instead of a second one on your host that silently diverges.
 
 ## Install
 
-Requires **Docker** and **git**. Rust 1.85+ to build.
+Requires **Docker** and **git**.
+
+```console
+$ curl -fsSL https://raw.githubusercontent.com/mindsers/ohmyharness/main/install.sh | sh
+```
+
+Picks the build for your machine, checks it against the published
+`SHA256SUMS`, and installs to `~/.local/bin`. Read it first if you would rather
+— it is [one file](install.sh), and it does nothing but download and verify.
+
+*No release is tagged yet. Until one is, the script says so and sends you here.*
+
+From source, which needs Rust 1.85+:
 
 ```console
 $ git clone https://github.com/mindsers/ohmyharness && cd ohmyharness
