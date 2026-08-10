@@ -349,6 +349,30 @@ notes, because a teammate's clone has no gitignored layer to follow the link
 into. The lint warns about it; `promote` refuses, since a warning is negotiable
 and this is the last point at which it can be caught.
 
+These are two mechanisms, not two settings on one dial. A rule's `Severity`
+gates a *write* — `CrossLayerLink` is a warning there because the note at fault
+is committed and the agent writing right now cannot fix somebody else's. A
+`Blocker` gates a *promotion*, and there the same condition is fatal. Raising
+the rule to a refusal to make them agree would fail every `remember` in a repo
+whose committed layer has one bad link.
+
+Invariant 2 is not the only thing refused, because it is not the only way a
+promotion can publish something wrong:
+
+- **A note the schema refuses** is never shared. An unclosed fence is the case
+  that matters: it quotes every heading and link below it, so the invariant-2
+  check would read no links at all and pass on the one note whose links cannot
+  be seen.
+- **A key that is not a key.** `validate_key` guards the mint; a key read back
+  off disk has never been through it, and every path here is built from it.
+- **A destination that already exists.** The conflict above asks whether a
+  *key* is committed; the write lands on a *path*, and a note whose frontmatter
+  disagrees with its filename owns one without the other.
+- **A key claimed by two local files** — `rm` refuses this store and asks for
+  `--at`; promoting one and leaving the other would be a third story about it.
+- **An ignore check that could not answer.** `git check-ignore` reports
+  ignored, not-ignored, or failure, and the third is not the second.
+
 Name them together and both go:
 
 ```console
@@ -447,6 +471,6 @@ degrades to absent with one line at launch rather than failing it.
 
 ### What is not here yet
 
-`promote` and `stale` arrive with the milestones that give them something to act
-on — see [the design](design/memory.md). A subcommand that printed "not
-implemented" would be worse than its absence, because `--help` advertises it.
+`stale` arrives with the milestone that gives it something to act on — see
+[the design](design/memory.md). A subcommand that printed "not implemented"
+would be worse than its absence, because `--help` advertises it.

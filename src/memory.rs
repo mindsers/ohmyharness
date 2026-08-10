@@ -391,7 +391,7 @@ pub fn expand_key(template: &str, vars: &[(&str, &str)]) -> Result<String> {
 /// creates the key's parent directories, an unchecked template is an
 /// arbitrary write. `auth::validate_name` and `session::validate_id` are the
 /// precedent: validate identity where it is minted, not where it is used.
-fn validate_key(key: &str) -> Result<()> {
+pub(crate) fn validate_key(key: &str) -> Result<()> {
     // An empty component covers more than it looks: `""` splits to one empty
     // part, `/abs` to a leading one, `a//b` and `a/` to an interior and a
     // trailing one. Spelling those out separately reads as thorough and is
@@ -689,11 +689,16 @@ pub fn links(body: &str) -> Vec<String> {
 /// A set, never a winner — that is the whole of §4. Two claims about one topic
 /// are two facts, and picking one would hide a teammate's note behind yours.
 ///
-/// The asymmetry is invariant 2, expressed as a return type rather than as a
-/// rule: from `local` a key reaches whatever holds it, but from `team` it
-/// reaches only `team`, because a committed note is read in a clone where no
-/// local layer exists. A rule can be forgotten at a second call site; a type
-/// cannot.
+/// The asymmetry is invariant 2: from `local` a key reaches whatever holds it,
+/// but from `team` it reaches only `team`, because a committed note is read in
+/// a clone where no local layer exists.
+///
+/// It is one place to be right, not a type that refuses to be wrong — the
+/// return is `Vec<Layer>` whichever way it is asked, so the rule lives in the
+/// filter below rather than in the signature. Worth saying because the
+/// stronger claim invites trusting a `Vec<Layer>` obtained "from team" to be
+/// safe by construction, and `recall`'s neighbourhood expansion already
+/// resolves links without asking here.
 pub fn resolve(notes: &[Note], key: &str, from: Layer) -> Vec<Layer> {
     let mut found: Vec<Layer> = notes
         .iter()
@@ -716,10 +721,13 @@ pub fn resolve(notes: &[Note], key: &str, from: Layer) -> Vec<Layer> {
 /// plan can be checked against its own closure — otherwise two notes that
 /// point at each other are unpromotable in either order, with an error that
 /// reads like a bug.
-pub fn uncommitted_links(notes: &[Note], key: &str, also_committed: &[String]) -> Vec<String> {
-    let Some(note) = notes.iter().find(|n| n.key == key) else {
-        return Vec::new();
-    };
+///
+/// Takes the note, not its key. Identity is `(layer, key)` and `DuplicateKey`
+/// is only a warning, so a key can name more than one file: looking one up
+/// here judged every claimant by the first match's body, which hid the
+/// offender's links behind a clean namesake and reported the clean one twice.
+/// Both callers already hold the note.
+pub fn uncommitted_links(notes: &[Note], note: &Note, also_committed: &[String]) -> Vec<String> {
     let mut out: Vec<String> = links(&note.body)
         .into_iter()
         .filter(|target| {
@@ -752,8 +760,12 @@ pub fn hygiene(notes: &[Note]) -> Vec<Violation> {
         // Invariant 2, checked here and again at `promote`. Warns rather than
         // refuses: the note at fault is committed, and an agent writing right
         // now cannot fix somebody else's.
-        for target in uncommitted_links(notes, &note.key, &[]) {
-            if note.layer.is_committed() {
+        //
+        // The layer decides whether to ask, not what to do with the answer:
+        // asking first and discarding the result for local notes computed the
+        // whole predicate for every note in the store to throw most of it away.
+        if note.layer.is_committed() {
+            for target in uncommitted_links(notes, note, &[]) {
                 found.push(Violation {
                     key: note.key.clone(),
                     layer: note.layer,
@@ -2216,6 +2228,16 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     // ── the store ───────────────────────────────────────────────────────────
 
+    /// The note a key names, for the predicates that take one. Panics rather
+    /// than returning an `Option`: a fixture that did not seed what the test
+    /// asks about is a broken test, not a case to assert about.
+    fn find<'a>(notes: &'a [Note], key: &str) -> &'a Note {
+        notes
+            .iter()
+            .find(|n| n.key == key)
+            .unwrap_or_else(|| panic!("no note `{key}` in the fixture"))
+    }
+
     fn seed(paths: &Paths, layer: Layer, key: &str, body: &str) {
         let path = layer.dir(paths).join(format!("{key}.md"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -3251,7 +3273,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let notes = load(&paths).unwrap();
 
         assert_eq!(
-            uncommitted_links(&notes, "candidate", &[]),
+            uncommitted_links(&notes, find(&notes, "candidate"), &[]),
             vec!["private".to_string()],
             "only the link a clone could not follow"
         );
@@ -3273,9 +3295,12 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         }
         let notes = load(&paths).unwrap();
 
-        assert_eq!(uncommitted_links(&notes, "a", &[]), vec!["b".to_string()]);
+        assert_eq!(
+            uncommitted_links(&notes, find(&notes, "a"), &[]),
+            vec!["b".to_string()]
+        );
         assert!(
-            uncommitted_links(&notes, "a", &["b".to_string()]).is_empty(),
+            uncommitted_links(&notes, find(&notes, "a"), &["b".to_string()]).is_empty(),
             "promoted together, neither dangles"
         );
     }
@@ -3302,6 +3327,50 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             .collect();
         assert_eq!(crossing.len(), 1, "got: {found:?}");
         assert_eq!(crossing[0].key, "shared");
+        assert!(crossing[0].detail.contains("private"), "{:?}", crossing[0]);
+    }
+
+    /// **The store the lint exists for is the one it was blind to.** Identity
+    /// is `(layer, key)` and `DuplicateKey` is a *warning*, so two committed
+    /// files may legitimately claim one key. Looking a note up by key alone
+    /// then judged every one of them by the first match's body: the offending
+    /// file's links were never read, and the clean file was reported twice.
+    ///
+    /// Order-independent on purpose. The defect was invisible while
+    /// `Layer::ALL` happened to list `Team` first, and a test that only holds
+    /// for one ordering is a test that stops holding when somebody sorts.
+    #[test]
+    fn a_duplicate_key_never_hides_a_committed_notes_cross_layer_link() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "private", &surprise_body());
+        // Clean, and first by path — so a key-only lookup finds this one.
+        seed(&paths, Layer::Team, "dup", &surprise_body());
+        // The offender, claiming the same key from a different file.
+        let other = Layer::Team.dir(&paths).join("ns/dup.md");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(
+            &other,
+            render(&Note {
+                path: other.clone(),
+                ..note_with(
+                    Kind::Surprise,
+                    "dup",
+                    &format!("{}\n## Related\n\n- [[private]]\n", surprise_body()),
+                )
+            }),
+        )
+        .unwrap();
+
+        let found = lint(&paths).unwrap();
+        let crossing: Vec<&Violation> = found
+            .iter()
+            .filter(|v| v.rule == Rule::CrossLayerLink)
+            .collect();
+        assert_eq!(
+            crossing.len(),
+            1,
+            "the file that links into the gitignored layer, exactly once: {found:?}"
+        );
         assert!(crossing[0].detail.contains("private"), "{:?}", crossing[0]);
     }
 

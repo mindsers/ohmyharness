@@ -38,7 +38,7 @@ change — most of them record something that was tried and cost something.
 | [The base set](design/base-set.md) | omh's opinion as a versioned data file, and the test that makes an entry earn its place |
 | [Architecture](design/architecture.md) | images, runtime backends, on-disk layout |
 | [Adapters](design/adapters.md) | harnesses and editors as data, and how to add one |
-| [Memory](design/memory.md) | the note graph, its guards, and the build order — M1 (the store) is built, retrieval is not |
+| [Memory](design/memory.md) | the note graph, its guards, and the build order — the store, retrieval and the team layer are built; staleness is not |
 | [Memory: how the design got here](design/memory-rationale.md) | the survey, the benchmark that reversed six choices, and the alternatives not taken |
 | [Memory M0: running iwe](design/memory-m0.md) | the blocking spike, and the four claims the design rested on that did not survive it |
 | [Measuring retrieval](design/memory-benchmark.md) | the benchmark that decides retrieval questions, and why it cannot be tilted |

@@ -5,9 +5,14 @@
 //! a memory you have to approve is a notebook, and nobody keeps one.
 //!
 //! Decide everything, move nothing, then move exactly what was decided. Same
-//! shape as `container::plan` and its `validate`: the judgement is pure and
-//! testable without a filesystem, and the part that touches disk has no
-//! opinions.
+//! shape as `container::plan` and its `validate`: the part that touches disk
+//! has no opinions, and every judgement is driven by values a test can supply
+//! — the loaded notes, and an injected answer to "does git ignore this".
+//!
+//! `plan` does read the filesystem for one thing: whether the destination is
+//! already occupied. The store's own view answers the common case and is
+//! checked first, but a file the store never loaded still cannot be silently
+//! overwritten, and only the disk knows about that one.
 
 use crate::memory::{Layer, Note};
 use crate::profile::Paths;
@@ -29,11 +34,31 @@ pub enum Blocker {
     /// key is a primary key within its layer, so this is §6's conflict rather
     /// than something to reconcile.
     AlreadyCommitted,
+    /// One key over several local files. `rm` refuses this store and asks for
+    /// `--at`; picking the first silently promoted one and left the other
+    /// claiming the key.
+    Ambiguous(Vec<PathBuf>),
+    /// A key that is not a key. `validate_key` guards the mint; a key read
+    /// back off disk has never been through it, and it becomes a path.
+    InvalidKey,
+    /// The schema refuses this note. Sharing a note the store would not accept
+    /// is the one thing promotion must not do — and an unclosed fence hides
+    /// the links invariant 2 is about, so the gate below would pass on it
+    /// having read nothing.
+    Refused(Vec<crate::memory::Violation>),
     /// Invariant 2: the keys that would dangle in a teammate's clone.
     UncommittedLinks(Vec<String>),
     /// The destination is gitignored, so the note would reach nobody. Promote
     /// would exit 0 having done nothing that mattered.
     DestinationIgnored(PathBuf),
+    /// Something already occupies the destination path. The conflict check
+    /// above asks about a *key*; this asks about the file that key would be
+    /// written to, which a note whose frontmatter disagrees with its filename
+    /// owns without owning the key.
+    DestinationExists(PathBuf),
+    /// git could not say whether the destination is ignored. Not an answer,
+    /// and on this gate the open direction publishes.
+    IgnoreUnknown(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +75,29 @@ impl Blocked {
                 "`{}` is already committed; update that note instead",
                 self.key
             ),
+            Blocker::Ambiguous(paths) => format!(
+                "`{}` is one key over {} files — name one with --at: {}",
+                self.key,
+                paths.len(),
+                paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Blocker::InvalidKey => format!(
+                "`{}` is not a key: a key is slash-separated slugs, never a path",
+                self.key
+            ),
+            Blocker::Refused(violations) => format!(
+                "`{}` is refused by the schema, so it is not shareable: {}",
+                self.key,
+                violations
+                    .iter()
+                    .map(|v| v.detail.as_str())
+                    .collect::<Vec<_>>()
+                    .join("; ")
+            ),
             Blocker::UncommittedLinks(keys) => format!(
                 "`{}` links to {}, which {} not committed — promote {} too, or drop the link",
                 self.key,
@@ -60,6 +108,16 @@ impl Blocked {
             Blocker::DestinationIgnored(path) => format!(
                 "{} is gitignored, so `{}` would reach nobody",
                 path.display(),
+                self.key
+            ),
+            Blocker::DestinationExists(path) => format!(
+                "{} already exists, so promoting `{}` would overwrite it",
+                path.display(),
+                self.key
+            ),
+            Blocker::IgnoreUnknown(why) => format!(
+                "cannot tell whether the committed layer is gitignored, so `{}` is \
+                 not safe to promote: {why}",
                 self.key
             ),
         }
@@ -76,52 +134,100 @@ pub fn plan(
     notes: &[Note],
     paths: &Paths,
     keys: &[String],
-    is_ignored: &dyn Fn(&Path) -> bool,
+    is_ignored: &dyn Fn(&Path) -> Result<bool>,
 ) -> std::result::Result<Vec<Promotion>, Vec<Blocked>> {
     let mut promotions = Vec::new();
     let mut blocked = Vec::new();
 
+    // A key named twice is one note. Left as two steps the plan moved the file
+    // on the first and failed to read it on the second, so the promotion
+    // succeeded *and* the command reported failure.
+    let mut asked: Vec<&String> = Vec::new();
     for key in keys {
-        let Some(note) = notes
-            .iter()
-            .find(|n| n.key == *key && n.layer == Layer::Local)
-        else {
+        if !asked.contains(&key) {
+            asked.push(key);
+        }
+    }
+
+    for key in asked {
+        let mut block = |reason| {
             blocked.push(Blocked {
                 key: key.clone(),
-                reason: Blocker::Missing,
-            });
+                reason,
+            })
+        };
+
+        // Before anything derived from it: every check below builds a path out
+        // of this key, and `create_dir_all` on that path is an arbitrary write.
+        if crate::memory::validate_key(key).is_err() {
+            block(Blocker::InvalidKey);
             continue;
+        }
+
+        let claimants: Vec<&Note> = notes
+            .iter()
+            .filter(|n| n.key == *key && n.layer == Layer::Local)
+            .collect();
+        let note = match claimants.as_slice() {
+            [] => {
+                block(Blocker::Missing);
+                continue;
+            }
+            [one] => *one,
+            many => {
+                block(Blocker::Ambiguous(
+                    many.iter().map(|n| n.path.clone()).collect(),
+                ));
+                continue;
+            }
         };
         if notes
             .iter()
             .any(|n| n.key == *key && n.layer == Layer::Team)
         {
-            blocked.push(Blocked {
-                key: key.clone(),
-                reason: Blocker::AlreadyCommitted,
-            });
+            block(Blocker::AlreadyCommitted);
+            continue;
+        }
+
+        // Asked before invariant 2, not after. An unclosed fence hides every
+        // link beneath it, so a refused note would clear the link check having
+        // had none of its links read.
+        let refused: Vec<crate::memory::Violation> = crate::memory::check(note)
+            .into_iter()
+            .filter(|v| v.rule.severity() == crate::memory::Severity::Refused)
+            .collect();
+        if !refused.is_empty() {
+            block(Blocker::Refused(refused));
             continue;
         }
 
         // Checked against the whole plan's closure, not just what is committed
         // now: two notes that point at each other are otherwise unpromotable
         // in either order.
-        let dangling = crate::memory::uncommitted_links(notes, key, keys);
+        let dangling = crate::memory::uncommitted_links(notes, note, keys);
         if !dangling.is_empty() {
-            blocked.push(Blocked {
-                key: key.clone(),
-                reason: Blocker::UncommittedLinks(dangling),
-            });
+            block(Blocker::UncommittedLinks(dangling));
             continue;
         }
 
         let to = Layer::Team.dir(paths).join(format!("{key}.md"));
-        if is_ignored(&to) {
-            blocked.push(Blocked {
-                key: key.clone(),
-                reason: Blocker::DestinationIgnored(to),
-            });
+        // The store's own view first, so the common collision is caught with
+        // no filesystem at all: a committed note whose frontmatter disagrees
+        // with its filename owns this path without owning the key.
+        if notes.iter().any(|n| n.path == to) || to.exists() {
+            block(Blocker::DestinationExists(to));
             continue;
+        }
+        match is_ignored(&to) {
+            Err(why) => {
+                block(Blocker::IgnoreUnknown(format!("{why:#}")));
+                continue;
+            }
+            Ok(true) => {
+                block(Blocker::DestinationIgnored(to));
+                continue;
+            }
+            Ok(false) => {}
         }
 
         promotions.push(Promotion {
@@ -144,19 +250,71 @@ pub fn plan(
 /// rename — and nothing is re-rendered on the way, because a renderer touching
 /// a note it was not asked to change is the defect that produced the vendor's
 /// entire remaining quality gap.
+/// In two passes, because a note that exists in neither layer is the one
+/// outcome no message can repair. Every destination is written first; only
+/// once all of them are there is any source removed. A failure in the first
+/// pass rolls the new files back and nothing has moved, which is the promise
+/// `plan`'s all-or-nothing gate makes and the loop below used to break as soon
+/// as the second step hit a full disk.
 pub fn apply(plan: &[Promotion]) -> Result<()> {
+    let mut written: Vec<&Promotion> = Vec::new();
     for step in plan {
-        let bytes = std::fs::read(&step.from)
-            .with_context(|| format!("reading {}", step.from.display()))?;
-        if let Some(parent) = step.to.parent() {
-            std::fs::create_dir_all(parent)?;
+        match copy(step) {
+            Ok(()) => written.push(step),
+            Err(e) => {
+                // The sources are all still here, so undoing the copies
+                // restores the store exactly. Say so if it cannot be undone:
+                // a rollback that half-works and reports nothing is the
+                // failure this pass exists to avoid.
+                let stranded: Vec<String> = written
+                    .iter()
+                    .filter(|done| std::fs::remove_file(&done.to).is_err())
+                    .map(|done| done.to.display().to_string())
+                    .collect();
+                if stranded.is_empty() {
+                    return Err(e);
+                }
+                return Err(e.context(format!(
+                    "and these copies could not be rolled back, so they now \
+                     claim their keys in both layers: {}",
+                    stranded.join(", ")
+                )));
+            }
         }
-        std::fs::write(&step.to, &bytes)
-            .with_context(|| format!("writing {}", step.to.display()))?;
-        std::fs::remove_file(&step.from)
-            .with_context(|| format!("removing {}", step.from.display()))?;
+    }
+
+    let stranded: Vec<String> = plan
+        .iter()
+        .filter(|step| std::fs::remove_file(&step.from).is_err())
+        .map(|step| step.key.clone())
+        .collect();
+    if !stranded.is_empty() {
+        anyhow::bail!(
+            "promoted, but the local copies of {} could not be removed — those \
+             keys are now claimed in both layers; remove them by hand",
+            stranded.join(", ")
+        );
     }
     Ok(())
+}
+
+/// One note into the committed layer, refusing to land on anything already
+/// there. `create_new` rather than `write`: `apply` is handed paths and must
+/// not be the component that trusts them.
+fn copy(step: &Promotion) -> Result<()> {
+    let bytes =
+        std::fs::read(&step.from).with_context(|| format!("reading {}", step.from.display()))?;
+    if let Some(parent) = step.to.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let mut out = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&step.to)
+        .with_context(|| format!("writing {}", step.to.display()))?;
+    std::io::Write::write_all(&mut out, &bytes)
+        .with_context(|| format!("writing {}", step.to.display()))
 }
 
 /// What to say afterwards. Pure, so the part people actually read is testable.
@@ -173,15 +331,29 @@ pub fn report(plan: &[Promotion]) -> String {
 
 /// Whether git ignores a path. Shells out exactly as `carry::exclude_path` and
 /// `session::git` do.
-pub fn git_ignores(repo: &Path, path: &Path) -> bool {
-    std::process::Command::new("git")
+///
+/// `check-ignore` has three answers, not two: 0 ignored, 1 not ignored, and
+/// anything else — no git on `PATH`, a `.git` that is not a repository — meaning
+/// it could not tell. Collapsing that third case into `false` disabled the one
+/// gate standing between a promotion and a directory git will never track, and
+/// no test could see it because nothing asserted the `true` direction either.
+pub fn git_ignores(repo: &Path, path: &Path) -> Result<bool> {
+    let out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(["check-ignore", "-q"])
         .arg(path)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .output()
+        .with_context(|| format!("running git check-ignore in {}", repo.display()))?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => anyhow::bail!(
+            "git check-ignore in {}: {}",
+            repo.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -227,11 +399,305 @@ mod tests {
         std::fs::write(&path, crate::memory::render(&note)).unwrap();
     }
 
-    const NEVER: &dyn Fn(&Path) -> bool = &|_: &Path| false;
-    const ALWAYS: &dyn Fn(&Path) -> bool = &|_: &Path| true;
+    /// A note written by hand rather than by `render`, for the states the
+    /// happy-path helper cannot express: a key the store would never mint, a
+    /// fence left open, two files claiming one key.
+    fn seed_raw(paths: &Paths, layer: Layer, at: &str, key: &str, body: &str) {
+        let path = layer.dir(paths).join(at);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                "---\nkey: {key}\ntype: surprise\nsource: session s01, claude\n\
+                 recorded: 2026-08-07\n---\n\n{body}"
+            ),
+        )
+        .unwrap();
+    }
+
+    const NEVER: &dyn Fn(&Path) -> Result<bool> = &|_: &Path| Ok(false);
+    const ALWAYS: &dyn Fn(&Path) -> Result<bool> = &|_: &Path| Ok(true);
 
     fn keys(k: &[&str]) -> Vec<String> {
         k.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── what the gate must refuse ───────────────────────────────────────────
+
+    /// **`promote` re-validates a key it did not mint.** `validate_key` runs in
+    /// `expand_key`, where the key is created; `promote` reads one back off
+    /// disk, and `apply` calls `create_dir_all` on its parent. That makes the
+    /// destination path an arbitrary write, which is exactly the hazard
+    /// `validate_key`'s own comment names.
+    #[test]
+    fn promote_refuses_a_key_that_is_not_a_key() {
+        let (_d, paths) = fixture();
+        seed_raw(
+            &paths,
+            Layer::Local,
+            "escape.md",
+            "../../../../pwned",
+            &body(&[]),
+        );
+        let notes = load(&paths).unwrap();
+
+        let err = plan(&notes, &paths, &keys(&["../../../../pwned"]), NEVER).unwrap_err();
+        assert_eq!(err.len(), 1);
+        assert!(
+            matches!(err[0].reason, Blocker::InvalidKey),
+            "got {:?}",
+            err[0].reason
+        );
+        assert!(
+            !Layer::Team
+                .dir(&paths)
+                .join("../../../../pwned.md")
+                .exists(),
+            "nothing was written outside the store"
+        );
+    }
+
+    /// **The commit is titled "refuse to share a broken one".** `links` skips
+    /// fenced lines, so a fence left open hides every link after it — which is
+    /// why `check` refuses such a note outright. Without asking `check`, the
+    /// invariant-2 gate passes *vacuously* on the one note whose links cannot
+    /// be read, and both detectors stay blind once it is committed.
+    #[test]
+    fn promote_refuses_a_note_the_schema_refuses() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "private", &[]);
+        seed_raw(
+            &paths,
+            Layer::Local,
+            "candidate.md",
+            "candidate",
+            "# T\n\n## Expected\na\n\n## Observed\nb\n\n## Evidence\n\n```sh\nopen\n\n\
+             ## Answers\n\n- q\n\n## Related\n\n- [[private]]\n",
+        );
+        let notes = load(&paths).unwrap();
+
+        assert!(
+            crate::memory::uncommitted_links(
+                &notes,
+                notes.iter().find(|n| n.key == "candidate").unwrap(),
+                &[]
+            )
+            .is_empty(),
+            "premise: the open fence hides the link, so invariant 2 sees nothing"
+        );
+        let err = plan(&notes, &paths, &keys(&["candidate"]), NEVER).unwrap_err();
+        assert!(
+            matches!(err[0].reason, Blocker::Refused(_)),
+            "got {:?}",
+            err[0].reason
+        );
+    }
+
+    /// **The key check and the write target are different things.** The
+    /// conflict guard asks whether a *key* is committed; `apply` writes to a
+    /// *path* derived from that key. A committed note whose frontmatter
+    /// disagrees with its filename owns the path without owning the key, and
+    /// `fs::write` clobbers.
+    #[test]
+    fn promote_refuses_to_overwrite_a_file_the_key_does_not_own() {
+        let (_d, paths) = fixture();
+        seed_raw(
+            &paths,
+            Layer::Team,
+            "deploy.md",
+            "deploy-runbook",
+            &body(&[]),
+        );
+        seed(&paths, Layer::Local, "deploy", &[]);
+        let theirs = std::fs::read(Layer::Team.dir(&paths).join("deploy.md")).unwrap();
+        let notes = load(&paths).unwrap();
+
+        let err = plan(&notes, &paths, &keys(&["deploy"]), NEVER).unwrap_err();
+        assert!(
+            matches!(err[0].reason, Blocker::DestinationExists(_)),
+            "got {:?}",
+            err[0].reason
+        );
+        assert_eq!(
+            std::fs::read(Layer::Team.dir(&paths).join("deploy.md")).unwrap(),
+            theirs,
+            "the note that already lived there is untouched"
+        );
+    }
+
+    /// The backstop for anything the plan could not see. `apply` is handed
+    /// paths; it must not be the component that trusts them.
+    #[test]
+    fn apply_refuses_to_clobber_an_existing_destination() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "k", &[]);
+        let to = Layer::Team.dir(&paths).join("k.md");
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::write(&to, b"theirs").unwrap();
+
+        let step = Promotion {
+            key: "k".into(),
+            from: Layer::Local.dir(&paths).join("k.md"),
+            to: to.clone(),
+        };
+        assert!(apply(&[step]).is_err(), "must not overwrite");
+        assert_eq!(std::fs::read(&to).unwrap(), b"theirs");
+        assert!(
+            Layer::Local.dir(&paths).join("k.md").exists(),
+            "and the source is still there"
+        );
+    }
+
+    // ── what the gate must not answer by guessing ───────────────────────────
+
+    /// `check-ignore` exits 0 for ignored, 1 for not, and 128 when it could not
+    /// answer. Collapsing that to a bool made "git could not tell" mean "not
+    /// ignored" — the open direction, on the gate whose whole job is to stop a
+    /// promotion that would reach nobody.
+    #[test]
+    fn an_ignore_check_that_cannot_answer_blocks_the_promotion() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "k", &[]);
+        let notes = load(&paths).unwrap();
+
+        let err = plan(&notes, &paths, &keys(&["k"]), &|_: &Path| {
+            Err(anyhow::anyhow!("git exploded"))
+        })
+        .unwrap_err();
+        assert!(
+            matches!(err[0].reason, Blocker::IgnoreUnknown(_)),
+            "got {:?}",
+            err[0].reason
+        );
+        assert!(err[0].say().contains("git exploded"), "{}", err[0].say());
+    }
+
+    /// Nothing asserted `git_ignores` ever returns `true`, so the production
+    /// wiring of the gate could be replaced with `=> false` and stay green.
+    #[test]
+    fn git_ignores_recognises_a_path_git_actually_ignores() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join(".omh")).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".gitignore"), ".omh/\n").unwrap();
+
+        assert!(
+            git_ignores(&repo, &repo.join(".omh/notes/k.md")).unwrap(),
+            "a path under an ignored directory is ignored"
+        );
+        assert!(
+            !git_ignores(&repo, &repo.join("README.md")).unwrap(),
+            "and one that is not, is not"
+        );
+    }
+
+    /// The other half: outside a repository git cannot answer, and that must
+    /// surface as an error rather than as "not ignored".
+    #[test]
+    fn git_ignores_reports_an_error_where_git_cannot_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            git_ignores(dir.path(), &dir.path().join("k.md")).is_err(),
+            "not a git repository is not the same answer as `not ignored`"
+        );
+    }
+
+    // ── what must survive a failure ─────────────────────────────────────────
+
+    /// The docs promise the batch is all-or-nothing. That held for gate
+    /// blockers and not for the writes: an I/O error on a later step left the
+    /// earlier ones moved, with `report` never printed and only the failing key
+    /// named.
+    #[test]
+    fn a_failed_write_leaves_the_store_exactly_as_it_was() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "first", &[]);
+        seed(&paths, Layer::Local, "second", &[]);
+        // A directory where the second note's file must go: the write fails,
+        // and it fails after the first note has already been copied.
+        let blocked = Layer::Team.dir(&paths).join("second.md");
+        std::fs::create_dir_all(&blocked).unwrap();
+
+        let steps = vec![
+            Promotion {
+                key: "first".into(),
+                from: Layer::Local.dir(&paths).join("first.md"),
+                to: Layer::Team.dir(&paths).join("first.md"),
+            },
+            Promotion {
+                key: "second".into(),
+                from: Layer::Local.dir(&paths).join("second.md"),
+                to: blocked,
+            },
+        ];
+        assert!(apply(&steps).is_err());
+
+        assert!(
+            Layer::Local.dir(&paths).join("first.md").exists(),
+            "the source that would have moved is still in the local layer"
+        );
+        assert!(
+            !Layer::Team.dir(&paths).join("first.md").exists(),
+            "and the half that landed was rolled back"
+        );
+    }
+
+    /// `omh memory promote k k` — trivially produced by a shell glob. The plan
+    /// held two identical steps, the first moved the file and the second failed
+    /// to read it, so the promotion succeeded *and* the command exited 1 with
+    /// the `git add` instruction swallowed.
+    #[test]
+    fn a_key_named_twice_is_promoted_once() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "k", &[]);
+        let notes = load(&paths).unwrap();
+
+        let steps = plan(&notes, &paths, &keys(&["k", "k"]), NEVER).unwrap();
+        assert_eq!(steps.len(), 1, "one note, one move");
+        apply(&steps).unwrap();
+        assert!(Layer::Team.dir(&paths).join("k.md").exists());
+    }
+
+    /// `rm` refuses this store and demands `--at`. `promote` silently picked
+    /// the first file and left the other claiming the key — two subsystems
+    /// telling two stories about one store, which is the failure this module's
+    /// own comments are written against.
+    #[test]
+    fn two_local_files_claiming_one_key_are_ambiguous() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "dup", &[]);
+        seed_raw(&paths, Layer::Local, "ns/dup.md", "dup", &body(&[]));
+        let notes = load(&paths).unwrap();
+
+        let err = plan(&notes, &paths, &keys(&["dup"]), NEVER).unwrap_err();
+        assert!(
+            matches!(err[0].reason, Blocker::Ambiguous(_)),
+            "got {:?}",
+            err[0].reason
+        );
+        assert!(err[0].say().contains("--at"), "{}", err[0].say());
+        assert!(
+            Layer::Local.dir(&paths).join("dup.md").exists()
+                && Layer::Local.dir(&paths).join("ns/dup.md").exists(),
+            "neither was moved"
+        );
+    }
+
+    /// `main` prints every blocker, so the plan must collect every blocker. An
+    /// early return would send the operator through one fix-and-retry cycle per
+    /// bad key.
+    #[test]
+    fn the_plan_reports_every_blocked_key_not_only_the_first() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "private", &[]);
+        seed(&paths, Layer::Local, "one", &["private"]);
+        seed(&paths, Layer::Local, "two", &["private"]);
+        let notes = load(&paths).unwrap();
+
+        let err = plan(&notes, &paths, &keys(&["one", "two", "nope"]), NEVER).unwrap_err();
+        let blocked: Vec<&str> = err.iter().map(|b| b.key.as_str()).collect();
+        assert_eq!(blocked, vec!["one", "two", "nope"]);
     }
 
     /// **Invariant 2's second check.** The lint warns; this refuses. §12 makes
@@ -271,7 +737,11 @@ mod tests {
         let blocked = plan(&notes, &paths, &keys(&["bad"]), NEVER).unwrap_err();
         assert_eq!(blocked[0].key, "bad");
         assert_eq!(
-            crate::memory::uncommitted_links(&notes, "bad", &[]),
+            crate::memory::uncommitted_links(
+                &notes,
+                notes.iter().find(|n| n.key == "bad").unwrap(),
+                &[]
+            ),
             vec!["private".to_string()],
             "both sides ask the same question"
         );
@@ -473,10 +943,11 @@ mod tests {
     /// **M3 is done when this passes.** A note promoted here is retrievable in
     /// a fresh clone.
     ///
-    /// The negative half is what makes it worth writing. Without it the test
-    /// passes on an implementation that commits *both* layers — which is worse
-    /// than shipping no `promote` at all, because it publishes the layer whose
-    /// entire purpose is not being published.
+    /// The negative half is what makes it worth writing — but not for the
+    /// reason it first appears. The local layer lives outside the checkout, so
+    /// no `git add -A` could publish it and no implementation could fail that
+    /// way. What asserting the *exact* set catches is a `plan` that promotes
+    /// more than it was asked to, which is a mistake this module can make.
     ///
     /// A fresh `Paths.root` for the clone, so nothing outside the repo can
     /// supply the answer: whatever is found there arrived through git.
@@ -493,8 +964,10 @@ mod tests {
         git(&origin, &["init", "-q", "-b", "main"]);
         git(&origin, &["config", "user.email", "t@t"]);
         git(&origin, &["config", "user.name", "t"]);
-        // What `omh init` writes, and the only reason the local layer stays
-        // private in a clone: `info/exclude` is per-clone and never travels.
+        // What `omh init` writes. It is not what keeps the notes local layer
+        // out of the clone — that layer lives outside the checkout entirely
+        // (§4) — but it covers the in-repo config layer, and unlike
+        // `info/exclude` it is committed, so it travels.
         std::fs::create_dir_all(origin.join(".omh")).unwrap();
         std::fs::write(
             origin.join(".omh/.gitignore"),
@@ -551,9 +1024,12 @@ mod tests {
         );
     }
 
-    /// The other half: the gitignored layer must not travel. Without this the
-    /// test above passes on an implementation that commits everything, and
-    /// every private note reaches the whole team.
+    /// The gitignored layer must not travel. This does not test the shipped
+    /// local layer, which lives outside the checkout and so cannot reach a
+    /// clone by any route: it pins what `omh init` writes, so that moving the
+    /// layer back inside the checkout — where §4 first put it — would still be
+    /// caught by the committed ignore rule rather than silently publishing
+    /// every private note.
     #[test]
     fn the_gitignored_layer_never_reaches_a_clone() {
         let dir = tempfile::tempdir().unwrap();

@@ -991,6 +991,8 @@ fn memory_promote(cwd: &std::path::Path, keys: &[String]) -> Result<()> {
     let steps = match memory::promote::plan(&notes, &paths, keys, &|p: &std::path::Path| {
         memory::promote::git_ignores(&repo, p)
     }) {
+        // `git_ignores` now answers or refuses to; a promotion is never
+        // planned against a guess about where the note would land.
         Ok(steps) => steps,
         Err(blocked) => {
             // Nothing moved. A partial promotion would leave a store nobody
