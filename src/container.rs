@@ -63,6 +63,16 @@ pub struct Options {
     pub tty: bool,
     /// Resolved credential account. `None` means no login is mounted.
     pub account_dir: Option<PathBuf>,
+    /// Resolved memory-server binary. `None` means none is mounted, and that
+    /// is the whole absent case.
+    ///
+    /// Resolved by the caller rather than probed here, for the reason the
+    /// contributing doc gives: `plan()` is pure given a temp filesystem, and
+    /// the one probe left in it could not be reached from a test. On Linux
+    /// `deliver::available` returns the running executable, which exists by
+    /// construction — so "the binary is missing" was unreachable there, and
+    /// the guard against mounting a missing path only ran on macOS.
+    pub memory_bin: Option<PathBuf>,
 }
 
 pub fn plan(
@@ -135,7 +145,7 @@ pub fn plan(
     // Only when one exists. A bind mount of a missing host path makes docker
     // create a *directory*, and the failure then arrives as a permission error
     // about something nobody created.
-    if let Some(bin) = crate::memory::deliver::available(paths) {
+    if let Some(bin) = opts.memory_bin.clone() {
         mounts.push(Mount {
             host: bin,
             guest: PathBuf::from(crate::memory::deliver::GUEST_BIN),
@@ -391,6 +401,15 @@ mod tests {
     }
 
     fn plan_for(fx: &Fx, harness: &str) -> Plan {
+        plan_with_memory_bin(fx, harness, None)
+    }
+
+    /// The memory binary is an input rather than something `plan` probes, so
+    /// both its presence and its absence are reachable from a test on any
+    /// platform. Before that it was resolved inside `plan`, and on Linux it
+    /// resolved to the running executable — so the absent case could not be
+    /// constructed there at all.
+    fn plan_with_memory_bin(fx: &Fx, harness: &str, memory_bin: Option<PathBuf>) -> Plan {
         let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
         plan(
             &fx.paths,
@@ -403,6 +422,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                memory_bin,
             },
         )
         .unwrap()
@@ -461,17 +481,14 @@ mod tests {
         );
     }
 
+    /// No longer branches on the host OS: which binary gets chosen is
+    /// `deliver::plan_delivery`'s decision and is table-tested there. What is
+    /// left here is what `plan` does with the answer.
     fn fake_server_binary(fx: &Fx) -> std::path::PathBuf {
         let arch = crate::memory::deliver::target_arch(std::env::consts::ARCH).unwrap();
-        let at = if std::env::consts::OS == "linux" {
-            std::env::current_exe().unwrap()
-        } else {
-            crate::memory::deliver::cached_at(&fx.paths.root, arch)
-        };
+        let at = crate::memory::deliver::cached_at(&fx.paths.root, arch);
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
-        if !at.exists() {
-            std::fs::write(&at, b"#!/bin/sh\n").unwrap();
-        }
+        std::fs::write(&at, b"#!/bin/sh\n").unwrap();
         at
     }
 
@@ -483,7 +500,7 @@ mod tests {
     fn the_memory_server_binary_reaches_the_sandbox() {
         let fx = fixture();
         let host = fake_server_binary(&fx);
-        let p = plan_for(&fx, "claude");
+        let p = plan_with_memory_bin(&fx, "claude", Some(host.clone()));
 
         let mount = p
             .mounts
@@ -502,11 +519,16 @@ mod tests {
     /// A bind mount of a host path that does not exist makes docker create a
     /// **directory** there, and the harness then reports a permission error
     /// about something nobody created. Absent is absent.
+    ///
+    /// This ran on macOS only until the binary became an input. `plan` used to
+    /// resolve it itself, and on Linux that resolves to the running
+    /// executable — which exists by construction, so the state this guards
+    /// could not be built and the assertion never held there.
     #[test]
     fn a_missing_server_binary_is_left_out_rather_than_mounted_as_a_directory() {
         let fx = fixture();
-        // deliberately not created
-        let p = plan_for(&fx, "claude");
+        // deliberately absent
+        let p = plan_with_memory_bin(&fx, "claude", None);
         assert!(
             !p.mounts
                 .iter()
@@ -548,6 +570,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: Some(account.to_path_buf()),
+                memory_bin: None,
             },
         )
         .unwrap()
@@ -742,6 +765,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                memory_bin: None,
             },
         )
         .unwrap_err();
@@ -787,6 +811,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                memory_bin: None,
             },
         )
         .unwrap();
@@ -810,6 +835,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                memory_bin: None,
             },
         )
         .unwrap();
@@ -839,6 +865,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                memory_bin: None,
             },
         )
         .unwrap();
@@ -853,6 +880,7 @@ mod tests {
                 persist: crate::persist::Mode::None,
                 tty: true,
                 account_dir: None,
+                memory_bin: None,
             },
         )
         .unwrap();
@@ -878,6 +906,7 @@ mod tests {
             persist: crate::persist::Mode::Dtach,
             tty: true,
             account_dir: None,
+            memory_bin: None,
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
@@ -894,6 +923,7 @@ mod tests {
             persist: crate::persist::Mode::None,
             tty: true,
             account_dir: None,
+            memory_bin: None,
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);

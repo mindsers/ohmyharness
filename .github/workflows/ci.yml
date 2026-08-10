@@ -24,19 +24,23 @@ jobs:
     name: test (ubuntu)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked
 
-  # GitHub's macOS runners have no Docker daemon, so the one test that needs it
-  # is excluded by target rather than skipped by name — a `--skip` list rots
+  # GitHub's macOS runners have no Docker daemon, so the test that needs one is
+  # excluded by target rather than skipped by name — a `--skip` list rots
   # silently the moment a test is renamed, and reads as coverage it is not.
-  # This is 626 of the 637 tests; the missing one is Linux-covered above.
+  #
+  # That drops the whole of tests/cli.rs here: 624 of 635 tests run, and the
+  # other 11 are Linux-covered above. Only one of those 11 actually needs
+  # Docker, so this trades a little macOS coverage for a boundary that cannot
+  # go stale. Worth revisiting if tests/cli.rs grows.
   test-macos:
     name: test (macos, no-docker targets)
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --locked --bins --test docs
 
@@ -44,7 +48,7 @@ jobs:
     name: fmt + clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
@@ -58,7 +62,7 @@ jobs:
       # Overrides rust-toolchain.toml, which otherwise pins this job to stable.
       RUSTUP_TOOLCHAIN: "1.85"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.85"

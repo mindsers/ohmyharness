@@ -496,6 +496,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             persist: persist::Mode::None,
             tty: false,
             account_dir: account,
+            memory_bin: memory::deliver::available(&paths),
         },
     )?;
 
@@ -755,6 +756,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         persist: persist::Mode::None,
         tty: false,
         account_dir: account.clone(),
+        memory_bin: memory::deliver::available(&paths),
     };
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
@@ -1423,6 +1425,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
             .parse()?,
         tty: true,
         account_dir: account,
+        memory_bin: memory::deliver::available(&paths),
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
@@ -1904,6 +1907,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
             persist: persist::Mode::None,
             tty: true,
             account_dir: Some(account_dir.clone()),
+            memory_bin: memory::deliver::available(&paths),
         },
     )?;
     plan.validate(&backend.caps())?;
