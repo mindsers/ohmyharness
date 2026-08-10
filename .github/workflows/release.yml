@@ -1,0 +1,207 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Building every target is the only way to know this file works, and a
+  # release is a bad time to find out. Touching it rebuilds the whole matrix on
+  # the PR and publishes nothing — the jobs that upload are tag-gated below.
+  pull_request:
+    paths: [".github/workflows/release.yml"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A tag is a claim about which version is being released. Cargo.toml is the
+  # other half of that claim, and nothing else in the process compares them.
+  tag-matches-cargo-toml:
+    name: the tag and Cargo.toml agree
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+      - name: compare the tag against the crate version
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "$tagged" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME says $tagged, Cargo.toml says $declared" >&2
+            exit 1
+          fi
+          echo "both say $declared"
+
+  # Linux builds are static musl, and that is not a portability nicety here.
+  # On Linux omh mounts its own executable into the sandbox and the harness
+  # runs it there as the memory server — so a glibc-linked binary has to match
+  # the container's glibc or it dies with a loader error the agent reports as
+  # the MCP server crashing. Static removes the question.
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            os: macos-13
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+
+      - name: install the musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: add the ${{ matrix.target }} target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: build the release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: pack it with its licence
+        run: |
+          staging="omh-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/omh" "$staging/"
+          cp LICENSE README.md "$staging/"
+          tar -czf "$staging.tar.gz" "$staging"
+
+      - name: keep the tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: omh-${{ matrix.target }}
+          path: omh-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  # The one check that would have caught the thing every other check missed.
+  #
+  # `install_bundled` reads adapters, editors and the base set from
+  # `env!("CARGO_MANIFEST_DIR")` — the build machine's source path, resolved at
+  # runtime. On the machine that built it that path exists and everything
+  # works. Anywhere else `omh init` fails with "no usable base manifest ... run
+  # `omh init`", and adapters resolve to none at all because the read_dir error
+  # is swallowed.
+  #
+  # This job deliberately does not check out the repo. That is the whole point:
+  # the baked path is absent, exactly as it is on a user's machine, so the
+  # binary is exercised as the thing people would actually download.
+  runs-without-a-source-tree:
+    name: the binary works with no source tree
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: fetch the linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: omh-x86_64-unknown-linux-musl
+
+      - name: unpack it somewhere unrelated to any checkout
+        run: |
+          tar -xzf omh-x86_64-unknown-linux-musl.tar.gz
+          install -m755 omh-x86_64-unknown-linux-musl/omh "$RUNNER_TEMP/omh"
+
+      - name: run it in a fresh repo, with a fresh home
+        env:
+          HOME: ${{ runner.temp }}/home
+        run: |
+          # The default runner shell is `bash -e`, without pipefail — so the
+          # `| tee` below would report tee's exit code and a failing init would
+          # pass. That is the failure mode this job exists to catch.
+          set -o pipefail
+          mkdir -p "$HOME"
+          repo="$(mktemp -d)"
+          cd "$repo"
+          git init -q -b main .
+          git config user.email ci@example.com
+          git config user.name ci
+          printf 'fn main() {}\n' > main.rs
+          git add -A && git commit -qm init
+
+          "$RUNNER_TEMP/omh" init | tee out.txt
+
+          # "0 harnesses" is the silent version of this failure: init succeeds,
+          # reports nothing wrong, and the tool cannot launch anything.
+          if grep -qE 'harnesses +0' out.txt; then
+            echo "init shipped zero adapters — the bundled files did not travel" >&2
+            exit 1
+          fi
+
+  release:
+    name: publish the GitHub release
+    needs: [tag-matches-cargo-toml, build, runs-without-a-source-tree]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: collect every tarball
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: checksum them
+        run: |
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            dist/*.tar.gz dist/SHA256SUMS
+
+  crates-io:
+    name: publish to crates.io
+    needs: [tag-matches-cargo-toml, build, runs-without-a-source-tree]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment: crates-io
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+  # On a pull request nothing above publishes, so this is what says whether the
+  # crate would be accepted: it packages and builds from the packaged copy,
+  # which is where "works in the repo, missing from the tarball" shows up.
+  packaging:
+    name: the crate packages cleanly
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: package it
+        run: cargo package --locked
+      - name: list what would ship
+        run: cargo package --locked --list
