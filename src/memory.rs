@@ -209,7 +209,7 @@ fn split_frontmatter<'a>(raw: &'a str, path: &Path) -> Result<(&'a str, &'a str)
 fn required<'a>(fields: &BTreeMap<&str, &'a str>, name: &str, path: &Path) -> Result<&'a str> {
     match fields.get(name) {
         None => bail!("{}: missing `{name}`", path.display()),
-        Some(v) if v.is_empty() => bail!("{}: `{name}` is present but empty", path.display()),
+        Some(&"") => bail!("{}: `{name}` is present but empty", path.display()),
         Some(v) => Ok(v),
     }
 }
@@ -1379,8 +1379,8 @@ pub fn remember_in(
     // The root has to exist to be resolved, and it is the one directory that
     // is trivially inside itself. Everything below it is checked before it is
     // created, so a symlinked namespace cannot be walked into on the way.
-    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
-    contained(&root, &path)?;
+    std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+    contained(root, &path)?;
     std::fs::create_dir_all(path.parent().unwrap())
         .with_context(|| format!("creating {}", root.display()))?;
     std::fs::write(&path, &rendered).with_context(|| format!("writing {}", path.display()))?;
@@ -1540,7 +1540,7 @@ pub fn render_list(notes: &[Note]) -> String {
     for note in sorted {
         let refs = notes
             .iter()
-            .filter(|n| links(&n.body).iter().any(|t| *t == note.key))
+            .filter(|n| links(&n.body).contains(&note.key))
             .count();
         out.push_str(&format!(
             "{:width$}  {:<5}  {}  {} ref{}\n",

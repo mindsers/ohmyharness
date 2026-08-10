@@ -1576,7 +1576,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
 
     // 3. Detect rather than ask.
     let stacks = detect::stacks(&paths.repo);
-    let names: Vec<String> = adapters.iter().cloned().collect();
+    let names: Vec<String> = adapters.to_vec();
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h));
 
     // 4. Write layer 2 from what was detected. Never overwrite a human's file.
