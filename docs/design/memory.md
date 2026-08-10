@@ -334,8 +334,19 @@ guards in `cargo test`; the rest are honest about not being.
 | 6 | key derivation is canonical: one input, one key | unit test over spelling variants |
 | 7 | `rm` never cascades | unit test |
 | 8 | every schema threshold was calibrated against a known-good store | **process**, recorded in the entry |
-| 9 | the harness reads the tool description per session | **`omh doctor`** — not testable in-process |
+| 9 | the harness reads the tool description per session | **`omh doctor` proves the precondition only** — see below |
 | 10 | the agent actually writes notes worth keeping | **observable only.** See [§13](#13-measurement) |
+
+**Invariant 9 was overstated, corrected during M2.** `doctor` *cannot* enforce
+it: it replaces the launch command with its probe, so no harness ever starts,
+and a tool description is consumed by a model rather than written anywhere
+inspectable. What `doctor` does prove is that the server omh configured
+actually starts where the harness will spawn it, answers `tools/list`, and
+names both tools — reporting the store's own census, because `0 notes` is what
+a wrong mount looks like and a blank detail hides it. Whether a *harness*
+re-reads the description per session is [§15.2](#15-open-questions), and it is
+a dated measurement per harness, not a check. Claiming more than `doctor` can
+prove is the failure [contributing](../contributing.md) names.
 
 Invariants 8–10 are the ones that will be tempting to fake with a weak test. This
 repo has shipped that failure — a date guard that only checked a date was
@@ -430,6 +441,64 @@ deferrals *process, recorded in the entry* rather than a silence:
   no path can leave the store — but nothing distinguishes a canonical key from
   arbitrary text in a signature. M2 adds a second key-minting writer (`stub =
   "docs/{{path}}"`), which is where this stops being cosmetic.
+
+**What M2 actually shipped**, with the deviations named:
+
+- **Retrieval is omh's own**, not a proxy over iwe. §9 said "proxying iwe";
+  [M0](memory-m0.md) found iwe will not run on omh's base image, that `rename`
+  produces notes omh's schema refuses, and that it structurally cannot carry a
+  note's layer. `recall::search` is the seam an iwe-backed retriever would
+  replace without touching the tool surface or invariant 1, so the choice stays
+  open — and §13 is what should settle it.
+- **`recall` returns the tree, not note bodies.** §9.2's own example is a tree.
+  Prose cannot pass the strict, total parser that guards invariant 1, and
+  weakening that parser to admit it would make the guard vacuous. If a second
+  call turns out to be common, that is evidence to add bodies — not a guess.
+- **The stub key template is `{{path}}`, not §6's `docs/{{path}}`.** The path
+  already carries its directory; the latter keys `docs/design/memory.md` as
+  `docs/docs/design/memory`.
+- **Ranking is by term rarity over whole words.** The first version compared
+  substrings and retrieved a ten-note store in full for the question `"a"`.
+  No stopword list: rarity is derived from the store, so nobody decides which
+  words are noise.
+- **Retrieval was measured against iwe, twice.** The first benchmark asked the
+  wrong question and is recorded because getting it wrong was instructive.
+  Queries were lifted verbatim from document bodies, which is exact-token
+  matching's home turf; omh "won" 83% to 66% P@1, and the number was useless.
+  Inflecting the wording collapsed omh to **12.5%** while iwe's BM25 held flat
+  at 65.9% — it stems, and nobody asks a question in the words a note was
+  written in. Porter step 1 (plus 5a) now ships, and omh's curve is **flat at
+  77.3%**, above iwe at every level of drift. It costs 6 points on verbatim
+  queries, which is the right trade.
+- **On the use case itself, the two engines are indistinguishable.** Measured on
+  40 notes built from this repo's own commit bodies and searched with the
+  commit subjects — a real paraphrase, ~50% word overlap, and nothing in the
+  corpus or the queries authored by whoever wrote the ranker. omh 47.5% P@1 /
+  90% top-8 in 8 results; iwe 52.5% / 95% in 25.9 results. McNemar p ≥ 0.5 at
+  every cutoff. **Neither is good at paraphrase**, which is what a
+  half-remembered question is — so the mitigation is §9.2's, returning the
+  neighbourhood rather than the node, and 90% of the time the answer is inside
+  the budget.
+- **The paraphrase gap is the real limit, and it is not an engine problem.** A
+  half-remembered question shares roughly half its words with the note that
+  answers it, and no lexical ranker — omh's or BM25 — handles that well. Two
+  changes exploit the one thing in the loop that *is* good at paraphrase, the
+  agent itself. `recall` takes `also_phrased_as`, scoring each phrasing and
+  keeping a note's best, so a second wording can only help and never dilutes a
+  precise first one. And a `surprise` now records `## Answers` — the questions
+  it answers, in the writer's words — because only the writer knows what it was
+  trying to find out.
+- **Ranking those declared questions above prose was tried and reverted.** It
+  cost 10 points of P@1 on a 40-note store, because a weight applies whether or
+  not the declared question is any good; at ordinary weight the same store was
+  exactly neutral. The weight was an uncalibrated constant and §7 does not let
+  one ship. What the change buys for retrieval is therefore **unmeasured**: it
+  needs a store of real agent-written questions, which does not exist yet. The
+  text ships because it is discipline and it is information a reader wants; the
+  weight waits for evidence.
+- **Not done: the §15.2 caching experiment**, which needs a real harness launch
+  to measure, and **§13's benchmark**, which needs a question set written by
+  somebody who did not write the store.
 
 ## 15. Open questions
 

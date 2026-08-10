@@ -87,7 +87,21 @@ pub fn agents_md(stacks: &[Stack]) -> String {
          Grep is still right for literal text: a string, a config value, a TODO.\n\n\
          **Use the project named by `$OMH_GRAPH_PROJECT`.** Other sessions of this\n\
          repo have their own graphs in the same store; querying one of those answers\n\
-         confidently about code that is not in this worktree.\n",
+         confidently about code that is not in this worktree.\n\n\
+         ## Which graph to ask\n\n\
+         There are two, and they do not overlap:\n\n\
+         - **the code graph** knows **what the code is** — where a symbol lives, how\n\
+           one module reaches another. Re-derived from the code every turn, so it is\n\
+           never out of date and never needs to be told anything.\n\
+         - **`recall`** knows **why** it is that way — what was tried and failed, what\n\
+           turned out not to work, what surprised somebody. None of that is in the\n\
+           code, so no amount of reading will recover it.\n\n\
+         A *where* or *what* question goes to the code graph. A *why*, *is this safe*,\n\
+         or *has this been tried* question goes to `recall`. When you are about to\n\
+         assume how something here behaves, ask `recall` first — that is exactly the\n\
+         assumption somebody already got wrong once.\n\n\
+         They compose: find the code with the code graph, then ask `recall` what is\n\
+         known about it before changing it.\n",
     );
     out.push_str(&memory_rules());
     if stacks.is_empty() {
@@ -137,9 +151,14 @@ pub fn memory_rules() -> String {
          ## Expected\n\n\
          ## Observed\n\n\
          ## Evidence\n\n\
+         ## Answers\n\n\
+         - <the question somebody would later ask to find this>\n\n\
          ## Related\n\n\
          - [[another-notes-key]]\n\
          ```\n\n\
+         **Answers** is what makes the note findable later, and only you know it:\n\
+         write the question you would have asked five minutes ago, in the words you\n\
+         would have used. A note nobody can find is a note nobody wrote.\n\n\
          Store uncertainty rather than false precision, and date by when the thing\n\
          happened rather than when you mentioned it. If you have nothing to put\n\
          under **Expected**, there is nothing here worth recording.\n\n\

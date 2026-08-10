@@ -17,6 +17,7 @@ mod doctor;
 mod editor;
 mod idle;
 mod image;
+mod mcp;
 mod memory;
 mod persist;
 mod profile;
@@ -213,6 +214,10 @@ enum MemoryCmd {
         /// The command, the error, the file.
         #[arg(long)]
         evidence: String,
+        /// A question this note answers, as somebody would later ask it.
+        /// Repeat for several. A note nobody can find is a note nobody wrote.
+        #[arg(long = "answers")]
+        answers: Vec<String>,
         /// Keys of notes this connects to. Keys, not titles: a key is
         /// computable before its target exists.
         #[arg(long = "relates-to")]
@@ -228,6 +233,24 @@ enum MemoryCmd {
         /// disappears silently.
         #[arg(long, value_parser = parse_if_exists, default_value = "error")]
         if_exists: memory::IfExists,
+    },
+    /// Speak MCP on stdin/stdout. Launched by the harness, not by you.
+    ///
+    /// Hidden because it is a wire protocol, not a command: it prints JSON-RPC
+    /// frames and waits, which is indistinguishable from a hang if you run it
+    /// by hand. Paths arrive as arguments because this runs inside the
+    /// sandbox, where there is no repo to discover.
+    #[command(hide = true)]
+    Serve {
+        #[arg(long)]
+        team: std::path::PathBuf,
+        #[arg(long)]
+        local: std::path::PathBuf,
+        /// The session this server serves. Defaults to `$OMH_SESSION`, which
+        /// omh already sets in the sandbox — so the base set can declare
+        /// static arguments and still record real provenance.
+        #[arg(long)]
+        session: Option<String>,
     },
     /// Schema and hygiene violations, across both layers.
     Lint,
@@ -281,11 +304,17 @@ fn main() -> Result<()> {
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
             Some(MemoryCmd::Lint) => memory_lint(&cwd),
+            Some(MemoryCmd::Serve {
+                team,
+                local,
+                session,
+            }) => memory_serve(team.clone(), local.clone(), session.clone()),
             Some(MemoryCmd::Rm { key, layer, at }) => memory_rm(&cwd, key, *layer, at.as_deref()),
             Some(MemoryCmd::Remember {
                 expected,
                 observed,
                 evidence,
+                answers,
                 relates_to,
                 invalidated_by,
                 source,
@@ -296,6 +325,7 @@ fn main() -> Result<()> {
                     expected: expected.clone(),
                     observed: observed.clone(),
                     evidence: evidence.clone(),
+                    answers: answers.clone(),
                     relates_to: relates_to.clone(),
                     invalidated_by: invalidated_by.clone(),
                     source: source.clone().unwrap_or_default(),
@@ -358,6 +388,18 @@ fn session_up(
     let name = paths.container(&session.id);
     if image::container_running(backend.program(), &name) {
         return Ok((backend, name));
+    }
+
+    // Before planning, because the plan mounts the memory server only if a
+    // binary exists. Degraded rather than fatal: a session without memory is
+    // still a session, and refusing to launch over it would be the tail
+    // wagging the dog — the same rule as a capability a harness cannot express.
+    if let Err(e) = memory::deliver::ensure(
+        backend.program(),
+        paths,
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+    ) {
+        eprintln!("omh: memory server unavailable — {e:#}");
     }
 
     // The account must reach *this* plan: this is the container that actually
@@ -678,6 +720,16 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
+    // Only if the resolved profile actually declares it: a check for a server
+    // nobody configured would fail honestly and mean nothing.
+    //
+    // Read through `render::parse_layers` rather than `config::servers`, which
+    // returns only each server's *command* — the arguments are what say which
+    // directories it will look in, and those are the whole point of the check.
+    let declared = render::parse_layers(&profile.sources(adapter::Capability::Mcp))?;
+    if let Some(server) = declared.get(memory::tools::SERVER_KEY) {
+        checks.extend(doctor::memory_checks(server));
+    }
     if checks.is_empty() {
         println!("nothing to check: the profile is empty");
         return Ok(());
@@ -849,6 +901,76 @@ fn memory_remember(
         memory::Wrote::Skipped(key) => println!("`{key}` is already recorded; left alone"),
     }
     Ok(())
+}
+
+/// Write one note per tracked document, plus one for what `init` derived.
+///
+/// Into the **committed** layer: a stub is reproducible from a document every
+/// teammate already has, so it is not a claim from experience and does not need
+/// a human to vouch for it. `promote` stays reserved for what an agent
+/// observed.
+fn seed_store(paths: &Paths) -> Result<String> {
+    let templates = memory::templates(paths)?;
+    let today = memory::today();
+    let dir = memory::Layer::Team.dir(paths);
+
+    let mut written = 0;
+    let mut skipped = 0;
+    let mut stubs = Vec::new();
+    for doc in memory::ingest::documents(&paths.repo)? {
+        let note = memory::ingest::stub(&doc, &templates, &today)?;
+        stubs.push(note.key.clone());
+        match memory::ingest::write(&dir, &note, memory::IfExists::Skip)? {
+            true => written += 1,
+            false => skipped += 1,
+        }
+    }
+
+    let seeds = detect::seeds(&paths.repo);
+    if let Some(note) =
+        memory::ingest::overview(&paths.repo_name(), &seeds, &stubs, &templates, &today)?
+    {
+        if memory::ingest::write(&dir, &note, memory::IfExists::Skip)? {
+            written += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    if written == 0 && skipped == 0 {
+        return Ok("nothing to derive yet".into());
+    }
+    Ok(format!(
+        "{written} note{} written, {skipped} already there",
+        if written == 1 { "" } else { "s" }
+    ))
+}
+
+/// Speak MCP until stdin closes.
+///
+/// Nothing but protocol may reach stdout — this binary is full of `println!`,
+/// and one stray line breaks the very first handshake. Diagnostics go to
+/// stderr, which the harness shows as server logs.
+fn memory_serve(
+    team: std::path::PathBuf,
+    local: std::path::PathBuf,
+    session: Option<String>,
+) -> Result<()> {
+    let mut server = memory::tools::Server {
+        team,
+        local,
+        templates: memory::shipped_templates(),
+        // omh already sets `OMH_SESSION` in the sandbox, so the base set can
+        // declare static arguments and still record real provenance.
+        session: session
+            .or_else(|| std::env::var("OMH_SESSION").ok())
+            .unwrap_or_else(|| "unknown".into()),
+        client: None,
+        today: memory::today,
+    };
+    let stdin = std::io::stdin().lock();
+    let stdout = std::io::stdout().lock();
+    mcp::serve(stdin, stdout, &mut server)
 }
 
 /// The store, by layer, with what points at each note.
@@ -1429,18 +1551,15 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         }
     }
 
-    let seeds = detect::seeds(&paths.repo);
-    if seeds.is_empty() {
-        println!("  memory     nothing to derive yet");
-    } else {
-        println!(
-            "  memory     seeded from {} source{}:",
-            seeds.len(),
-            if seeds.len() == 1 { "" } else { "s" }
-        );
-        for seed in &seeds {
-            println!("               {:<12} {}", seed.source, seed.fact);
-        }
+    // What the repo already documents becomes notes that *point* at it. The
+    // seeds used to be printed here and thrown away — derived every run,
+    // read once, kept nowhere.
+    match seed_store(&paths) {
+        Ok(report) => println!("  memory     {report}"),
+        // Never fatal. A repo that cannot be ingested is still a repo omh set
+        // up, and failing `init` over the note store would be the tail
+        // wagging the dog.
+        Err(e) => println!("  memory     not seeded: {e:#}"),
     }
 
     // Derive, then confirm: a hypothesis worth correcting is not a questionnaire.

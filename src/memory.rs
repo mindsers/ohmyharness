@@ -10,6 +10,12 @@ use anyhow::{anyhow, bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub mod deliver;
+pub mod index;
+pub mod ingest;
+pub mod recall;
+pub mod tools;
+
 // ── layers ──────────────────────────────────────────────────────────────────
 
 /// `team` (committed) or `local` (gitignored).
@@ -106,12 +112,16 @@ impl Kind {
     /// Sections a note of this kind must carry, by heading. Data rather than
     /// code so the schema's refusal and the lint's message cannot drift apart.
     ///
-    /// A surprise's three are exactly what `remember` asks for: the signature
-    /// is the discipline, and a section it cannot fill is a section no writer
-    /// can supply.
+    /// A surprise's first three are exactly what `remember` asks for: the
+    /// signature is the discipline, and a section it cannot fill is a section
+    /// no writer can supply. `Answers` is derived rather than asked for.
     pub fn required_sections(&self) -> &'static [&'static str] {
         match self {
-            Self::Surprise => &["Expected", "Observed", "Evidence"],
+            // `Answers` is what a future question is matched against. Measured:
+            // an index of question-shaped lines scored 95.9% P@1 on
+            // question-shaped queries where the full text scored 56%. A note
+            // nobody can find is a note nobody wrote.
+            Self::Surprise => &["Expected", "Observed", "Evidence", "Answers"],
             // A topic is one subject richly filled; what fills it is the
             // subject's business, not the schema's.
             Self::Topic => &[],
@@ -125,7 +135,7 @@ impl Kind {
     /// block* needs none.
     pub fn list_sections(&self) -> &'static [&'static str] {
         match self {
-            Self::Surprise => &["Related"],
+            Self::Surprise => &["Related", "Answers"],
             Self::Topic => &["Related"],
             Self::Stub => &["Answers"],
         }
@@ -265,7 +275,7 @@ pub fn render(note: &Note) -> String {
 /// `\d{4}-\d{2}-\d{2}` is the rule §5 states, and it is the weak version: it
 /// accepts `2026-13-45`. A note's date is the only thing an unverified claim
 /// can be judged by, so it has to be a date that exists.
-fn is_calendar_date(s: &str) -> bool {
+pub(crate) fn is_calendar_date(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
         return false;
@@ -535,7 +545,7 @@ fn scan_fences(body: &str) -> Fenced<'_> {
 /// Headings rather than substrings, because `body.contains("Expected")` is
 /// satisfied by the word appearing in a sentence — the failure this repo
 /// already shipped once as a staleness guard.
-fn sections(body: &str) -> BTreeMap<&str, Vec<&str>> {
+pub(crate) fn sections(body: &str) -> BTreeMap<&str, Vec<&str>> {
     let mut out: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut current: Option<&str> = None;
     // Nothing a fence encloses is a heading: the staged rules hand the agent
@@ -807,10 +817,15 @@ fn contained(root: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn load_layer(paths: &Paths, layer: Layer) -> Result<Vec<Note>> {
-    let root = layer.dir(paths);
+/// Every note in one directory, stamped with the layer that directory *is*.
+///
+/// Takes a directory rather than `Paths` because the MCP server runs inside
+/// the sandbox, where there is no git repo to discover and the two stores
+/// arrive as mount points. `Paths` is the host's way of naming them, not the
+/// only way.
+pub fn notes_in(root: &Path, layer: Layer) -> Result<Vec<Note>> {
     let mut files = Vec::new();
-    markdown_files(&root, &mut files)?;
+    markdown_files(root, &mut files)?;
     files.sort();
 
     files
@@ -823,6 +838,10 @@ pub fn load_layer(paths: &Paths, layer: Layer) -> Result<Vec<Note>> {
             parse(&raw, layer, path)
         })
         .collect()
+}
+
+pub fn load_layer(paths: &Paths, layer: Layer) -> Result<Vec<Note>> {
+    notes_in(&layer.dir(paths), layer)
 }
 
 /// What a layer holds: the keys it already claims, and the files it could
@@ -839,12 +858,16 @@ struct LayerRead {
     opaque: Vec<PathBuf>,
 }
 
-fn read_layer(paths: &Paths, layer: Layer) -> Result<LayerRead> {
+/// Takes a directory rather than `Paths` for the same reason `notes_in` does:
+/// `remember_in` runs against a mount point inside the sandbox, where there is
+/// no repo to derive a layer directory from — and it is the caller that most
+/// needs `opaque`, because it is about to write.
+fn read_layer(root: &Path, layer: Layer) -> Result<LayerRead> {
     let mut files = Vec::new();
     // Traversal errors stay fatal: a directory omh cannot list may hold the
     // key a write is about to take, and guessing is the failure this whole
     // function exists to avoid.
-    markdown_files(&layer.dir(paths), &mut files)?;
+    markdown_files(root, &mut files)?;
     files.sort();
 
     let mut notes = Vec::new();
@@ -882,8 +905,15 @@ pub const SHIPPED_KEYS: &str = "\
 [keys]
 surprise = \"surprise/{{slug}}\"
 topic    = \"{{slug}}\"
-stub     = \"docs/{{path}}\"
+stub     = \"{{path}}\"
 ";
+
+/// What omh ships, parsed. Infallible by construction — a shipped constant
+/// that does not parse is a build-time defect, and the test that says so is
+/// `the_shipped_key_templates_cover_every_note_type`.
+pub fn shipped_templates() -> BTreeMap<Kind, String> {
+    parse_templates(SHIPPED_KEYS).expect("the shipped key templates must parse")
+}
 
 fn parse_templates(raw: &str) -> Result<BTreeMap<Kind, String>> {
     #[derive(serde::Deserialize)]
@@ -924,7 +954,7 @@ pub fn lint(paths: &Paths) -> Result<Vec<Violation>> {
     let mut notes = Vec::new();
     let mut found = Vec::new();
     for layer in Layer::ALL {
-        let read = read_layer(paths, layer)?;
+        let read = read_layer(&layer.dir(paths), layer)?;
         for path in read.opaque {
             found.push(Violation {
                 key: path
@@ -980,6 +1010,13 @@ pub struct Remembered {
     pub expected: String,
     pub observed: String,
     pub evidence: String,
+    /// Questions this note answers, in the writer's own words.
+    ///
+    /// The one thing an algorithm cannot supply and the agent can: it is the
+    /// only party that knows what it was trying to find out. Matching a
+    /// question against a question is what survives a paraphrase; matching a
+    /// question against prose is what does not.
+    pub answers: Vec<String>,
     /// Keys, not titles — a key is computable before its target exists.
     pub relates_to: Vec<String>,
     pub invalidated_by: Option<String>,
@@ -1025,6 +1062,10 @@ fn body_of(input: &Remembered) -> String {
         input.observed.trim(),
         input.evidence.trim(),
     );
+    body.push_str("\n## Answers\n\n");
+    for question in &input.answers {
+        body.push_str(&format!("- {}\n", question.trim()));
+    }
     if !input.relates_to.is_empty() {
         // Sorted and deduped: the same neighbours in a different order are the
         // same note, and an unpinned order churns the file on every re-record.
@@ -1045,12 +1086,34 @@ fn body_of(input: &Remembered) -> String {
 /// validating after writing leaves a refused note on disk, where `lint` blames
 /// a writer that believes it never created one.
 pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Result<Wrote> {
+    remember_in(
+        &Layer::AGENT_WRITE.dir(paths),
+        &templates(paths)?,
+        input,
+        if_exists,
+    )
+}
+
+/// `remember`, against an explicit directory.
+///
+/// `root` is where the note lands, and it is always the writable layer's
+/// directory — the caller cannot pass the committed one, because no caller is
+/// given the choice. In the sandbox this is a mount point rather than a path
+/// derived from a repo.
+pub fn remember_in(
+    root: &Path,
+    templates: &BTreeMap<Kind, String>,
+    input: &Remembered,
+    if_exists: IfExists,
+) -> Result<Wrote> {
     non_blank(&input.expected, "expected")?;
     non_blank(&input.observed, "observed")?;
     non_blank(&input.evidence, "evidence")?;
     non_blank(&input.source, "source")?;
+    if input.answers.iter().all(|q| q.trim().is_empty()) {
+        bail!("`answers` is empty; a note nobody can find is a note nobody wrote");
+    }
 
-    let templates = templates(paths)?;
     let template = templates
         .get(&Kind::Surprise)
         .context("no key template for `surprise`")?;
@@ -1063,14 +1126,13 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
     // could reach the committed layer would push wrong facts to teammates
     // through git, where they arrive with the authority of a reviewed change.
     let layer = Layer::AGENT_WRITE;
-    let root = layer.dir(paths);
 
     // §6 makes the key the primary key, so the conflict is on the *key*, not
     // on `{key}.md`. Those differ whenever a note sits somewhere other than
     // its own key — which nothing prevents, because `KeyDisagreesWithPath`
     // compares only the leaf. Checking the path let a second note land under
     // a key that was already taken, and `rm` could then separate neither.
-    let taken = read_layer(paths, layer)?;
+    let taken = read_layer(root, layer)?;
     // A note omh cannot read may hold the key this write wants. Refusing is
     // the recoverable half of that choice — the other half is a second note
     // under a key that already existed, which is unrecoverable through the
@@ -1600,10 +1662,20 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// required that no writer can supply.
     #[test]
     fn the_sections_a_surprise_requires_are_the_ones_remember_supplies() {
-        assert_eq!(
-            Kind::Surprise.required_sections(),
-            ["Expected", "Observed", "Evidence"],
-        );
+        // Tied to the tool's own required arguments, so a parameter cannot be
+        // added to one and forgotten in the other: a section nothing supplies
+        // refuses every write, and an argument no section holds is discarded
+        // on the way to disk.
+        let supplied: Vec<String> = crate::memory::tools::REQUIRED
+            .iter()
+            .map(|a| {
+                let mut c = a.chars();
+                c.next()
+                    .map(|f| f.to_uppercase().collect::<String>() + c.as_str())
+                    .unwrap_or_default()
+            })
+            .collect();
+        assert_eq!(Kind::Surprise.required_sections(), supplied.as_slice());
     }
 
     /// A list-like section that is not also declared somewhere is a rule that
@@ -1809,7 +1881,8 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     }
 
     fn surprise_body() -> String {
-        "# T\n\n## Expected\na\n\n## Observed\nb\n\n## Evidence\nc\n".to_string()
+        "# T\n\n## Expected\na\n\n## Observed\nb\n\n## Evidence\nc\n\n## Answers\n\n- what happens here\n"
+            .to_string()
     }
 
     fn rules(violations: &[Violation]) -> Vec<Rule> {
@@ -1928,7 +2001,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_heading_inside_a_code_fence_does_not_satisfy_the_schema() {
         let fenced =
-            "# T\n\n```markdown\n## Expected\nsample\n## Observed\nx\n## Evidence\ny\n```\n";
+            "# T\n\n```markdown\n## Expected\nsample\n## Observed\nx\n## Evidence\ny\n```\n\n## Answers\n\n- what happens here\n";
         let note = note_with(Kind::Surprise, "fenced", fenced);
 
         assert_eq!(
@@ -1946,7 +2019,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// Without this the fix trades a false pass for a false refusal.
     #[test]
     fn a_section_after_a_closed_fence_still_counts() {
-        let body = "# T\n\n## Expected\n```markdown\n## Observed\nquoted\n```\n\n## Observed\nb\n\n## Evidence\nc\n";
+        let body = "# T\n\n## Expected\n```markdown\n## Observed\nquoted\n```\n\n## Observed\nb\n\n## Evidence\nc\n\n## Answers\n\n- what happens here\n";
         assert!(
             check(&note_with(Kind::Surprise, "k", body)).is_empty(),
             "got: {:?}",
@@ -1975,7 +2048,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn a_tilde_fence_hides_a_heading_just_like_a_backtick_one() {
         let fenced =
-            "# T\n\n~~~markdown\n## Expected\nsample\n## Observed\nx\n## Evidence\ny\n~~~\n";
+            "# T\n\n~~~markdown\n## Expected\nsample\n## Observed\nx\n## Evidence\ny\n~~~\n\n## Answers\n\n- what happens here\n";
 
         assert_eq!(
             rules(&check(&note_with(Kind::Surprise, "tilde", fenced))),
@@ -1992,7 +2065,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// fence on the inner one and read the rest of the block as prose.
     #[test]
     fn a_longer_fence_is_not_closed_by_a_shorter_one_inside_it() {
-        let nested = "# T\n\n````markdown\n```\n## Expected\n## Observed\n## Evidence\n```\n````\n";
+        let nested = "# T\n\n````markdown\n```\n## Expected\n## Observed\n## Evidence\n```\n````\n\n## Answers\n\n- what happens here\n";
 
         assert_eq!(
             rules(&check(&note_with(Kind::Surprise, "fourtick", nested))),
@@ -2011,7 +2084,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn an_indented_fence_still_opens_a_block() {
         let indented =
-            "# T\n\n## Expected\na\n\n  ```markdown\n## Observed\nquoted\n  ```\n\n## Evidence\nc\n";
+            "# T\n\n## Expected\na\n\n  ```markdown\n## Observed\nquoted\n  ```\n\n## Evidence\nc\n\n## Answers\n\n- what happens here\n";
         let found = check(&note_with(Kind::Surprise, "indented", indented));
 
         assert_eq!(
@@ -2222,6 +2295,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             expected: "A bind mount of the token file to persist the login.".into(),
             observed: "The harness rewrites in place. A file mount is one inode.".into(),
             evidence: "`EBUSY` from the mount syscall.".into(),
+            answers: vec!["why does my login not persist".into()],
             relates_to: Vec::new(),
             invalidated_by: None,
             source: "session s03, claude".into(),
@@ -3245,7 +3319,11 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             .replace("# One line naming the surprise", "# A mount failed")
             .replace("## Expected\n", "## Expected\nit would persist\n")
             .replace("## Observed\n", "## Observed\nit did not\n")
-            .replace("## Evidence\n", "## Evidence\n`EBUSY`\n");
+            .replace("## Evidence\n", "## Evidence\n`EBUSY`\n")
+            .replace(
+                "- <the question somebody would later ask to find this>",
+                "- why does my login not persist",
+            );
 
         let path = PathBuf::from("an-observation.md");
         let note = parse(&filled, Layer::Local, &path)
@@ -3254,6 +3332,49 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             check(&note),
             vec![],
             "the documented shape must satisfy the schema that refuses writes"
+        );
+    }
+
+    /// Two graphs reach the agent, and they answer different questions. The
+    /// code graph knows what the code *is* — where a symbol lives, how one
+    /// module reaches another — and is re-derived from the code every turn.
+    /// Memory knows what nobody could re-derive: why it is that way, what was
+    /// tried and failed, what surprised somebody at 2am.
+    ///
+    /// Without a rule for choosing, an agent asks the wrong one and concludes
+    /// the answer does not exist. The rule cannot live in a tool description
+    /// either — a description is attached to one tool and cannot say "prefer
+    /// the other one", so this is the part that has to be in the rules file.
+    #[test]
+    fn the_rules_say_which_of_the_two_graphs_answers_which_question() {
+        let rules = crate::detect::agents_md(&[]);
+        let lower = rules.to_lowercase();
+
+        assert!(
+            lower.contains("search_graph"),
+            "the code graph must be named"
+        );
+        assert!(lower.contains("recall"), "memory must be named");
+
+        // Naming both is not a rule. There has to be a sentence that tells them
+        // apart, and it has to survive somebody rewording the prose around it.
+        let has_rule = lower.contains("what the code is") && lower.contains("why");
+        assert!(
+            has_rule,
+            "the rules name both graphs but never say how to choose:\n{rules}"
+        );
+    }
+
+    /// The trigger is the half a rules file carries badly — it decays as
+    /// context grows — so it also rides on the call. A description that only
+    /// says what the tool searches leaves the agent to guess when.
+    #[test]
+    fn recalls_description_says_when_to_reach_for_it_not_only_what_it_holds() {
+        let text =
+            crate::memory::index::describe(&crate::memory::index::Index::of(&[])).to_lowercase();
+        assert!(
+            text.contains("code"),
+            "it has to distinguish itself from the code graph: {text}"
         );
     }
 

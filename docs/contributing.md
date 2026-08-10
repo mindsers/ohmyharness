@@ -103,6 +103,9 @@ product, not fixing a test.
 | a note is never listed without its date and its layer | an undated, unattributed claim cannot be judged |
 | `omh memory rm` never touches a neighbour | a pruned neighbourhood is invisible; a dangling link is not |
 | the note template in the staged rules parses | it teaches a shape the store then refuses, silently |
+| a retrieved note always carries its date and layer | an unattributed claim launders a guess into a fact |
+| the memory server is pointed at the paths omh mounts | it starts, finds nothing, and "0 notes" reads as an empty store |
+| a generated stub passes the same schema an agent's write does | ingestion half-populates the store while `init` reports success |
 
 Notice how many of them are about **failing loudly**. That is the recurring
 lesson of this codebase: the expensive bugs were not crashes, they were things

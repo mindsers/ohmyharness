@@ -153,3 +153,48 @@ because    = "unmaintained for roughly a year at the time of review."
 name       = "search_code"
 considered = "2026.08"
 because    = "looks like a cheaper grep, but `--pattern 'fn unfilled' --mode compact` returned zero results against a symbol that demonstrably exists. Routing literal search through it would make things worse, and the claim stays unverified until that is explained."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Memory
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[entry]]
+name    = "memory"
+kind    = "mcp"
+since   = "2026.08"
+because = "what a session learned outlives it — a removed session leaves no transcript to grep"
+remove  = "omh config mcp rm memory"
+command = "omh"
+args    = [
+  "memory", "serve",
+  # The committed layer is tracked, so it arrives inside the worktree and
+  # needs no mount. The local layer is mounted from ~/.omh, keyed by repo,
+  # because a worktree holds tracked files only and `omh s rm` removes it
+  # with --force.
+  "--team",  "/work/.omh/notes",
+  "--local", "/omh/notes/local",
+]
+
+  [[entry.measured]]
+  what  = "injected per session"
+  value = "1470 B"
+  how   = "two tool names, descriptions and schemas as the server emits them, recomputed from the shipped code by the_memory_surfaces_declared_cost_matches_what_it_ships"
+  on    = "2026-08-08"
+
+  [[entry.measured]]
+  what  = "the surface it replaces"
+  value = "14 tools, 3787 B"
+  how   = "iwec v0.19.0 answering tools/list in a container, measured during M0 — see docs/design/memory-m0.md"
+  on    = "2026-08-08"
+
+  [[entry.instead_of]]
+  name = "iwe's own MCP server (iwec)"
+  why  = "cannot carry a note's layer — it is the directory, not a field — and `iwe rename` rewrites links to titles, producing notes omh's schema refuses"
+
+  [[entry.instead_of]]
+  name = "an AGENTS.md section listing what the store holds"
+  why  = "a rules file decays as context grows; a tool description arrives attached to the call"
+
+  [[entry.instead_of]]
+  name = "letting the agent grep the notes directory"
+  why  = "grep cannot attach a note's date and layer, and an undated claim of unknown origin cannot be judged"
