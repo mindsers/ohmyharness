@@ -1,0 +1,24 @@
+version: 2
+
+updates:
+  # Patch and minor bumps arrive as one grouped PR so a quiet week is one
+  # review, not six. Majors come separately — they deserve to be read.
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # The workflows below pin actions by major tag; this is what moves them.
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns: ["*"]

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A force-push should not leave the previous run burning a runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Linux gets the whole suite. Exactly one test — the `omh init` end-to-end in
+  # tests/cli.rs — shells out to the real binary and needs a working Docker to
+  # build the base image. Every other test is in-process.
+  test:
+    name: test (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+
+  # GitHub's macOS runners have no Docker daemon, so the one test that needs it
+  # is excluded by target rather than skipped by name — a `--skip` list rots
+  # silently the moment a test is renamed, and reads as coverage it is not.
+  # This is 626 of the 637 tests; the missing one is Linux-covered above.
+  test-macos:
+    name: test (macos, no-docker targets)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked --bins --test docs
+
+  lint:
+    name: fmt + clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+
+  # The MSRV in Cargo.toml is a claim about who can build this, and an unchecked
+  # claim is the thing this repo distrusts most. This job is what makes it true.
+  msrv:
+    name: msrv (1.85)
+    runs-on: ubuntu-latest
+    env:
+      # Overrides rust-toolchain.toml, which otherwise pins this job to stable.
+      RUSTUP_TOOLCHAIN: "1.85"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets
