@@ -147,7 +147,7 @@ fn slug(heading: &str) -> String {
 fn anchors(body: &str) -> BTreeSet<String> {
     body.lines()
         .filter(|l| l.starts_with('#'))
-        .map(|l| slug(l))
+        .map(slug)
         .collect()
 }
 

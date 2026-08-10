@@ -635,8 +635,6 @@ why = "w"
         }
     }
 
-    #[test]
-
     /// `init` writes stack hooks only into the shared layer, so one sitting in
     /// `local` was not written by `init` whatever it is called. Claiming
     /// otherwise is the same authorship lie this module exists to prevent,

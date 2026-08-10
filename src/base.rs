@@ -819,9 +819,6 @@ command = "c"
         assert_eq!(s["codegraph"].command, GRAPH_BIN);
     }
 
-    /// Base servers run in the sandbox. A command carrying a host path would
-    /// work on the machine that wrote it and nowhere else.
-    #[test]
     /// The manifest's arguments and the launcher's mounts have to name the
     /// same directories. A server that starts, finds nothing, and reports "0
     /// notes" is the failure this prevents — it looks exactly like an empty
@@ -903,6 +900,9 @@ command = "c"
         );
     }
 
+    /// Base servers run in the sandbox. A command carrying a host path would
+    /// work on the machine that wrote it and nowhere else.
+    #[test]
     fn base_servers_reference_nothing_on_the_host() {
         for (name, server) in shipped().servers() {
             assert!(

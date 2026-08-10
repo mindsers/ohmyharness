@@ -297,7 +297,6 @@ mod tests {
         (dir, root)
     }
 
-    #[test]
     /// `rm` keeps a branch so unreviewed work is unloseable. A branch with no
     /// commits holds no work to lose — `worktree remove --force` has already
     /// discarded anything uncommitted — so keeping it preserves nothing and
