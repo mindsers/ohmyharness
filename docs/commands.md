@@ -438,6 +438,63 @@ A `--at` that names no note is an error, never a fall-through to a different
 one: it is the flag you reach for to be careful, so it is the one input that
 must not be quietly ignored.
 
+### `omh memory stale`
+
+Notes the world has moved on from. **A join against facts omh already holds**,
+never a judgement — there is no "old enough to be suspect" here, because that
+would be a threshold nobody calibrated wearing the clothes of a fact.
+
+```console
+$ omh memory stale
+stale:
+  surprise/the-base-set-pins-its-version   local  2026-08-10  — the base set is
+                                                                2026.08; this note
+                                                                pinned 2020.01
+  surprise/the-entrypoint-is-tiny          local  2026-08-10  — `src/main.rs` was
+                                                                f328e4d…, is now
+                                                                8370720…
+
+omh cannot tell:
+  surprise/a-symbol-nobody-can-check       local  2026-08-10  — no indexed code
+                                                                graph reachable
+                                                                from the host
+
+no expiry — carries only its date:
+  surprise/nothing-pins-this-at-all        local  2026-08-10
+
+1 still current
+```
+
+Three groups because they are three different claims. **"omh cannot tell" is
+never folded into "still current"** — that is the one failure that would make
+this command a liar rather than merely incomplete.
+
+A note declares its expiry with `--invalidated-by`, from a closed set omh can
+evaluate itself:
+
+| | invalid when |
+|---|---|
+| `file:<path>@<hash>` | the file's content changes, or it is deleted |
+| `image:<digest>` | the sandbox image recipe changes |
+| `base:<version>` | the base set is re-cut |
+| `symbol:<name>` | the code graph no longer contains it |
+| *(absent)* | never — it carries only its date |
+
+Anything else is **refused at the door**. A trigger omh cannot evaluate is a
+note advertising an expiry it does not have, which is worse than carrying none,
+because somebody trusts it.
+
+A `file:` path recorded inside the sandbox as `/work/src/main.rs` is stored
+relative to the repo. Without that, every file trigger would report stale the
+moment it was written.
+
+**`symbol:` always answers "cannot tell" today.** The code graph lives in a
+container volume, queried per session through a running sandbox under a
+per-session project name; a host-side command has none of those. Asking for one
+would put a container exec in the middle of a command whose whole point is that
+it only joins facts already at hand. It fires correctly the day a symbol set can
+be supplied, and there is a test that says so — so this is a gap, not a stub.
+
 ### What the agent sees
 
 Inside a session the store is two MCP tools, not a command. omh runs the server

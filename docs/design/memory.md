@@ -533,6 +533,28 @@ deferrals *process, recorded in the entry* rather than a silence:
   rolls the copies back. A note that exists in neither layer is the one outcome
   no message can repair.
 
+**M4 shipped without hub pages, and that was §7 deciding rather than a
+shortcut.** A hub's lint needs a threshold, §7 does not let one ship without a
+known-good store to calibrate it against, and that store is what M1's two-week
+read produces — which has not happened. Shipping a guessed number would be the
+exact failure §7 legislates against. So M4 is `invalidated_by` and `stale`, and
+hub pages wait for the corpus.
+
+One piece of that work landed anyway, because it stands alone:
+`writing_a_note_never_rewrites_its_link_text` guards the vendor's *actual* bug —
+a renderer rewriting link text as it wrote, which made three successive prompt
+revisions look randomly disobeyed and was invisible to every semantic assertion.
+Only a byte comparison across a write-read-write cycle can see it.
+
+**What is honestly computable, and what is not:**
+
+| kind | today |
+|---|---|
+| `file:<path>@<hash>` | **computable** — `git hash-object`, with paths stored repo-relative |
+| `base:<version>` | **computable** — the same `parse_ym` the manifest loader uses, compared numerically |
+| `image:<digest>` | **computable, after one redefinition** — the digest is of the *recipe*, a stable `git hash-object` of the Dockerfile, deliberately **not** `base_tag()`'s `DefaultHasher`, which std does not guarantee across releases. Pinning that would mark every image-triggered note stale the day somebody upgrades Rust |
+| `symbol:<name>` | **not computable from the host** — reports "cannot tell", and `evaluate` fires correctly the day a symbol set can be supplied |
+
 ## 15. Open questions
 
 One blocks the build; one is answered and kept for the record. The rest are

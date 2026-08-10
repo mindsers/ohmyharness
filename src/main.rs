@@ -259,6 +259,8 @@ enum MemoryCmd {
         #[arg(required = true)]
         keys: Vec<String>,
     },
+    /// Notes the world has moved on from. A join, never a judgement.
+    Stale,
     /// Schema and hygiene violations, across both layers.
     Lint,
     /// Remove one note. Never a neighbour; reports what linked to it.
@@ -311,6 +313,7 @@ fn main() -> Result<()> {
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
             Some(MemoryCmd::Lint) => memory_lint(&cwd),
+            Some(MemoryCmd::Stale) => memory_stale(&cwd),
             Some(MemoryCmd::Promote { keys }) => memory_promote(&cwd, keys),
             Some(MemoryCmd::Serve {
                 team,
@@ -866,6 +869,12 @@ fn parse_note_layer(s: &str) -> std::result::Result<memory::Layer, String> {
     s.parse().map_err(|e: anyhow::Error| e.to_string())
 }
 
+/// The agent's working directory inside the sandbox. Named once, so the note
+/// store and the launch plan cannot disagree about it.
+pub fn container_workdir() -> &'static str {
+    "/work"
+}
+
 fn parse_if_exists(s: &str) -> std::result::Result<memory::IfExists, String> {
     match s {
         "error" => Ok(memory::IfExists::Error),
@@ -979,6 +988,62 @@ fn memory_serve(
     let stdin = std::io::stdin().lock();
     let stdout = std::io::stdout().lock();
     mcp::serve(stdin, stdout, &mut server)
+}
+
+/// A join against facts omh already holds. Three groups, because they are
+/// three different claims: the world moved, omh cannot tell, and omh was never
+/// asked to tell.
+fn memory_stale(cwd: &std::path::Path) -> Result<()> {
+    use memory::expiry::Verdict;
+    let paths = Paths::discover(cwd)?;
+    let judged = memory::expiry::judge(&paths, &memory::load(&paths)?)?;
+
+    let mut fresh = 0;
+    let mut printed = false;
+    for (heading, want) in [
+        ("stale", 0),
+        ("omh cannot tell", 1),
+        ("no expiry — carries only its date", 2),
+    ] {
+        let group: Vec<&memory::expiry::Judged> = judged
+            .iter()
+            .filter(|j| match (&j.verdict, want) {
+                (Verdict::Stale { .. }, 0) => true,
+                (Verdict::Unknown { .. }, 1) => true,
+                (Verdict::NoTrigger, 2) => true,
+                _ => false,
+            })
+            .collect();
+        if group.is_empty() {
+            continue;
+        }
+        if printed {
+            println!();
+        }
+        printed = true;
+        println!("{heading}:");
+        for j in group {
+            // Every line carries its date and its layer, exactly as `recall`
+            // does: a note reported without those cannot be judged.
+            print!("  {:<44} {:<5}  {}", j.key, j.layer.to_string(), j.recorded);
+            match &j.verdict {
+                Verdict::Stale { because } | Verdict::Unknown { because } => {
+                    println!("  — {because}")
+                }
+                _ => println!(),
+            }
+        }
+    }
+    fresh += judged
+        .iter()
+        .filter(|j| j.verdict == Verdict::Fresh)
+        .count();
+    if !printed && fresh == 0 {
+        println!("no notes yet");
+    } else if fresh > 0 {
+        println!("\n{fresh} still current");
+    }
+    Ok(())
 }
 
 /// local → team. §12's one human gate, because it is the one place a wrong

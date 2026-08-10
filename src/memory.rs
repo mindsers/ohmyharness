@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub mod deliver;
+pub mod expiry;
 pub mod index;
 pub mod ingest;
 pub mod promote;
@@ -233,6 +234,14 @@ pub fn parse(raw: &str, layer: Layer, path: &Path) -> Result<Note> {
             "{}: `recorded` must be a real calendar date, got `{recorded}`",
             path.display()
         );
+    }
+
+    if let Some(trigger) = fields.get("invalidated_by").filter(|v| !v.is_empty()) {
+        // §8 is a closed set: a kind omh cannot evaluate is a note advertising
+        // an expiry it does not have, which is worse than carrying none —
+        // somebody trusts it.
+        crate::memory::expiry::Trigger::parse(trigger)
+            .map_err(|e| anyhow!("{}: {e}", path.display()))?;
     }
 
     let kind: Kind = required(&fields, "type", path)?
@@ -1139,6 +1148,22 @@ pub enum Wrote {
     Skipped(String),
 }
 
+/// Parse a trigger, and rewrite a `file:` path relative to the repo.
+///
+/// Parsing here as well as at load is what makes §8's set closed at the only
+/// door an agent uses.
+fn normalise_trigger(raw: &str, repo: &Path) -> Result<String> {
+    let trigger = expiry::Trigger::parse(raw)?;
+    Ok(match trigger {
+        expiry::Trigger::File { path, hash } => expiry::Trigger::File {
+            path: expiry::normalise_path(&path, repo),
+            hash,
+        }
+        .render(),
+        other => other.render(),
+    })
+}
+
 fn non_blank(value: &str, name: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("`{name}` is empty; there is nothing here worth recording");
@@ -1180,6 +1205,7 @@ fn body_of(input: &Remembered) -> String {
 pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Result<Wrote> {
     remember_in(
         &Layer::AGENT_WRITE.dir(paths),
+        &paths.repo,
         &templates(paths)?,
         input,
         if_exists,
@@ -1194,6 +1220,7 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
 /// derived from a repo.
 pub fn remember_in(
     root: &Path,
+    repo: &Path,
     templates: &BTreeMap<Kind, String>,
     input: &Remembered,
     if_exists: IfExists,
@@ -1295,7 +1322,14 @@ pub fn remember_in(
         kind: Kind::Surprise,
         source: input.source.trim().to_string(),
         recorded: input.recorded.clone(),
-        invalidated_by: input.invalidated_by.clone(),
+        // Stored repo-relative. The agent records what it sees, which inside
+        // the sandbox is `/work/...`; host-side that file does not exist, and
+        // every `file:` trigger would report stale on day one.
+        invalidated_by: input
+            .invalidated_by
+            .as_deref()
+            .map(|raw| normalise_trigger(raw, repo))
+            .transpose()?,
         body: body_of(input),
         layer,
         path: path.clone(),
@@ -3698,6 +3732,99 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             text.contains("code"),
             "it has to distinguish itself from the code graph: {text}"
         );
+    }
+
+    /// The agent records what it sees, and inside the sandbox that is
+    /// `/work/...`. Host-side that path does not exist, so every `file:`
+    /// trigger would report stale the moment it was written.
+    #[test]
+    fn a_trigger_recorded_in_the_sandbox_is_stored_repo_relative() {
+        let (_d, paths) = fixture();
+        let mut input = observation();
+        input.invalidated_by = Some(format!(
+            "file:{}/src/main.rs@abc123",
+            crate::container_workdir()
+        ));
+        remember(&paths, &input, IfExists::Error).unwrap();
+
+        let note = &load(&paths).unwrap()[0];
+        assert_eq!(
+            note.invalidated_by.as_deref(),
+            Some("file:src/main.rs@abc123"),
+            "the sandbox prefix must not survive into the store"
+        );
+    }
+
+    /// §8's set is closed so that `stale` can evaluate every member. A note
+    /// carrying `vibes:soon` parses, round-trips and is never judged — an
+    /// expiry that exists only in the reader's mind.
+    #[test]
+    fn an_invalidation_kind_omh_cannot_evaluate_is_refused_at_the_door() {
+        let raw = SURPRISE.replace(
+            "invalidated_by: image:sha256-4f2a",
+            "invalidated_by: vibes:soon",
+        );
+        let err = parse(&raw, Layer::Local, std::path::Path::new("x.md"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("vibes"), "got: {err}");
+    }
+
+    /// And a refused trigger must leave nothing behind, like any other refused
+    /// write.
+    #[test]
+    fn a_note_with_an_unevaluatable_trigger_is_never_written() {
+        let (dir, paths) = fixture();
+        let mut input = observation();
+        input.invalidated_by = Some("whenever:i-feel-like-it".into());
+        assert!(remember(&paths, &input, IfExists::Error).is_err());
+        assert!(
+            std::fs::read_dir(dir.path())
+                .map(|d| d.count() == 0)
+                .unwrap_or(true)
+                || load(&paths).unwrap().is_empty()
+        );
+    }
+
+    /// **The vendor's actual bug**, guarded at the byte level.
+    ///
+    /// Their remaining quality gap was not a prompt failure: the renderer
+    /// rewrote link text as it wrote, so three successive prompt revisions
+    /// looked randomly disobeyed. It was invisible to every semantic assertion
+    /// because the renderer was doing exactly what it was built to do.
+    ///
+    /// Only a byte comparison across a write-read-write cycle can see it, and
+    /// this belongs here whether or not hub pages ever ship.
+    #[test]
+    fn writing_a_note_never_rewrites_its_link_text() {
+        let (_d, paths) = fixture();
+        let mut input = observation();
+        input.relates_to = vec![
+            "credentials-are-a-named-volume".into(),
+            "surprise/one-inode".into(),
+        ];
+        let Wrote::Created(path) = remember(&paths, &input, IfExists::Error).unwrap() else {
+            panic!()
+        };
+        let first = std::fs::read(&path).unwrap();
+
+        // Read it back and write it out again by the same route a rename, a
+        // promotion or a lint pass would.
+        let note = &load(&paths).unwrap()[0];
+        std::fs::write(&path, render(note)).unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            first,
+            "a round trip must not touch a single byte, link text least of all"
+        );
+        let text = String::from_utf8(first).unwrap();
+        for key in &input.relates_to {
+            assert!(
+                text.contains(&format!("[[{key}]]")),
+                "the link is stored as written: {text}"
+            );
+        }
     }
 
     /// The agent writes into the sandbox, so the path it is given must be the

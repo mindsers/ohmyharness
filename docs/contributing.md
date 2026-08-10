@@ -109,6 +109,9 @@ product, not fixing a test.
 | a committed note links only to committed notes | the link dangles in a teammate's clone, where the target does not exist |
 | the gitignored layer never reaches a clone | every private note is published to the whole team, silently |
 | `promote` rewrites nothing but the note it was given | a renderer touching what it was not asked to is invisible to every semantic test |
+| writing a note never rewrites its link text | the vendor's own remaining quality gap; only a byte comparison sees it |
+| `stale` never reports "cannot tell" as "still current" | it makes the command a liar rather than merely incomplete |
+| an image digest a note pins is stable across toolchains | `DefaultHasher` marks every pinned note stale on a Rust upgrade |
 
 Notice how many of them are about **failing loudly**. That is the recurring
 lesson of this codebase: the expensive bugs were not crashes, they were things

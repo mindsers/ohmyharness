@@ -1,0 +1,660 @@
+//! When a note stops being true.
+//!
+//! §8: `invalidated_by` takes one of a **closed set** omh can evaluate itself.
+//! `omh memory stale` is a join against facts omh already holds, never a
+//! judgement — there is no "old enough to be suspect" here, because that is a
+//! threshold nobody calibrated pretending to be knowledge.
+//!
+//! Split impure-gather from pure-evaluate, so the whole decision table is a
+//! unit test over hand-built facts and the part that shells out has no
+//! opinions.
+
+use anyhow::{bail, Result};
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+/// §8's closed set. Parsed, never a free string: omh must be able to evaluate
+/// every one of these itself, and a kind it cannot evaluate is a note
+/// advertising an expiry it does not have.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Trigger {
+    File { path: String, hash: String },
+    Image { digest: String },
+    Base { version: String },
+    Symbol { name: String },
+}
+
+impl Trigger {
+    pub fn parse(raw: &str) -> Result<Self> {
+        let Some((kind, rest)) = raw.split_once(':') else {
+            bail!("`{raw}` is not an invalidation trigger (file, image, base, symbol)");
+        };
+        if rest.is_empty() {
+            bail!("`{raw}` names a `{kind}` trigger with nothing in it");
+        }
+        Ok(match kind {
+            "file" => {
+                // The LAST `@`: a path may legitimately contain one, and
+                // splitting on the first takes the wrong half.
+                let Some((path, hash)) = rest.rsplit_once('@') else {
+                    bail!("`{raw}` has no hash; an expiry with nothing to compare can never fire");
+                };
+                if path.is_empty() || hash.is_empty() {
+                    bail!("`{raw}` needs both a path and a hash");
+                }
+                Self::File {
+                    path: path.into(),
+                    hash: hash.into(),
+                }
+            }
+            "image" => Self::Image {
+                digest: rest.into(),
+            },
+            "base" => Self::Base {
+                version: rest.into(),
+            },
+            "symbol" => Self::Symbol { name: rest.into() },
+            other => {
+                bail!("`{other}` is not something omh can evaluate (file, image, base, symbol)")
+            }
+        })
+    }
+
+    pub fn render(&self) -> String {
+        match self {
+            Self::File { path, hash } => format!("file:{path}@{hash}"),
+            Self::Image { digest } => format!("image:{digest}"),
+            Self::Base { version } => format!("base:{version}"),
+            Self::Symbol { name } => format!("symbol:{name}"),
+        }
+    }
+}
+
+/// What a file looks like right now.
+///
+/// Three states, not two. Conflating "cannot be read" with "is not there" is
+/// the bug `config::read_layer` exists to prevent, and here it would report a
+/// permissions problem as the world having changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileFact {
+    Hash(String),
+    Absent,
+    Unreadable,
+}
+
+/// Facts omh already holds. Gathered once, impurely; nothing here is a
+/// judgement.
+#[derive(Debug, Default)]
+pub struct Facts {
+    pub files: BTreeMap<String, FileFact>,
+    /// Recipe digests of the images omh would build right now.
+    pub image_digests: BTreeSet<String>,
+    pub base_version: Option<String>,
+    /// `None` means no indexed graph was reachable — deliberately not an empty
+    /// set, which would say every symbol is gone.
+    pub symbols: Option<BTreeSet<String>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Verdict {
+    NoTrigger,
+    Fresh,
+    /// `because` names the recorded value *and* the current one. A join
+    /// reports a fact; the reader has to be able to tell whether the world
+    /// moved or the note was wrong to begin with.
+    Stale {
+        because: String,
+    },
+    /// omh cannot answer. **Never collapsed into `Fresh`** — that is the one
+    /// failure that makes `stale` a liar rather than merely incomplete.
+    Unknown {
+        because: String,
+    },
+}
+
+/// Repo-relative, always.
+///
+/// The MCP server runs where the repo is `/work`, so an agent naturally
+/// records an absolute sandbox path. Host-side that file does not exist, and
+/// every `file:` trigger would report stale on day one — turning the command
+/// into noise nobody reads.
+pub fn normalise_path(raw: &str, repo: &Path) -> String {
+    let trimmed = raw
+        .strip_prefix("/work/")
+        .or_else(|| raw.strip_prefix("./"))
+        .unwrap_or(raw);
+    Path::new(trimmed)
+        .strip_prefix(repo)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| trimmed.to_string())
+}
+
+/// Pure. The entire decision table is a unit test over hand-built facts.
+pub fn evaluate(trigger: Option<&Trigger>, facts: &Facts) -> Verdict {
+    let Some(trigger) = trigger else {
+        // §8's honest residue: derived from experience, carrying a date and
+        // nothing else. Never "old enough to be suspect" — that is a threshold
+        // nobody calibrated dressed as knowledge.
+        return Verdict::NoTrigger;
+    };
+    match trigger {
+        Trigger::File { path, hash } => match facts.files.get(path) {
+            None | Some(FileFact::Unreadable) => Verdict::Unknown {
+                because: format!("`{path}` could not be read"),
+            },
+            Some(FileFact::Absent) => Verdict::Stale {
+                because: format!("`{path}` is gone; it was pinned at {hash}"),
+            },
+            Some(FileFact::Hash(now)) if now == hash => Verdict::Fresh,
+            Some(FileFact::Hash(now)) => Verdict::Stale {
+                because: format!("`{path}` was {hash}, is now {now}"),
+            },
+        },
+        Trigger::Image { digest } => {
+            if facts.image_digests.is_empty() {
+                return Verdict::Unknown {
+                    because: "no image recipe available to compare against".into(),
+                };
+            }
+            match facts.image_digests.contains(digest) {
+                true => Verdict::Fresh,
+                false => Verdict::Stale {
+                    because: format!("the sandbox image was rebuilt; this note pinned {digest}"),
+                },
+            }
+        }
+        Trigger::Base { version } => {
+            let Some(current) = &facts.base_version else {
+                return Verdict::Unknown {
+                    because: "no base set installed to compare against".into(),
+                };
+            };
+            // Reuses the parser the manifest loader uses, so a version `stale`
+            // cannot read is the same version `load_dir` refuses. Compared as
+            // numbers: `2027.2` beating `2027.10` is a bug this repo already
+            // shipped once.
+            let (Some(now), Some(pinned)) = (
+                crate::base::parse_ym(current),
+                crate::base::parse_ym(version),
+            ) else {
+                return Verdict::Unknown {
+                    because: format!("`{current}` or `{version}` is not a version omh can read"),
+                };
+            };
+            match now > pinned {
+                true => Verdict::Stale {
+                    because: format!("the base set is {current}; this note pinned {version}"),
+                },
+                false => Verdict::Fresh,
+            }
+        }
+        Trigger::Symbol { name } => {
+            let Some(symbols) = &facts.symbols else {
+                return Verdict::Unknown {
+                    because: "no indexed code graph reachable from the host".into(),
+                };
+            };
+            match symbols.contains(name) {
+                true => Verdict::Fresh,
+                false => Verdict::Stale {
+                    because: format!("the code graph no longer contains `{name}`"),
+                },
+            }
+        }
+    }
+}
+
+/// Facts about the world right now, gathered once.
+///
+/// Only the files the notes actually name. Walking the repo would make `stale`
+/// O(repo) and slow enough that nobody runs it, and a check nobody runs is a
+/// check that does not exist.
+pub fn gather(paths: &crate::profile::Paths, triggers: &[Trigger]) -> Facts {
+    let mut facts = Facts::default();
+
+    for trigger in triggers {
+        if let Trigger::File { path, .. } = trigger {
+            if facts.files.contains_key(path) {
+                continue;
+            }
+            let full = paths.repo.join(path);
+            let fact = match std::fs::metadata(&full) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileFact::Absent,
+                Err(_) => FileFact::Unreadable,
+                Ok(_) => match hash_file(&paths.repo, path) {
+                    Some(h) => FileFact::Hash(h),
+                    // Present but unhashable is not the same as gone.
+                    None => FileFact::Unreadable,
+                },
+            };
+            facts.files.insert(path.clone(), fact);
+        }
+    }
+
+    // The recipes omh would build right now. Cheap and pure, so always
+    // available — unlike a running container.
+    if let Ok(d) = crate::image::recipe_digest(&crate::image::base_dockerfile()) {
+        facts.image_digests.insert(d);
+    }
+
+    facts.base_version = crate::base::Manifest::load_dir(&paths.base())
+        .ok()
+        .map(|m| m.version);
+
+    // `symbols` stays `None`. The code graph lives in a container volume and is
+    // queried per session, through a running sandbox, under a project name that
+    // is per-session too. A host-side `stale` has none of those, and asking for
+    // one would put a container exec in the middle of a command whose entire
+    // spec sentence is "a join against facts omh already holds". `evaluate`
+    // already fires correctly the day a set can be supplied.
+    facts
+}
+
+fn hash_file(repo: &Path, path: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["hash-object", "--"])
+        .arg(path)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// One note's verdict, with everything needed to print it.
+#[derive(Debug)]
+pub struct Judged {
+    pub key: String,
+    pub layer: crate::memory::Layer,
+    pub recorded: String,
+    pub verdict: Verdict,
+}
+
+/// `omh memory stale` — a join, in one pass.
+pub fn judge(paths: &crate::profile::Paths, notes: &[crate::memory::Note]) -> Result<Vec<Judged>> {
+    let triggers: Vec<Trigger> = notes
+        .iter()
+        .filter_map(|n| n.invalidated_by.as_deref())
+        .filter_map(|raw| Trigger::parse(raw).ok())
+        .collect();
+    let facts = gather(paths, &triggers);
+
+    Ok(notes
+        .iter()
+        .map(|n| {
+            let parsed = n.invalidated_by.as_deref().map(Trigger::parse);
+            let verdict = match parsed {
+                None => Verdict::NoTrigger,
+                // A trigger that will not parse is a note omh cannot judge,
+                // said out loud rather than treated as having none.
+                Some(Err(e)) => Verdict::Unknown {
+                    because: format!("{e}"),
+                },
+                Some(Ok(t)) => evaluate(Some(&t), &facts),
+            };
+            Judged {
+                key: n.key.clone(),
+                layer: n.layer,
+                recorded: n.recorded.clone(),
+                verdict,
+            }
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn facts() -> Facts {
+        Facts::default()
+    }
+
+    // ── gathering ───────────────────────────────────────────────────────────
+
+    fn repo_with(files: &[(&str, &str)]) -> (tempfile::TempDir, crate::profile::Paths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::profile::Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        for (name, body) in files {
+            let p = paths.repo.join(name);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+        (dir, paths)
+    }
+
+    /// Walking the repo would make `stale` O(repo) and slow enough that nobody
+    /// runs it — and a check nobody runs is a check that does not exist.
+    #[test]
+    fn gathering_facts_hashes_only_the_files_notes_name() {
+        let (_d, paths) = repo_with(&[
+            ("named.rs", "x"),
+            ("unnamed.rs", "y"),
+            ("deep/also-unnamed.rs", "z"),
+        ]);
+        let triggers = vec![Trigger::parse("file:named.rs@old").unwrap()];
+        let facts = gather(&paths, &triggers);
+
+        assert_eq!(facts.files.len(), 1, "only what was asked about");
+        assert!(facts.files.contains_key("named.rs"));
+    }
+
+    /// A file that is there and one that is not are different facts, and both
+    /// are different from one omh could not read.
+    #[test]
+    fn a_present_file_hashes_and_a_missing_one_is_absent() {
+        let (_d, paths) = repo_with(&[("here.rs", "content")]);
+        let triggers = vec![
+            Trigger::parse("file:here.rs@old").unwrap(),
+            Trigger::parse("file:gone.rs@old").unwrap(),
+        ];
+        let facts = gather(&paths, &triggers);
+
+        assert!(matches!(facts.files["here.rs"], FileFact::Hash(_)));
+        assert_eq!(facts.files["gone.rs"], FileFact::Absent);
+    }
+
+    /// The hash has to be the same one `remember` would have recorded, or a
+    /// note is stale from the moment it is written.
+    #[test]
+    fn a_files_hash_matches_what_git_would_record_for_it() {
+        let (_d, paths) = repo_with(&[("f.txt", "hello\n")]);
+        let facts = gather(&paths, &[Trigger::parse("file:f.txt@x").unwrap()]);
+        assert_eq!(
+            facts.files["f.txt"],
+            FileFact::Hash("ce013625030ba8dba906f756967f9e9ca394464a".into()),
+            "git's own blob hash for `hello\\n`"
+        );
+    }
+
+    /// A trigger omh cannot parse is a note it cannot judge, and saying so is
+    /// not the same as saying the note has no expiry.
+    #[test]
+    fn a_note_whose_trigger_will_not_parse_is_unknown_not_untriggered() {
+        let (_d, paths) = repo_with(&[]);
+        let mut note = crate::memory::Note {
+            key: "k".into(),
+            kind: crate::memory::Kind::Surprise,
+            source: "session s01, claude".into(),
+            recorded: "2026-08-07".into(),
+            invalidated_by: Some("vibes:soon".into()),
+            body: String::new(),
+            layer: crate::memory::Layer::Local,
+            path: std::path::PathBuf::from("k.md"),
+        };
+        let judged = judge(&paths, std::slice::from_ref(&note)).unwrap();
+        assert!(matches!(judged[0].verdict, Verdict::Unknown { .. }));
+
+        note.invalidated_by = None;
+        let judged = judge(&paths, std::slice::from_ref(&note)).unwrap();
+        assert_eq!(judged[0].verdict, Verdict::NoTrigger);
+    }
+
+    // ── the closed set ──────────────────────────────────────────────────────
+
+    /// A parser that accepts a kind the evaluator cannot handle produces a
+    /// note advertising an expiry it does not have — worse than no expiry,
+    /// because somebody trusts it.
+    #[test]
+    fn every_invalidation_kind_in_the_spec_round_trips() {
+        for raw in [
+            "file:src/main.rs@9f2c1a4e",
+            "image:sha256-4f2a",
+            "base:2026.08",
+            "symbol:GUEST_HOME",
+        ] {
+            let parsed = Trigger::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+            assert_eq!(parsed.render(), raw);
+        }
+    }
+
+    #[test]
+    fn an_unknown_invalidation_kind_is_refused_rather_than_stored() {
+        for raw in ["vibes:soon", "2026-08-07", "file", "", "when:tuesday"] {
+            assert!(Trigger::parse(raw).is_err(), "{raw:?} is not a trigger");
+        }
+        let err = Trigger::parse("vibes:soon").unwrap_err().to_string();
+        assert!(err.contains("vibes"), "name what was not understood: {err}");
+        for kind in ["file", "image", "base", "symbol"] {
+            assert!(err.contains(kind), "list what is accepted: {err}");
+        }
+    }
+
+    /// `split('@').next()` on a path containing one takes the wrong half. The
+    /// hash is after the **last** `@`.
+    #[test]
+    fn a_file_path_containing_an_at_sign_still_parses() {
+        let t = Trigger::parse("file:vendor/@scope/pkg/x.ts@abc123").unwrap();
+        assert_eq!(
+            t,
+            Trigger::File {
+                path: "vendor/@scope/pkg/x.ts".into(),
+                hash: "abc123".into()
+            }
+        );
+    }
+
+    /// A `file:` with no hash is an expiry structurally incapable of firing —
+    /// which is the bug `why::is_stale` shipped with, in a new costume.
+    #[test]
+    fn a_file_trigger_without_a_hash_is_refused() {
+        assert!(Trigger::parse("file:src/main.rs").is_err());
+        assert!(Trigger::parse("file:src/main.rs@").is_err());
+        assert!(Trigger::parse("file:@abc").is_err());
+    }
+
+    /// The server runs where the repo is `/work`, so an agent naturally writes
+    /// an absolute sandbox path. Host-side `stale` would then see a missing
+    /// file and report **every** file trigger stale on day one, which turns the
+    /// whole command into noise nobody reads.
+    #[test]
+    fn a_path_recorded_inside_the_sandbox_is_stored_repo_relative() {
+        let repo = std::path::Path::new("/Users/x/proj");
+        for raw in ["/work/src/main.rs", "src/main.rs", "./src/main.rs"] {
+            assert_eq!(normalise_path(raw, repo), "src/main.rs", "from {raw:?}");
+        }
+        assert_eq!(
+            normalise_path("/Users/x/proj/src/main.rs", repo),
+            "src/main.rs",
+            "a host absolute path inside the repo is relative too"
+        );
+    }
+
+    // ── evaluation, as a table ──────────────────────────────────────────────
+
+    #[test]
+    fn a_note_with_no_trigger_is_never_stale() {
+        // Not "stale after N days". §8 forbids a judgement, and a day count is
+        // a threshold nobody calibrated wearing the clothes of a fact.
+        assert_eq!(evaluate(None, &facts()), Verdict::NoTrigger);
+    }
+
+    #[test]
+    fn a_note_is_stale_when_the_file_it_pinned_changed() {
+        let mut f = facts();
+        f.files
+            .insert("src/main.rs".into(), FileFact::Hash("different".into()));
+        let t = Trigger::parse("file:src/main.rs@original").unwrap();
+        let v = evaluate(Some(&t), &f);
+        assert!(matches!(v, Verdict::Stale { .. }), "{v:?}");
+        // The reason names both values: a join reports a fact, and the reader
+        // has to be able to tell whether the world moved or the note was wrong.
+        let Verdict::Stale { because } = v else {
+            unreachable!()
+        };
+        assert!(
+            because.contains("original") && because.contains("different"),
+            "{because}"
+        );
+    }
+
+    /// Without this the test above passes on `=> Stale`, which this repo has
+    /// shipped: a staleness check that could have been `=> true`.
+    #[test]
+    fn an_unchanged_file_is_not_stale() {
+        let mut f = facts();
+        f.files
+            .insert("src/main.rs".into(), FileFact::Hash("same".into()));
+        let t = Trigger::parse("file:src/main.rs@same").unwrap();
+        assert_eq!(evaluate(Some(&t), &f), Verdict::Fresh);
+    }
+
+    /// Deleting the evidence must not make the note permanently true.
+    #[test]
+    fn a_note_is_stale_when_the_file_it_pinned_was_deleted() {
+        let mut f = facts();
+        f.files.insert("gone.rs".into(), FileFact::Absent);
+        let t = Trigger::parse("file:gone.rs@abc").unwrap();
+        assert!(matches!(evaluate(Some(&t), &f), Verdict::Stale { .. }));
+    }
+
+    /// `config.rs` carries this bug's own docstring: folding "cannot read" into
+    /// "is not there" reports a permissions problem as the world having changed.
+    #[test]
+    fn an_unreadable_file_is_unknown_rather_than_stale() {
+        let mut f = facts();
+        f.files.insert("locked.rs".into(), FileFact::Unreadable);
+        let t = Trigger::parse("file:locked.rs@abc").unwrap();
+        assert!(
+            matches!(evaluate(Some(&t), &f), Verdict::Unknown { .. }),
+            "a file omh could not read says nothing about the note"
+        );
+    }
+
+    #[test]
+    fn a_note_is_stale_when_the_image_recipe_changed() {
+        let mut f = facts();
+        f.image_digests.insert("current".into());
+        assert!(matches!(
+            evaluate(Some(&Trigger::parse("image:old").unwrap()), &f),
+            Verdict::Stale { .. }
+        ));
+        assert_eq!(
+            evaluate(Some(&Trigger::parse("image:current").unwrap()), &f),
+            Verdict::Fresh
+        );
+    }
+
+    /// With no image built, omh knows nothing about images — and knowing
+    /// nothing is not the same as the image having changed.
+    #[test]
+    fn an_image_trigger_is_unknown_when_no_recipe_is_available() {
+        assert!(matches!(
+            evaluate(Some(&Trigger::parse("image:x").unwrap()), &facts()),
+            Verdict::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn a_note_is_stale_when_the_base_set_was_re_cut() {
+        let mut f = facts();
+        f.base_version = Some("2026.09".into());
+        assert!(matches!(
+            evaluate(Some(&Trigger::parse("base:2026.08").unwrap()), &f),
+            Verdict::Stale { .. }
+        ));
+        assert_eq!(
+            evaluate(Some(&Trigger::parse("base:2026.09").unwrap()), &f),
+            Verdict::Fresh
+        );
+    }
+
+    /// **This exact bug already shipped in this repo**, where `2027.2` beat
+    /// `2027.10` because the comparison was a string sort. It is the best
+    /// mutation available and it costs nothing to reuse.
+    #[test]
+    fn base_versions_are_compared_numerically_not_lexicographically() {
+        let mut f = facts();
+        f.base_version = Some("2027.10".into());
+        assert!(
+            matches!(
+                evaluate(Some(&Trigger::parse("base:2027.2").unwrap()), &f),
+                Verdict::Stale { .. }
+            ),
+            "2027.10 is newer than 2027.2, which a string sort denies"
+        );
+        // And the converse, so the check cannot be `=> Stale`.
+        f.base_version = Some("2027.2".into());
+        assert_eq!(
+            evaluate(Some(&Trigger::parse("base:2027.10").unwrap()), &f),
+            Verdict::Fresh
+        );
+    }
+
+    /// A version omh cannot read is a fact it does not have. Treating it as
+    /// stale flags every good note the day a format changes.
+    #[test]
+    fn a_base_version_omh_cannot_parse_is_unknown_rather_than_stale() {
+        let mut f = facts();
+        f.base_version = Some("not-a-version".into());
+        assert!(matches!(
+            evaluate(Some(&Trigger::parse("base:2026.08").unwrap()), &f),
+            Verdict::Unknown { .. }
+        ));
+        f.base_version = None;
+        assert!(matches!(
+            evaluate(Some(&Trigger::parse("base:2026.08").unwrap()), &f),
+            Verdict::Unknown { .. }
+        ));
+    }
+
+    /// The code graph lives in a container volume and is queried per session.
+    /// A host-side `stale` has neither, so it must say so rather than guess —
+    /// and `Unknown` must never quietly become `Fresh`, which would promise an
+    /// expiry omh has not implemented.
+    #[test]
+    fn a_symbol_trigger_is_unknown_when_no_graph_is_reachable() {
+        let v = evaluate(
+            Some(&Trigger::parse("symbol:GUEST_HOME").unwrap()),
+            &facts(),
+        );
+        assert!(matches!(v, Verdict::Unknown { .. }), "{v:?}");
+        let Verdict::Unknown { because } = v else {
+            unreachable!()
+        };
+        assert!(because.contains("graph"), "say why: {because}");
+    }
+
+    /// Without this, the arm above could be hardwired to `Unknown` for ever and
+    /// nothing would notice the day a symbol set can be supplied.
+    #[test]
+    fn a_symbol_trigger_fires_when_a_graph_says_the_symbol_is_gone() {
+        let mut f = facts();
+        f.symbols = Some(["STILL_HERE".to_string()].into_iter().collect());
+        assert!(matches!(
+            evaluate(Some(&Trigger::parse("symbol:GONE").unwrap()), &f),
+            Verdict::Stale { .. }
+        ));
+        assert_eq!(
+            evaluate(Some(&Trigger::parse("symbol:STILL_HERE").unwrap()), &f),
+            Verdict::Fresh
+        );
+    }
+
+    /// Every arm, in one place: nothing may return `Fresh` from an absence.
+    /// That is the single failure mode that makes `stale` a liar rather than
+    /// merely incomplete.
+    #[test]
+    fn nothing_is_ever_fresh_because_omh_knows_nothing() {
+        for raw in [
+            "file:x.rs@abc",
+            "image:sha256-1",
+            "base:2026.08",
+            "symbol:X",
+        ] {
+            let t = Trigger::parse(raw).unwrap();
+            assert_ne!(
+                evaluate(Some(&t), &facts()),
+                Verdict::Fresh,
+                "{raw} reported fresh against facts omh does not have"
+            );
+        }
+    }
+}
