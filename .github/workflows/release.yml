@@ -51,8 +51,12 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             os: ubuntu-24.04-arm
+          # Both Apple targets build on the arm64 runner. The Intel `macos-13`
+          # label has been retired, so a job asking for one queues until it is
+          # cancelled — it does not fail, which is worse. Apple's SDK carries
+          # both slices and omh pulls in no C, so the x86_64 cross is native.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
     steps:
