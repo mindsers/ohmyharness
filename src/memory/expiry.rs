@@ -629,6 +629,73 @@ mod tests {
         );
     }
 
+    /// **A trap, disarmed rather than a feature deferred.**
+    ///
+    /// `image:` covers the base recipe only, and the obvious extension — digest
+    /// `harness_dockerfile` as well — quietly reintroduces the bug
+    /// `recipe_digest` was written to prevent. The harness recipe opens
+    /// `FROM {base_tag()}`, and `base_tag` is a `DefaultHasher` of the base
+    /// recipe: a value std does not guarantee across releases. Pinning a digest
+    /// computed over that text marks every harness-triggered note stale for
+    /// everyone the day somebody upgrades Rust — the mass false positive with no
+    /// cause anybody could find, which is the sentence `recipe_digest`'s own
+    /// docstring uses.
+    ///
+    /// There are two honest ways forward: render the recipe stably first,
+    /// substituting the base's *recipe* digest for its tag, or leave `image:`
+    /// base-only as the docs say. This fails on the third — `gather` growing a
+    /// harness digest while the recipe still carries an unstable tag — so the
+    /// dependency is discovered here rather than in a store full of notes that
+    /// went stale on a toolchain bump.
+    #[test]
+    fn a_harness_recipe_is_never_pinned_while_it_carries_an_unstable_tag() {
+        let shipped = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/adapters"));
+        let harnesses = crate::adapter::Adapter::load_dir(shipped).unwrap();
+        assert!(!harnesses.is_empty(), "no adapters to check: {shipped:?}");
+
+        // Into the profile `gather` would actually read, or this guards a
+        // directory the code under test never looks at — the fixture would be
+        // empty, `load_dir` would return nothing, and the mistake this exists
+        // to catch would sail through.
+        let (_d, paths) = repo_with(&[]);
+        std::fs::create_dir_all(paths.adapters()).unwrap();
+        for entry in std::fs::read_dir(shipped).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|e| e == "toml") {
+                std::fs::copy(entry.path(), paths.adapters().join(entry.file_name())).unwrap();
+            }
+        }
+
+        let pinned = match gather(&paths, &[]).images {
+            Fact::Known(set) => set,
+            Fact::Unavailable(why) => panic!("the base recipe must be digestible: {why}"),
+        };
+
+        for adapter in &harnesses {
+            let recipe = crate::image::harness_dockerfile(adapter);
+            let carries_unstable_tag = recipe.contains(&crate::image::base_tag());
+            let digest = crate::image::recipe_digest(&recipe).unwrap();
+
+            // Pinned as well as guarded, so this cannot go quietly vacuous. If
+            // it fails, the recipe has become stable and the news is good:
+            // `image:` may now cover harnesses, and the guard below has nothing
+            // left to protect. Read it and delete it rather than relaxing it.
+            assert!(
+                carries_unstable_tag,
+                "`{}`'s recipe no longer embeds `base_tag()` — a harness digest \
+                 is now safe to pin, and this test has become the obstacle",
+                adapter.name
+            );
+            assert!(
+                !pinned.contains(&digest),
+                "`{}`'s recipe digest is pinned while the recipe still embeds \
+                 `base_tag()`, a DefaultHasher value std does not guarantee \
+                 across releases. Render it stably first — substitute the base's \
+                 recipe digest for its tag — or leave `image:` base-only.",
+                adapter.name
+            );
+        }
+    }
+
     /// `symbols` is `None` by never being assigned, so an `= Some(empty)` slip
     /// would report every symbol gone — under the `stale` heading, which is the
     /// bold claim `commands.md` makes.
