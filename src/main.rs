@@ -9,6 +9,7 @@
 mod adapter;
 mod auth;
 mod base;
+mod bundled;
 mod carry;
 mod config;
 mod container;
@@ -1570,8 +1571,10 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     let adapters = install_bundled_adapters(&paths)?;
     let editors = install_bundled(&paths.editors(), "editors")?;
     // The base set ships as data next to the adapters, for the same reason: the
-    // opinion should be reviewable by the people it is imposed on, not buried
-    // in the binary. `omh why` reads the same file init seeds from.
+    // opinion should be reviewable by the people it is imposed on. It travels
+    // *inside* the binary now — otherwise a released omh installs nothing — but
+    // it still lands as a file in `~/.omh/base`, which is where the
+    // reviewability actually lives. `omh why` reads the file init seeds from.
     install_bundled(&paths.base(), "base")?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     std::fs::create_dir_all(paths.root.join("profile/skills"))?;
@@ -1780,29 +1783,27 @@ fn install_bundled_adapters(paths: &Paths) -> Result<Vec<String>> {
 /// fix omh ships has to reach people who already ran it once. The one that
 /// mattered was a wrong credential path, which made `omh auth` capture nothing
 /// while reporting success. Definitions you add yourself are left alone.
+///
+/// The contents come from [`bundled`], embedded at compile time. Reading them
+/// from the source tree instead is what made a released binary install nothing
+/// at all — and say nothing, because the `read_dir` error was discarded.
 fn install_bundled(dest: &std::path::Path, kind: &str) -> Result<Vec<String>> {
     std::fs::create_dir_all(dest)?;
-    let bundled = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(kind);
-    if let Ok(entries) = std::fs::read_dir(&bundled) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "toml") {
-                let shipped = std::fs::read_to_string(&path)?;
-                let target = dest.join(entry.file_name());
-                let existing = std::fs::read_to_string(&target).unwrap_or_default();
-                if !existing.is_empty() && existing != shipped {
-                    // Managed files are refreshed so shipped fixes land, but
-                    // silently discarding an edit is not acceptable.
-                    println!(
-                        "  replaced   {} (yours saved as {}.yours)",
-                        target.display(),
-                        entry.file_name().to_string_lossy()
-                    );
-                    std::fs::write(target.with_extension("toml.yours"), &existing)?;
-                }
-                std::fs::write(&target, shipped)?;
-            }
+    let shipped_files = bundled::files(kind)
+        .with_context(|| format!("omh ships no `{kind}` — nothing would be installed"))?;
+    for (name, shipped) in shipped_files {
+        let target = dest.join(name);
+        let existing = std::fs::read_to_string(&target).unwrap_or_default();
+        if !existing.is_empty() && existing != *shipped {
+            // Managed files are refreshed so shipped fixes land, but
+            // silently discarding an edit is not acceptable.
+            println!(
+                "  replaced   {} (yours saved as {name}.yours)",
+                target.display(),
+            );
+            std::fs::write(target.with_extension("toml.yours"), &existing)?;
         }
+        std::fs::write(&target, shipped)?;
     }
     let mut names: Vec<String> = std::fs::read_dir(dest)?
         .flatten()
