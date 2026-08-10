@@ -1005,7 +1005,7 @@ fn memory_promote(cwd: &std::path::Path, keys: &[String]) -> Result<()> {
         }
     };
     memory::promote::apply(&steps)?;
-    print!("{}", memory::promote::report(&steps));
+    print!("{}", memory::promote::report(&steps, &paths));
     Ok(())
 }
 

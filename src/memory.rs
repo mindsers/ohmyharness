@@ -711,16 +711,22 @@ pub fn resolve(notes: &[Note], key: &str, from: Layer) -> Vec<Layer> {
     found
 }
 
-/// The links a note carries that a fresh clone could not follow.
+/// The links a note carries that exist here but would not exist in a fresh
+/// clone. A link to a key nobody wrote is the lint's `DanglingLink`, not this:
+/// it is already broken everywhere, and counting it here would refuse a
+/// promotion for a reason promotion cannot fix.
 ///
 /// The one predicate both `lint` and `promote` call. Two implementations of
 /// "what would dangle for a teammate" is the shape that once had two
 /// subsystems telling two stories about one file.
 ///
-/// `also_committed` is what a pending promotion would make committed, so a
-/// plan can be checked against its own closure — otherwise two notes that
-/// point at each other are unpromotable in either order, with an error that
-/// reads like a bug.
+/// `also_committed` is everything the caller *asked* to promote, not the
+/// subset that will succeed, so a plan can be checked against its own closure
+/// — otherwise two notes that point at each other are unpromotable in either
+/// order, with an error that reads like a bug. That it is the request rather
+/// than the outcome is safe only because one blocker aborts the whole batch:
+/// a partial promotion would let a key that was itself blocked go on vouching
+/// for its neighbours.
 ///
 /// Takes the note, not its key. Identity is `(layer, key)` and `DuplicateKey`
 /// is only a warning, so a key can name more than one file: looking one up

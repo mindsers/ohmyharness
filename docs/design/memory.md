@@ -359,7 +359,7 @@ guard red first, then reintroduce the defect to confirm it bites**
 
 ```console
 $ omh memory                    # list, by layer, with reference counts
-$ omh memory promote <key>      # local → team; checks invariant 2 first
+$ omh memory promote <key>…     # local → team; refuses anything unshareable
 $ omh memory rm <key>           # one note; reports inbound links
 $ omh memory stale              # join against §8 events
 $ omh memory lint               # schema + hygiene violations

@@ -318,14 +318,31 @@ fn copy(step: &Promotion) -> Result<()> {
 }
 
 /// What to say afterwards. Pure, so the part people actually read is testable.
-pub fn report(plan: &[Promotion]) -> String {
+///
+/// Paths are named relative to the repo: the destination is inside it, an
+/// absolute path leaks the operator's home into anything they paste, and the
+/// documented transcript shows the short form.
+pub fn report(plan: &[Promotion], paths: &Paths) -> String {
     let mut out = String::new();
     for step in plan {
-        out.push_str(&format!("promoted {} → {}\n", step.key, step.to.display()));
+        let to = step.to.strip_prefix(&paths.repo).unwrap_or(&step.to);
+        out.push_str(&format!("promoted {} → {}\n", step.key, to.display()));
     }
     // The file has moved; the teammate has not received anything. Saying
     // "promoted" and stopping invites believing otherwise.
-    out.push_str("\nnot shared until committed:\n  git add .omh/notes && git commit\n");
+    //
+    // `:/` is git's root-relative pathspec. Without it this line is advice
+    // that only works from the repo root: from a subdirectory a bare
+    // `.omh/notes` matches nothing and git exits non-zero, which is the worst
+    // moment to hand somebody a command that fails.
+    let notes = Layer::Team
+        .dir(paths)
+        .strip_prefix(&paths.repo)
+        .map(|rel| format!(":/{}", rel.display()))
+        .unwrap_or_else(|_| Layer::Team.dir(paths).display().to_string());
+    out.push_str(&format!(
+        "\nnot shared until committed:\n  git add {notes} && git commit\n"
+    ));
     out
 }
 
@@ -915,12 +932,87 @@ mod tests {
         let (_d, paths) = fixture();
         seed(&paths, Layer::Local, "k", &[]);
         let notes = load(&paths).unwrap();
-        let text = report(&plan(&notes, &paths, &keys(&["k"]), NEVER).unwrap());
+        let text = report(&plan(&notes, &paths, &keys(&["k"]), NEVER).unwrap(), &paths);
 
         assert!(text.contains("git commit"), "{text}");
+        assert!(text.contains("k.md"), "name where it went: {text}");
+    }
+
+    /// The destination is inside the repo, so naming it from the repo is what a
+    /// reader can act on — and it is what the documented transcript shows. An
+    /// absolute path also leaks the operator's home directory into output that
+    /// gets pasted into issues.
+    #[test]
+    fn the_report_names_the_destination_relative_to_the_repo() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "surprise/thing", &[]);
+        let notes = load(&paths).unwrap();
+        let text = report(
+            &plan(&notes, &paths, &keys(&["surprise/thing"]), NEVER).unwrap(),
+            &paths,
+        );
+
         assert!(
-            text.contains(&Layer::Team.dir(&paths).join("k.md").display().to_string()),
-            "name where it went: {text}"
+            text.contains(".omh/notes/surprise/thing.md"),
+            "repo-relative: {text}"
+        );
+        assert!(
+            !text.contains(&paths.repo.display().to_string()),
+            "not the absolute path: {text}"
+        );
+    }
+
+    /// **The instruction is run, not read.** `git add .omh/notes` matches
+    /// nothing from a subdirectory and exits 128, so the one line telling the
+    /// operator how to finish the job failed exactly when they were not sitting
+    /// at the repo root.
+    #[test]
+    fn the_git_add_the_report_suggests_works_from_a_subdirectory() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(repo.join("src/deep")).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+
+        seed(&paths, Layer::Local, "k", &[]);
+        let notes = load(&paths).unwrap();
+        let steps = plan(&notes, &paths, &keys(&["k"]), NEVER).unwrap();
+        apply(&steps).unwrap();
+        let text = report(&steps, &paths);
+
+        // The literal line the operator would copy, run where they actually
+        // are. Only up to the `&&`: the commit that follows opens an editor,
+        // and it is the `add` that has to resolve a path.
+        let line = text
+            .lines()
+            .find(|l| l.trim_start().starts_with("git add"))
+            .unwrap_or_else(|| panic!("no git add line: {text}"));
+        let suggested = line.split("&&").next().unwrap().trim();
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(suggested)
+            .current_dir(repo.join("src/deep"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "`{suggested}` from a subdirectory: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let staged = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["diff", "--cached", "--name-only"])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&staged.stdout).contains(".omh/notes/k.md"),
+            "and it staged the promoted note: {}",
+            String::from_utf8_lossy(&staged.stdout)
         );
     }
 

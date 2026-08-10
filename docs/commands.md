@@ -323,12 +323,17 @@ one `refused` line, and would exit 0 without it. Until the agent's own writes
 are refused, this is what a hook or a CI step can gate on, and a gate that also
 tripped on hygiene would be red for every store with an unlinked note in it.
 
-Two rules are worth naming because they describe the store rather than one
+Three rules are worth naming because they describe the store rather than one
 note's shape. `UnclosedFence` refuses a note whose code fence never closes:
 everything after it is quoted, including headings and `[[links]]`, so the note
 does not mean what it looks like. `DuplicateKey` warns when one key is claimed
 by two files in one layer — §6 makes a key a primary key, `remember` refuses to
 create a second, and this is how one that arrived by hand becomes visible.
+`CrossLayerLink` warns when a *committed* note links to one that is not: the
+link works on the machine that wrote it and dangles in every clone, which is
+invariant 2 and the reason `promote` exists. It warns rather than refuses
+because the note at fault is somebody else's, and an agent writing right now
+cannot fix it — `promote` is where the same condition is fatal.
 
 ### `omh memory promote <key>…`
 
@@ -381,11 +386,16 @@ promoted surprise/credentials-live-in-a-volume → .omh/notes/…
 promoted surprise/ebusy-on-a-file-mount → .omh/notes/…
 
 not shared until committed:
-  git add .omh/notes && git commit
+  git add :/.omh/notes && git commit
 ```
 
 Two notes that link to each other are unpromotable one at a time, which is why
 the check knows what else is in the batch.
+
+`:/` in that last line is git's root-relative pathspec, so the command works
+from wherever you happened to run `promote`. A bare `.omh/notes` matches
+nothing from a subdirectory, and a command that fails is a poor way to end the
+one step that actually shares the note.
 
 **One blocked key stops the whole batch.** A half-finished promotion leaves a
 store nobody planned, and you would have to work out which half landed.
