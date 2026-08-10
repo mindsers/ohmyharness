@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub mod deliver;
+pub mod expiry;
 pub mod index;
 pub mod ingest;
 pub mod promote;
@@ -235,6 +236,12 @@ pub fn parse(raw: &str, layer: Layer, path: &Path) -> Result<Note> {
         );
     }
 
+    // §8's closed set is checked by `check` and refused at the write path, not
+    // here. `invalidated_by` was free text through M1–M3, so a legacy value is
+    // a file already sitting on somebody's disk — and refusing it at *load*
+    // made one hand-edited line take down `ls`, `recall`, `stale` and the MCP
+    // read path together, then blocked every subsequent write.
+
     let kind: Kind = required(&fields, "type", path)?
         .parse()
         // Flattened rather than wrapped: `to_string()` on a wrapped error
@@ -454,6 +461,9 @@ pub enum Rule {
     DanglingLink,
     /// A committed note links somewhere a fresh clone cannot follow.
     CrossLayerLink,
+    /// `invalidated_by` names an expiry omh cannot evaluate, so the note
+    /// advertises a freshness guarantee nothing will ever check.
+    UnevaluatableTrigger,
     Orphan,
 }
 
@@ -476,7 +486,8 @@ impl Rule {
             | Self::UnclosedFence
             | Self::MissingSection
             | Self::ProseInListSection
-            | Self::KeyDisagreesWithPath => Severity::Refused,
+            | Self::KeyDisagreesWithPath
+            | Self::UnevaluatableTrigger => Severity::Refused,
             Self::DuplicateKey | Self::DanglingLink | Self::CrossLayerLink | Self::Orphan => {
                 Severity::Warning
             }
@@ -586,6 +597,15 @@ pub fn check(note: &Note) -> Vec<Violation> {
             detail,
         })
     };
+
+    // §8's closed set, asked here rather than at load: a note that already
+    // exists must still be readable, and this is what makes the bad one
+    // visible instead of fatal.
+    if let Some(raw) = note.invalidated_by.as_deref().filter(|v| !v.is_empty()) {
+        if let Err(e) = expiry::Trigger::parse(raw) {
+            fire(Rule::UnevaluatableTrigger, format!("{e}"));
+        }
+    }
 
     // A fence left open swallows every heading and every link after it, so
     // the section checks below would report sections the writer can plainly
@@ -1139,6 +1159,40 @@ pub enum Wrote {
     Skipped(String),
 }
 
+/// Parse a trigger, and rewrite a `file:` path relative to the repo.
+///
+/// Parsing here as well as at load is what makes §8's set closed at the only
+/// door an agent uses.
+/// The write path's share of §8: fold what only makes sense here, and refuse
+/// what omh could never evaluate.
+///
+/// Spelled out rather than ending in a binding catch-all. This function exists
+/// because a value that means one thing where it was written means another
+/// where it is read, and `other => other.render()` silently opts each new kind
+/// out of exactly that — writing it through un-normalised, which is the bug
+/// this was added to prevent.
+fn normalise_trigger(raw: &str, repo: &Path) -> Result<String> {
+    Ok(match expiry::Trigger::parse(raw)? {
+        // Recorded from inside the sandbox, read from outside it.
+        expiry::Trigger::File { path, hash } => expiry::Trigger::File {
+            path: expiry::normalise_path(&path, repo),
+            hash,
+        }
+        .render(),
+        // `current` is a request, not a value: resolve it while omh is the one
+        // holding the recipe, so what lands on disk is a digest a later `stale`
+        // can compare against.
+        expiry::Trigger::Image { digest } if digest == expiry::IMAGE_NOW => {
+            let now = crate::image::recipe_digest(&crate::image::base_dockerfile())
+                .context("recording what the image recipe is right now")?;
+            expiry::Trigger::Image { digest: now }.render()
+        }
+        t @ (expiry::Trigger::Image { .. }
+        | expiry::Trigger::Base { .. }
+        | expiry::Trigger::Symbol { .. }) => t.render(),
+    })
+}
+
 fn non_blank(value: &str, name: &str) -> Result<()> {
     if value.trim().is_empty() {
         bail!("`{name}` is empty; there is nothing here worth recording");
@@ -1180,6 +1234,7 @@ fn body_of(input: &Remembered) -> String {
 pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Result<Wrote> {
     remember_in(
         &Layer::AGENT_WRITE.dir(paths),
+        &paths.repo,
         &templates(paths)?,
         input,
         if_exists,
@@ -1194,6 +1249,7 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
 /// derived from a repo.
 pub fn remember_in(
     root: &Path,
+    repo: &Path,
     templates: &BTreeMap<Kind, String>,
     input: &Remembered,
     if_exists: IfExists,
@@ -1295,7 +1351,14 @@ pub fn remember_in(
         kind: Kind::Surprise,
         source: input.source.trim().to_string(),
         recorded: input.recorded.clone(),
-        invalidated_by: input.invalidated_by.clone(),
+        // Stored repo-relative. The agent records what it sees, which inside
+        // the sandbox is `/work/...`; host-side that file does not exist, and
+        // every `file:` trigger would report stale on day one.
+        invalidated_by: input
+            .invalidated_by
+            .as_deref()
+            .map(|raw| normalise_trigger(raw, repo))
+            .transpose()?,
         body: body_of(input),
         layer,
         path: path.clone(),
@@ -1602,7 +1665,7 @@ key: surprise/mounting-a-credential-file-returns-ebusy
 type: surprise
 source: session s03, claude
 recorded: 2026-08-07
-invalidated_by: image:sha256-4f2a
+invalidated_by: image:4f2a1c3b5d7e9f0a2b4c6d8e0f1a3b5c7d9e0f1a
 ---
 
 # Mounting a credential file returns EBUSY
@@ -2703,7 +2766,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let (_d, paths) = fixture();
         let mut input = observation();
         input.relates_to = vec!["credentials-are-a-named-volume".into()];
-        input.invalidated_by = Some("image:sha256-4f2a".into());
+        input.invalidated_by = Some("image:4f2a1c3b5d7e9f0a2b4c6d8e0f1a3b5c7d9e0f1a".into());
 
         let Wrote::Created(path) = remember(&paths, &input, IfExists::Error).unwrap() else {
             panic!("a fresh key must be created");
@@ -3698,6 +3761,179 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             text.contains("code"),
             "it has to distinguish itself from the code graph: {text}"
         );
+    }
+
+    /// The agent records what it sees, and inside the sandbox that is
+    /// `/work/...`. Host-side that path does not exist, so every `file:`
+    /// trigger would report stale the moment it was written.
+    #[test]
+    fn a_trigger_recorded_in_the_sandbox_is_stored_repo_relative() {
+        let (_d, paths) = fixture();
+        let mut input = observation();
+        input.invalidated_by = Some(format!(
+            "file:{}/src/main.rs@abc1230",
+            crate::container_workdir()
+        ));
+        remember(&paths, &input, IfExists::Error).unwrap();
+
+        let note = &load(&paths).unwrap()[0];
+        assert_eq!(
+            note.invalidated_by.as_deref(),
+            Some("file:src/main.rs@abc1230"),
+            "the sandbox prefix must not survive into the store"
+        );
+    }
+
+    /// §8's set is closed so that `stale` can evaluate every member. A note
+    /// carrying `vibes:soon` advertises an expiry that exists only in the
+    /// reader's mind.
+    ///
+    /// The door is the schema, not the parser. Reading such a note has to keep
+    /// working — it may already exist — so `check` is what refuses it, which is
+    /// also what puts it in front of somebody in `lint`.
+    #[test]
+    fn an_invalidation_kind_omh_cannot_evaluate_is_refused_by_the_schema() {
+        let raw = SURPRISE.replace(
+            "invalidated_by: image:4f2a1c3b5d7e9f0a2b4c6d8e0f1a3b5c7d9e0f1a",
+            "invalidated_by: vibes:soon",
+        );
+        let note = parse(&raw, Layer::Local, std::path::Path::new("x.md"))
+            .expect("a note that already exists must still be readable");
+
+        let found = check(&note);
+        let bad: Vec<&Violation> = found
+            .iter()
+            .filter(|v| v.rule == Rule::UnevaluatableTrigger)
+            .collect();
+        assert_eq!(bad.len(), 1, "got: {found:?}");
+        assert!(bad[0].detail.contains("vibes"), "{:?}", bad[0]);
+        assert_eq!(
+            bad[0].rule.severity(),
+            Severity::Refused,
+            "a warning would let it ship"
+        );
+    }
+
+    /// And a refused trigger must leave nothing behind, like any other refused
+    /// write.
+    ///
+    /// One assertion, not three joined by `||`: the original could pass because
+    /// the directory happened to be unreadable, which is not the same news.
+    #[test]
+    fn a_note_with_an_unevaluatable_trigger_is_never_written() {
+        let (_d, paths) = fixture();
+        let mut input = observation();
+        input.invalidated_by = Some("whenever:i-feel-like-it".into());
+        assert!(remember(&paths, &input, IfExists::Error).is_err());
+        assert!(load(&paths).unwrap().is_empty());
+    }
+
+    /// **One bad note must not take the store down with it.** `invalidated_by`
+    /// was free text through M1–M3, so a legacy value is a file that already
+    /// exists on somebody's disk. Refusing it at *load* made `ls`, `recall`,
+    /// `stale` and the MCP read path all fail together, and `remember`'s own
+    /// opaque check then refused every subsequent write: one hand-edited line,
+    /// and the memory is gone.
+    #[test]
+    fn a_trigger_omh_cannot_evaluate_does_not_take_the_store_down() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "good", &surprise_body());
+        let bad = Layer::Local.dir(&paths).join("legacy.md");
+        std::fs::write(
+            &bad,
+            format!(
+                "---\nkey: legacy\ntype: surprise\nsource: audit\n\
+                 recorded: 2026-08-07\ninvalidated_by: whenever:i-feel-like-it\n---\n\n{}",
+                surprise_body()
+            ),
+        )
+        .unwrap();
+
+        let notes = load(&paths).unwrap();
+        assert_eq!(notes.len(), 2, "both notes still load");
+
+        // And the lint is where it surfaces, rather than nowhere.
+        let found = lint(&paths).unwrap();
+        let bad_trigger: Vec<&Violation> = found
+            .iter()
+            .filter(|v| v.rule == Rule::UnevaluatableTrigger)
+            .collect();
+        assert_eq!(bad_trigger.len(), 1, "got: {found:?}");
+        assert_eq!(bad_trigger[0].key, "legacy");
+        assert_eq!(Rule::UnevaluatableTrigger.severity(), Severity::Refused);
+    }
+
+    /// **`image:` had no producer.** The digest is a hash of recipe text that
+    /// only exists inside the binary, so no command could print it and every
+    /// pin a writer invented was wrong from birth — the expiry-that-can-never-
+    /// fire this module opens by forbidding. `current` is the name for "what
+    /// omh would build now", resolved here so the store still holds a value.
+    #[test]
+    fn pinning_the_current_image_records_the_digest_omh_would_build() {
+        let (_d, paths) = fixture();
+        let mut input = observation();
+        input.invalidated_by = Some(format!("image:{}", expiry::IMAGE_NOW));
+        remember(&paths, &input, IfExists::Error).unwrap();
+
+        let recorded = load(&paths).unwrap()[0].invalidated_by.clone().unwrap();
+        let expected = crate::image::recipe_digest(&crate::image::base_dockerfile()).unwrap();
+        assert_eq!(
+            recorded,
+            format!("image:{expected}"),
+            "the sentinel must not reach the store"
+        );
+        assert!(
+            expiry::Trigger::parse(&recorded).is_ok(),
+            "and what lands is a pin omh can evaluate"
+        );
+    }
+
+    /// **The shape of the vendor's bug, guarded on omh's own renderer.**
+    ///
+    /// Their remaining quality gap was not a prompt failure: the renderer
+    /// rewrote link text as it wrote, so three successive prompt revisions
+    /// looked randomly disobeyed. This does not guard *their* renderer — iwe is
+    /// never invoked here — it guards `render`/`parse`, which is the one that
+    /// could acquire the same habit.
+    ///
+    /// **Both halves are load-bearing, and the byte comparison is the weaker
+    /// one.** It catches a rewrite that differs from pass to pass. It cannot
+    /// catch an *idempotent* one — which is what the bug actually was — because
+    /// both writes go through the same renderer and agree with each other. The
+    /// `[[key]]` assertion below is what sees that, so the two are not
+    /// belt-and-braces: they cover different failures.
+    ///
+    /// This belongs here whether or not hub pages ever ship.
+    #[test]
+    fn writing_a_note_never_rewrites_its_link_text() {
+        let (_d, paths) = fixture();
+        let mut input = observation();
+        input.relates_to = vec![
+            "credentials-are-a-named-volume".into(),
+            "surprise/one-inode".into(),
+        ];
+        let Wrote::Created(path) = remember(&paths, &input, IfExists::Error).unwrap() else {
+            panic!()
+        };
+        let first = std::fs::read(&path).unwrap();
+
+        // Read it back and write it out again by the same route a rename, a
+        // promotion or a lint pass would.
+        let note = &load(&paths).unwrap()[0];
+        std::fs::write(&path, render(note)).unwrap();
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            first,
+            "a round trip must not touch a single byte, link text least of all"
+        );
+        let text = String::from_utf8(first).unwrap();
+        for key in &input.relates_to {
+            assert!(
+                text.contains(&format!("[[{key}]]")),
+                "the link is stored as written: {text}"
+            );
+        }
     }
 
     /// The agent writes into the sandbox, so the path it is given must be the

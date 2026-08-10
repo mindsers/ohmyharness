@@ -82,7 +82,7 @@ pub fn plan(
     // The agent's entire world. Never the host working tree.
     mounts.push(Mount {
         host: session.worktree.clone(),
-        guest: "/work".into(),
+        guest: crate::container_workdir().into(),
         read_only: false,
         file: false,
     });
@@ -171,7 +171,7 @@ pub fn plan(
             ),
         ],
         network: paths.network(),
-        workdir: "/work".into(),
+        workdir: crate::container_workdir().into(),
         argv: crate::persist::wrap(
             opts.persist,
             &session.id,

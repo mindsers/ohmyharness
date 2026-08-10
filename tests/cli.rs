@@ -283,3 +283,113 @@ fn promote_moves_the_note_and_says_it_is_not_shared_yet() {
         "and no longer in the gitignored one"
     );
 }
+
+/// The hash git would record for a file, so a fixture can pin the real thing
+/// rather than a value that is stale by construction.
+fn hash_object(repo: &Path, rel: &str) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["hash-object", "--"])
+        .arg(rel)
+        .output()
+        .expect("git must be installed to run this test");
+    assert!(out.status.success(), "git hash-object failed");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+fn note_expiring(key: &str, trigger: &str) -> String {
+    format!(
+        "---\nkey: {key}\ntype: surprise\nsource: audit\nrecorded: 2026-08-10\n\
+         invalidated_by: {trigger}\n---\n\n# T\n\n{WHOLE}"
+    )
+}
+
+/// **`stale` said nothing at the only boundary a script reads.** Four notes
+/// stale exited 0; git missing so that not one probe could be answered exited
+/// 0; an empty store exited 0. `lint` in the same file has bothered to bail
+/// since M1, and CI cannot tell "the store is clean" from "omh checked
+/// nothing".
+#[test]
+fn stale_fails_the_command_when_a_note_is_out_of_date() {
+    let sb = sandbox();
+    sb.git_init();
+    std::fs::write(sb.repo.join("t.txt"), "before\n").unwrap();
+    sb.seed("pinned.md", &note_expiring("pinned", "file:t.txt@0000000"));
+
+    let out = sb.omh(&["memory", "stale"]);
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "a stale store must fail: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        printed.contains("stale"),
+        "the report is the product: {printed}"
+    );
+}
+
+/// The other half, or the test above passes on a `stale` that always fails.
+#[test]
+fn stale_exits_zero_when_every_note_is_current() {
+    let sb = sandbox();
+    sb.git_init();
+    std::fs::write(sb.repo.join("t.txt"), "before\n").unwrap();
+    let real = hash_object(&sb.repo, "t.txt");
+    sb.seed(
+        "pinned.md",
+        &note_expiring("pinned", &format!("file:t.txt@{real}")),
+    );
+
+    let out = sb.omh(&["memory", "stale"]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "nothing is stale: {}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// **"omh cannot tell" is not "fine".** Folding it into 0 is the same lie the
+/// `Unknown` verdict exists to refuse, arriving one layer later — a scripted
+/// caller reads the code, not the prose.
+#[test]
+fn stale_reports_a_separate_code_when_it_cannot_tell() {
+    let sb = sandbox();
+    sb.git_init();
+    // `symbol:` is unanswerable from the host by design.
+    sb.seed("sym.md", &note_expiring("sym", "symbol:GUEST_HOME"));
+
+    let out = sb.omh(&["memory", "stale"]);
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "cannot-tell has its own code: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The grouping is the last hop, and the heading a note lands under is the
+/// whole claim. Swapping the two headings, or filing `Unknown` under `stale`,
+/// kept the suite green while `contributing.md` listed the opposite as guarded.
+#[test]
+fn stale_never_files_what_it_cannot_tell_under_stale() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed("sym.md", &note_expiring("sym", "symbol:GUEST_HOME"));
+
+    let printed = String::from_utf8_lossy(&sb.omh(&["memory", "stale"]).stdout).to_string();
+    let cannot = printed.find("omh cannot tell").expect(&printed);
+    let key = printed.find("sym").expect(&printed);
+    assert!(
+        printed.find("stale:").is_none(),
+        "nothing is known to be stale here: {printed}"
+    );
+    assert!(
+        key > cannot,
+        "the note belongs under that heading: {printed}"
+    );
+}

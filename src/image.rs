@@ -46,6 +46,37 @@ pub fn tag_for(adapter: &Adapter) -> String {
 /// consistent until it isn't.
 pub const GUEST_HOME: &str = "/home/agent";
 
+/// A digest of an image recipe, for a note to pin.
+///
+/// Deliberately **not** `base_tag()`'s. That uses `DefaultHasher`, whose output
+/// std explicitly does not guarantee across releases — fine for a tag, which is
+/// ephemeral and local. A note is committed and travels, so pinning that value
+/// would mark every image-triggered note in the repo stale on the day somebody
+/// upgrades Rust: a mass false positive with no cause anybody could find.
+///
+/// `git hash-object` is a stable SHA-1 of the text, for ever, and shells out
+/// exactly as `carry.rs` and `session.rs` already do.
+pub fn recipe_digest(recipe: &str) -> Result<String> {
+    use anyhow::Context;
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = std::process::Command::new("git")
+        .args(["hash-object", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("running git hash-object")?;
+    child
+        .stdin
+        .take()
+        .context("no stdin")?
+        .write_all(recipe.as_bytes())?;
+    let out = child.wait_with_output()?;
+    anyhow::ensure!(out.status.success(), "git hash-object failed");
+    Ok(String::from_utf8(out.stdout)?.trim().to_string())
+}
+
 pub fn base_dockerfile() -> String {
     // Interpolated rather than written out, so the directory the image
     // prepares and the directory the launcher mounts into cannot drift.
@@ -363,6 +394,22 @@ mod tests {
             base_dockerfile().contains(GRAPH_CACHE),
             "the image must create the cache directory, or docker makes it root-owned"
         );
+    }
+
+    /// The one place a literal is correct: the whole point of this digest is
+    /// that the value never moves. `DefaultHasher` would pass every test here
+    /// and change under a toolchain upgrade, marking every image-pinned note in
+    /// every repo stale on the same day.
+    #[test]
+    fn an_image_recipe_digest_is_stable_across_toolchains() {
+        assert_eq!(
+            recipe_digest("hello\n").unwrap(),
+            "ce013625030ba8dba906f756967f9e9ca394464a",
+            "this is git's SHA-1 of the blob and it is not allowed to change"
+        );
+        // Same recipe, same digest; different recipe, different digest.
+        assert_eq!(recipe_digest("a").unwrap(), recipe_digest("a").unwrap());
+        assert_ne!(recipe_digest("a").unwrap(), recipe_digest("b").unwrap());
     }
 
     /// A bind mount whose guest directory does not exist is created by docker

@@ -140,7 +140,7 @@ impl Server {
                 },
                 "invalidated_by": {
                     "type": "string",
-                    "description": "optional: file:<path>@<hash>, image:<digest>, or base:<version>",
+                    "description": "optional: file:<path>@<hash> (git hash-object, 7+ chars), image:current, base:<version>, or symbol:<name>",
                 },
             },
             "required": REQUIRED,
@@ -177,7 +177,15 @@ impl Server {
 
         // Strict, always, and not because a flag says so — there is no flag.
         // The population most likely to skip a guard is the one that needs it.
-        match memory::remember_in(&self.local, &self.templates, &input, IfExists::Error) {
+        // The repo, as this process sees it: the server runs inside the
+        // sandbox, where the checkout is the workdir.
+        match memory::remember_in(
+            &self.local,
+            std::path::Path::new(crate::container_workdir()),
+            &self.templates,
+            &input,
+            IfExists::Error,
+        ) {
             Ok(Wrote::Created(path)) => ToolResult::Text(format!(
                 "recorded `{}`",
                 path.file_stem().unwrap_or_default().to_string_lossy()
