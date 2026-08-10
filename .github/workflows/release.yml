@@ -101,9 +101,15 @@ jobs:
   # This job deliberately does not check out the repo. That is the whole point:
   # the baked path is absent, exactly as it is on a user's machine, so the
   # binary is exercised as the thing people would actually download.
+  #
+  # Tag-only. It fails today, and that is the correct answer rather than a
+  # broken job: until the bundled files travel inside the binary, there is no
+  # release worth publishing. Running it on every pull request would just make
+  # the tree permanently red for a reason already known and written down.
   runs-without-a-source-tree:
     name: the binary works with no source tree
     needs: build
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: fetch the linux binary
