@@ -475,8 +475,8 @@ evaluate itself:
 | | invalid when |
 |---|---|
 | `file:<path>@<hash>` | the file's content changes, or it is deleted |
-| `image:<digest>` | the sandbox image recipe changes |
-| `base:<version>` | the base set is re-cut |
+| `image:<digest>` | the **base** image recipe changes. Pin it as `image:current` and omh records what it would build now — the value is a `git hash-object` of recipe text that lives inside the binary, so there is nothing to read it off. A harness layer changing does not fire it |
+| `base:<version>` | the base set moves to a **later month**. `parse_ym` compares year and month, so a re-cut within the same month is not a change, and a rollback to an older set is not staleness |
 | `symbol:<name>` | the code graph no longer contains it |
 | *(absent)* | never — it carries only its date |
 
@@ -538,6 +538,7 @@ degrades to absent with one line at launch rather than failing it.
 
 ### What is not here yet
 
-`stale` arrives with the milestone that gives it something to act on — see
-[the design](design/memory.md). A subcommand that printed "not implemented"
-would be worse than its absence, because `--help` advertises it.
+Hub pages — notes whose job is joining others — wait on a calibrated lint, and
+that needs a store nobody has grown yet. See [the design](design/memory.md#14-build-order).
+A subcommand that printed "not implemented" would be worse than its absence,
+because `--help` advertises it.

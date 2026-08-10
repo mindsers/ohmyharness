@@ -140,7 +140,7 @@ impl Server {
                 },
                 "invalidated_by": {
                     "type": "string",
-                    "description": "optional: file:<path>@<hash>, image:<digest>, or base:<version>",
+                    "description": "optional: file:<path>@<hash> (git hash-object, 7+ chars), image:current, base:<version>, or symbol:<name>",
                 },
             },
             "required": REQUIRED,

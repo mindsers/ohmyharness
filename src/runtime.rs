@@ -138,7 +138,7 @@ impl Runtime for Docker {
             "-u".into(),
             "agent".into(),
             "-w".into(),
-            "/work".into(),
+            crate::container_workdir().into(),
         ];
         a.push(name.into());
         a.extend(argv.iter().cloned());
@@ -152,7 +152,12 @@ impl Runtime for Docker {
         }
         // Never root: the session's PID 1 needs privilege to run sshd, the
         // agent does not.
-        a.extend(["-u".into(), "agent".into(), "-w".into(), "/work".into()]);
+        a.extend([
+            "-u".into(),
+            "agent".into(),
+            "-w".into(),
+            crate::container_workdir().into(),
+        ]);
         a.push(name.into());
         a.extend(argv.iter().cloned());
         a
@@ -603,5 +608,50 @@ mod tests {
         assert!(!Docker
             .exec_args("n", &["x".into()], false)
             .contains(&"-it".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod workdir_tests {
+    /// `container_workdir`'s docstring says the path is named once, so the note
+    /// store and the launch plan cannot disagree about it. It was not: the plan
+    /// spelled it twice and the note store's path folding a third time.
+    ///
+    /// Introspects the source, the way the `RESERVED` guard introspects the CLI
+    /// definition, because the obvious test cannot fail. Asserting that the
+    /// plan's workdir equals `container_workdir()` passes just as well when the
+    /// plan holds the literal — both sides are the same string, so it pins
+    /// nothing. Only counting the spellings can tell them apart.
+    #[test]
+    fn only_one_place_spells_the_container_workdir() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut offenders = Vec::new();
+        let mut stack = vec![root];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).unwrap();
+                // Fixtures may say it; the shipped path may not.
+                let production = body.split("#[cfg(test)]").next().unwrap_or("");
+                for (i, line) in production.lines().enumerate() {
+                    if line.contains("\"/work\"") {
+                        let name = path.file_name().unwrap().to_string_lossy().to_string();
+                        offenders.push(format!("{name}:{}", i + 1));
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            offenders.len(),
+            1,
+            "exactly one place may spell it — `container_workdir` itself. Found: {offenders:?}"
+        );
     }
 }

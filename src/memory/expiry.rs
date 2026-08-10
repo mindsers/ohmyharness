@@ -24,6 +24,37 @@ pub enum Trigger {
     Symbol { name: String },
 }
 
+/// The literal a writer pins when they mean "whatever omh would build now".
+///
+/// The digest is a `git hash-object` of recipe text that exists only inside
+/// the binary, so there is no command anybody can run to discover it. Without
+/// this, `image:` is a kind with no way to produce a value for it — every pin
+/// wrong from birth, which is the note-advertising-an-expiry-it-does-not-have
+/// case the module opens by forbidding. Resolved at the write path, so what
+/// lands on disk is still a concrete digest.
+pub const IMAGE_NOW: &str = "current";
+
+/// A `git hash-object` output, or a prefix of one long enough to mean it.
+///
+/// Seven is what `git log` abbreviates to and therefore what a writer pastes.
+/// Shorter is a typo rather than an abbreviation, and anything outside lower
+/// hex was never a hash — both used to be stored and then compared with `==`
+/// against the full forty, so the note was stale the day it was written and
+/// could never recover.
+fn is_hash(s: &str, min: usize) -> bool {
+    (min..=40).contains(&s.len())
+        && s.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+}
+
+/// Wrong at every stage, so it can be refused before anything is known about
+/// the repo. Absolute is deliberately absent: `/work/…` is what the agent
+/// records and a host path inside the repo normalises away, so those are
+/// `gather`'s to confine.
+fn escapes(path: &str) -> bool {
+    path.contains('\\') || Path::new(path).components().any(|c| c.as_os_str() == "..")
+}
+
 impl Trigger {
     pub fn parse(raw: &str) -> Result<Self> {
         let Some((kind, rest)) = raw.split_once(':') else {
@@ -42,14 +73,39 @@ impl Trigger {
                 if path.is_empty() || hash.is_empty() {
                     bail!("`{raw}` needs both a path and a hash");
                 }
+                if escapes(path) {
+                    bail!("`{path}` leaves the repo; a trigger names a file omh can check");
+                }
+                if !is_hash(hash, 7) {
+                    bail!(
+                        "`{hash}` is not a git hash; `stale` compares it against \
+                         `git hash-object`, so nothing else can ever match"
+                    );
+                }
                 Self::File {
                     path: path.into(),
                     hash: hash.into(),
                 }
             }
-            "image" => Self::Image {
+            // A recipe digest, not a container digest. `sha256:…` is what a
+            // reader assumes and what the spec's own example used, and it can
+            // never equal a `git hash-object` of the Dockerfile text.
+            "image" if rest == IMAGE_NOW => Self::Image {
+                digest: IMAGE_NOW.into(),
+            },
+            "image" if is_hash(rest, 40) => Self::Image {
                 digest: rest.into(),
             },
+            "image" => bail!(
+                "`{rest}` is not a recipe digest — pin `image:{IMAGE_NOW}` and omh \
+                 records what it would build now"
+            ),
+            // The same parser `evaluate` will compare with, asked at the door:
+            // otherwise `base:banana` is stored and answers "omh cannot tell"
+            // for ever, indistinguishable from having no base set installed.
+            "base" if crate::base::parse_ym(rest).is_none() => {
+                bail!("`{rest}` is not a base-set version omh can read")
+            }
             "base" => Self::Base {
                 version: rest.into(),
             },
@@ -82,14 +138,39 @@ pub enum FileFact {
     Unreadable,
 }
 
+/// Something omh either knows, or can say why it does not.
+///
+/// The reason is not decoration. Every way of failing to read the base
+/// manifest — unreadable directory, broken TOML naming its own file, no
+/// version omh can parse — used to arrive as `None` and print "no base set
+/// installed to compare against", which tells the reader to install what is
+/// already there and throws away the error that said so.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fact<T> {
+    Known(T),
+    Unavailable(String),
+}
+
+impl<T> Default for Fact<T> {
+    fn default() -> Self {
+        Self::Unavailable("not gathered".into())
+    }
+}
+
 /// Facts omh already holds. Gathered once, impurely; nothing here is a
 /// judgement.
 #[derive(Debug, Default)]
 pub struct Facts {
     pub files: BTreeMap<String, FileFact>,
-    /// Recipe digests of the images omh would build right now.
-    pub image_digests: BTreeSet<String>,
-    pub base_version: Option<String>,
+    /// Recipe digests omh would build right now — the base image only.
+    ///
+    /// A set because the harness layer is a second recipe and belongs here,
+    /// but it is keyed by adapter and `gather` has no adapter to ask about.
+    /// Until it does, the docs say `image:` tracks the base and nothing
+    /// else, rather than this quietly reporting stale for a recipe it never
+    /// looked at.
+    pub images: Fact<BTreeSet<String>>,
+    pub base: Fact<String>,
     /// `None` means no indexed graph was reachable — deliberately not an empty
     /// set, which would say every symbol is gone.
     pub symbols: Option<BTreeSet<String>>,
@@ -119,8 +200,9 @@ pub enum Verdict {
 /// every `file:` trigger would report stale on day one — turning the command
 /// into noise nobody reads.
 pub fn normalise_path(raw: &str, repo: &Path) -> String {
+    let sandbox = format!("{}/", crate::container_workdir());
     let trimmed = raw
-        .strip_prefix("/work/")
+        .strip_prefix(&sandbox)
         .or_else(|| raw.strip_prefix("./"))
         .unwrap_or(raw);
     Path::new(trimmed)
@@ -145,29 +227,31 @@ pub fn evaluate(trigger: Option<&Trigger>, facts: &Facts) -> Verdict {
             Some(FileFact::Absent) => Verdict::Stale {
                 because: format!("`{path}` is gone; it was pinned at {hash}"),
             },
-            Some(FileFact::Hash(now)) if now == hash => Verdict::Fresh,
+            // A prefix, because `git log` abbreviates and so does everyone
+            // reading it. `parse` has already refused anything too short to
+            // mean one hash.
+            Some(FileFact::Hash(now)) if now.starts_with(hash.as_str()) => Verdict::Fresh,
             Some(FileFact::Hash(now)) => Verdict::Stale {
                 because: format!("`{path}` was {hash}, is now {now}"),
             },
         },
-        Trigger::Image { digest } => {
-            if facts.image_digests.is_empty() {
-                return Verdict::Unknown {
-                    because: "no image recipe available to compare against".into(),
-                };
-            }
-            match facts.image_digests.contains(digest) {
-                true => Verdict::Fresh,
-                false => Verdict::Stale {
-                    because: format!("the sandbox image was rebuilt; this note pinned {digest}"),
-                },
-            }
-        }
+        Trigger::Image { digest } => match &facts.images {
+            Fact::Unavailable(why) => Verdict::Unknown {
+                because: why.clone(),
+            },
+            Fact::Known(recipes) if recipes.contains(digest) => Verdict::Fresh,
+            Fact::Known(_) => Verdict::Stale {
+                because: format!("the sandbox image recipe changed; this note pinned {digest}"),
+            },
+        },
         Trigger::Base { version } => {
-            let Some(current) = &facts.base_version else {
-                return Verdict::Unknown {
-                    because: "no base set installed to compare against".into(),
-                };
+            let current = match &facts.base {
+                Fact::Unavailable(why) => {
+                    return Verdict::Unknown {
+                        because: why.clone(),
+                    }
+                }
+                Fact::Known(v) => v,
             };
             // Reuses the parser the manifest loader uses, so a version `stale`
             // cannot read is the same version `load_dir` refuses. Compared as
@@ -217,15 +301,28 @@ pub fn gather(paths: &crate::profile::Paths, triggers: &[Trigger]) -> Facts {
             if facts.files.contains_key(path) {
                 continue;
             }
-            let full = paths.repo.join(path);
-            let fact = match std::fs::metadata(&full) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileFact::Absent,
-                Err(_) => FileFact::Unreadable,
-                Ok(_) => match hash_file(&paths.repo, path) {
-                    Some(h) => FileFact::Hash(h),
-                    // Present but unhashable is not the same as gone.
-                    None => FileFact::Unreadable,
-                },
+            // Folded here as well as on the write path. A note that arrived any
+            // other way — hand-authored, edited, promoted from a teammate, or
+            // written before normalisation shipped — still carries the sandbox
+            // prefix, and reported a deletion for a file sitting right there.
+            let relative = normalise_path(path, &paths.repo);
+            // `Path::join` with an absolute argument *replaces*, so a pin
+            // normalisation could not fold into the repo would have `stale`
+            // stat an arbitrary host path and report on what it found.
+            let fact = match escapes(&relative) || Path::new(&relative).is_absolute() {
+                true => FileFact::Unreadable,
+                false => {
+                    let full = paths.repo.join(&relative);
+                    match std::fs::metadata(&full) {
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => FileFact::Absent,
+                        Err(_) => FileFact::Unreadable,
+                        Ok(_) => match hash_file(&paths.repo, &relative) {
+                            Ok(h) => FileFact::Hash(h),
+                            // Present but unhashable is not the same as gone.
+                            Err(_) => FileFact::Unreadable,
+                        },
+                    }
+                }
             };
             facts.files.insert(path.clone(), fact);
         }
@@ -233,13 +330,17 @@ pub fn gather(paths: &crate::profile::Paths, triggers: &[Trigger]) -> Facts {
 
     // The recipes omh would build right now. Cheap and pure, so always
     // available — unlike a running container.
-    if let Ok(d) = crate::image::recipe_digest(&crate::image::base_dockerfile()) {
-        facts.image_digests.insert(d);
-    }
+    facts.images = match crate::image::recipe_digest(&crate::image::base_dockerfile()) {
+        Ok(d) => Fact::Known(BTreeSet::from([d])),
+        // The recipe is compiled in, so the only way here is git. Saying "no
+        // recipe available" would blame the one thing that is certainly present.
+        Err(e) => Fact::Unavailable(format!("could not digest the image recipe: {e:#}")),
+    };
 
-    facts.base_version = crate::base::Manifest::load_dir(&paths.base())
-        .ok()
-        .map(|m| m.version);
+    facts.base = match crate::base::Manifest::load_dir(&paths.base()) {
+        Ok(m) => Fact::Known(m.version),
+        Err(e) => Fact::Unavailable(format!("{e:#}")),
+    };
 
     // `symbols` stays `None`. The code graph lives in a container volume and is
     // queried per session, through a running sandbox, under a project name that
@@ -250,18 +351,31 @@ pub fn gather(paths: &crate::profile::Paths, triggers: &[Trigger]) -> Facts {
     facts
 }
 
-fn hash_file(repo: &Path, path: &str) -> Option<String> {
+/// Says which way it failed. `git` missing, `git` not executable, `-C repo`
+/// not a repository (exit 128), a path git refuses, and a path that is a
+/// directory all used to arrive as one `None` and print "could not be read" —
+/// six causes behind one string, and the stderr that distinguished them thrown
+/// away unread.
+fn hash_file(repo: &Path, path: &str) -> Result<String> {
+    use anyhow::Context;
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(["hash-object", "--"])
         .arg(path)
         .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .filter(|s| !s.is_empty())
+        .with_context(|| format!("running git hash-object in {}", repo.display()))?;
+    if !out.status.success() {
+        bail!(
+            "git hash-object: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let hash = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if hash.is_empty() {
+        bail!("git hash-object printed nothing for `{path}`");
+    }
+    Ok(hash)
 }
 
 /// One note's verdict, with everything needed to print it.
@@ -330,6 +444,272 @@ mod tests {
         (dir, paths)
     }
 
+    /// A note whose key is a real note, for the bridges that go through `judge`
+    /// rather than calling `evaluate` with hand-built facts.
+    fn note_pinning(trigger: Option<&str>) -> crate::memory::Note {
+        crate::memory::Note {
+            key: "k".into(),
+            kind: crate::memory::Kind::Surprise,
+            source: "session s01, claude".into(),
+            recorded: "2026-08-07".into(),
+            invalidated_by: trigger.map(|t| t.into()),
+            body: String::new(),
+            layer: crate::memory::Layer::Local,
+            path: std::path::PathBuf::from("k.md"),
+        }
+    }
+
+    fn git_init(repo: &Path) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .expect("git must be installed");
+        assert!(out.status.success());
+    }
+
+    // ── what the door must refuse ───────────────────────────────────────────
+
+    /// **An expiry that can never fire is worse than none**, which is this
+    /// module's own doctrine — and every one of these was accepted. `git log`
+    /// prints abbreviated hashes, so a short pin is what a writer produces;
+    /// `parse_ym` sits unused two arms away; and the spec's own `image:` example
+    /// is a *container* digest, which no recipe hash can ever equal.
+    #[test]
+    fn a_trigger_omh_could_never_evaluate_is_refused_at_the_door() {
+        for raw in [
+            "file:src/main.rs@zzzz",
+            "file:src/main.rs@abc",
+            "file:src/main.rs@ABC123DEF456A",
+            "base:banana",
+            "image:sha256-4f2a",
+            "image:",
+            "base:",
+            "symbol:",
+        ] {
+            assert!(
+                Trigger::parse(raw).is_err(),
+                "`{raw}` names an expiry omh cannot evaluate"
+            );
+        }
+    }
+
+    /// The pins a writer actually produces must still be accepted, or the guard
+    /// above is just a way to refuse the whole feature.
+    #[test]
+    fn the_pins_a_writer_produces_are_accepted() {
+        for raw in [
+            "file:src/main.rs@ce013625030ba8dba906f756967f9e9ca394464a",
+            "file:src/main.rs@ce01362",
+            "base:2026.08",
+            "image:ce013625030ba8dba906f756967f9e9ca394464a",
+            "image:current",
+            "symbol:GUEST_HOME",
+        ] {
+            assert!(
+                Trigger::parse(raw).is_ok(),
+                "`{raw}` is a pin omh can honour"
+            );
+        }
+    }
+
+    /// `validate_key` exists because a path read back off disk becomes a write.
+    /// A trigger path is read back off disk and becomes a `metadata` call —
+    /// and notes are promoted, so it arrives from another machine.
+    ///
+    /// Only the forms that are wrong at every stage are refused here. An
+    /// absolute path cannot be: `/work/…` is what the agent legitimately
+    /// records and a host path inside the repo is normalised away, so `gather`
+    /// is where an absolute path that survives normalisation has to stop.
+    #[test]
+    fn a_trigger_path_that_leaves_the_repo_is_refused() {
+        for raw in [
+            "file:../../../../etc/passwd@ce01362",
+            "file:a/../../b@ce01362",
+            "file:a\\b@ce01362",
+        ] {
+            assert!(Trigger::parse(raw).is_err(), "`{raw}` leaves the store");
+        }
+    }
+
+    /// The existence oracle. `Path::join` with an absolute argument *replaces*,
+    /// so an absolute pin normalisation could not fold into the repo used to
+    /// `metadata` an arbitrary host path and report on what it found.
+    #[test]
+    fn gather_never_stats_a_path_outside_the_repo() {
+        let (_d, paths) = repo_with(&[("in.txt", "x")]);
+        let outside = Trigger::File {
+            path: "/etc/passwd".into(),
+            hash: "ce01362".into(),
+        };
+        let facts = gather(&paths, std::slice::from_ref(&outside));
+
+        assert_eq!(
+            facts.files.get("/etc/passwd"),
+            Some(&FileFact::Unreadable),
+            "a path omh cannot confine to the repo is not a fact about the repo"
+        );
+        assert!(
+            matches!(evaluate(Some(&outside), &facts), Verdict::Unknown { .. }),
+            "and it is never reported as gone"
+        );
+    }
+
+    /// Abbreviated pins have to actually match, or refusing the unmatchable
+    /// ones above just moves the permanently-stale note to a different arm.
+    #[test]
+    fn an_abbreviated_hash_matches_the_hash_it_abbreviates() {
+        let mut facts = facts();
+        facts.files.insert(
+            "t.txt".into(),
+            FileFact::Hash("ce013625030ba8dba906f756967f9e9ca394464a".into()),
+        );
+        let short = Trigger::parse("file:t.txt@ce01362").unwrap();
+        assert_eq!(evaluate(Some(&short), &facts), Verdict::Fresh);
+
+        let wrong = Trigger::parse("file:t.txt@ce01363").unwrap();
+        assert!(matches!(
+            evaluate(Some(&wrong), &facts),
+            Verdict::Stale { .. }
+        ));
+    }
+
+    // ── the bridges: everything `main` actually calls ───────────────────────
+
+    /// **`judge` is the only thing the command calls, and nothing went through
+    /// it.** Every other test here hand-builds `Facts` and calls `evaluate`, so
+    /// `judge` could return `Fresh` for every note and the suite stayed green.
+    #[test]
+    fn judge_reports_a_file_that_really_changed_as_stale() {
+        let (_d, paths) = repo_with(&[("tracked.txt", "before\n")]);
+        git_init(&paths.repo);
+        let pinned = hash_file(&paths.repo, "tracked.txt").unwrap();
+
+        let fresh = note_pinning(Some(&format!("file:tracked.txt@{pinned}")));
+        assert_eq!(
+            judge(&paths, std::slice::from_ref(&fresh)).unwrap()[0].verdict,
+            Verdict::Fresh,
+            "the hash omh computes must be the hash a note would have pinned"
+        );
+
+        std::fs::write(paths.repo.join("tracked.txt"), "after\n").unwrap();
+        assert!(
+            matches!(
+                judge(&paths, std::slice::from_ref(&fresh)).unwrap()[0].verdict,
+                Verdict::Stale { .. }
+            ),
+            "and the change has to reach the verdict"
+        );
+    }
+
+    /// **The milestone's gate, wired end to end.** `gather` could have been
+    /// digesting the wrong string forever: the false direction was covered by a
+    /// hand-built `Facts`, and the true direction — that the digest omh
+    /// computes is the digest a note would pin — by nothing.
+    #[test]
+    fn judge_agrees_with_the_recipe_digest_a_note_would_pin() {
+        let (_d, paths) = repo_with(&[]);
+        let now = crate::image::recipe_digest(&crate::image::base_dockerfile()).unwrap();
+
+        let pinned = note_pinning(Some(&format!("image:{now}")));
+        assert_eq!(
+            judge(&paths, std::slice::from_ref(&pinned)).unwrap()[0].verdict,
+            Verdict::Fresh,
+            "a note pinning today's recipe is current"
+        );
+
+        let stale = note_pinning(Some(&format!("image:{}", "0".repeat(40))));
+        assert!(
+            matches!(
+                judge(&paths, std::slice::from_ref(&stale)).unwrap()[0].verdict,
+                Verdict::Stale { .. }
+            ),
+            "and one pinning a recipe omh would not build now is not"
+        );
+    }
+
+    /// `symbols` is `None` by never being assigned, so an `= Some(empty)` slip
+    /// would report every symbol gone — under the `stale` heading, which is the
+    /// bold claim `commands.md` makes.
+    #[test]
+    fn gather_leaves_the_symbol_set_unknown_rather_than_empty() {
+        let (_d, paths) = repo_with(&[]);
+        assert_eq!(gather(&paths, &[]).symbols, None);
+    }
+
+    /// The sandbox prefix was folded in on the write path only. Any note that
+    /// did not come through `remember` — hand-authored, edited, promoted from a
+    /// teammate, or written before this shipped — reported a deletion that
+    /// never happened, for a file sitting right there.
+    #[test]
+    fn gather_folds_a_sandbox_path_the_way_the_write_path_would() {
+        let (_d, paths) = repo_with(&[("tracked.txt", "x\n")]);
+        git_init(&paths.repo);
+        // Pinned exactly as the writer would have: the hash of the file as it
+        // is, recorded against the path the agent sees.
+        let pinned = hash_file(&paths.repo, "tracked.txt").unwrap();
+        let sandbox = Trigger::File {
+            path: format!("{}/tracked.txt", crate::container_workdir()),
+            hash: pinned,
+        };
+        let facts = gather(&paths, std::slice::from_ref(&sandbox));
+
+        assert_eq!(
+            evaluate(Some(&sandbox), &facts),
+            Verdict::Fresh,
+            "the file is present and unchanged"
+        );
+    }
+
+    /// Half the `Absent`/`Unreadable` distinction was unenforced: flipping
+    /// `Err(_) => Unreadable` to `Absent` kept the suite green, which reports a
+    /// permissions problem as the world having changed.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_omh_may_not_read_is_not_reported_as_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, paths) = repo_with(&[("locked/secret.txt", "x\n")]);
+        git_init(&paths.repo);
+        let dir = paths.repo.join("locked");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let t = Trigger::File {
+            path: "locked/secret.txt".into(),
+            hash: "ce01362".into(),
+        };
+        let facts = gather(&paths, std::slice::from_ref(&t));
+        let verdict = evaluate(Some(&t), &facts);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            matches!(verdict, Verdict::Unknown { .. }),
+            "a file omh cannot read has not been deleted: {verdict:?}"
+        );
+    }
+
+    /// `load_dir` builds five distinct errors, including a parse failure naming
+    /// the offending file, and every one of them became "no base set
+    /// installed" — telling the reader to install what is already there.
+    #[test]
+    fn an_unreadable_base_manifest_says_so_rather_than_claiming_none_is_installed() {
+        let (_d, paths) = repo_with(&[]);
+        std::fs::create_dir_all(paths.base()).unwrap();
+        std::fs::write(paths.base().join("2026.09.toml"), "this is not toml {{{").unwrap();
+
+        let t = Trigger::Base {
+            version: "2026.08".into(),
+        };
+        let facts = gather(&paths, std::slice::from_ref(&t));
+        let Verdict::Unknown { because } = evaluate(Some(&t), &facts) else {
+            panic!("a manifest omh cannot read is not an answer");
+        };
+        assert!(
+            because.contains("2026.09"),
+            "name what could not be read: {because}"
+        );
+    }
+
     /// Walking the repo would make `stale` O(repo) and slow enough that nobody
     /// runs it — and a check nobody runs is a check that does not exist.
     #[test]
@@ -339,7 +719,7 @@ mod tests {
             ("unnamed.rs", "y"),
             ("deep/also-unnamed.rs", "z"),
         ]);
-        let triggers = vec![Trigger::parse("file:named.rs@old").unwrap()];
+        let triggers = vec![Trigger::parse("file:named.rs@01d0111").unwrap()];
         let facts = gather(&paths, &triggers);
 
         assert_eq!(facts.files.len(), 1, "only what was asked about");
@@ -352,8 +732,8 @@ mod tests {
     fn a_present_file_hashes_and_a_missing_one_is_absent() {
         let (_d, paths) = repo_with(&[("here.rs", "content")]);
         let triggers = vec![
-            Trigger::parse("file:here.rs@old").unwrap(),
-            Trigger::parse("file:gone.rs@old").unwrap(),
+            Trigger::parse("file:here.rs@01d0111").unwrap(),
+            Trigger::parse("file:gone.rs@01d0111").unwrap(),
         ];
         let facts = gather(&paths, &triggers);
 
@@ -366,7 +746,7 @@ mod tests {
     #[test]
     fn a_files_hash_matches_what_git_would_record_for_it() {
         let (_d, paths) = repo_with(&[("f.txt", "hello\n")]);
-        let facts = gather(&paths, &[Trigger::parse("file:f.txt@x").unwrap()]);
+        let facts = gather(&paths, &[Trigger::parse("file:f.txt@0000001").unwrap()]);
         assert_eq!(
             facts.files["f.txt"],
             FileFact::Hash("ce013625030ba8dba906f756967f9e9ca394464a".into()),
@@ -406,7 +786,7 @@ mod tests {
     fn every_invalidation_kind_in_the_spec_round_trips() {
         for raw in [
             "file:src/main.rs@9f2c1a4e",
-            "image:sha256-4f2a",
+            "image:4f2a000000000000000000000000000000000000",
             "base:2026.08",
             "symbol:GUEST_HOME",
         ] {
@@ -431,12 +811,12 @@ mod tests {
     /// hash is after the **last** `@`.
     #[test]
     fn a_file_path_containing_an_at_sign_still_parses() {
-        let t = Trigger::parse("file:vendor/@scope/pkg/x.ts@abc123").unwrap();
+        let t = Trigger::parse("file:vendor/@scope/pkg/x.ts@abc1230").unwrap();
         assert_eq!(
             t,
             Trigger::File {
                 path: "vendor/@scope/pkg/x.ts".into(),
-                hash: "abc123".into()
+                hash: "abc1230".into()
             }
         );
     }
@@ -480,8 +860,8 @@ mod tests {
     fn a_note_is_stale_when_the_file_it_pinned_changed() {
         let mut f = facts();
         f.files
-            .insert("src/main.rs".into(), FileFact::Hash("different".into()));
-        let t = Trigger::parse("file:src/main.rs@original").unwrap();
+            .insert("src/main.rs".into(), FileFact::Hash("d1ff333".into()));
+        let t = Trigger::parse("file:src/main.rs@0a1b2c3").unwrap();
         let v = evaluate(Some(&t), &f);
         assert!(matches!(v, Verdict::Stale { .. }), "{v:?}");
         // The reason names both values: a join reports a fact, and the reader
@@ -490,7 +870,7 @@ mod tests {
             unreachable!()
         };
         assert!(
-            because.contains("original") && because.contains("different"),
+            because.contains("0a1b2c3") && because.contains("d1ff333"),
             "{because}"
         );
     }
@@ -500,9 +880,11 @@ mod tests {
     #[test]
     fn an_unchanged_file_is_not_stale() {
         let mut f = facts();
-        f.files
-            .insert("src/main.rs".into(), FileFact::Hash("same".into()));
-        let t = Trigger::parse("file:src/main.rs@same").unwrap();
+        f.files.insert(
+            "src/main.rs".into(),
+            FileFact::Hash("5a3e5a3f00000000000000000000000000000000".into()),
+        );
+        let t = Trigger::parse("file:src/main.rs@5a3e5a3").unwrap();
         assert_eq!(evaluate(Some(&t), &f), Verdict::Fresh);
     }
 
@@ -511,7 +893,7 @@ mod tests {
     fn a_note_is_stale_when_the_file_it_pinned_was_deleted() {
         let mut f = facts();
         f.files.insert("gone.rs".into(), FileFact::Absent);
-        let t = Trigger::parse("file:gone.rs@abc").unwrap();
+        let t = Trigger::parse("file:gone.rs@abc0001").unwrap();
         assert!(matches!(evaluate(Some(&t), &f), Verdict::Stale { .. }));
     }
 
@@ -521,7 +903,7 @@ mod tests {
     fn an_unreadable_file_is_unknown_rather_than_stale() {
         let mut f = facts();
         f.files.insert("locked.rs".into(), FileFact::Unreadable);
-        let t = Trigger::parse("file:locked.rs@abc").unwrap();
+        let t = Trigger::parse("file:locked.rs@abc0001").unwrap();
         assert!(
             matches!(evaluate(Some(&t), &f), Verdict::Unknown { .. }),
             "a file omh could not read says nothing about the note"
@@ -531,13 +913,21 @@ mod tests {
     #[test]
     fn a_note_is_stale_when_the_image_recipe_changed() {
         let mut f = facts();
-        f.image_digests.insert("current".into());
+        f.images = Fact::Known(BTreeSet::from([
+            "abcdef0000000000000000000000000000000000".to_string()
+        ]));
         assert!(matches!(
-            evaluate(Some(&Trigger::parse("image:old").unwrap()), &f),
+            evaluate(
+                Some(&Trigger::parse("image:01d0000000000000000000000000000000000000").unwrap()),
+                &f
+            ),
             Verdict::Stale { .. }
         ));
         assert_eq!(
-            evaluate(Some(&Trigger::parse("image:current").unwrap()), &f),
+            evaluate(
+                Some(&Trigger::parse("image:abcdef0000000000000000000000000000000000").unwrap()),
+                &f
+            ),
             Verdict::Fresh
         );
     }
@@ -547,7 +937,10 @@ mod tests {
     #[test]
     fn an_image_trigger_is_unknown_when_no_recipe_is_available() {
         assert!(matches!(
-            evaluate(Some(&Trigger::parse("image:x").unwrap()), &facts()),
+            evaluate(
+                Some(&Trigger::parse("image:0000000000000000000000000000000000000001").unwrap()),
+                &facts()
+            ),
             Verdict::Unknown { .. }
         ));
     }
@@ -555,7 +948,7 @@ mod tests {
     #[test]
     fn a_note_is_stale_when_the_base_set_was_re_cut() {
         let mut f = facts();
-        f.base_version = Some("2026.09".into());
+        f.base = Fact::Known("2026.09".into());
         assert!(matches!(
             evaluate(Some(&Trigger::parse("base:2026.08").unwrap()), &f),
             Verdict::Stale { .. }
@@ -572,7 +965,7 @@ mod tests {
     #[test]
     fn base_versions_are_compared_numerically_not_lexicographically() {
         let mut f = facts();
-        f.base_version = Some("2027.10".into());
+        f.base = Fact::Known("2027.10".into());
         assert!(
             matches!(
                 evaluate(Some(&Trigger::parse("base:2027.2").unwrap()), &f),
@@ -581,7 +974,7 @@ mod tests {
             "2027.10 is newer than 2027.2, which a string sort denies"
         );
         // And the converse, so the check cannot be `=> Stale`.
-        f.base_version = Some("2027.2".into());
+        f.base = Fact::Known("2027.2".into());
         assert_eq!(
             evaluate(Some(&Trigger::parse("base:2027.10").unwrap()), &f),
             Verdict::Fresh
@@ -593,12 +986,12 @@ mod tests {
     #[test]
     fn a_base_version_omh_cannot_parse_is_unknown_rather_than_stale() {
         let mut f = facts();
-        f.base_version = Some("not-a-version".into());
+        f.base = Fact::Known("not-a-version".into());
         assert!(matches!(
             evaluate(Some(&Trigger::parse("base:2026.08").unwrap()), &f),
             Verdict::Unknown { .. }
         ));
-        f.base_version = None;
+        f.base = Fact::Unavailable("no base set installed".into());
         assert!(matches!(
             evaluate(Some(&Trigger::parse("base:2026.08").unwrap()), &f),
             Verdict::Unknown { .. }
@@ -644,8 +1037,8 @@ mod tests {
     #[test]
     fn nothing_is_ever_fresh_because_omh_knows_nothing() {
         for raw in [
-            "file:x.rs@abc",
-            "image:sha256-1",
+            "file:x.rs@abc0001",
+            "image:1000000000000000000000000000000000000000",
             "base:2026.08",
             "symbol:X",
         ] {

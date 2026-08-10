@@ -447,7 +447,7 @@ fn session_up(
                 "cli".into(),
                 "index_repository".into(),
                 "--repo-path".into(),
-                "/work".into(),
+                container_workdir().into(),
                 "--name".into(),
                 project,
                 "--mode".into(),
@@ -998,31 +998,43 @@ fn memory_stale(cwd: &std::path::Path) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let judged = memory::expiry::judge(&paths, &memory::load(&paths)?)?;
 
-    let mut fresh = 0;
+    /// Which heading a verdict belongs under, or `None` for the one that is
+    /// counted rather than listed.
+    ///
+    /// A `match` on the verdict alone, so the compiler owns the mapping. The
+    /// grouping used to match on `(&verdict, <integer tag>)`, where a `_` arm
+    /// is unavoidable — a verdict added later fell through it, was counted in
+    /// no group and tallied nowhere, so the note simply vanished from the
+    /// command. `evaluate` refusing to collapse the third answer buys nothing
+    /// if the printer drops the fourth.
+    fn heading(verdict: &Verdict) -> Option<&'static str> {
+        match verdict {
+            Verdict::Stale { .. } => Some("stale"),
+            Verdict::Unknown { .. } => Some("omh cannot tell"),
+            Verdict::NoTrigger => Some("no expiry — carries only its date"),
+            Verdict::Fresh => None,
+        }
+    }
+
     let mut printed = false;
-    for (heading, want) in [
-        ("stale", 0),
-        ("omh cannot tell", 1),
-        ("no expiry — carries only its date", 2),
+    for group in [
+        "stale",
+        "omh cannot tell",
+        "no expiry — carries only its date",
     ] {
-        let group: Vec<&memory::expiry::Judged> = judged
+        let members: Vec<&memory::expiry::Judged> = judged
             .iter()
-            .filter(|j| match (&j.verdict, want) {
-                (Verdict::Stale { .. }, 0) => true,
-                (Verdict::Unknown { .. }, 1) => true,
-                (Verdict::NoTrigger, 2) => true,
-                _ => false,
-            })
+            .filter(|j| heading(&j.verdict) == Some(group))
             .collect();
-        if group.is_empty() {
+        if members.is_empty() {
             continue;
         }
         if printed {
             println!();
         }
         printed = true;
-        println!("{heading}:");
-        for j in group {
+        println!("{group}:");
+        for j in members {
             // Every line carries its date and its layer, exactly as `recall`
             // does: a note reported without those cannot be judged.
             print!("  {:<44} {:<5}  {}", j.key, j.layer.to_string(), j.recorded);
@@ -1030,18 +1042,37 @@ fn memory_stale(cwd: &std::path::Path) -> Result<()> {
                 Verdict::Stale { because } | Verdict::Unknown { because } => {
                     println!("  — {because}")
                 }
-                _ => println!(),
+                Verdict::NoTrigger | Verdict::Fresh => println!(),
             }
         }
     }
-    fresh += judged
-        .iter()
-        .filter(|j| j.verdict == Verdict::Fresh)
-        .count();
+
+    let count = |f: fn(&Verdict) -> bool| judged.iter().filter(|j| f(&j.verdict)).count();
+    let fresh = count(|v| matches!(v, Verdict::Fresh));
+    let stale = count(|v| matches!(v, Verdict::Stale { .. }));
+    let unknown = count(|v| matches!(v, Verdict::Unknown { .. }));
+
     if !printed && fresh == 0 {
         println!("no notes yet");
     } else if fresh > 0 {
         println!("\n{fresh} still current");
+    }
+
+    // The report is the product, so it prints in full before this decides the
+    // exit code — the same order `lint` uses.
+    //
+    // Three states in the output and one in the exit code is the same lie
+    // `Unknown` exists to refuse, moved to the boundary a script actually
+    // reads. Without a code of its own, a run where git was missing and *not
+    // one probe could be answered* is indistinguishable from a clean store.
+    if stale > 0 {
+        anyhow::bail!(
+            "{stale} note{} the world has moved past",
+            if stale == 1 { "" } else { "s" }
+        );
+    }
+    if unknown > 0 {
+        std::process::exit(2);
     }
     Ok(())
 }

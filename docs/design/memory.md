@@ -1,10 +1,11 @@
 # Memory — specification
 
-> **Status: M1–M3 are built; M4 is not.** The store, its schemas, the key
-> templates, retrieval, the MCP surface, and `omh memory` / `lint` / `rm` /
-> `promote` ship — see [commands](../commands.md#omh-memory-) and §14 for what
-> each milestone deferred. `invalidated_by`, `stale` and hub pages remain
-> specification. The reasoning
+> **Status: M1–M4 are built, except hub pages.** The store, its schemas, the
+> key templates, retrieval, the MCP surface, `invalidated_by`, and `omh memory`
+> / `lint` / `rm` / `promote` / `stale` ship — see
+> [commands](../commands.md#omh-memory-) and §14 for what each milestone
+> deferred. Hub pages remain specification, because their lint needs a
+> threshold §7 will not let anyone guess. The reasoning
 > behind each decision, the survey that picked the server, the benchmark that
 > reversed six of these choices, and the alternatives not taken are in
 > [how the design got here](memory-rationale.md).
@@ -107,7 +108,7 @@ key: credentials-file-mount-returns-ebusy
 type: surprise | topic | stub
 source: session s03, claude
 recorded: 2026-08-07
-invalidated_by: image:sha256-4f2a…       # optional; see §8
+invalidated_by: image:current            # optional; see §8
 ---
 
 # Mounting a credential file returns EBUSY
@@ -197,8 +198,8 @@ pass.
 | kind | invalid when |
 |---|---|
 | `file:<path>@<hash>` | the file's hash changes |
-| `image:<digest>` | the sandbox image is rebuilt |
-| `base:<version>` | the base set is re-cut |
+| `image:<digest>` | the **base** image recipe changes; written as `image:current` and resolved at the write path |
+| `base:<version>` | the base set moves to a later month |
 | `symbol:<name>` | the code graph no longer contains it |
 | *(absent)* | never automatically — carries only its date |
 
@@ -541,10 +542,14 @@ exact failure §7 legislates against. So M4 is `invalidated_by` and `stale`, and
 hub pages wait for the corpus.
 
 One piece of that work landed anyway, because it stands alone:
-`writing_a_note_never_rewrites_its_link_text` guards the vendor's *actual* bug —
-a renderer rewriting link text as it wrote, which made three successive prompt
-revisions look randomly disobeyed and was invisible to every semantic assertion.
-Only a byte comparison across a write-read-write cycle can see it.
+`writing_a_note_never_rewrites_its_link_text` guards the *shape* of the vendor's
+bug — a renderer rewriting link text as it wrote, which made three successive
+prompt revisions look randomly disobeyed. It guards omh's own `render`/`parse`
+rather than theirs, since iwe is never invoked. And the byte comparison is the
+weaker of its two assertions: an idempotent rewrite passes it, because both
+writes go through the same renderer and agree. What catches that is asserting
+the link survived — so the two halves cover different failures, and the earlier
+claim that only bytes could see it had it backwards.
 
 **What is honestly computable, and what is not:**
 
@@ -552,7 +557,7 @@ Only a byte comparison across a write-read-write cycle can see it.
 |---|---|
 | `file:<path>@<hash>` | **computable** — `git hash-object`, with paths stored repo-relative |
 | `base:<version>` | **computable** — the same `parse_ym` the manifest loader uses, compared numerically |
-| `image:<digest>` | **computable, after one redefinition** — the digest is of the *recipe*, a stable `git hash-object` of the Dockerfile, deliberately **not** `base_tag()`'s `DefaultHasher`, which std does not guarantee across releases. Pinning that would mark every image-triggered note stale the day somebody upgrades Rust |
+| `image:<digest>` | **computable, after one redefinition and with a producer** — the digest is of the *recipe*: a stable `git hash-object` of the Dockerfile **text**, which is assembled at runtime and exists in no file, deliberately **not** `base_tag()`'s `DefaultHasher`, which std does not guarantee across releases. Pinning that would mark every image-triggered note stale the day somebody upgrades Rust. Since nothing can print the value, a writer pins `image:current` and the write path resolves it. Only the **base** recipe is gathered; a harness layer changing does not fire it |
 | `symbol:<name>` | **not computable from the host** — reports "cannot tell", and `evaluate` fires correctly the day a symbol set can be supplied |
 
 ## 15. Open questions
