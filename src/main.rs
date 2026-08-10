@@ -236,6 +236,10 @@ enum MemoryCmd {
         key: String,
         #[arg(long, value_parser = parse_note_layer)]
         layer: Option<memory::Layer>,
+        /// Which file, when one key somehow reached two of them. Path
+        /// relative to the layer's root, as `rm` prints it.
+        #[arg(long)]
+        at: Option<String>,
     },
 }
 
@@ -277,7 +281,7 @@ fn main() -> Result<()> {
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
             Some(MemoryCmd::Lint) => memory_lint(&cwd),
-            Some(MemoryCmd::Rm { key, layer }) => memory_rm(&cwd, key, *layer),
+            Some(MemoryCmd::Rm { key, layer, at }) => memory_rm(&cwd, key, *layer, at.as_deref()),
             Some(MemoryCmd::Remember {
                 expected,
                 observed,
@@ -872,15 +876,31 @@ fn memory_lint(cwd: &std::path::Path) -> Result<()> {
     for (rule, count) in memory::tally(&found) {
         println!("  {count:>3}  {rule:?}");
     }
+
+    // The report is the product, so it prints in full before this decides the
+    // exit code. Warnings do not fail the command: `Orphan` fires on every
+    // note nothing links to, and a gate that is always red gates nothing.
+    let refused = memory::refused(&found);
+    if refused > 0 {
+        anyhow::bail!(
+            "{refused} violation{} the schema refuses",
+            if refused == 1 { "" } else { "s" }
+        );
+    }
     Ok(())
 }
 
 /// One note, and a report of what pointed at it. Deletion never cascades: a
 /// dangling link is visible and the lint finds it, while a silently pruned
 /// neighbourhood is neither.
-fn memory_rm(cwd: &std::path::Path, key: &str, layer: Option<memory::Layer>) -> Result<()> {
+fn memory_rm(
+    cwd: &std::path::Path,
+    key: &str,
+    layer: Option<memory::Layer>,
+    at: Option<&str>,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let removed = memory::remove(&paths, layer, key)?;
+    let removed = memory::remove(&paths, layer, key, at)?;
     println!("removed {key} ({})", removed.layer);
     if removed.layer.is_committed() {
         // The file is gone here, but a teammate still has it until the
@@ -1315,7 +1335,16 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // template that changed under an existing store would silently re-key
     // every note in it, and every existing key would stop being derivable.
     write_if_absent(&paths.repo.join(".omh/keys.toml"), memory::SHIPPED_KEYS)?;
-    write_if_absent(&shared.join("AGENTS.md"), &detect::agents_md(&stacks))?;
+    let agents = shared.join("AGENTS.md");
+    write_if_absent(&agents, &detect::agents_md(&stacks))?;
+    // A repo that ran `init` before the note store existed has an AGENTS.md
+    // already, and that file promises omh will not overwrite it — so the
+    // rules are appended, never merged in. Without this the feature ships
+    // inert for every existing repo: M1 has no MCP surface, so this file is
+    // the only thing that tells the agent the store is there.
+    if append_section_if_absent(&agents, "## Memory", &detect::memory_rules())? {
+        println!("  memory     added the note rules to .omh/profile/AGENTS.md");
+    }
     // The base set: omh's opinion, seeded into the committed layer where it is
     // visible, reviewable, and removable rather than hidden in the binary.
     let base_mcp =
@@ -1546,6 +1575,31 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+/// Add a section to a file omh does not own, once.
+///
+/// Appending rather than rewriting is the whole point: the file's own header
+/// says *edit freely, omh will not overwrite*, so a shipped addition has to
+/// arrive without touching a line the human wrote. Keyed on the heading, so
+/// running `init` again is a no-op rather than a second copy.
+///
+/// Returns whether anything was written.
+fn append_section_if_absent(path: &std::path::Path, heading: &str, section: &str) -> Result<bool> {
+    let Ok(existing) = std::fs::read_to_string(path) else {
+        return Ok(false);
+    };
+    if existing.contains(heading) {
+        return Ok(false);
+    }
+
+    let mut out = existing;
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(section);
+    std::fs::write(path, out)?;
+    Ok(true)
+}
+
 /// Run the harness's own login inside a sandbox, with this account's credential
 /// files bind-mounted writable. There is no separate capture step: the login
 /// writes straight through to the host.
@@ -1748,6 +1802,32 @@ mod tests {
 
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");
+
+    /// Every repo that ran `init` before the store existed already has an
+    /// `AGENTS.md`, and `write_if_absent` skips it — so the note rules, which
+    /// in M1 are the *only* thing telling the agent the store is there, never
+    /// arrived. The human's own file has to survive the delivery intact.
+    #[test]
+    fn an_agents_md_that_predates_the_store_still_gets_the_note_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let human = "# Project rules\n\n## House style\n\nTabs, and no adverbs.\n";
+        std::fs::write(&path, human).unwrap();
+
+        assert!(append_section_if_absent(&path, "## Memory", &detect::memory_rules()).unwrap());
+        let body = std::fs::read_to_string(&path).unwrap();
+
+        assert!(body.starts_with(human), "a human's file must survive whole");
+        assert!(body.contains("## Memory"), "the rules must arrive");
+
+        // `init` is re-runnable, so a second pass must not stack a second copy.
+        assert!(!append_section_if_absent(&path, "## Memory", &detect::memory_rules()).unwrap());
+        assert_eq!(
+            body,
+            std::fs::read_to_string(&path).unwrap(),
+            "appending twice duplicates the rules"
+        );
+    }
 
     /// `omh <name>` treats any unknown word as a harness, so a command that is
     /// not in RESERVED could be shadowed by an adapter of the same name. This

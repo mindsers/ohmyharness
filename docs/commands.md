@@ -295,7 +295,12 @@ The two words are not decoration. **Schemas refuse and hygiene warns**, because
 agents negotiate with warnings and cannot negotiate with a refused write — and
 because a store-wide problem must never fail somebody else's write.
 
-### `omh memory rm <key> [--layer team|local]`
+The same split decides the exit code: **the command fails when the schema
+refused something, and not for warnings.** Until the agent's own writes are
+refused, this is what a hook or a CI step can gate on — and a gate that also
+tripped on hygiene would be red for every store with an unlinked note in it.
+
+### `omh memory rm <key> [--layer team|local] [--at <path>]`
 
 Removes one note and reports what pointed at it.
 
@@ -309,6 +314,16 @@ removed credentials-are-a-named-volume
 **Deletion never cascades**, and neighbours are never rewritten. A dangling link
 is visible and the lint finds it; a silently pruned neighbourhood is neither.
 This is the same rule that makes `omh s rm` keep a branch holding commits.
+
+`--layer` separates a key held in both layers. `--at` separates two files in one
+layer that claim the same key — which the store should never reach, and which
+`omh memory lint` reports as a key disagreeing with its path:
+
+```console
+$ omh memory rm surprise/the-mount-failed
+Error: `surprise/the-mount-failed` is one key over 2 files in local — name one
+       with --at: ns/dup.md, surprise/the-mount-failed.md
+```
 
 `--layer` is needed only when one key exists in both layers, which is a
 disagreement rather than a duplicate. Without it, `rm` names both and removes

@@ -113,7 +113,7 @@ pub fn agents_md(stacks: &[Stack]) -> String {
 /// it does not know it needs. The note **shape** is here only because M1 has no
 /// MCP surface yet — once `remember` exists, the schema is enforced at the
 /// write instead of described here, and this shrinks back to the trigger.
-fn memory_rules() -> String {
+pub fn memory_rules() -> String {
     format!(
         "\n## Memory\n\n\
          When something surprises you — you expected one thing and the repo did\n\
