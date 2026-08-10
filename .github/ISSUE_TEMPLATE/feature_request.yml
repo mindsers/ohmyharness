@@ -1,0 +1,37 @@
+name: Feature request
+description: Something omh should decide for you that it currently does not
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        omh is a distribution, and its metric is **decisions removed**. The most
+        useful requests are framed that way: not "add an option for X" but "omh
+        should already know X, and here is how it could tell."
+
+        Please check [What isn't done](https://github.com/mindsers/ohmyharness#what-isnt-done)
+        first — several large pieces are known-missing and already have a plan.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you were trying to do, and where omh made you stop and decide.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What omh should do instead
+      description: >
+        Including what it should decide on its own, and what it should infer
+        that from.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do today
+      description: The workaround, if you have one.

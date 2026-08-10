@@ -1,0 +1,62 @@
+name: Bug report
+description: Something omh did that it should not have, or did not do that it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before anything else: if this involves a harness not seeing your rules,
+        skills, MCP servers or credentials, please run `omh doctor` and paste
+        the output. That boundary is where almost every bug in this project has
+        lived, and it is the only thing that verifies it.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you ran, and what it did.
+      placeholder: |
+        $ omh claude
+        ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`omh doctor` output"
+      description: >
+        Required if a harness is not seeing part of your setup. Skip it only if
+        the bug clearly has nothing to do with a sandbox, an adapter or a mount.
+      render: console
+
+  - type: input
+    id: version
+    attributes:
+      label: omh version
+      description: "`omh --version`, or the commit you built from."
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS and runtime
+      placeholder: "macOS 15.3, Docker 27.4 — or: Ubuntu 24.04, podman 5.3"
+    validations:
+      required: true
+
+  - type: textarea
+    id: anything
+    attributes:
+      label: Anything else
+      description: >
+        Relevant profile layers, a `.omh/profile/policy.toml` excerpt, the
+        harness and account you used. Redact tokens.
