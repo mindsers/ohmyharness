@@ -55,7 +55,7 @@ the agent, instead of a second one on your host that silently diverges.
 
 ## Install
 
-Requires **Docker** and **git**. Rust 1.97+ to build.
+Requires **Docker** and **git**. Rust 1.85+ to build.
 
 ```console
 $ git clone https://github.com/mindsers/ohmyharness && cd ohmyharness

@@ -8,7 +8,9 @@ servers. Roughly five minutes, most of it the first image build.
 - **Docker**, running. It is currently the only verified runtime — see
   [runtime backends](design/architecture.md#runtime-backends).
 - **git**, and a repository to work in. omh refuses to run outside one.
-- **Rust 1.97+**, to build omh itself.
+- **Rust 1.85+**, to build omh itself. Declared as `rust-version` in
+  `Cargo.toml` and checked by CI, so it is a tested floor rather than the
+  version that happened to be on the maintainer's machine.
 
 ## Install
 
