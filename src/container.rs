@@ -116,6 +116,17 @@ pub fn plan(
         file: false,
     });
 
+    // The local note store, keyed by repo like the graph cache and for the
+    // same reason: it must survive a container rebuild, a harness switch and
+    // — unlike anything under /work — the removal of the session that wrote
+    // it. Writable, because `remember` writes here.
+    mounts.push(Mount {
+        host: crate::memory::Layer::Local.dir(paths),
+        guest: PathBuf::from(crate::memory::GUEST_LOCAL_NOTES),
+        read_only: false,
+        file: false,
+    });
+
     // Credentials mount at the paths the harness itself reads — anywhere else
     // and the session starts logged out no matter what was captured. Writable,
     // because OAuth tokens refresh in place.
@@ -395,9 +406,62 @@ mod tests {
             .iter()
             .map(|m| m.guest.display().to_string())
             .collect();
-        assert_eq!(guests.len(), 2, "worktree and graph cache only: {guests:?}");
+        assert_eq!(
+            guests.len(),
+            3,
+            "worktree, graph cache and the note store only: {guests:?}"
+        );
         assert!(guests.contains(&"/work".to_string()));
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
+        assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
+    }
+
+    /// The local note store is the one thing outside the worktree the agent
+    /// may write, and it is writable because `remember` writes there. It is
+    /// mounted from `~/.omh` rather than the checkout, which is what keeps
+    /// `host_working_tree_is_never_mounted` true — assert both together, so a
+    /// future mount cannot satisfy one by breaking the other.
+    #[test]
+    fn the_note_store_is_mounted_from_omhs_own_directory_never_the_checkout() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        let notes = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new(crate::memory::GUEST_LOCAL_NOTES))
+            .expect("the local note store must reach the sandbox");
+
+        assert!(!notes.read_only, "`remember` writes there");
+        assert!(
+            notes.host.starts_with(&fx.paths.root),
+            "the store belongs to omh: {}",
+            notes.host.display()
+        );
+        assert!(
+            !notes.host.starts_with(&fx.paths.repo),
+            "a store inside the checkout dies with the worktree: {}",
+            notes.host.display()
+        );
+    }
+
+    /// Two sessions on one repo share a store: it is memory for the repo, not
+    /// for the session that happened to record it. Keyed the same way the
+    /// graph cache is, and for the same reason.
+    #[test]
+    fn every_session_of_one_repo_sees_the_same_notes() {
+        let fx = fixture();
+        let host_of = |p: &Plan| {
+            p.mounts
+                .iter()
+                .find(|m| m.guest == Path::new(crate::memory::GUEST_LOCAL_NOTES))
+                .map(|m| m.host.clone())
+                .expect("note store mount")
+        };
+        assert_eq!(
+            host_of(&plan_for(&fx, "claude")),
+            host_of(&plan_for(&fx, "opencode")),
+            "a harness switch must not change which notes exist"
+        );
     }
 
     fn plan_with_account(fx: &Fx, account: &std::path::Path) -> Plan {

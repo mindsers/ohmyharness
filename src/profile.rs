@@ -75,6 +75,18 @@ impl Paths {
         self.root.join("keys").join(self.repo_id())
     }
 
+    /// The local note store — keyed by repo, and outside the checkout so it
+    /// outlives the worktree that produced it. A session is a git worktree
+    /// holding tracked files only, and `omh s rm` removes it with `--force`,
+    /// so a gitignored store inside the repo would be both invisible to the
+    /// sandbox and destroyed by session removal.
+    ///
+    /// The committed half of the store is not here: it is tracked, so it
+    /// belongs in the repo, and it arrives in every worktree by itself.
+    pub fn notes(&self) -> PathBuf {
+        self.root.join("notes").join(self.repo_id())
+    }
+
     /// Cache volume — keyed by repo, deliberately not by harness. This is what
     /// lets memory survive a harness switch.
     pub fn cache_volume(&self) -> String {

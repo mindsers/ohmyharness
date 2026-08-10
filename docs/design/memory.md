@@ -1,6 +1,9 @@
 # Memory — specification
 
-> **Status: specified, not built.** This page states what to build. The reasoning
+> **Status: M1 is built; §9's agent surface is not.** The store, its schemas,
+> the key templates and `omh memory` / `lint` / `rm` ship — see
+> [commands](../commands.md#omh-memory-) and §14 for what M1 deferred. Retrieval,
+> the MCP surface, `promote` and `stale` remain specification. The reasoning
 > behind each decision, the survey that picked the server, the benchmark that
 > reversed six of these choices, and the alternatives not taken are in
 > [how the design got here](memory-rationale.md).
@@ -58,13 +61,34 @@ accuracy** — and it is the only way to keep what a removed session learned.
 ## 4. Storage
 
 ```
-<repo>/.omh/notes/         team  — COMMITTED, teammates get these
-<repo>/.omh/local/notes/   local — GITIGNORED, yours alone
+<repo>/.omh/notes/              team  — COMMITTED, teammates get these
+~/.omh/notes/<repo>/local/    local — outside the checkout, yours alone
 ```
 
-`omh init` creates both and adds `.omh/local/` to the repo's exclude file, using
-the same path handling as the existing layers — note that `info/exclude` lives in
-the **common** git dir, not the per-worktree one.
+> **Corrected during M1.** This section first put both layers in the checkout.
+> That does not work, and the code says why: a session is a **git worktree**,
+> which holds tracked files only, so a gitignored `<repo>/.omh/local/notes`
+> never exists in the sandbox — and anything the agent writes under `/work` is
+> destroyed by `git worktree remove --force` when the session is removed. That
+> contradicts §1's *survives session removal* and §12's own example.
+>
+> The two layers therefore live apart, because their lifecycles differ. `team`
+> is committed, so it is *tracked* — which is what makes it retrievable in a
+> fresh clone, and what puts it inside every worktree for free, needing no
+> mount. `local` is keyed by repo under `~/.omh`, exactly as the graph cache
+> is, and is bind-mounted into the sandbox at `/omh/notes/local`.
+>
+> Deliberately **not** under `/work`: the code graph would index notes as
+> source, `git status` would show them, and an agent running `git add -A` would
+> commit local notes onto its session branch — the exact leak [§9.1](#91-remember)
+> forbids.
+
+`omh init` creates both. The committed layer needs no ignore rule; the local one
+needs no ignore rule either, because there is no git where it lives. The earlier
+claim that `init` adds `.omh/local/` to `info/exclude` was doubly wrong:
+`info/exclude` is per-clone and never travels, so it could not have hidden a
+store from a teammate anyway. `init` already writes a committed `.omh/.gitignore`,
+which is the mechanism that does travel.
 
 **Layers do not merge.** `policy.toml` merges key by key because a setting has one
 value; a note is a *claim*, and two claims about one topic are two facts. So the
@@ -98,7 +122,13 @@ Related: [[credentials-are-a-named-volume]]
 
 Rules that are **schema-enforced** (a violating write is refused):
 
-- `key`, `type`, `source`, `recorded` present; `recorded` matches `\d{4}-\d{2}-\d{2}`
+- `key`, `type`, `source`, `recorded` present **and non-blank**; `recorded` is a
+  date that exists — `\d{4}-\d{2}-\d{2}` was the rule written here first, and it
+  is the weak version: it accepts `2026-13-45`. Month and day ranges are
+  calendar facts, not calibrated thresholds, so the strong version costs nothing
+- sections are **`## Name` headings**, never words appearing somewhere in the
+  body. `body.contains("Expected")` is satisfied by a sentence, which is the
+  failure this repo already shipped once as a staleness guard
 - required sections by name, per `type`
 - **budgets per section**, never a flat per-page cap
 - structural shape where it substitutes for a threshold — *bullets only, no prose
@@ -370,6 +400,36 @@ Store quality dominates and tooling comes second, so retrieval is built last.
 
 **M1's gate is a read, not a green test.** If the store is bad, no retrieval
 architecture rescues it — and discovering that after M1 is cheap.
+
+**What M1 actually shipped**, recorded here because invariant 8 makes the
+deferrals *process, recorded in the entry* rather than a silence:
+
+- **Zero numeric thresholds.** Every rule is satisfied-or-not: fields present
+  and non-blank, dates that exist, types in a closed set, sections present as
+  headings, *bullets only* in list sections, keys matching filenames, set
+  membership for links.
+- **Deferred: per-section budgets.** They need a corpus. The last 300-word cap
+  tried in this space became a fossil and *caused* the newest failure class.
+- **Deferred: the near-duplicate lint.** §7 lists it under `lint` and §14 puts
+  `lint` in M1, so this is a real scope deviation and not an oversight. It needs
+  a similarity threshold, a threshold cannot be calibrated against a store that
+  does not exist, and an uncalibrated one is a guess wearing the authority of a
+  gate.
+- **No refused write for the agent yet.** §7 gives schemas the power to refuse,
+  and over MCP they will. M1 has no MCP surface, so the agent writes Markdown
+  with its ordinary tools and `omh memory lint` is the guard. The schema still
+  refuses on omh's own write path; it simply is not yet in front of the agent.
+  This is the one place M1 is weaker than §7 describes, and M2 closes it.
+- **The agent picks its own key.** §6 derives keys from templates, and
+  `remember` does — but M1's only writer *for the agent* is a hand-written
+  file, and the staged rules tell it to key the note after the filename. So
+  two identity schemes share the store until the MCP surface lands.
+  `DuplicateKey` makes the collision visible; it does not prevent it.
+- **Deferred: a `Key` type.** A key is a primary key with a canonicality rule,
+  and it lives as `String` throughout. `expand_key` validates what it mints, so
+  no path can leave the store — but nothing distinguishes a canonical key from
+  arbitrary text in a signature. M2 adds a second key-minting writer (`stub =
+  "docs/{{path}}"`), which is where this stops being cosmetic.
 
 ## 15. Open questions
 

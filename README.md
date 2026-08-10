@@ -88,7 +88,7 @@ omh init — decided, asked nothing
 
   omh why <name>  what it costs, what was considered instead, how to remove it
 
-not yet done: memory store, cost accounting.
+not yet done: recall, cost accounting.
 next: omh claude
 ```
 
@@ -317,7 +317,7 @@ whether anything reads it. That gap is what `doctor` closes.
 
 | | |
 |---|---|
-| **Memory** | [specified](docs/design/memory.md), not built. A graph of linked notes the agent queries and grows, so what one session learned survives the session. |
+| **Memory** | the store and its guards are [built](docs/commands.md#omh-memory-); retrieval is not. A graph of linked notes the agent queries and grows, so what one session learned survives the session — today it can write and lint them, not yet recall them. |
 | **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
 | **`omh eject`** | a credible exit: write out the raw per-harness config and step aside. |
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |

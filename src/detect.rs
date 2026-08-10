@@ -89,6 +89,7 @@ pub fn agents_md(stacks: &[Stack]) -> String {
          repo have their own graphs in the same store; querying one of those answers\n\
          confidently about code that is not in this worktree.\n",
     );
+    out.push_str(&memory_rules());
     if stacks.is_empty() {
         out.push_str(
             "\nNo stack detected. Add your build, test, and lint commands here so\n\
@@ -103,6 +104,49 @@ pub fn agents_md(stacks: &[Stack]) -> String {
         ));
     }
     out
+}
+
+/// What the agent needs to write a note before there is a tool to write one.
+///
+/// This is the part of the surface that cannot move into a tool description:
+/// *record what surprised you* is a trigger, and an agent cannot look up a rule
+/// it does not know it needs. The note **shape** is here only because the
+/// agent has no *tool* to write through yet — `remember` already enforces the
+/// schema at the write, but nothing inside the sandbox can call it, so the
+/// agent writes the file by hand and needs to be told the shape. When the MCP
+/// surface lands, this shrinks back to the trigger.
+///
+/// The condition is the MCP surface, not `remember`'s existence: `remember`
+/// exists, so a reader checking the wrong one deletes the staged shape while
+/// the agent still has no way to reach it.
+pub fn memory_rules() -> String {
+    format!(
+        "\n## Memory\n\n\
+         When something surprises you — you expected one thing and the repo did\n\
+         another — record it. Not what you did; what you were wrong about.\n\n\
+         Write a Markdown file into `{}/`, named after the\n\
+         observation, in this shape:\n\n\
+         ```markdown\n\
+         ---\n\
+         key: <the filename, without .md>\n\
+         type: surprise\n\
+         source: session $OMH_SESSION, <this harness>\n\
+         recorded: <YYYY-MM-DD, the day it happened>\n\
+         ---\n\n\
+         # One line naming the surprise\n\n\
+         ## Expected\n\n\
+         ## Observed\n\n\
+         ## Evidence\n\n\
+         ## Related\n\n\
+         - [[another-notes-key]]\n\
+         ```\n\n\
+         Store uncertainty rather than false precision, and date by when the thing\n\
+         happened rather than when you mentioned it. If you have nothing to put\n\
+         under **Expected**, there is nothing here worth recording.\n\n\
+         Rename a note by rewriting its `key` and its filename together — never\n\
+         one without the other.\n",
+        crate::memory::GUEST_LOCAL_NOTES,
+    )
 }
 
 /// Facts derived for memory. No questions asked.
