@@ -406,12 +406,25 @@ fn session_up(
     // binary exists. Degraded rather than fatal: a session without memory is
     // still a session, and refusing to launch over it would be the tail
     // wagging the dog — the same rule as a capability a harness cannot express.
-    if let Err(e) = memory::deliver::ensure(
+    //
+    // `ensure` is also what *resolves* the path, rather than the caller's
+    // earlier `available()`. That ordering is the whole point and it is easy to
+    // lose: on a first launch `available()` answers `None` because the binary
+    // has not been cross-built yet, `ensure` then builds it, and a plan holding
+    // the earlier answer mounts nothing — after printing that it was building
+    // the very thing it goes on to ignore. Owning the field here means no
+    // caller can sample it too early.
+    let mut opts = opts;
+    match memory::deliver::ensure(
         backend.program(),
         paths,
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
     ) {
-        eprintln!("omh: memory server unavailable — {e:#}");
+        Ok(bin) => opts.memory_bin = Some(bin),
+        Err(e) => {
+            eprintln!("omh: memory server unavailable — {e:#}");
+            opts.memory_bin = None;
+        }
     }
 
     // The account must reach *this* plan: this is the container that actually

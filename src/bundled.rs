@@ -8,9 +8,12 @@
 //! downloaded binary got `no usable base manifest — run omh init` from `omh
 //! init` itself, and zero adapters with no message at all.
 //!
-//! `cargo install` escaped it only by accident: cargo leaves the extracted
-//! crate in `~/.cargo/registry/src/`, so the baked path happened to resolve.
-//! That directory is a cache, and clearing it broke an installed omh.
+//! A `cargo install` would have escaped it, but only by accident: cargo leaves
+//! the extracted crate under `~/.cargo/registry/src/`, so the baked path would
+//! have resolved for as long as that directory survived — and it is a cache.
+//! Stated as reasoning rather than history: omh has never been published, so
+//! nobody has actually been bitten this way. The measured case was a binary
+//! separated from the tree it was built in.
 //!
 //! Embedding is what makes the binary the unit of distribution. Note that the
 //! files still land on disk in `~/.omh` exactly as before — the base set stays

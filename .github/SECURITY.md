@@ -10,9 +10,10 @@ security` in the subject.
 
 Please do not open a public issue for a vulnerability.
 
-Expect an acknowledgement within a week. This is a one-maintainer project at
-`0.1.0`; that is an honest estimate rather than a service level, and it is
-better to say so than to publish a number nobody is on call to meet.
+Expect an acknowledgement within a week. This is a one-maintainer project that
+has not cut its first release; that is an honest estimate rather than a service
+level, and it is better to say so than to publish a number nobody is on call to
+meet.
 
 ## What is in scope
 
@@ -63,5 +64,6 @@ rests on the difference between an unverified claim and a disclosed gap:
 
 ## Supported versions
 
-`0.1.0` is the only release, and it is pre-1.0. Fixes land on `main`; there are
-no backport branches.
+There is no tagged release yet — `Cargo.toml` says `0.1.0`, but a version
+number is not a release. Fixes land on `main`, and there will be no backport
+branches before 1.0.

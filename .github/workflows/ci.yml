@@ -17,9 +17,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Linux gets the whole suite. Exactly one test — the `omh init` end-to-end in
-  # tests/cli.rs — shells out to the real binary and needs a working Docker to
-  # build the base image. Every other test is in-process.
+  # Linux gets the whole suite. Every test in tests/cli.rs shells out to the
+  # real binary; one of them runs `omh init`, which builds the base image
+  # through Docker. Everything else is in-process.
   test-linux:
     name: tests (linux, full suite)
     runs-on: ubuntu-latest
@@ -35,10 +35,13 @@ jobs:
   # excluded by target rather than skipped by name — a `--skip` list rots
   # silently the moment a test is renamed, and reads as coverage it is not.
   #
-  # That drops the whole of tests/cli.rs here: 624 of 635 tests run, and the
-  # other 11 are Linux-covered above. Only one of those 11 actually needs
-  # Docker, so this trades a little macOS coverage for a boundary that cannot
-  # go stale. Worth revisiting if tests/cli.rs grows.
+  # That drops the whole of tests/cli.rs here, and only one of those tests
+  # actually needs Docker — a little macOS coverage traded for a boundary that
+  # cannot go stale. Worth revisiting if tests/cli.rs grows.
+  #
+  # Deliberately no test count: the first version of this comment carried one,
+  # and a later commit in the same pull request added four tests and left it
+  # wrong. A number nothing recomputes is a number that lies on a schedule.
   test-macos:
     name: tests (macos, no docker)
     runs-on: macos-latest
