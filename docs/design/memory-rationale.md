@@ -97,7 +97,7 @@ Not on features — features were never what disqualified a candidate there.
 
 | | licence | runtime | storage | active | writes? |
 |---|---|---|---|---|---|
-| **[iwe](https://github.com/iwe-org/iwe)** | **Apache-2.0** | **none — Rust, single binary** | plain `.md`, **no database** | 308 commits, current | yes |
+| **[iwe](https://github.com/iwe-org/iwe)** | **Apache-2.0** | **none — Rust, single binary** ([wrong](memory-m0.md#2-it-is-not-a-single-static-binary): three, dynamic) | plain `.md`, **no database** | 308 commits, current | yes |
 | [Basic Memory](https://github.com/basicmachines-co/basic-memory) | **AGPL-3.0** | **Python 3.12+** | `.md` + **SQLite** | 1,649 commits, 3.6k stars | yes |
 | [mwe-mcp](https://github.com/Fr4nZ82/mwe-mcp) | **AGPL-3.0** | not checked | not checked | not checked | yes |
 | others | not checked | | | | |
@@ -108,6 +108,8 @@ Not on features — features were never what disqualified a candidate there.
   default would have put every user writing code at work in violation.
 - **Rust, single static binary, no database.** Exactly what won it for codegraph
   — *"a service to run is a decision `omh init` promised to remove"*.
+  ([M0](memory-m0.md#2-it-is-not-a-single-static-binary) later measured this:
+  the no-database half holds, the single-static-binary half is wrong.)
 - **It is also an LSP.** The editor [attached to the session](../editors.md) and
   the agent read the same graph. Nothing else on the list does this.
 
@@ -119,8 +121,11 @@ refused once, and a Python runtime is a cost the base image does not pay.
 which is precisely the class of claim this project treats as unverified: the
 graph server's own docs advertised a `CBM_VARIANT=ui` switch its published
 installer ignored. That is why
-[running iwe unattended in a container](memory.md#15-open-questions) is a gate on
+[running iwe unattended in a container](memory.md#15-open-questions) was a gate on
 the spec rather than an assumption inside it.
+
+**It has since been run**, and the gate earned its keep: [M0](memory-m0.md) cost
+this design four of the claims it rested on, one of them from the table above.
 
 ## What the benchmark changed
 
@@ -533,5 +538,7 @@ with what would close each:
   Closed by the [dogfood measurement](memory.md#13-measurement).
 - **The one-shot architecture assumes a question.** omh's agent has a task.
 - **The numbers are the vendor's**, however honestly reported.
-- **Nothing was run in an omh container**, which is still the bar
-  [`doctor`](../troubleshooting.md) exists to enforce.
+- ~~**Nothing was run in an omh container**~~ — closed by [M0](memory-m0.md),
+  which ran iwe in exactly that container and found it does not execute there.
+  What stays open is narrower: retrieval quality, `iwes`, and anything above ten
+  notes. The bar [`doctor`](../troubleshooting.md) exists to enforce is unchanged.

@@ -40,6 +40,7 @@ change — most of them record something that was tried and cost something.
 | [Adapters](design/adapters.md) | harnesses and editors as data, and how to add one |
 | [Memory](design/memory.md) | *specified, not built* — the note graph, its guards, and the build order |
 | [Memory: how the design got here](design/memory-rationale.md) | the survey, the benchmark that reversed six choices, and the alternatives not taken |
+| [Memory M0: running iwe](design/memory-m0.md) | the blocking spike, and the four claims the design rested on that did not survive it |
 | [Trust](design/trust.md) | provenance, evidence, and a credible exit |
 | [Risks](design/risks.md) | what is weak, stated plainly |
 | [Roadmap](design/roadmap.md) | what ships when, and what gates what |
