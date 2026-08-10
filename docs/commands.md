@@ -236,9 +236,12 @@ destroyed by `omh s rm`. Inside the sandbox it is mounted at `/omh/notes/local`.
 
 ```console
 $ omh memory
-credentials-are-a-named-volume            team   2026-06-12  1 ref
-mounting-a-credential-file-returns-ebusy  local  2026-08-07  1 ref
+credentials-are-a-named-volume                     team   2026-08-05  1 ref
+surprise/mounting-a-credential-file-returns-ebusy  local  2026-08-07  1 ref
 ```
+
+The `surprise/` on the second key is the shipped template's namespace, not
+decoration — see `omh memory remember` below.
 
 **Every line carries its date and its layer.** A note presented without age and
 origin cannot be judged, and a store the agent writes to unattended would
@@ -249,9 +252,9 @@ otherwise become a machine for laundering guesses into facts.
 ```console
 $ omh memory remember \
     --expected "A bind mount of the token file would persist the login." \
-    --observed "Mounting a credential file returns EBUSY; the harness rewrites in place." \
+    --observed "Mounting a credential file returns EBUSY." \
     --evidence 'EBUSY from the mount syscall'
-recorded ~/.omh/notes/omh/local/surprise/mounting-a-credential-file-returns-ebusy.md
+recorded /home/you/.omh/notes/omh/local/surprise/mounting-a-credential-file-returns-ebusy.md
 ```
 
 The three arguments are the discipline. Something with nothing to put in
@@ -264,14 +267,25 @@ credential  file returns ebusy` produce one key, and the second write is a
 conflict that says *update that note instead*:
 
 ```console
-$ omh memory remember --observed "mounting a  credential FILE returns ebusy." …
+$ omh memory remember --expected … --observed "mounting a  credential FILE returns ebusy" --evidence …
 Error: `surprise/mounting-a-credential-file-returns-ebusy` is already recorded;
        update that note instead
 ```
 
+The slug is the observation's **first sentence**, and the terminators are `.`,
+`!` and `?` only — a semicolon or a colon does not end one, so a long
+`--observed` yields a long key.
+
 `--if-exists skip|suffix|override` makes retry policy an argument. Skipping is a
 mode you ask for, never a fallback: as a fallback, every genuine conflict
-disappears silently.
+disappears silently. `override` is the destructive one and says so — it removes
+the note that held the key, wherever that note was stored, and leaves the
+replacement at the key's own path:
+
+```console
+$ omh memory remember --if-exists override …
+replaced /home/you/.omh/notes/omh/local/surprise/mounting-a-credential-file-returns-ebusy.md — the note that was there is gone
+```
 
 Writes go to **`local` only**, always. A writer that could reach the committed
 layer would push wrong facts to teammates through git, where they arrive with
@@ -286,19 +300,35 @@ rule, with no questions asked and no model pass.
 $ omh memory lint
 refused  local  a `surprise` note needs a `## Evidence` section
 warning  team   `deploy` links to `rollback`, which is not in the store
+warning  team   nothing in the store links to `deploy`
+warning  local  nothing in the store links to `surprise/mounting-a-credential-file-returns-ebusy`
 
     1  MissingSection
     1  DanglingLink
+    2  Orphan
+Error: 1 violation the schema refuses
 ```
+
+`Orphan` fires on every note nothing links to, so a young store is mostly
+orphans — that is the rule working, not the store failing. It is the count over
+time that means something.
 
 The two words are not decoration. **Schemas refuse and hygiene warns**, because
 agents negotiate with warnings and cannot negotiate with a refused write — and
 because a store-wide problem must never fail somebody else's write.
 
 The same split decides the exit code: **the command fails when the schema
-refused something, and not for warnings.** Until the agent's own writes are
-refused, this is what a hook or a CI step can gate on — and a gate that also
+refused something, and not for warnings** — the run above exits 1 because of the
+one `refused` line, and would exit 0 without it. Until the agent's own writes
+are refused, this is what a hook or a CI step can gate on, and a gate that also
 tripped on hygiene would be red for every store with an unlinked note in it.
+
+Two rules are worth naming because they describe the store rather than one
+note's shape. `UnclosedFence` refuses a note whose code fence never closes:
+everything after it is quoted, including headings and `[[links]]`, so the note
+does not mean what it looks like. `DuplicateKey` warns when one key is claimed
+by two files in one layer — §6 makes a key a primary key, `remember` refuses to
+create a second, and this is how one that arrived by hand becomes visible.
 
 ### `omh memory rm <key> [--layer team|local] [--at <path>]`
 
@@ -306,18 +336,22 @@ Removes one note and reports what pointed at it.
 
 ```console
 $ omh memory rm credentials-are-a-named-volume
-removed credentials-are-a-named-volume
-  still linked from mounting-a-credential-file-returns-ebusy — those links now
-  dangle, and `omh memory lint` lists them
+removed credentials-are-a-named-volume (team)
+  it was committed — teammates keep it until you commit the deletion
+  still linked from surprise/mounting-a-credential-file-returns-ebusy — those links now dangle, and `omh memory lint` lists them
 ```
 
 **Deletion never cascades**, and neighbours are never rewritten. A dangling link
 is visible and the lint finds it; a silently pruned neighbourhood is neither.
 This is the same rule that makes `omh s rm` keep a branch holding commits.
 
-`--layer` separates a key held in both layers. `--at` separates two files in one
-layer that claim the same key — which the store should never reach, and which
-`omh memory lint` reports as a key disagreeing with its path:
+`--layer` is needed when one key exists in both layers, which is a disagreement
+rather than a duplicate. Without it, `rm` names both and removes neither.
+
+`--at` is the repair path for something worse: two files in *one* layer claiming
+one key, which `omh memory lint` reports as `DuplicateKey`. It takes any
+trailing run of path components — `dup.md` alone is enough when it is
+unambiguous — and `rm` prints the layer-relative form:
 
 ```console
 $ omh memory rm surprise/the-mount-failed
@@ -325,9 +359,9 @@ Error: `surprise/the-mount-failed` is one key over 2 files in local — name one
        with --at: ns/dup.md, surprise/the-mount-failed.md
 ```
 
-`--layer` is needed only when one key exists in both layers, which is a
-disagreement rather than a duplicate. Without it, `rm` names both and removes
-neither.
+A `--at` that names no note is an error, never a fall-through to a different
+one: it is the flag you reach for to be careful, so it is the one input that
+must not be quietly ignored.
 
 ### What is not here yet
 

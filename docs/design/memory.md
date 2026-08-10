@@ -1,6 +1,9 @@
 # Memory — specification
 
-> **Status: specified, not built.** This page states what to build. The reasoning
+> **Status: M1 is built; §9's agent surface is not.** The store, its schemas,
+> the key templates and `omh memory` / `lint` / `rm` ship — see
+> [commands](../commands.md#omh-memory-) and §14 for what M1 deferred. Retrieval,
+> the MCP surface, `promote` and `stale` remain specification. The reasoning
 > behind each decision, the survey that picked the server, the benchmark that
 > reversed six of these choices, and the alternatives not taken are in
 > [how the design got here](memory-rationale.md).
@@ -391,6 +394,12 @@ Store quality dominates and tooling comes second, so retrieval is built last.
 | | ships | done when |
 |---|---|---|
 | **M1** | layout, schemas, key templates, `remember`, `omh memory` / `lint` / `rm` | the store has run on this repo for two weeks and been read by a human |
+| **M2** | stub ingestion, `recall`, the generated tool description | invariant 1 holds under test; invariant 9 checked by `doctor` |
+| **M3** | the `team` layer, `promote`, invariant 2 | a note promoted here is retrievable in a fresh clone |
+| **M4** | `invalidated_by`, `omh memory stale`, hub pages | `stale` fires on a real image rebuild |
+
+**M1's gate is a read, not a green test.** If the store is bad, no retrieval
+architecture rescues it — and discovering that after M1 is cheap.
 
 **What M1 actually shipped**, recorded here because invariant 8 makes the
 deferrals *process, recorded in the entry* rather than a silence:
@@ -411,12 +420,16 @@ deferrals *process, recorded in the entry* rather than a silence:
   with its ordinary tools and `omh memory lint` is the guard. The schema still
   refuses on omh's own write path; it simply is not yet in front of the agent.
   This is the one place M1 is weaker than §7 describes, and M2 closes it.
-| **M2** | stub ingestion, `recall`, the generated tool description | invariant 1 holds under test; invariant 9 checked by `doctor` |
-| **M3** | the `team` layer, `promote`, invariant 2 | a note promoted here is retrievable in a fresh clone |
-| **M4** | `invalidated_by`, `omh memory stale`, hub pages | `stale` fires on a real image rebuild |
-
-**M1's gate is a read, not a green test.** If the store is bad, no retrieval
-architecture rescues it — and discovering that after M1 is cheap.
+- **The agent picks its own key.** §6 derives keys from templates, and
+  `remember` does — but M1's only writer *for the agent* is a hand-written
+  file, and the staged rules tell it to key the note after the filename. So
+  two identity schemes share the store until the MCP surface lands.
+  `DuplicateKey` makes the collision visible; it does not prevent it.
+- **Deferred: a `Key` type.** A key is a primary key with a canonicality rule,
+  and it lives as `String` throughout. `expand_key` validates what it mints, so
+  no path can leave the store — but nothing distinguishes a canonical key from
+  arbitrary text in a signature. M2 adds a second key-minting writer (`stub =
+  "docs/{{path}}"`), which is where this stops being cosmetic.
 
 ## 15. Open questions
 

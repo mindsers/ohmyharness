@@ -110,9 +110,15 @@ pub fn agents_md(stacks: &[Stack]) -> String {
 ///
 /// This is the part of the surface that cannot move into a tool description:
 /// *record what surprised you* is a trigger, and an agent cannot look up a rule
-/// it does not know it needs. The note **shape** is here only because M1 has no
-/// MCP surface yet — once `remember` exists, the schema is enforced at the
-/// write instead of described here, and this shrinks back to the trigger.
+/// it does not know it needs. The note **shape** is here only because the
+/// agent has no *tool* to write through yet — `remember` already enforces the
+/// schema at the write, but nothing inside the sandbox can call it, so the
+/// agent writes the file by hand and needs to be told the shape. When the MCP
+/// surface lands, this shrinks back to the trigger.
+///
+/// The condition is the MCP surface, not `remember`'s existence: `remember`
+/// exists, so a reader checking the wrong one deletes the staged shape while
+/// the agent still has no way to reach it.
 pub fn memory_rules() -> String {
     format!(
         "\n## Memory\n\n\

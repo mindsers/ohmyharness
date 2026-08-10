@@ -344,6 +344,10 @@ pub fn slug_of_observation(observed: &str) -> Result<String> {
 /// placeholder nothing binds is an error naming it, because the alternative is
 /// a literal `{{slugg}}` inside a key that parses, round-trips, and is wrong
 /// forever.
+///
+/// The result is validated here, at the mint, rather than by the caller: this
+/// is the only place a key comes into existence, so a guard here is one every
+/// future caller inherits instead of one each has to remember.
 pub fn expand_key(template: &str, vars: &[(&str, &str)]) -> Result<String> {
     let mut out = String::new();
     let mut rest = template;
@@ -362,6 +366,7 @@ pub fn expand_key(template: &str, vars: &[(&str, &str)]) -> Result<String> {
         rest = &after[end + 2..];
     }
     out.push_str(rest);
+    validate_key(&out)?;
     Ok(out)
 }
 
@@ -376,9 +381,11 @@ pub fn expand_key(template: &str, vars: &[(&str, &str)]) -> Result<String> {
 /// arbitrary write. `auth::validate_name` and `session::validate_id` are the
 /// precedent: validate identity where it is minted, not where it is used.
 fn validate_key(key: &str) -> Result<()> {
-    let escapes = key.is_empty()
-        || key.starts_with('/')
-        || key.contains('\\')
+    // An empty component covers more than it looks: `""` splits to one empty
+    // part, `/abs` to a leading one, `a//b` and `a/` to an interior and a
+    // trailing one. Spelling those out separately reads as thorough and is
+    // untestable — no input can distinguish the extra arms from this one.
+    let escapes = key.contains('\\')
         || key
             .split('/')
             .any(|part| part.is_empty() || part.starts_with('.'));
@@ -421,9 +428,18 @@ fn civil(days: i64) -> String {
 /// message is the whole product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Rule {
+    /// A file in the store that omh cannot read back as a note.
+    ///
+    /// A rule rather than a hard error, because `lint` is where you find out
+    /// what is wrong with the store: aborting on the first bad file hid every
+    /// other violation and reported nothing, on exactly the store that needed
+    /// reporting most.
+    Unreadable,
+    UnclosedFence,
     MissingSection,
     ProseInListSection,
     KeyDisagreesWithPath,
+    DuplicateKey,
     DanglingLink,
     Orphan,
 }
@@ -443,10 +459,12 @@ impl Rule {
     /// iterates a `Rule::ALL` somebody has to remember to extend.
     pub fn severity(&self) -> Severity {
         match self {
-            Self::MissingSection | Self::ProseInListSection | Self::KeyDisagreesWithPath => {
-                Severity::Refused
-            }
-            Self::DanglingLink | Self::Orphan => Severity::Warning,
+            Self::Unreadable
+            | Self::UnclosedFence
+            | Self::MissingSection
+            | Self::ProseInListSection
+            | Self::KeyDisagreesWithPath => Severity::Refused,
+            Self::DuplicateKey | Self::DanglingLink | Self::Orphan => Severity::Warning,
         }
     }
 }
@@ -459,6 +477,59 @@ pub struct Violation {
     pub detail: String,
 }
 
+/// A fence opener or closer: which character, and how many of it.
+///
+/// Three or more, backtick or tilde. Anything shorter is inline code.
+fn fence_marker(line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start();
+    let ch = trimmed.chars().next()?;
+    if ch != '`' && ch != '~' {
+        return None;
+    }
+    let run = trimmed.chars().take_while(|c| *c == ch).count();
+    (run >= 3).then_some((ch, run))
+}
+
+/// Every line, paired with whether a fenced block encloses it, plus whether
+/// a fence was still open at the end.
+///
+/// One scanner for both readers, because `sections` and `links` disagreeing
+/// about what is quoted is how a heading gets refused while the link beside
+/// it is trusted. CommonMark's two rules that matter here: a fence closes
+/// only on **the same character**, and only on a run **at least as long** —
+/// without the second, a ````-wrapped example closes on the ``` it exists to
+/// contain, which is the whole reason for a fourth backtick.
+struct Fenced<'a> {
+    lines: Vec<(&'a str, bool)>,
+    unclosed: bool,
+}
+
+fn scan_fences(body: &str) -> Fenced<'_> {
+    let mut open: Option<(char, usize)> = None;
+    let mut lines = Vec::new();
+
+    for line in body.lines() {
+        let inside = match (open, fence_marker(line)) {
+            (None, Some(marker)) => {
+                open = Some(marker);
+                true
+            }
+            (Some((och, orun)), Some((cch, crun))) if cch == och && crun >= orun => {
+                open = None;
+                true
+            }
+            (Some(_), _) => true,
+            (None, _) => false,
+        };
+        lines.push((line, inside));
+    }
+
+    Fenced {
+        lines,
+        unclosed: open.is_some(),
+    }
+}
+
 /// `## Name` and the lines beneath it, to the next heading of the same level.
 ///
 /// Headings rather than substrings, because `body.contains("Expected")` is
@@ -467,17 +538,11 @@ pub struct Violation {
 fn sections(body: &str) -> BTreeMap<&str, Vec<&str>> {
     let mut out: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     let mut current: Option<&str> = None;
-    let mut in_fence = false;
-    for line in body.lines() {
-        // A fence line is never a heading, and neither is anything it
-        // encloses: the staged rules hand the agent a ```markdown block
-        // containing these exact headings, so a schema that reads inside one
-        // is satisfied by the agent pasting back the example it was shown.
-        let fence = line.trim_start().starts_with("```");
-        if fence {
-            in_fence = !in_fence;
-        }
-        let heading = if fence || in_fence {
+    // Nothing a fence encloses is a heading: the staged rules hand the agent
+    // a fenced block containing these exact headings, so a schema that reads
+    // inside one is satisfied by pasting back the example it was shown.
+    for (line, quoted) in scan_fences(body).lines {
+        let heading = if quoted {
             None
         } else {
             line.strip_prefix("## ")
@@ -506,6 +571,21 @@ pub fn check(note: &Note) -> Vec<Violation> {
             detail,
         })
     };
+
+    // A fence left open swallows every heading and every link after it, so
+    // the section checks below would report sections the writer can plainly
+    // see, and `links` would report a neighbourhood that is not the note's.
+    // Naming the fence is the only message here that is both true and
+    // actionable, so it is the only one worth printing.
+    if scan_fences(&note.body).unclosed {
+        fire(
+            Rule::UnclosedFence,
+            "a code fence is never closed, so everything after it is quoted \
+             — including the sections and links below it"
+                .to_string(),
+        );
+        return found;
+    }
 
     let sections = sections(&note.body);
     for name in note.kind.required_sections() {
@@ -563,15 +643,12 @@ pub fn check(note: &Note) -> Vec<Violation> {
 /// other ninety.
 pub fn links(body: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut in_fence = false;
-    for line in body.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
-        }
+    for (line, quoted) in scan_fences(body).lines {
         // A link in a quoted command is a string, not a claim about the
         // graph — without this, `lint` reports a shell snippet as dangling.
-        if in_fence {
+        // A fence left open therefore hides every link after it, which is
+        // why `check` refuses such a note outright rather than warning.
+        if quoted {
             continue;
         }
         // Scanned per line, because a target does not span one. Scanning the
@@ -622,6 +699,38 @@ pub fn hygiene(notes: &[Note]) -> Vec<Violation> {
         }
     }
 
+    // §6 makes a key a primary key, and `remember` refuses to break that —
+    // but hand-written notes are the only writer M1 gives the agent, so the
+    // store can already hold two. Per layer, because §4 makes `team/deploy`
+    // and `local/deploy` two notes on purpose.
+    let mut by_key: BTreeMap<(Layer, &str), Vec<&Path>> = BTreeMap::new();
+    for note in notes {
+        by_key
+            .entry((note.layer, note.key.as_str()))
+            .or_default()
+            .push(&note.path);
+    }
+    for ((layer, key), mut paths) in by_key {
+        if paths.len() < 2 {
+            continue;
+        }
+        paths.sort();
+        found.push(Violation {
+            key: key.to_string(),
+            layer,
+            rule: Rule::DuplicateKey,
+            detail: format!(
+                "`{key}` is claimed by {} files: {}",
+                paths.len(),
+                paths
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        });
+    }
+
     for note in notes {
         // An orphan is a note *nothing links to*. Inverting this flags every
         // leaf, which is the opposite of what the count is for.
@@ -649,14 +758,51 @@ fn markdown_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
         Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
     };
     for entry in entries {
-        let path = entry
-            .with_context(|| format!("reading {}", dir.display()))?
-            .path();
-        if path.is_dir() {
+        let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+        // `file_type` rather than `is_dir`, because `is_dir` follows links:
+        // one symlinked namespace and the store answers with files that are
+        // not in it, and `rm` deletes one of them. A link is not a note, so
+        // it is not followed and not collected — and `contained` refuses the
+        // write that would put one there.
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("reading {}", entry.path().display()))?;
+        if kind.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        if kind.is_dir() {
             markdown_files(&path, out)?;
         } else if path.extension().is_some_and(|e| e == "md") {
             out.push(path);
         }
+    }
+    Ok(())
+}
+
+/// Refuse a path that resolves outside the layer it claims to be in.
+///
+/// `validate_key` reads a key's spelling; this reads the filesystem. The
+/// local store is bind-mounted writable into the sandbox, so the agent can
+/// put a symlink in it, and `{key}.md` beneath one resolves anywhere —
+/// exit 0, reporting a path it did not write to. Checked against the deepest
+/// ancestor that exists, because the note itself does not yet.
+fn contained(root: &Path, path: &Path) -> Result<()> {
+    let anchor = root
+        .canonicalize()
+        .with_context(|| format!("resolving {}", root.display()))?;
+
+    let mut existing = path.to_path_buf();
+    while !existing.exists() && existing.pop() {}
+    let resolved = existing
+        .canonicalize()
+        .with_context(|| format!("resolving {}", existing.display()))?;
+
+    if !resolved.starts_with(&anchor) {
+        bail!(
+            "{} resolves outside the store, so omh will not write there",
+            path.display()
+        );
     }
     Ok(())
 }
@@ -679,26 +825,40 @@ pub fn load_layer(paths: &Paths, layer: Layer) -> Result<Vec<Note>> {
         .collect()
 }
 
-/// The keys a layer already holds, and the file each one sits in.
+/// What a layer holds: the keys it already claims, and the files it could
+/// not be asked about.
 ///
-/// Deliberately lenient where `load_layer` is strict: a note nothing can
-/// parse holds no key to collide with, and §7 says a store-wide problem must
-/// never refuse somebody else's write. Answering "is this key taken" from the
-/// readable subset is safe in a way answering a *query* from a subset is not,
-/// and `lint` still owns the unreadable file.
-fn keys_in(paths: &Paths, layer: Layer) -> Result<Vec<(String, PathBuf)>> {
+/// The second field is the point. Skipping an unparseable note answers "is
+/// this key free?" with "yes" to a question whose true answer may be "no",
+/// and the caller acts on that by *writing* — so the gap has to travel with
+/// the answer instead of being swallowed by a `filter_map(..ok())`.
+struct LayerRead {
+    notes: Vec<Note>,
+    /// Files that exist but cannot be read back as notes, so whatever key
+    /// they hold is unknown.
+    opaque: Vec<PathBuf>,
+}
+
+fn read_layer(paths: &Paths, layer: Layer) -> Result<LayerRead> {
     let mut files = Vec::new();
+    // Traversal errors stay fatal: a directory omh cannot list may hold the
+    // key a write is about to take, and guessing is the failure this whole
+    // function exists to avoid.
     markdown_files(&layer.dir(paths), &mut files)?;
     files.sort();
 
-    Ok(files
-        .iter()
-        .filter_map(|path| {
-            let raw = std::fs::read_to_string(path).ok()?;
-            let note = parse(&raw, layer, path).ok()?;
-            Some((note.key, path.clone()))
-        })
-        .collect())
+    let mut notes = Vec::new();
+    let mut opaque = Vec::new();
+    for path in files {
+        match std::fs::read_to_string(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|raw| parse(&raw, layer, &path))
+        {
+            Ok(note) => notes.push(note),
+            Err(_) => opaque.push(path),
+        }
+    }
+    Ok(LayerRead { notes, opaque })
 }
 
 /// Both layers. Never merged and never deduped: `team/deploy` and
@@ -756,8 +916,30 @@ pub fn templates(paths: &Paths) -> Result<BTreeMap<Kind, String>> {
 /// Also the store-quality meter: violation counts are a write-time proxy for
 /// store quality, available with no questions asked and no model pass.
 pub fn lint(paths: &Paths) -> Result<Vec<Violation>> {
-    let notes = load(paths)?;
-    let mut found: Vec<Violation> = notes.iter().flat_map(check).collect();
+    // Read leniently *here specifically*, and turn what could not be read
+    // into violations. `load` stays strict because a query answered from a
+    // subset is a wrong answer; `lint` is the one caller whose whole job is
+    // to describe the store including its damage, so giving up on the first
+    // bad file is the one thing it must not do.
+    let mut notes = Vec::new();
+    let mut found = Vec::new();
+    for layer in Layer::ALL {
+        let read = read_layer(paths, layer)?;
+        for path in read.opaque {
+            found.push(Violation {
+                key: path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+                layer,
+                rule: Rule::Unreadable,
+                detail: format!("{} is in the store but omh cannot read it", path.display()),
+            });
+        }
+        notes.extend(read.notes);
+    }
+
+    found.extend(notes.iter().flat_map(check));
     found.extend(hygiene(&notes));
     found.sort_by(|a, b| (a.rule, &a.key).cmp(&(b.rule, &b.key)));
     Ok(found)
@@ -821,6 +1003,10 @@ pub enum IfExists {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Wrote {
     Created(PathBuf),
+    /// An `--if-exists override` that destroyed a note to make room. Its own
+    /// variant because reporting it as a creation is how a destructive write
+    /// passes for a harmless one, and §6 only permits it when it was named.
+    Replaced(PathBuf),
     Skipped(String),
 }
 
@@ -872,7 +1058,6 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
         template,
         &[("slug", &slug_of_observation(&input.observed)?)],
     )?;
-    validate_key(&key)?;
 
     // Always the write layer, never a parameter. An unattended writer that
     // could reach the committed layer would push wrong facts to teammates
@@ -885,15 +1070,29 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
     // its own key — which nothing prevents, because `KeyDisagreesWithPath`
     // compares only the leaf. Checking the path let a second note land under
     // a key that was already taken, and `rm` could then separate neither.
-    let taken = keys_in(paths, layer)?;
+    let taken = read_layer(paths, layer)?;
+    // A note omh cannot read may hold the key this write wants. Refusing is
+    // the recoverable half of that choice — the other half is a second note
+    // under a key that already existed, which is unrecoverable through the
+    // CLI and invisible until somebody tries to `rm` one of them.
+    if let Some(opaque) = taken.opaque.first() {
+        bail!(
+            "{} is in the store but omh cannot read it, so it cannot tell whether `{key}` is \
+             free — fix or remove that note first",
+            opaque.display()
+        );
+    }
     let held_at = |k: &str| {
         taken
+            .notes
             .iter()
-            .find(|(existing, _)| existing == k)
-            .map(|(_, path)| path.clone())
+            .find(|note| note.key == k)
+            .map(|note| note.path.clone())
     };
 
-    let (key, path) = match if_exists {
+    // `replacing` is the note this write destroys, if any — carried this far
+    // so the return value can say so instead of calling it a creation.
+    let (key, path, replacing) = match if_exists {
         IfExists::Suffix => {
             let mut candidate = key.clone();
             let mut n = 1;
@@ -902,15 +1101,20 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
                 candidate = format!("{key}-{n}");
             }
             let path = root.join(format!("{candidate}.md"));
-            (candidate, path)
+            (candidate, path, None)
         }
         _ => match held_at(&key) {
-            // Override replaces the note that holds the key, wherever it
-            // lives — writing to `{key}.md` instead would leave the original
-            // in place and make a second note under one key.
             Some(existing) => match if_exists {
                 IfExists::Skip => return Ok(Wrote::Skipped(key)),
-                IfExists::Override => (key, existing),
+                // The replacement lands at the key's own path and the old
+                // file goes, so overriding *restores* invariant 5 rather than
+                // preserving a mislocated note. Writing to `existing` instead
+                // made the key disagree with its filename, and `check` then
+                // refused the very write it had been told to force.
+                IfExists::Override => {
+                    let path = root.join(format!("{key}.md"));
+                    (key, path, Some(existing))
+                }
                 IfExists::Error => {
                     bail!("`{key}` is already recorded; update that note instead")
                 }
@@ -927,7 +1131,7 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
                         path.display()
                     );
                 }
-                (key, path)
+                (key, path, None)
             }
         },
     };
@@ -955,10 +1159,27 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
         bail!("`{}` was not written: {}", note.key, first.detail);
     }
 
+    // The root has to exist to be resolved, and it is the one directory that
+    // is trivially inside itself. Everything below it is checked before it is
+    // created, so a symlinked namespace cannot be walked into on the way.
+    std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
+    contained(&root, &path)?;
     std::fs::create_dir_all(path.parent().unwrap())
         .with_context(|| format!("creating {}", root.display()))?;
     std::fs::write(&path, &rendered).with_context(|| format!("writing {}", path.display()))?;
-    Ok(Wrote::Created(path))
+
+    match replacing {
+        Some(stale) => {
+            // Unlinked after the replacement is safely on disk, and only when
+            // it is a different file — one key must end up with one note.
+            if stale != path {
+                std::fs::remove_file(&stale)
+                    .with_context(|| format!("removing {}", stale.display()))?;
+            }
+            Ok(Wrote::Replaced(path))
+        }
+        None => Ok(Wrote::Created(path)),
+    }
 }
 
 // ── rm ──────────────────────────────────────────────────────────────────────
@@ -997,15 +1218,35 @@ fn disambiguate<'a>(
 
     if let Some(at) = at {
         let picked: Vec<&&Note> = many.iter().filter(|n| n.path.ends_with(at)).collect();
+        let spans_layers = |notes: &[&&Note]| {
+            notes
+                .iter()
+                .map(|n| n.layer)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                > 1
+        };
         return match picked.as_slice() {
             [one] => Ok(**one),
             [] => bail!(
                 "no note `{key}` at `{at}` — it is in {}",
                 many.iter().map(|n| shown(n)).collect::<Vec<_>>().join(", ")
             ),
-            _ => bail!(
+            // Two layers can hold the same relative path, and then `shown`
+            // renders both identically — so "give more of the path" asks for
+            // something the caller does not have. The layer is the only
+            // thing that separates them.
+            rest if spans_layers(rest) => bail!(
+                "`{at}` matches {} notes, in {} — name one with --layer",
+                rest.len(),
+                rest.iter()
+                    .map(|n| n.layer.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+            ),
+            rest => bail!(
                 "`{at}` matches {} of them — give more of the path",
-                picked.len()
+                rest.len()
             ),
         };
     }
@@ -1040,10 +1281,15 @@ pub fn remove(paths: &Paths, layer: Option<Layer>, key: &str, at: Option<&str>) 
         .iter()
         .filter(|n| n.key == key && layer.is_none_or(|l| n.layer == l))
         .collect();
-    let note = match matching.as_slice() {
-        [] => bail!("no note `{key}`"),
-        [one] => *one,
-        many => disambiguate(paths, many, key, at)?,
+    // `--at` is applied whenever it is given, not only when the key is
+    // ambiguous. Consulting it only in the `many` arm meant naming a file
+    // that does not hold the key deleted a *different* note and reported
+    // success — the caller reached for `--at` to be careful, and it was the
+    // one input that could not be wrong.
+    let note = match (matching.as_slice(), at) {
+        ([], _) => bail!("no note `{key}`"),
+        ([one], None) => *one,
+        (many, _) => disambiguate(paths, many, key, at)?,
     };
 
     let mut inbound: Vec<String> = notes
@@ -1498,6 +1744,23 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert_eq!(key.matches('/').count(), 1);
     }
 
+    /// The guard belongs at the mint, not at one call site. `remember` is the
+    /// only caller today, but M2 adds a second (`stub = "docs/{{path}}"`,
+    /// binding a repo path into an identity) and a guard it has to remember
+    /// to call is a guard it will ship without.
+    #[test]
+    fn a_template_that_escapes_the_store_never_becomes_a_key() {
+        let err = expand_key("../../escaped/{{slug}}", &[("slug", "x")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not a key"), "got: {err}");
+
+        assert!(
+            expand_key("docs/{{path}}", &[("path", "../../etc/passwd")]).is_err(),
+            "a bound value must not smuggle in what the template may not spell"
+        );
+    }
+
     // ── the clock ───────────────────────────────────────────────────────────
 
     /// `days / 365` misdates every note by a growing amount, and it is exactly
@@ -1705,6 +1968,87 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             "the link after the stray bracket vanished: {found:?}"
         );
         assert!(found.contains(&"another".to_string()), "got: {found:?}");
+    }
+
+    /// A tilde fence is CommonMark's other fence character, and matching only
+    /// backticks left the whole bypass open under a different spelling.
+    #[test]
+    fn a_tilde_fence_hides_a_heading_just_like_a_backtick_one() {
+        let fenced =
+            "# T\n\n~~~markdown\n## Expected\nsample\n## Observed\nx\n## Evidence\ny\n~~~\n";
+
+        assert_eq!(
+            rules(&check(&note_with(Kind::Surprise, "tilde", fenced))),
+            vec![
+                Rule::MissingSection,
+                Rule::MissingSection,
+                Rule::MissingSection
+            ],
+        );
+    }
+
+    /// A fourth backtick exists precisely to wrap a fenced example, which is
+    /// the shape the staged rules teach. A blind toggle closed the outer
+    /// fence on the inner one and read the rest of the block as prose.
+    #[test]
+    fn a_longer_fence_is_not_closed_by_a_shorter_one_inside_it() {
+        let nested = "# T\n\n````markdown\n```\n## Expected\n## Observed\n## Evidence\n```\n````\n";
+
+        assert_eq!(
+            rules(&check(&note_with(Kind::Surprise, "fourtick", nested))),
+            vec![
+                Rule::MissingSection,
+                Rule::MissingSection,
+                Rule::MissingSection
+            ],
+        );
+    }
+
+    /// Fences inside a list item are indented, and CommonMark allows up to
+    /// three spaces before one. The heading inside is written flush, so this
+    /// separates "the fence was recognised" from "the heading was indented
+    /// out of recognition" — which a fence of indented headings cannot.
+    #[test]
+    fn an_indented_fence_still_opens_a_block() {
+        let indented =
+            "# T\n\n## Expected\na\n\n  ```markdown\n## Observed\nquoted\n  ```\n\n## Evidence\nc\n";
+        let found = check(&note_with(Kind::Surprise, "indented", indented));
+
+        assert_eq!(
+            rules(&found),
+            vec![Rule::MissingSection],
+            "`## Observed` sits inside an indented fence: {found:?}"
+        );
+        assert!(
+            found[0].detail.contains("Observed"),
+            "got: {}",
+            found[0].detail
+        );
+    }
+
+    /// `## Evidence` holds pasted terminal output, so a truncated paste that
+    /// never closes its fence is the likely accident, not the exotic one.
+    /// Everything after it stops being a heading and stops being a link — so
+    /// the note must say *that*, rather than reporting sections it can see.
+    #[test]
+    fn an_unclosed_fence_is_refused_by_name_not_as_missing_sections() {
+        let truncated =
+            "# T\n\n## Expected\na\n\n## Evidence\n```sh\nomh run\n\n## Observed\nb\n\n## Related\n\n- [[somewhere]]\n";
+        let found = check(&note_with(Kind::Surprise, "truncated", truncated));
+
+        assert_eq!(
+            rules(&found),
+            vec![Rule::UnclosedFence],
+            "the fence is the problem; the sections are right there"
+        );
+        assert_eq!(
+            Rule::UnclosedFence.severity(),
+            Severity::Refused,
+            "a note whose links have silently vanished must not be written"
+        );
+        // The links really are gone — which is why this has to be refused
+        // rather than warned about.
+        assert!(links(truncated).is_empty());
     }
 
     /// Per-line scanning stops a stray `[[` reaching the *next* line's link,
@@ -1934,6 +2278,91 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         }
     }
 
+    /// Every spelling of "not a key", in one table. The escape test below
+    /// exercises exactly one of these through `remember`; the other four
+    /// disjuncts were each individually removable with the suite green, and
+    /// two of them are redundant with each other for absolute keys, so
+    /// neither was named by anything.
+    #[test]
+    fn a_key_is_slash_separated_slugs_and_nothing_else() {
+        for bad in [
+            "",
+            "/etc/passwd",
+            "..",
+            "../escaped",
+            "a/../b",
+            "a//b",
+            "a/",
+            "a\\b",
+            ".ssh/authorized_keys",
+            "surprise/.",
+        ] {
+            assert!(
+                validate_key(bad).is_err(),
+                "`{bad}` must not be usable as a key"
+            );
+        }
+        for good in ["a", "ns/a", "surprise/the-mount-failed", "docs/a/b/c"] {
+            assert!(
+                validate_key(good).is_ok(),
+                "`{good}` is a key and must stay one"
+            );
+        }
+    }
+
+    /// A key can be innocent and still land outside the store, because the
+    /// store is a directory tree an agent can write to: one symlinked
+    /// namespace and `{key}.md` resolves anywhere. `validate_key` reads the
+    /// spelling, so only the resolved path can answer this.
+    #[test]
+    fn a_symlinked_namespace_cannot_carry_a_write_out_of_the_store() {
+        let (dir, paths) = fixture();
+        let root = Layer::Local.dir(&paths);
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("surprise")).unwrap();
+
+        let err = remember(&paths, &observation(), IfExists::Error).unwrap_err();
+        assert!(err.to_string().contains("outside the store"), "got: {err}");
+        assert!(
+            std::fs::read_dir(&outside).unwrap().next().is_none(),
+            "a note landed outside the store through a symlink"
+        );
+    }
+
+    /// The write guard and the read guard are separate: refusing to write
+    /// through a symlink does nothing about one already in the store. A store
+    /// that reads through it answers with notes that are not in it, and `rm`
+    /// then deletes one of them — outside the directory it claims to own.
+    #[test]
+    fn the_store_does_not_read_through_a_symlink() {
+        let (dir, paths) = fixture();
+        let root = Layer::Local.dir(&paths);
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut stray = note_with(Kind::Surprise, "elsewhere", &surprise_body());
+        stray.path = outside.join("elsewhere.md");
+        std::fs::write(&stray.path, render(&stray)).unwrap();
+
+        // Both shapes, because they are caught by different things: a linked
+        // directory by reading the entry's own type instead of the target's,
+        // a linked file by refusing links outright.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+            std::os::unix::fs::symlink(&stray.path, root.join("linked.md")).unwrap();
+        }
+
+        assert!(
+            load_layer(&paths, Layer::Local).unwrap().is_empty(),
+            "the store answered with a note that is not in it"
+        );
+    }
+
     /// §6 derives keys from a template in the repo, so the template is input
     /// omh does not control — a clone carries one. `remember` creates the
     /// key's parent directories, so a template that leaves the store is an
@@ -1986,6 +2415,107 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert!(
             err.to_string().contains("already recorded"),
             "a taken key is a conflict wherever it lives, got: {err}"
+        );
+    }
+
+    /// Skipping a note omh cannot parse answers "is this key free?" with
+    /// "yes" to a question whose true answer may be "no" — and the
+    /// consequence is a write, not a read. The result was two notes under one
+    /// key, silently, through the sanctioned path.
+    ///
+    /// So the write is refused. A deliberate exception to §7's "a store-wide
+    /// problem must never refuse somebody else's write": this is not an
+    /// unrelated problem elsewhere in the store, it is omh being unable to
+    /// verify the invariant *this* write depends on. A refused write is
+    /// recoverable; a duplicated key is not.
+    #[test]
+    fn a_note_omh_cannot_read_stops_the_write_rather_than_risking_a_duplicate() {
+        let (dir, paths) = fixture();
+        let root = Layer::Local.dir(&paths);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("unreadable.md"), "this has no frontmatter\n").unwrap();
+
+        let err = remember(&paths, &observation(), IfExists::Error).unwrap_err();
+        assert!(
+            err.to_string().contains("unreadable.md"),
+            "the refusal must name the file standing in the way: {err}"
+        );
+
+        let notes = files_under(dir.path())
+            .into_keys()
+            .filter(|p| p.extension().is_some_and(|e| e == "md"))
+            .count();
+        assert_eq!(
+            notes, 1,
+            "nothing new may be written while the store is unverifiable"
+        );
+    }
+
+    /// A mislocated note is exactly the case `--if-exists override` was
+    /// pointed at, and it was the one case it could not do: writing to the
+    /// old file made the key disagree with the new filename, so `check`
+    /// refused the write it had just been told to force.
+    ///
+    /// Overriding restores the invariant rather than preserving the mistake:
+    /// one note, at the key's own path.
+    #[test]
+    fn override_replaces_a_mislocated_note_and_leaves_one_behind() {
+        let (_d, paths) = fixture();
+        let root = Layer::Local.dir(&paths);
+        let key = derived_key(&paths, &observation());
+
+        let stale = root.join("hand-written.md");
+        std::fs::create_dir_all(root.join("surprise")).unwrap();
+        let mut note = note_with(Kind::Surprise, &key, &surprise_body());
+        note.path = stale.clone();
+        std::fs::write(&stale, render(&note)).unwrap();
+
+        let wrote = remember(&paths, &observation(), IfExists::Override).unwrap();
+
+        assert_eq!(
+            wrote,
+            Wrote::Replaced(root.join(format!("{key}.md"))),
+            "a write that destroyed a note must not report as a creation"
+        );
+        assert!(!stale.exists(), "the note it replaced is still there");
+        assert_eq!(
+            lint(&paths)
+                .unwrap()
+                .iter()
+                .filter(|v| v.rule == Rule::DuplicateKey)
+                .count(),
+            0,
+            "override must leave one note under the key, not two"
+        );
+    }
+
+    /// `skip` is §6's mode for idempotent ingest, so it has to recognise the
+    /// key as taken wherever the note holding it sits — otherwise a repeated
+    /// ingest writes a second copy of what it was told to leave alone.
+    #[test]
+    fn skip_and_suffix_see_a_key_held_by_a_mislocated_note() {
+        let (_d, paths) = fixture();
+        let root = Layer::Local.dir(&paths);
+        let key = derived_key(&paths, &observation());
+        let mut note = note_with(Kind::Surprise, &key, &surprise_body());
+        note.path = root.join("hand-written.md");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&note.path, render(&note)).unwrap();
+
+        assert_eq!(
+            remember(&paths, &observation(), IfExists::Skip).unwrap(),
+            Wrote::Skipped(key.clone()),
+            "the key is taken, so there is nothing to add"
+        );
+
+        let Wrote::Created(path) = remember(&paths, &observation(), IfExists::Suffix).unwrap()
+        else {
+            panic!("suffix creates a new note");
+        };
+        assert!(
+            path.ends_with(format!("{key}-2.md")),
+            "suffix must step over the held key: {}",
+            path.display()
         );
     }
 
@@ -2227,6 +2757,80 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     // ── rm ──────────────────────────────────────────────────────────────────
 
+    /// `--at` was consulted only when the key matched several notes, so
+    /// naming a file that does not hold the key deleted a different one and
+    /// reported success. Someone types `--at` precisely to be careful about
+    /// which file dies; deletion is irreversible and the local store is
+    /// outside the checkout, so git will not give it back.
+    #[test]
+    fn an_at_that_names_nothing_never_falls_through_to_another_note() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "solo", &surprise_body());
+
+        let err = remove(&paths, None, "solo", Some("some-other-file.md"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("some-other-file.md"), "got: {err}");
+        assert!(
+            Layer::Local.dir(&paths).join("solo.md").exists(),
+            "a note the caller did not name was removed"
+        );
+    }
+
+    /// Both bail arms of `disambiguate` are one `Ok(first)` away from being
+    /// silent data loss, so both are pinned: a `--at` that matches nothing,
+    /// and one that matches more than it can separate.
+    #[test]
+    fn an_at_that_cannot_pick_one_note_removes_none_of_them() {
+        let (_d, paths) = fixture();
+        let root = Layer::Local.dir(&paths);
+        std::fs::create_dir_all(root.join("ns")).unwrap();
+        for at in ["dup.md", "ns/dup.md"] {
+            let mut note = note_with(Kind::Surprise, "dup", &surprise_body());
+            note.path = root.join(at);
+            std::fs::write(&note.path, render(&note)).unwrap();
+        }
+
+        let missed = remove(&paths, Some(Layer::Local), "dup", Some("absent.md"))
+            .unwrap_err()
+            .to_string();
+        assert!(missed.contains("absent.md"), "got: {missed}");
+
+        // `dup.md` is a component-suffix of both paths, so it names neither.
+        let ambiguous = remove(&paths, Some(Layer::Local), "dup", Some("dup.md"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            ambiguous.contains("2"),
+            "an ambiguous --at must say so: {ambiguous}"
+        );
+
+        assert_eq!(
+            files_under(&root).len(),
+            2,
+            "neither refusal may remove anything"
+        );
+    }
+
+    /// When the same relative path exists in both layers, `--at` cannot
+    /// separate them however much of the path is given — the answer is
+    /// `--layer`, and the message has to say so rather than asking for more
+    /// of a path that is already identical.
+    #[test]
+    fn an_at_that_spans_layers_points_at_the_layer_flag() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "shared", &surprise_body());
+        seed(&paths, Layer::Team, "shared", &surprise_body());
+
+        let err = remove(&paths, None, "shared", Some("shared.md"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--layer"),
+            "the only thing that separates these is the layer: {err}"
+        );
+    }
+
     /// `remove` assumed duplicates could only be cross-layer, so two notes
     /// under one key in one layer produced "`k` is in local and local" — and
     /// `--layer local` produced it again. There was no argument that reached
@@ -2433,6 +3037,96 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     }
 
     // ── lint ────────────────────────────────────────────────────────────────
+
+    /// One note omh cannot parse aborted `lint` before it printed anything,
+    /// so the command that exists to tell you what is wrong with the store
+    /// went silent on precisely the store that needed it — and `remember`
+    /// refuses while it is in that state, which made it unrecoverable
+    /// through omh. Reporting it is what lets you fix it.
+    #[test]
+    fn lint_reports_a_note_it_cannot_read_instead_of_giving_up() {
+        let (_d, paths) = fixture();
+        let root = Layer::Local.dir(&paths);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("broken.md"), "no frontmatter here\n").unwrap();
+        seed(&paths, Layer::Local, "fine", &surprise_body());
+
+        let found = lint(&paths).unwrap();
+        let unreadable: Vec<_> = found
+            .iter()
+            .filter(|v| v.rule == Rule::Unreadable)
+            .collect();
+
+        assert_eq!(unreadable.len(), 1, "got: {found:?}");
+        assert!(
+            unreadable[0].detail.contains("broken.md"),
+            "the report must name the file: {}",
+            unreadable[0].detail
+        );
+        assert_eq!(
+            Rule::Unreadable.severity(),
+            Severity::Refused,
+            "a note the store cannot read is not a style warning"
+        );
+        // And the rest of the store is still judged, which is the point.
+        assert!(
+            found.iter().any(|v| v.key == "fine"),
+            "one bad file must not hide every other violation: {found:?}"
+        );
+    }
+
+    /// `remember` now refuses to create one, but a store can already hold
+    /// two notes under one key — hand-written notes are the only writer M1
+    /// gives the agent. Nothing could report that state: `KeyDisagreesWithPath`
+    /// compares only the leaf, so two files whose leaves agree were invisible
+    /// and `lint` exited 0 on a violated §6.
+    ///
+    /// A warning, not a refusal, because it is a property of the store rather
+    /// than of the note being written — §7's split, and the reason `remember`
+    /// is where the refusal lives.
+    #[test]
+    fn two_notes_under_one_key_in_one_layer_are_reported() {
+        let (_d, paths) = fixture();
+        let root = Layer::Local.dir(&paths);
+        std::fs::create_dir_all(root.join("ns")).unwrap();
+        for at in ["dup.md", "ns/dup.md"] {
+            let mut note = note_with(Kind::Surprise, "dup", &surprise_body());
+            note.path = root.join(at);
+            std::fs::write(&note.path, render(&note)).unwrap();
+        }
+
+        let found = lint(&paths).unwrap();
+        let dupes: Vec<_> = found
+            .iter()
+            .filter(|v| v.rule == Rule::DuplicateKey)
+            .collect();
+
+        assert_eq!(dupes.len(), 1, "one key, one report: {found:?}");
+        assert!(
+            dupes[0].detail.contains("dup.md") && dupes[0].detail.contains("ns/dup.md"),
+            "the report must name both files: {}",
+            dupes[0].detail
+        );
+        assert_eq!(Rule::DuplicateKey.severity(), Severity::Warning);
+    }
+
+    /// §4 makes `team/deploy` and `local/deploy` two notes on purpose — both
+    /// retrieve, and neither shadows the other. A duplicate check that
+    /// ignored the layer would report the design as a defect.
+    #[test]
+    fn one_key_in_both_layers_is_not_a_duplicate() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "deploy", &surprise_body());
+        seed(&paths, Layer::Team, "deploy", &surprise_body());
+
+        assert!(
+            !lint(&paths)
+                .unwrap()
+                .iter()
+                .any(|v| v.rule == Rule::DuplicateKey),
+            "a key in both layers is a disagreement, not a duplicate"
+        );
+    }
 
     /// What makes `omh memory lint` fail. Only refusals may: `Orphan` fires
     /// on every note nothing links to — which is every note `remember` writes

@@ -838,6 +838,14 @@ fn memory_remember(
     }
     match memory::remember(&paths, &input, if_exists)? {
         memory::Wrote::Created(path) => println!("recorded {}", path.display()),
+        // Said out loud: a note that existed is gone, and only `--if-exists
+        // override` gets here, so the caller asked for it and can check.
+        memory::Wrote::Replaced(path) => {
+            println!(
+                "replaced {} — the note that was there is gone",
+                path.display()
+            )
+        }
         memory::Wrote::Skipped(key) => println!("`{key}` is already recorded; left alone"),
     }
     Ok(())
@@ -1584,10 +1592,18 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
 ///
 /// Returns whether anything was written.
 fn append_section_if_absent(path: &std::path::Path, heading: &str, section: &str) -> Result<bool> {
-    let Ok(existing) = std::fs::read_to_string(path) else {
-        return Ok(false);
+    let existing = match std::fs::read_to_string(path) {
+        Ok(existing) => existing,
+        // Absent is the fresh-install case the caller just handled with
+        // `write_if_absent`. Every other error is real, and swallowing it
+        // ships the rules nowhere while reporting success.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    if existing.contains(heading) {
+
+    // A whole line, not a substring: `## Memory management` is a different
+    // section, and prose naming this one is not this one.
+    if existing.lines().any(|line| line.trim() == heading) {
         return Ok(false);
     }
 
@@ -1802,6 +1818,48 @@ mod tests {
 
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");
+
+    /// `contains` is a substring test, so any prose mentioning the heading —
+    /// `## Memory management`, or a sentence pointing at `## Memory` in a
+    /// wiki — read as "already delivered" and suppressed the rules for good.
+    /// That ships the feature inert, which is the defect this exists to fix.
+    #[test]
+    fn a_heading_that_merely_starts_with_memory_is_not_the_memory_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        std::fs::write(
+            &path,
+            "# Project rules\n\n## Memory management\n\nArena, not GC.\n",
+        )
+        .unwrap();
+
+        assert!(
+            append_section_if_absent(&path, "## Memory", &detect::memory_rules()).unwrap(),
+            "a different section that happens to share a prefix is not this one"
+        );
+        assert!(std::fs::read_to_string(&path)
+            .unwrap()
+            .contains("## Memory management"));
+    }
+
+    /// A file omh cannot read is not a file that needs nothing done to it.
+    /// Treating the two alike returned "nothing to do", printed nothing, and
+    /// exited 0 — the feature shipped inert and said so to no one.
+    #[test]
+    fn an_unreadable_agents_md_is_an_error_rather_than_a_quiet_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        // Invalid UTF-8 rather than a permission bit: `read_to_string` fails
+        // on it for every user, including the one running CI as root.
+        std::fs::write(&path, [0x23, 0x20, 0xff, 0xfe, 0x0a]).unwrap();
+
+        let err = append_section_if_absent(&path, "## Memory", &detect::memory_rules())
+            .expect_err("an unreadable file must be reported, not skipped");
+        assert!(
+            err.to_string().contains("AGENTS.md"),
+            "the error must name the file: {err}"
+        );
+    }
 
     /// Every repo that ran `init` before the store existed already has an
     /// `AGENTS.md`, and `write_if_absent` skips it — so the note rules, which
