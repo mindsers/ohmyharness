@@ -16,9 +16,11 @@ use std::process::{Command, Output};
 
 /// A repo and a home, isolated from the developer's own.
 ///
-/// `repo_root` only looks for a `.git` directory, so an empty one is a repo
-/// as far as omh is concerned — no `git init`, and no dependency on git being
-/// installed to run the tests.
+/// `repo_root` only looks for a `.git` directory, so an empty one is a repo as
+/// far as omh is concerned, and most of this file needs no `git init` and no
+/// git on the box. `promote` is the exception — it asks git whether the
+/// destination is ignored and refuses to guess — so those tests call
+/// `git_init` and do depend on git being installed.
 struct Sandbox {
     _dir: tempfile::TempDir,
     repo: PathBuf,
@@ -59,6 +61,26 @@ impl Sandbox {
         let path = self.local_store().join(at);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, body).unwrap();
+    }
+
+    /// A real repository, for the commands that ask git a question rather than
+    /// just needing somewhere to be. `promote` is the only one: it will not
+    /// plan against a destination it cannot establish the ignore status of,
+    /// and the empty `.git` above is exactly the case git refuses to answer
+    /// about — so a promotion in the bare sandbox is correctly always blocked.
+    fn git_init(&self) {
+        std::fs::remove_dir_all(self.repo.join(".git")).unwrap();
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .expect("git must be installed to run this test");
+        assert!(out.status.success(), "git init failed");
+    }
+
+    fn team_store(&self) -> PathBuf {
+        self.repo.join(".omh/notes")
     }
 }
 
@@ -193,4 +215,71 @@ fn escaped_notes(under: &Path) -> bool {
         }
     }
     false
+}
+
+/// `promote` is the one command whose failure must not be quiet: it is the
+/// human gate, and a gate that reports a refusal only on stdout — or exits 0
+/// having refused — is a gate somebody scripts straight past. Nothing under
+/// `plan` can observe either, because both live in `main`.
+#[test]
+fn promote_fails_the_command_and_moves_nothing_when_a_key_is_blocked() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed("private.md", &note("private", WHOLE));
+    sb.seed(
+        "candidate.md",
+        &note(
+            "candidate",
+            &format!("{WHOLE}\n## Related\n\n- [[private]]\n"),
+        ),
+    );
+
+    let out = sb.omh(&["memory", "promote", "candidate"]);
+    assert!(
+        !out.status.success(),
+        "a refused promotion must fail the command"
+    );
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("private"),
+        "the blocker names what to fix, on stderr: {said}"
+    );
+    assert!(
+        sb.local_store().join("candidate.md").exists(),
+        "and the note is still in the gitignored layer"
+    );
+    assert!(
+        !sb.team_store().join("candidate.md").exists(),
+        "and nothing was committed-layer written"
+    );
+}
+
+/// The other half. Without it the test above passes on a `promote` that
+/// refuses everything, which is the failure mode a fail-closed ignore check
+/// makes easy to ship.
+#[test]
+fn promote_moves_the_note_and_says_it_is_not_shared_yet() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed("fine.md", &note("fine", WHOLE));
+
+    let out = sb.omh(&["memory", "promote", "fine"]);
+    assert!(
+        out.status.success(),
+        "a clean note promotes: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        printed.contains("not shared until committed"),
+        "moving the file is not sharing it: {printed}"
+    );
+    assert!(
+        sb.team_store().join("fine.md").exists(),
+        "the note is in the committed layer"
+    );
+    assert!(
+        !sb.local_store().join("fine.md").exists(),
+        "and no longer in the gitignored one"
+    );
 }

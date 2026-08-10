@@ -323,12 +323,87 @@ one `refused` line, and would exit 0 without it. Until the agent's own writes
 are refused, this is what a hook or a CI step can gate on, and a gate that also
 tripped on hygiene would be red for every store with an unlinked note in it.
 
-Two rules are worth naming because they describe the store rather than one
+Three rules are worth naming because they describe the store rather than one
 note's shape. `UnclosedFence` refuses a note whose code fence never closes:
 everything after it is quoted, including headings and `[[links]]`, so the note
 does not mean what it looks like. `DuplicateKey` warns when one key is claimed
 by two files in one layer — §6 makes a key a primary key, `remember` refuses to
 create a second, and this is how one that arrived by hand becomes visible.
+`CrossLayerLink` warns when a *committed* note links to one that is not: the
+link works on the machine that wrote it and dangles in every clone, which is
+invariant 2 and the reason `promote` exists. It warns rather than refuses
+because the note at fault is somebody else's, and an agent writing right now
+cannot fix it — `promote` is where the same condition is fatal.
+
+### `omh memory promote <key>…`
+
+local → team. **The only place a human gates anything**, because it is the only
+place a wrong note reaches somebody else. Everything else is invisible: a memory
+you have to approve is a notebook, and nobody keeps one.
+
+```console
+$ omh memory promote surprise/credentials-live-in-a-volume
+omh: `surprise/credentials-live-in-a-volume` links to
+     surprise/ebusy-on-a-file-mount, which is not committed — promote it too,
+     or drop the link
+Error: promoted nothing
+```
+
+That refusal is **invariant 2**: a committed note may only link to committed
+notes, because a teammate's clone has no gitignored layer to follow the link
+into. The lint warns about it; `promote` refuses, since a warning is negotiable
+and this is the last point at which it can be caught.
+
+These are two mechanisms, not two settings on one dial. A rule's `Severity`
+gates a *write* — `CrossLayerLink` is a warning there because the note at fault
+is committed and the agent writing right now cannot fix somebody else's. A
+`Blocker` gates a *promotion*, and there the same condition is fatal. Raising
+the rule to a refusal to make them agree would fail every `remember` in a repo
+whose committed layer has one bad link.
+
+Invariant 2 is not the only thing refused, because it is not the only way a
+promotion can publish something wrong:
+
+- **A note the schema refuses** is never shared. An unclosed fence is the case
+  that matters: it quotes every heading and link below it, so the invariant-2
+  check would read no links at all and pass on the one note whose links cannot
+  be seen.
+- **A key that is not a key.** `validate_key` guards the mint; a key read back
+  off disk has never been through it, and every path here is built from it.
+- **A destination that already exists.** The conflict above asks whether a
+  *key* is committed; the write lands on a *path*, and a note whose frontmatter
+  disagrees with its filename owns one without the other.
+- **A key claimed by two local files** — `rm` refuses this store and asks for
+  `--at`; promoting one and leaving the other would be a third story about it.
+- **An ignore check that could not answer.** `git check-ignore` reports
+  ignored, not-ignored, or failure, and the third is not the second.
+
+Name them together and both go:
+
+```console
+$ omh memory promote surprise/credentials-live-in-a-volume surprise/ebusy-on-a-file-mount
+promoted surprise/credentials-live-in-a-volume → .omh/notes/…
+promoted surprise/ebusy-on-a-file-mount → .omh/notes/…
+
+not shared until committed:
+  git add :/.omh/notes && git commit
+```
+
+Two notes that link to each other are unpromotable one at a time, which is why
+the check knows what else is in the batch.
+
+`:/` in that last line is git's root-relative pathspec, so the command works
+from wherever you happened to run `promote`. A bare `.omh/notes` matches
+nothing from a subdirectory, and a command that fails is a poor way to end the
+one step that actually shares the note.
+
+**One blocked key stops the whole batch.** A half-finished promotion leaves a
+store nobody planned, and you would have to work out which half landed.
+
+**The key never changes** — identity is `(layer, key)`, so promotion moves a
+note between layers rather than renaming it — and nothing else is rewritten.
+Notes that pointed at it keep working, because from `local` a key resolves into
+either layer.
 
 ### `omh memory rm <key> [--layer team|local] [--at <path>]`
 
@@ -406,6 +481,6 @@ degrades to absent with one line at launch rather than failing it.
 
 ### What is not here yet
 
-`promote` and `stale` arrive with the milestones that give them something to act
-on — see [the design](design/memory.md). A subcommand that printed "not
-implemented" would be worse than its absence, because `--help` advertises it.
+`stale` arrives with the milestone that gives it something to act on — see
+[the design](design/memory.md). A subcommand that printed "not implemented"
+would be worse than its absence, because `--help` advertises it.

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 pub mod deliver;
 pub mod index;
 pub mod ingest;
+pub mod promote;
 pub mod recall;
 pub mod tools;
 
@@ -390,7 +391,7 @@ pub fn expand_key(template: &str, vars: &[(&str, &str)]) -> Result<String> {
 /// creates the key's parent directories, an unchecked template is an
 /// arbitrary write. `auth::validate_name` and `session::validate_id` are the
 /// precedent: validate identity where it is minted, not where it is used.
-fn validate_key(key: &str) -> Result<()> {
+pub(crate) fn validate_key(key: &str) -> Result<()> {
     // An empty component covers more than it looks: `""` splits to one empty
     // part, `/abs` to a leading one, `a//b` and `a/` to an interior and a
     // trailing one. Spelling those out separately reads as thorough and is
@@ -451,6 +452,8 @@ pub enum Rule {
     KeyDisagreesWithPath,
     DuplicateKey,
     DanglingLink,
+    /// A committed note links somewhere a fresh clone cannot follow.
+    CrossLayerLink,
     Orphan,
 }
 
@@ -474,7 +477,9 @@ impl Rule {
             | Self::MissingSection
             | Self::ProseInListSection
             | Self::KeyDisagreesWithPath => Severity::Refused,
-            Self::DuplicateKey | Self::DanglingLink | Self::Orphan => Severity::Warning,
+            Self::DuplicateKey | Self::DanglingLink | Self::CrossLayerLink | Self::Orphan => {
+                Severity::Warning
+            }
         }
     }
 }
@@ -679,6 +684,72 @@ pub fn links(body: &str) -> Vec<String> {
     out
 }
 
+/// Which layers a `[[key]]` written *in a note of `from`* actually reaches.
+///
+/// A set, never a winner — that is the whole of §4. Two claims about one topic
+/// are two facts, and picking one would hide a teammate's note behind yours.
+///
+/// The asymmetry is invariant 2: from `local` a key reaches whatever holds it,
+/// but from `team` it reaches only `team`, because a committed note is read in
+/// a clone where no local layer exists.
+///
+/// It is one place to be right, not a type that refuses to be wrong — the
+/// return is `Vec<Layer>` whichever way it is asked, so the rule lives in the
+/// filter below rather than in the signature. Worth saying because the
+/// stronger claim invites trusting a `Vec<Layer>` obtained "from team" to be
+/// safe by construction, and `recall`'s neighbourhood expansion already
+/// resolves links without asking here.
+pub fn resolve(notes: &[Note], key: &str, from: Layer) -> Vec<Layer> {
+    let mut found: Vec<Layer> = notes
+        .iter()
+        .filter(|n| n.key == key)
+        .map(|n| n.layer)
+        .filter(|layer| !from.is_committed() || layer.is_committed())
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// The links a note carries that exist here but would not exist in a fresh
+/// clone. A link to a key nobody wrote is the lint's `DanglingLink`, not this:
+/// it is already broken everywhere, and counting it here would refuse a
+/// promotion for a reason promotion cannot fix.
+///
+/// The one predicate both `lint` and `promote` call. Two implementations of
+/// "what would dangle for a teammate" is the shape that once had two
+/// subsystems telling two stories about one file.
+///
+/// `also_committed` is everything the caller *asked* to promote, not the
+/// subset that will succeed, so a plan can be checked against its own closure
+/// — otherwise two notes that point at each other are unpromotable in either
+/// order, with an error that reads like a bug. That it is the request rather
+/// than the outcome is safe only because one blocker aborts the whole batch:
+/// a partial promotion would let a key that was itself blocked go on vouching
+/// for its neighbours.
+///
+/// Takes the note, not its key. Identity is `(layer, key)` and `DuplicateKey`
+/// is only a warning, so a key can name more than one file: looking one up
+/// here judged every claimant by the first match's body, which hid the
+/// offender's links behind a clean namesake and reported the clean one twice.
+/// Both callers already hold the note.
+pub fn uncommitted_links(notes: &[Note], note: &Note, also_committed: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = links(&note.body)
+        .into_iter()
+        .filter(|target| {
+            !also_committed.contains(target)
+                && resolve(notes, target, Layer::Team).is_empty()
+                // A link to a key nobody wrote is dangling, which the lint
+                // already reports. Counting it here too would refuse a
+                // promotion for a reason `promote` cannot fix.
+                && !resolve(notes, target, Layer::Local).is_empty()
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Store-wide checks: links that point nowhere, notes nothing points at.
 ///
 /// Takes the whole store because that is the only thing that can answer it,
@@ -692,6 +763,27 @@ pub fn hygiene(notes: &[Note]) -> Vec<Violation> {
     let mut found = Vec::new();
 
     for note in notes {
+        // Invariant 2, checked here and again at `promote`. Warns rather than
+        // refuses: the note at fault is committed, and an agent writing right
+        // now cannot fix somebody else's.
+        //
+        // The layer decides whether to ask, not what to do with the answer:
+        // asking first and discarding the result for local notes computed the
+        // whole predicate for every note in the store to throw most of it away.
+        if note.layer.is_committed() {
+            for target in uncommitted_links(notes, note, &[]) {
+                found.push(Violation {
+                    key: note.key.clone(),
+                    layer: note.layer,
+                    rule: Rule::CrossLayerLink,
+                    detail: format!(
+                        "`{}` is committed but links to `{target}`, which is not — \
+                         a fresh clone would not have it",
+                        note.key
+                    ),
+                });
+            }
+        }
         for target in links(&note.body) {
             if known.contains(target.as_str()) {
                 pointed_at.insert(target);
@@ -2142,6 +2234,16 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
 
     // ── the store ───────────────────────────────────────────────────────────
 
+    /// The note a key names, for the predicates that take one. Panics rather
+    /// than returning an `Option`: a fixture that did not seed what the test
+    /// asks about is a broken test, not a case to assert about.
+    fn find<'a>(notes: &'a [Note], key: &str) -> &'a Note {
+        notes
+            .iter()
+            .find(|n| n.key == key)
+            .unwrap_or_else(|| panic!("no note `{key}` in the fixture"))
+    }
+
     fn seed(paths: &Paths, layer: Layer, key: &str, body: &str) {
         let path = layer.dir(paths).join(format!("{key}.md"));
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -3108,6 +3210,226 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             let key = expand_key(template, &[("slug", "x"), ("path", "docs/x")]).unwrap();
             assert!(!key.is_empty() && !key.contains("{{"), "`{kind}` → {key}");
         }
+    }
+
+    // ── resolution across layers ────────────────────────────────────────────
+
+    /// Identity is `(layer, key)`. A `BTreeMap<String, Note>` is the natural
+    /// first implementation and it collapses `team/deploy` into
+    /// `local/deploy`, which silently loses whichever a teammate wrote — the
+    /// exact shadowing §4 forbids.
+    #[test]
+    fn the_layer_is_part_of_a_notes_identity() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Team, "deploy", &surprise_body());
+        seed(&paths, Layer::Local, "deploy", &surprise_body());
+
+        let notes = load(&paths).unwrap();
+        assert_eq!(notes.len(), 2);
+        assert_eq!(resolve(&notes, "deploy", Layer::Local).len(), 2);
+    }
+
+    /// From the gitignored layer a key resolves into whatever holds it: §4 says
+    /// both retrieve, so a local note may point at a committed one.
+    #[test]
+    fn a_local_link_resolves_into_either_layer() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Team, "shared", &surprise_body());
+        let notes = load(&paths).unwrap();
+        assert_eq!(resolve(&notes, "shared", Layer::Local), vec![Layer::Team]);
+    }
+
+    /// **Invariant 2's whole mechanism.** A committed note is read in a clone
+    /// where no local layer exists, so a link out of `team` may only reach
+    /// `team`. Expressed as resolution rather than as a separate rule, because
+    /// a rule can be forgotten at a second call site and a return type cannot.
+    ///
+    /// This is also the "fallback" somebody adds to silence the test above:
+    /// one layer-blind `resolve` breaks the invariant everywhere at once.
+    #[test]
+    fn a_committed_note_never_resolves_a_link_into_the_gitignored_layer() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "mine", &surprise_body());
+        let notes = load(&paths).unwrap();
+
+        assert_eq!(resolve(&notes, "mine", Layer::Local), vec![Layer::Local]);
+        assert!(
+            resolve(&notes, "mine", Layer::Team).is_empty(),
+            "a teammate cloning this repo has no local layer to reach"
+        );
+    }
+
+    /// The one predicate the lint and `promote` both call. Two implementations
+    /// of "which links would dangle in a clone" is the shape that let two
+    /// subsystems tell two stories about one file in `config.rs`.
+    #[test]
+    fn uncommitted_links_names_what_a_clone_would_lose() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Team, "committed", &surprise_body());
+        seed(&paths, Layer::Local, "private", &surprise_body());
+        seed(
+            &paths,
+            Layer::Local,
+            "candidate",
+            &format!(
+                "{}\n## Related\n\n- [[committed]]\n- [[private]]\n",
+                surprise_body()
+            ),
+        );
+        let notes = load(&paths).unwrap();
+
+        assert_eq!(
+            uncommitted_links(&notes, find(&notes, "candidate"), &[]),
+            vec!["private".to_string()],
+            "only the link a clone could not follow"
+        );
+    }
+
+    /// Two notes that point at each other are unpromotable in either order
+    /// unless the check knows what else is being promoted alongside — and the
+    /// error would read like a bug rather than a rule.
+    #[test]
+    fn a_pair_that_link_to_each_other_are_promotable_together() {
+        let (_d, paths) = fixture();
+        for (key, other) in [("a", "b"), ("b", "a")] {
+            seed(
+                &paths,
+                Layer::Local,
+                key,
+                &format!("{}\n## Related\n\n- [[{other}]]\n", surprise_body()),
+            );
+        }
+        let notes = load(&paths).unwrap();
+
+        assert_eq!(
+            uncommitted_links(&notes, find(&notes, "a"), &[]),
+            vec!["b".to_string()]
+        );
+        assert!(
+            uncommitted_links(&notes, find(&notes, "a"), &["b".to_string()]).is_empty(),
+            "promoted together, neither dangles"
+        );
+    }
+
+    /// **Invariant 2, the headline.** A lint that asks "does this key exist
+    /// *somewhere*" is green on precisely the store that breaks in a fresh
+    /// clone — the target is right there in the local layer, which the
+    /// teammate will never receive.
+    #[test]
+    fn every_committed_note_links_only_to_committed_notes() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "private", &surprise_body());
+        seed(
+            &paths,
+            Layer::Team,
+            "shared",
+            &format!("{}\n## Related\n\n- [[private]]\n", surprise_body()),
+        );
+
+        let found = lint(&paths).unwrap();
+        let crossing: Vec<&Violation> = found
+            .iter()
+            .filter(|v| v.rule == Rule::CrossLayerLink)
+            .collect();
+        assert_eq!(crossing.len(), 1, "got: {found:?}");
+        assert_eq!(crossing[0].key, "shared");
+        assert!(crossing[0].detail.contains("private"), "{:?}", crossing[0]);
+    }
+
+    /// **The store the lint exists for is the one it was blind to.** Identity
+    /// is `(layer, key)` and `DuplicateKey` is a *warning*, so two committed
+    /// files may legitimately claim one key. Looking a note up by key alone
+    /// then judged every one of them by the first match's body: the offending
+    /// file's links were never read, and the clean file was reported twice.
+    ///
+    /// Order-independent on purpose. The defect was invisible while
+    /// `Layer::ALL` happened to list `Team` first, and a test that only holds
+    /// for one ordering is a test that stops holding when somebody sorts.
+    #[test]
+    fn a_duplicate_key_never_hides_a_committed_notes_cross_layer_link() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Local, "private", &surprise_body());
+        // Clean, and first by path — so a key-only lookup finds this one.
+        seed(&paths, Layer::Team, "dup", &surprise_body());
+        // The offender, claiming the same key from a different file.
+        let other = Layer::Team.dir(&paths).join("ns/dup.md");
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(
+            &other,
+            render(&Note {
+                path: other.clone(),
+                ..note_with(
+                    Kind::Surprise,
+                    "dup",
+                    &format!("{}\n## Related\n\n- [[private]]\n", surprise_body()),
+                )
+            }),
+        )
+        .unwrap();
+
+        let found = lint(&paths).unwrap();
+        let crossing: Vec<&Violation> = found
+            .iter()
+            .filter(|v| v.rule == Rule::CrossLayerLink)
+            .collect();
+        assert_eq!(
+            crossing.len(),
+            1,
+            "the file that links into the gitignored layer, exactly once: {found:?}"
+        );
+        assert!(crossing[0].detail.contains("private"), "{:?}", crossing[0]);
+    }
+
+    /// Without this the test above passes on a lint that complains about every
+    /// committed note — which this repo has shipped before, as a check that
+    /// could have been `=> true`.
+    #[test]
+    fn a_committed_note_pointing_at_a_committed_note_is_silent() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Team, "target", &surprise_body());
+        seed(
+            &paths,
+            Layer::Team,
+            "source",
+            &format!("{}\n## Related\n\n- [[target]]\n", surprise_body()),
+        );
+        assert!(
+            !lint(&paths)
+                .unwrap()
+                .iter()
+                .any(|v| v.rule == Rule::CrossLayerLink),
+            "a committed link to a committed note is exactly what is wanted"
+        );
+    }
+
+    /// Applied in both directions it would make the gitignored layer unusable:
+    /// a local note is *supposed* to reach a committed one.
+    #[test]
+    fn a_local_note_may_point_wherever_it_likes() {
+        let (_d, paths) = fixture();
+        seed(&paths, Layer::Team, "shared", &surprise_body());
+        seed(&paths, Layer::Local, "other", &surprise_body());
+        seed(
+            &paths,
+            Layer::Local,
+            "mine",
+            &format!(
+                "{}\n## Related\n\n- [[shared]]\n- [[other]]\n",
+                surprise_body()
+            ),
+        );
+        assert!(!lint(&paths)
+            .unwrap()
+            .iter()
+            .any(|v| v.rule == Rule::CrossLayerLink));
+    }
+
+    /// It warns rather than refuses. The note at fault is committed and the
+    /// agent writing right now cannot fix it, so refusing would fail an
+    /// unattended write over somebody else's mistake — §7's whole split.
+    #[test]
+    fn a_cross_layer_link_warns_rather_than_refusing() {
+        assert_eq!(Rule::CrossLayerLink.severity(), Severity::Warning);
     }
 
     // ── lint ────────────────────────────────────────────────────────────────

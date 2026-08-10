@@ -1,9 +1,10 @@
 # Memory — specification
 
-> **Status: M1 is built; §9's agent surface is not.** The store, its schemas,
-> the key templates and `omh memory` / `lint` / `rm` ship — see
-> [commands](../commands.md#omh-memory-) and §14 for what M1 deferred. Retrieval,
-> the MCP surface, `promote` and `stale` remain specification. The reasoning
+> **Status: M1–M3 are built; M4 is not.** The store, its schemas, the key
+> templates, retrieval, the MCP surface, and `omh memory` / `lint` / `rm` /
+> `promote` ship — see [commands](../commands.md#omh-memory-) and §14 for what
+> each milestone deferred. `invalidated_by`, `stale` and hub pages remain
+> specification. The reasoning
 > behind each decision, the survey that picked the server, the benchmark that
 > reversed six of these choices, and the alternatives not taken are in
 > [how the design got here](memory-rationale.md).
@@ -358,7 +359,7 @@ guard red first, then reintroduce the defect to confirm it bites**
 
 ```console
 $ omh memory                    # list, by layer, with reference counts
-$ omh memory promote <key>      # local → team; checks invariant 2 first
+$ omh memory promote <key>…     # local → team; refuses anything unshareable
 $ omh memory rm <key>           # one note; reports inbound links
 $ omh memory stale              # join against §8 events
 $ omh memory lint               # schema + hygiene violations
@@ -499,6 +500,38 @@ deferrals *process, recorded in the entry* rather than a silence:
 - **Not done: the §15.2 caching experiment**, which needs a real harness launch
   to measure, and **§13's benchmark**, which needs a question set written by
   somebody who did not write the store.
+
+**What M3 shipped**, with the deviations named:
+
+- **The gate was met against real git**: a promoted note is committed, cloned,
+  and loaded back in the clone carrying its `team` layer. The negative half —
+  that the promotion moved only what it was asked to — is asserted alongside
+  it, because without it the test passes on a `plan` that sweeps in every local
+  note. What is *not* asserted there is the local layer's privacy: that layer
+  lives outside the checkout, so no `git add -A` could publish it, and the
+  property is pinned where it belongs by
+  `the_local_store_lives_outside_the_checkout_and_the_team_store_inside_it`.
+- **Invariant 2 is one predicate, not one type.** `resolve(key, from)` gives the
+  layers a link actually reaches, and from `team` that can only be `team` — but
+  it returns `Vec<Layer>` either way, so the asymmetry is a filter inside one
+  function rather than something the type system refuses to represent. What was
+  bought is a single place to be right, which is real and is less than a type.
+  `recall`'s neighbourhood expansion still resolves links itself and is the
+  second call site that would have to change before the stronger claim is true.
+- **The lint and `promote` share `uncommitted_links`**, because two
+  implementations of "what would dangle for a teammate" is how two subsystems
+  come to tell two stories about one file. It takes the note rather than its
+  key: `DuplicateKey` is a warning, so a key can name two files, and a key-only
+  lookup judged both by the first one's body.
+- **`promote` refuses more than invariant 2.** It re-validates the key, because
+  a key read off disk has never been through `validate_key` and becomes a path;
+  it asks `check` first, because an unclosed fence hides the links the
+  invariant is about; and it refuses a destination that already exists, because
+  the conflict check asks about a key while the write lands on a path.
+- **The batch is all-or-nothing through the write, not only through the gate.**
+  Every destination is written before any source is removed, and a failure
+  rolls the copies back. A note that exists in neither layer is the one outcome
+  no message can repair.
 
 ## 15. Open questions
 

@@ -106,6 +106,9 @@ product, not fixing a test.
 | a retrieved note always carries its date and layer | an unattributed claim launders a guess into a fact |
 | the memory server is pointed at the paths omh mounts | it starts, finds nothing, and "0 notes" reads as an empty store |
 | a generated stub passes the same schema an agent's write does | ingestion half-populates the store while `init` reports success |
+| a committed note links only to committed notes | the link dangles in a teammate's clone, where the target does not exist |
+| the gitignored layer never reaches a clone | every private note is published to the whole team, silently |
+| `promote` rewrites nothing but the note it was given | a renderer touching what it was not asked to is invisible to every semantic test |
 
 Notice how many of them are about **failing loudly**. That is the recurring
 lesson of this codebase: the expensive bugs were not crashes, they were things
