@@ -1455,8 +1455,8 @@ fn edit(cwd: &std::path::Path, layer: Option<config::Layer>) -> Result<()> {
 /// failure that wastes an hour inside the sandbox.
 fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
     // The rules themselves are mounted, not written here — this covers the
-    // placeholder a bind mount's destination may leave behind, and any backend
-    // that cannot mount a single file.
+    // empty placeholder each mount lands on, and any backend that cannot mount
+    // a single file. It must run before `plan` places those placeholders.
     carry::hide_staged_rules(&session.worktree)?;
 
     let patterns = config::policy_list(paths, "carry_in");

@@ -63,6 +63,6 @@ rests on the difference between an unverified claim and a disclosed gap:
 
 ## Supported versions
 
-The latest release is supported, and only that one: `0.2.0` today. Fixes land
+The latest release is supported, and only that one: `0.2.1` today. Fixes land
 on `main` and reach you in the next tag — there are no backport branches before
 1.0, because one maintainer cannot honestly promise to keep two lines patched.

@@ -106,7 +106,15 @@ pub fn plan(
             dropped.push((cap, count_entries(&sources)));
             continue;
         };
-        stage_capability(cap, binding, &sources, &stage, &mut mounts, staging)?;
+        stage_capability(
+            cap,
+            binding,
+            &sources,
+            &stage,
+            &session.worktree,
+            &mut mounts,
+            staging,
+        )?;
     }
 
     // The graph index, keyed by repo rather than harness — that is what lets
@@ -192,6 +200,7 @@ fn stage_capability(
     binding: &Binding,
     sources: &[PathBuf],
     stage: &Path,
+    worktree: &Path,
     mounts: &mut Vec<Mount>,
     staging: Staging,
 ) -> Result<()> {
@@ -258,9 +267,12 @@ fn stage_capability(
                 // Still `/work`-relative: the guest path is inside the worktree
                 // mount, and a `concat` target anywhere else would put the rules
                 // somewhere the harness does not read and nothing would say so.
-                target
+                let rel = target
                     .strip_prefix("/work/")
                     .with_context(|| format!("`concat` target {target} must live under /work/"))?;
+                if staging == Staging::Apply {
+                    place_destination(&worktree.join(rel))?;
+                }
                 mounts.push(Mount {
                     host: file.clone(),
                     guest: PathBuf::from(target),
@@ -289,6 +301,34 @@ fn stage_capability(
         }
     }
     Ok(())
+}
+
+/// Put an empty file where a mount is about to land, if nothing is there yet.
+///
+/// A bind mount needs its destination to exist, and for destinations inside
+/// `/work` the runtime will not supply one: `/work` is the host worktree, so
+/// docker resolves `/work/CLAUDE.md` back to a host path and refuses to create
+/// a mountpoint "outside of rootfs". It creates the file on the host anyway on
+/// its way out, which is what made the failure look intermittent — the first
+/// launch of a session died, and the second found the leftover and worked.
+///
+/// `create_new`, never a write: a branch that carries its own `CLAUDE.md` must
+/// find it byte-for-byte intact. The mount hides that file for the length of the
+/// session; it does not replace it. The placeholder is kept out of the agent's
+/// `git status` by `carry::hide_staged_rules`, which runs before this.
+fn place_destination(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("placing {}", path.display())),
+    }
 }
 
 /// How much a harness is giving up, for the one-line degradation warning.
@@ -646,6 +686,90 @@ mod tests {
         }
     }
 
+    /// Regression: launching died before the harness started, with
+    /// `create mountpoint for /work/AGENTS.md mount: mountpoint
+    /// "/run/host_virtiofs/.../AGENTS.md" is outside of rootfs`.
+    ///
+    /// omh mounts its rules onto `/work/CLAUDE.md`, inside the worktree mount,
+    /// and left creating that destination to the runtime. Docker Desktop will
+    /// not: `/work` is the host worktree over virtiofs, so runc resolves the
+    /// destination to a path outside the container's rootfs and refuses. It
+    /// creates the empty file on the host on its way out, which is why the
+    /// second launch of a session always worked and only the first one failed —
+    /// the bug hid behind its own leftovers.
+    ///
+    /// So omh has to place the destination itself, before docker sees the plan.
+    #[test]
+    fn concat_destinations_exist_in_the_worktree_before_anything_mounts_onto_them() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+
+        let targets: Vec<_> = p
+            .mounts
+            .iter()
+            .filter(|m| m.file && m.guest.starts_with("/work"))
+            .collect();
+        assert!(!targets.is_empty(), "claude stages rules into /work");
+
+        for m in targets {
+            let rel = m.guest.strip_prefix("/work").unwrap();
+            let host = fx.session.worktree.join(rel);
+            assert!(
+                host.is_file(),
+                "{} has nothing to mount onto: {} is missing",
+                m.guest.display(),
+                host.display()
+            );
+        }
+    }
+
+    /// The placeholder exists only so the mount has somewhere to land. A repo
+    /// that keeps its own `CLAUDE.md` on the branch must find it untouched — the
+    /// read-only mount hides it for the length of the session, and truncating it
+    /// would show up in the user's diff as a deletion nobody made.
+    #[test]
+    fn a_repos_own_rules_file_survives_staging() {
+        let fx = fixture();
+        let own = fx.session.worktree.join("CLAUDE.md");
+        std::fs::write(&own, "the project's own rules").unwrap();
+
+        plan_for(&fx, "claude");
+
+        assert_eq!(
+            std::fs::read_to_string(&own).unwrap(),
+            "the project's own rules"
+        );
+    }
+
+    /// `--dry-run` prints the plan and writes nothing, placeholders included.
+    #[test]
+    fn a_dry_run_leaves_no_placeholder_behind() {
+        let fx = fixture();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Skip,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+            },
+        )
+        .unwrap();
+
+        for name in crate::carry::STAGED_RULES {
+            assert!(
+                !fx.session.worktree.join(name).exists(),
+                "a dry run created {name}"
+            );
+        }
+    }
+
     /// Regression: staged links pointed at host paths, which do not exist inside
     /// the container, so every skill silently vanished.
     #[test]
@@ -737,8 +861,13 @@ mod tests {
     /// users run agent harnesses — showed a permanent modification nobody made,
     /// and `s commit` published omh's rules over the project's conventions. A
     /// mount leaves the file on disk exactly as the branch has it.
+    ///
+    /// What the worktree does get is an empty file to mount onto, because docker
+    /// will not create one there — see `place_destination`. So the invariant is
+    /// about the bytes, not the file's existence: omh's rules must never be
+    /// what is on disk.
     #[test]
-    fn rules_reach_every_declared_filename_without_touching_the_worktree() {
+    fn rules_reach_every_declared_filename_without_writing_them_into_the_worktree() {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
 
@@ -753,9 +882,10 @@ mod tests {
             assert!(m.read_only, "a rules file the agent can rewrite is not one");
             let body = std::fs::read_to_string(&m.host).unwrap();
             assert_eq!(body, "personal rules\n\nshared rules", "{name}");
-            assert!(
-                !fx.session.worktree.join(name).exists(),
-                "{name} must not be written into the worktree"
+            assert_eq!(
+                std::fs::read_to_string(fx.session.worktree.join(name)).unwrap(),
+                "",
+                "{name} in the worktree must stay empty — the rules arrive by mount"
             );
         }
     }

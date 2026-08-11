@@ -180,10 +180,10 @@ pub const STAGED_RULES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
 
 /// Hide the rules filenames from the agent's `git status`.
 ///
-/// omh mounts its rules rather than writing them, so there is usually nothing
-/// here to hide. What this covers is the placeholder: a bind mount needs its
-/// destination to exist, and a runtime that creates one inside `/work` leaves an
-/// empty untracked file behind.
+/// omh mounts its rules rather than writing them, so the content is never here
+/// to hide. What this covers is the placeholder: a bind mount needs its
+/// destination to exist, and docker will not create one inside `/work`, so
+/// `container::place_destination` puts an empty file there before every launch.
 ///
 /// It cannot cover the tracked case at all — `info/exclude` is gitignore
 /// semantics, silent about a file git already has — which is why the mount, not
