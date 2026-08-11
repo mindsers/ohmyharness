@@ -75,10 +75,6 @@ Picks the build for your machine, checks it against the published
 `~/.local/bin`. A failed install never replaces a working `omh`. Read it first
 if you would rather — it is [one file](install.sh). Re-run it to update.
 
-*No release is tagged yet, so neither of these has anything to install. The
-script says so and sends you here; Homebrew will only say the formula does not
-exist. Until then, build from source.*
-
 From source, which needs Rust 1.85+:
 
 ```console

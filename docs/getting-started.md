@@ -49,10 +49,6 @@ stop the install, and a failed install never replaces a working `omh`.
 
 Linux builds are static musl, so one build covers every distribution.
 
-*No release is tagged yet, so neither route has anything to install. The script
-says so and points at the source build below; Homebrew will only report that
-the formula does not exist.*
-
 ### From source
 
 ```console
