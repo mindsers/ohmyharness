@@ -321,7 +321,10 @@ jobs:
             exit 1
           fi
 
-          printf '%s' "$formula" > omh.rb
+          # The newline is not cosmetic: `brew style` fails a formula without a
+          # final one, so writing it with a bare `printf '%s'` would turn the
+          # tap's own audit red on the first real release.
+          printf '%s\n' "$formula" > omh.rb
           ruby -c omh.rb
 
       - name: check out the tap

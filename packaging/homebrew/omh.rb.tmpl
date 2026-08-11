@@ -5,12 +5,19 @@
 # release ships. (Written that way round on purpose: the renderer refuses if a
 # placeholder-shaped token survives, and a literal example here would trip it.)
 #
+# No `version` field: Homebrew scans it from the release URL, and `brew audit
+# --strict` rejects stating it twice. `version` in the test block below is that
+# scanned value, which makes the assertion sharper than it looks — it compares
+# the binary against the version the URL claims, not against a string this file
+# also controls.
+#
 # Edit this file, never the copy in the tap.
 class Omh < Formula
   desc "Launch any coding harness, in a sandbox, with your setup already there"
   homepage "https://github.com/mindsers/ohmyharness"
-  version "@VERSION@"
   license "MIT"
+
+  depends_on "git"
 
   on_macos do
     on_arm do
@@ -34,8 +41,6 @@ class Omh < Formula
       sha256 "@SHA_LINUX_X86@"
     end
   end
-
-  depends_on "git"
 
   def install
     # The tarball holds a single omh-<target>/ directory, which Homebrew has
