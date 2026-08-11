@@ -248,6 +248,97 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: cargo publish --locked
 
+  # The tap is downstream of the release, never beside it: the formula names
+  # URLs that must already resolve, and the checksums come from the release's
+  # own SHA256SUMS rather than being recomputed here — so the formula cannot
+  # disagree with what was actually published.
+  #
+  # Needs HOMEBREW_TAP_TOKEN: a fine-grained PAT with contents:write on
+  # mindsers/homebrew-tap only. GITHUB_TOKEN is scoped to this repository and
+  # cannot push to another one. If the secret is absent the job fails loudly
+  # rather than skipping, because a tap silently pinned to an old version is
+  # indistinguishable from one nobody has updated yet.
+  homebrew:
+    name: update the homebrew tap
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+
+      - name: take the checksums from the published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern SHA256SUMS --dir .
+          cat SHA256SUMS
+
+      - name: render the formula
+        run: |
+          set -o pipefail
+          version="${GITHUB_REF_NAME#v}"
+
+          sha_for() {
+            awk -v f="omh-$1.tar.gz" '{ sub(/^\.\//, "", $2); if ($2 == f) print $1 }' SHA256SUMS
+          }
+
+          formula=$(cat packaging/homebrew/omh.rb.tmpl)
+          formula=${formula//@VERSION@/$version}
+          for pair in \
+            "SHA_DARWIN_ARM:aarch64-apple-darwin" \
+            "SHA_DARWIN_X86:x86_64-apple-darwin" \
+            "SHA_LINUX_ARM:aarch64-unknown-linux-musl" \
+            "SHA_LINUX_X86:x86_64-unknown-linux-musl"
+          do
+            key="${pair%%:*}"; target="${pair#*:}"
+            sum="$(sha_for "$target")"
+            if [ -z "$sum" ]; then
+              echo "no checksum for $target in the release — refusing to write a formula that cannot install" >&2
+              exit 1
+            fi
+            formula=${formula//@$key@/$sum}
+          done
+
+          # A placeholder that survives means the template grew a field the
+          # renderer does not know about, and it would reach users as a Ruby
+          # syntax error at install time.
+          if printf '%s' "$formula" | grep -q '@[A-Z_]\+@'; then
+            echo "unfilled placeholders remain:" >&2
+            printf '%s' "$formula" | grep -o '@[A-Z_]\+@' | sort -u >&2
+            exit 1
+          fi
+
+          printf '%s' "$formula" > omh.rb
+          ruby -c omh.rb
+
+      - name: check out the tap
+        uses: actions/checkout@v5
+        with:
+          repository: mindsers/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: commit the formula
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p tap/Formula
+          cp omh.rb tap/Formula/omh.rb
+          cd tap
+          if git diff --quiet -- Formula/omh.rb; then
+            echo "the tap already describes $version"
+            exit 0
+          fi
+          git config user.name "omh release"
+          git config user.email "nathanael@cherrier.dev"
+          git add Formula/omh.rb
+          git commit -m "omh $version
+
+          Rendered from packaging/homebrew/omh.rb.tmpl at $GITHUB_REF_NAME.
+          Checksums are the ones that release published."
+          git push
+
   # On a pull request nothing above publishes, so this is what says whether the
   # crate would be accepted: it packages and builds from the packaged copy,
   # which is where "works in the repo, missing from the tarball" shows up.
