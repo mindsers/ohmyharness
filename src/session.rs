@@ -21,6 +21,53 @@ pub enum Removed {
     NoBranch,
 }
 
+/// What `commit` does about files omh copied in from the checkout.
+///
+/// `carry_in` is for what a worktree does not get — a tracked file is already
+/// there, so listing one is a misconfiguration. It is also the only path by
+/// which a secret reaches the agent, and the two compose badly: a tracked path
+/// in the list arrives as an ordinary modification, because `carry`'s
+/// `info/exclude` is gitignore semantics and says nothing about tracked files.
+/// Committing it publishes whatever local edit the user was carrying.
+///
+/// `carry` warns at launch, where the mistake is made. This is the backstop for
+/// a session already running when the list changed.
+pub struct Carried<'a> {
+    paths: &'a [String],
+    skip: bool,
+}
+
+impl<'a> Carried<'a> {
+    /// Stop and name them. The default, because dropping a change silently is
+    /// the second silent behaviour, not the fix for the first.
+    pub fn refusing(paths: &'a [String]) -> Self {
+        Self { paths, skip: false }
+    }
+
+    /// Leave them out and commit the rest — `--skip-carried`. Without it a
+    /// tracked carried file makes a session you can never commit from.
+    pub fn skipping(paths: &'a [String]) -> Self {
+        Self { paths, skip: true }
+    }
+
+    /// Carried paths that the staging step actually picked up. A path is
+    /// normalised the way `carry` writes it, and a carried *directory* matches
+    /// everything under it.
+    fn staged_among<'s>(&self, staged: &'s str) -> Vec<&'s str> {
+        staged
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .filter(|line| {
+                self.paths.iter().any(|p| {
+                    let p = p.trim().trim_end_matches('/');
+                    *line == p || line.starts_with(&format!("{p}/"))
+                })
+            })
+            .collect()
+    }
+}
+
 pub struct Session {
     pub id: String,
     /// `None` for a scratch session. `omh auth` and `omh doctor` need a
@@ -168,6 +215,278 @@ impl Session {
             .context("a scratch session has no branch")?;
         git(repo, &["diff", "--stat", &format!("{base}...{branch}")])
     }
+
+    /// Stage the agent's work in the worktree and commit it onto the branch.
+    ///
+    /// Runs in the worktree rather than the checkout. On the host its `.git`
+    /// pointer resolves, which is the whole reason this can be a plain git call
+    /// — inside the sandbox that pointer leads nowhere and none of this works.
+    pub fn commit(&self, message: Option<&str>, carried: Carried) -> Result<()> {
+        let branch = self
+            .branch
+            .as_deref()
+            .context("a scratch session has no branch to commit to")?;
+
+        // The worktree is where the agent works, but nothing guarantees it is
+        // still on the branch this session is named for — `worktree add -b` is
+        // overridden by git's DWIM when the base exists only as `origin/<base>`,
+        // and a session can be left detached mid-rebase. Committing anyway puts
+        // the work on whatever HEAD happens to be, which has been `main`, and
+        // reports the branch it did not touch.
+        let head = git(&self.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        anyhow::ensure!(
+            head.trim() == branch,
+            "{} is on {} rather than {branch}; omh will not commit to a branch it did not open",
+            self.id,
+            head.trim()
+        );
+
+        git(&self.worktree, &["add", "-A", "."])?;
+
+        // A backstop, not the fix. The rules are mounted rather than written
+        // into the worktree, so on a healthy launch there is nothing here to
+        // take back — but a bind mount's destination has to exist, and whether
+        // the runtime creates that placeholder inside `/work` is unverified
+        // against a real container. Cheap insurance against the answer being
+        // "yes", and against a backend that cannot mount a single file.
+        //
+        // An unstage rather than an `:(exclude)` pathspec: naming a path that
+        // way still counts as naming it, and git answers "the following paths
+        // are ignored by one of your .gitignore files" about the very file the
+        // pathspec was written to leave alone.
+        git_owned(&self.worktree, &unstage_rules_args())?;
+
+        // Asked *after* staging, and against the index rather than the worktree:
+        // `git diff` says nothing about untracked files, so a session whose only
+        // work is new files reads as clean when the question comes first. That
+        // is the shape of `e0a41b8`, where a release published an empty tap and
+        // reported success.
+        let staged = git(&self.worktree, &["diff", "--cached", "--name-only"])?;
+
+        // A carried file only reaches the index when the repo tracks it, and
+        // then it is the user's own local edit — possibly the secret they were
+        // carrying. Refused rather than dropped: omh cannot tell a credential
+        // from a deliberate change, and silently discarding either is worse
+        // than stopping.
+        let from_your_checkout = carried.staged_among(&staged);
+        if !from_your_checkout.is_empty() {
+            anyhow::ensure!(
+                carried.skip,
+                "{} is listed in carry_in and git tracks it, so what is in the worktree \
+                 is your local copy rather than the branch's.\n  omh will neither publish \
+                 that nor drop it silently.\n\n  \
+                 fix the cause:  omh config edit   (carry_in is for files git does not \
+                 track; a tracked file is already in the worktree)\n  \
+                 or just this once:  omh s commit --skip-carried",
+                from_your_checkout.join(", ")
+            );
+            let unstage: Vec<String> = ["reset", "-q", "--"]
+                .iter()
+                .map(|s| s.to_string())
+                .chain(from_your_checkout.iter().map(|p| p.to_string()))
+                .collect();
+            git_owned(&self.worktree, &unstage)?;
+        }
+
+        let staged = git(&self.worktree, &["diff", "--cached", "--name-only"])?;
+        if staged.trim().is_empty() {
+            anyhow::bail!("nothing to commit in {}", self.label());
+        }
+
+        // Verbatim, and no trailer. omh has no view on what the work was for,
+        // which is the refusal `omh why` already makes about rationale it does
+        // not hold.
+        match message {
+            Some(message) => {
+                git(&self.worktree, &["commit", "-q", "-m", message])?;
+            }
+            // git's own editor flow rather than `$EDITOR` directly: it already
+            // knows `core.editor`, the commented template, and that an empty
+            // message aborts. Reaching past it would reimplement three things
+            // slightly wrong. Inherited stdio, because `git()` captures output
+            // and an editor with nowhere to draw hangs.
+            None => {
+                let status = Command::new("git")
+                    .current_dir(&self.worktree)
+                    .arg("commit")
+                    .status()
+                    .context("running git commit")?;
+                anyhow::ensure!(status.success(), "commit aborted");
+            }
+        }
+        Ok(())
+    }
+
+    /// Entries in the worktree's `git status`, committed to nothing.
+    ///
+    /// `-uall` because git collapses an untracked directory into one line, and
+    /// a session where the agent wrote a whole new module would otherwise read
+    /// as a single stray file — this is the number `s ls` is glanced at for.
+    ///
+    /// An error is never zero. The pointer these commands run through is the one
+    /// this module documents as leading nowhere inside the sandbox, and a stale
+    /// one on the host is what `remove` at line 141 already handles; reporting
+    /// that as a clean session is how work gets discarded.
+    pub fn uncommitted(&self) -> Result<usize> {
+        let out = git_owned(&self.worktree, &status_args())?;
+        Ok(out.lines().filter(|l| !l.trim().is_empty()).count())
+    }
+
+    /// The branch on origin this session has already been pushed to.
+    ///
+    /// Read from `branch.<b>.remote`/`.merge` rather than `@{u}`, which resolves
+    /// against **HEAD**: a detached worktree would report no upstream for a
+    /// branch that demonstrably has one. Anything tracking a remote that is not
+    /// origin is an error rather than a name, because reusing it would push to a
+    /// different remote than the one it came from.
+    pub fn published_as(&self) -> Result<Option<String>> {
+        let Some(branch) = self.branch.as_deref() else {
+            return Ok(None);
+        };
+        // `config --get` exits non-zero when unset, which is the common case.
+        let remote = git(
+            &self.worktree,
+            &["config", "--get", &format!("branch.{branch}.remote")],
+        )
+        .unwrap_or_default();
+        let remote = remote.trim();
+        if remote.is_empty() {
+            return Ok(None);
+        }
+        anyhow::ensure!(
+            remote == "origin",
+            "{branch} tracks {remote}, not origin — name the branch explicitly:\n  omh s push <name>"
+        );
+        let merge = git(
+            &self.worktree,
+            &["config", "--get", &format!("branch.{branch}.merge")],
+        )
+        .unwrap_or_default();
+        Ok(merge
+            .trim()
+            .strip_prefix("refs/heads/")
+            .filter(|name| !name.is_empty())
+            .map(str::to_string))
+    }
+
+    /// Commits this session has that origin does not.
+    ///
+    /// `Ok(None)` means it has never been pushed, which is a different state
+    /// from zero: one says name it and push, the other says you are done. `Err`
+    /// is a third — git could not answer — and the caller must not render it as
+    /// either of the first two.
+    pub fn unpushed(&self) -> Result<Option<usize>> {
+        let Some(branch) = self.branch.as_deref() else {
+            return Ok(None);
+        };
+        let Some(target) = self.published_as()? else {
+            return Ok(None);
+        };
+        let out = git(
+            &self.worktree,
+            &[
+                "rev-list",
+                "--count",
+                &format!("refs/remotes/origin/{target}..{branch}"),
+            ],
+        )?;
+        Ok(Some(
+            out.trim().parse().context("counting unpushed commits")?,
+        ))
+    }
+
+    /// Push the session branch to origin under a name a reviewer can read, and
+    /// return the name it landed under.
+    ///
+    /// Naming is required the first time and never again. `omh/s01` records
+    /// *when* the work happened rather than what it was, and on origin it
+    /// outlives the session that would explain it — so omh refuses rather than
+    /// choosing, the same refusal it makes about commit messages.
+    pub fn push(&self, name: Option<&str>) -> Result<String> {
+        let branch = self
+            .branch
+            .as_deref()
+            .context("a scratch session has no branch to push")?;
+
+        let target = match name {
+            Some(name) => name.to_string(),
+            None => self.published_as()?.with_context(|| {
+                format!(
+                    "{branch} is a session id, not a branch name\n  name it:  omh s push <name>"
+                )
+            })?,
+        };
+
+        // No `-u` here. Recording the upstream is what makes `s ls` report the
+        // branch as published, and doing it in the same breath as the push means
+        // a push that never reached origin still leaves that claim behind, with
+        // nothing to roll it back. Set it below, once there is something true to
+        // record.
+        git(
+            &self.worktree,
+            &["push", "origin", &format!("{branch}:refs/heads/{target}")],
+        )?;
+
+        // Read it back from origin before calling this a success. `git push`
+        // reports on the push URL, which need not be the fetch URL a reviewer
+        // opens the PR from — the same green-and-wrong shape as `e0a41b8`, where
+        // a release job passed while the tap it published to stayed empty.
+        let local = git(&self.worktree, &["rev-parse", branch])?;
+        let published = git(
+            &self.worktree,
+            &["ls-remote", "origin", &format!("refs/heads/{target}")],
+        )?;
+        let published = published.split_whitespace().next().unwrap_or_default();
+        anyhow::ensure!(
+            published == local.trim(),
+            "push reported success, but origin/{target} does not hold {branch}"
+        );
+
+        git(
+            &self.worktree,
+            &[
+                "branch",
+                "--set-upstream-to",
+                &format!("origin/{target}"),
+                branch,
+            ],
+        )?;
+        Ok(target)
+    }
+}
+
+/// The files omh wrote into the worktree, kept out of the user's work.
+///
+/// `carry`'s `info/exclude` covers these only while they are untracked, and a
+/// repo that commits its own `CLAUDE.md` — normal for one whose users run agent
+/// harnesses — has omh's copy written over a tracked file, which gitignore
+/// semantics say nothing about. Without this, omh's generated rules land on top
+/// of the project's own conventions in the user's commit, and a session where
+/// the agent did nothing still looks like it has work in it.
+fn rules_pathspec() -> Vec<String> {
+    std::iter::once(".".to_string())
+        .chain(
+            crate::carry::STAGED_RULES
+                .iter()
+                .map(|name| format!(":(exclude){name}")),
+        )
+        .collect()
+}
+
+fn unstage_rules_args() -> Vec<String> {
+    ["reset", "-q", "--"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(crate::carry::STAGED_RULES.iter().map(|n| n.to_string()))
+        .collect()
+}
+
+fn status_args() -> Vec<String> {
+    ["status", "--porcelain", "-uall", "--"]
+        .iter()
+        .map(|s| s.to_string())
+        .chain(rules_pathspec())
+        .collect()
 }
 
 /// Reject a session id that is not a single path component.
@@ -268,6 +587,12 @@ pub fn list(worktrees_dir: &Path) -> Vec<String> {
         .collect();
     out.sort();
     out
+}
+
+/// `git` for the callers that build their arguments dynamically.
+fn git_owned(cwd: &Path, args: &[String]) -> Result<String> {
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    git(cwd, &borrowed)
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
@@ -406,6 +731,526 @@ mod tests {
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "add"]).unwrap();
         assert!(s.diff(&root, "main").unwrap().contains("new.rs"));
+    }
+
+    // ── committing a session's work ─────────────────────────────────────────
+
+    /// What the commit actually contains, which is the only question these
+    /// tests are asking. `git status` would answer about the worktree instead.
+    fn committed_files(wt: &Path) -> String {
+        git(wt, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap()
+    }
+
+    /// `commit` stages everything, so the guarantee that omh's own staging stays
+    /// out of the user's work rests entirely on `carry`'s exclusion holding.
+    /// Nothing else connects these two modules, and the failure — omh's
+    /// `CLAUDE.md` riding into a PR on the commit omh itself made — is invisible
+    /// until a reviewer finds it.
+    #[test]
+    fn a_file_omh_staged_never_reaches_the_commit() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        crate::carry::hide_staged_rules(&s.worktree).unwrap();
+        std::fs::write(s.worktree.join("CLAUDE.md"), "staged by omh").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        s.commit(Some("Add the work"), Carried::refusing(&[]))
+            .unwrap();
+
+        let files = committed_files(&s.worktree);
+        assert!(
+            files.contains("work.rs"),
+            "the agent's work must land: {files}"
+        );
+        assert!(
+            !files.contains("CLAUDE.md"),
+            "omh's own staging must not: {files}"
+        );
+    }
+
+    /// `git diff` does not report untracked files, so asking whether anything
+    /// changed *before* staging answers "nothing" for a session whose only work
+    /// is new files. That is `e0a41b8` — the tap formula a release published as
+    /// a no-op — arriving in a second place.
+    #[test]
+    fn a_brand_new_file_is_committed_rather_than_read_as_nothing_to_do() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("brand-new.rs"), "fn main() {}").unwrap();
+
+        s.commit(Some("Add a new file"), Carried::refusing(&[]))
+            .unwrap();
+
+        assert!(committed_files(&s.worktree).contains("brand-new.rs"));
+    }
+
+    /// A no-op reporting success teaches people to trust a commit that never
+    /// happened, and the next command they run is `push`.
+    #[test]
+    fn committing_a_clean_worktree_is_an_error() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+
+        let err = s
+            .commit(Some("nothing to say"), Carried::refusing(&[]))
+            .unwrap_err();
+        assert!(err.to_string().contains("nothing to commit"), "got: {err}");
+    }
+
+    /// omh has no view on what the work was for and will not invent one — the
+    /// same refusal `omh why` makes about rationale it does not hold.
+    #[test]
+    fn the_commit_message_is_exactly_what_was_given() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        s.commit(Some("Fix the guard"), Carried::refusing(&[]))
+            .unwrap();
+
+        let message = git(&s.worktree, &["log", "-1", "--format=%B"]).unwrap();
+        assert_eq!(
+            message.trim(),
+            "Fix the guard",
+            "omh added something to the message"
+        );
+    }
+
+    // ── pushing it somewhere a PR can be opened from ────────────────────────
+
+    /// A real bare remote rather than a mock: half of what `push` promises is
+    /// that the branch actually arrived, and nothing you can stub answers that.
+    fn repo_with_origin() -> (tempfile::TempDir, PathBuf) {
+        let (d, root) = repo();
+        let origin = d.path().join("origin.git");
+        git(
+            d.path(),
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        )
+        .unwrap();
+        git(
+            &root,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        )
+        .unwrap();
+        (d, root)
+    }
+
+    fn session_with_a_commit(root: &Path, wt: &Path, file: &str) -> Session {
+        let s = Session::new(wt, "s01".into());
+        s.ensure(root, "main").unwrap();
+        std::fs::write(s.worktree.join(file), "fn main() {}").unwrap();
+        s.commit(Some("Add the work"), Carried::refusing(&[]))
+            .unwrap();
+        s
+    }
+
+    /// `omh/s01` names when the work happened, not what it was. On origin it
+    /// outlives the session that explains it, and it is what the PR inherits.
+    #[test]
+    fn pushing_without_a_name_refuses_rather_than_using_the_session_id() {
+        let (d, root) = repo_with_origin();
+        let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
+
+        let err = s.push(None).unwrap_err();
+
+        assert!(err.to_string().contains("not a branch name"), "got: {err}");
+    }
+
+    #[test]
+    fn a_named_push_reaches_the_remote_and_sets_upstream() {
+        let (d, root) = repo_with_origin();
+        let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
+
+        s.push(Some("fix/tap-guard")).unwrap();
+
+        assert_eq!(s.published_as().unwrap().as_deref(), Some("fix/tap-guard"));
+        let on_remote = git(&root, &["ls-remote", "origin", "fix/tap-guard"]).unwrap();
+        assert!(
+            !on_remote.trim().is_empty(),
+            "the branch must actually be on origin"
+        );
+    }
+
+    /// Naming it once is the whole bargain: refusing every time would be a
+    /// command you cannot put in a loop.
+    #[test]
+    fn a_later_push_needs_no_name() {
+        let (d, root) = repo_with_origin();
+        let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
+        s.push(Some("fix/tap-guard")).unwrap();
+
+        std::fs::write(s.worktree.join("more.rs"), "fn more() {}").unwrap();
+        s.commit(Some("Add more"), Carried::refusing(&[])).unwrap();
+
+        assert_eq!(s.push(None).unwrap(), "fix/tap-guard");
+    }
+
+    /// Every local step can succeed while the remote a reviewer would open the
+    /// PR from stays untouched — which is `e0a41b8` exactly: a release job that
+    /// copied, staged, pushed and passed, against a local clone, while the tap
+    /// it was publishing to stayed empty.
+    ///
+    /// Reproduced with a `pushurl`, because that is the configuration where the
+    /// push genuinely succeeds and origin genuinely does not have it. Deleting
+    /// the remote instead only proves that `git push` fails when there is
+    /// nothing to push to, which needs no guard of ours — that version stays
+    /// green with the read-back removed.
+    #[test]
+    fn a_push_that_did_not_reach_origin_is_not_a_success() {
+        let (d, root) = repo_with_origin();
+        let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
+        let elsewhere = d.path().join("elsewhere.git");
+        git(
+            d.path(),
+            &["init", "-q", "--bare", elsewhere.to_str().unwrap()],
+        )
+        .unwrap();
+        git(
+            &root,
+            &[
+                "config",
+                "remote.origin.pushurl",
+                elsewhere.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let err = s.push(Some("fix/tap-guard")).unwrap_err();
+
+        assert!(
+            err.to_string().contains("does not hold"),
+            "the push succeeded; only the read-back can catch this: {err}"
+        );
+    }
+
+    // ── what `s ls` reports about work in flight ────────────────────────────
+
+    /// The state that strands work is the one `s ls` cannot otherwise see: a
+    /// session holding a day of uncommitted changes reads exactly like an
+    /// untouched one. It must not count what omh itself put there, for the same
+    /// reason `commit` must not commit it.
+    #[test]
+    fn uncommitted_counts_the_agents_work_and_not_omhs_own() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        crate::carry::hide_staged_rules(&s.worktree).unwrap();
+        std::fs::write(s.worktree.join("CLAUDE.md"), "staged by omh").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        assert_eq!(s.uncommitted().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_clean_session_reports_nothing_uncommitted() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+
+        assert_eq!(s.uncommitted().unwrap(), 0);
+    }
+
+    /// Before a push there is no upstream to measure against, which is a
+    /// different answer from "nothing to push" — one means name it, the other
+    /// means you are done.
+    #[test]
+    fn unpushed_distinguishes_never_pushed_from_up_to_date() {
+        let (d, root) = repo_with_origin();
+        let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
+        assert_eq!(s.unpushed().unwrap(), None, "never pushed");
+
+        s.push(Some("fix/tap-guard")).unwrap();
+        assert_eq!(s.unpushed().unwrap(), Some(0), "everything is on origin");
+
+        std::fs::write(s.worktree.join("more.rs"), "fn more() {}").unwrap();
+        s.commit(Some("Add more"), Carried::refusing(&[])).unwrap();
+        assert_eq!(s.unpushed().unwrap(), Some(1));
+    }
+
+    /// A repo that commits its own `CLAUDE.md` is the normal case for one whose
+    /// users run agent harnesses, and it is the case `carry`'s exclusion cannot
+    /// reach: `info/exclude` is gitignore semantics, silent about a file git
+    /// already tracks. omh overwrites it at launch, so git sees a modification
+    /// and `add -A` stages it — omh's generated rules landing on top of the
+    /// project's own conventions, in the user's PR, on the commit omh made.
+    #[test]
+    fn omhs_rules_stay_out_of_the_commit_even_when_the_repo_tracks_them() {
+        let (d, root) = repo();
+        // The repo's own file, committed before any session exists.
+        std::fs::write(root.join("CLAUDE.md"), "# House style\n\nTabs.\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "house style"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        crate::carry::hide_staged_rules(&s.worktree).unwrap();
+        // What omh does at launch: overwrite it with the merged rules.
+        std::fs::write(s.worktree.join("CLAUDE.md"), "omh generated rules").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        s.commit(Some("Add the work"), Carried::refusing(&[]))
+            .unwrap();
+
+        let committed = git(&s.worktree, &["show", "--stat", "--name-only", "HEAD"]).unwrap();
+        assert!(committed.contains("work.rs"), "got: {committed}");
+        assert!(
+            !committed.contains("CLAUDE.md"),
+            "omh clobbered the project's own conventions file: {committed}"
+        );
+        // And the repo's version is what survives on the branch.
+        let on_branch = git(&s.worktree, &["show", "HEAD:CLAUDE.md"]).unwrap();
+        assert!(on_branch.contains("House style"), "got: {on_branch}");
+    }
+
+    /// The same overwrite, in a session where the agent did nothing. Left
+    /// counted, omh's own clobbering is the entire diff — so `commit` reports
+    /// success for work that does not exist, and `s ls` reads `1 uncommitted`
+    /// for a session nobody has touched.
+    #[test]
+    fn a_session_holding_only_omhs_overwrite_has_nothing_to_commit() {
+        let (d, root) = repo();
+        std::fs::write(root.join("CLAUDE.md"), "# House style\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "house style"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        crate::carry::hide_staged_rules(&s.worktree).unwrap();
+        std::fs::write(s.worktree.join("CLAUDE.md"), "omh generated rules").unwrap();
+
+        assert_eq!(
+            s.uncommitted().ok(),
+            Some(0),
+            "omh's own staging is not work"
+        );
+        let err = s
+            .commit(Some("nothing the agent did"), Carried::refusing(&[]))
+            .unwrap_err();
+        assert!(err.to_string().contains("nothing to commit"), "got: {err}");
+    }
+
+    /// `git status --porcelain` collapses an untracked directory into one entry,
+    /// so a session where the agent wrote a whole new module reads as a single
+    /// stray file — and this is the number `s ls` is designed to be glanced at.
+    #[test]
+    fn a_new_directory_counts_once_per_file_not_once() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::create_dir_all(s.worktree.join("newmodule")).unwrap();
+        for i in 0..12 {
+            std::fs::write(s.worktree.join(format!("newmodule/f{i}.rs")), "fn f() {}").unwrap();
+        }
+
+        assert_eq!(s.uncommitted().unwrap(), 12);
+    }
+
+    /// `carry_in` is documented as the only path by which a secret reaches the
+    /// agent, and a carried file that the repo *tracks* arrives in the worktree
+    /// as an ordinary modification — `info/exclude` says nothing about tracked
+    /// files. Staged and committed, a local edit holding a credential is on the
+    /// branch, and one `s push` from being published.
+    #[test]
+    fn a_carried_file_the_repo_tracks_is_refused_rather_than_committed() {
+        let (d, root) = repo();
+        std::fs::write(root.join("config.toml"), "PORT=3000\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "config"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        // The user's local edit, carried in as `carry::apply` copies it.
+        std::fs::write(
+            s.worktree.join("config.toml"),
+            "PORT=3000\nSECRET=hunter2\n",
+        )
+        .unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        let carried = ["config.toml".to_string()];
+        let err = s
+            .commit(Some("Add the work"), Carried::refusing(&carried))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("config.toml"), "got: {err}");
+        assert_eq!(s.commits(&root, "main"), 0, "nothing may land");
+    }
+
+    /// The escape hatch, because refusing forever would make a carried file that
+    /// the repo tracks a session you can never commit from.
+    #[test]
+    fn skipping_carried_files_commits_the_rest_and_leaves_them_behind() {
+        let (d, root) = repo();
+        std::fs::write(root.join("config.toml"), "PORT=3000\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "config"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(
+            s.worktree.join("config.toml"),
+            "PORT=3000\nSECRET=hunter2\n",
+        )
+        .unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        let carried = ["config.toml".to_string()];
+        s.commit(Some("Add the work"), Carried::skipping(&carried))
+            .unwrap();
+
+        let committed = git(&s.worktree, &["show", "--stat", "--name-only", "HEAD"]).unwrap();
+        assert!(committed.contains("work.rs"), "got: {committed}");
+        assert!(
+            !committed.contains("config.toml"),
+            "the secret must not land: {committed}"
+        );
+    }
+
+    /// A carried file the repo does not track is already invisible to git, so it
+    /// must not turn every commit into a refusal.
+    #[test]
+    fn an_untracked_carried_file_is_not_something_to_refuse_over() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        crate::carry::apply(&root, &s.worktree, &[".env.local".to_string()]).ok();
+        std::fs::write(s.worktree.join(".env.local"), "SECRET=hunter2\n").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        let carried = [".env.local".to_string()];
+        s.commit(Some("Add the work"), Carried::refusing(&carried))
+            .unwrap();
+
+        let committed = git(&s.worktree, &["show", "--stat", "--name-only", "HEAD"]).unwrap();
+        assert!(!committed.contains(".env.local"), "got: {committed}");
+    }
+
+    /// Without `-m`, git owns the message and can refuse it — an editor that
+    /// writes nothing means an empty message, and git aborts. Accepting that as
+    /// success reports `committed to omh/s01 (0 commits)` and exits zero, which
+    /// is the same lie as an empty commit and reaches the user one command later,
+    /// at `push`.
+    #[test]
+    fn a_commit_the_editor_abandoned_is_not_reported_as_made() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+        // An "editor" that exits 0 having written nothing.
+        git(&s.worktree, &["config", "core.editor", "true"]).unwrap();
+
+        let err = s.commit(None, Carried::refusing(&[])).unwrap_err();
+
+        assert!(err.to_string().contains("aborted"), "got: {err}");
+        assert_eq!(
+            s.commits(&root, "main"),
+            0,
+            "nothing may land on the branch"
+        );
+    }
+
+    /// `branch.autoSetupMerge = always` — a documented git setting — makes
+    /// `worktree add -b omh/s01 <path> main` track the **local** `main`. Parsing
+    /// that upstream as `remote/branch` yields `main` as a branch name on origin,
+    /// it fast-forwards, the read-back passes because it checks the ref it just
+    /// pushed, and unreviewed agent work is on trunk.
+    #[test]
+    fn an_upstream_that_is_not_on_origin_is_never_read_as_a_branch_name() {
+        let (d, root) = repo_with_origin();
+        git(&root, &["config", "branch.autoSetupMerge", "always"]).unwrap();
+        git(&root, &["push", "-q", "-u", "origin", "main"]).unwrap();
+        let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
+
+        let err = s.push(None).unwrap_err();
+
+        assert!(
+            err.to_string().contains("not a branch name") || err.to_string().contains("not origin"),
+            "got: {err}"
+        );
+        let on_origin = git(&root, &["ls-remote", "origin", "refs/heads/main"]).unwrap();
+        let trunk = git(&root, &["rev-parse", "main"]).unwrap();
+        assert!(
+            on_origin.starts_with(trunk.trim()),
+            "the session branch reached origin/main: {on_origin}"
+        );
+    }
+
+    /// `worktree add -b` loses to git's DWIM when the base exists only as
+    /// `origin/<base>`: the worktree lands on a local branch named after the
+    /// base instead. Committing then puts the agent's work on trunk and reports
+    /// the branch it never touched.
+    #[test]
+    fn a_worktree_that_drifted_off_its_branch_is_not_committed_to() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        git(&s.worktree, &["checkout", "-q", "-b", "somewhere-else"]).unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        let err = s
+            .commit(Some("Add the work"), Carried::refusing(&[]))
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("rather than omh/s01"),
+            "got: {err}"
+        );
+    }
+
+    /// The read-back is a detector with no undo. Recording the upstream in the
+    /// same breath as the push leaves that record behind when the push did not
+    /// reach origin — and `s ls` then reports the branch as published while the
+    /// remote holds nothing, which is the `e0a41b8` state the guard exists to
+    /// prevent, reproduced by the guard itself.
+    #[test]
+    fn a_failed_push_leaves_no_claim_that_the_branch_is_published() {
+        let (d, root) = repo_with_origin();
+        let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
+        let elsewhere = d.path().join("elsewhere.git");
+        git(
+            d.path(),
+            &["init", "-q", "--bare", elsewhere.to_str().unwrap()],
+        )
+        .unwrap();
+        git(
+            &root,
+            &[
+                "config",
+                "remote.origin.pushurl",
+                elsewhere.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+
+        assert!(s.push(Some("fix/tap-guard")).is_err());
+
+        assert_eq!(
+            s.published_as().unwrap(),
+            None,
+            "a push that never reached origin must not claim it did"
+        );
+    }
+
+    /// `omh auth` and `omh doctor` get a writable directory, not somewhere to
+    /// keep work. `diff` already refuses them; so must this.
+    ///
+    /// Asserting the reason: a scratch directory is not a git repository, so
+    /// `add -A` refuses on its own and a bare `is_err()` stays green with the
+    /// branch guard deleted.
+    #[test]
+    fn a_scratch_session_cannot_be_committed() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Session::scratch(d.path().join("scratch"), "doctor".into());
+        std::fs::create_dir_all(&s.worktree).unwrap();
+        let err = s
+            .commit(Some("anything"), Carried::refusing(&[]))
+            .unwrap_err();
+        assert!(err.to_string().contains("no branch"), "got: {err}");
     }
 
     #[test]

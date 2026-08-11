@@ -142,9 +142,15 @@ mounted and the agent cannot reach it.
 
 ```console
 $ omh s diff              # what the agent changed
+$ omh s commit -m "..."   # commit it onto the session branch
+$ omh s push fix/thing    # push it to origin under a name a reviewer can read
 $ omh attach              # open the same session in your editor
 $ omh graph               # browse the codebase as a graph
 ```
+
+Those run on the host, against the worktree you never have to visit. The agent
+cannot run them itself: git does not work inside the sandbox, and it is told so
+rather than left to discover it.
 
 Closing your terminal does not kill the agent — running `omh claude` again
 reattaches to the session you left. See [Sessions](sessions.md).

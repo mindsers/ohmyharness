@@ -23,6 +23,14 @@ pub enum Action {
     Unchanged,
     /// Listed but not present in the checkout.
     Missing,
+    /// Listed, and git already tracks it.
+    ///
+    /// A misconfiguration rather than a hazard: `carry_in` exists for what the
+    /// worktree does *not* get, and a tracked file is already there on the
+    /// branch. Carrying one replaces it with whatever the checkout holds right
+    /// now, which shows up forever as a modification nobody made in the session
+    /// — and, until `commit` learned to refuse it, went out in the commit.
+    AlreadyTracked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +76,8 @@ pub fn apply(repo: &Path, worktree: &Path, patterns: &[String]) -> Result<Vec<Ca
         let dst = worktree.join(rel);
         let action = if !src.exists() {
             Action::Missing
+        } else if tracked(repo, rel) {
+            Action::AlreadyTracked
         } else if src.is_dir() {
             copy_dir(&src, &dst)?
         } else {
@@ -81,6 +91,19 @@ pub fn apply(repo: &Path, worktree: &Path, patterns: &[String]) -> Result<Vec<Ca
 
     exclude(worktree, patterns)?;
     Ok(out)
+}
+
+/// Whether git already has this path on the branch the session will start from.
+///
+/// Asked of the checkout rather than the worktree, because that is where the
+/// `carry_in` entry is aimed and where the user can see the answer.
+fn tracked(repo: &Path, rel: &str) -> bool {
+    std::process::Command::new("git")
+        .current_dir(repo)
+        .args(["ls-files", "--error-unmatch", "--", rel])
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
 }
 
 /// The checkout is the source of truth for carried files — they are yours, not
@@ -147,13 +170,26 @@ pub fn exclude_path(worktree: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(dir).join("info/exclude"))
 }
 
-/// Hide the rules omh stages into the worktree. Left untracked, the agent is
-/// invited to commit omh's own staging onto the session branch.
+/// The filenames omh stages its rules onto, inside `/work`.
+///
+/// Named once because three things have to agree about them, in three modules:
+/// the `concat` targets the adapters declare, `hide_staged_rules` here, and
+/// `Session::commit`'s backstop. A harness whose rules file is named something
+/// else needs adding to this list too.
+pub const STAGED_RULES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
+
+/// Hide the rules filenames from the agent's `git status`.
+///
+/// omh mounts its rules rather than writing them, so there is usually nothing
+/// here to hide. What this covers is the placeholder: a bind mount needs its
+/// destination to exist, and a runtime that creates one inside `/work` leaves an
+/// empty untracked file behind.
+///
+/// It cannot cover the tracked case at all — `info/exclude` is gitignore
+/// semantics, silent about a file git already has — which is why the mount, not
+/// this, is what keeps omh's staging out of the user's commit.
 pub fn hide_staged_rules(worktree: &Path) -> Result<()> {
-    exclude(
-        worktree,
-        &["CLAUDE.md".to_string(), "AGENTS.md".to_string()],
-    )
+    exclude(worktree, &STAGED_RULES.map(String::from))
 }
 
 /// Keep carried files out of the agent's `git status`, so they never show up as
@@ -316,6 +352,35 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    /// `carry_in` is for what a worktree does not get. A tracked file is
+    /// already on the branch, so listing one is a misconfiguration — and a
+    /// quietly expensive one: the copy lands as a modification nobody made in
+    /// the session, and `commit` then has to refuse it. Named at launch, where
+    /// the entry can actually be fixed.
+    #[test]
+    fn a_carry_in_entry_git_already_tracks_is_reported_rather_than_copied() {
+        let (_d, repo, wt) = worktree_repo();
+        std::fs::write(repo.join("config.toml"), "PORT=3000\n").unwrap();
+        for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "config"]] {
+            std::process::Command::new("git")
+                .current_dir(&repo)
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        // The user's local edit, which is what carrying would copy across.
+        std::fs::write(repo.join("config.toml"), "PORT=3000\nSECRET=hunter2\n").unwrap();
+
+        let out = apply(&repo, &wt, &["config.toml".to_string()]).unwrap();
+
+        assert_eq!(out[0].action, Action::AlreadyTracked);
+        assert!(
+            !wt.join("config.toml").exists(),
+            "a tracked path is git's to deliver, and carrying it would have written \
+             the checkout's uncommitted copy over whatever the branch holds"
+        );
+    }
+
     /// Carried files must not appear as untracked, or the agent commits your
     /// `.env` onto the session branch.
     #[test]
@@ -354,8 +419,8 @@ mod tests {
         );
     }
 
-    /// omh writes CLAUDE.md and AGENTS.md into the worktree itself; left
-    /// untracked, the agent is invited to commit omh's staging onto the branch.
+    /// The rules filenames stay out of `git status` whatever put them there —
+    /// a mount placeholder, or a backend that had to fall back to writing.
     #[test]
     fn omhs_own_staged_files_are_hidden_too() {
         let (_d, _repo, wt) = worktree_repo();

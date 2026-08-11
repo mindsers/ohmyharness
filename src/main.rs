@@ -165,10 +165,29 @@ enum SessionsCmd {
     Down { session: Option<String> },
     /// What a session changed, against its base branch.
     Diff {
-        session: String,
+        session: Option<String>,
         /// Defaults to the repo's own default branch.
         #[arg(long)]
         base: Option<String>,
+    },
+    /// Commit a session's work onto its branch. Run on the host: the sandbox
+    /// has no git, and the worktree omh keeps out of your way is not somewhere
+    /// you should have to go.
+    Commit {
+        /// The message, verbatim. Without it, git opens your editor.
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+        /// Commit without the files omh carried in from your checkout.
+        #[arg(long)]
+        skip_carried: bool,
+    },
+    /// Push a session's branch to origin under a name a reviewer can read.
+    Push {
+        /// The branch name on origin. Required the first time, remembered after.
+        name: Option<String>,
+        /// Open a pull request with `gh` once it is pushed.
+        #[arg(long)]
+        pr: bool,
     },
 }
 
@@ -300,7 +319,23 @@ fn main() -> Result<()> {
             SessionsCmd::Ls => sessions_ls(&cwd),
             SessionsCmd::Rm { session } => rm(&cwd, session),
             SessionsCmd::Down { session } => down(&cwd, session.as_deref()),
-            SessionsCmd::Diff { session, base } => diff(&cwd, session, base.as_deref()),
+            SessionsCmd::Diff { session, base } => diff(
+                &cwd,
+                session.as_deref().or(cli.session.as_deref()),
+                base.as_deref(),
+            ),
+            SessionsCmd::Commit {
+                message,
+                skip_carried,
+            } => commit(
+                &cwd,
+                cli.session.as_deref(),
+                message.as_deref(),
+                *skip_carried,
+            ),
+            SessionsCmd::Push { name, pr } => {
+                push(&cwd, cli.session.as_deref(), name.as_deref(), *pr)
+            }
         },
 
         Cmd::Config { cmd } => match cmd {
@@ -854,12 +889,53 @@ fn sessions_ls(cwd: &std::path::Path) -> Result<()> {
             n => format!("  ({n} behind {base})"),
         };
         println!(
-            "  {id:<8} {:<14} {}{drift}",
+            "  {id:<8} {:<14} {:<9} {:<20}{drift}",
             sess.label(),
-            if up { "up" } else { "stopped" }
+            if up { "up" } else { "stopped" },
+            work_state(&sess, &paths.repo, &base),
         );
     }
     Ok(())
+}
+
+/// Where a session is in the cycle, phrased as the next thing to do about it.
+///
+/// Ordered most-actionable first, and deliberately one answer rather than a
+/// tally: `s ls` is read at a glance, and a session with uncommitted work needs
+/// committing whatever else is also true of it.
+fn work_state(session: &Session, repo: &std::path::Path, base: &str) -> String {
+    // A git that cannot answer is never rendered as an answer. Every accessor
+    // below runs through the worktree's `.git` pointer, which goes stale when a
+    // checkout moves and is already handled as a real case by `Session::remove`
+    // — and a blank column reads as "nothing here" for a session that may be
+    // holding a day of work the user is about to `s rm`.
+    let (uncommitted, unpushed) = match (session.uncommitted(), session.unpushed()) {
+        (Ok(uncommitted), Ok(unpushed)) => (uncommitted, unpushed),
+        _ => return "?".into(),
+    };
+
+    if let n @ 1.. = uncommitted {
+        return format!("{n} uncommitted");
+    }
+    match unpushed {
+        Some(n @ 1..) => format!("{n} to push"),
+        // Nothing origin does not already have. Report the name it went out
+        // under, which is what you would look for in a list of PRs — `omh/s01`
+        // is not a name anybody searches for.
+        Some(_) => match session.published_as() {
+            Ok(Some(target)) => format!("→ {target}"),
+            Ok(None) => String::new(),
+            Err(_) => "?".into(),
+        },
+        // Never pushed, which is not the same as nothing to push: this is the
+        // state the loop passes through every time, between `s commit` and the
+        // first `s push`. Measured against the base branch instead, because a
+        // blank here reads as a session nobody touched.
+        None => match session.commits(repo, base) {
+            0 => String::new(),
+            n => format!("{n} to push"),
+        },
+    }
 }
 
 /// Read one policy key through the usual layer merge.
@@ -1378,8 +1454,9 @@ fn edit(cwd: &std::path::Path, layer: Option<config::Layer>) -> Result<()> {
 /// happened — a `.env` you thought you were carrying and are not is exactly the
 /// failure that wastes an hour inside the sandbox.
 fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
-    // omh stages CLAUDE.md / AGENTS.md into the worktree; left untracked, the
-    // agent is invited to commit omh's own staging onto the session branch.
+    // The rules themselves are mounted, not written here — this covers the
+    // placeholder a bind mount's destination may leave behind, and any backend
+    // that cannot mount a single file.
     carry::hide_staged_rules(&session.worktree)?;
 
     let patterns = config::policy_list(paths, "carry_in");
@@ -1390,6 +1467,14 @@ fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
         match item.action {
             carry::Action::Copied => eprintln!("omh: carried {}", item.path),
             carry::Action::Refreshed => eprintln!("omh: refreshed {}", item.path),
+            // The mistake, named where it is made rather than three commands
+            // later at `s commit`. `carry_in` is for what a worktree does not
+            // get; a tracked file is already on the branch.
+            carry::Action::AlreadyTracked => eprintln!(
+                "omh: warning: carry_in lists {} — git already tracks it, so the worktree\n\
+                 \x20 has it already. Not carried; remove it with `omh config edit`.",
+                item.path
+            ),
             carry::Action::Missing => {
                 eprintln!(
                     "omh: warning: carry_in lists {} — not in this checkout",
@@ -1625,6 +1710,12 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // the only thing that tells the agent the store is there.
     if append_section_if_absent(&agents, "## Memory", &detect::memory_rules())? {
         println!("  memory     added the note rules to .omh/profile/AGENTS.md");
+    }
+    // Same delivery problem, same answer: every repo that exists today ran
+    // `init` before this section did, and without the append the notice reaches
+    // only repos nobody has created yet.
+    if append_section_if_absent(&agents, "## Git", &detect::git_rules())? {
+        println!("  git        added the git notice to .omh/profile/AGENTS.md");
     }
     // The base set: omh's opinion, seeded into the committed layer where it is
     // visible, reviewable, and removable rather than hidden in the binary.
@@ -2043,9 +2134,9 @@ fn ls(cwd: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
-fn diff(cwd: &std::path::Path, id: &str, base: Option<&str>) -> Result<()> {
+fn diff(cwd: &std::path::Path, id: Option<&str>, base: Option<&str>) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let session = Session::new(&paths.worktrees(), id.to_string());
+    let session = existing_session(&paths, id)?;
     let base = base
         .map(str::to_string)
         .unwrap_or_else(|| session::default_branch(&paths.repo));
@@ -2056,6 +2147,87 @@ fn diff(cwd: &std::path::Path, id: &str, base: Option<&str>) -> Result<()> {
     } else {
         print!("{out}");
     }
+    Ok(())
+}
+
+/// The session a command acts on when it acts on work already done.
+///
+/// Deliberately not `session::pick`: that invents the *next* id when none
+/// exists, which is right for a launch — it is about to create that worktree —
+/// and wrong for every command that operates on a session that must already be
+/// there. Committing into a fabricated id would fail somewhere further down,
+/// about a path nobody named.
+fn existing_session(paths: &Paths, explicit: Option<&str>) -> Result<Session> {
+    let id = match explicit {
+        Some(id) => {
+            session::validate_id(id)?;
+            id.to_string()
+        }
+        None => session::current(&paths.worktrees())
+            .context("no sessions yet — start one with `omh claude`")?,
+    };
+    let session = Session::new(&paths.worktrees(), id);
+    anyhow::ensure!(
+        session.worktree.exists(),
+        "no session {} — `omh s ls` lists them",
+        session.id
+    );
+    Ok(session)
+}
+
+fn commit(
+    cwd: &std::path::Path,
+    id: Option<&str>,
+    message: Option<&str>,
+    skip_carried: bool,
+) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let session = existing_session(&paths, id)?;
+
+    // The same list the launcher copies from, so what `commit` refuses to
+    // publish and what omh put there cannot disagree.
+    let carried = config::policy_list(&paths, "carry_in");
+    let policy = if skip_carried {
+        session::Carried::skipping(&carried)
+    } else {
+        session::Carried::refusing(&carried)
+    };
+    session.commit(message, policy)?;
+
+    // Counted against the base rather than reported as "committed", because the
+    // number is what tells you whether the branch is worth pushing — and it is
+    // the same number `omh s rm` will use to decide the branch survives.
+    let base = session::default_branch(&paths.repo);
+    let n = session.commits(&paths.repo, &base);
+    let s = if n == 1 { "commit" } else { "commits" };
+    println!("committed to {} ({n} {s} on the branch)", session.label());
+    Ok(())
+}
+
+fn push(cwd: &std::path::Path, id: Option<&str>, name: Option<&str>, pr: bool) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let session = existing_session(&paths, id)?;
+    let target = session.push(name)?;
+    println!("  {} → origin/{target}", session.label());
+
+    if !pr {
+        return Ok(());
+    }
+
+    // Optional accelerant, never a dependency: a repo on a non-GitHub remote is
+    // a normal repo, and a box without `gh` still has to be able to push. Saying
+    // what to run beats half-succeeding and leaving the user to guess whether
+    // the PR exists.
+    anyhow::ensure!(
+        runtime::installed("gh"),
+        "gh is not installed; open it with\n  gh pr create --head {target}"
+    );
+    let status = Command::new("gh")
+        .current_dir(&session.worktree)
+        .args(["pr", "create", "--head", &target])
+        .status()
+        .context("running gh pr create")?;
+    anyhow::ensure!(status.success(), "gh pr create did not open a pull request");
     Ok(())
 }
 
@@ -2160,6 +2332,31 @@ mod tests {
     /// `AGENTS.md`, and `write_if_absent` skips it — so the note rules, which
     /// in M1 are the *only* thing telling the agent the store is there, never
     /// arrived. The human's own file has to survive the delivery intact.
+    /// Same delivery problem as the note rules, and the same answer: every repo
+    /// that exists today ran `init` before this section did, and the file's own
+    /// header promises omh will not overwrite it. Without the append the notice
+    /// ships only to repos nobody has created yet.
+    #[test]
+    fn an_agents_md_that_predates_the_notice_still_gets_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("AGENTS.md");
+        let human = "# Project rules\n\n## House style\n\nTabs, and no adverbs.\n";
+        std::fs::write(&path, human).unwrap();
+
+        assert!(append_section_if_absent(&path, "## Git", &detect::git_rules()).unwrap());
+        let body = std::fs::read_to_string(&path).unwrap();
+
+        assert!(body.starts_with(human), "a human's file must survive whole");
+        assert!(body.contains("omh s commit"), "the notice must arrive");
+
+        assert!(!append_section_if_absent(&path, "## Git", &detect::git_rules()).unwrap());
+        assert_eq!(
+            body,
+            std::fs::read_to_string(&path).unwrap(),
+            "`init` is re-runnable; a second pass must not stack a second copy"
+        );
+    }
+
     #[test]
     fn an_agents_md_that_predates_the_store_still_gets_the_note_rules() {
         let dir = tempfile::tempdir().unwrap();

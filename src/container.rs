@@ -106,15 +106,7 @@ pub fn plan(
             dropped.push((cap, count_entries(&sources)));
             continue;
         };
-        stage_capability(
-            cap,
-            binding,
-            &sources,
-            &stage,
-            session,
-            &mut mounts,
-            staging,
-        )?;
+        stage_capability(cap, binding, &sources, &stage, &mut mounts, staging)?;
     }
 
     // The graph index, keyed by repo rather than harness — that is what lets
@@ -200,7 +192,6 @@ fn stage_capability(
     binding: &Binding,
     sources: &[PathBuf],
     stage: &Path,
-    session: &Session,
     mounts: &mut Vec<Mount>,
     staging: Staging,
 ) -> Result<()> {
@@ -242,23 +233,40 @@ fn stage_capability(
             });
         }
 
-        // Rules ride along inside the worktree, so they need no mount of their
-        // own — which is also why every harness's expected filename can point at
-        // the same bytes.
+        // Mounted read-only at each declared filename, which is why every
+        // harness's expected name can point at the same bytes.
+        //
+        // Written into the worktree instead, omh's staging was indistinguishable
+        // from the agent's work: a repo that tracks its own `CLAUDE.md` saw a
+        // permanent modification nobody made, and `s commit` carried omh's rules
+        // into the user's PR on top of the project's own conventions. A mount
+        // leaves the file on disk as the branch has it, so git has nothing to
+        // report. Read-only for the reason every other staged capability is: a
+        // file the agent can rewrite is not a profile, it is a suggestion.
         Render::Concat => {
             let merged = sources
                 .iter()
                 .map(|p| std::fs::read_to_string(p).unwrap_or_default())
                 .collect::<Vec<_>>()
                 .join("\n\n");
+            let file = stage.join(format!("{cap}.md"));
+            if staging == Staging::Apply {
+                std::fs::create_dir_all(stage)?;
+                std::fs::write(&file, &merged).with_context(|| format!("staging {cap}"))?;
+            }
             for target in std::iter::once(&binding.path).chain(binding.also.iter()) {
-                let rel = target
+                // Still `/work`-relative: the guest path is inside the worktree
+                // mount, and a `concat` target anywhere else would put the rules
+                // somewhere the harness does not read and nothing would say so.
+                target
                     .strip_prefix("/work/")
                     .with_context(|| format!("`concat` target {target} must live under /work/"))?;
-                if staging == Staging::Apply {
-                    std::fs::write(session.worktree.join(rel), &merged)
-                        .with_context(|| format!("staging {cap} at {rel}"))?;
-                }
+                mounts.push(Mount {
+                    host: file.clone(),
+                    guest: PathBuf::from(target),
+                    read_only: true,
+                    file: true,
+                });
             }
         }
 
@@ -722,13 +730,33 @@ mod tests {
         );
     }
 
+    /// Every declared filename gets the same bytes, and gets them as a mount.
+    ///
+    /// Writing them into the worktree instead put omh's staging where git could
+    /// see it: a repo that tracks its own `CLAUDE.md` — normal for one whose
+    /// users run agent harnesses — showed a permanent modification nobody made,
+    /// and `s commit` published omh's rules over the project's conventions. A
+    /// mount leaves the file on disk exactly as the branch has it.
     #[test]
-    fn rules_concatenate_into_every_declared_filename() {
+    fn rules_reach_every_declared_filename_without_touching_the_worktree() {
         let fx = fixture();
-        plan_for(&fx, "claude");
+        let p = plan_for(&fx, "claude");
+
         for name in ["CLAUDE.md", "AGENTS.md"] {
-            let body = std::fs::read_to_string(fx.session.worktree.join(name)).unwrap();
+            let guest = PathBuf::from("/work").join(name);
+            let m = p
+                .mounts
+                .iter()
+                .find(|m| m.guest == guest)
+                .unwrap_or_else(|| panic!("no mount for {name}: {:?}", p.mounts));
+            assert!(m.file, "{name} is one file, not a directory");
+            assert!(m.read_only, "a rules file the agent can rewrite is not one");
+            let body = std::fs::read_to_string(&m.host).unwrap();
             assert_eq!(body, "personal rules\n\nshared rules", "{name}");
+            assert!(
+                !fx.session.worktree.join(name).exists(),
+                "{name} must not be written into the worktree"
+            );
         }
     }
 
@@ -812,11 +840,17 @@ mod tests {
 
     /// Regression: `--dry-run` created a branch, a worktree, and wrote rules
     /// into it. A flag that exists to change nothing must change nothing.
+    ///
+    /// The rules moved from the worktree into the staging directory, so the
+    /// worktree check that used to carry this test now passes for a reason
+    /// unrelated to dry-run — it is the *staged* file that has to stay unwritten,
+    /// while the mount describing it still appears in the plan. A dry run is
+    /// only useful if what it prints is what would run.
     #[test]
     fn skipped_staging_writes_nothing() {
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        plan(
+        let p = plan(
             &fx.paths,
             &fx.profile,
             &adapter,
@@ -834,9 +868,20 @@ mod tests {
 
         assert!(!fx.paths.root.join("run").exists(), "no staging directory");
         for name in ["CLAUDE.md", "AGENTS.md"] {
+            let guest = PathBuf::from("/work").join(name);
+            let m = p
+                .mounts
+                .iter()
+                .find(|m| m.guest == guest)
+                .unwrap_or_else(|| panic!("the plan must still describe {name}"));
+            assert!(
+                !m.host.exists(),
+                "{name} staged during a dry run: {}",
+                m.host.display()
+            );
             assert!(
                 !fx.session.worktree.join(name).exists(),
-                "{name} written during a dry run"
+                "{name} written into the worktree during a dry run"
             );
         }
     }
