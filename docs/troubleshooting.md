@@ -103,6 +103,19 @@ The plan named a per-project network that was never created. A plan must be
 *runnable*, not merely well-formed — this gap made every real launch die while
 every unit test passed, and it is the archetypal case for why `doctor` exists.
 
+### `create mountpoint for /work/AGENTS.md mount: ... is outside of rootfs`
+
+Fixed in `0.2.1`. omh mounts its rules onto `/work/CLAUDE.md` and
+`/work/AGENTS.md` — paths inside the worktree mount — and left creating those
+destinations to the runtime. Docker Desktop will not: `/work` is the host
+worktree, so it resolves the destination back to a host path and refuses to
+create a mountpoint outside the container's rootfs.
+
+Docker creates the empty file on the host on its way out, which is why this read
+as intermittent: the first launch of a session died, the second found the
+leftover and worked. omh places those files itself now, before docker sees the
+plan. On an older version, launching a second time is the workaround.
+
 ### `omh s rm` says the session "is not a working tree"
 
 Worktree registration and the directory on disk disagreed. omh prunes before

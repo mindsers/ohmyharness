@@ -2,9 +2,9 @@
 
 Ordered by what gates what, not by what is most fun.
 
-**These are milestones, not crate versions.** The crate is at `0.2.0` and
+**These are milestones, not crate versions.** The crate is at `0.2.1` and
 milestone v0 is roughly what those releases contain. They are deliberately not
-kept in lockstep — v0 has spanned two releases already: a milestone moves when
+kept in lockstep — v0 has spanned three releases already: a milestone moves when
 a body of work lands, semver moves on every release, and calling the crate `1.0`
 would imply a stability this project has not earned — one verified harness, one
 verified runtime.
