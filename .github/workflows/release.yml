@@ -146,7 +146,7 @@ jobs:
   # baked path is absent, exactly as it is on a user's machine, so the binary
   # is exercised as the thing people actually download.
   runs-without-a-source-tree:
-    name: artifact (no source tree)
+    name: check artifact (runs standalone)
     needs: build
     runs-on: ubuntu-latest
     steps:
