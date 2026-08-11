@@ -188,13 +188,21 @@ pub fn validate_id(id: &str) -> Result<()> {
 /// every repo that still uses `master`, or any other convention — and it fails
 /// at review time, after the agent has already done the work.
 pub fn default_branch(repo: &Path) -> String {
-    // What the remote says is authoritative when there is one.
+    // What the remote says is authoritative when there is one — but only while
+    // it still points at something. `origin/HEAD` is cached at clone time and
+    // nothing refreshes it when a repo renames its trunk, so a repo cloned back
+    // when it was `master` keeps claiming `master` forever. Taking that claim on
+    // faith fails at `worktree add` with `invalid reference`, which is every
+    // session, not just review time.
     if let Ok(head) = git(
         repo,
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     ) {
         if let Some(name) = head.trim().strip_prefix("origin/") {
-            if !name.is_empty() {
+            let remote_ref = format!("refs/remotes/origin/{name}");
+            if !name.is_empty()
+                && git(repo, &["rev-parse", "--verify", "--quiet", &remote_ref]).is_ok()
+            {
                 return name.to_string();
             }
         }
@@ -479,6 +487,46 @@ mod tests {
             let (_d, root) = repo_on(branch);
             assert_eq!(default_branch(&root), branch, "on a {branch} repo");
         }
+    }
+
+    /// The remote knows its own trunk better than any local convention does, so
+    /// `origin/HEAD` outranks the `main`/`master` guess.
+    #[test]
+    fn the_remotes_own_answer_outranks_local_convention() {
+        let (_d, root) = repo_on("main");
+        git(&root, &["update-ref", "refs/remotes/origin/trunk", "HEAD"]).unwrap();
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(default_branch(&root), "trunk");
+    }
+
+    /// Regression: `origin/HEAD` is a cached guess from clone time that nothing
+    /// updates when a repo renames its trunk, so it can name a branch that no
+    /// longer exists. Trusting it unchecked made every session fail to start
+    /// with `invalid reference: master`.
+    #[test]
+    fn a_stale_origin_head_loses_to_a_branch_that_exists() {
+        let (_d, root) = repo_on("main");
+        git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/master",
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(default_branch(&root), "main");
     }
 
     #[test]
