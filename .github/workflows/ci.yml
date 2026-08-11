@@ -20,7 +20,7 @@ jobs:
   # One test in tests/cli.rs runs `omh init`, which builds the base image
   # through Docker. It is `#[ignore]`d, so this is the job that opts back in.
   test-linux:
-    name: tests (linux, including the docker one)
+    name: tests (linux, with docker)
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
@@ -62,7 +62,7 @@ jobs:
   # install.sh runs before omh does, on a machine nobody has checked, and it is
   # the only file here that no compiler reads.
   installer:
-    name: the installer, and its refusals
+    name: installer (shellcheck and tests)
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo

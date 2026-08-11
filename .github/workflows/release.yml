@@ -29,24 +29,25 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# Job names carry the phase they belong to, because the checks list is the
-# only view most people ever see of this pipeline and "gate" and "publish" are
-# the distinction that matters in it: a gate failing means nothing shipped, a
-# publish failing means something half-shipped.
+# Names are labels, not sentences: a short noun with the varying part in
+# parentheses, matching verify. They are read in a checks list, where anything
+# longer than a glance is wasted — the reasoning belongs in these comments.
 #
-# Free to rename, unlike the `verify` jobs — those names are required status
-# checks on main, and renaming one there silently stops enforcing it.
+# Free to rename, unlike the `verify` jobs, whose names are required status
+# checks on main. Renaming one there stops it being enforced: the rule waits on
+# a name nothing produces, so the pull request blocks rather than merging
+# wrongly, but nothing says why.
 jobs:
   # A tag is a claim about which version is being released. Cargo.toml is the
   # other half of that claim, and nothing else in the process compares them.
   tag-matches-cargo-toml:
-    name: "gate: the tag and Cargo.toml agree"
+    name: tag matches Cargo.toml
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
         uses: actions/checkout@v5
-      - name: compare the tag against the crate version
+      - name: compare tag and crate version
         run: |
           tagged="${GITHUB_REF_NAME#v}"
           declared="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
@@ -60,7 +61,7 @@ jobs:
   # without this a tag on a red commit publishes — and a crates.io release
   # cannot be withdrawn, only yanked.
   tests:
-    name: "gate: the suite passes at this tag"
+    name: tests (at the tag)
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -79,7 +80,7 @@ jobs:
   # the container's glibc or it dies with a loader error the agent reports as
   # the MCP server crashing. Static removes the question.
   build:
-    name: "build: ${{ matrix.target }}"
+    name: build (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -105,7 +106,7 @@ jobs:
         if: endsWith(matrix.target, '-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
-      - name: add the standard library for ${{ matrix.target }}
+      - name: add the target
         run: rustup target add ${{ matrix.target }}
 
       - name: restore the cargo cache
@@ -116,7 +117,7 @@ jobs:
       - name: build the release binary
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: pack the binary with its licence and readme
+      - name: pack the tarball
         run: |
           staging="omh-${{ matrix.target }}"
           mkdir -p "$staging"
@@ -124,7 +125,7 @@ jobs:
           cp LICENSE README.md "$staging/"
           tar -czf "$staging.tar.gz" "$staging"
 
-      - name: hand the tarball to the jobs downstream
+      - name: upload the tarball
         uses: actions/upload-artifact@v4
         with:
           name: omh-${{ matrix.target }}
@@ -145,21 +146,21 @@ jobs:
   # baked path is absent, exactly as it is on a user's machine, so the binary
   # is exercised as the thing people actually download.
   runs-without-a-source-tree:
-    name: "gate: the binary works with no source tree"
+    name: artifact (no source tree)
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - name: fetch the linux tarball, and nothing else
+      - name: fetch the linux tarball
         uses: actions/download-artifact@v4
         with:
           name: omh-x86_64-unknown-linux-musl
 
-      - name: unpack it somewhere unrelated to any checkout
+      - name: unpack it outside any checkout
         run: |
           tar -xzf omh-x86_64-unknown-linux-musl.tar.gz
           install -m755 omh-x86_64-unknown-linux-musl/omh "$RUNNER_TEMP/omh"
 
-      - name: run it in a fresh repo, with a fresh home
+      - name: run it in a fresh repo
         env:
           HOME: ${{ runner.temp }}/home
         run: |
@@ -193,7 +194,7 @@ jobs:
           done
 
   release:
-    name: "publish: the GitHub release"
+    name: publish (github release)
     needs: [tag-matches-cargo-toml, tests, build, runs-without-a-source-tree]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -208,7 +209,7 @@ jobs:
 
       # Plain file names, no `./` prefix, so a downloader can run
       # `sha256sum -c SHA256SUMS` against them unchanged.
-      - name: checksum them, and refuse a release missing a platform
+      - name: checksum every tarball
         run: |
           cd dist
           # A release missing a platform would otherwise ship with a
@@ -222,7 +223,7 @@ jobs:
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
-      - name: create the release and attach every artifact
+      - name: create the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -234,7 +235,7 @@ jobs:
             dist/*.tar.gz dist/SHA256SUMS
 
   crates-io:
-    name: "publish: the crate to crates.io"
+    name: publish (crates.io)
     # After the GitHub release rather than beside it. Run in parallel, a
     # rejected publish still leaves the release live, and the two halves of one
     # version disagree with no way back.
@@ -266,7 +267,7 @@ jobs:
   # rather than skipping, because a tap silently pinned to an old version is
   # indistinguishable from one nobody has updated yet.
   homebrew:
-    name: "publish: the homebrew formula"
+    name: publish (homebrew tap)
     needs: [release]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -274,7 +275,7 @@ jobs:
       - name: check out the repo
         uses: actions/checkout@v5
 
-      - name: take the checksums from the published release
+      - name: download the release checksums
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -282,7 +283,7 @@ jobs:
             --pattern SHA256SUMS --dir .
           cat SHA256SUMS
 
-      - name: render the formula from the template
+      - name: render the formula
         run: |
           set -o pipefail
           version="${GITHUB_REF_NAME#v}"
@@ -320,14 +321,14 @@ jobs:
           printf '%s' "$formula" > omh.rb
           ruby -c omh.rb
 
-      - name: check out the tap repository
+      - name: check out the tap
         uses: actions/checkout@v5
         with:
           repository: mindsers/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
 
-      - name: commit and push, unless the tap already says this
+      - name: commit and push to the tap
         run: |
           version="${GITHUB_REF_NAME#v}"
           mkdir -p tap/Formula
@@ -350,7 +351,7 @@ jobs:
   # crate would be accepted: it packages and builds from the packaged copy,
   # which is where "works in the repo, missing from the tarball" shows up.
   packaging:
-    name: "gate: the crate packages cleanly"
+    name: crate packaging
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
@@ -358,7 +359,7 @@ jobs:
         uses: actions/checkout@v5
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
-      - name: build the crate tarball
+      - name: package the crate
         run: cargo package --locked
       - name: list what would ship
         run: cargo package --locked --list
