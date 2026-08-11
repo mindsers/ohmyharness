@@ -1,10 +1,14 @@
 # Contributing
 
 ```console
-$ cargo test            # the suite
-$ ./scripts/smoke.sh    # end-to-end walkthrough in a throwaway repo
-$ omh doctor            # the only thing that verifies an adapter
+$ cargo test                    # the suite
+$ cargo clippy --all-targets -- -D warnings
+$ ./scripts/test-install.sh     # install.sh, and every refusal it should make
+$ omh doctor                    # the only thing that verifies an adapter
 ```
+
+One test is `#[ignore]`d because it needs a container runtime; `cargo test --
+--include-ignored` runs it, and so does CI.
 
 ## Read this first
 
@@ -119,9 +123,9 @@ that worked, said so, and were wrong.
 
 ## Documentation
 
-Docs live in [`docs/`](README.md) and are tested — `tests/docs.rs` checks that
+Docs live in [`docs/`](../docs/README.md) and are tested — `tests/docs.rs` checks that
 every relative link resolves and that no page is orphaned. Add a page, link it
-from [`docs/README.md`](README.md).
+from [`docs/README.md`](../docs/README.md).
 
 Where a number appears, it should be a measurement, and it should say what it
 measured. Where something is unverified, say so. The project's credibility rests
@@ -132,8 +136,9 @@ on the difference between those two, and the moment a doc claims more than
 
 1. `cargo test`
 2. `cargo fmt`
-3. `omh doctor` if you touched anything a harness reads
-4. Reintroduce the bug your new test guards; confirm it goes red
+3. `cargo clippy --all-targets -- -D warnings`
+4. `omh doctor` if you touched anything a harness reads
+5. Reintroduce the bug your new test guards; confirm it goes red
 
-Step 4 is the one people skip. It is also the one that catches tests that assert
+Step 5 is the one people skip. It is also the one that catches tests that assert
 nothing.

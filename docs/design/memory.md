@@ -348,13 +348,13 @@ names both tools — reporting the store's own census, because `0 notes` is what
 a wrong mount looks like and a blank detail hides it. Whether a *harness*
 re-reads the description per session is [§15.2](#15-open-questions), and it is
 a dated measurement per harness, not a check. Claiming more than `doctor` can
-prove is the failure [contributing](../contributing.md) names.
+prove is the failure [contributing](../../.github/CONTRIBUTING.md) names.
 
 Invariants 8–10 are the ones that will be tempting to fake with a weak test. This
 repo has shipped that failure — a date guard that only checked a date was
 *present*, a `GUEST_HOME` guard matching `const` but not `pub const`. **Write the
 guard red first, then reintroduce the defect to confirm it bites**
-([contributing](../contributing.md)).
+([contributing](../../.github/CONTRIBUTING.md)).
 
 ## 12. CLI
 

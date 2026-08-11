@@ -498,8 +498,7 @@ pub fn parse_rendered(rendered: &str) -> Result<Vec<Cite>> {
             continue;
         }
 
-        let stripped =
-            line.trim_start_matches(|c| c == '├' || c == '└' || c == '─' || c == '│' || c == ' ');
+        let stripped = line.trim_start_matches(['├', '└', '─', '│', ' ']);
 
         let Some((key, rest)) = stripped.split_once("  ") else {
             bail!("`{line}` carries no provenance at all");
@@ -1091,7 +1090,7 @@ mod tests {
             ),
         ];
         let precise = "mounting a token file fail".to_string();
-        let alone = search_phrased(&notes, &[precise.clone()], Budget::default());
+        let alone = search_phrased(&notes, std::slice::from_ref(&precise), Budget::default());
         assert_eq!(
             alone.hits.first().map(|h| h.cite.key.as_str()),
             Some("target")

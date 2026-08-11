@@ -48,7 +48,7 @@ change — most of them record something that was tried and cost something.
 
 ## Contributing
 
-[Contributing](contributing.md) — the testing rules, the invariants that must
+[Contributing](../.github/CONTRIBUTING.md) — the testing rules, the invariants that must
 keep holding, and the one thing about this codebase that will mislead you if
 nobody tells you first.
 

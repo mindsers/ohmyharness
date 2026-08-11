@@ -1,0 +1,13 @@
+# Pins the toolchain so the tools cannot disagree about which rustc they are.
+#
+# This is not hypothetical: on one machine here `cargo clippy` resolved to a
+# stale 0.1.81 shim on PATH while `cargo build` used 1.97, so clippy refused to
+# run at all and its output was silently absent from every local check. A lint
+# nobody can run is a lint nobody is enforcing.
+#
+# rustup reads this file. A Homebrew or distro-packaged rust ignores it, so if
+# `rustc --version` disagrees with the channel below, that is why.
+
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

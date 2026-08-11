@@ -1,0 +1,368 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # Building every target is the only way to know this file works, and a
+  # release is a bad time to find out. These paths rebuild the whole matrix on
+  # the pull request and publish nothing — the uploading jobs are tag-gated.
+  #
+  # The list is everything that changes what a released binary contains. When
+  # it was only this workflow file, a pull request editing build.rs or deleting
+  # an adapter never ran the job that checks the artifact, so the bug this
+  # pipeline exists to catch could be reintroduced whole with CI green.
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "build.rs"
+      - "src/bundled.rs"
+      - "src/main.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "adapters/**"
+      - "base/**"
+      - "editors/**"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Names are labels, not sentences. Each starts with what the job does —
+# check, run, build, publish — and puts the varying part in parentheses. That
+# verb carries the distinction that matters when one goes red: a `check` or
+# `build` failing means nothing shipped, a `publish` failing means something
+# half-shipped, and those need different responses. Read in a checks list,
+# where anything longer than a glance is wasted; reasoning goes in comments.
+#
+# Free to rename, unlike the `verify` jobs, whose names are required status
+# checks on main. Renaming one there stops it being enforced: the rule waits on
+# a name nothing produces, so the pull request blocks rather than merging
+# wrongly, but nothing says why.
+jobs:
+  # A tag is a claim about which version is being released. Cargo.toml is the
+  # other half of that claim, and nothing else in the process compares them.
+  tag-matches-cargo-toml:
+    name: check tag (matches Cargo.toml)
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+      - name: compare tag and crate version
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')"
+          if [ "$tagged" != "$declared" ]; then
+            echo "tag $GITHUB_REF_NAME says $tagged, Cargo.toml says $declared" >&2
+            exit 1
+          fi
+          echo "both say $declared"
+
+  # `verify` runs on pushes to main and on pull requests. A tag is neither, so
+  # without this a tag on a red commit publishes — and a crates.io release
+  # cannot be withdrawn, only yanked.
+  tests:
+    name: run tests (at the tag)
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: run every test
+        run: cargo test --locked -- --include-ignored
+      - name: lint, with warnings as errors
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  # Linux builds are static musl, and that is not a portability nicety here.
+  # On Linux omh mounts its own executable into the sandbox and the harness
+  # runs it there as the memory server — so a glibc-linked binary has to match
+  # the container's glibc or it dies with a loader error the agent reports as
+  # the MCP server crashing. Static removes the question.
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+          # Both Apple targets build on the arm64 runner. The Intel `macos-13`
+          # label has been retired, so a job asking for one queues until it is
+          # cancelled — it does not fail, which is worse. Apple's SDK carries
+          # both slices and omh pulls in no C, so the x86_64 cross is native.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+
+      - name: install the musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: add the target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: build the release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: pack the tarball
+        run: |
+          staging="omh-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/omh" "$staging/"
+          cp LICENSE README.md "$staging/"
+          tar -czf "$staging.tar.gz" "$staging"
+
+      - name: upload the tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: omh-${{ matrix.target }}
+          path: omh-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  # The one check no in-process test can make.
+  #
+  # `install_bundled` used to read adapters, editors and the base set from
+  # `env!("CARGO_MANIFEST_DIR")` — the build machine's source path, resolved at
+  # runtime. During `cargo test` that path is right there, so the whole suite
+  # stayed green while a downloaded binary got "no usable base manifest ... run
+  # `omh init`" out of `omh init` itself, and no adapters at all, because the
+  # read_dir error was discarded. build.rs embeds them now, and this is what
+  # keeps them embedded.
+  #
+  # It deliberately does not check out the repo. That is the entire point: the
+  # baked path is absent, exactly as it is on a user's machine, so the binary
+  # is exercised as the thing people actually download.
+  runs-without-a-source-tree:
+    name: check artifact (runs standalone)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: fetch the linux tarball
+        uses: actions/download-artifact@v4
+        with:
+          name: omh-x86_64-unknown-linux-musl
+
+      - name: unpack it outside any checkout
+        run: |
+          tar -xzf omh-x86_64-unknown-linux-musl.tar.gz
+          install -m755 omh-x86_64-unknown-linux-musl/omh "$RUNNER_TEMP/omh"
+
+      - name: run it in a fresh repo
+        env:
+          HOME: ${{ runner.temp }}/home
+        run: |
+          # The default runner shell is `bash -e`, without pipefail — so the
+          # `| tee` below would report tee's exit code and a failing init would
+          # pass. That is the failure mode this job exists to catch.
+          set -o pipefail
+          mkdir -p "$HOME"
+          repo="$(mktemp -d)"
+          cd "$repo"
+          git init -q -b main .
+          git config user.email ci@example.com
+          git config user.name ci
+          printf 'fn main() {}\n' > main.rs
+          git add -A && git commit -qm init
+
+          "$RUNNER_TEMP/omh" init
+
+          # Asserted against the filesystem, not against the report. A negative
+          # grep on a printed line ("harnesses  0") passes the moment that line
+          # is reworded, which is the failure mode CONTRIBUTING.md calls
+          # out under "assert invariants, not output shape". What matters is
+          # that the files arrived.
+          for dir in adapters base editors; do
+            count=$(find "$HOME/.omh/$dir" -name '*.toml' 2>/dev/null | wc -l)
+            if [ "$count" -eq 0 ]; then
+              echo "init installed no $dir — the bundled files did not travel" >&2
+              exit 1
+            fi
+            echo "  $dir: $count"
+          done
+
+  release:
+    name: publish (github release)
+    needs: [tag-matches-cargo-toml, tests, build, runs-without-a-source-tree]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: collect every tarball
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Plain file names, no `./` prefix, so a downloader can run
+      # `sha256sum -c SHA256SUMS` against them unchanged.
+      - name: checksum every tarball
+        run: |
+          cd dist
+          # A release missing a platform would otherwise ship with a
+          # SHA256SUMS that agrees with itself perfectly.
+          found=$(ls -1 ./*.tar.gz | wc -l)
+          if [ "$found" -ne 4 ]; then
+            echo "expected 4 tarballs, found $found" >&2
+            ls -la >&2
+            exit 1
+          fi
+          sha256sum *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag \
+            dist/*.tar.gz dist/SHA256SUMS
+
+  crates-io:
+    name: publish (crates.io)
+    # After the GitHub release rather than beside it. Run in parallel, a
+    # rejected publish still leaves the release live, and the two halves of one
+    # version disagree with no way back.
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    # CARGO_REGISTRY_TOKEN is a repository secret, so no environment is named
+    # here. That leaves the `if:` above as the only thing tying a publish to a
+    # tag. If you want that rule to survive an edit to this file, move the
+    # token into an environment pinned to `v*` and name it here.
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+  # The tap is downstream of the release, never beside it: the formula names
+  # URLs that must already resolve, and the checksums come from the release's
+  # own SHA256SUMS rather than being recomputed here — so the formula cannot
+  # disagree with what was actually published.
+  #
+  # Needs HOMEBREW_TAP_TOKEN: a fine-grained PAT with contents:write on
+  # mindsers/homebrew-tap only. GITHUB_TOKEN is scoped to this repository and
+  # cannot push to another one. If the secret is absent the job fails loudly
+  # rather than skipping, because a tap silently pinned to an old version is
+  # indistinguishable from one nobody has updated yet.
+  homebrew:
+    name: publish (homebrew tap)
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+
+      - name: download the release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --pattern SHA256SUMS --dir .
+          cat SHA256SUMS
+
+      - name: render the formula
+        run: |
+          set -o pipefail
+          version="${GITHUB_REF_NAME#v}"
+
+          sha_for() {
+            awk -v f="omh-$1.tar.gz" '{ sub(/^\.\//, "", $2); if ($2 == f) print $1 }' SHA256SUMS
+          }
+
+          formula=$(cat packaging/homebrew/omh.rb.tmpl)
+          formula=${formula//@VERSION@/$version}
+          for pair in \
+            "SHA_DARWIN_ARM:aarch64-apple-darwin" \
+            "SHA_DARWIN_X86:x86_64-apple-darwin" \
+            "SHA_LINUX_ARM:aarch64-unknown-linux-musl" \
+            "SHA_LINUX_X86:x86_64-unknown-linux-musl"
+          do
+            key="${pair%%:*}"; target="${pair#*:}"
+            sum="$(sha_for "$target")"
+            if [ -z "$sum" ]; then
+              echo "no checksum for $target in the release — refusing to write a formula that cannot install" >&2
+              exit 1
+            fi
+            formula=${formula//@$key@/$sum}
+          done
+
+          # A placeholder that survives means the template grew a field the
+          # renderer does not know about, and it would reach users as a Ruby
+          # syntax error at install time.
+          if printf '%s' "$formula" | grep -q '@[A-Z_]\+@'; then
+            echo "unfilled placeholders remain:" >&2
+            printf '%s' "$formula" | grep -o '@[A-Z_]\+@' | sort -u >&2
+            exit 1
+          fi
+
+          printf '%s' "$formula" > omh.rb
+          ruby -c omh.rb
+
+      - name: check out the tap
+        uses: actions/checkout@v5
+        with:
+          repository: mindsers/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: commit and push to the tap
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p tap/Formula
+          cp omh.rb tap/Formula/omh.rb
+          cd tap
+          if git diff --quiet -- Formula/omh.rb; then
+            echo "the tap already describes $version"
+            exit 0
+          fi
+          git config user.name "omh release"
+          git config user.email "nathanael@cherrier.dev"
+          git add Formula/omh.rb
+          git commit -m "omh $version
+
+          Rendered from packaging/homebrew/omh.rb.tmpl at $GITHUB_REF_NAME.
+          Checksums are the ones that release published."
+          git push
+
+  # On a pull request nothing above publishes, so this is what says whether the
+  # crate would be accepted: it packages and builds from the packaged copy,
+  # which is where "works in the repo, missing from the tarball" shows up.
+  packaging:
+    name: check crate (packages cleanly)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: package the crate
+        run: cargo package --locked
+      - name: list what would ship
+        run: cargo package --locked --list

@@ -31,7 +31,14 @@ fn markdown_files() -> Vec<PathBuf> {
             let p = e.path();
             let name = e.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with('.') || name == "target" || name == "node_modules" {
+            // `.github` is walked despite the dot: CONTRIBUTING, SECURITY and
+            // the code of conduct are prose with links, and links rot there
+            // exactly as they do under docs/. It only became load-bearing when
+            // CONTRIBUTING.md moved out of docs/ — a rename that would
+            // otherwise have quietly removed the file from this check.
+            // Everything else beginning with a dot is skipped, `.git` above all.
+            let hidden = name.starts_with('.') && name != ".github";
+            if hidden || name == "target" || name == "node_modules" {
                 continue;
             }
             if p.is_dir() {
@@ -147,7 +154,7 @@ fn slug(heading: &str) -> String {
 fn anchors(body: &str) -> BTreeSet<String> {
     body.lines()
         .filter(|l| l.starts_with('#'))
-        .map(|l| slug(l))
+        .map(slug)
         .collect()
 }
 

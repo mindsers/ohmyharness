@@ -632,8 +632,7 @@ mod tests {
         for df in [base_dockerfile(), harness_dockerfile(&claude())] {
             let last_user = df
                 .lines()
-                .filter(|l| l.trim_start().starts_with("USER "))
-                .next_back()
+                .rfind(|l| l.trim_start().starts_with("USER "))
                 .unwrap_or("");
             assert_eq!(last_user.trim(), "USER agent", "ended privileged:\n{df}");
         }

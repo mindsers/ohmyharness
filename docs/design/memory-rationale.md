@@ -236,7 +236,7 @@ numeric ones were not.
 > A budget that cannot separate a known-good store from a known-bad one doesn't
 > ship.
 
-That is [the weak-guard problem](../contributing.md) in a new costume: a check
+That is [the weak-guard problem](../../.github/CONTRIBUTING.md) in a new costume: a check
 that passes everything and a check that flags everything are the same failure.
 
 One free result worth stealing outright: validating three generations of stores

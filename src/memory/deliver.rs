@@ -80,9 +80,29 @@ pub fn target_arch(host_arch: &str) -> Result<&'static str> {
 ///
 /// `None` rather than a path that does not exist: the caller mounts what this
 /// returns, and docker turns a missing bind source into a directory.
+///
+/// Two of the ways this answers `None` are not "not built yet" but "omh cannot
+/// tell", and they used to be discarded with `.ok()?`. An unsupported host
+/// architecture and a `current_exe` that will not resolve both produced a
+/// session with no memory server and no explanation — including under
+/// `omh doctor`, which is the one command whose job is to notice. They are
+/// still `None`, because a session without memory is still a session, but they
+/// no longer pass in silence.
 pub fn available(paths: &crate::profile::Paths) -> Option<PathBuf> {
-    let arch = target_arch(std::env::consts::ARCH).ok()?;
-    let exe = std::env::current_exe().ok()?;
+    let arch = match target_arch(std::env::consts::ARCH) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("omh: no memory server here — {e:#}");
+            return None;
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("omh: no memory server here — cannot locate the running omh: {e}");
+            return None;
+        }
+    };
     let plan = plan_delivery(
         std::env::consts::OS,
         arch,

@@ -2,6 +2,7 @@
 name = "omh"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "Launch any coding harness, in a sandbox, with your setup already there."
 license = "MIT"
 authors = ["Nathanaël Cherrier <nathanael@cherrier.dev>"]
