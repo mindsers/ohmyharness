@@ -29,9 +29,12 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# Names are labels, not sentences: a short noun with the varying part in
-# parentheses, matching verify. They are read in a checks list, where anything
-# longer than a glance is wasted — the reasoning belongs in these comments.
+# Names are labels, not sentences. Each starts with what the job does —
+# check, run, build, publish — and puts the varying part in parentheses. That
+# verb carries the distinction that matters when one goes red: a `check` or
+# `build` failing means nothing shipped, a `publish` failing means something
+# half-shipped, and those need different responses. Read in a checks list,
+# where anything longer than a glance is wasted; reasoning goes in comments.
 #
 # Free to rename, unlike the `verify` jobs, whose names are required status
 # checks on main. Renaming one there stops it being enforced: the rule waits on
@@ -41,7 +44,7 @@ jobs:
   # A tag is a claim about which version is being released. Cargo.toml is the
   # other half of that claim, and nothing else in the process compares them.
   tag-matches-cargo-toml:
-    name: tag matches Cargo.toml
+    name: check tag (matches Cargo.toml)
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -61,7 +64,7 @@ jobs:
   # without this a tag on a red commit publishes — and a crates.io release
   # cannot be withdrawn, only yanked.
   tests:
-    name: tests (at the tag)
+    name: run tests (at the tag)
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
@@ -351,7 +354,7 @@ jobs:
   # crate would be accepted: it packages and builds from the packaged copy,
   # which is where "works in the repo, missing from the tarball" shows up.
   packaging:
-    name: crate packaging
+    name: check crate (packages cleanly)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
