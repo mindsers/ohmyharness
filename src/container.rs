@@ -481,9 +481,6 @@ mod tests {
         );
     }
 
-    /// No longer branches on the host OS: which binary gets chosen is
-    /// `deliver::plan_delivery`'s decision and is table-tested there. What is
-    /// left here is what `plan` does with the answer.
     fn fake_server_binary(fx: &Fx) -> std::path::PathBuf {
         let arch = crate::memory::deliver::target_arch(std::env::consts::ARCH).unwrap();
         let at = crate::memory::deliver::cached_at(&fx.paths.root, arch);
@@ -519,11 +516,6 @@ mod tests {
     /// A bind mount of a host path that does not exist makes docker create a
     /// **directory** there, and the harness then reports a permission error
     /// about something nobody created. Absent is absent.
-    ///
-    /// This ran on macOS only until the binary became an input. `plan` used to
-    /// resolve it itself, and on Linux that resolves to the running
-    /// executable — which exists by construction, so the state this guards
-    /// could not be built and the assertion never held there.
     #[test]
     fn a_missing_server_binary_is_left_out_rather_than_mounted_as_a_directory() {
         let fx = fixture();

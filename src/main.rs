@@ -1576,11 +1576,11 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
 
 #[allow(dead_code)]
 fn init(cwd: &std::path::Path) -> Result<()> {
-    // 1. Fail fast. Everything below is wasted work outside a repo.
+    // Fail fast. Everything below is wasted work outside a repo.
     let paths = Paths::discover(cwd)?;
 
-    // 2. A fresh install has no adapters, so `omh <harness>` would fail no
-    //    matter what else init did. Ship them before anything else.
+    // A fresh install has no adapters, so `omh <harness>` would fail no matter
+    // what else init did. Ship them before anything else.
     let adapters = install_bundled_adapters(&paths)?;
     let editors = install_bundled(&paths.editors(), bundled::Shipped::Editors)?;
     // The base set ships as data next to the adapters, for the same reason: the
@@ -1593,12 +1593,12 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(paths.root.join("profile/skills"))?;
     std::fs::create_dir_all(paths.worktrees())?;
 
-    // 3. Detect rather than ask.
+    // Detect rather than ask.
     let stacks = detect::stacks(&paths.repo);
     let names: Vec<String> = adapters.to_vec();
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h));
 
-    // 4. Write layer 2 from what was detected. Never overwrite a human's file.
+    // Write layer 2 from what was detected. Never overwrite a human's file.
     let shared = paths.repo.join(".omh/profile");
     let local = paths.repo.join(".omh/local");
     for dir in [&shared, &local] {
@@ -1676,7 +1676,9 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // Appended, not overwritten: re-running init must not eat a line you added.
     ensure_line(&paths.repo.join(".omh/.gitignore"), "local/")?;
 
-    // 5. Report every decision, so `omh why` has something to explain.
+    // Report every decision, so `omh why` has something to explain. Printed as
+    // each one is made rather than collected for the end, which is why the
+    // image and graph lines below appear inside the summary.
     println!("omh init — decided, asked nothing\n");
     println!("  harnesses  {} ({})", adapters.len(), adapters.join(", "));
     println!("  editors    {} ({})", editors.len(), editors.join(", "));
@@ -1702,9 +1704,9 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         }
     }
 
-    // What the repo already documents becomes notes that *point* at it. The
-    // seeds used to be printed here and thrown away — derived every run,
-    // read once, kept nowhere.
+    // What the repo already documents becomes notes that *point* at it.
+    // Printing the seeds instead would derive them every run, show them once,
+    // and keep them nowhere.
     match seed_store(&paths) {
         Ok(report) => println!("  memory     {report}"),
         // Never fatal. A repo that cannot be ingested is still a repo omh set
@@ -1724,8 +1726,8 @@ fn init(cwd: &std::path::Path) -> Result<()> {
 
     println!("\n  layers     {}  (committed)", shared.display());
     println!("             {}  (gitignored)", local.display());
-    // 5. The image. Without it the headline command cannot run, so init is not
-    //    finished until this exists.
+    // The image. Without it the headline command cannot run, so init is not
+    // finished until this exists.
     if let Some(h) = &harness {
         let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
