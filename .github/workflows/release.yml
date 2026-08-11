@@ -340,18 +340,34 @@ jobs:
           mkdir -p tap/Formula
           cp omh.rb tap/Formula/omh.rb
           cd tap
-          if git diff --quiet -- Formula/omh.rb; then
+          git config user.name "omh release"
+          git config user.email "nathanael@cherrier.dev"
+
+          # Staged first, and compared against the index rather than the
+          # working tree. `git diff` ignores untracked files, so on the release
+          # that first created this formula it reported no change, the no-op
+          # branch below fired, and the job exited 0 having published nothing —
+          # a green tick over an empty tap. The one case that had to work was
+          # the one case the guard could not see.
+          git add Formula/omh.rb
+          if git diff --cached --quiet -- Formula/omh.rb; then
             echo "the tap already describes $version"
             exit 0
           fi
-          git config user.name "omh release"
-          git config user.email "nathanael@cherrier.dev"
-          git add Formula/omh.rb
+
           git commit -m "omh $version
 
           Rendered from packaging/homebrew/omh.rb.tmpl at $GITHUB_REF_NAME.
           Checksums are the ones that release published."
           git push
+
+          # Read it back from the remote. Everything above can succeed against
+          # a local clone and still leave the tap untouched, which is exactly
+          # what happened once.
+          git fetch -q origin
+          git diff --quiet "origin/$(git branch --show-current)" -- Formula/omh.rb \
+            || { echo "the push did not land Formula/omh.rb" >&2; exit 1; }
+          echo "the tap now describes $version"
 
   # On a pull request nothing above publishes, so this is what says whether the
   # crate would be accepted: it packages and builds from the packaged copy,
