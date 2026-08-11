@@ -388,6 +388,13 @@ pub fn grep_nudge(project: &str) -> String {
 
 /// Hooks that make the graph actually get used. Without them the server is
 /// installed and never called, which is how most of these end up.
+/// Wrap a string for `sh`, so prose with punctuation cannot end the argument
+/// it is inside. Single quotes, and the only character that matters inside them
+/// is the single quote itself.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
 pub fn hooks() -> Vec<Hook> {
     // Nudges speak through `hookSpecificOutput.additionalContext` — the
     // documented channel a hook uses to reach the model. Bare stdout on exit 0
@@ -434,6 +441,26 @@ pub fn hooks() -> Vec<Hook> {
                  \" — modules, layers, boundaries and entry points. Query it with \
                  search_graph/trace_path/get_code_snippet rather than exploring by \
                  hand:\\n\" + $a)}}}}'"
+            ),
+        },
+        Hook {
+            name: "git-unavailable",
+            event: "PreToolUse",
+            matcher: "Bash",
+            // Silent unless the command is actually git, for the reason
+            // `graph-read` is silent on small files: a nudge on every Bash call
+            // is noise the model tunes out, and Bash is most of what an agent
+            // runs. Matched after a separator too — `cd x && git status` is the
+            // same mistake with a prefix.
+            //
+            // Built from `detect::GIT_ABSENT` so the sentence the agent sees
+            // here and the one `init` writes into the rules cannot drift.
+            command: format!(
+                "c=$(jq -r '.tool_input.command // empty'); \
+                 case \"$c\" in git\\ *|*[\\;\\&\\|]\\ git\\ *) ;; *) exit 0 ;; esac; \
+                 jq -nc --arg m {} '{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\
+                 \"additionalContext\":$m}}}}'",
+                shell_quote(crate::detect::GIT_ABSENT)
             ),
         },
         Hook {
@@ -1062,9 +1089,23 @@ command = "c"
 
     /// Hooks are one shared file across every session, so they name the project
     /// through the environment rather than baking a session into the text.
+    ///
+    /// Scoped to the hooks that reach the graph, which is where the guarantee
+    /// comes from: the store holds every session's graph for this repo, so a
+    /// query that does not name one answers about the wrong worktree. A hook
+    /// that touches no store has no project to name, and asserting otherwise
+    /// would only force a variable into text that does not use it.
     #[test]
-    fn hooks_name_their_project_through_the_environment() {
-        for h in hooks() {
+    fn hooks_that_query_the_graph_name_their_project_through_the_environment() {
+        let querying: Vec<_> = hooks()
+            .into_iter()
+            .filter(|h| h.command.contains(GRAPH_BIN))
+            .collect();
+        assert!(
+            !querying.is_empty(),
+            "the filter must still match something"
+        );
+        for h in querying {
             assert!(
                 h.command.contains(PROJECT_ENV),
                 "{} must name its project: {}",
@@ -1082,6 +1123,22 @@ command = "c"
     fn the_nudge_names_the_project_to_query() {
         let h = hook("graph-first");
         assert!(h.command.contains(PROJECT_ENV), "got: {}", h.command);
+    }
+
+    /// The rules file says this too, but a rules file decays as context grows —
+    /// which is the reason this repo already gives for preferring delivery
+    /// attached to the call. The hook fires at the moment the agent reaches for
+    /// git, which is where the sentence actually lands.
+    #[test]
+    fn the_git_notice_fires_on_the_call_that_would_fail() {
+        let h = hook("git-unavailable");
+        assert_eq!(h.event, "PreToolUse");
+        assert_eq!(h.matcher, "Bash", "git arrives as a shell command");
+        assert!(
+            h.command.contains("git init"),
+            "the repair it would otherwise reach for has to be named: {}",
+            h.command
+        );
     }
 
     // ── the graph UI ────────────────────────────────────────────────────────

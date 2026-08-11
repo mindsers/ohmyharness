@@ -167,9 +167,50 @@ Everything omh knows about: harnesses, editors, sessions and their state.
 ```
 omh s ls              sessions, their branches and state
 omh s diff [id]       what the agent changed
+omh s commit [-m …]   commit that work onto the session branch
+omh s push [name]     push it to origin under a name a reviewer can read
 omh s down [id]       stop the container, keep the worktree and branch
 omh s rm [id]         remove the session — a branch with commits is kept
 ```
+
+Every one of them defaults to the most recent session; `-s` names another.
+
+### Getting work out of a session
+
+The worktree lives under `~/.omh/worktrees/` so your IDE does not index it, and
+you should never have to go there. `commit` and `push` are how the work comes
+out, run on the host — the same place `diff` already runs:
+
+```console
+$ omh s diff
+$ omh s commit -m "Fix the tap guard"
+$ omh s push fix/tap-guard --pr
+  omh/s01 → origin/fix/tap-guard
+```
+
+`commit` stages everything in the worktree except what omh put there itself, and
+writes your message **verbatim** — no trailer, no generated summary. omh has no
+view on what the work was for and will not invent one. Without `-m`, git opens
+your editor.
+
+`push` requires a name the first time and remembers it after. `omh/s01` records
+when the work happened rather than what it was, and on origin it outlives the
+session that would explain it — so omh refuses rather than choosing for you:
+
+```console
+$ omh s push
+omh: omh/s01 is a session id, not a branch name
+  name it:  omh s push fix/tap-guard
+```
+
+`--pr` opens the pull request with `gh` when it is installed, and prints the
+command when it is not. It is never a dependency: a repo on a non-GitHub remote
+is a normal repo.
+
+**The agent cannot do any of this itself.** git does not work inside the session
+— the worktree's `.git` points at an admin directory on the host, which omh does
+not mount — so the sandbox is told as much, and told not to try to repair it.
+See `omh why git-unavailable`.
 
 **`rm` never deletes a branch that has commits.** Unreviewed agent work must be
 unloseable, so the branch outlives the session that produced it, and `rm` tells

@@ -400,3 +400,120 @@ fn stale_never_files_what_it_cannot_tell_under_stale() {
         "the note belongs under that heading: {printed}"
     );
 }
+
+// ── getting work out of a session ───────────────────────────────────────────
+
+impl Sandbox {
+    /// A session as omh would have left one: a real worktree on `omh/<id>`.
+    ///
+    /// Built with plain git rather than by launching a container, because what
+    /// these tests are about is the host-side path out of a session — the half
+    /// that has to work whether or not a sandbox is running.
+    fn session(&self, id: &str) -> PathBuf {
+        self.git_init();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(&self.repo)
+                .args(args)
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+
+        let worktree = self
+            .home
+            .join(".omh/worktrees")
+            .join(self.repo.file_name().unwrap())
+            .join(id);
+        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            worktree.to_str().unwrap(),
+            "-b",
+            &format!("omh/{id}"),
+        ]);
+        worktree
+    }
+}
+
+/// `pick` invents the next id when none exists, which is right for a launch
+/// about to create that worktree and wrong here. Reaching for it would make
+/// this fail somewhere further down, about a path nobody named.
+#[test]
+fn committing_with_no_session_says_so_rather_than_inventing_one() {
+    let sb = sandbox();
+
+    let out = sb.omh(&["s", "commit", "-m", "anything"]);
+
+    assert!(!out.status.success(), "there is nothing to commit to");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no sessions"), "got: {err}");
+}
+
+/// The pair that is broken end to end today: nothing can commit a session's
+/// work, so `s diff` — which compares `base...branch` and therefore sees only
+/// commits — reports nothing for a session that did real work.
+#[test]
+fn work_committed_from_the_host_is_what_diff_then_reports() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
+
+    let out = sb.omh(&["s", "commit", "-m", "Add the feature"]);
+    assert!(
+        out.status.success(),
+        "commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let printed = String::from_utf8_lossy(&sb.omh(&["s", "diff", "s01"]).stdout).to_string();
+    assert!(printed.contains("feature.rs"), "got: {printed}");
+}
+
+/// A session id is a path component and `Session::new` joins it into the
+/// worktree path. `s rm` already validates; so must anything else that takes
+/// one from the command line.
+///
+/// Asserting the *reason*, not just the failure: a missing worktree fails this
+/// too, so a bare `!success` here stays green with the validation deleted. It
+/// did, when this test was first written.
+#[test]
+fn a_session_id_that_is_a_path_is_refused() {
+    let sb = sandbox();
+    sb.session("s01");
+
+    let out = sb.omh(&["-s", "../escape", "s", "commit", "-m", "x"]);
+
+    assert!(!out.status.success(), "`../escape` is not a session id");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("not a path"),
+        "refused for the wrong reason: {err}"
+    );
+}
+
+/// A committed session with no upstream yet has everything to push and nothing
+/// to compare against, and the first version of `s ls` printed a blank for it —
+/// indistinguishable from a session nobody had touched. Measuring against the
+/// base branch is what makes "never report work as clean" true in the state the
+/// loop actually passes through.
+#[test]
+fn a_session_that_has_committed_but_never_pushed_is_not_reported_as_clean() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
+    assert!(sb
+        .omh(&["s", "commit", "-m", "Add the feature"])
+        .status
+        .success());
+
+    let printed = String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stdout).to_string();
+
+    assert!(printed.contains("to push"), "got: {printed}");
+}

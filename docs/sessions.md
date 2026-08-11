@@ -37,6 +37,28 @@ $ omh s diff
 $ git log omh/s01
 ```
 
+That git runs on the **host**, and so does the way work leaves a session:
+
+```console
+$ omh s commit -m "Fix the tap guard"
+$ omh s push fix/tap-guard
+```
+
+Not a stylistic choice. A worktree's `.git` is a file holding an absolute path
+to an admin directory in your checkout, and omh mounts only the worktree — so
+inside the sandbox that pointer leads nowhere and every git command fails with
+`fatal: not a git repository`.
+
+The agent is told this, and told not to try to repair it. Not because repairing
+is dangerous — `git init` there refuses for the same reason and leaves the
+pointer untouched, which was checked rather than assumed — but because it cannot
+work, and an agent that thinks git is merely broken will offer to commit work it
+has no way to commit.
+
+The branch itself is in your checkout the whole time — worktrees share a ref
+store — so once the work is committed, `git log omh/s01` and `git push` work
+from your own repo without `~/.omh` entering into it.
+
 Two things are writable — the worktree, because that is the work, and
 credentials, because tokens refresh in place. **Nothing else is**, and a test
 asserts exactly that rather than asserting a list of mount strings.
