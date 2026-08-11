@@ -25,7 +25,9 @@ say() { printf '%s\n' "$*"; }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
 need() {
-  command -v "$1" >/dev/null 2>&1 || die "$1 is required and was not found"
+  for tool in "$@"; do
+    command -v "$tool" >/dev/null 2>&1 || die "$tool is required and was not found"
+  done
 }
 
 # Inlined rather than read back out of $0: piped through `curl | sh` there is
@@ -50,8 +52,11 @@ case "${1:-}" in
   *) die "unexpected argument: $1 (see --help)" ;;
 esac
 
-need curl
-need tar
+# Everything the script shells out to. Checked up front so a missing tool is
+# reported as a missing tool: without this, a machine without coreutils reached
+# `install` and was told to set OMH_BIN_DIR to somewhere writable, which was
+# both wrong and a good way to spend an afternoon on file permissions.
+need curl tar awk mktemp install
 
 # macOS ships `shasum`, most Linuxes ship `sha256sum`, and a download nobody
 # verified is a download nobody should run.
@@ -88,12 +93,34 @@ if [ -z "$VERSION" ]; then
   esac
 fi
 
+# Validated whether it came from the redirect or from OMH_VERSION. It is
+# interpolated straight into the download URL, so a value containing a path
+# would fetch a different repository's release — and verify it happily against
+# that repository's own SHA256SUMS, since both come from the same base.
+case "$VERSION" in
+  v[0-9]*) ;;
+  *) die "$VERSION is not a version tag" ;;
+esac
+case "$VERSION" in
+  */*|*..*) die "$VERSION is not a version tag" ;;
+esac
+
 base="${OMH_BASE_URL:-https://github.com/$REPO/releases/download}/$VERSION"
 tarball="omh-$target.tar.gz"
 
+# Both are cleaned on any exit. The staged binary matters as much as the temp
+# directory: it lands in $BIN_DIR, so an interrupt between staging and the move
+# would otherwise leave an executable named .omh.incoming.NNN there forever.
+tmp=""
+staged=""
+cleanup() {
+  [ -n "$tmp" ] && rm -rf "$tmp"
+  [ -n "$staged" ] && rm -f "$staged"
+  return 0
+}
+trap cleanup EXIT INT TERM
+
 tmp="$(mktemp -d)"
-# shellcheck disable=SC2064 # $tmp is expanded now on purpose
-trap "rm -rf '$tmp'" EXIT INT TERM
 
 say "omh $VERSION — $target"
 
@@ -104,11 +131,17 @@ curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" \
 
 # Match the exact file name, so a checksum for a different platform cannot
 # stand in for this one.
-expected="$(awk -v f="$tarball" '{ sub(/^\.\//, "", $2); if ($2 == f) print $1 }' \
+# `\r` because a SHA256SUMS with CRLF endings would otherwise match nothing and
+# report that the release lists no entry for a file it plainly lists.
+expected="$(awk -v f="$tarball" '{ sub(/^\.\//, "", $2); sub(/\r$/, "", $2); if ($2 == f) print $1 }' \
   "$tmp/SHA256SUMS")"
 [ -n "$expected" ] || die "SHA256SUMS lists no entry for $tarball"
 
 actual="$(sha256 "$tmp/$tarball")"
+# There is no pipefail in POSIX sh, so a hashing tool that dies still leaves
+# `cut` exiting 0 and `actual` empty. Reported as a broken tool rather than as
+# a corrupt download, which is a different afternoon.
+[ -n "$actual" ] || die "could not hash $tarball"
 if [ "$expected" != "$actual" ]; then
   die "checksum mismatch for $tarball
   expected $expected
@@ -116,7 +149,7 @@ if [ "$expected" != "$actual" ]; then
 fi
 say "  checksum ok"
 
-tar -xzf "$tmp/$tarball" -C "$tmp"
+tar -xzf "$tmp/$tarball" -C "$tmp" || die "$tarball is not a readable tar.gz"
 [ -f "$tmp/omh-$target/omh" ] || die "$tarball did not contain omh-$target/omh"
 
 mkdir -p "$BIN_DIR" || die "could not create $BIN_DIR"
@@ -130,12 +163,22 @@ staged="$BIN_DIR/.omh.incoming.$$"
 install -m 755 "$tmp/omh-$target/omh" "$staged" \
   || die "could not write to $BIN_DIR — set OMH_BIN_DIR to somewhere writable"
 
-if ! "$staged" --version >/dev/null 2>&1; then
-  rm -f "$staged"
-  die "the downloaded omh does not run here — wrong build for $os/$arch?"
+if ! probe="$("$staged" --version 2>&1)"; then
+  die "the downloaded omh does not run here — wrong build for $os/$arch?
+  $probe"
 fi
 
-mv -f "$staged" "$BIN_DIR/omh" || { rm -f "$staged"; die "could not install into $BIN_DIR"; }
+# The tag names a version; so does the binary. A release whose tarball holds
+# the previous build passes every check above, and the installer would announce
+# the version it meant to install rather than the one it did.
+want="${VERSION#v}"
+case "$probe" in
+  *"$want"*) ;;
+  *) die "$tarball reports '$probe', which does not match the tag $VERSION" ;;
+esac
+
+mv -f "$staged" "$BIN_DIR/omh" || die "could not install into $BIN_DIR"
+staged=""
 
 say "  installed $BIN_DIR/omh"
 
@@ -151,7 +194,7 @@ esac
 # Stated, not enforced. omh needs a container runtime and git, and neither is
 # something an installer should be quietly putting on your machine.
 missing=""
-command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 || missing="docker"
+command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 || missing="docker or podman"
 command -v git >/dev/null 2>&1 || missing="${missing:+$missing and }git"
 if [ -n "$missing" ]; then
   say ""

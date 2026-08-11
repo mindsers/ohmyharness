@@ -1582,13 +1582,13 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // 2. A fresh install has no adapters, so `omh <harness>` would fail no
     //    matter what else init did. Ship them before anything else.
     let adapters = install_bundled_adapters(&paths)?;
-    let editors = install_bundled(&paths.editors(), "editors")?;
+    let editors = install_bundled(&paths.editors(), bundled::Shipped::Editors)?;
     // The base set ships as data next to the adapters, for the same reason: the
     // opinion should be reviewable by the people it is imposed on. It travels
     // *inside* the binary now — otherwise a released omh installs nothing — but
     // it still lands as a file in `~/.omh/base`, which is where the
     // reviewability actually lives. `omh why` reads the file init seeds from.
-    install_bundled(&paths.base(), "base")?;
+    install_bundled(&paths.base(), bundled::Shipped::Base)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     std::fs::create_dir_all(paths.root.join("profile/skills"))?;
     std::fs::create_dir_all(paths.worktrees())?;
@@ -1783,7 +1783,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
 /// Adapters ship with omh but live in `~/.omh`. Without this a fresh install
 /// cannot launch anything, which is the state the tool was in until now.
 fn install_bundled_adapters(paths: &Paths) -> Result<Vec<String>> {
-    install_bundled(&paths.adapters(), "adapters")?;
+    install_bundled(&paths.adapters(), bundled::Shipped::Adapters)?;
     Ok(Adapter::load_dir(&paths.adapters())?
         .into_iter()
         .map(|a| a.name)
@@ -1800,29 +1800,53 @@ fn install_bundled_adapters(paths: &Paths) -> Result<Vec<String>> {
 /// The contents come from [`bundled`], embedded at compile time. Reading them
 /// from the source tree instead is what made a released binary install nothing
 /// at all — and say nothing, because the `read_dir` error was discarded.
-fn install_bundled(dest: &std::path::Path, kind: &str) -> Result<Vec<String>> {
-    std::fs::create_dir_all(dest)?;
-    let shipped_files = bundled::files(kind)
-        .with_context(|| format!("omh ships no `{kind}` — nothing would be installed"))?;
-    for (name, shipped) in shipped_files {
+fn install_bundled(dest: &std::path::Path, kind: bundled::Shipped) -> Result<Vec<String>> {
+    std::fs::create_dir_all(dest)
+        .with_context(|| format!("creating {} for the bundled {}", dest.display(), kind.dir()))?;
+    for &bundled::File { name, contents } in kind.files() {
         let target = dest.join(name);
-        let existing = std::fs::read_to_string(&target).unwrap_or_default();
-        if !existing.is_empty() && existing != *shipped {
+
+        // Bytes, not text. `read_to_string` fails on a single non-UTF-8 byte,
+        // and treating that failure as "no file here" overwrote the file
+        // without the backup promised below — the read failed, the write
+        // succeeded, and somebody's edit was gone. Only "not found" means
+        // absent; every other error is reported rather than assumed benign.
+        let existing = match std::fs::read(&target) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", target.display())),
+        };
+
+        if !existing.is_empty() && existing != contents.as_bytes() {
             // Managed files are refreshed so shipped fixes land, but
             // silently discarding an edit is not acceptable.
-            println!(
+            let backup = target.with_extension("toml.yours");
+            std::fs::write(&backup, &existing)
+                .with_context(|| format!("saving your {name} as {}", backup.display()))?;
+            // stderr: this is a warning about data, and stdout is the report.
+            eprintln!(
                 "  replaced   {} (yours saved as {name}.yours)",
-                target.display(),
+                target.display()
             );
-            std::fs::write(target.with_extension("toml.yours"), &existing)?;
         }
-        std::fs::write(&target, shipped)?;
+        std::fs::write(&target, contents)
+            .with_context(|| format!("writing {}", target.display()))?;
     }
-    let mut names: Vec<String> = std::fs::read_dir(dest)?
-        .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "toml"))
-        .map(|e| e.path().file_stem().unwrap().to_string_lossy().into_owned())
-        .collect();
+
+    // Not `.flatten()`. An unreadable entry here would be dropped from the
+    // list omh then prints as `harnesses N (...)` and hands to
+    // `detect::preferred_harness` — under-reporting and choosing from an
+    // incomplete set, silently. That is the shape of bug this file just
+    // finished removing.
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(dest).with_context(|| format!("reading {}", dest.display()))? {
+        let path = entry
+            .with_context(|| format!("listing {}", dest.display()))?
+            .path();
+        if path.extension().is_some_and(|x| x == "toml") {
+            names.push(path.file_stem().unwrap().to_string_lossy().into_owned());
+        }
+    }
     names.sort();
     Ok(names)
 }
@@ -2233,7 +2257,7 @@ mod tests {
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("claude.toml"), "name = \"stale\"\n").unwrap();
 
-        install_bundled(&dest, "adapters").unwrap();
+        install_bundled(&dest, bundled::Shipped::Adapters).unwrap();
 
         let shipped =
             std::fs::read_to_string(std::path::Path::new(BUNDLED_ADAPTERS).join("claude.toml"))
@@ -2241,6 +2265,49 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(dest.join("claude.toml")).unwrap(),
             shipped
+        );
+    }
+
+    /// The refresh above is only acceptable because the old bytes survive it,
+    /// and nothing asserted that they did — deleting the backup entirely kept
+    /// the suite green.
+    #[test]
+    fn the_file_it_replaces_is_kept_verbatim() {
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("adapters");
+        std::fs::create_dir_all(&dest).unwrap();
+        let mine = "name = \"mine, edited\"\n";
+        std::fs::write(dest.join("claude.toml"), mine).unwrap();
+
+        install_bundled(&dest, bundled::Shipped::Adapters).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dest.join("claude.toml.yours")).unwrap(),
+            mine,
+            "the replaced file must be recoverable byte for byte"
+        );
+    }
+
+    /// A file omh cannot read as text is still a file somebody wrote.
+    ///
+    /// `read_to_string` fails on a single non-UTF-8 byte — one accented
+    /// character pasted into a description is enough — and collapsing that to
+    /// "absent" meant the overwrite went ahead with no backup and no message.
+    /// The read failed, the write succeeded, and the edit was gone.
+    #[test]
+    fn an_edit_omh_cannot_read_as_text_is_still_backed_up() {
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("adapters");
+        std::fs::create_dir_all(&dest).unwrap();
+        let mine = b"name = \"caf\xe9\"\n"; // latin-1 é: valid file, invalid UTF-8
+        std::fs::write(dest.join("claude.toml"), mine).unwrap();
+
+        install_bundled(&dest, bundled::Shipped::Adapters).unwrap();
+
+        assert_eq!(
+            std::fs::read(dest.join("claude.toml.yours")).unwrap(),
+            mine,
+            "bytes omh cannot decode are still bytes it must not discard"
         );
     }
 
@@ -2252,7 +2319,7 @@ mod tests {
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("mine.toml"), "name = \"mine\"\n").unwrap();
 
-        install_bundled(&dest, "adapters").unwrap();
+        install_bundled(&dest, bundled::Shipped::Adapters).unwrap();
         assert_eq!(
             std::fs::read_to_string(dest.join("mine.toml")).unwrap(),
             "name = \"mine\"\n"

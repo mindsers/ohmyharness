@@ -9,8 +9,9 @@ servers. Roughly five minutes, most of it the first image build.
   [runtime backends](design/architecture.md#runtime-backends).
 - **git**, and a repository to work in. omh refuses to run outside one.
 - **Rust 1.85+**, but only to build from source. Declared as `rust-version` in
-  `Cargo.toml` and checked by CI, so it is a tested floor rather than the
-  version that happened to be on the maintainer's machine.
+  `Cargo.toml`, and CI builds the whole tree on exactly 1.85 — so it is a floor
+  something checks, rather than the version that happened to be on the
+  maintainer's machine.
 
 ## Install
 
@@ -28,7 +29,7 @@ stop the install, and a failed install never replaces a working `omh`.
 |---|---|
 | `OMH_VERSION` | tag to install, instead of the latest |
 | `OMH_BIN_DIR` | where the binary goes (default `~/.local/bin`) |
-| `OMH_BASE_URL` | where to fetch from — for mirrors |
+| `OMH_BASE_URL` | where to fetch from — for mirrors, and for testing the script. Pair it with `OMH_VERSION`: resolving *latest* always asks github.com |
 
 Linux builds are static musl, so one build covers every distribution.
 

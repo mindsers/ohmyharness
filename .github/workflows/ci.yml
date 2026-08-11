@@ -17,41 +17,34 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Linux gets the whole suite. Every test in tests/cli.rs shells out to the
-  # real binary; one of them runs `omh init`, which builds the base image
-  # through Docker. Everything else is in-process.
+  # One test in tests/cli.rs runs `omh init`, which builds the base image
+  # through Docker. It is `#[ignore]`d, so this is the job that opts back in.
   test-linux:
-    name: tests (linux, full suite)
+    name: tests (linux, including the docker one)
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
         uses: actions/checkout@v5
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
-      - name: run every test, including the one that needs docker
-        run: cargo test --locked
+      - name: run every test
+        run: cargo test --locked -- --include-ignored
 
-  # GitHub's macOS runners have no Docker daemon, so the test that needs one is
-  # excluded by target rather than skipped by name — a `--skip` list rots
-  # silently the moment a test is renamed, and reads as coverage it is not.
-  #
-  # That drops the whole of tests/cli.rs here, and only one of those tests
-  # actually needs Docker — a little macOS coverage traded for a boundary that
-  # cannot go stale. Worth revisiting if tests/cli.rs grows.
-  #
-  # Deliberately no test count: the first version of this comment carried one,
-  # and a later commit in the same pull request added four tests and left it
-  # wrong. A number nothing recomputes is a number that lies on a schedule.
+  # GitHub's macOS runners have no Docker daemon. This runs the same command a
+  # contributor runs, and the one Docker test reports itself as ignored rather
+  # than being excluded by target — so a new integration test is covered here
+  # by default instead of silently dropping off macOS, and nothing has to
+  # remember to update a skip list.
   test-macos:
-    name: tests (macos, no docker)
+    name: tests (macos)
     runs-on: macos-latest
     steps:
       - name: check out the repo
         uses: actions/checkout@v5
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
-      - name: run every test that does not need docker
-        run: cargo test --locked --bins --test docs
+      - name: run every test that does not need a container runtime
+        run: cargo test --locked
 
   lint:
     name: format and lint
@@ -66,8 +59,26 @@ jobs:
       - name: lint, with warnings as errors
         run: cargo clippy --locked --all-targets -- -D warnings
 
+  # install.sh runs before omh does, on a machine nobody has checked, and it is
+  # the only file here that no compiler reads.
+  installer:
+    name: the installer, and its refusals
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: shellcheck it
+        run: shellcheck install.sh scripts/test-install.sh
+      - name: build the binary the tests package
+        run: cargo build --locked
+      - name: exercise every path it can take
+        run: ./scripts/test-install.sh
+
   # The MSRV in Cargo.toml is a claim about who can build this, and an unchecked
-  # claim is the thing this repo distrusts most. This job is what makes it true.
+  # claim is the thing this repo distrusts most. `build` rather than `check`,
+  # because the job says "builds" and `cargo check` stops before codegen.
   msrv:
     name: msrv (builds on 1.85)
     runs-on: ubuntu-latest
@@ -83,5 +94,5 @@ jobs:
           toolchain: "1.85"
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
-      - name: check it still builds on the floor omh declares
-        run: cargo check --locked --all-targets
+      - name: build on the floor omh declares
+        run: cargo build --locked --all-targets

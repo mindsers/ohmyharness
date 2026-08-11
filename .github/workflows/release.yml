@@ -4,10 +4,24 @@ on:
   push:
     tags: ["v*"]
   # Building every target is the only way to know this file works, and a
-  # release is a bad time to find out. Touching it rebuilds the whole matrix on
-  # the PR and publishes nothing — the jobs that upload are tag-gated below.
+  # release is a bad time to find out. These paths rebuild the whole matrix on
+  # the pull request and publish nothing — the uploading jobs are tag-gated.
+  #
+  # The list is everything that changes what a released binary contains. When
+  # it was only this workflow file, a pull request editing build.rs or deleting
+  # an adapter never ran the job that checks the artifact, so the bug this
+  # pipeline exists to catch could be reintroduced whole with CI green.
   pull_request:
-    paths: [".github/workflows/release.yml"]
+    paths:
+      - ".github/workflows/release.yml"
+      - "build.rs"
+      - "src/bundled.rs"
+      - "src/main.rs"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "adapters/**"
+      - "base/**"
+      - "editors/**"
 
 permissions:
   contents: read
@@ -34,6 +48,23 @@ jobs:
             exit 1
           fi
           echo "both say $declared"
+
+  # `verify` runs on pushes to main and on pull requests. A tag is neither, so
+  # without this a tag on a red commit publishes — and a crates.io release
+  # cannot be withdrawn, only yanked.
+  tests:
+    name: the suite passes at this tag
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: check out the repo
+        uses: actions/checkout@v5
+      - name: restore the cargo cache
+        uses: Swatinem/rust-cache@v2
+      - name: run every test
+        run: cargo test --locked -- --include-ignored
+      - name: lint, with warnings as errors
+        run: cargo clippy --locked --all-targets -- -D warnings
 
   # Linux builds are static musl, and that is not a portability nicety here.
   # On Linux omh mounts its own executable into the sandbox and the harness
@@ -138,18 +169,25 @@ jobs:
           printf 'fn main() {}\n' > main.rs
           git add -A && git commit -qm init
 
-          "$RUNNER_TEMP/omh" init | tee out.txt
+          "$RUNNER_TEMP/omh" init
 
-          # "0 harnesses" is the silent version of this failure: init succeeds,
-          # reports nothing wrong, and the tool cannot launch anything.
-          if grep -qE 'harnesses +0' out.txt; then
-            echo "init shipped zero adapters — the bundled files did not travel" >&2
-            exit 1
-          fi
+          # Asserted against the filesystem, not against the report. A negative
+          # grep on a printed line ("harnesses  0") passes the moment that line
+          # is reworded, which is the failure mode docs/contributing.md calls
+          # out under "assert invariants, not output shape". What matters is
+          # that the files arrived.
+          for dir in adapters base editors; do
+            count=$(find "$HOME/.omh/$dir" -name '*.toml' 2>/dev/null | wc -l)
+            if [ "$count" -eq 0 ]; then
+              echo "init installed no $dir — the bundled files did not travel" >&2
+              exit 1
+            fi
+            echo "  $dir: $count"
+          done
 
   release:
     name: publish the GitHub release
-    needs: [tag-matches-cargo-toml, build, runs-without-a-source-tree]
+    needs: [tag-matches-cargo-toml, tests, build, runs-without-a-source-tree]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     permissions:
@@ -166,6 +204,14 @@ jobs:
       - name: checksum them
         run: |
           cd dist
+          # A release missing a platform would otherwise ship with a
+          # SHA256SUMS that agrees with itself perfectly.
+          found=$(ls -1 ./*.tar.gz | wc -l)
+          if [ "$found" -ne 4 ]; then
+            echo "expected 4 tarballs, found $found" >&2
+            ls -la >&2
+            exit 1
+          fi
           sha256sum *.tar.gz > SHA256SUMS
           cat SHA256SUMS
 
@@ -182,7 +228,10 @@ jobs:
 
   crates-io:
     name: publish to crates.io
-    needs: [tag-matches-cargo-toml, build, runs-without-a-source-tree]
+    # After the GitHub release rather than beside it. Run in parallel, a
+    # rejected publish still leaves the release live, and the two halves of one
+    # version disagree with no way back.
+    needs: [release]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     # CARGO_REGISTRY_TOKEN is a repository secret, so no environment is named
