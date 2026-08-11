@@ -58,15 +58,26 @@ the agent, instead of a second one on your host that silently diverges.
 Requires **Docker** and **git**.
 
 ```console
+$ brew install mindsers/tap/omh
+```
+
+macOS and Linux, arm64 and x86_64. `brew upgrade` keeps it current afterwards,
+which is the part the script below cannot do.
+
+Without Homebrew:
+
+```console
 $ curl -fsSL https://raw.githubusercontent.com/mindsers/ohmyharness/main/install.sh | sh
 ```
 
 Picks the build for your machine, checks it against the published
 `SHA256SUMS`, runs it once to confirm it works here, and moves it into
 `~/.local/bin`. A failed install never replaces a working `omh`. Read it first
-if you would rather — it is [one file](install.sh).
+if you would rather — it is [one file](install.sh). Re-run it to update.
 
-*No release is tagged yet. Until one is, the script says so and sends you here.*
+*No release is tagged yet, so neither of these has anything to install. The
+script says so and sends you here; Homebrew will only say the formula does not
+exist. Until then, build from source.*
 
 From source, which needs Rust 1.85+:
 
