@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: run every test
@@ -47,7 +47,7 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: run every test that does not need a container runtime
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: check formatting
@@ -73,7 +73,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: shellcheck it
@@ -94,7 +94,7 @@ jobs:
       RUSTUP_TOOLCHAIN: "1.85"
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: install rust 1.85
         uses: dtolnay/rust-toolchain@master
         with:

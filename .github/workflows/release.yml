@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: compare tag and crate version
         run: |
           tagged="${GITHUB_REF_NAME#v}"
@@ -69,7 +69,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: run every test
@@ -103,7 +103,7 @@ jobs:
             os: macos-latest
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: install the musl toolchain
         if: endsWith(matrix.target, '-musl')
@@ -129,7 +129,7 @@ jobs:
           tar -czf "$staging.tar.gz" "$staging"
 
       - name: upload the tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: omh-${{ matrix.target }}
           path: omh-${{ matrix.target }}.tar.gz
@@ -154,7 +154,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: fetch the linux tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: omh-x86_64-unknown-linux-musl
 
@@ -205,7 +205,7 @@ jobs:
       contents: write
     steps:
       - name: collect every tarball
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
@@ -251,7 +251,7 @@ jobs:
     # token into an environment pinned to `v*` and name it here.
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: cargo publish
@@ -276,7 +276,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: download the release checksums
         env:
@@ -328,7 +328,7 @@ jobs:
           ruby -c omh.rb
 
       - name: check out the tap
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           repository: mindsers/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -362,7 +362,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: restore the cargo cache
         uses: Swatinem/rust-cache@v2
       - name: package the crate
