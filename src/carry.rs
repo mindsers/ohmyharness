@@ -170,7 +170,7 @@ pub fn exclude_path(worktree: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(dir).join("info/exclude"))
 }
 
-/// The files omh writes into the worktree itself, at launch.
+/// The filenames omh stages its rules onto, inside `/work`.
 ///
 /// Named once because three things have to agree about them, in three modules:
 /// the `concat` targets the adapters declare, `hide_staged_rules` here, and
@@ -178,14 +178,16 @@ pub fn exclude_path(worktree: &Path) -> Option<PathBuf> {
 /// else needs adding to this list too.
 pub const STAGED_RULES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
 
-/// Hide the rules omh stages into the worktree. Left untracked, the agent is
-/// invited to commit omh's own staging onto the session branch.
+/// Hide the rules filenames from the agent's `git status`.
 ///
-/// This covers the untracked case and **only** that case: `info/exclude` is
-/// gitignore semantics, which say nothing about a file git already tracks. A
-/// repo that commits its own `CLAUDE.md` — normal for a repo whose users run
-/// agent harnesses — gets omh's copy written over it, and git sees an ordinary
-/// modification. `Session::commit` is what excludes it there.
+/// omh mounts its rules rather than writing them, so there is usually nothing
+/// here to hide. What this covers is the placeholder: a bind mount needs its
+/// destination to exist, and a runtime that creates one inside `/work` leaves an
+/// empty untracked file behind.
+///
+/// It cannot cover the tracked case at all — `info/exclude` is gitignore
+/// semantics, silent about a file git already has — which is why the mount, not
+/// this, is what keeps omh's staging out of the user's commit.
 pub fn hide_staged_rules(worktree: &Path) -> Result<()> {
     exclude(worktree, &STAGED_RULES.map(String::from))
 }
@@ -417,8 +419,8 @@ mod tests {
         );
     }
 
-    /// omh writes CLAUDE.md and AGENTS.md into the worktree itself; left
-    /// untracked, the agent is invited to commit omh's staging onto the branch.
+    /// The rules filenames stay out of `git status` whatever put them there —
+    /// a mount placeholder, or a backend that had to fall back to writing.
     #[test]
     fn omhs_own_staged_files_are_hidden_too() {
         let (_d, _repo, wt) = worktree_repo();

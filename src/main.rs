@@ -1454,8 +1454,9 @@ fn edit(cwd: &std::path::Path, layer: Option<config::Layer>) -> Result<()> {
 /// happened — a `.env` you thought you were carrying and are not is exactly the
 /// failure that wastes an hour inside the sandbox.
 fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
-    // omh stages CLAUDE.md / AGENTS.md into the worktree; left untracked, the
-    // agent is invited to commit omh's own staging onto the session branch.
+    // The rules themselves are mounted, not written here — this covers the
+    // placeholder a bind mount's destination may leave behind, and any backend
+    // that cannot mount a single file.
     carry::hide_staged_rules(&session.worktree)?;
 
     let patterns = config::policy_list(paths, "carry_in");

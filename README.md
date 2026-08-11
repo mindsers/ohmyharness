@@ -39,7 +39,8 @@ Running `omh claude` instead of `claude` buys four things:
 
 **A sandbox that protects your repo, not just your host.** The agent works in a
 git worktree on its own branch. Your checkout is never mounted. Review with
-`git diff`, discard by deleting a branch.
+`omh s diff`, ship with `omh s commit` and `omh s push`, discard by deleting a
+branch. You never go near the worktree directory itself.
 
 **Your setup, in any harness.** Rules, skills, MCP servers, commands, subagents
 and hooks are declared once and rendered into whatever shape each harness reads.
@@ -134,7 +135,7 @@ omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
-omh sessions ls|rm|down|diff  s   omh s ls, omh s diff s01
+omh sessions ls|diff|commit|push|down|rm  s   omh s diff, omh s push fix/x
 omh config [set|unset|edit|mcp] c omh c mcp import claude
 ```
 
@@ -309,6 +310,11 @@ carry_in = [".env.local", "certs/"]
 
 An explicit allowlist, because **this is the only path by which a secret reaches
 the agent**. A listed path that doesn't exist is reported, not skipped.
+
+It is for files git does **not** track. A tracked path is already in the worktree,
+so listing one replaces the branch's copy with whatever your checkout holds right
+now — usually an uncommitted edit, on the one path a secret travels. omh says so
+at launch and does not copy it.
 
 ## Verify it yourself
 

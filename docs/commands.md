@@ -9,7 +9,7 @@ omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
-omh sessions ls|rm|down|diff  s   omh s ls, omh s diff s01
+omh sessions ls|diff|commit|push|down|rm  s   omh s diff, omh s push fix/x
 omh config [set|unset|edit|mcp] c omh c mcp import claude
 ```
 
@@ -189,10 +189,29 @@ $ omh s push fix/tap-guard --pr
   omh/s01 → origin/fix/tap-guard
 ```
 
-`commit` stages everything in the worktree except what omh put there itself, and
-writes your message **verbatim** — no trailer, no generated summary. omh has no
-view on what the work was for and will not invent one. Without `-m`, git opens
-your editor.
+`commit` stages the agent's work and writes your message **verbatim** — no
+trailer, no generated summary. omh has no view on what the work was for and will
+not invent one. Without `-m`, git opens your editor.
+
+What omh put in the worktree is not the agent's work and never lands in the
+commit. The rules are mounted rather than written, so git does not see them at
+all; carried files are a different matter:
+
+```console
+$ omh s commit -m "Fix the tap guard"
+Error: config.toml is listed in carry_in and git tracks it, so what is in the
+worktree is your local copy rather than the branch's.
+  omh will neither publish that nor drop it silently.
+
+  fix the cause:  omh config edit
+  or just this once:  omh s commit --skip-carried
+```
+
+`carry_in` is for files git does **not** track, so this means the list needs
+fixing — see [Configuration](configuration.md#keeping-the-agents-git-status-clean).
+`--skip-carried` commits everything else meanwhile. omh refuses rather than
+quietly leaving the file out because it cannot tell a credential you were
+carrying from a change you meant.
 
 `push` requires a name the first time and remembers it after. `omh/s01` records
 when the work happened rather than what it was, and on origin it outlives the
