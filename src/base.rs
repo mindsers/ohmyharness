@@ -1152,6 +1152,84 @@ command = "c"
         );
     }
 
+    /// Every hook is a shell one-liner, and nothing else here would notice one
+    /// that cannot parse.
+    ///
+    /// The `git-unavailable` hook embeds prose, and prose contains apostrophes:
+    /// a `shell_quote` that lets one through produces `unexpected EOF while
+    /// looking for matching '`, which is a hook that silently never runs. Every
+    /// assertion over a hook's *command string* is satisfied by that hook —
+    /// `contains("git init")` passes on a script `sh` refuses to parse. This is
+    /// the cheapest guard that covers all of them, including the ones whose
+    /// binaries are not installed here.
+    #[test]
+    fn every_hook_command_is_valid_shell() {
+        for h in hooks() {
+            let out = std::process::Command::new("sh")
+                .args(["-n", "-c", &h.command])
+                .output()
+                .expect("sh must run");
+            assert!(
+                out.status.success(),
+                "{} is not parseable by sh: {}\n{}",
+                h.name,
+                String::from_utf8_lossy(&out.stderr),
+                h.command
+            );
+        }
+    }
+
+    /// And that every one of them survives being *run*, which parsing does not
+    /// prove: an unbound variable, a `case` that falls through to an error, or a
+    /// missing binary all parse fine.
+    ///
+    /// The graph binary is stubbed rather than required — what is under test is
+    /// omh's script, not the server. A hook whose tool is absent must still exit
+    /// 0 and stay quiet, because a session where the graph is not installed is
+    /// a session, not a failure.
+    #[test]
+    fn every_hook_runs_quietly_when_its_tool_says_nothing() {
+        let stub = tempfile::tempdir().unwrap();
+        for name in [GRAPH_BIN, "codebase-memory-mcp"] {
+            let at = stub.path().join(name);
+            std::fs::write(&at, "#!/bin/sh\nexit 0\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let path = format!(
+            "{}:{}",
+            stub.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+
+        for h in hooks() {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&h.command)
+                .env("PATH", &path)
+                .env(PROJECT_ENV, "repo-s01")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("sh must run");
+            assert!(
+                out.status.success(),
+                "{} exited {:?}: {}",
+                h.name,
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            assert!(
+                out.stderr.is_empty(),
+                "{} wrote to stderr, which the harness shows the user: {}",
+                h.name,
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
     /// Run the hook the way the harness does.
     ///
     /// Asserting on the command *string* proves the sentence is embedded, never

@@ -91,7 +91,11 @@ product, not fixing a test.
 | staging is keyed by session **and** harness | else a second harness overwrites the first's mounted config |
 | unknown adapter fields are rejected | else a stale adapter degrades everything, silently |
 | `rm` keeps a branch that has commits; `ensure` reattaches | unreviewed agent work must be unloseable |
-| `s commit` never commits a file omh staged into the worktree | omh's own `CLAUDE.md` in the user's PR is omh corrupting the work it exists to isolate |
+| the rules omh stages are mounted, never written into the worktree | written there they are indistinguishable from the agent's work, and `info/exclude` cannot hide a file git tracks |
+| `s commit` never commits a file omh put in the worktree | omh's own `CLAUDE.md` in the user's PR is omh corrupting the work it exists to isolate |
+| a `carry_in` entry git already tracks is reported, not copied | it overwrites the branch's copy with the checkout's, and the only path a secret takes to the agent is not one to widen |
+| `s commit` refuses a carried file rather than dropping it | omh cannot tell a credential from a deliberate change, and silently discarding either is worse than stopping |
+| every hook command parses and runs under `sh` | a hook that cannot parse satisfies every assertion about its text and never runs |
 | `s commit` writes no message the user did not write | a synthesized message is a claim about intent omh does not hold |
 | nothing to commit is never a successful commit | `-q` hides git's own complaint, so the user gets a bare error and a commit that never happened |
 | `s commit` stages before asking whether anything changed | `git diff` says nothing about untracked files, so a session whose only work is new files reads as clean |

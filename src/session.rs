@@ -21,6 +21,53 @@ pub enum Removed {
     NoBranch,
 }
 
+/// What `commit` does about files omh copied in from the checkout.
+///
+/// `carry_in` is for what a worktree does not get — a tracked file is already
+/// there, so listing one is a misconfiguration. It is also the only path by
+/// which a secret reaches the agent, and the two compose badly: a tracked path
+/// in the list arrives as an ordinary modification, because `carry`'s
+/// `info/exclude` is gitignore semantics and says nothing about tracked files.
+/// Committing it publishes whatever local edit the user was carrying.
+///
+/// `carry` warns at launch, where the mistake is made. This is the backstop for
+/// a session already running when the list changed.
+pub struct Carried<'a> {
+    paths: &'a [String],
+    skip: bool,
+}
+
+impl<'a> Carried<'a> {
+    /// Stop and name them. The default, because dropping a change silently is
+    /// the second silent behaviour, not the fix for the first.
+    pub fn refusing(paths: &'a [String]) -> Self {
+        Self { paths, skip: false }
+    }
+
+    /// Leave them out and commit the rest — `--skip-carried`. Without it a
+    /// tracked carried file makes a session you can never commit from.
+    pub fn skipping(paths: &'a [String]) -> Self {
+        Self { paths, skip: true }
+    }
+
+    /// Carried paths that the staging step actually picked up. A path is
+    /// normalised the way `carry` writes it, and a carried *directory* matches
+    /// everything under it.
+    fn staged_among<'s>(&self, staged: &'s str) -> Vec<&'s str> {
+        staged
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .filter(|line| {
+                self.paths.iter().any(|p| {
+                    let p = p.trim().trim_end_matches('/');
+                    *line == p || line.starts_with(&format!("{p}/"))
+                })
+            })
+            .collect()
+    }
+}
+
 pub struct Session {
     pub id: String,
     /// `None` for a scratch session. `omh auth` and `omh doctor` need a
@@ -174,7 +221,7 @@ impl Session {
     /// Runs in the worktree rather than the checkout. On the host its `.git`
     /// pointer resolves, which is the whole reason this can be a plain git call
     /// — inside the sandbox that pointer leads nowhere and none of this works.
-    pub fn commit(&self, message: Option<&str>) -> Result<()> {
+    pub fn commit(&self, message: Option<&str>, carried: Carried) -> Result<()> {
         let branch = self
             .branch
             .as_deref()
@@ -196,12 +243,17 @@ impl Session {
 
         git(&self.worktree, &["add", "-A", "."])?;
 
-        // Then take back what omh itself put there. Done as an unstage rather
-        // than an `:(exclude)` pathspec because naming a path that way still
-        // counts as naming it: git answers "the following paths are ignored by
-        // one of your .gitignore files" and warns about the very file the
-        // pathspec was written to leave alone. The worktree copy is untouched,
-        // which matters — the agent may still be running against it.
+        // A backstop, not the fix. The rules are mounted rather than written
+        // into the worktree, so on a healthy launch there is nothing here to
+        // take back — but a bind mount's destination has to exist, and whether
+        // the runtime creates that placeholder inside `/work` is unverified
+        // against a real container. Cheap insurance against the answer being
+        // "yes", and against a backend that cannot mount a single file.
+        //
+        // An unstage rather than an `:(exclude)` pathspec: naming a path that
+        // way still counts as naming it, and git answers "the following paths
+        // are ignored by one of your .gitignore files" about the very file the
+        // pathspec was written to leave alone.
         git_owned(&self.worktree, &unstage_rules_args())?;
 
         // Asked *after* staging, and against the index rather than the worktree:
@@ -209,6 +261,33 @@ impl Session {
         // work is new files reads as clean when the question comes first. That
         // is the shape of `e0a41b8`, where a release published an empty tap and
         // reported success.
+        let staged = git(&self.worktree, &["diff", "--cached", "--name-only"])?;
+
+        // A carried file only reaches the index when the repo tracks it, and
+        // then it is the user's own local edit — possibly the secret they were
+        // carrying. Refused rather than dropped: omh cannot tell a credential
+        // from a deliberate change, and silently discarding either is worse
+        // than stopping.
+        let from_your_checkout = carried.staged_among(&staged);
+        if !from_your_checkout.is_empty() {
+            anyhow::ensure!(
+                carried.skip,
+                "{} is listed in carry_in and git tracks it, so what is in the worktree \
+                 is your local copy rather than the branch's.\n  omh will neither publish \
+                 that nor drop it silently.\n\n  \
+                 fix the cause:  omh config edit   (carry_in is for files git does not \
+                 track; a tracked file is already in the worktree)\n  \
+                 or just this once:  omh s commit --skip-carried",
+                from_your_checkout.join(", ")
+            );
+            let unstage: Vec<String> = ["reset", "-q", "--"]
+                .iter()
+                .map(|s| s.to_string())
+                .chain(from_your_checkout.iter().map(|p| p.to_string()))
+                .collect();
+            git_owned(&self.worktree, &unstage)?;
+        }
+
         let staged = git(&self.worktree, &["diff", "--cached", "--name-only"])?;
         if staged.trim().is_empty() {
             anyhow::bail!("nothing to commit in {}", self.label());
@@ -676,7 +755,8 @@ mod tests {
         std::fs::write(s.worktree.join("CLAUDE.md"), "staged by omh").unwrap();
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
 
-        s.commit(Some("Add the work")).unwrap();
+        s.commit(Some("Add the work"), Carried::refusing(&[]))
+            .unwrap();
 
         let files = committed_files(&s.worktree);
         assert!(
@@ -700,7 +780,8 @@ mod tests {
         s.ensure(&root, "main").unwrap();
         std::fs::write(s.worktree.join("brand-new.rs"), "fn main() {}").unwrap();
 
-        s.commit(Some("Add a new file")).unwrap();
+        s.commit(Some("Add a new file"), Carried::refusing(&[]))
+            .unwrap();
 
         assert!(committed_files(&s.worktree).contains("brand-new.rs"));
     }
@@ -713,7 +794,9 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
 
-        let err = s.commit(Some("nothing to say")).unwrap_err();
+        let err = s
+            .commit(Some("nothing to say"), Carried::refusing(&[]))
+            .unwrap_err();
         assert!(err.to_string().contains("nothing to commit"), "got: {err}");
     }
 
@@ -726,7 +809,8 @@ mod tests {
         s.ensure(&root, "main").unwrap();
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
 
-        s.commit(Some("Fix the guard")).unwrap();
+        s.commit(Some("Fix the guard"), Carried::refusing(&[]))
+            .unwrap();
 
         let message = git(&s.worktree, &["log", "-1", "--format=%B"]).unwrap();
         assert_eq!(
@@ -760,7 +844,8 @@ mod tests {
         let s = Session::new(wt, "s01".into());
         s.ensure(root, "main").unwrap();
         std::fs::write(s.worktree.join(file), "fn main() {}").unwrap();
-        s.commit(Some("Add the work")).unwrap();
+        s.commit(Some("Add the work"), Carried::refusing(&[]))
+            .unwrap();
         s
     }
 
@@ -800,7 +885,7 @@ mod tests {
         s.push(Some("fix/tap-guard")).unwrap();
 
         std::fs::write(s.worktree.join("more.rs"), "fn more() {}").unwrap();
-        s.commit(Some("Add more")).unwrap();
+        s.commit(Some("Add more"), Carried::refusing(&[])).unwrap();
 
         assert_eq!(s.push(None).unwrap(), "fix/tap-guard");
     }
@@ -883,7 +968,7 @@ mod tests {
         assert_eq!(s.unpushed().unwrap(), Some(0), "everything is on origin");
 
         std::fs::write(s.worktree.join("more.rs"), "fn more() {}").unwrap();
-        s.commit(Some("Add more")).unwrap();
+        s.commit(Some("Add more"), Carried::refusing(&[])).unwrap();
         assert_eq!(s.unpushed().unwrap(), Some(1));
     }
 
@@ -908,7 +993,8 @@ mod tests {
         std::fs::write(s.worktree.join("CLAUDE.md"), "omh generated rules").unwrap();
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
 
-        s.commit(Some("Add the work")).unwrap();
+        s.commit(Some("Add the work"), Carried::refusing(&[]))
+            .unwrap();
 
         let committed = git(&s.worktree, &["show", "--stat", "--name-only", "HEAD"]).unwrap();
         assert!(committed.contains("work.rs"), "got: {committed}");
@@ -942,7 +1028,9 @@ mod tests {
             Some(0),
             "omh's own staging is not work"
         );
-        let err = s.commit(Some("nothing the agent did")).unwrap_err();
+        let err = s
+            .commit(Some("nothing the agent did"), Carried::refusing(&[]))
+            .unwrap_err();
         assert!(err.to_string().contains("nothing to commit"), "got: {err}");
     }
 
@@ -962,6 +1050,86 @@ mod tests {
         assert_eq!(s.uncommitted().unwrap(), 12);
     }
 
+    /// `carry_in` is documented as the only path by which a secret reaches the
+    /// agent, and a carried file that the repo *tracks* arrives in the worktree
+    /// as an ordinary modification — `info/exclude` says nothing about tracked
+    /// files. Staged and committed, a local edit holding a credential is on the
+    /// branch, and one `s push` from being published.
+    #[test]
+    fn a_carried_file_the_repo_tracks_is_refused_rather_than_committed() {
+        let (d, root) = repo();
+        std::fs::write(root.join("config.toml"), "PORT=3000\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "config"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        // The user's local edit, carried in as `carry::apply` copies it.
+        std::fs::write(
+            s.worktree.join("config.toml"),
+            "PORT=3000\nSECRET=hunter2\n",
+        )
+        .unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        let carried = ["config.toml".to_string()];
+        let err = s
+            .commit(Some("Add the work"), Carried::refusing(&carried))
+            .unwrap_err();
+
+        assert!(err.to_string().contains("config.toml"), "got: {err}");
+        assert_eq!(s.commits(&root, "main"), 0, "nothing may land");
+    }
+
+    /// The escape hatch, because refusing forever would make a carried file that
+    /// the repo tracks a session you can never commit from.
+    #[test]
+    fn skipping_carried_files_commits_the_rest_and_leaves_them_behind() {
+        let (d, root) = repo();
+        std::fs::write(root.join("config.toml"), "PORT=3000\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "config"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(
+            s.worktree.join("config.toml"),
+            "PORT=3000\nSECRET=hunter2\n",
+        )
+        .unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        let carried = ["config.toml".to_string()];
+        s.commit(Some("Add the work"), Carried::skipping(&carried))
+            .unwrap();
+
+        let committed = git(&s.worktree, &["show", "--stat", "--name-only", "HEAD"]).unwrap();
+        assert!(committed.contains("work.rs"), "got: {committed}");
+        assert!(
+            !committed.contains("config.toml"),
+            "the secret must not land: {committed}"
+        );
+    }
+
+    /// A carried file the repo does not track is already invisible to git, so it
+    /// must not turn every commit into a refusal.
+    #[test]
+    fn an_untracked_carried_file_is_not_something_to_refuse_over() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        crate::carry::apply(&root, &s.worktree, &[".env.local".to_string()]).ok();
+        std::fs::write(s.worktree.join(".env.local"), "SECRET=hunter2\n").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+
+        let carried = [".env.local".to_string()];
+        s.commit(Some("Add the work"), Carried::refusing(&carried))
+            .unwrap();
+
+        let committed = git(&s.worktree, &["show", "--stat", "--name-only", "HEAD"]).unwrap();
+        assert!(!committed.contains(".env.local"), "got: {committed}");
+    }
+
     /// Without `-m`, git owns the message and can refuse it — an editor that
     /// writes nothing means an empty message, and git aborts. Accepting that as
     /// success reports `committed to omh/s01 (0 commits)` and exits zero, which
@@ -976,7 +1144,7 @@ mod tests {
         // An "editor" that exits 0 having written nothing.
         git(&s.worktree, &["config", "core.editor", "true"]).unwrap();
 
-        let err = s.commit(None).unwrap_err();
+        let err = s.commit(None, Carried::refusing(&[])).unwrap_err();
 
         assert!(err.to_string().contains("aborted"), "got: {err}");
         assert_eq!(
@@ -1024,7 +1192,9 @@ mod tests {
         git(&s.worktree, &["checkout", "-q", "-b", "somewhere-else"]).unwrap();
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
 
-        let err = s.commit(Some("Add the work")).unwrap_err();
+        let err = s
+            .commit(Some("Add the work"), Carried::refusing(&[]))
+            .unwrap_err();
 
         assert!(
             err.to_string().contains("rather than omh/s01"),
@@ -1077,7 +1247,9 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let s = Session::scratch(d.path().join("scratch"), "doctor".into());
         std::fs::create_dir_all(&s.worktree).unwrap();
-        let err = s.commit(Some("anything")).unwrap_err();
+        let err = s
+            .commit(Some("anything"), Carried::refusing(&[]))
+            .unwrap_err();
         assert!(err.to_string().contains("no branch"), "got: {err}");
     }
 

@@ -177,6 +177,9 @@ enum SessionsCmd {
         /// The message, verbatim. Without it, git opens your editor.
         #[arg(short = 'm', long)]
         message: Option<String>,
+        /// Commit without the files omh carried in from your checkout.
+        #[arg(long)]
+        skip_carried: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
     Push {
@@ -321,9 +324,15 @@ fn main() -> Result<()> {
                 session.as_deref().or(cli.session.as_deref()),
                 base.as_deref(),
             ),
-            SessionsCmd::Commit { message } => {
-                commit(&cwd, cli.session.as_deref(), message.as_deref())
-            }
+            SessionsCmd::Commit {
+                message,
+                skip_carried,
+            } => commit(
+                &cwd,
+                cli.session.as_deref(),
+                message.as_deref(),
+                *skip_carried,
+            ),
             SessionsCmd::Push { name, pr } => {
                 push(&cwd, cli.session.as_deref(), name.as_deref(), *pr)
             }
@@ -1457,6 +1466,14 @@ fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
         match item.action {
             carry::Action::Copied => eprintln!("omh: carried {}", item.path),
             carry::Action::Refreshed => eprintln!("omh: refreshed {}", item.path),
+            // The mistake, named where it is made rather than three commands
+            // later at `s commit`. `carry_in` is for what a worktree does not
+            // get; a tracked file is already on the branch.
+            carry::Action::AlreadyTracked => eprintln!(
+                "omh: warning: carry_in lists {} — git already tracks it, so the worktree\n\
+                 \x20 has it already. Not carried; remove it with `omh config edit`.",
+                item.path
+            ),
             carry::Action::Missing => {
                 eprintln!(
                     "omh: warning: carry_in lists {} — not in this checkout",
@@ -2157,10 +2174,24 @@ fn existing_session(paths: &Paths, explicit: Option<&str>) -> Result<Session> {
     Ok(session)
 }
 
-fn commit(cwd: &std::path::Path, id: Option<&str>, message: Option<&str>) -> Result<()> {
+fn commit(
+    cwd: &std::path::Path,
+    id: Option<&str>,
+    message: Option<&str>,
+    skip_carried: bool,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
-    session.commit(message)?;
+
+    // The same list the launcher copies from, so what `commit` refuses to
+    // publish and what omh put there cannot disagree.
+    let carried = config::policy_list(&paths, "carry_in");
+    let policy = if skip_carried {
+        session::Carried::skipping(&carried)
+    } else {
+        session::Carried::refusing(&carried)
+    };
+    session.commit(message, policy)?;
 
     // Counted against the base rather than reported as "committed", because the
     // number is what tells you whether the branch is worth pushing — and it is

@@ -150,8 +150,19 @@ sandbox's platform.
 ### Keeping the agent's `git status` clean
 
 Carried files must not show up as untracked, or the agent is invited to commit
-your `.env` onto the session branch. omh's own staged `CLAUDE.md` / `AGENTS.md`
-are hidden the same way.
+your `.env` onto the session branch.
+
+omh's own `CLAUDE.md` / `AGENTS.md` are not written into the worktree at all —
+they are **mounted read-only** over their declared filenames. Writing them there
+made omh's staging indistinguishable from the agent's work, and `info/exclude`
+could not help: gitignore semantics say nothing about a file git already tracks,
+so a repo that commits its own `CLAUDE.md` saw a permanent modification nobody
+made, and `omh s commit` published omh's rules over the project's conventions.
+
+`carry_in` is for files git does **not** track. A tracked path is already in the
+worktree, so listing one is a misconfiguration: omh says so at launch and does
+not copy it, and `omh s commit` refuses to publish it if a running session got
+one before the list was fixed.
 
 Two traps here, both found by running it rather than reasoning about it:
 
