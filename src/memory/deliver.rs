@@ -3,16 +3,19 @@
 //! MCP servers are spawned by the harness, and the harness runs *inside* the
 //! container — so the base set declaring `command = "omh"` only means anything
 //! if an `omh` exists in there. The code graph sidesteps this by curling a
-//! published release into the image; omh has no release pipeline, and baking
-//! the source into the base image would rebuild it on every edit.
+//! published release into the image; baking omh's own source into the base
+//! image would rebuild it on every edit.
 //!
 //! So: cross-build once into `~/.omh/bin`, bind-mount it read-only. The build
 //! is a `cargo build` inside a throwaway `rust` container, cached by a digest
 //! of the sources, which means it reruns exactly when the code changes and not
 //! otherwise.
 //!
-//! Publishing static musl releases is the eventual answer. This is the one
-//! that works without a release pipeline.
+//! Releases publish static musl linux binaries now — the answer this was
+//! written while waiting for — but nothing here fetches one, so a macOS omh
+//! installed from a release finds no sources to build from and launches
+//! without a memory server, saying so. Downloading the tarball matching its
+//! own version is what closes that, and it is not done.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
