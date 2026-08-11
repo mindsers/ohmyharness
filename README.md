@@ -344,7 +344,7 @@ drops a session branch only when it has no commits.
 
 ## Contributing
 
-See [`docs/contributing.md`](docs/contributing.md) for the full rules and the
+See [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) for the full rules and the
 invariant list.
 
 ```console

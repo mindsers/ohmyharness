@@ -173,7 +173,7 @@ jobs:
 
           # Asserted against the filesystem, not against the report. A negative
           # grep on a printed line ("harnesses  0") passes the moment that line
-          # is reworded, which is the failure mode docs/contributing.md calls
+          # is reworded, which is the failure mode CONTRIBUTING.md calls
           # out under "assert invariants, not output shape". What matters is
           # that the files arrived.
           for dir in adapters base editors; do

@@ -1,5 +1,5 @@
 <!--
-The checklist is from docs/contributing.md. It is short because every line of
+The checklist is from CONTRIBUTING.md. It is short because every line of
 it was earned by a bug that shipped.
 -->
 
@@ -30,7 +30,7 @@ written that way and all three were too weak. Better flagged than assumed.
 ## Invariants
 
 <!--
-docs/contributing.md lists the invariants, each with a test that fails without
+CONTRIBUTING.md lists the invariants, each with a test that fails without
 it. If you changed one, say which and why — that is a product change, not a
 test fix. Delete this section if none are affected.
 -->
