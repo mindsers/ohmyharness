@@ -16,11 +16,18 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
 
+# Names lead with the verb for what the job does — run, check, build — with
+# the varying part in parentheses, matching release. Read in a checks list,
+# where anything longer than a glance is wasted.
+#
+# Unlike release, these are the required status checks on main: renaming one
+# means updating branch protection in the same breath, or the rule waits on a
+# name nothing produces and every pull request blocks without saying why.
 jobs:
   # One test in tests/cli.rs runs `omh init`, which builds the base image
   # through Docker. It is `#[ignore]`d, so this is the job that opts back in.
   test-linux:
-    name: tests (linux, with docker)
+    name: run tests (linux, with docker)
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
@@ -36,7 +43,7 @@ jobs:
   # by default instead of silently dropping off macOS, and nothing has to
   # remember to update a skip list.
   test-macos:
-    name: tests (macos)
+    name: run tests (macos)
     runs-on: macos-latest
     steps:
       - name: check out the repo
@@ -47,7 +54,7 @@ jobs:
         run: cargo test --locked
 
   lint:
-    name: format and lint
+    name: check formatting and lints
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
@@ -62,7 +69,7 @@ jobs:
   # install.sh runs before omh does, on a machine nobody has checked, and it is
   # the only file here that no compiler reads.
   installer:
-    name: installer (shellcheck and tests)
+    name: check installer (shellcheck and tests)
     runs-on: ubuntu-latest
     steps:
       - name: check out the repo
@@ -80,7 +87,7 @@ jobs:
   # claim is the thing this repo distrusts most. `build` rather than `check`,
   # because the job says "builds" and `cargo check` stops before codegen.
   msrv:
-    name: msrv (builds on 1.85)
+    name: build (msrv 1.85)
     runs-on: ubuntu-latest
     env:
       # Overrides rust-toolchain.toml, which otherwise pins this job to stable.
