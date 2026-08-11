@@ -247,6 +247,56 @@ fn every_docs_page_is_reachable() {
     );
 }
 
+/// Backticked bare semver: `` `0.1.0` ``. Three parts, no `v`, which is how
+/// this repo writes *its own* version — another project's goes with its tag
+/// prefix (`` `v0.19.0` `` for iwe) or with fewer parts (`` `2026.08` `` for a
+/// base manifest), and both stay out of the way here.
+fn stated_versions(body: &str) -> Vec<(usize, String)> {
+    body.lines()
+        .enumerate()
+        .flat_map(|(i, line)| {
+            line.split('`')
+                .skip(1)
+                .step_by(2)
+                .filter(|span| {
+                    let parts: Vec<&str> = span.split('.').collect();
+                    parts.len() == 3
+                        && parts
+                            .iter()
+                            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+                })
+                .map(move |span| (i + 1, span.to_string()))
+        })
+        .collect()
+}
+
+/// A release bumps `Cargo.toml` and the tag, and both are checked against each
+/// other by the release workflow. The prose is the third copy, nothing checks
+/// it, and it is the one a reader meets first — so a page introducing itself
+/// with **Status: early.** `0.1.0` outlives the release it describes and
+/// undersells or oversells the thing depending on which way the drift went.
+#[test]
+fn no_page_states_a_version_the_crate_does_not() {
+    let crate_version = env!("CARGO_PKG_VERSION");
+    let mut stale: Vec<String> = Vec::new();
+
+    for file in markdown_files() {
+        let body = fs::read_to_string(&file).unwrap();
+        let shown = file.strip_prefix(repo()).unwrap().display().to_string();
+        for (line, stated) in stated_versions(&body) {
+            if stated != crate_version {
+                stale.push(format!("{shown}:{line} says `{stated}`"));
+            }
+        }
+    }
+
+    assert!(
+        stale.is_empty(),
+        "the crate is at {crate_version}:\n  {}",
+        stale.join("\n  ")
+    );
+}
+
 /// The README is the entry point, so a link out of it that dies is the most
 /// expensive one in the repo.
 #[test]
