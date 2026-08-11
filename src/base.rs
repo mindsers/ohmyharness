@@ -239,10 +239,10 @@ pub const GRAPH_UI_INTERNAL: u16 = 9748;
 
 pub const GRAPH_BIN: &str = "codebase-memory-mcp";
 
-// The MCP servers and their rationale used to live here as two hardcoded
-// functions. They are `Manifest::servers()` and `Manifest::rationale()` now:
-// one file that `init` seeds from and `why` explains from, which cannot
-// disagree with itself the way two definitions can.
+// The MCP servers and their rationale are not here: they are
+// `Manifest::servers()` and `Manifest::rationale()`, read from the base-set
+// file. One file that `init` seeds from and `why` explains from cannot
+// contradict itself; a hardcoded list beside it can.
 
 /// The graph UI runs **once per repo**, not once per session.
 ///

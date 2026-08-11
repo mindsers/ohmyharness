@@ -40,10 +40,10 @@ pub fn tag_for(adapter: &Adapter) -> String {
 /// `usermod -d` below — and the same constant is interpolated into that
 /// Dockerfile, so the image and the code that mounts into it cannot disagree.
 ///
-/// It used to be declared separately in `auth`, `container` and `doctor`, two
-/// of them carrying a comment saying they mirrored a third, plus a bare literal
-/// here and another inside `base::GRAPH_CACHE`. Consistent by copying, which is
-/// consistent until it isn't.
+/// Declared once because the alternative is consistency by copying: a literal
+/// in `auth`, another in `container`, another in `doctor`, each with a comment
+/// claiming it mirrors the others. That is consistent right up until it isn't,
+/// and the symptom is a session that starts and reads nothing.
 pub const GUEST_HOME: &str = "/home/agent";
 
 /// A digest of an image recipe, for a note to pin.

@@ -98,19 +98,21 @@ cleared it yet: see [derive, never interrogate](#derive-never-interrogate).
 
 ```
 1  repo check                     fail fast, before any work
-2  ensure ~/.omh + bundled adapters + your personal profile layer
+2  ensure ~/.omh + bundled adapters, editors and the base set
 3  detect the stack; read the host for a harness *preference*
 4  write <repo>/.omh/profile: AGENTS.md, hooks, mcp.json, policy
-5  ensure the image                ← the real blocker; nothing runs without it
-6  index the code graph            background, resumable
-7  seed memory by derivation       README, manifests, git log, existing rules
-8  report every decision
+5  seed memory by derivation       README, manifests, git log, existing rules
+6  ensure the image                ← the real blocker; nothing runs without it
+7  index the code graph            background, resumable
 ```
+
+The report is not a final step. It prints from 5 onward as each decision is
+made, which is why the image and graph lines appear inside it.
 
 Step 4 **never overwrites what you already wrote.** If you have a `CLAUDE.md`,
 init leaves it alone and merges around it.
 
-Step 5 is the slow one — about 30 seconds the first time, cached afterwards.
+Step 6 is the slow one — about 30 seconds the first time, cached afterwards.
 `init` is not finished until `omh <harness>` works, so it builds the image
 rather than deferring it to your first launch.
 
