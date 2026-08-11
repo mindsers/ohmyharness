@@ -386,8 +386,6 @@ pub fn grep_nudge(project: &str) -> String {
     )
 }
 
-/// Hooks that make the graph actually get used. Without them the server is
-/// installed and never called, which is how most of these end up.
 /// Wrap a string for `sh`, so prose with punctuation cannot end the argument
 /// it is inside. Single quotes, and the only character that matters inside them
 /// is the single quote itself.
@@ -395,6 +393,8 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Hooks that make the graph actually get used. Without them the server is
+/// installed and never called, which is how most of these end up.
 pub fn hooks() -> Vec<Hook> {
     // Nudges speak through `hookSpecificOutput.additionalContext` — the
     // documented channel a hook uses to reach the model. Bare stdout on exit 0
@@ -450,14 +450,25 @@ pub fn hooks() -> Vec<Hook> {
             // Silent unless the command is actually git, for the reason
             // `graph-read` is silent on small files: a nudge on every Bash call
             // is noise the model tunes out, and Bash is most of what an agent
-            // runs. Matched after a separator too — `cd x && git status` is the
-            // same mistake with a prefix.
+            // runs.
+            //
+            // git is matched anywhere a command can start, not just at the
+            // front. `cd /work && git status` is the same mistake with a prefix,
+            // and a **newline** is the separator that matters most — multi-line
+            // Bash is one of the most common shapes an agent emits, and an
+            // earlier version of this pattern missed every one of them. `[:blank:]`
+            // rather than `[:space:]` for the leading-whitespace case, so the
+            // newline arm stays the thing doing that work.
             //
             // Built from `detect::GIT_ABSENT` so the sentence the agent sees
             // here and the one `init` writes into the rules cannot drift.
             command: format!(
                 "c=$(jq -r '.tool_input.command // empty'); \
-                 case \"$c\" in git\\ *|*[\\;\\&\\|]\\ git\\ *) ;; *) exit 0 ;; esac; \
+                 case \"$c\" in \
+                 git\\ *|git) ;; \
+                 *[\\;\\&\\|\\(]*git\\ *|*[[:blank:]]git\\ *) ;; \
+                 *) case \"$c\" in *\"\
+                 \"git\\ *) ;; *) exit 0 ;; esac ;; esac; \
                  jq -nc --arg m {} '{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\
                  \"additionalContext\":$m}}}}'",
                 shell_quote(crate::detect::GIT_ABSENT)
@@ -1139,6 +1150,86 @@ command = "c"
             "the repair it would otherwise reach for has to be named: {}",
             h.command
         );
+    }
+
+    /// Run the hook the way the harness does.
+    ///
+    /// Asserting on the command *string* proves the sentence is embedded, never
+    /// that a shell will emit it — and this one is a `case` over prose that has
+    /// to survive `sh` quoting. Two separate defects lived through the string
+    /// assertion above: the pattern matching nothing, and `shell_quote` letting
+    /// the apostrophe in "worktree's" end the argument, which is a syntax error
+    /// rather than a wrong answer.
+    fn fire_hook(command: &str) -> String {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&hook("git-unavailable").command)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh must run");
+        let payload = serde_json::json!({ "tool_input": { "command": command } });
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.stderr.is_empty(),
+            "the hook must not write to stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    #[test]
+    fn the_git_notice_reaches_the_agent_verbatim() {
+        let fired = fire_hook("git status");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fired).unwrap_or_else(|e| panic!("not JSON: {fired} ({e})"));
+        assert_eq!(
+            parsed["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap(),
+            crate::detect::GIT_ABSENT,
+            "the prose has to survive shell quoting intact"
+        );
+    }
+
+    /// The shapes an agent actually emits. A newline-separated script is the
+    /// most common of them and the easiest to miss, because a `case` separator
+    /// class written by hand does not include one.
+    #[test]
+    fn the_git_notice_matches_git_wherever_a_command_can_start() {
+        for command in [
+            "git status",
+            "cd /work && git status",
+            "cd /work; git init",
+            "cd /work\ngit status",
+            "  git status",
+            "echo hi | git apply",
+        ] {
+            assert!(
+                !fire_hook(command).trim().is_empty(),
+                "silent on {command:?}, which is a git call"
+            );
+        }
+    }
+
+    /// Bash is most of what an agent runs, so a nudge on every call is the
+    /// noise `graph-read` exists to avoid. This is the `0 B` the manifest claims.
+    #[test]
+    fn the_git_notice_is_silent_on_everything_else() {
+        for command in ["cargo test", "ls -la", "echo git", "rg digital"] {
+            assert!(
+                fire_hook(command).trim().is_empty(),
+                "fired on {command:?}, which is not a git call"
+            );
+        }
     }
 
     // ── the graph UI ────────────────────────────────────────────────────────

@@ -411,6 +411,12 @@ impl Sandbox {
     /// that has to work whether or not a sandbox is running.
     fn session(&self, id: &str) -> PathBuf {
         self.git_init();
+        let origin = self._dir.path().join("origin.git");
+        Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&origin)
+            .output()
+            .expect("git must be installed to run this test");
         let git = |args: &[&str]| {
             let out = Command::new("git")
                 .arg("-C")
@@ -423,6 +429,7 @@ impl Sandbox {
         git(&["config", "user.email", "t@example.com"]);
         git(&["config", "user.name", "t"]);
         git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(&["remote", "add", "origin", origin.to_str().unwrap()]);
 
         let worktree = self
             .home
@@ -456,9 +463,9 @@ fn committing_with_no_session_says_so_rather_than_inventing_one() {
     assert!(err.contains("no sessions"), "got: {err}");
 }
 
-/// The pair that is broken end to end today: nothing can commit a session's
-/// work, so `s diff` — which compares `base...branch` and therefore sees only
-/// commits — reports nothing for a session that did real work.
+/// `s diff` compares `base...branch` and so sees only commits, which means
+/// nothing a session did is visible until something commits it. This is that
+/// pair, end to end.
 #[test]
 fn work_committed_from_the_host_is_what_diff_then_reports() {
     let sb = sandbox();
@@ -481,8 +488,8 @@ fn work_committed_from_the_host_is_what_diff_then_reports() {
 /// one from the command line.
 ///
 /// Asserting the *reason*, not just the failure: a missing worktree fails this
-/// too, so a bare `!success` here stays green with the validation deleted. It
-/// did, when this test was first written.
+/// too, so a bare `!success` here stays green with the validation deleted —
+/// confirmed by deleting it.
 #[test]
 fn a_session_id_that_is_a_path_is_refused() {
     let sb = sandbox();
@@ -498,11 +505,11 @@ fn a_session_id_that_is_a_path_is_refused() {
     );
 }
 
-/// A committed session with no upstream yet has everything to push and nothing
-/// to compare against, and the first version of `s ls` printed a blank for it —
-/// indistinguishable from a session nobody had touched. Measuring against the
-/// base branch is what makes "never report work as clean" true in the state the
-/// loop actually passes through.
+/// A committed session with no upstream has everything to push and nothing to
+/// compare against. Without the base-branch fallback that prints a blank —
+/// indistinguishable from a session nobody has touched — so measuring against
+/// the base is what makes "never report work as clean" true in the state the
+/// loop passes through every time.
 #[test]
 fn a_session_that_has_committed_but_never_pushed_is_not_reported_as_clean() {
     let sb = sandbox();
@@ -516,4 +523,81 @@ fn a_session_that_has_committed_but_never_pushed_is_not_reported_as_clean() {
     let printed = String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stdout).to_string();
 
     assert!(printed.contains("to push"), "got: {printed}");
+}
+
+/// `s ls` is where every one of these measurements is actually read, and the
+/// rendering is the part no unit test reaches. Each state is one the loop sits
+/// in, not one it passes through, so a blank column is a wrong answer rather
+/// than a missing one.
+#[test]
+fn s_ls_renders_each_state_a_session_can_sit_in() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    let ls = || String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stdout).to_string();
+
+    std::fs::write(worktree.join("a.rs"), "fn a() {}").unwrap();
+    assert!(ls().contains("1 uncommitted"), "got: {}", ls());
+
+    assert!(sb.omh(&["s", "commit", "-m", "Add a"]).status.success());
+    assert!(ls().contains("1 to push"), "got: {}", ls());
+
+    assert!(sb.omh(&["s", "push", "feat/a"]).status.success());
+    assert!(ls().contains("→ feat/a"), "got: {}", ls());
+}
+
+/// The worktree's `.git` is a pointer at an absolute path, and a checkout that
+/// moves leaves it dangling — a state `Session::remove` already treats as real.
+/// Every accessor then fails, and defaulting them to zero renders a session
+/// holding a day of work as clean, which is what leads someone to `s rm` it.
+#[test]
+fn a_session_omh_cannot_read_is_never_rendered_as_clean() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("a.rs"), "fn a() {}").unwrap();
+    // Break the pointer the way a moved or re-cloned checkout would.
+    std::fs::write(worktree.join(".git"), "gitdir: /nowhere/that/exists").unwrap();
+
+    let printed = String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stdout).to_string();
+
+    assert!(
+        printed.contains("s01"),
+        "the session is still listed: {printed}"
+    );
+    assert!(
+        printed.contains('?'),
+        "omh cannot tell, and must say so rather than imply clean: {printed}"
+    );
+}
+
+/// `omh s push <name>` has to carry the name through the CLI, and `--pr` has to
+/// treat `gh`'s exit code as the answer it is. Both are wiring no unit test on
+/// `Session::push` can reach.
+#[test]
+fn the_push_command_carries_its_name_and_refuses_without_one() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("a.rs"), "fn a() {}").unwrap();
+    assert!(sb.omh(&["s", "commit", "-m", "Add a"]).status.success());
+
+    let bare = sb.omh(&["s", "push"]);
+    assert!(!bare.status.success(), "a session id is not a branch name");
+    assert!(String::from_utf8_lossy(&bare.stderr).contains("not a branch name"));
+
+    assert!(sb.omh(&["s", "push", "feat/a"]).status.success());
+    let printed = String::from_utf8_lossy(&sb.omh(&["s", "push", "feat/a"]).stdout).to_string();
+    assert!(printed.contains("origin/feat/a"), "got: {printed}");
+}
+
+/// `existing_session` refuses an id with no worktree so the failure names the
+/// session rather than arriving from inside git, about a path nobody chose.
+#[test]
+fn a_session_that_does_not_exist_is_named_in_the_refusal() {
+    let sb = sandbox();
+    sb.session("s01");
+
+    let out = sb.omh(&["-s", "s99", "s", "commit", "-m", "x"]);
+
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("s99"), "the refusal must name it: {err}");
 }

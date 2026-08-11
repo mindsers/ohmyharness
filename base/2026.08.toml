@@ -141,13 +141,13 @@ remove  = "rm .omh/profile/hooks/git-unavailable.json"
   [[entry.measured]]
   what  = "when it fires"
   value = "640 B"
-  how   = "the notice delivered as `additionalContext`, measured by running the hook's own command against a `git status` call — 717 B of JSON, 640 B of it prose"
+  how   = "the notice delivered as `additionalContext`, measured by piping a `git status` call through the hook's own command — 717 B of JSON, 640 B of it prose. Pinned by `the_git_notice_reaches_the_agent_verbatim`, which compares the emitted context against the shipped string"
   on    = "2026-08-11"
 
   [[entry.measured]]
   what  = "when it does not"
   value = "0 B"
-  how   = "silent unless the Bash command is git; verified against `cargo test` and against `cd /work && git init`, which it does catch"
+  how   = "silent unless the Bash command is git. The match set is asserted by running the hook through `sh`, not by reading its text: it fires on `git …`, after `&&`, `;` and `|`, on a leading-whitespace call, and on a newline-separated script — that last one is the common shape an agent emits, and an earlier pattern missed every one"
   on    = "2026-08-11"
 
   [[entry.instead_of]]

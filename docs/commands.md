@@ -170,10 +170,11 @@ omh s diff [id]       what the agent changed
 omh s commit [-m …]   commit that work onto the session branch
 omh s push [name]     push it to origin under a name a reviewer can read
 omh s down [id]       stop the container, keep the worktree and branch
-omh s rm [id]         remove the session — a branch with commits is kept
+omh s rm <id>         remove the session — a branch with commits is kept
 ```
 
-Every one of them defaults to the most recent session; `-s` names another.
+`diff`, `commit` and `push` default to the most recent session; `-s` names
+another. `rm` takes an id, and `down` with none stops every session.
 
 ### Getting work out of a session
 
@@ -199,8 +200,8 @@ session that would explain it — so omh refuses rather than choosing for you:
 
 ```console
 $ omh s push
-omh: omh/s01 is a session id, not a branch name
-  name it:  omh s push fix/tap-guard
+Error: omh/s01 is a session id, not a branch name
+  name it:  omh s push <name>
 ```
 
 `--pr` opens the pull request with `gh` when it is installed, and prints the

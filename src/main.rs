@@ -895,22 +895,33 @@ fn sessions_ls(cwd: &std::path::Path) -> Result<()> {
 /// tally: `s ls` is read at a glance, and a session with uncommitted work needs
 /// committing whatever else is also true of it.
 fn work_state(session: &Session, repo: &std::path::Path, base: &str) -> String {
-    if let n @ 1.. = session.uncommitted() {
+    // A git that cannot answer is never rendered as an answer. Every accessor
+    // below runs through the worktree's `.git` pointer, which goes stale when a
+    // checkout moves and is already handled as a real case by `Session::remove`
+    // — and a blank column reads as "nothing here" for a session that may be
+    // holding a day of work the user is about to `s rm`.
+    let (uncommitted, unpushed) = match (session.uncommitted(), session.unpushed()) {
+        (Ok(uncommitted), Ok(unpushed)) => (uncommitted, unpushed),
+        _ => return "?".into(),
+    };
+
+    if let n @ 1.. = uncommitted {
         return format!("{n} uncommitted");
     }
-    match session.unpushed() {
+    match unpushed {
         Some(n @ 1..) => format!("{n} to push"),
-        // Nothing an upstream does not already have. Report the name it went
-        // out under, which is what you would look for in a list of PRs —
-        // `omh/s01` is not a name anybody searches for.
-        Some(_) => match session.upstream() {
-            Some(up) => format!("→ {}", up.split_once('/').map_or(up.as_str(), |(_, b)| b)),
-            None => String::new(),
+        // Nothing origin does not already have. Report the name it went out
+        // under, which is what you would look for in a list of PRs — `omh/s01`
+        // is not a name anybody searches for.
+        Some(_) => match session.published_as() {
+            Ok(Some(target)) => format!("→ {target}"),
+            Ok(None) => String::new(),
+            Err(_) => "?".into(),
         },
-        // No upstream to measure against, which is not the same as nothing to
-        // push: this is the state the loop passes through every time, between
-        // `s commit` and the first `s push`. Measured against the base branch
-        // instead, because a blank here reads as a session nobody touched.
+        // Never pushed, which is not the same as nothing to push: this is the
+        // state the loop passes through every time, between `s commit` and the
+        // first `s push`. Measured against the base branch instead, because a
+        // blank here reads as a session nobody touched.
         None => match session.commits(repo, base) {
             0 => String::new(),
             n => format!("{n} to push"),

@@ -147,13 +147,25 @@ pub fn exclude_path(worktree: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(dir).join("info/exclude"))
 }
 
+/// The files omh writes into the worktree itself, at launch.
+///
+/// Named once because two things have to agree about them and they are in
+/// different modules: `hide_staged_rules` keeps them out of the agent's
+/// `git status`, and `Session::commit` keeps them out of the user's commit.
+/// They are also the `concat` targets in the adapters — a harness whose rules
+/// file is named something else needs adding here too.
+pub const STAGED_RULES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
+
 /// Hide the rules omh stages into the worktree. Left untracked, the agent is
 /// invited to commit omh's own staging onto the session branch.
+///
+/// This covers the untracked case and **only** that case: `info/exclude` is
+/// gitignore semantics, which say nothing about a file git already tracks. A
+/// repo that commits its own `CLAUDE.md` — normal for a repo whose users run
+/// agent harnesses — gets omh's copy written over it, and git sees an ordinary
+/// modification. `Session::commit` is what excludes it there.
 pub fn hide_staged_rules(worktree: &Path) -> Result<()> {
-    exclude(
-        worktree,
-        &["CLAUDE.md".to_string(), "AGENTS.md".to_string()],
-    )
+    exclude(worktree, &STAGED_RULES.map(String::from))
 }
 
 /// Keep carried files out of the agent's `git status`, so they never show up as

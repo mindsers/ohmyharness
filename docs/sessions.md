@@ -51,9 +51,9 @@ inside the sandbox that pointer leads nowhere and every git command fails with
 
 The agent is told this, and told not to try to repair it. Not because repairing
 is dangerous — `git init` there refuses for the same reason and leaves the
-pointer untouched, which was checked rather than assumed — but because it cannot
-work, and an agent that thinks git is merely broken will offer to commit work it
-has no way to commit.
+pointer untouched, checked against git 2.55.0 rather than assumed — but because
+it cannot work, and an agent that thinks git is merely broken will offer to
+commit work it has no way to commit.
 
 The branch itself is in your checkout the whole time — worktrees share a ref
 store — so once the work is committed, `git log omh/s01` and `git push` work

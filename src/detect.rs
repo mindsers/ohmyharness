@@ -134,38 +134,6 @@ pub fn agents_md(stacks: &[Stack]) -> String {
 /// The condition is the MCP surface, not `remember`'s existence: `remember`
 /// exists, so a reader checking the wrong one deletes the staged shape while
 /// the agent still has no way to reach it.
-/// What the agent is told about git, in one place.
-///
-/// Both deliveries read from here — the `## Git` section `init` writes and the
-/// `git-unavailable` hook — because two copies of a safety notice drift, and
-/// the one that drifts is never the one you are reading.
-///
-/// Written as a claim about *this session*, not about git: an agent told "git
-/// is broken" spends its turns trying to fix it, and the repair cannot work.
-///
-/// It also does no harm, which was checked rather than assumed — `git init`
-/// against an unreachable gitdir refuses, naming the missing directory, and
-/// leaves the pointer file exactly as it was. So this says the attempt is
-/// futile, not that it is dangerous. The expensive failure here is the agent
-/// promising a commit it cannot make.
-pub const GIT_ABSENT: &str = "git does not work in this session, by design and not by fault. \
-     The worktree's .git is a pointer at an admin directory on the host, which omh does not \
-     mount — so every git command fails with `fatal: not a git repository`. Do not try to \
-     repair it: `git init` refuses for the same reason, and re-cloning would only give you a \
-     second repository nobody is reviewing. Nothing here is broken and nothing is lost. Your \
-     work is already visible outside the sandbox, where the person you are working with \
-     reviews it with `omh s diff`, commits it with `omh s commit`, and pushes it with \
-     `omh s push`. Say that rather than offering to commit yourself.";
-
-/// The `## Git` section of the generated rules.
-///
-/// Orientation, where the hook is interception: a hook can only fire once the
-/// agent has decided to run git, and by then it may already have promised the
-/// user a commit. This is what stops the plan being made.
-pub fn git_rules() -> String {
-    format!("\n## Git\n\n{GIT_ABSENT}\n")
-}
-
 pub fn memory_rules() -> String {
     format!(
         "\n## Memory\n\n\
@@ -199,6 +167,38 @@ pub fn memory_rules() -> String {
          one without the other.\n",
         crate::memory::GUEST_LOCAL_NOTES,
     )
+}
+
+/// What the agent is told about git, in one place.
+///
+/// Both deliveries read from here — the `## Git` section `init` writes and the
+/// `git-unavailable` hook — because two copies of a safety notice drift, and
+/// the one that drifts is never the one you are reading.
+///
+/// Written as a claim about *this session*, not about git: an agent told "git
+/// is broken" spends its turns trying to fix it, and the repair cannot work.
+///
+/// It also does no harm, which was checked rather than assumed — `git init`
+/// against an unreachable gitdir refuses (git 2.55.0), naming the missing
+/// directory, and leaves the pointer file exactly as it was. So this says the attempt is
+/// futile, not that it is dangerous. The expensive failure here is the agent
+/// promising a commit it cannot make.
+pub const GIT_ABSENT: &str = "git does not work in this session, by design and not by fault. \
+     The worktree's .git is a pointer at an admin directory on the host, which omh does not \
+     mount — so every git command fails with `fatal: not a git repository`. Do not try to \
+     repair it: `git init` refuses for the same reason, and re-cloning would only give you a \
+     second repository nobody is reviewing. Nothing here is broken and nothing is lost. Your \
+     work is already visible outside the sandbox, where the person you are working with \
+     reviews it with `omh s diff`, commits it with `omh s commit`, and pushes it with \
+     `omh s push`. Say that rather than offering to commit yourself.";
+
+/// The `## Git` section of the generated rules.
+///
+/// Orientation, where the hook is interception: a hook can only fire once the
+/// agent has decided to run git, and by then it may already have promised the
+/// user a commit. This is what stops the plan being made.
+pub fn git_rules() -> String {
+    format!("\n## Git\n\n{GIT_ABSENT}\n")
 }
 
 /// Facts derived for memory. No questions asked.
