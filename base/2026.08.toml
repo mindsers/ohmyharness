@@ -23,7 +23,7 @@ kind    = "mcp"
 feature = "codegraph"
 since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
-remove  = "omh config mcp rm codegraph"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 command = "codebase-memory-mcp"
 
   [[entry.measured]]
@@ -60,7 +60,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "the agent is given the module map instead of discovering it by reading files"
-remove  = "rm .omh/profile/hooks/graph-orient.json"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "per context rebuild"
@@ -78,7 +78,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "structural questions answer in one call instead of an iterative grep"
-remove  = "rm .omh/profile/hooks/graph-first.json"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "per grep"
@@ -96,7 +96,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "one symbol instead of a whole file, when the file is big enough for that to matter"
-remove  = "rm .omh/profile/hooks/graph-read.json"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "when it fires"
@@ -120,7 +120,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "the graph describes the code as it is now, not as the session found it"
-remove  = "rm .omh/profile/hooks/graph-refresh.json"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "per turn"
@@ -142,7 +142,7 @@ kind    = "hook"
 feature = "git-notice"
 since   = "2026.08"
 because = "an agent that meets `fatal: not a git repository` explains it to itself, and the explanation it reaches for is that something is broken — so it spends turns repairing what cannot be repaired, and offers the user a commit it has no way to make"
-remove  = "rm .omh/profile/hooks/git-unavailable.json"
+remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml"
 
   [[entry.measured]]
   what  = "when it fires"
