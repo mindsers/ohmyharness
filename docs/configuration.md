@@ -92,9 +92,13 @@ used is taking a bundle apart, not changing a setting, and "graph on, refresher
 off" is a graph that quietly stops tracking the code.
 
 Disabling is not removal: your `mcp.json` is untouched, the server is left out
-of the document *this* session is given, and the next repo gets it back. It
-layers like everything else — `~/.omh/settings.toml`, then this file, then
-`<repo>/.omh/settings.local.toml`.
+of the document *this* session is given, and the next repo gets it back.
+**Removing the server is the other door** — `omh config mcp rm codegraph` takes
+the feature with it, hooks and rules section included, because a hook nudging
+the agent toward a server that is gone is worse than no hook.
+
+It layers like everything else — `~/.omh/settings.toml`, then this file, then
+`<repo>/.omh/settings.local.toml`, which `omh init` adds to `.omh/.gitignore`.
 
 Nothing else lives here yet. A `carry_in` written into it is refused by name
 rather than read and ignored; it belongs in `policy.toml` until the layer model
@@ -209,10 +213,12 @@ sitting in front of it. Each is an entry: `omh why git-rules` states what it
 costs and how to switch it off.
 
 A repo that ran `omh init` before this still has those sections inside
-`.omh/profile/AGENTS.md`, where init used to append them. They are composed as
-part of that layer, so **the git notice and the note protocol currently appear
-twice**. Deleting the sections from that file fixes it; the migration off
-`.omh/profile` removes them for good.
+`.omh/profile/AGENTS.md`, where init used to write them. They are composed as
+part of that layer, so **all three of omh's sections currently appear twice** —
+about 3.3 KB of duplicated context on every turn, and a safety notice the base
+set treats as one string reaching the agent as two. Deleting the sections from
+that file fixes it today; a planned migration off `.omh/profile`
+([the profile](design/profile.md), P3) removes them for good.
 
 Content comes from the worktree if the branch has a copy, otherwise from the
 default branch — so a session that has just written its rules is governed by

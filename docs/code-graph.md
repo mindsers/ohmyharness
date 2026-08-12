@@ -49,9 +49,13 @@ removed and disabled together.
 | Hook | Event | Cost | Buys |
 |---|---|---|---|
 | `graph-orient` | `SessionStart` | 2,300 B per context rebuild | modules, layers, boundaries, entry points |
-| `graph-first` | `PreToolUse` Grep\|Glob | 243 B per grep | structural questions in one call |
+| `graph-first` | `PreToolUse` Grep\|Glob | 243 B per grep¹ | structural questions in one call |
 | `graph-read` | `PreToolUse` Read | 0 unless it speaks | **1,511 bytes** for one symbol instead of a whole module |
 | `graph-refresh` | `Stop` | 0.14s per turn | a graph describing the code as it is *now* |
+
+¹ For a `ohmyharness-s01`-length project name, which the nudge interpolates
+twice — the figure moves two bytes per character of `<repo>-<session>`.
+Computed from the shipped literals rather than typed in.
 
 **Kept current.** A session's worktree is not the checkout it started from; it
 holds whatever the agent has since written. Each session indexes its own, and

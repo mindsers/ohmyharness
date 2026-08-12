@@ -37,7 +37,7 @@ change — most of them record something that was tried and cost something.
 | [Decisions](design/decisions.md) | every load-bearing choice with its reasoning |
 | [The base set](design/base-set.md) | omh's opinion as a versioned data file, and the test that makes an entry earn its place |
 | [Architecture](design/architecture.md) | images, runtime backends, on-disk layout |
-| [The profile](design/profile.md) | designed, not built — one catalogue, per-project selection, and rules composed with the repo's own instead of replacing them |
+| [The profile](design/profile.md) | partly built — rules composed with the repo's own, omh's hooks and sections generated from the base set; the catalogue and per-project selection are not |
 | [Adapters](design/adapters.md) | harnesses and editors as data, and how to add one |
 | [Memory](design/memory.md) | the note graph, its guards, and the build order — the store, retrieval and the team layer are built; staleness is not |
 | [Memory: how the design got here](design/memory-rationale.md) | the survey, the benchmark that reversed six choices, and the alternatives not taken |

@@ -1,9 +1,11 @@
 # The profile — catalogue, selection, composition
 
-> **Status: designed, not built.** What ships today is
-> [Configuration](../configuration.md): three layers that each carry content, a
-> union that can only add, and a rules file that replaces the project's own.
-> This page is the model that replaces it, and the reasons.
+> **Status: partly built.** P1 and P2 of the [build order](#build-order) have
+> landed — the project's own rules are composed rather than replaced, omh's
+> hooks and rules sections are generated from the base manifest, and `[omh]`
+> switches a feature off per repo. The storage model in
+> [Configuration](../configuration.md) is still the three layers this page
+> replaces: the catalogue move and the migration are P3, selection is P4.
 
 ## The three things wrong with what exists
 
@@ -790,8 +792,8 @@ has hooks at all, which is a fact about the ecosystem rather than a task.
 
 | | | |
 |---|---|---|
-| **P1** | compose the rules on a `concat` binding | fixes a bug on its own; no storage change |
-| **P2** | `kind = "rules"` and `feature` in the base set, omh's own hooks **generated** rather than seeded, `remove` moved to the feature level | |
+| **P1** | compose the rules on a `concat` binding | **landed** — fixed a bug on its own; no storage change |
+| **P2** | `kind = "rules"` and `feature` in the base set, omh's own hooks **generated** rather than seeded, `remove` moved to the feature level | **landed**, plus `[omh]` read-only, brought forward so `remove` names something that works |
 | **P3** | catalogue move, and the migration off `<repo>/.omh/profile` | |
 | **P4** | `[use]`, `[omh]`, `omh use` / `unuse`, `init` writing it expanded, the unselected report | |
 | **P5** | the three maps exercised by a **second** harness | the only thing that can prove the translation |

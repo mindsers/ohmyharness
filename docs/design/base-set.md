@@ -4,7 +4,7 @@ This is the product. Everything else in omh is a place to put it.
 
 It lives in a versioned TOML file — `~/.omh/base/2026.08.toml`, shipped with the
 binary and installed by `init` the same way [adapters](adapters.md) and editors
-are. **every session is built from it and [`omh why`](../commands.md#omh-why-thing)
+are. **Every session is built from it and [`omh why`](../commands.md#omh-why-thing)
 explains from it**, so the two cannot disagree about what is installed or why.
 
 ## An entry
@@ -166,7 +166,7 @@ revisits, so `git-unavailable` — rewritten once, after the old pattern was
 found to miss the multi-line scripts agents most often emit — would have gone
 on running broken in every repo initialised before the fix.
 
-A manifest name is omh's, on or off. A file in a layer answering to one is
+A manifest **hook** name is omh's, on or off. A file in a layer answering to one is
 never read: with the feature on the generated hook would win anyway, and with
 it off there would be nothing to override the file with, so switching a feature
 off would leave the disabled thing running.

@@ -454,6 +454,43 @@ mod tests {
         compose(&fx.paths, &claude(), &fx.worktree, None, &[]).unwrap()
     }
 
+    /// What an upgraded repo actually gets today: omh's sections twice.
+    ///
+    /// `init` used to append them to `.omh/profile/AGENTS.md`, and that file
+    /// is still composed as a layer — so every repo initialised before
+    /// generation pays all three sections twice per turn, and the git notice
+    /// the manifest calls a single string reaches the agent as two.
+    ///
+    /// Deliberate for this phase: the migration that takes that file apart is
+    /// P3 (`docs/design/profile.md`). This asserts the state rather than
+    /// describing it in a comment, so P3 has a test to turn red rather than a
+    /// sentence to remember — and so the duplication cannot quietly outlive
+    /// the phase that accepted it.
+    #[test]
+    fn an_upgraded_repo_is_given_omhs_sections_twice() {
+        let fx = fixture();
+        let git = crate::base::sections()
+            .into_iter()
+            .find(|s| s.name == "git-rules")
+            .expect("git-rules is a section omh ships");
+        layer(&fx, Layer::Shared, &git.body);
+
+        let (body, _) = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            None,
+            &crate::base::sections(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            body.matches(crate::base::GIT_ABSENT).count(),
+            2,
+            "the layer's copy and the generated one, until the P3 migration:\n{body}"
+        );
+    }
+
     /// omh's own sections close the document, after every layer and after the
     /// project's own rules.
     ///

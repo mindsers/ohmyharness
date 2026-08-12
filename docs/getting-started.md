@@ -100,7 +100,7 @@ cleared it yet: see [derive, never interrogate](#derive-never-interrogate).
 1  repo check                     fail fast, before any work
 2  ensure ~/.omh + bundled adapters, editors and the base set
 3  detect the stack; read the host for a harness *preference*
-4  write <repo>/.omh/profile: mcp.json, policy, a hook per detected stack
+4  write <repo>/.omh/profile: mcp.json, policy, two hooks per stack
 5  seed memory by derivation       README, manifests, git log, existing rules
 6  ensure the image                ← the real blocker; nothing runs without it
 7  index the code graph            background, resumable
