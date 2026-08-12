@@ -21,6 +21,8 @@ these, the reason is what you need to argue with.
 | Settings scope | **3 layers: personal / shared / local** | a machine-wide preference and a one-repo exception are both real |
 | Write default | **the gitignored layer** | a mistyped key must not be committable |
 | Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
+| Tool vocabulary | **one closed set, per-adapter map** | the one thing skills, subagents and hooks all leak |
+| Portability | **store the standard where one exists** | skills and rules already travel; only hooks and subagents need omh |
 
 Each is expanded where it applies: [architecture](architecture.md) for runtime
 and images, [sessions](../sessions.md) for the session model and persistence,

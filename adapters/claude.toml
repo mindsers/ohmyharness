@@ -13,6 +13,16 @@ token   = ["$HOME/.claude/.credentials.json"]
 
 login   = "run `/login` inside Claude Code, then exit"
 
+# How this harness names the things an agent does. Adapter-level rather than
+# per-capability: hooks match on these, the Agent Skills standard carries them
+# in `allowed-tools`, and subagent frontmatter carries them in `tools`. One
+# vocabulary, spelled once.
+[tools]
+edit   = "Edit|Write|MultiEdit"
+read   = "Read"
+shell  = "Bash"
+search = "Grep|Glob"
+
 [capabilities.rules]
 path   = "/work/CLAUDE.md"
 also   = ["/work/AGENTS.md"]  # CLAUDE.md wins where both exist; same bytes either way
@@ -49,12 +59,6 @@ session-start = "SessionStart"   # re-fires on resume and compact, not once
 turn-end      = "Stop"
 before-tool   = "PreToolUse"
 after-tool    = "PostToolUse"
-
-[capabilities.hooks.tools]
-edit   = "Edit|Write|MultiEdit"
-read   = "Read"
-shell  = "Bash"
-search = "Grep|Glob"
 
 # Where each canonical field lives in this harness's stdin schema.
 [capabilities.hooks.fields]

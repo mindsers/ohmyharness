@@ -24,7 +24,7 @@
 use crate::adapter::Binding;
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A moment every harness has, in omh's words.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
@@ -296,7 +296,12 @@ impl std::fmt::Display for Dropped {
 
 /// Translate one hook for one harness. All of it is string generation, done
 /// once, at staging.
-pub fn render(name: &str, hook: &Hook, binding: &Binding) -> Result<Outcome> {
+pub fn render(
+    name: &str,
+    hook: &Hook,
+    binding: &Binding,
+    tools: &BTreeMap<Tool, String>,
+) -> Result<Outcome> {
     let dropped = |wanted: String| {
         Ok(Outcome::Dropped(Dropped {
             name: name.to_string(),
@@ -310,7 +315,7 @@ pub fn render(name: &str, hook: &Hook, binding: &Binding) -> Result<Outcome> {
 
     let mut matchers = Vec::new();
     for tool in &hook.tools {
-        match binding.tools.get(tool) {
+        match tools.get(tool) {
             Some(spelling) => matchers.push(spelling.clone()),
             None => return dropped(format!("`{tool}` tool")),
         }
@@ -409,14 +414,14 @@ mod tests {
     }
 
     fn rendered(name: &str, hook: &Hook, b: &Binding) -> Rendered {
-        match render(name, hook, b).unwrap() {
+        match render(name, hook, b, &shipped().tools).unwrap() {
             Outcome::Rendered(r) => r,
             Outcome::Dropped(d) => panic!("unexpectedly dropped: {d}"),
         }
     }
 
     fn dropped(name: &str, hook: &Hook, b: &Binding) -> Dropped {
-        match render(name, hook, b).unwrap() {
+        match render(name, hook, b, &shipped().tools).unwrap() {
             Outcome::Rendered(r) => panic!("unexpectedly rendered: {r:?}"),
             Outcome::Dropped(d) => d,
         }
@@ -596,39 +601,20 @@ mod tests {
 
     // ── the translation ─────────────────────────────────────────────────────
 
+    /// The shipped adapter, read once.
+    ///
+    /// Leaked deliberately: every test below wants the same maps a launch
+    /// uses, and reconstructing a `Binding` from its parts was a fixture that
+    /// could be wrong in the same direction as the code.
+    fn shipped() -> &'static Adapter {
+        static CELL: std::sync::OnceLock<Adapter> = std::sync::OnceLock::new();
+        CELL.get_or_init(claude)
+    }
+
     fn hooks_binding() -> &'static Binding {
-        // Leaked deliberately: the shipped adapter is read once and every test
-        // below wants the same maps a launch uses.
-        static CELL: std::sync::OnceLock<Binding> = std::sync::OnceLock::new();
-        CELL.get_or_init(|| {
-            let a = claude();
-            let b = a.supports(Capability::Hooks).expect("claude has hooks");
-            binding(&format!(
-                "path = {p:?}\nrender = \"claude-settings\"\n\
-                 [events]\n{events}\n[tools]\n{tools}\n[fields]\n{fields}\n\
-                 [inject]\ntemplate = {t:?}\n",
-                p = b.path,
-                events = b
-                    .events
-                    .iter()
-                    .map(|(k, v)| format!("{k} = {v:?}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                tools = b
-                    .tools
-                    .iter()
-                    .map(|(k, v)| format!("{k} = {v:?}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                fields = b
-                    .fields
-                    .iter()
-                    .map(|(k, v)| format!("{k} = {v:?}"))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-                t = b.inject.as_ref().unwrap().template,
-            ))
-        })
+        shipped()
+            .supports(Capability::Hooks)
+            .expect("claude has hooks")
     }
 
     /// An absent map entry means this harness has no such moment — the same
@@ -657,15 +643,22 @@ mod tests {
     fn an_unmapped_tool_drops_the_hook_saying_which_tool() {
         let b = binding(
             "path = \"/x\"\nrender = \"claude-settings\"\n\
-             [events]\nbefore-tool = \"PreToolUse\"\n[tools]\nshell = \"Bash\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
              [inject]\ntemplate = \"echo {{text}}\"\n",
         );
+        // A harness that has a shell and no reader. The map is the adapter's
+        // now, so an absent tool is an absent adapter-level entry.
+        let tools = BTreeMap::from([(Tool::Shell, "Bash".to_string())]);
         let h = Hook::parse(
             r#"{"on":"before-tool","tools":["read"],"run":"x"}"#,
             "h.json",
         )
         .unwrap();
-        assert!(dropped("peek", &h, &b).wanted.contains("read"));
+
+        match render("peek", &h, &b, &tools).unwrap() {
+            Outcome::Dropped(d) => assert!(d.wanted.contains("read"), "got: {}", d.wanted),
+            Outcome::Rendered(r) => panic!("unexpectedly rendered: {r:?}"),
+        }
     }
 
     /// The payload is names too, so it degrades the same way. A harness whose

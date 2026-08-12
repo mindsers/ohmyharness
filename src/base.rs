@@ -1656,7 +1656,7 @@ command = "c"
         let binding = adapter
             .supports(crate::adapter::Capability::Hooks)
             .expect("claude has hooks");
-        match crate::hook::render(name, &hook(name).hook, binding).unwrap() {
+        match crate::hook::render(name, &hook(name).hook, binding, &adapter.tools).unwrap() {
             crate::hook::Outcome::Rendered(r) => r,
             crate::hook::Outcome::Dropped(d) => panic!("claude cannot express {d}"),
         }

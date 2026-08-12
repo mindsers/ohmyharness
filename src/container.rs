@@ -7,7 +7,7 @@
 //! harness only ever sees a read-only mount, so there is still nothing to drift
 //! and nothing to clean up.
 
-use crate::adapter::{expand, Adapter, Binding, Capability, Render};
+use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::profile::{Paths, Profile};
 use crate::session::Session;
 use anyhow::{Context, Result};
@@ -156,7 +156,7 @@ pub fn plan(
         if !carries_something {
             continue;
         }
-        let Some(binding) = adapter.supports(cap) else {
+        if adapter.supports(cap).is_none() {
             // The composed document is one thing however many layers fed it, so
             // a rules-less harness drops at least the one it was handed — never
             // zero, which is what counting empty sources would have reported.
@@ -174,10 +174,10 @@ pub fn plan(
             };
             dropped.push((cap, count));
             continue;
-        };
+        }
         let gave_up = stage_capability(
             cap,
-            binding,
+            adapter,
             &sources,
             &rules_doc,
             &opts.omh,
@@ -299,7 +299,7 @@ struct Destination<'a> {
 
 fn stage_capability(
     cap: Capability,
-    binding: &Binding,
+    adapter: &Adapter,
     sources: &[PathBuf],
     rules_doc: &str,
     own: &crate::base::Own,
@@ -307,6 +307,14 @@ fn stage_capability(
     mounts: &mut Vec<Mount>,
 ) -> Result<Vec<crate::hook::Dropped>> {
     let mut dropped_hooks = Vec::new();
+    // Looked up here rather than threaded in, so the tool vocabulary — which
+    // lives on the adapter, not the binding — arrives without pushing this
+    // past the argument count clippy accepts. `plan` has already established
+    // the capability is supported; the error path exists because "the caller
+    // checked" is not something the type system carries.
+    let binding = adapter
+        .supports(cap)
+        .with_context(|| format!("{} declares no `{cap}` capability", adapter.name))?;
     let Destination {
         stage,
         worktree,
@@ -395,7 +403,7 @@ fn stage_capability(
             let file = stage.join(format!("{cap}.rendered"));
             // Rendered even when skipped, so a dry run still surfaces a
             // malformed mcp.json instead of deferring it to launch.
-            let rendered = crate::render::document(cap, binding, sources, own)?;
+            let rendered = crate::render::document(cap, binding, sources, own, &adapter.tools)?;
             dropped_hooks.extend(rendered.dropped);
             if staging == Staging::Apply {
                 std::fs::create_dir_all(stage)?;
@@ -1003,7 +1011,7 @@ mod tests {
         crate::base::hooks()
             .into_iter()
             .map(
-                |h| match crate::hook::render(h.name, &h.hook, binding).unwrap() {
+                |h| match crate::hook::render(h.name, &h.hook, binding, &adapter.tools).unwrap() {
                     crate::hook::Outcome::Rendered(r) => (h.name, r.command),
                     crate::hook::Outcome::Dropped(d) => panic!("claude cannot express {d}"),
                 },
@@ -1370,12 +1378,14 @@ mod tests {
 
         let oc = plan_for(&fx, "opencode");
         let dropped: Vec<_> = oc.dropped.iter().map(|(c, _)| *c).collect();
-        assert_eq!(dropped, vec![Capability::Subagents, Capability::Hooks]);
-        let msg = oc.degradation().unwrap();
-        assert!(
-            msg.contains("subagents") && msg.contains("hooks"),
-            "got: {msg}"
+        assert_eq!(
+            dropped,
+            vec![Capability::Hooks],
+            "hooks and only hooks — opencode has agent files, and claiming \
+             otherwise dropped a capability the user had"
         );
+        let msg = oc.degradation().unwrap();
+        assert!(msg.contains("hooks"), "got: {msg}");
 
         // What is given up includes omh's own, which come from the manifest
         // rather than from a layer. Counting only the profile's files would

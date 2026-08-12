@@ -409,10 +409,14 @@ mod tests {
             .map(|c| c.name)
             .collect();
         assert!(
-            !caps.iter().any(|c| c == "subagents"),
-            "opencode has no subagents"
+            !caps.iter().any(|c| c == "hooks"),
+            "opencode declares no hooks capability"
         );
         assert!(caps.iter().any(|c| c == "skills"));
+        // And one it *does* have is checked, which is the other half: a
+        // capability omh silently declines to check is a capability nobody
+        // ever finds out is broken.
+        assert!(caps.iter().any(|c| c == "subagents"));
     }
 
     /// The entire point: doctor must inspect where the *harness* looks, not

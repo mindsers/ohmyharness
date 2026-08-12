@@ -36,6 +36,15 @@ pub struct Adapter {
     /// login differently and none of them say so on the way in.
     #[serde(default)]
     pub login: Option<String>,
+    /// How this harness names the things an agent does.
+    ///
+    /// Adapter-level, not per-capability: `edit`/`read`/`shell`/`search` is
+    /// omh's answer to "what did the agent just do", and hooks were only the
+    /// first thing to need it. The Agent Skills standard carries harness tool
+    /// names in `allowed-tools` and subagent frontmatter carries them in
+    /// `tools` — one vocabulary, one leak, and neither of those is a hook.
+    #[serde(default)]
+    pub tools: BTreeMap<crate::hook::Tool, String>,
     #[serde(default)]
     pub capabilities: BTreeMap<Capability, Binding>,
 }
@@ -120,9 +129,6 @@ pub struct Binding {
     /// and the rest still ship.
     #[serde(default)]
     pub events: BTreeMap<crate::hook::Event, String>,
-    /// How this harness names the tools each moment happens to.
-    #[serde(default)]
-    pub tools: BTreeMap<crate::hook::Tool, String>,
     /// Where each canonical payload field lives in this harness's stdin schema.
     #[serde(default)]
     pub fields: BTreeMap<crate::hook::Field, String>,
@@ -222,7 +228,6 @@ impl Adapter {
     fn check_hook_maps(&self, path: &Path) -> Result<()> {
         for (cap, binding) in &self.capabilities {
             let declares = !binding.events.is_empty()
-                || !binding.tools.is_empty()
                 || !binding.fields.is_empty()
                 || binding.inject.is_some();
             match cap {
@@ -235,9 +240,9 @@ impl Adapter {
                 ),
                 Capability::Hooks => {}
                 _ if declares => anyhow::bail!(
-                    "adapter {}: `{cap}` declares hook maps (`events`, `tools`, \
-                     `fields` or `inject`), which are read only under `hooks`. \
-                     Nothing would use them.",
+                    "adapter {}: `{cap}` declares hook maps (`events`, `fields` \
+                     or `inject`), which are read only under `hooks`. Nothing \
+                     would use them.",
                     path.display()
                 ),
                 _ => {}
@@ -292,11 +297,17 @@ mod tests {
         assert!(oc.supports(Capability::Skills).is_some());
         assert!(
             oc.supports(Capability::Hooks).is_none(),
-            "opencode has no hooks"
+            "opencode declares no hooks capability"
         );
+        // opencode *does* have subagents — agent markdown files under
+        // `~/.config/opencode/agents/`, with `mode: subagent` in the
+        // frontmatter. This adapter said otherwise, so omh dropped them at
+        // every opencode launch and reported it as correct degradation:
+        // `decisions.md` calls that violating the capability floor — "omh must
+        // never cost you a feature you already had".
         assert!(
-            oc.supports(Capability::Subagents).is_none(),
-            "opencode has no subagents"
+            oc.supports(Capability::Subagents).is_some(),
+            "opencode has agent files; dropping them costs a feature the user had"
         );
     }
 
@@ -328,6 +339,49 @@ mod tests {
             format!("{err:#}").contains("rules"),
             "must name the stray key: {err:#}"
         );
+    }
+
+    /// The tool vocabulary belongs to the harness, not to its hooks.
+    ///
+    /// `edit`/`read`/`shell`/`search` is omh's answer to "what did the agent
+    /// just do", and hooks were simply the first thing to need it. The Agent
+    /// Skills standard puts harness tool names in `allowed-tools`, and subagent
+    /// frontmatter puts them in `tools` — same vocabulary, same leak, and
+    /// neither is a hook. Declared under `[capabilities.hooks.tools]` it was
+    /// reachable only by the one consumer that happened to arrive first.
+    #[test]
+    fn the_tool_vocabulary_is_declared_once_for_the_harness() {
+        let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
+        assert_eq!(claude.tools[&crate::hook::Tool::Shell], "Bash");
+        assert_eq!(
+            claude.tools[&crate::hook::Tool::Edit],
+            "Edit|Write|MultiEdit"
+        );
+    }
+
+    /// And it is refused inside a capability, where the map it replaced used to
+    /// live — otherwise both spellings work and they drift.
+    #[test]
+    fn a_tool_map_inside_a_capability_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "old.toml",
+            r#"
+            name = "old"
+            bin  = "old"
+            install = "x"
+            [capabilities.hooks]
+            path   = "$HOME/settings.json"
+            render = "claude-settings"
+            [capabilities.hooks.events]
+            turn-end = "Stop"
+            [capabilities.hooks.tools]
+            shell = "Bash"
+            "#,
+        );
+        let err = format!("{:#}", Adapter::find(d.path(), "old").unwrap_err());
+        assert!(err.contains("tools"), "must name the key: {err}");
     }
 
     /// The hook maps say how a harness spells omh's hook vocabulary, so on any

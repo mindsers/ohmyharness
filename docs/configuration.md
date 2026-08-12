@@ -65,6 +65,38 @@ Recorded, not built: a catalogue entry could carry a `source` and `omh sync`
 could fetch the missing ones, which restores team sharing without putting
 content back in the repo.
 
+## What goes in the catalogue
+
+Four of the six are portable by standard rather than by omh's effort, which is
+what makes adopting the catalogue cheap: the files you already have are the
+files omh wants.
+
+**Skills follow [Agent Skills](https://agentskills.io/specification)** — a
+`SKILL.md` with `name` and `description` required, `license`, `compatibility`,
+`metadata` and `allowed-tools` optional, unknown fields ignored, in a directory
+named after the skill. Claude Code, opencode, Cursor and Codex CLI all read it.
+So `~/.omh/skills/<name>/SKILL.md` is copied to whichever harness you launch,
+unchanged, and nothing is lost in the trip.
+
+**Rules are markdown.** `~/.omh/rules/*.md` is prose, and prose travels.
+
+**MCP servers** are the MCP spec's own shape, re-rendered per harness — the one
+place omh has always translated.
+
+**Hooks** are omh's own vocabulary, translated at staging. See below.
+
+**Subagents are the exception**, and it is worth knowing before you fill that
+directory. There is no cross-tool standard: `name`, `description`, `tools`,
+`model` and `hidden` are common to Claude Code and opencode, but
+`permissionMode`, `disallowedTools` and `skills` are Claude's alone, while
+`temperature`, `maxSteps`, `mode` and `permissions` are opencode's. omh copies
+the file as written, so a subagent authored for one harness reaches the other
+with fields it will ignore. Nothing is lost, and nothing is translated.
+
+The thread running through all of it: what does not travel is **tool names** —
+`allowed-tools` in a skill, `tools` in a subagent, a hook's matcher. That is
+why omh keeps one closed tool vocabulary and one `[tools]` map per adapter.
+
 ## Writing a hook
 
 A hook is the one kind of content a repo can declare, and the only thing omh

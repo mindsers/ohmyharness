@@ -66,6 +66,14 @@ A hook is authored in omh's vocabulary and translated when it is staged, so the
 adapter is where a harness's spelling lives — the same rule as every `path`.
 
 ```toml
+# Adapter-level: hooks match on these, and the Agent Skills standard and
+# subagent frontmatter both carry harness tool names too. One vocabulary.
+[tools]
+edit   = "Edit|Write|MultiEdit"
+read   = "Read"
+shell  = "Bash"
+search = "Grep|Glob"
+
 [capabilities.hooks]
 path   = "$HOME/.claude/settings.json"
 render = "claude-settings"
@@ -75,12 +83,6 @@ session-start = "SessionStart"
 turn-end      = "Stop"
 before-tool   = "PreToolUse"
 after-tool    = "PostToolUse"
-
-[capabilities.hooks.tools]         # omh's tool classes → this harness's matchers
-edit   = "Edit|Write|MultiEdit"
-read   = "Read"
-shell  = "Bash"
-search = "Grep|Glob"
 
 [capabilities.hooks.fields]        # where each field lives in this harness's stdin
 tool-file    = ".tool_input.file_path"

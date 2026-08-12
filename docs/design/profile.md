@@ -282,6 +282,49 @@ broken one. Generated-at-launch means the fix arrives with the upgrade.
 
 What remains in `~/.omh/hooks/` is unambiguously yours.
 
+### What is already portable, and what is not
+
+Researched rather than assumed, because the answer decides how much omh has to
+translate — and an earlier draft of this page had it wrong in both directions.
+
+| Capability | Canonical because | omh's job |
+|---|---|---|
+| `skills` | [Agent Skills](https://agentskills.io/specification), open-standardised Dec 2025, read by Claude Code, opencode, Cursor, Codex CLI | copy |
+| `rules` | markdown | copy |
+| `mcp` | the MCP spec | re-render per harness |
+| `hooks` | **nothing** — omh defines the vocabulary | translate at staging |
+| `commands` | markdown + frontmatter, converging with skills in Claude Code (unverified) | copy |
+| `subagents` | **nothing** — no cross-tool standard exists | copy, and say so |
+
+**Skills needed no work.** The standard fixes `name` and `description` as
+required, `license` / `compatibility` / `metadata` / `allowed-tools` as
+optional, and says unknown fields are ignored — so a skill is portable by
+construction, and `Render::Dir` copying it unchanged is correct rather than a
+bet. opencode goes further and reads `~/.claude/skills/` directly.
+
+**Subagents are the real outlier.** [OpenPackage's frontmatter
+spec](https://github.com/enulus/OpenPackage/blob/main/specs/agents-frontmatter.md)
+documents the split: `name`, `description`, `tools`, `model`, `hidden` common;
+`disallowedTools`, `permissionMode`, `skills`, `hooks` Claude-only;
+`temperature`, `maxSteps`, `permissions`, `mode`, `prompt`, `disabled`
+opencode-only — and it explicitly defines **no** cross-tool mapping. omh copies
+and does not translate. A map is buildable, and it should wait for P5: a
+translation with one harness on the far side is untested by construction, which
+is the whole reason that phase exists.
+
+**The one thing that does not travel anywhere is tool names.** `allowed-tools`
+in a skill, `tools` in a subagent, a hook's matcher — three fields, one leak. It
+is why omh has a closed tool vocabulary (`edit` / `read` / `shell` / `search`)
+and why the map for it is declared **once per adapter** under `[tools]` rather
+than inside the hooks capability, which is where it started when hooks were the
+only consumer.
+
+**Import follows from this.** `mcp` and `hooks` translate and refuse what they
+cannot; `skills`, `commands` and `rules` copy; `subagents` copies with a notice
+that the frontmatter is harness-specific. Nothing harness-shaped is ever stored
+under a neutral name — an absent entry is reported at launch, whereas a Claude
+body mounted for opencode is silent and wrong.
+
 ### The canonical hook format
 
 > **Built.** One correction fell out of writing it, recorded below: two kinds do

@@ -24,4 +24,16 @@ import = "$HOME/.config/opencode/opencode.json"
 path   = "$HOME/.config/opencode/command"
 render = "dir"
 
-# no `subagents`, no `hooks` — omh reports these as dropped at launch
+# Agent markdown files, `mode: subagent` in the frontmatter. Plural `agents/`
+# is the documented name; singular is accepted for backwards compatibility.
+#
+# omh declared none here and dropped them at every launch, which cost opencode
+# users a feature they had — the capability floor `docs/design/decisions.md`
+# calls out. That the mount lands is checked by `omh doctor`; that opencode
+# reads what is in it is a claim about external software, and the frontmatter
+# it accepts is *not* the same as Claude's — see `docs/design/profile.md`.
+[capabilities.subagents]
+path   = "$HOME/.config/opencode/agents"
+render = "dir"
+
+# no `hooks` — omh reports that as dropped at launch

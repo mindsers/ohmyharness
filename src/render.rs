@@ -44,6 +44,7 @@ pub fn document(
     binding: &Binding,
     sources: &[PathBuf],
     own: &crate::base::Own,
+    tools: &BTreeMap<hook::Tool, String>,
 ) -> Result<Document> {
     match binding.render {
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
@@ -79,7 +80,7 @@ pub fn document(
             Ok(mcp(binding.render, &servers)?.into())
         }
         Render::ClaudeSettings => {
-            let (rendered, dropped) = translate(&merge_hooks(sources, own)?, binding)?;
+            let (rendered, dropped) = translate(&merge_hooks(sources, own)?, binding, tools)?;
             Ok(Document {
                 body: claude_settings(&rendered)?,
                 dropped,
@@ -247,11 +248,12 @@ pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
 fn translate(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
+    tools: &BTreeMap<hook::Tool, String>,
 ) -> Result<(BTreeMap<String, hook::Rendered>, Vec<hook::Dropped>)> {
     let mut rendered = BTreeMap::new();
     let mut dropped = Vec::new();
     for (name, h) in hooks {
-        match hook::render(name, h, binding)? {
+        match hook::render(name, h, binding, tools)? {
             Outcome::Rendered(r) => {
                 rendered.insert(name.clone(), r);
             }
@@ -483,6 +485,7 @@ mod tests {
             hooks_binding(&adapter),
             &[dir.path().join("h")],
             &Default::default(),
+            &adapter.tools,
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
@@ -519,6 +522,7 @@ mod tests {
             hooks_binding(&adapter),
             &[dir.path().join("h")],
             &Default::default(),
+            &adapter.tools,
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
@@ -556,6 +560,7 @@ mod tests {
             adapter.supports(Capability::Mcp).unwrap(),
             &[mcp],
             &own,
+            &adapter.tools,
         )
         .unwrap();
 
@@ -585,6 +590,7 @@ mod tests {
             adapter.supports(Capability::Mcp).unwrap(),
             &[mcp],
             &own,
+            &adapter.tools,
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("linear"), "got: {err:#}");
@@ -656,7 +662,14 @@ mod tests {
     fn staged_renders_are_not_documents() {
         let adapter = claude_hooks();
         let skills = adapter.supports(Capability::Skills).unwrap();
-        let err = document(Capability::Skills, skills, &[], &Default::default()).unwrap_err();
+        let err = document(
+            Capability::Skills,
+            skills,
+            &[],
+            &Default::default(),
+            &adapter.tools,
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("staged by the launcher"));
     }
 
