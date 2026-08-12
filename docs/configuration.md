@@ -3,6 +3,11 @@
 Your setup is declared once and rendered into whatever shape each harness reads.
 This page covers where it lives, how the layers merge, and how to change things.
 
+> This page describes what ships today. The layer model is **being replaced** —
+> one personal catalogue, per-project selection instead of per-project content,
+> and a rules file composed with the project's own rather than mounted over it.
+> See [The profile](design/profile.md) for the model and the reasoning.
+
 ## The three layers
 
 ```
@@ -158,6 +163,42 @@ made omh's staging indistinguishable from the agent's work, and `info/exclude`
 could not help: gitignore semantics say nothing about a file git already tracks,
 so a repo that commits its own `CLAUDE.md` saw a permanent modification nobody
 made, and `omh s commit` published omh's rules over the project's conventions.
+
+**The mount composes your project's rules rather than replacing them.** The
+repo's own `AGENTS.md` is read before anything is mounted over it and joined
+into the document the agent gets, after your personal layer and before the
+project ones:
+
+```
+<!-- omh: personal -->      ~/.omh/profile/AGENTS.md
+<!-- omh: <repo>/AGENTS.md -->   the project's own, tracked
+<!-- omh: shared -->        <repo>/.omh/profile/AGENTS.md
+<!-- omh: local -->         <repo>/.omh/local/AGENTS.md
+```
+
+Content comes from the worktree if the branch has a copy, otherwise from the
+default branch — so a session that has just written its rules is governed by
+them, and one that never had them still gets the project's. The marker says
+which, because the two are not the same claim:
+
+```
+<!-- omh: <repo>/AGENTS.md -->   this branch's copy
+<!-- omh: main:AGENTS.md -->     the branch has none; read from main
+```
+
+A **blank** rules file counts as no rules file. omh has to place an empty file
+at each declared name for the mount to land on, so from a session's second
+launch its own placeholder is sitting in the worktree — read as content it would
+outrank the project's real rules under the canonical name.
+
+A repo with `CLAUDE.md` and no `AGENTS.md` is composed anyway, and omh says
+which file it read. Where both exist and differ, `AGENTS.md` wins and the other
+is reported rather than silently dropped:
+
+```console
+$ omh claude
+omh: composed CLAUDE.md — rename it to AGENTS.md
+```
 
 `carry_in` is for files git does **not** track. A tracked path is already in the
 worktree, so listing one is a misconfiguration: omh says so at launch and does

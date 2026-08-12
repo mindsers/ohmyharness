@@ -23,6 +23,8 @@ pub struct Plan {
     pub argv: Vec<String>,
     /// Capabilities the profile carries that this harness cannot express.
     pub dropped: Vec<(Capability, usize)>,
+    /// What composing the project's rules turned up that the user should hear.
+    pub rules: crate::rules::Report,
     /// Interactive harnesses need a terminal; a captured probe must not ask.
     pub tty: bool,
 }
@@ -73,6 +75,16 @@ pub struct Options {
     /// construction — so "the binary is missing" was unreachable there, and
     /// the guard against mounting a missing path only ran on macOS.
     pub memory_bin: Option<PathBuf>,
+    /// The branch the project's own rules are read from when the worktree has
+    /// none of its own. `None` asks git nothing.
+    ///
+    /// Resolved by the caller for the reason `memory_bin` is: `plan` stays pure
+    /// given a temp filesystem, and a probe in here is a probe no test can
+    /// reach. `Option` rather than an empty-string sentinel because
+    /// `git show :AGENTS.md` is *valid* — `:path` is the index — so a sentinel
+    /// that ever leaked past its guard would silently compose the staging area
+    /// as the project's rules. `Option` makes that a compile error.
+    pub base: Option<String>,
 }
 
 pub fn plan(
@@ -89,6 +101,13 @@ pub fn plan(
     let mut mounts = Vec::new();
     let mut dropped = Vec::new();
 
+    // Composed before the capability loop because `place_destination` runs
+    // inside it: it creates the empty placeholder at every declared name, and
+    // composing afterwards would read omh's own file as the project's rules on
+    // the very first launch.
+    let (rules_doc, rules_report) =
+        crate::rules::compose(paths, adapter, &session.worktree, opts.base.as_deref())?;
+
     // The agent's entire world. Never the host working tree.
     mounts.push(Mount {
         host: session.worktree.clone(),
@@ -99,21 +118,42 @@ pub fn plan(
 
     for cap in Capability::ALL {
         let sources = profile.sources(cap);
-        if sources.is_empty() {
+        // Every other capability is exactly what the profile carries. Rules are
+        // not: the project's own `AGENTS.md` is composed in, and it is often the
+        // only thing there — a fresh install has no rules layer of its own. So
+        // asking the profile whether to stage threw the repo's conventions away
+        // in the configuration a clone lands in, which is the bug this module
+        // was written to fix.
+        let carries_something = if cap == Capability::Rules {
+            !rules_doc.trim().is_empty()
+        } else {
+            !sources.is_empty()
+        };
+        if !carries_something {
             continue;
         }
         let Some(binding) = adapter.supports(cap) else {
-            dropped.push((cap, count_entries(&sources)));
+            // The composed document is one thing however many layers fed it, so
+            // a rules-less harness drops at least the one it was handed — never
+            // zero, which is what counting empty sources would have reported.
+            let count = match cap {
+                Capability::Rules => count_entries(&sources).max(1),
+                _ => count_entries(&sources),
+            };
+            dropped.push((cap, count));
             continue;
         };
         stage_capability(
             cap,
             binding,
             &sources,
-            &stage,
-            &session.worktree,
+            &rules_doc,
+            Destination {
+                stage: &stage,
+                worktree: &session.worktree,
+                staging,
+            },
             &mut mounts,
-            staging,
         )?;
     }
 
@@ -191,19 +231,38 @@ pub fn plan(
                 .collect(),
         ),
         dropped,
+        rules: rules_report,
         tty: opts.tty,
     })
+}
+
+/// Where staging writes, and whether it writes at all.
+///
+/// The three genuinely travel together — every render arm needs all of them —
+/// and bundling them is what keeps `stage_capability` under the argument count
+/// clippy accepts. The composed document is deliberately *not* in here: it is an
+/// input to one arm, not part of the destination, and folding it in turned a
+/// type into a parameter bag.
+#[derive(Clone, Copy)]
+struct Destination<'a> {
+    stage: &'a Path,
+    worktree: &'a Path,
+    staging: Staging,
 }
 
 fn stage_capability(
     cap: Capability,
     binding: &Binding,
     sources: &[PathBuf],
-    stage: &Path,
-    worktree: &Path,
+    rules_doc: &str,
+    to: Destination<'_>,
     mounts: &mut Vec<Mount>,
-    staging: Staging,
 ) -> Result<()> {
+    let Destination {
+        stage,
+        worktree,
+        staging,
+    } = to;
     match binding.render {
         // Union layers by entry name; later layers shadow earlier ones. Links
         // point at each layer's *guest* mount path, so they are intentionally
@@ -253,15 +312,15 @@ fn stage_capability(
         // report. Read-only for the reason every other staged capability is: a
         // file the agent can rewrite is not a profile, it is a suggestion.
         Render::Concat => {
-            let merged = sources
-                .iter()
-                .map(|p| std::fs::read_to_string(p).unwrap_or_default())
-                .collect::<Vec<_>>()
-                .join("\n\n");
+            // `rules::compose` owns the join, because the document is more than
+            // the layers: the project's own file is read from the worktree
+            // before this mount hides it, and each section is labelled with
+            // where it came from.
+            let merged = rules_doc;
             let file = stage.join(format!("{cap}.md"));
             if staging == Staging::Apply {
                 std::fs::create_dir_all(stage)?;
-                std::fs::write(&file, &merged).with_context(|| format!("staging {cap}"))?;
+                std::fs::write(&file, merged).with_context(|| format!("staging {cap}"))?;
             }
             for target in std::iter::once(&binding.path).chain(binding.also.iter()) {
                 // Still `/work`-relative: the guest path is inside the worktree
@@ -471,6 +530,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin,
+                base: None,
             },
         )
         .unwrap()
@@ -611,6 +671,7 @@ mod tests {
                 tty: true,
                 account_dir: Some(account.to_path_buf()),
                 memory_bin: None,
+                base: None,
             },
         )
         .unwrap()
@@ -741,6 +802,75 @@ mod tests {
         );
     }
 
+    /// Read the document staged for the `rules` capability, as the agent gets it.
+    fn composed_rules(p: &Plan) -> String {
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new("/work/CLAUDE.md"))
+            .expect("claude stages rules onto /work/CLAUDE.md");
+        std::fs::read_to_string(&mount.host).unwrap()
+    }
+
+    /// Regression: the capability loop asked the *profile* whether there were
+    /// rules, and skipped everything when the answer was no.
+    ///
+    /// `Profile::sources` only ever looks at the three layer directories, so a
+    /// user with no `AGENTS.md` of their own — a fresh install, which is most
+    /// of them — took the `sources.is_empty()` branch and never staged or
+    /// mounted anything. The composed document existed and was thrown away, so
+    /// the repo's own rules went nowhere: the exact bug this module was written
+    /// to fix, surviving in the configuration a clone lands in.
+    ///
+    /// Worse than silent — `plan.rules` was still returned, so the launcher
+    /// could report "composed CLAUDE.md" about a document nobody was given.
+    #[test]
+    fn the_project_alone_is_reason_enough_to_mount_rules() {
+        let fx = fixture();
+        for layer in ["profile", ".omh/profile", ".omh/local"] {
+            let _ = std::fs::remove_file(fx.paths.root.join(layer).join("AGENTS.md"));
+            let _ = std::fs::remove_file(fx.paths.repo.join(layer).join("AGENTS.md"));
+        }
+        std::fs::write(fx.session.worktree.join("AGENTS.md"), "ONLY THE PROJECT").unwrap();
+        // `Profile` caches which layers exist, so re-resolve after removing.
+        let fx = Fx {
+            profile: Profile::resolve(&fx.paths),
+            ..fx
+        };
+
+        let p = plan_for(&fx, "claude");
+
+        assert!(
+            composed_rules(&p).contains("ONLY THE PROJECT"),
+            "a repo's own rules must reach the agent even when the profile has none"
+        );
+    }
+
+    /// The bug: surviving on disk is not the same as reaching the agent.
+    ///
+    /// `a_repos_own_rules_file_survives_staging` proves the file is intact for
+    /// the user's diff, and that was mistaken for the whole obligation. The
+    /// read-only mount still hides it for the length of the session, so a repo
+    /// that writes down its own conventions runs an agent that has never read
+    /// them — omh replaced the project's rules with its own instead of adding to
+    /// them.
+    #[test]
+    fn the_repos_own_rules_reach_the_agent() {
+        let fx = fixture();
+        std::fs::write(
+            fx.session.worktree.join("AGENTS.md"),
+            "always run cargo fmt before finishing",
+        )
+        .unwrap();
+
+        let body = composed_rules(&plan_for(&fx, "claude"));
+
+        assert!(
+            body.contains("always run cargo fmt before finishing"),
+            "the project's own rules must reach the agent, got:\n{body}"
+        );
+    }
+
     /// `--dry-run` prints the plan and writes nothing, placeholders included.
     #[test]
     fn a_dry_run_leaves_no_placeholder_behind() {
@@ -758,6 +888,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
+                base: None,
             },
         )
         .unwrap();
@@ -866,11 +997,16 @@ mod tests {
     /// will not create one there — see `place_destination`. So the invariant is
     /// about the bytes, not the file's existence: omh's rules must never be
     /// what is on disk.
+    /// "Both names, one document" is asserted on the mount's **host path**, not
+    /// by reading the two files and comparing them. `Concat` stages one file and
+    /// points every target at it, so comparing the bytes back was two reads of
+    /// one path — an assertion no mutation could fail.
     #[test]
     fn rules_reach_every_declared_filename_without_writing_them_into_the_worktree() {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
 
+        let mut hosts = Vec::new();
         for name in ["CLAUDE.md", "AGENTS.md"] {
             let guest = PathBuf::from("/work").join(name);
             let m = p
@@ -880,14 +1016,24 @@ mod tests {
                 .unwrap_or_else(|| panic!("no mount for {name}: {:?}", p.mounts));
             assert!(m.file, "{name} is one file, not a directory");
             assert!(m.read_only, "a rules file the agent can rewrite is not one");
-            let body = std::fs::read_to_string(&m.host).unwrap();
-            assert_eq!(body, "personal rules\n\nshared rules", "{name}");
+            hosts.push(m.host.clone());
             assert_eq!(
                 std::fs::read_to_string(fx.session.worktree.join(name)).unwrap(),
                 "",
                 "{name} in the worktree must stay empty — the rules arrive by mount"
             );
         }
+        assert_eq!(hosts[0], hosts[1], "both names, one staged document");
+        assert!(
+            !hosts[0].starts_with(&fx.session.worktree),
+            "the document is staged outside the worktree, not in it: {}",
+            hosts[0].display()
+        );
+        let body = std::fs::read_to_string(&hosts[0]).unwrap();
+        assert!(
+            body.contains("personal rules") && body.contains("shared rules"),
+            "the layers must be in there: {body}"
+        );
     }
 
     #[test]
@@ -916,6 +1062,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
+                base: None,
             },
         )
         .unwrap_err();
@@ -962,6 +1109,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
+                base: None,
             },
         )
         .unwrap();
@@ -992,6 +1140,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
+                base: None,
             },
         )
         .unwrap();
@@ -1033,6 +1182,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
+                base: None,
             },
         )
         .unwrap();
@@ -1048,6 +1198,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
+                base: None,
             },
         )
         .unwrap();
@@ -1074,6 +1225,7 @@ mod tests {
             tty: true,
             account_dir: None,
             memory_bin: None,
+            base: None,
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
@@ -1091,6 +1243,7 @@ mod tests {
             tty: true,
             account_dir: None,
             memory_bin: None,
+            base: None,
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);

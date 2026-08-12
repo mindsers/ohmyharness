@@ -309,6 +309,7 @@ mod tests {
             workdir: "/work".into(),
             argv: vec!["claude".into()],
             dropped: vec![],
+            rules: Default::default(),
             tty: true,
         }
     }
