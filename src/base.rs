@@ -468,8 +468,8 @@ pub fn hooks() -> Vec<Hook> {
             // rather than `[:space:]` for the leading-whitespace case, so the
             // newline arm stays the thing doing that work.
             //
-            // Built from `detect::GIT_ABSENT` so the sentence the agent sees
-            // here and the one `init` writes into the rules cannot drift.
+            // Built from `GIT_ABSENT` so the sentence the agent meets here
+            // and the one the `git-rules` section carries cannot drift.
             command: format!(
                 "c=$(jq -r '.tool_input.command // empty'); \
                  case \"$c\" in \
@@ -479,7 +479,7 @@ pub fn hooks() -> Vec<Hook> {
                  \"git\\ *) ;; *) exit 0 ;; esac ;; esac; \
                  jq -nc --arg m {} '{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\
                  \"additionalContext\":$m}}}}'",
-                shell_quote(crate::detect::GIT_ABSENT)
+                shell_quote(GIT_ABSENT)
             ),
         },
         Hook {
@@ -523,6 +523,155 @@ pub fn hooks() -> Vec<Hook> {
             ),
         },
     ]
+}
+
+/// A section of the rules omh ships, in the shape a layer would store one.
+///
+/// The `name` is the manifest entry it answers to, exactly as a hook's is —
+/// `the_manifest_and_the_code_describe_the_same_base_set` compares the two
+/// name sets in both directions, so a section cannot ship unexplained and an
+/// entry cannot explain a section nobody writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Section {
+    pub name: &'static str,
+    pub body: String,
+}
+
+/// What the agent is told about git, in one place.
+///
+/// Both deliveries read from here — the `git-rules` section and the
+/// `git-unavailable` hook — because two copies of a safety notice drift, and
+/// the one that drifts is never the one you are reading.
+///
+/// Written as a claim about *this session*, not about git: an agent told "git
+/// is broken" spends its turns trying to fix it, and the repair cannot work.
+///
+/// It also does no harm, which was checked rather than assumed — `git init`
+/// against an unreachable gitdir refuses (git 2.55.0), naming the missing
+/// directory, and leaves the pointer file exactly as it was. So this says the
+/// attempt is futile, not that it is dangerous. The expensive failure here is
+/// the agent promising a commit it cannot make.
+pub const GIT_ABSENT: &str = "git does not work in this session, by design and not by fault. \
+     The worktree's .git is a pointer at an admin directory on the host, which omh does not \
+     mount — so every git command fails with `fatal: not a git repository`. Do not try to \
+     repair it: `git init` refuses for the same reason, and re-cloning would only give you a \
+     second repository nobody is reviewing. Nothing here is broken and nothing is lost. Your \
+     work is already visible outside the sandbox, where the person you are working with \
+     reviews it with `omh s diff`, commits it with `omh s commit`, and pushes it with \
+     `omh s push`. Say that rather than offering to commit yourself.";
+
+/// The rules omh ships, one section per base-set entry.
+///
+/// They live here rather than in the manifest for the reason hook commands do:
+/// `memory-rules` interpolates `GUEST_LOCAL_NOTES` and `git-rules` reads
+/// `GIT_ABSENT`, which the hook reads too. Flattened into TOML both couplings
+/// become two strings that can drift, and the drift is silent — a safety notice
+/// saying one thing in the rules and another in the hook.
+///
+/// They were prose `init` appended to `.omh/profile/AGENTS.md`, which meant they
+/// reached the repos where somebody remembered and nowhere else, could not be
+/// explained by `omh why`, and were invisible to the cost rollup.
+pub fn sections() -> Vec<Section> {
+    vec![
+        Section {
+            name: "graph-rules",
+            body: "## Code graph\n\n\
+                 This repo is indexed as a graph, refreshed after every turn. Prefer it over\n\
+                 reading or grepping files when the question is structural:\n\n\
+                 - `search_graph` — where is X defined, what is named like Y\n\
+                 - `trace_path` — how does A reach B\n\
+                 - `get_architecture` — what the modules are and how they depend on each other\n\
+                 - `get_code_snippet` — read one symbol instead of a whole file\n\n\
+                 Grep is still right for literal text: a string, a config value, a TODO.\n\n\
+                 **Use the project named by `$OMH_GRAPH_PROJECT`.** Other sessions of this\n\
+                 repo have their own graphs in the same store; querying one of those answers\n\
+                 confidently about code that is not in this worktree.\n"
+                .into(),
+        },
+        Section {
+            name: "git-rules",
+            // Orientation, where the hook is interception: a hook can only fire
+            // once the agent has decided to run git, and by then it may already
+            // have promised the user a commit. This is what stops the plan being
+            // made.
+            body: format!("## Git\n\n{GIT_ABSENT}\n"),
+        },
+        Section {
+            name: "memory-rules",
+            // "Which graph to ask" ships with memory rather than with the graph
+            // because the decision it teaches is *when to reach for `recall`*,
+            // and `recall` is what this feature introduces. With memory off the
+            // agent should not be told to ask a tool it does not have; with the
+            // graph off it loses a comparison, which is the cheaper of the two
+            // wrong documents.
+            body: format!(
+                "## Which graph to ask\n\n\
+                 There are two, and they do not overlap:\n\n\
+                 - **the code graph** knows **what the code is** — where a symbol lives, how\n  \
+                   one module reaches another. Re-derived from the code every turn, so it is\n  \
+                   never out of date and never needs to be told anything.\n\
+                 - **`recall`** knows **why** it is that way — what was tried and failed, what\n  \
+                   turned out not to work, what surprised somebody. None of that is in the\n  \
+                   code, so no amount of reading will recover it.\n\n\
+                 A *where* or *what* question goes to the code graph. A *why*, *is this safe*,\n\
+                 or *has this been tried* question goes to `recall`. When you are about to\n\
+                 assume how something here behaves, ask `recall` first — that is exactly the\n\
+                 assumption somebody already got wrong once.\n\n\
+                 They compose: find the code with the code graph, then ask `recall` what is\n\
+                 known about it before changing it.\n\n\
+                 {}",
+                note_taking()
+            ),
+        },
+    ]
+}
+
+/// What the agent needs to write a note before there is a tool to write one.
+///
+/// This is the part of the surface that cannot move into a tool description:
+/// *record what surprised you* is a trigger, and an agent cannot look up a rule
+/// it does not know it needs. The note **shape** is here only because the
+/// agent has no *tool* to write through yet — `remember` already enforces the
+/// schema at the write, but nothing inside the sandbox can call it, so the
+/// agent writes the file by hand and needs to be told the shape. When the MCP
+/// surface lands, this shrinks back to the trigger.
+///
+/// The condition is the MCP surface, not `remember`'s existence: `remember`
+/// exists, so a reader checking the wrong one deletes the staged shape while
+/// the agent still has no way to reach it.
+fn note_taking() -> String {
+    format!(
+        "## Memory\n\n\
+         When something surprises you — you expected one thing and the repo did\n\
+         another — record it. Not what you did; what you were wrong about.\n\n\
+         Write a Markdown file into `{}/`, named after the\n\
+         observation, in this shape:\n\n\
+         ```markdown\n\
+         ---\n\
+         key: <the filename, without .md>\n\
+         type: surprise\n\
+         source: session $OMH_SESSION, <this harness>\n\
+         recorded: <YYYY-MM-DD, the day it happened>\n\
+         ---\n\n\
+         # One line naming the surprise\n\n\
+         ## Expected\n\n\
+         ## Observed\n\n\
+         ## Evidence\n\n\
+         ## Answers\n\n\
+         - <the question somebody would later ask to find this>\n\n\
+         ## Related\n\n\
+         - [[another-notes-key]]\n\
+         ```\n\n\
+         **Answers** is what makes the note findable later, and only you know it:\n\
+         write the question you would have asked five minutes ago, in the words you\n\
+         would have used. A note nobody can find is a note nobody wrote.\n\n\
+         Store uncertainty rather than false precision, and date by when the thing\n\
+         happened rather than when you mentioned it. If you have nothing to put\n\
+         under **Expected**, there is nothing here worth recording.\n\n\
+         Rename a note by rewriting its `key` and its filename together — never\n\
+         one without the other.\n",
+        crate::memory::GUEST_LOCAL_NOTES,
+    )
 }
 
 /// Index a repository into the shared graph.
@@ -1323,7 +1472,7 @@ command = "c"
             parsed["hookSpecificOutput"]["additionalContext"]
                 .as_str()
                 .unwrap(),
-            crate::detect::GIT_ABSENT,
+            GIT_ABSENT,
             "the prose has to survive shell quoting intact"
         );
     }

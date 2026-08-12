@@ -246,6 +246,7 @@ pub fn render(verdict: &Verdict, version: &str) -> String {
                 entry.name, entry.since
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
+            out.push_str(&format!("  {:<11} {}\n", "part of", entry.feature));
             costs(entry, version, &mut out);
             alternatives(entry, &mut out);
             out.push_str(&format!("  {:<11} {}\n", "installed", yours.layer));
@@ -266,6 +267,7 @@ pub fn render(verdict: &Verdict, version: &str) -> String {
                 "on disk", yours.value, yours.layer
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
+            out.push_str(&format!("  {:<11} {}\n", "part of", entry.feature));
             costs(entry, version, &mut out);
             out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
             // Which of the two it is, omh does not know — so it says so rather
@@ -281,6 +283,7 @@ pub fn render(verdict: &Verdict, version: &str) -> String {
                 entry.name
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
+            out.push_str(&format!("  {:<11} {}\n", "part of", entry.feature));
             costs(entry, version, &mut out);
             alternatives(entry, &mut out);
             out.push_str(&format!("  {:<11} omh init\n", "restore"));
@@ -403,6 +406,38 @@ mod tests {
         let m = manifest();
         let c = catalog(&m, vec![]);
         assert!(matches!(c.why("codegraph"), Verdict::Removed { .. }));
+    }
+
+    /// `graph-first` is not a hook that happens to mention the graph; it is
+    /// part of the graph, and removing the server takes it too.
+    ///
+    /// Unanswerable while the grouping was a comment header in the manifest,
+    /// which is the whole reason `feature` became a field. Asserted on all
+    /// three entry verdicts because a removed or edited entry is exactly when
+    /// somebody is asking what it belonged to.
+    #[test]
+    fn every_entry_answer_names_the_feature_it_is_part_of() {
+        let m = manifest();
+        for verdict in [
+            catalog(&m, vec![setting("graph-first", "nudge", Layer::Shared)]).why("graph-first"),
+            catalog(&m, vec![]).why("graph-first"),
+            catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]).why("codegraph"),
+            catalog(
+                &m,
+                vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
+            )
+            .why("codegraph"),
+        ] {
+            // One line, not two `contains` — `remove` already names the
+            // feature for these entries, so a split assertion passes on
+            // output that never says what anything is part of.
+            let out = render(&verdict, "2026.08");
+            assert!(
+                out.lines()
+                    .any(|l| l.trim().starts_with("part of") && l.trim().ends_with("codegraph")),
+                "must say what it belongs to: {out}"
+            );
+        }
     }
 
     /// The load-bearing case: omh must not claim authorship of your choices.

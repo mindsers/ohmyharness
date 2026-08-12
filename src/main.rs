@@ -1735,13 +1735,13 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // rules are appended, never merged in. Without this the feature ships
     // inert for every existing repo: M1 has no MCP surface, so this file is
     // the only thing that tells the agent the store is there.
-    if append_section_if_absent(&agents, "## Memory", &detect::memory_rules())? {
+    if append_section_if_absent(&agents, "## Memory", &section("memory-rules"))? {
         println!("  memory     added the note rules to .omh/profile/AGENTS.md");
     }
     // Same delivery problem, same answer: every repo that exists today ran
     // `init` before this section did, and without the append the notice reaches
     // only repos nobody has created yet.
-    if append_section_if_absent(&agents, "## Git", &detect::git_rules())? {
+    if append_section_if_absent(&agents, "## Git", &section("git-rules"))? {
         println!("  git        added the git notice to .omh/profile/AGENTS.md");
     }
     // The base set: omh's opinion, seeded into the committed layer where it is
@@ -2003,6 +2003,20 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
 /// running `init` again is a no-op rather than a second copy.
 ///
 /// Returns whether anything was written.
+/// One of the rules sections omh ships, ready to append to a file.
+///
+/// Panics on an unknown name, which is a programming error rather than a
+/// runtime one: the names are the base set's own, and the drift test in
+/// `base.rs` is what keeps them in step with the manifest.
+fn section(name: &str) -> String {
+    let body = base::sections()
+        .into_iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("`{name}` is not a section the base set ships"))
+        .body;
+    format!("\n{body}")
+}
+
 fn append_section_if_absent(path: &std::path::Path, heading: &str, section: &str) -> Result<bool> {
     let existing = match std::fs::read_to_string(path) {
         Ok(existing) => existing,
@@ -2332,7 +2346,7 @@ mod tests {
         .unwrap();
 
         assert!(
-            append_section_if_absent(&path, "## Memory", &detect::memory_rules()).unwrap(),
+            append_section_if_absent(&path, "## Memory", &section("memory-rules")).unwrap(),
             "a different section that happens to share a prefix is not this one"
         );
         assert!(std::fs::read_to_string(&path)
@@ -2351,7 +2365,7 @@ mod tests {
         // on it for every user, including the one running CI as root.
         std::fs::write(&path, [0x23, 0x20, 0xff, 0xfe, 0x0a]).unwrap();
 
-        let err = append_section_if_absent(&path, "## Memory", &detect::memory_rules())
+        let err = append_section_if_absent(&path, "## Memory", &section("memory-rules"))
             .expect_err("an unreadable file must be reported, not skipped");
         assert!(
             err.to_string().contains("AGENTS.md"),
@@ -2374,13 +2388,13 @@ mod tests {
         let human = "# Project rules\n\n## House style\n\nTabs, and no adverbs.\n";
         std::fs::write(&path, human).unwrap();
 
-        assert!(append_section_if_absent(&path, "## Git", &detect::git_rules()).unwrap());
+        assert!(append_section_if_absent(&path, "## Git", &section("git-rules")).unwrap());
         let body = std::fs::read_to_string(&path).unwrap();
 
         assert!(body.starts_with(human), "a human's file must survive whole");
         assert!(body.contains("omh s commit"), "the notice must arrive");
 
-        assert!(!append_section_if_absent(&path, "## Git", &detect::git_rules()).unwrap());
+        assert!(!append_section_if_absent(&path, "## Git", &section("git-rules")).unwrap());
         assert_eq!(
             body,
             std::fs::read_to_string(&path).unwrap(),
@@ -2395,14 +2409,14 @@ mod tests {
         let human = "# Project rules\n\n## House style\n\nTabs, and no adverbs.\n";
         std::fs::write(&path, human).unwrap();
 
-        assert!(append_section_if_absent(&path, "## Memory", &detect::memory_rules()).unwrap());
+        assert!(append_section_if_absent(&path, "## Memory", &section("memory-rules")).unwrap());
         let body = std::fs::read_to_string(&path).unwrap();
 
         assert!(body.starts_with(human), "a human's file must survive whole");
         assert!(body.contains("## Memory"), "the rules must arrive");
 
         // `init` is re-runnable, so a second pass must not stack a second copy.
-        assert!(!append_section_if_absent(&path, "## Memory", &detect::memory_rules()).unwrap());
+        assert!(!append_section_if_absent(&path, "## Memory", &section("memory-rules")).unwrap());
         assert_eq!(
             body,
             std::fs::read_to_string(&path).unwrap(),
