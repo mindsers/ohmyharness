@@ -99,6 +99,13 @@ pub struct Options {
     /// manifest lives on disk under `~/.omh/base` and reading it here would put
     /// a probe in a function whose purity is what makes it testable.
     pub omh: crate::base::Own,
+    /// What this checkout decided — features off here, servers dropped with
+    /// them, per-repo MCP environment.
+    ///
+    /// Beside `omh` rather than inside it. Both arrive resolved from outside for
+    /// the same reason, which is what made one field tempting, but they answer
+    /// opposite questions and `omh why` exists to keep those apart.
+    pub repo: crate::settings::RepoPolicy,
 }
 
 pub fn plan(
@@ -175,19 +182,18 @@ pub fn plan(
             dropped.push((cap, count));
             continue;
         }
-        let gave_up = stage_capability(
-            cap,
+        let gave_up = Stager {
             adapter,
-            &sources,
-            &rules_doc,
-            &opts.omh,
-            Destination {
+            rules_doc: &rules_doc,
+            own: &opts.omh,
+            repo: &opts.repo,
+            to: Destination {
                 stage: &stage,
                 worktree: &session.worktree,
                 staging,
             },
-            &mut mounts,
-        )?;
+        }
+        .stage(cap, &sources, &mut mounts)?;
         dropped_hooks.extend(gave_up);
     }
 
@@ -206,7 +212,7 @@ pub fn plan(
     // nothing spawns — the half-configured state the design calls
     // unrepresentable.
     let memory_on = !opts
-        .omh
+        .repo
         .disabled_servers
         .contains(crate::memory::tools::SERVER_KEY);
 
@@ -297,127 +303,149 @@ struct Destination<'a> {
     staging: Staging,
 }
 
-fn stage_capability(
-    cap: Capability,
-    adapter: &Adapter,
-    sources: &[PathBuf],
-    rules_doc: &str,
-    own: &crate::base::Own,
-    to: Destination<'_>,
-    mounts: &mut Vec<Mount>,
-) -> Result<Vec<crate::hook::Dropped>> {
-    let mut dropped_hooks = Vec::new();
-    // Looked up here rather than threaded in, so the tool vocabulary — which
-    // lives on the adapter, not the binding — arrives without pushing this
-    // past the argument count clippy accepts. `plan` has already established
-    // the capability is supported; the error path exists because "the caller
-    // checked" is not something the type system carries.
-    let binding = adapter
-        .supports(cap)
-        .with_context(|| format!("{} declares no `{cap}` capability", adapter.name))?;
-    let Destination {
-        stage,
-        worktree,
-        staging,
-    } = to;
-    match binding.render {
-        // Union layers by entry name; later layers shadow earlier ones. Links
-        // point at each layer's *guest* mount path, so they are intentionally
-        // dangling on the host and correct inside the container. Mounting rather
-        // than copying keeps content live: edit a skill on the host and the
-        // running agent sees it.
-        Render::Dir => {
-            let dst = stage.join(cap.source());
-            if staging == Staging::Apply {
-                std::fs::create_dir_all(&dst)?;
-            }
-            for (i, src) in sources.iter().enumerate() {
+/// What staging needs that does not change from one capability to the next.
+///
+/// Five values, invariant across the six-capability loop, which is what a
+/// struct with a method is for. They were five parameters until `RepoPolicy`
+/// made a sixth, and `Destination`'s own comment already records that folding
+/// unrelated things into *it* was the wrong answer once — so the bundle is the
+/// staging context itself rather than a bag hung off the destination.
+struct Stager<'a> {
+    adapter: &'a Adapter,
+    rules_doc: &'a str,
+    own: &'a crate::base::Own,
+    repo: &'a crate::settings::RepoPolicy,
+    to: Destination<'a>,
+}
+
+impl Stager<'_> {
+    fn stage(
+        &self,
+        cap: Capability,
+        sources: &[PathBuf],
+        mounts: &mut Vec<Mount>,
+    ) -> Result<Vec<crate::hook::Dropped>> {
+        let Stager {
+            adapter,
+            rules_doc,
+            own,
+            repo,
+            to,
+        } = self;
+        let mut dropped_hooks = Vec::new();
+        // Looked up here rather than threaded in, so the tool vocabulary — which
+        // lives on the adapter, not the binding — arrives with the adapter it
+        // belongs to. `plan` has already established the capability is
+        // supported; the error path exists because "the caller checked" is not
+        // something the type system carries.
+        let binding = adapter
+            .supports(cap)
+            .with_context(|| format!("{} declares no `{cap}` capability", adapter.name))?;
+        let Destination {
+            stage,
+            worktree,
+            staging,
+        } = *to;
+        match binding.render {
+            // Union layers by entry name; later layers shadow earlier ones. Links
+            // point at each layer's *guest* mount path, so they are intentionally
+            // dangling on the host and correct inside the container. Mounting rather
+            // than copying keeps content live: edit a skill on the host and the
+            // running agent sees it.
+            Render::Dir => {
+                let dst = stage.join(cap.source());
+                if staging == Staging::Apply {
+                    std::fs::create_dir_all(&dst)?;
+                }
+                for (i, src) in sources.iter().enumerate() {
+                    mounts.push(Mount {
+                        host: src.clone(),
+                        guest: guest_layer(i, cap),
+                        read_only: true,
+                        file: false,
+                    });
+                    if staging == Staging::Skip {
+                        continue;
+                    }
+                    let Ok(entries) = std::fs::read_dir(src) else {
+                        continue;
+                    };
+                    for entry in entries.flatten() {
+                        let link = dst.join(entry.file_name());
+                        let _ = std::fs::remove_file(&link);
+                        symlink(&guest_layer(i, cap).join(entry.file_name()), &link)?;
+                    }
+                }
                 mounts.push(Mount {
-                    host: src.clone(),
-                    guest: guest_layer(i, cap),
+                    host: dst,
+                    guest: expand(&binding.path, GUEST_HOME),
                     read_only: true,
                     file: false,
                 });
-                if staging == Staging::Skip {
-                    continue;
-                }
-                let Ok(entries) = std::fs::read_dir(src) else {
-                    continue;
-                };
-                for entry in entries.flatten() {
-                    let link = dst.join(entry.file_name());
-                    let _ = std::fs::remove_file(&link);
-                    symlink(&guest_layer(i, cap).join(entry.file_name()), &link)?;
-                }
             }
-            mounts.push(Mount {
-                host: dst,
-                guest: expand(&binding.path, GUEST_HOME),
-                read_only: true,
-                file: false,
-            });
-        }
 
-        // Mounted read-only at each declared filename, which is why every
-        // harness's expected name can point at the same bytes.
-        //
-        // Written into the worktree instead, omh's staging was indistinguishable
-        // from the agent's work: a repo that tracks its own `CLAUDE.md` saw a
-        // permanent modification nobody made, and `s commit` carried omh's rules
-        // into the user's PR on top of the project's own conventions. A mount
-        // leaves the file on disk as the branch has it, so git has nothing to
-        // report. Read-only for the reason every other staged capability is: a
-        // file the agent can rewrite is not a profile, it is a suggestion.
-        Render::Concat => {
-            // `rules::compose` owns the join, because the document is more than
-            // the layers: the project's own file is read from the worktree
-            // before this mount hides it, and each section is labelled with
-            // where it came from.
-            let merged = rules_doc;
-            let file = stage.join(format!("{cap}.md"));
-            if staging == Staging::Apply {
-                std::fs::create_dir_all(stage)?;
-                std::fs::write(&file, merged).with_context(|| format!("staging {cap}"))?;
-            }
-            for target in std::iter::once(&binding.path).chain(binding.also.iter()) {
-                // Still `/work`-relative: the guest path is inside the worktree
-                // mount, and a `concat` target anywhere else would put the rules
-                // somewhere the harness does not read and nothing would say so.
-                let rel = target
-                    .strip_prefix("/work/")
-                    .with_context(|| format!("`concat` target {target} must live under /work/"))?;
+            // Mounted read-only at each declared filename, which is why every
+            // harness's expected name can point at the same bytes.
+            //
+            // Written into the worktree instead, omh's staging was indistinguishable
+            // from the agent's work: a repo that tracks its own `CLAUDE.md` saw a
+            // permanent modification nobody made, and `s commit` carried omh's rules
+            // into the user's PR on top of the project's own conventions. A mount
+            // leaves the file on disk as the branch has it, so git has nothing to
+            // report. Read-only for the reason every other staged capability is: a
+            // file the agent can rewrite is not a profile, it is a suggestion.
+            Render::Concat => {
+                // `rules::compose` owns the join, because the document is more than
+                // the layers: the project's own file is read from the worktree
+                // before this mount hides it, and each section is labelled with
+                // where it came from.
+                let merged = rules_doc;
+                let file = stage.join(format!("{cap}.md"));
                 if staging == Staging::Apply {
-                    place_destination(&worktree.join(rel))?;
+                    std::fs::create_dir_all(stage)?;
+                    std::fs::write(&file, merged).with_context(|| format!("staging {cap}"))?;
+                }
+                for target in std::iter::once(&binding.path).chain(binding.also.iter()) {
+                    // Still `/work`-relative: the guest path is inside the worktree
+                    // mount, and a `concat` target anywhere else would put the rules
+                    // somewhere the harness does not read and nothing would say so.
+                    let rel = target.strip_prefix("/work/").with_context(|| {
+                        format!("`concat` target {target} must live under /work/")
+                    })?;
+                    if staging == Staging::Apply {
+                        place_destination(&worktree.join(rel))?;
+                    }
+                    mounts.push(Mount {
+                        host: file.clone(),
+                        guest: PathBuf::from(target),
+                        read_only: true,
+                        file: true,
+                    });
+                }
+            }
+
+            // Everything else reshapes a merged canonical document.
+            _ => {
+                let file = stage.join(format!("{cap}.rendered"));
+                // Rendered even when skipped, so a dry run still surfaces a
+                // malformed mcp.json instead of deferring it to launch.
+                let rendered =
+                    crate::render::document(cap, binding, sources, own, repo, &adapter.tools)?;
+                dropped_hooks.extend(rendered.dropped);
+                if staging == Staging::Apply {
+                    std::fs::create_dir_all(stage)?;
+                    std::fs::write(&file, rendered.body)?;
                 }
                 mounts.push(Mount {
-                    host: file.clone(),
-                    guest: PathBuf::from(target),
+                    host: file,
+                    guest: expand(&binding.path, GUEST_HOME),
                     read_only: true,
                     file: true,
                 });
             }
         }
-
-        // Everything else reshapes a merged canonical document.
-        _ => {
-            let file = stage.join(format!("{cap}.rendered"));
-            // Rendered even when skipped, so a dry run still surfaces a
-            // malformed mcp.json instead of deferring it to launch.
-            let rendered = crate::render::document(cap, binding, sources, own, &adapter.tools)?;
-            dropped_hooks.extend(rendered.dropped);
-            if staging == Staging::Apply {
-                std::fs::create_dir_all(stage)?;
-                std::fs::write(&file, rendered.body)?;
-            }
-            mounts.push(Mount {
-                host: file,
-                guest: expand(&binding.path, GUEST_HOME),
-                read_only: true,
-                file: true,
-            });
-        }
+        Ok(dropped_hooks)
     }
-    Ok(dropped_hooks)
 }
 
 /// Put an empty file where a mount is about to land, if nothing is there yet.
@@ -549,18 +577,29 @@ mod tests {
     /// What omh contributes, from the manifest this repo ships. Every plan
     /// built here gets the real thing rather than an empty stand-in, because
     /// the hooks and rules sections are part of what a launch *is*.
-    fn own() -> crate::base::Own {
-        own_with(&Default::default())
+    /// What omh contributes and what this repo decided — the two inputs a plan
+    /// takes from outside, resolved together because a fixture that built one
+    /// without the other could say `codegraph` is off while its server is not.
+    fn decided() -> (crate::base::Own, crate::settings::RepoPolicy) {
+        decided_with(Default::default())
     }
 
     /// Every server the manifest names is treated as installed unless a case
     /// is about removal: `own` switches a feature off when its server is gone
     /// from the profile, and a fixture that declared none would silently
     /// disable everything.
-    fn own_with(off: &std::collections::BTreeSet<String>) -> crate::base::Own {
+    fn decided_with(
+        off: std::collections::BTreeSet<String>,
+    ) -> (crate::base::Own, crate::settings::RepoPolicy) {
         let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
         let installed = manifest.servers().into_keys().collect();
-        crate::base::own(&manifest, off, &installed).unwrap()
+        let own = crate::base::own(&manifest, &off, &installed).unwrap();
+        // Through the same constructor `settings::resolve` uses, so a fixture
+        // cannot hold a different opinion about which servers a feature owns.
+        (
+            own,
+            crate::settings::RepoPolicy::switching_off(&manifest, off),
+        )
     }
 
     struct Fx {
@@ -633,7 +672,8 @@ mod tests {
                 account_dir: None,
                 memory_bin,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .unwrap()
@@ -775,7 +815,8 @@ mod tests {
                 account_dir: Some(account.to_path_buf()),
                 memory_bin: None,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .unwrap()
@@ -1086,7 +1127,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: Some(bin),
                 base: None,
-                omh: own_with(&["memory".to_string()].into()),
+                omh: decided_with(["memory".to_string()].into()).0,
+                repo: decided_with(["memory".to_string()].into()).1,
             },
         )
         .unwrap();
@@ -1123,7 +1165,7 @@ mod tests {
             r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
         )
         .unwrap();
-        let own = own_with(&["codegraph".to_string()].into());
+        let (own, repo) = decided_with(["codegraph".to_string()].into());
 
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
@@ -1140,6 +1182,7 @@ mod tests {
                 memory_bin: None,
                 base: None,
                 omh: own,
+                repo,
             },
         )
         .unwrap();
@@ -1218,7 +1261,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .expect_err("a reserved name must not launch");
@@ -1291,7 +1335,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own_with(&["codegraph".to_string()].into()),
+                omh: decided_with(["codegraph".to_string()].into()).0,
+                repo: decided_with(["codegraph".to_string()].into()).1,
             },
         )
         .expect_err("a manifest name is omh's whether the feature is on or off");
@@ -1316,7 +1361,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .unwrap();
@@ -1467,7 +1513,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .unwrap();
@@ -1604,7 +1651,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .unwrap_err();
@@ -1652,7 +1700,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .unwrap();
@@ -1684,7 +1733,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .unwrap();
@@ -1727,7 +1777,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .unwrap();
@@ -1744,7 +1795,8 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own(),
+                omh: decided().0,
+                repo: decided().1,
             },
         )
         .unwrap();
@@ -1772,7 +1824,8 @@ mod tests {
             account_dir: None,
             memory_bin: None,
             base: None,
-            omh: own(),
+            omh: decided().0,
+            repo: decided().1,
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
@@ -1791,7 +1844,8 @@ mod tests {
             account_dir: None,
             memory_bin: None,
             base: None,
-            omh: own(),
+            omh: decided().0,
+            repo: decided().1,
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);

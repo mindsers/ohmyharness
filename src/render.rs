@@ -35,15 +35,17 @@ impl From<String> for Document {
 
 /// Render a capability into the shape this harness parses.
 ///
-/// `own` is what omh itself contributes and what this repo has switched off.
-/// It is not a layer: omh's hooks belong to no directory, and a server whose
-/// feature is disabled here is still in your `mcp.json` — the file is yours and
-/// is left exactly as you have it.
+/// Two inputs from outside, and they are deliberately two: `own` is what omh
+/// itself contributes, `repo` is what this checkout decided. Neither is a
+/// layer — omh's hooks belong to no directory, and a server whose feature is
+/// disabled here is still in your `mcp.json`, which is yours and is left
+/// exactly as you have it.
 pub fn document(
     cap: Capability,
     binding: &Binding,
     sources: &[PathBuf],
     own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
     tools: &BTreeMap<hook::Tool, String>,
 ) -> Result<Document> {
     match binding.render {
@@ -54,7 +56,7 @@ pub fn document(
             // repo switched off reported "not in your catalogue" about a
             // server that is plainly in it — advice pointing at
             // `omh config mcp ls`, which lists it, and no way forward.
-            for name in own.mcp_env.keys() {
+            for name in repo.mcp_env.keys() {
                 if !servers.contains_key(name) {
                     anyhow::bail!(
                         "[mcp.{name}.env] overrides a server that is not in your \
@@ -63,7 +65,7 @@ pub fn document(
                     );
                 }
             }
-            servers.retain(|name, _| !own.disabled_servers.contains(name));
+            servers.retain(|name, _| !repo.disabled_servers.contains(name));
             // Variable by variable, not entry by entry: a repo overriding one
             // token must not silently inherit the rest of a catalogue entry it
             // never saw. Named where it is applied rather than merged into the
@@ -72,7 +74,7 @@ pub fn document(
             // A server whose feature is off here is simply gone by now, so its
             // override is a no-op rather than an error: switching a feature off
             // is not a reason to make you delete a token you will want back.
-            for (name, env) in &own.mcp_env {
+            for (name, env) in &repo.mcp_env {
                 if let Some(server) = servers.get_mut(name) {
                     server.env.extend(env.clone());
                 }
@@ -485,6 +487,7 @@ mod tests {
             hooks_binding(&adapter),
             &[dir.path().join("h")],
             &Default::default(),
+            &Default::default(),
             &adapter.tools,
         )
         .unwrap();
@@ -522,6 +525,7 @@ mod tests {
             hooks_binding(&adapter),
             &[dir.path().join("h")],
             &Default::default(),
+            &Default::default(),
             &adapter.tools,
         )
         .unwrap();
@@ -547,7 +551,7 @@ mod tests {
                                         "env":{"LINEAR_API_KEY":"","REGION":"eu"}}}}"#,
         );
 
-        let own = crate::base::Own {
+        let repo = crate::settings::RepoPolicy {
             mcp_env: BTreeMap::from([(
                 "linear".to_string(),
                 BTreeMap::from([("LINEAR_API_KEY".to_string(), "secret".to_string())]),
@@ -559,7 +563,8 @@ mod tests {
             Capability::Mcp,
             adapter.supports(Capability::Mcp).unwrap(),
             &[mcp],
-            &own,
+            &Default::default(),
+            &repo,
             &adapter.tools,
         )
         .unwrap();
@@ -580,7 +585,7 @@ mod tests {
     fn an_override_for_a_server_that_is_not_installed_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let mcp = file(dir.path(), "mcp.json", r#"{"mcpServers":{}}"#);
-        let own = crate::base::Own {
+        let repo = crate::settings::RepoPolicy {
             mcp_env: BTreeMap::from([("linear".to_string(), BTreeMap::new())]),
             ..Default::default()
         };
@@ -589,7 +594,8 @@ mod tests {
             Capability::Mcp,
             adapter.supports(Capability::Mcp).unwrap(),
             &[mcp],
-            &own,
+            &Default::default(),
+            &repo,
             &adapter.tools,
         )
         .unwrap_err();
@@ -666,6 +672,7 @@ mod tests {
             Capability::Skills,
             skills,
             &[],
+            &Default::default(),
             &Default::default(),
             &adapter.tools,
         )

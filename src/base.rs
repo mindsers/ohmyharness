@@ -729,11 +729,19 @@ fn note_taking() -> String {
     )
 }
 
-/// What omh itself contributes to a session, once this repo has had its say.
+/// What omh itself contributes to a session — generated from the manifest, and
+/// nothing else.
 ///
-/// Resolved from the manifest by the caller and handed to `container::plan`,
-/// the rule `memory_bin` and `base` already follow: `plan` stays pure given a
-/// temp filesystem, and a probe inside it is a probe no test can reach.
+/// Resolved by the caller and handed to `container::plan`, the rule
+/// `memory_bin` and `base` already follow: `plan` stays pure given a temp
+/// filesystem, and a probe inside it is a probe no test can reach.
+///
+/// It used to carry `disabled_servers` and `mcp_env` as well, on the argument
+/// that both are decisions about the rendered document arriving from outside
+/// `plan`. True, and not enough — they are decisions *this repo* made, which is
+/// the opposite of what this type's name claims, and the moment a third one
+/// arrived the type was two things wearing one word. They live in
+/// [`crate::settings::RepoPolicy`] now, and the two travel side by side.
 ///
 /// Empty is a legitimate value — every feature switched off. What keeps a
 /// caller from shipping an empty one *by accident* is `container::Options`,
@@ -745,22 +753,6 @@ fn note_taking() -> String {
 pub struct Own {
     pub hooks: Vec<Hook>,
     pub sections: Vec<Section>,
-    /// Servers to drop from the rendered document even though `mcp.json` still
-    /// lists them. The feature is off *here*; nothing was uninstalled, and the
-    /// file is left exactly as the user has it.
-    pub disabled_servers: BTreeSet<String>,
-    /// Per-repo MCP environment, by server name, from `[mcp.<name>.env]`.
-    ///
-    /// Not omh's contribution but the repo's, and here for the reason
-    /// `disabled_servers` is: both are decisions about the rendered document
-    /// that come from settings rather than from a profile source, and both have
-    /// to travel to `plan` rather than be probed inside it.
-    ///
-    /// An override rather than a redeclaration, which is the whole point: a
-    /// repo used to hold a token by copying the entire server entry into its
-    /// own `mcp.json`, so a catalogue fix never reached it and the copy was
-    /// invisible until it drifted.
-    pub mcp_env: BTreeMap<String, BTreeMap<String, String>>,
     /// Every hook name the manifest owns, whether or not its feature is on.
     ///
     /// A file in a layer answering to one of these is never read. With the
@@ -833,17 +825,10 @@ pub fn own(
     let mut own = Own {
         hooks: Vec::new(),
         sections: Vec::new(),
-        disabled_servers: manifest
-            .entries
-            .iter()
-            .filter(|e| matches!(e.kind, Kind::Mcp) && off.contains(&e.feature))
-            .map(|e| e.name.clone())
-            .collect(),
         // Every hook the manifest owns, on or off — which is why this is built
         // from the manifest rather than from `hooks()`. A file answering to one
         // of these is never read, and with the feature off there would be
         // nothing to override it with.
-        mcp_env: BTreeMap::new(),
         reserved: manifest
             .entries
             .iter()

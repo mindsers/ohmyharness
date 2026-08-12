@@ -518,6 +518,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
         .context("no adapters installed — run `omh init`")?;
     let adapter = Adapter::find(&paths.adapters(), &harness)?;
+    let (own, repo) = resolved(&paths)?;
 
     std::fs::create_dir_all(paths.worktrees())?;
     let id = session::pick(&paths.worktrees(), id, false);
@@ -544,7 +545,8 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             account_dir: account,
             memory_bin: memory::deliver::available(&paths),
             base: Some(session::default_branch(&paths.repo)),
-            omh: omh_own(&paths)?,
+            omh: own,
+            repo,
         },
     )?;
 
@@ -778,8 +780,8 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
 
     // Resolved once and used for both the checks and the plan below, so the
     // probe cannot check a session different from the one it launches.
-    let own = omh_own(&paths)?;
-    let mut checks = doctor::checks(&profile, &adapter, &own)?;
+    let (own, repo) = resolved(&paths)?;
+    let mut checks = doctor::checks(&profile, &adapter, &own, &repo)?;
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
@@ -795,7 +797,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     // deliberately did not make.
     if let Some(server) = declared
         .get(memory::tools::SERVER_KEY)
-        .filter(|_| !own.disabled_servers.contains(memory::tools::SERVER_KEY))
+        .filter(|_| !repo.disabled_servers.contains(memory::tools::SERVER_KEY))
     {
         checks.extend(doctor::memory_checks(server));
     }
@@ -818,6 +820,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         // the harness reads a document nobody will be given.
         base: Some(session::default_branch(&paths.repo)),
         omh: own,
+        repo,
     };
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
@@ -1595,6 +1598,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     // plan needs it too: it is where the project's own rules come from when the
     // worktree has none of its own.
     let base = session::default_branch(&paths.repo);
+    let (own, repo) = resolved(&paths)?;
 
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
@@ -1611,7 +1615,8 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         account_dir: account,
         memory_bin: memory::deliver::available(&paths),
         base: Some(base.clone()),
-        omh: omh_own(&paths)?,
+        omh: own,
+        repo,
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
@@ -1683,22 +1688,25 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// What omh contributes to a session here: the hooks and rules sections the
-/// base manifest generates, minus the features this repo switched off.
+/// The two things a launch needs from outside the plan: what omh contributes,
+/// and what this repo decided.
 ///
 /// Resolved by the caller of `container::plan` rather than inside it, the rule
 /// `memory_bin` and `base` already follow — the manifest is a file, and a probe
 /// inside `plan` is a probe no test can reach.
-fn omh_own(paths: &Paths) -> Result<base::Own> {
+///
+/// Returned as a pair rather than merged. They arrive together and travel
+/// together, which is exactly what made one struct tempting, but "omh generated
+/// this" and "this repo asked for this" are the two answers `omh why` exists to
+/// keep apart — and a type that holds both cannot help blurring them.
+fn resolved(paths: &Paths) -> Result<(base::Own, settings::RepoPolicy)> {
     let manifest = base::Manifest::load_dir(&paths.base())?;
-    let settings = settings::resolve(paths, &manifest)?;
+    let repo = settings::resolve(paths, &manifest)?;
     // What the catalogue still declares, so removing a server takes its feature
     // with it. `omh config mcp rm codegraph` edits `mcp.json` and nothing
     // else, so this read is where that instruction is kept or broken.
     let installed = config::servers(paths)?.into_iter().map(|s| s.key).collect();
-    let mut own = base::own(&manifest, &settings.off, &installed)?;
-    own.mcp_env = settings.mcp_env;
-    Ok(own)
+    Ok((base::own(&manifest, &repo.off, &installed)?, repo))
 }
 
 /// `omh why <thing>` — who put this here, and on what grounds.
@@ -2120,6 +2128,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     // A throwaway: logging in must not leave a branch behind.
     let session = Session::scratch(paths.scratch("auth"), "auth".into());
     session.ensure(&paths.repo, "")?;
+    let (own, repo) = resolved(&paths)?;
 
     let plan = container::plan(
         &paths,
@@ -2137,7 +2146,8 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
             // `session.ensure(&paths.repo, "")`: a login is not work on the
             // project, so there are no project rules to look up.
             base: None,
-            omh: omh_own(&paths)?,
+            omh: own,
+            repo,
         },
     )?;
     plan.validate(&backend.caps())?;
@@ -2385,17 +2395,17 @@ mod tests {
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");
 
-    /// `omh_own` is the wiring between the manifest and every launch, and
-    /// nothing reached it: replacing its body with `Ok(base::Own::default())`
-    /// — omh contributing no hooks, no rules sections, nothing — left the
-    /// whole suite green.
+    /// `resolved` is the wiring between the manifest and every launch, and
+    /// nothing reached it: replacing its body with a pair of defaults — omh
+    /// contributing no hooks, no rules sections, nothing — left the whole suite
+    /// green.
     ///
     /// That is the failure `tests/cli.rs` says in its own module doc it exists
     /// to notice: a guard correct while the wiring that reaches it is missing.
-    /// `container` and `doctor` each build an `Own` in their fixtures, so they
+    /// `container` and `doctor` each build the pair in their fixtures, so they
     /// prove a plan handles one and say nothing about whether one arrives.
     #[test]
-    fn omh_own_resolves_the_manifest_and_reads_this_repos_settings() {
+    fn resolved_reads_the_manifest_and_this_repos_settings() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
             root: dir.path().join("home"),
@@ -2418,7 +2428,7 @@ mod tests {
             r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"}}}"#,
         );
 
-        let own = omh_own(&paths).unwrap();
+        let (own, _) = resolved(&paths).unwrap();
         assert!(
             !own.hooks.is_empty() && !own.sections.is_empty(),
             "a launch must be given what the manifest ships"
@@ -2433,7 +2443,7 @@ mod tests {
             paths.repo.join(".omh/settings.toml"),
             "[omh]\ncodegraph = false\n\n[mcp.memory.env]\nOMH_TEST = \"seen\"\n",
         );
-        let off = omh_own(&paths).unwrap();
+        let (off, policy) = resolved(&paths).unwrap();
         assert!(
             !off.hooks.iter().any(|h| h.name.starts_with("graph-")),
             "and `[omh]` in this repo has to reach it: {:?}",
@@ -2448,8 +2458,16 @@ mod tests {
         // between them was asserted nowhere, so deleting it left the suite
         // green and a token reached no server.
         assert_eq!(
-            off.mcp_env["memory"]["OMH_TEST"], "seen",
+            policy.mcp_env["memory"]["OMH_TEST"], "seen",
             "a per-repo MCP environment has to reach the plan too"
+        );
+        // And the half that used to hang off `Own`: switching a feature off is
+        // what drops its server from the document, and it is a fact about this
+        // repo rather than about what omh generates.
+        assert!(
+            policy.disabled_servers.contains("codegraph"),
+            "the feature's server travels with the feature: {:?}",
+            policy.disabled_servers
         );
     }
 

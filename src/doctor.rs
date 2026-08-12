@@ -101,7 +101,12 @@ pub fn credential_checks(adapter: &Adapter) -> Vec<Check> {
 }
 
 /// What must be true inside the sandbox, given this profile and adapter.
-pub fn checks(profile: &Profile, adapter: &Adapter, own: &crate::base::Own) -> Result<Vec<Check>> {
+pub fn checks(
+    profile: &Profile,
+    adapter: &Adapter,
+    own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
+) -> Result<Vec<Check>> {
     let mut out = Vec::new();
     for capability in Capability::ALL {
         let sources = profile.sources(capability)?;
@@ -139,7 +144,7 @@ pub fn checks(profile: &Profile, adapter: &Adapter, own: &crate::base::Own) -> R
             Render::Concat => Expect::NonEmptyFile,
             Render::Dir => Expect::Entries(entry_names(&sources)),
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
-                Expect::Mentions(server_names(&sources, own))
+                Expect::Mentions(server_names(&sources, repo))
             }
             Render::ClaudeSettings => Expect::NonEmptyFile,
         };
@@ -180,12 +185,12 @@ fn entry_names(sources: &[PathBuf]) -> Vec<String> {
 /// A server whose feature is off here is deliberately left out of that
 /// document. Demanding it makes `omh doctor` fail forever and blame the
 /// harness for obeying, which is the opposite of what this command is for.
-fn server_names(sources: &[PathBuf], own: &crate::base::Own) -> Vec<String> {
+fn server_names(sources: &[PathBuf], repo: &crate::settings::RepoPolicy) -> Vec<String> {
     crate::render::parse_layers(sources)
         .map(|servers| {
             servers
                 .into_keys()
-                .filter(|name| !own.disabled_servers.contains(name))
+                .filter(|name| !repo.disabled_servers.contains(name))
                 .collect()
         })
         .unwrap_or_default()
@@ -319,21 +324,36 @@ mod tests {
         }
     }
 
-    fn own() -> crate::base::Own {
-        own_with(&Default::default())
+    /// Called twice per `checks` call, once for each half, which is why the
+    /// manifest behind it is read once and leaked.
+    fn decided() -> (crate::base::Own, crate::settings::RepoPolicy) {
+        decided_with(Default::default())
+    }
+
+    fn base_manifest() -> &'static crate::base::Manifest {
+        static CELL: std::sync::OnceLock<crate::base::Manifest> = std::sync::OnceLock::new();
+        CELL.get_or_init(|| {
+            crate::base::Manifest::load_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/base")))
+                .unwrap()
+        })
     }
 
     /// Every server the manifest names counts as installed: `own` also
     /// switches a feature off when its server is gone from the profile, and a
     /// fixture declaring none would disable everything for the wrong reason.
-    fn own_with(off: &std::collections::BTreeSet<String>) -> crate::base::Own {
-        let manifest = crate::base::Manifest::load_dir(Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/base"
-        )))
-        .unwrap();
+    ///
+    /// The pair together, because a fixture that named a feature off without
+    /// the servers it owns would let a check pass on a plan omh cannot build.
+    fn decided_with(
+        off: std::collections::BTreeSet<String>,
+    ) -> (crate::base::Own, crate::settings::RepoPolicy) {
+        let manifest = base_manifest();
         let installed = manifest.servers().into_keys().collect();
-        crate::base::own(&manifest, off, &installed).unwrap()
+        let own = crate::base::own(manifest, &off, &installed).unwrap();
+        (
+            own,
+            crate::settings::RepoPolicy::switching_off(manifest, off),
+        )
     }
 
     fn adapter(name: &str) -> Adapter {
@@ -352,11 +372,12 @@ mod tests {
     #[test]
     fn a_capability_the_profile_does_not_source_is_still_checked() {
         let fx = fixture();
-        let names: Vec<String> = checks(&fx.profile, &adapter("claude"), &own())
-            .unwrap()
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
+        let names: Vec<String> =
+            checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
         assert!(
             names.iter().any(|n| n == "hooks"),
             "omh's own hooks are mounted with no hooks layer to source them: {names:?}"
@@ -374,9 +395,9 @@ mod tests {
     #[test]
     fn a_server_this_repo_switched_off_is_not_demanded() {
         let fx = fixture();
-        let off = own_with(&["codegraph".to_string()].into());
+        let (own, off) = decided_with(["codegraph".to_string()].into());
 
-        let mcp = checks(&fx.profile, &adapter("claude"), &off)
+        let mcp = checks(&fx.profile, &adapter("claude"), &own, &off)
             .unwrap()
             .into_iter()
             .find(|c| c.name == "mcp")
@@ -391,7 +412,7 @@ mod tests {
     #[test]
     fn every_declared_capability_is_checked() {
         let fx = fixture();
-        let got: Vec<_> = checks(&fx.profile, &adapter("claude"), &own())
+        let got: Vec<_> = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1)
             .unwrap()
             .into_iter()
             .map(|c| c.name)
@@ -408,11 +429,16 @@ mod tests {
     #[test]
     fn capabilities_the_harness_cannot_express_are_not_checked() {
         let fx = fixture();
-        let caps: Vec<String> = checks(&fx.profile, &adapter("opencode"), &own())
-            .unwrap()
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
+        let caps: Vec<String> = checks(
+            &fx.profile,
+            &adapter("opencode"),
+            &decided().0,
+            &decided().1,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
         assert!(
             !caps.iter().any(|c| c == "hooks"),
             "opencode declares no hooks capability"
@@ -429,7 +455,7 @@ mod tests {
     #[test]
     fn checks_target_guest_paths_only() {
         let fx = fixture();
-        for check in checks(&fx.profile, &adapter("claude"), &own()).unwrap() {
+        for check in checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap() {
             let p = check.guest.to_string_lossy().to_string();
             assert!(
                 p.starts_with("/work") || p.starts_with(GUEST_HOME),
@@ -441,7 +467,7 @@ mod tests {
     #[test]
     fn content_checks_name_what_must_be_present() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &own()).unwrap();
+        let cs = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap();
 
         let skills = cs.iter().find(|c| c.name == "skills").unwrap();
         assert_eq!(skills.expect, Expect::Entries(vec!["graphify".into()]));
@@ -473,7 +499,7 @@ mod tests {
     #[test]
     fn the_probe_reports_one_line_per_check() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &own()).unwrap();
+        let cs = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap();
         let script = probe_script(&cs);
         for c in &cs {
             assert!(
