@@ -1067,11 +1067,16 @@ pub fn templates(paths: &Paths) -> Result<BTreeMap<Kind, String>> {
             // knowing it happened.
             let stale = paths.repo.join(".omh").join("keys.toml");
             if stale.exists() {
-                anyhow::bail!(
-                    "{} is where key templates used to live; they are read from {} now.                      Renaming the file is the whole migration — but do it rather than                      leaving both, because the shipped defaults would silently re-key                      every note written from here on.",
-                    stale.display(),
-                    path.display()
-                );
+                // Built line by line rather than as one `\`-continued literal.
+                // `cargo fmt` re-indents a continued string and the leading
+                // whitespace survives into the message, so the user reads a
+                // wall of spaces mid-sentence. It has happened twice here.
+                let mut msg = format!("{} is where key templates used to live.\n", stale.display());
+                msg.push_str(&format!("They are read from {} now.\n", path.display()));
+                msg.push_str("Rename it rather than leaving both: the shipped defaults ");
+                msg.push_str("would silently re-key every note written from here on, ");
+                msg.push_str("and every existing key would stop being derivable.");
+                anyhow::bail!(msg);
             }
             parse_templates(SHIPPED_KEYS)
         }

@@ -1387,14 +1387,17 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
 
 fn show_config(cwd: &std::path::Path, section: Option<&str>) -> Result<()> {
     let paths = Paths::discover(cwd)?;
+    // `settings` rather than `policy`: the file is `settings.toml` now, and a
+    // section named after a file that no longer exists is a section nobody can
+    // look up.
     let sections: Vec<(&str, Vec<config::Setting>)> = match section {
-        Some("policy") => vec![("policy", config::policy(&paths)?)],
+        Some("settings") => vec![("settings", config::policy(&paths)?)],
         Some("mcp") => vec![("mcp", config::servers(&paths)?)],
         None => vec![
-            ("policy", config::policy(&paths)?),
+            ("settings", config::policy(&paths)?),
             ("mcp", config::servers(&paths)?),
         ],
-        Some(other) => anyhow::bail!("unknown section `{other}` — expected policy or mcp"),
+        Some(other) => anyhow::bail!("unknown section `{other}` — expected settings or mcp"),
     };
 
     for (name, settings) in sections {
@@ -1411,7 +1414,13 @@ fn show_config(cwd: &std::path::Path, section: Option<&str>) -> Result<()> {
                 let names: Vec<_> = s.shadows.iter().map(|l| l.to_string()).collect();
                 format!(" (overrides {})", names.join(", "))
             };
-            println!("  {:<16} {:<28} ← {}{shadowed}", s.key, s.value, s.layer);
+            // Content says whose it is; a setting says which file decided it.
+            let from = if name == "settings" {
+                s.layer.to_string()
+            } else {
+                s.layer.whose().to_string()
+            };
+            println!("  {:<16} {:<28} ← {from}{shadowed}", s.key, s.value);
         }
         println!();
     }

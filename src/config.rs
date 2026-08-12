@@ -77,6 +77,21 @@ impl Layer {
         }
     }
 
+    /// Whose this is, for reporting *content* rather than a setting.
+    ///
+    /// The layer names are exactly right for a setting — they are what `--layer`
+    /// takes, and personal/shared/local says which of three files decided a
+    /// value. They are wrong for content, where there is one catalogue and one
+    /// repo tier: `omh why rust-test` reporting a hook this project committed
+    /// as "installed shared" names a layer that no longer describes anything.
+    pub fn whose(&self) -> &'static str {
+        match self {
+            Self::Personal => "your catalogue",
+            Self::Shared => "this repo",
+            Self::Local => "local",
+        }
+    }
+
     /// Only the shared layer is under version control.
     pub fn is_committed(&self) -> bool {
         matches!(self, Self::Shared)

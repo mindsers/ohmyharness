@@ -338,7 +338,7 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
             feature(catalog, entry, &mut out);
             costs(entry, version, &mut out);
             alternatives(entry, &mut out);
-            out.push_str(&format!("  {:<11} {}\n", "installed", yours.layer));
+            out.push_str(&format!("  {:<11} {}\n", "installed", yours.layer.whose()));
             out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
         }
         Verdict::Differs {
@@ -353,7 +353,9 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
             out.push_str(&format!("  {:<11} {ships}\n", "omh ships"));
             out.push_str(&format!(
                 "  {:<11} {}   in {}\n",
-                "on disk", yours.value, yours.layer
+                "on disk",
+                yours.value,
+                yours.layer.whose()
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
             feature(catalog, entry, &mut out);
@@ -385,8 +387,8 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
             match stale {
                 Some(stale) => {
                     out.push_str(&format!(
-                        "\n  A file of this name is in your {} layer and is no longer read.\n",
-                        stale.layer
+                        "\n  A file of this name is in {} and is no longer read.\n",
+                        stale.layer.whose()
                     ));
                     out.push_str("  `init` seeded these before omh generated them, so editing\n");
                     out.push_str("  it changes nothing.\n");
@@ -417,7 +419,7 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
                 yours.key
             ));
             out.push_str(&format!("  {:<11} {from}\n", "derived from"));
-            out.push_str(&format!("  {:<11} {}\n", "installed", yours.layer));
+            out.push_str(&format!("  {:<11} {}\n", "installed", yours.layer.whose()));
             out.push_str(
                 "\n  Not a curated choice — it follows from what your repo is,\n  \
                  so there is nothing to argue about. Edit or delete it freely;\n  \
@@ -428,7 +430,7 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
         // this and must not lend it reasoning it does not have.
         Verdict::Yours { yours } => {
             out.push_str(&format!("{} — your choice, not omh's\n\n", yours.key));
-            out.push_str(&format!("  {:<11} {}\n", "added in", yours.layer));
+            out.push_str(&format!("  {:<11} {}\n", "added in", yours.layer.whose()));
             let shadowed = if yours.shadows.is_empty() {
                 "nothing".to_string()
             } else {
@@ -621,7 +623,7 @@ mod tests {
         );
         let out = render(&c, &verdict, "2026.08");
         assert!(
-            out.contains("shared") && out.contains("no longer read"),
+            out.contains("this repo") && out.contains("no longer read"),
             "the dead file is named rather than ignored: {out}"
         );
     }
