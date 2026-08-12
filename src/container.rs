@@ -741,6 +741,41 @@ mod tests {
         );
     }
 
+    /// Read the document staged for the `rules` capability, as the agent gets it.
+    fn composed_rules(p: &Plan) -> String {
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new("/work/CLAUDE.md"))
+            .expect("claude stages rules onto /work/CLAUDE.md");
+        std::fs::read_to_string(&mount.host).unwrap()
+    }
+
+    /// The bug: surviving on disk is not the same as reaching the agent.
+    ///
+    /// `a_repos_own_rules_file_survives_staging` proves the file is intact for
+    /// the user's diff, and that was mistaken for the whole obligation. The
+    /// read-only mount still hides it for the length of the session, so a repo
+    /// that writes down its own conventions runs an agent that has never read
+    /// them — omh replaced the project's rules with its own instead of adding to
+    /// them.
+    #[test]
+    fn the_repos_own_rules_reach_the_agent() {
+        let fx = fixture();
+        std::fs::write(
+            fx.session.worktree.join("AGENTS.md"),
+            "always run cargo fmt before finishing",
+        )
+        .unwrap();
+
+        let body = composed_rules(&plan_for(&fx, "claude"));
+
+        assert!(
+            body.contains("always run cargo fmt before finishing"),
+            "the project's own rules must reach the agent, got:\n{body}"
+        );
+    }
+
     /// `--dry-run` prints the plan and writes nothing, placeholders included.
     #[test]
     fn a_dry_run_leaves_no_placeholder_behind() {
