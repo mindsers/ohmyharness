@@ -51,7 +51,7 @@ codegraph — omh's choice, in the base set since 2026.06
   instead of  gitnexus            PolyForm-Noncommercial licence
               codegraphcontext    needs a Neo4j service running
               @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
-  installed   shared
+  installed   this repo
   remove      omh config mcp rm codegraph
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
@@ -75,7 +75,7 @@ config, so an omh entry and one you added are byte-identical in the same file.
 `why` recovers the difference by comparing against the manifest — derived, never
 recorded, so there is no marker to go stale.
 
-Six answers, and the two negatives matter most:
+Seven answers, and the two negatives matter most:
 
 - **your choice** — omh offers **no rationale**. A tool that answers "because it
   is in the base set" about something you added is lying about its own
@@ -84,7 +84,12 @@ Six answers, and the two negatives matter most:
   is omh's writing but not omh's opinion. Disowning it would be the same false
   claim pointing the other way.
 
-A third: **not what omh ships now**. `init` seeds your profile once and never
+A third: **omh's own, generated at launch** — the hooks and rules sections the
+base manifest produces. They are not files anywhere, which is what lets a fix
+reach a repo initialised a year ago, and it means there is nothing of yours to
+compare: a file of that name is a leftover, and `omh why` names it as one.
+
+A fourth: **not what omh ships now**. `init` seeds what it seeds once and never
 rewrites it, while the shipped baseline moves every release — so omh genuinely
 cannot tell an edit from an upgrade, and says so rather than picking the
 accusing guess. An earlier version called this *"modified by you"* and told

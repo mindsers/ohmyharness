@@ -16,8 +16,11 @@ these, the reason is what you need to argue with.
 | IDE access | **SSH into the session** | one dependency tree, shared with the agent |
 | Untracked files | **`carry_in` allowlist** | worktrees are pure git; secrets enter only by declaration |
 | Capability floor | **superset, adapters degrade** | omh must never cost you a feature you already had |
-| Profile scope | **3 layers: personal / shared / local** | team sharing without leaking secrets |
+| Content scope | **one personal catalogue** | "where is this skill" had three answers, and a union can add but never subtract |
+| Repo content | **hooks, and nothing else** | a hook binds to a repo's commands; a skill is a way you work |
+| Settings scope | **3 layers: personal / shared / local** | a machine-wide preference and a one-repo exception are both real |
 | Write default | **the gitignored layer** | a mistyped key must not be committable |
+| Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
 
 Each is expanded where it applies: [architecture](architecture.md) for runtime
 and images, [sessions](../sessions.md) for the session model and persistence,

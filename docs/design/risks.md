@@ -45,7 +45,7 @@ forget that you are both in there.
 
 ## Operational
 
-**9. Sandbox sprawl.** One container per session. `policy.idle_timeout` stops
+**9. Sandbox sprawl.** One container per session. `idle_timeout` stops
 sessions nobody has used, on the next launch — but it is **unset by default**,
 so sprawl is opt-out rather than prevented, and a machine that never launches
 again never reaps.

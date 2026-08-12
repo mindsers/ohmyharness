@@ -65,6 +65,72 @@ Recorded, not built: a catalogue entry could carry a `source` and `omh sync`
 could fetch the missing ones, which restores team sharing without putting
 content back in the repo.
 
+## Writing a hook
+
+A hook is the one kind of content a repo can declare, and the only thing omh
+carries that *executes*. It goes in `<repo>/.omh/hooks/<name>.json` if it needs
+to know which repo it is in, and in `~/.omh/hooks/` if it works anywhere.
+
+**You write what you want; the adapter says how this harness spells it.**
+
+```json
+{ "on": "turn-end", "run": "cargo test" }
+```
+
+```json
+{ "on": "before-tool", "tools": ["read"],
+  "when": "[ \"$(wc -c < \"$OMH_TOOL_FILE\")\" -gt 8000 ]",
+  "inject": "$OMH_TOOL_FILE is large — ask for one symbol instead." }
+```
+
+| Field | Meaning |
+|---|---|
+| `on` | `session-start` · `turn-end` · `before-tool` · `after-tool` |
+| `tools` | `edit` · `read` · `shell` · `search`. Empty means every tool |
+| `when` | a shell predicate; non-zero keeps the hook silent |
+| `capture` | a command whose output binds to `$OMH_CAPTURE` |
+| `run` | executes; output ignored |
+| `inject` | text into the agent's context |
+
+Exactly one of `run` or `inject`. `capture` needs `inject` — collecting output
+nobody reads says nothing. A hook wanting a moment, tool or field this harness
+has no word for is **dropped by name at launch**, saying what it asked for; the
+rest still ship.
+
+### What the payload gives you
+
+`$OMH_TOOL_FILE` and `$OMH_TOOL_COMMAND` are the tool call, in omh's words.
+Mention one in any body and omh reads it for you — `${OMH_TOOL_FILE:-none}`
+counts too. Mention neither and your hook pays for nothing, which matters:
+`before-tool` on `read` fires on the most frequent tool there is.
+
+### Two rules about `inject`
+
+It is prose that reaches a shell, and that combination fails quietly, so both
+are refused when the file is read rather than discovered at runtime:
+
+- **every `$` must name a variable.** A bare one expands to nothing and your
+  sentence arrives with a hole in it, while every check on the text still
+  passes. Write `$$` for a literal dollar.
+- **no `$(…)`.** Running a command from inside a sentence is what `capture` is
+  for.
+
+### Degrade to a no-op, never to an error
+
+A catalogue hook runs in repos it was never tested against. `graph-refresh`
+ends in `|| true` so a missing indexer cannot fail somebody's turn; `when`
+carries the rest. A hook that breaks a turn gets deleted, and then it protects
+nobody.
+
+### Names omh ships are omh's
+
+`graph-orient`, `graph-first`, `graph-read`, `graph-refresh` and
+`git-unavailable` are generated from the [base set](design/base-set.md), not
+files. A hook file answering to one of those names is an **error naming both**
+— it would not override omh's, and it would not run, and a hook that is
+committed, reviewed and silently inert is worse than one that refuses to start.
+To be rid of omh's, switch the feature off with `[omh]`.
+
 ## Settings, and their three layers
 
 Content has one home; **settings** keep their layers, because a setting has one

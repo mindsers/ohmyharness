@@ -46,12 +46,15 @@ for. Four hooks and a section of the rules are what make this a base-set entry
 rather than an installed package — and all six are one feature, `codegraph`,
 removed and disabled together.
 
-| Hook | Event | Cost | Buys |
+| Hook | Fires | Cost | Buys |
 |---|---|---|---|
-| `graph-orient` | `SessionStart` | 2,300 B per context rebuild | modules, layers, boundaries, entry points |
-| `graph-first` | `PreToolUse` Grep\|Glob | 243 B per grep¹ | structural questions in one call |
-| `graph-read` | `PreToolUse` Read | 0 unless it speaks | **1,511 bytes** for one symbol instead of a whole module |
-| `graph-refresh` | `Stop` | 0.14s per turn | a graph describing the code as it is *now* |
+| `graph-orient` | `session-start` | 2,300 B per context rebuild | modules, layers, boundaries, entry points |
+| `graph-first` | `before-tool`, `search` | 243 B per grep¹ | structural questions in one call |
+| `graph-read` | `before-tool`, `read` | 0 unless it speaks | **1,511 bytes** for one symbol instead of a whole module |
+| `graph-refresh` | `turn-end` | 0.14s per turn | a graph describing the code as it is *now* |
+
+Those are omh's words, not a harness's — see [writing a hook](configuration.md#writing-a-hook).
+What `session-start` is called inside Claude Code is the adapter's business.
 
 ¹ For a `ohmyharness-s01`-length project name, which the nudge interpolates
 twice — the figure moves two bytes per character of `<repo>-<session>`.

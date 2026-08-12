@@ -202,7 +202,7 @@ settings:
   idle_timeout     30m                ← personal
 
 mcp:
-  codegraph        codebase-memory-mcp  ← shared
+  codegraph        codebase-memory-mcp  ← your catalogue
 ```
 
 Writes default to the **gitignored** layer, so a mistyped API key can't be
@@ -265,7 +265,7 @@ missing map entry, not special-case logic, and it is announced once:
 
 ```console
 $ omh opencode
-omh: opencode on omh/s01 — dropped 1 subagents, 2 hooks (unsupported)
+omh: opencode on omh/s01 — dropped 1 subagents, 7 hooks (unsupported)
 ```
 
 Editors work the same way — `~/.omh/editors/zed.toml` is four lines.
@@ -334,7 +334,7 @@ reads:
 $ omh doctor
 omh doctor: claude (in omh/claude:2133265d, account personal)
 
-  ✓ AGENTS     /work/CLAUDE.md
+  ✓ rules      /work/CLAUDE.md
   ✓ skills     /home/agent/.claude/skills
   ✓ mcp        /home/agent/.mcp.json
   ✓ commands   /home/agent/.claude/commands
@@ -391,7 +391,7 @@ Full docs live in [`docs/`](docs/README.md).
 | | |
 |---|---|
 | [Getting started](docs/getting-started.md) | install, `omh init`, your first session |
-| [Commands](docs/commands.md) · [Configuration](docs/configuration.md) | the surface, and the three profile layers |
+| [Commands](docs/commands.md) · [Configuration](docs/configuration.md) | the surface, and the catalogue, settings and their layers |
 | [Sessions](docs/sessions.md) · [Accounts](docs/accounts.md) · [Editors](docs/editors.md) | how the sandbox, logins and IDE attach work |
 | [Code graph](docs/code-graph.md) · [Troubleshooting](docs/troubleshooting.md) | the graph and its hooks; `omh doctor` |
 | [Design](docs/README.md#understanding-omh) | the thesis, every decision with its reasoning, and an honest record of what verification cost |

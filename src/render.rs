@@ -261,19 +261,17 @@ fn translate(
     Ok((rendered, dropped))
 }
 
-/// Union by filename across layers; later layers shadow earlier ones.
+/// Union by name across the catalogue and the repo; the repo's shadow yours.
 ///
-/// A file answering to a manifest name is **never read** — see `Own::reserved`.
-/// Read-and-then-override is not enough: with the feature off there is nothing
-/// to override it with, and a repo initialised before generation still has the
-/// five seeded files, so switching a feature off would leave it running.
+/// A file answering to a manifest name is an **error naming both** — see
+/// `Own::reserved`. Read-and-then-override would not be enough even if it were
+/// wanted: with the feature off there is nothing to override it with, so the
+/// file would simply go on running.
 ///
-/// omh's own are inserted after the layers, but that ordering is not what makes
-/// them win. They are generated from the manifest and belong to no layer, which
-/// is the point: a hook you can edit is a hook omh can never ship a fix to, and
-/// `git-unavailable` has already needed one. A planned migration deletes the
-/// leftovers (`docs/design/profile.md`, P3); until then they are inert, and
-/// `omh why` says so rather than reporting one as yours.
+/// omh's own are inserted last, but that ordering is not what makes them win.
+/// They are generated from the manifest and belong to no directory, which is
+/// the point: a hook you can edit is a hook omh can never ship a fix to, and
+/// `git-unavailable` has already needed one.
 fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<String, hook::Hook>> {
     let mut out = BTreeMap::new();
     for dir in dirs {
@@ -501,10 +499,10 @@ mod tests {
     /// that moment is the adapter's business, exactly as every path in an
     /// adapter already is.
     ///
-    /// Today a hook file has to say `"event": "Stop"` — Claude Code's
-    /// vocabulary, in a file omh presents as its own — and `matcher` and the
-    /// `hookSpecificOutput` payload are the same leak one level down. Nothing
-    /// has had to translate one only because opencode declares no hooks
+    /// A hook file used to have to say `"event": "Stop"` — Claude Code's
+    /// vocabulary, in a file omh presented as its own — with `matcher` and the
+    /// `hookSpecificOutput` payload the same leak one level down. Nothing had
+    /// ever had to translate one, only because opencode declares no hooks
     /// capability at all.
     #[test]
     fn a_hook_written_in_omhs_words_reaches_the_harness() {

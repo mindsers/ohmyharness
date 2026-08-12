@@ -51,10 +51,56 @@ your setup is already there.
 
 | Render | Used by | Effect |
 |---|---|---|
-| `dir` | skills, commands, subagents | union layers by entry name, mount read-only |
-| `concat` | rules | join layers, write into the worktree |
+| `dir` | skills, commands, subagents | link the catalogue's entries by name, mount read-only |
+| `concat` | rules | join the sections into one document, staged and mounted read-only |
 | `mcp-json`, `codex-toml`, `opencode-json` | mcp | reshape the canonical server list |
 | `claude-settings` | hooks | reshape the canonical hook list |
+
+`concat` is mounted, never written into the worktree — writing there made omh's
+staging indistinguishable from the agent's work and carried omh's rules into
+users' pull requests.
+
+## Hooks: three maps and a template
+
+A hook is authored in omh's vocabulary and translated when it is staged, so the
+adapter is where a harness's spelling lives — the same rule as every `path`.
+
+```toml
+[capabilities.hooks]
+path   = "$HOME/.claude/settings.json"
+render = "claude-settings"
+
+[capabilities.hooks.events]        # omh's moments → this harness's names
+session-start = "SessionStart"
+turn-end      = "Stop"
+before-tool   = "PreToolUse"
+after-tool    = "PostToolUse"
+
+[capabilities.hooks.tools]         # omh's tool classes → this harness's matchers
+edit   = "Edit|Write|MultiEdit"
+read   = "Read"
+shell  = "Bash"
+search = "Grep|Glob"
+
+[capabilities.hooks.fields]        # where each field lives in this harness's stdin
+tool-file    = ".tool_input.file_path"
+tool-command = ".tool_input.command"
+
+[capabilities.hooks.inject]        # how this harness accepts text for the agent
+template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","additionalContext":$m}}'"""
+```
+
+**An absent entry means this harness has no such thing** — the capability map's
+rule, one level down. The hooks wanting it are dropped **by name**, saying what
+they asked for, and the rest still ship: a harness with `turn-end` and no
+`before-tool` keeps most of them, and a count per capability would report that
+as "hooks: 0".
+
+`events` is required on a `hooks` binding. Without it nothing can be expressed,
+every hook is dropped, and the harness receives an empty settings document —
+indistinguishable from a harness that declares no hooks, except that this one
+claimed to have them. These maps are refused on any other capability, where
+nothing would read them.
 
 **Every renderer must round-trip through its parser.** `omh config mcp import`
 is the exact inverse of rendering, so a format that renders but parses lossily

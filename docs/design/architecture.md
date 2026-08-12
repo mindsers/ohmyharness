@@ -16,7 +16,7 @@ the runtime backend is kept swappable.
   creds/<harness>/<account>/  captured logins, one directory per account
   worktrees/<repo>/<session>/ the agent's working directory
   keys/<repo>/                per-repo ed25519 keypair
-  run/<session>/<harness>/    staged profile, regenerated per launch
+  run/<repo>/<session>/<harness>/  staged profile, regenerated per launch
   sessions.json               session → container, branch, port
 
 <repo>/.omh/
@@ -97,11 +97,11 @@ Inside a real container, with the real mounts:
 ```
 user:   agent uid=1000    home: /home/agent    cwd: /work
 tools:  claude=ok dtach=ok git=ok rg=ok node=ok
-  rules      # Global rules              (layers 1+2 concatenated)
-  skills     graphify project-only       (unioned across layers)
+  rules      # tdd / <repo>/AGENTS.md    (your catalogue, then the project's)
+  skills     graphify, review-diff       (your catalogue)
   mcp        codegraph, filesystem, github, linear, omh-memory, sentry
   subagents  explorer.md
-  hooks      PostToolUse, Stop           (rendered to claude settings.json)
+  hooks      rust-test, graph-refresh …  (translated into settings.json)
   version    2.1.222 (Claude Code)
 ```
 
