@@ -54,10 +54,17 @@ pub enum Capability {
 }
 
 impl Capability {
-    /// Where this capability lives inside a profile layer.
+    /// Where this capability lives inside the catalogue.
+    ///
+    /// `rules` is a **directory of named files** rather than one `AGENTS.md`,
+    /// which is what lets a repo take the ones that apply to it: `tdd.md`,
+    /// `commit-style.md` and `rust-idiom.md` are separate things you hold. It
+    /// also makes the catalogue uniform — every capability is now a directory of
+    /// named entries, with `mcp.json` the lone exception because a server is a
+    /// record rather than a file.
     pub fn source(&self) -> &'static str {
         match self {
-            Self::Rules => "AGENTS.md",
+            Self::Rules => "rules",
             Self::Skills => "skills",
             Self::Mcp => "mcp.json",
             Self::Commands => "commands",

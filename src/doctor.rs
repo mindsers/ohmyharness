@@ -304,12 +304,12 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        let personal = paths.root.join("profile");
-        write(personal.join("AGENTS.md"), "rules");
-        write(personal.join("skills/graphify/SKILL.md"), "s");
-        write(personal.join("subagents/explorer.md"), "a");
+        let catalogue = &paths.root;
+        write(catalogue.join("rules/tdd.md"), "rules");
+        write(catalogue.join("skills/graphify/SKILL.md"), "s");
+        write(catalogue.join("subagents/explorer.md"), "a");
         write(
-            personal.join("mcp.json"),
+            catalogue.join("mcp.json"),
             r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
         );
         Fx {

@@ -562,8 +562,8 @@ mod tests {
         session: Session,
     }
 
-    /// Personal layer: skills(graphify), rules, hooks, subagents.
-    /// Shared layer:   skills(shared, graphify-override), rules, mcp.
+    /// Catalogue: rules, skills, subagents, mcp, one hook.
+    /// The repo:  one hook, which is the only content a project may declare.
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
@@ -575,24 +575,17 @@ mod tests {
             std::fs::write(p, body).unwrap();
         };
 
-        let personal = paths.root.join("profile");
-        write(personal.join("AGENTS.md"), "personal rules");
+        let catalogue = &paths.root;
+        write(catalogue.join("rules/tdd.md"), "personal rules");
+        write(catalogue.join("skills/graphify/SKILL.md"), "graphify");
+        write(catalogue.join("skills/review-diff/SKILL.md"), "review-diff");
+        write(catalogue.join("subagents/explorer.md"), "explorer");
         write(
-            personal.join("skills/graphify/SKILL.md"),
-            "personal graphify",
-        );
-        write(personal.join("subagents/explorer.md"), "explorer");
-        write(
-            personal.join("hooks/fmt.json"),
+            catalogue.join("hooks/fmt.json"),
             r#"{"on":"turn-end","run":"fmt"}"#,
         );
-
-        let shared = paths.repo.join(".omh/profile");
-        write(shared.join("AGENTS.md"), "shared rules");
-        write(shared.join("skills/graphify/SKILL.md"), "shared graphify");
-        write(shared.join("skills/only-shared/SKILL.md"), "only shared");
         write(
-            shared.join("mcp.json"),
+            catalogue.join("mcp.json"),
             r#"{"mcpServers":{"m":{"command":"m"}}}"#,
         );
 
@@ -1028,12 +1021,7 @@ mod tests {
     #[test]
     fn omhs_hooks_reach_a_profile_with_no_hooks_layer() {
         let fx = fixture();
-        std::fs::remove_dir_all(fx.paths.root.join("profile/hooks")).unwrap();
-        // `Profile` caches which layers exist, so re-resolve after removing.
-        let fx = Fx {
-            profile: Profile::resolve(&fx.paths),
-            ..fx
-        };
+        std::fs::remove_dir_all(fx.paths.root.join("hooks")).unwrap();
 
         let staged = staged_hooks(&plan_for(&fx, "claude"));
         for (name, command) in own_commands() {
@@ -1123,7 +1111,7 @@ mod tests {
     fn a_disabled_feature_takes_its_server_its_hooks_and_its_rules() {
         let fx = fixture();
         std::fs::write(
-            fx.paths.repo.join(".omh/profile/mcp.json"),
+            fx.paths.root.join("mcp.json"),
             r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
         )
         .unwrap();
@@ -1165,8 +1153,8 @@ mod tests {
         );
         assert!(
             fx.paths
-                .repo
-                .join(".omh/profile/mcp.json")
+                .root
+                .join("mcp.json")
                 .metadata()
                 .is_ok_and(|m| m.len() > 0),
             "your mcp.json is left exactly as you have it"
@@ -1186,25 +1174,30 @@ mod tests {
     /// document. Disabling that leaves the disabled thing running is worse
     /// than not offering it.
     ///
-    /// The rule is that a manifest name is omh's, on or off. Nothing in a
-    /// layer answers to one.
+    /// A hook answering to a manifest name stops the launch, naming the file.
+    ///
+    /// P2 skipped these silently, which was right while the only such files
+    /// were leftovers omh had seeded into `.omh/profile/hooks/` itself. Nothing
+    /// reads that directory any more, so a file with one of these names is
+    /// something somebody wrote on purpose — and a hook that is committed,
+    /// reviewed, and quietly never runs is worse than one that refuses to
+    /// start.
+    ///
+    /// It has to reach the *launch*, not just the renderer: the whole failure
+    /// is a hook the user believes is installed.
     #[test]
-    fn switching_a_feature_off_silences_the_files_it_seeded() {
+    fn a_repo_hook_answering_to_a_manifest_name_stops_the_launch() {
         let fx = fixture();
-        for hook in crate::base::hooks() {
-            std::fs::write(
-                fx.paths
-                    .root
-                    .join("profile/hooks")
-                    .join(format!("{}.json", hook.name)),
-                r#"{"on":"turn-end","run":"a leftover file omh once seeded"}"#,
-            )
-            .unwrap();
-        }
-        let own = own_with(&["codegraph".to_string()].into());
+        let hooks = fx.paths.repo.join(".omh/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("graph-refresh.json"),
+            r#"{"on":"turn-end","run":"my own indexer"}"#,
+        )
+        .unwrap();
 
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let p = plan(
+        let err = plan(
             &fx.paths,
             &fx.profile,
             &adapter,
@@ -1217,54 +1210,13 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own,
+                omh: own(),
             },
         )
-        .unwrap();
-
-        let hooks = staged_hooks(&p);
-        assert!(
-            !hooks
-                .iter()
-                .any(|c| c.contains("codebase-memory-mcp") || c.contains("OMH_GRAPH_PROJECT")),
-            "no graph hook may survive as a seeded file: {hooks:?}"
-        );
-        assert!(
-            hooks
-                .iter()
-                .any(|c| c.contains("fatal") || c.contains("git")),
-            "git-notice is a different feature and stays on: {hooks:?}"
-        );
-    }
-
-    /// A hook file carrying a manifest name is a leftover: `init` seeded these
-    /// before they were generated, and every repo initialised then still has
-    /// five of them. omh's own must win, or the fix it ships never arrives —
-    /// `git-unavailable` was already rewritten once, and every profile written
-    /// before that carries the version that misses the multi-line scripts
-    /// agents most often emit.
-    #[test]
-    fn a_seeded_copy_no_longer_decides_what_runs() {
-        let fx = fixture();
-        std::fs::write(
-            fx.paths.root.join("profile/hooks/graph-refresh.json"),
-            r#"{"on":"turn-end","run":"the version from an older omh"}"#,
-        )
-        .unwrap();
-
-        let staged = staged_hooks(&plan_for(&fx, "claude"));
-        let (_, ships) = own_commands()
-            .into_iter()
-            .find(|(name, _)| *name == "graph-refresh")
-            .expect("graph-refresh is in the base set");
-        assert!(
-            staged.contains(&ships),
-            "omh's own hook must be what runs: {staged:?}"
-        );
-        assert!(
-            !staged.iter().any(|c| c == "the version from an older omh"),
-            "the leftover file must not decide: {staged:?}"
-        );
+        .expect_err("a reserved name must not launch");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("graph-refresh"), "name it: {msg}");
+        assert!(msg.contains("settings.toml"), "and say the way out: {msg}");
     }
 
     /// `--dry-run` prints the plan and writes nothing, placeholders included.
@@ -1323,11 +1275,11 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            ["graphify", "only-shared"],
-            "layers union by entry name"
+            ["graphify", "review-diff"],
+            "every catalogue entry is linked by name"
         );
 
-        // Every layer a link can point into must actually be mounted.
+        // Every source a link can point into must actually be mounted.
         for i in 0..fx.profile.sources(Capability::Skills).len() {
             assert!(
                 p.mounts
@@ -1472,7 +1424,7 @@ mod tests {
             std::fs::write(
                 fx.paths
                     .root
-                    .join("profile/hooks")
+                    .join("hooks")
                     .join(format!("{}.json", hook.name)),
                 r#"{"on":"turn-end","run":"seeded by an older omh"}"#,
             )
@@ -1539,8 +1491,8 @@ mod tests {
         );
         let body = std::fs::read_to_string(&hosts[0]).unwrap();
         assert!(
-            body.contains("personal rules") && body.contains("shared rules"),
-            "the layers must be in there: {body}"
+            body.contains("personal rules"),
+            "the catalogue must be in there: {body}"
         );
     }
 

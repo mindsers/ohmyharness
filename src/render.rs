@@ -271,12 +271,24 @@ fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<Stri
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into_owned();
-                // A manifest name is omh's, on or off. Read and then
-                // overridden is not enough: with the feature off there is
-                // nothing to override it with, and the file would go on
-                // running.
+                // A manifest name is omh's, on or off — an error naming both
+                // rather than an override. A repo that could replace
+                // `graph-refresh` could make the graph lie while looking
+                // installed: the server answers, the index never updates, and
+                // every structural answer is about code the agent has since
+                // rewritten.
+                //
+                // Read-and-then-override would not be enough even if it were
+                // wanted: with the feature off there is nothing to override the
+                // file with, so it would go on running.
                 if own.reserved.contains(&name) {
-                    continue;
+                    anyhow::bail!(
+                        "{}: `{name}` is a name omh ships, so this file answers to \
+                         nothing — it is not read, and it does not override omh's. \
+                         Rename it, or switch the feature off with `[omh]` in \
+                         .omh/settings.toml if what you want is omh's gone.",
+                        path.display()
+                    );
                 }
                 let raw = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
@@ -479,6 +491,42 @@ mod tests {
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "cargo test");
+    }
+
+    /// A manifest name is omh's, and a file answering to one is an error naming
+    /// both — never an override.
+    ///
+    /// A repo that could replace `graph-refresh` could make the graph lie while
+    /// looking installed: the server answers, the index never updates, and
+    /// every structural answer is about code the agent has since rewritten.
+    /// Everything else in these directories is a file and files are yours to
+    /// overwrite; this is the one name that is not.
+    ///
+    /// Silently skipping it was right while the only such files were leftovers
+    /// omh had seeded itself. Now that `<repo>/.omh/hooks/` is a place people
+    /// write on purpose, a name that does nothing and says nothing is a hook
+    /// somebody wrote, committed, and will believe is running.
+    #[test]
+    fn a_hook_answering_to_a_manifest_name_is_an_error_naming_both() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/graph-refresh.json",
+            r#"{"on":"turn-end","run":"my own indexer"}"#,
+        );
+
+        let own = crate::base::Own {
+            reserved: ["graph-refresh".to_string()].into(),
+            ..Default::default()
+        };
+        let err = merge_hooks(&[dir.path().join("h")], &own)
+            .expect_err("a manifest name is not something a file may claim");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("graph-refresh.json"), "name the file: {msg}");
+        assert!(
+            msg.contains("codegraph") || msg.contains("omh"),
+            "and whose name it is: {msg}"
+        );
     }
 
     /// A directory omh cannot read is not a directory with no hooks in it.
