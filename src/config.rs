@@ -49,10 +49,6 @@ pub struct Written {
 impl Layer {
     pub const ALL: [Layer; 3] = [Self::Personal, Self::Shared, Self::Local];
 
-    /// `omh set` with no `--layer` writes here: a mistyped secret must not be
-    /// committable by accident.
-    pub const DEFAULT_WRITE: Layer = Self::Local;
-
     /// The file this layer's settings live in.
     pub fn file(&self, paths: &Paths) -> PathBuf {
         match self {
@@ -291,6 +287,83 @@ pub fn unset(paths: &Paths, key: &str, layer: Layer) -> Result<bool> {
     }
     std::fs::write(&path, toml::to_string_pretty(&table)?)?;
     Ok(true)
+}
+
+/// The table `[use]` lives in, and the one `[omh]` lives in. Spelled once here
+/// rather than at each writer, so the reader in `settings.rs` and the writers
+/// below cannot drift about what a table is called.
+pub const USE: &str = "use";
+pub const OMH: &str = "omh";
+
+/// Write one capability's `[use]` list, or several.
+///
+/// A whole list per capability rather than an append, because that is what the
+/// table means: `[use]` is an allowlist and the value *is* the selection. The
+/// caller computes the new list — `omh use` from the effective one plus a name,
+/// `omh use --all` from the catalogue — so the one place that knows "absent
+/// means everything" stays [`crate::selection`] rather than being re-derived
+/// inside a writer.
+pub fn write_selection(
+    paths: &Paths,
+    layer: Layer,
+    lists: &BTreeMap<crate::adapter::Capability, Vec<String>>,
+) -> Result<Written> {
+    write_table(paths, layer, USE, |table| {
+        for (cap, names) in lists {
+            table.insert(
+                cap.to_string(),
+                toml::Value::Array(
+                    names
+                        .iter()
+                        .map(|n| toml::Value::String(n.clone()))
+                        .collect(),
+                ),
+            );
+        }
+    })
+}
+
+/// Switch one of omh's features on or off here.
+pub fn write_feature(paths: &Paths, layer: Layer, feature: &str, on: bool) -> Result<Written> {
+    write_table(paths, layer, OMH, |table| {
+        table.insert(feature.to_string(), toml::Value::Boolean(on));
+    })
+}
+
+/// Read-modify-write one named table inside a layer's file.
+///
+/// Through `read_table`, which distinguishes absent from unreadable — this is a
+/// read-modify-write, so an error read as "empty" would turn the write into a
+/// replacement and take the rest of the file with it.
+fn write_table(
+    paths: &Paths,
+    layer: Layer,
+    name: &str,
+    edit: impl FnOnce(&mut toml::Table),
+) -> Result<Written> {
+    let path = layer.file(paths);
+    let mut doc = read_table(&path)?;
+    // A non-table under this name would be silently replaced, taking whatever
+    // somebody wrote with it. Refused instead, naming the file.
+    let mut table = match doc.remove(name) {
+        Some(toml::Value::Table(t)) => t,
+        None => toml::Table::new(),
+        Some(other) => anyhow::bail!(
+            "{}: `{name}` is {}, not a table — omh will not overwrite it",
+            path.display(),
+            other.type_str()
+        ),
+    };
+    edit(&mut table);
+    doc.insert(name.to_string(), toml::Value::Table(table));
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    std::fs::write(&path, toml::to_string_pretty(&doc)?)
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(Written {
+        path,
+        layer,
+        committed: layer.is_committed(),
+    })
 }
 
 /// Last layer wins; every earlier declaration of the same key is recorded as
@@ -886,17 +959,10 @@ mod tests {
 
     // ── writes ──────────────────────────────────────────────────────────────
 
-    /// The safety property: an unqualified write can never reach version control.
-    #[test]
-    fn default_write_target_is_gitignored() {
-        assert_eq!(Layer::DEFAULT_WRITE, Layer::Local);
-        assert!(!Layer::DEFAULT_WRITE.is_committed());
-    }
-
     #[test]
     fn set_creates_the_layer_file_when_absent() {
         let (_d, paths) = fixture();
-        let w = set(&paths, "idle_timeout", "30m", Layer::DEFAULT_WRITE).unwrap();
+        let w = set(&paths, "idle_timeout", "30m", Layer::Local).unwrap();
         assert_eq!(w.path, Layer::Local.file(&paths));
         assert!(!w.committed);
         assert_eq!(get(&policy(&paths).unwrap(), "idle_timeout").value, "30m");
