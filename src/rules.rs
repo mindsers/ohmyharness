@@ -150,7 +150,17 @@ fn candidates(binding: &Binding) -> Vec<String> {
 /// best-effort: a scratch directory has no `.git` at all, and a repo with no
 /// commits has nothing to show — neither is a reason to refuse to launch.
 fn body(paths: &Paths, worktree: &Path, base: &str, name: &str) -> Result<Option<String>> {
-    if let Some(body) = read(&worktree.join(name))? {
+    // Blank is absent, and the distinction is load-bearing rather than tidy.
+    // `place_destination` puts an **empty** file at every declared name before
+    // mounting, because docker will not create a mountpoint inside `/work` —
+    // so from a session's second launch onward omh's own placeholder is sitting
+    // in the worktree. Read as content it outranks the real rules under the
+    // canonical name, and a repo keeping its rules in `CLAUDE.md` lost them
+    // entirely.
+    //
+    // A file with nothing in it states no rules under any reading, so there is
+    // no case where treating it as absent loses something the user wrote.
+    if let Some(body) = read(&worktree.join(name))?.filter(|b| !b.trim().is_empty()) {
         return Ok(Some(body));
     }
     if base.is_empty() {
@@ -353,6 +363,49 @@ mod tests {
         assert!(!body.contains("<repo>/"), "no project section:\n{body}");
         assert!(body.contains("PERSONAL") && body.contains("SHARED"));
         assert_eq!(report, Report::default());
+    }
+
+    /// Regression: omh read its own placeholder as the project's rules.
+    ///
+    /// A bind mount needs its destination to exist and docker will not create
+    /// one inside `/work`, so `place_destination` puts an **empty** file at
+    /// every declared name before mounting. From the second launch of a session
+    /// onward that file is sitting in the worktree, and composition happily
+    /// treated it as what the project had to say.
+    ///
+    /// For a repo that keeps its rules in `CLAUDE.md` this was destructive
+    /// rather than merely noisy: the empty `AGENTS.md` placeholder outranks it
+    /// as the canonical name, so the project's real rules were dropped and
+    /// replaced with nothing.
+    #[test]
+    fn an_empty_placeholder_is_not_the_projects_rules() {
+        let fx = fixture();
+        // exactly what `place_destination` leaves behind
+        write(fx.worktree.join("AGENTS.md"), "");
+        write(fx.worktree.join("CLAUDE.md"), "THE PROJECT'S REAL RULES");
+
+        let (body, report) = composed(&fx);
+
+        assert!(body.contains("THE PROJECT'S REAL RULES"), "got:\n{body}");
+        assert_eq!(report.read_instead.as_deref(), Some("CLAUDE.md"));
+        assert_eq!(
+            report.not_composed, None,
+            "a file omh created itself is not a conflict to report"
+        );
+    }
+
+    /// The same placeholder, seen from the other side: it must not suppress the
+    /// default branch either, or a session gets no project rules at all from its
+    /// second launch on.
+    #[test]
+    fn an_empty_placeholder_does_not_suppress_the_default_branch() {
+        let fx = fixture();
+        committed(&fx, "WHAT MAIN SAYS");
+        write(fx.worktree.join("AGENTS.md"), "   \n");
+
+        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, "main").unwrap();
+
+        assert!(body.contains("WHAT MAIN SAYS"), "got:\n{body}");
     }
 
     // ── against a real repository ───────────────────────────────────────────
