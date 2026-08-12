@@ -893,3 +893,87 @@ fn bare_repo_reports_what_is_used_what_is_not_and_what_decided_it() {
         "and which file decided each: {said}"
     );
 }
+
+/// A settings file is a file somebody maintains by hand, and comments are part
+/// of what they wrote.
+///
+/// Before P4 a write to `.omh/settings.toml` was rare — `omh config set` and
+/// nothing else. Now `omh use`, `omh unuse` and `omh repo enable` all touch it,
+/// and `init` writes it *full* of explanatory comments, so a round trip through
+/// a serializer would have the first `omh use` silently delete everything init
+/// had just explained. That is data loss, not formatting.
+#[test]
+fn writing_a_setting_keeps_what_you_wrote_around_it() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        "# why this repo carries an env file\ncarry_in = [\".env.local\"]  # the app needs it\n",
+    )
+    .unwrap();
+
+    assert!(sb.omh(&["use", "skills", "review-diff"]).status.success());
+
+    let after = sb.settings();
+    assert!(
+        after.contains("# why this repo carries an env file"),
+        "the comment above a setting is part of the setting: {after}"
+    );
+    assert!(
+        after.contains("# the app needs it"),
+        "and so is the one beside it: {after}"
+    );
+    assert!(
+        after.contains("review-diff"),
+        "and the write happened: {after}"
+    );
+}
+
+/// `omh init` writes the selection out with every entry named.
+///
+/// Expanded rather than `"*"`, because an explicit list is editable and
+/// reviewable in a way a wildcard is not — you curate by deleting lines. The
+/// repo's own detected hooks are in it, because `init` wrote those a moment
+/// earlier and a list that omitted them would switch off what init just
+/// created; omh's own are not, because `[omh]` governs those and `[use]`
+/// refuses to name one.
+///
+/// `#[ignore]`d because `init` builds an image, so it needs a container runtime.
+/// CI's linux job runs `--include-ignored`, which is where this bites.
+#[test]
+#[ignore]
+fn init_writes_the_selection_expanded() {
+    let sb = sandbox();
+    sb.git_init();
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    assert!(sb.omh(&["init"]).status.success());
+
+    let written = sb.settings();
+    assert!(written.contains("[use]"), "got: {written}");
+    assert!(written.contains("review-diff"), "your catalogue: {written}");
+    assert!(
+        written.contains("rust-test") && written.contains("rust-format"),
+        "and the hooks init just wrote for the detected stack: {written}"
+    );
+    assert!(
+        !written.contains("codegraph") || !written.contains("mcp = [\"codegraph"),
+        "omh's own are `[omh]`'s, not `[use]`'s: {written}"
+    );
+    // The comment block init writes is what explains the file. A selection
+    // appended by a serializer round trip would have deleted all of it.
+    assert!(
+        written.contains("# carry_in"),
+        "init's own explanation has to survive its own write: {written}"
+    );
+
+    // Re-running must not resync a list somebody pruned on purpose.
+    assert!(sb.omh(&["unuse", "skills", "review-diff"]).status.success());
+    assert!(sb.omh(&["init"]).status.success());
+    assert!(
+        !sb.settings().contains("review-diff"),
+        "init writes the list once; `omh use --all` is how you ask for a resync"
+    );
+}

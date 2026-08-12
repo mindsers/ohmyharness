@@ -18,6 +18,11 @@ dirs = "6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+# Writing settings is a read-modify-write on a file people maintain by hand,
+# so the writers use the format-preserving document rather than the serializer:
+# a round trip through `toml::to_string_pretty` deletes every comment in it.
+# Already in the tree as `toml`'s own dependency, so this is an edge, not code.
+toml_edit = "0.22"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

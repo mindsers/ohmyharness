@@ -1472,6 +1472,22 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
     }
 }
 
+/// Does this repo already say what it uses?
+///
+/// Read from the committed file directly rather than through `settings::resolve`,
+/// which merges three layers: a `[use]` in *your* personal file is your default
+/// everywhere and is not this repo having decided anything, so treating it as
+/// one would leave a fresh checkout with no list of its own.
+fn repo_has_selection(paths: &Paths) -> Result<bool> {
+    let path = config::Layer::Shared.file(paths);
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return Ok(false);
+    };
+    let doc: toml::Table =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(doc.contains_key(config::USE))
+}
+
 /// The catalogue's MCP servers, with whose each one is.
 fn show_servers(cwd: &std::path::Path) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -2354,6 +2370,23 @@ fn init(cwd: &std::path::Path) -> Result<()> {
             write_if_absent(&repo_omh.join("hooks").join(name), &body)?;
         }
     }
+    // The selection, written out with every catalogue entry named — after the
+    // stack hooks, so this repo's own two are in the list it writes.
+    //
+    // Expanded rather than `"*"`, because an explicit list is editable and
+    // reviewable in a way a wildcard is not: you curate by deleting lines. That
+    // has one failure mode — an entry added to the catalogue *afterwards* is not
+    // in the list, so it is off and the reason is invisible — and the launcher
+    // reports exactly that, which is what makes writing it expanded safe.
+    //
+    // Only when there is no `[use]` already: `write_if_absent` guards the file,
+    // not the table, and re-running `init` in a curated repo must not resync a
+    // list somebody pruned on purpose. `omh use --all` is how you ask for that.
+    if !repo_has_selection(&paths)? {
+        let lists = catalogue_lists(&paths)?;
+        config::write_selection(&paths, config::Layer::Shared, &lists)?;
+    }
+
     // Appended, not overwritten: re-running init must not eat a line you added.
     let gitignore = paths.repo.join(".omh/.gitignore");
     // Left tracked, a machine-local override gets committed to the team's repo.

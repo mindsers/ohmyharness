@@ -267,25 +267,20 @@ fn refuse_a_repo_server(paths: &Paths) -> Result<()> {
 }
 
 pub fn set(paths: &Paths, key: &str, raw: &str, layer: Layer) -> Result<Written> {
-    let path = layer.file(paths);
-    let mut table = read_table(&path)?;
-    table.insert(key.to_string(), parse_value(raw));
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, toml::to_string_pretty(&table)?)?;
-    Ok(Written {
-        path,
-        layer,
-        committed: layer.is_committed(),
+    edit_layer(paths, layer, |doc| {
+        doc[key] = toml_edit::Item::Value(parse_value(raw));
+        Ok(())
     })
 }
 
 pub fn unset(paths: &Paths, key: &str, layer: Layer) -> Result<bool> {
     let path = layer.file(paths);
-    let mut table = read_table(&path)?;
-    if table.remove(key).is_none() {
+    let mut doc = read_doc(&path)?;
+    if doc.remove(key).is_none() {
         return Ok(false);
     }
-    std::fs::write(&path, toml::to_string_pretty(&table)?)?;
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(true)
 }
 
@@ -310,15 +305,11 @@ pub fn write_selection(
 ) -> Result<Written> {
     write_table(paths, layer, USE, |table| {
         for (cap, names) in lists {
-            table.insert(
-                cap.to_string(),
-                toml::Value::Array(
-                    names
-                        .iter()
-                        .map(|n| toml::Value::String(n.clone()))
-                        .collect(),
-                ),
-            );
+            let mut array = toml_edit::Array::new();
+            for name in names {
+                array.push(name.as_str());
+            }
+            table[&cap.to_string()] = toml_edit::value(array);
         }
     })
 }
@@ -326,44 +317,79 @@ pub fn write_selection(
 /// Switch one of omh's features on or off here.
 pub fn write_feature(paths: &Paths, layer: Layer, feature: &str, on: bool) -> Result<Written> {
     write_table(paths, layer, OMH, |table| {
-        table.insert(feature.to_string(), toml::Value::Boolean(on));
+        table[feature] = toml_edit::value(on);
     })
 }
 
 /// Read-modify-write one named table inside a layer's file.
-///
-/// Through `read_table`, which distinguishes absent from unreadable — this is a
-/// read-modify-write, so an error read as "empty" would turn the write into a
-/// replacement and take the rest of the file with it.
 fn write_table(
     paths: &Paths,
     layer: Layer,
     name: &str,
-    edit: impl FnOnce(&mut toml::Table),
+    edit: impl FnOnce(&mut toml_edit::Table),
+) -> Result<Written> {
+    edit_layer(paths, layer, |doc| {
+        // The entry API, not `doc[name]`: indexing a document with a key it
+        // does not have *panics*, and the first `omh use` in a repo is exactly
+        // that case.
+        let item = doc
+            .as_table_mut()
+            .entry(name)
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        // A non-table under this name would be silently replaced, taking
+        // whatever somebody wrote with it. Refused instead, naming the file.
+        let Some(table) = item.as_table_mut() else {
+            anyhow::bail!("`{name}` is not a table — omh will not overwrite it");
+        };
+        edit(table);
+        Ok(())
+    })
+}
+
+/// Read a layer's file as a **document**, apply an edit, write it back.
+///
+/// `DocumentMut` rather than `toml::Table` and `to_string_pretty`, and the
+/// difference is not cosmetic: a settings file is one somebody maintains by
+/// hand, `omh init` writes it full of explanatory comments, and P4 turned
+/// writing it from something `omh config set` did occasionally into something
+/// `omh use`, `omh unuse` and `omh repo enable` all do. A serializer round trip
+/// deletes every comment in the file, which is deleting what the user wrote.
+fn edit_layer(
+    paths: &Paths,
+    layer: Layer,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
 ) -> Result<Written> {
     let path = layer.file(paths);
-    let mut doc = read_table(&path)?;
-    // A non-table under this name would be silently replaced, taking whatever
-    // somebody wrote with it. Refused instead, naming the file.
-    let mut table = match doc.remove(name) {
-        Some(toml::Value::Table(t)) => t,
-        None => toml::Table::new(),
-        Some(other) => anyhow::bail!(
-            "{}: `{name}` is {}, not a table — omh will not overwrite it",
-            path.display(),
-            other.type_str()
-        ),
-    };
-    edit(&mut table);
-    doc.insert(name.to_string(), toml::Value::Table(table));
+    let mut doc = read_doc(&path)?;
+    edit(&mut doc).with_context(|| format!("editing {}", path.display()))?;
     std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, toml::to_string_pretty(&doc)?)
+    std::fs::write(&path, doc.to_string())
         .with_context(|| format!("writing {}", path.display()))?;
     Ok(Written {
         path,
         layer,
         committed: layer.is_committed(),
     })
+}
+
+/// Absent is not unreadable, and this is where conflating them **destroys**:
+/// every caller is a read-modify-write, so an error read as "empty" turns the
+/// write into a replacement. One byte that is not UTF-8 in `settings.toml` used
+/// to take every `[omh]` switch and every `[mcp.<name>.env]` token with it, and
+/// print success.
+fn read_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
+    let Some(raw) = read_layer(path)? else {
+        return Ok(toml_edit::DocumentMut::new());
+    };
+    raw.parse()
+        .with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Accept TOML literals (`["a", "b"]`, `true`, `30`) and fall back to a bare
+/// string, so `omh set idle_timeout 30m` does not need quoting.
+fn parse_value(raw: &str) -> toml_edit::Value {
+    raw.parse::<toml_edit::Value>()
+        .unwrap_or_else(|_| toml_edit::Value::from(raw))
 }
 
 /// Last layer wins; every earlier declaration of the same key is recorded as
@@ -385,28 +411,6 @@ fn resolve(found: Vec<(String, String, Layer)>) -> Vec<Setting> {
             }
         })
         .collect()
-}
-
-/// Absent is not unreadable, and this is the function where conflating them
-/// **destroys** rather than merely misreports: every caller is a
-/// read-modify-write, so an error read as "empty" turns the write into a
-/// replacement. One byte that is not UTF-8 in `settings.toml` used to take
-/// every `[omh]` switch and every `[mcp.<name>.env]` token with it, and print
-/// success.
-fn read_table(path: &Path) -> Result<toml::Table> {
-    let Some(raw) = read_layer(path)? else {
-        return Ok(toml::Table::new());
-    };
-    toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
-}
-
-/// Accept TOML literals (`["a", "b"]`, `true`, `30`) and fall back to a bare
-/// string, so `omh set idle_timeout 30m` does not need quoting.
-fn parse_value(raw: &str) -> toml::Value {
-    toml::from_str::<toml::Table>(&format!("v = {raw}"))
-        .ok()
-        .and_then(|t| t.get("v").cloned())
-        .unwrap_or_else(|| toml::Value::String(raw.to_string()))
 }
 
 fn repr(value: &toml::Value) -> String {
