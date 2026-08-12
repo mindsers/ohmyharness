@@ -1236,7 +1236,7 @@ mod tests {
         let hooks = staged_hooks(&p);
         for (name, command) in own_commands() {
             assert!(
-                hooks.iter().any(|c| *c == command),
+                hooks.contains(&command),
                 "{name} is omh's and must still fire: {hooks:?}"
             );
         }
