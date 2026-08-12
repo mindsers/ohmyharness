@@ -76,6 +76,14 @@ impl Field {
 /// What `capture` binds its command's output to.
 pub const CAPTURE_VAR: &str = "OMH_CAPTURE";
 
+/// Variables the sandbox sets for every hook, on top of the payload fields.
+///
+/// Named here rather than where they are set, because this is the module that
+/// has to decide whether a `$` in prose refers to something real.
+/// `container::plan` puts exactly these on the container, and
+/// `the_sandbox_sets_what_a_hook_may_name` holds the two lists together.
+pub const SANDBOX_VARS: [&str; 2] = ["OMH_SESSION", "OMH_GRAPH_PROJECT"];
+
 impl std::fmt::Display for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
@@ -163,7 +171,7 @@ impl Hook {
             );
         }
         if let Some(text) = &self.inject {
-            check_interpolation(text, whence)?;
+            check_interpolation(text, whence, self.capture.is_some())?;
         }
         Ok(())
     }
@@ -229,7 +237,14 @@ fn mentions(body: &str, var: &str) -> bool {
 /// literal one, and command substitution is refused by name — that is what
 /// `capture` is for, and running a command from inside a sentence is how a hook
 /// body learns to be shell again.
-fn check_interpolation(text: &str, whence: &str) -> Result<()> {
+fn check_interpolation(text: &str, whence: &str, capture: bool) -> Result<()> {
+    let known: Vec<&str> = Field::ALL
+        .iter()
+        .map(|f| f.var())
+        .chain(SANDBOX_VARS)
+        .chain(capture.then_some(CAPTURE_VAR))
+        .collect();
+
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -237,28 +252,60 @@ fn check_interpolation(text: &str, whence: &str) -> Result<()> {
             i += 1;
             continue;
         }
-        match chars.get(i + 1) {
-            Some('$') => i += 2,
-            Some('(') => anyhow::bail!(
+        // `$$` is the literal dollar, resolved by `interpolating`.
+        if chars.get(i + 1) == Some(&'$') {
+            i += 2;
+            continue;
+        }
+        if chars.get(i + 1) == Some(&'(') {
+            anyhow::bail!(
                 "{whence}: `$(` in `inject` runs a command from inside a sentence. \
                  Use `capture` and interpolate ${CAPTURE_VAR}."
-            ),
-            // An unclosed `${` reaches the shell as an unterminated expansion,
-            // so the hook does not merely say the wrong thing — it fails to
-            // parse. Refused here because this is the one field where prose
-            // and shell syntax share a string.
-            Some('{') if !chars[i + 2..].contains(&'}') => anyhow::bail!(
-                "{whence}: `${{` in `inject` is never closed with `}}`. \
-                 A shell reads that as an unterminated expansion and refuses \
-                 the whole hook."
-            ),
-            Some(c) if c.is_ascii_alphabetic() || *c == '_' || *c == '{' => i += 2,
-            _ => anyhow::bail!(
-                "{whence}: `$` in `inject` must name a variable — it is interpolated \
-                 by a shell, so a bare one expands to nothing and the text arrives \
-                 with a hole in it. Write `$$` for a literal dollar."
-            ),
+            );
         }
+
+        // `${NAME}` and `${NAME:-default}` alike: the name runs to the first
+        // character that cannot be part of one, and what follows has to be a
+        // brace or an expansion operator. Asking only whether a `}` appears
+        // *somewhere later* accepted `${ high } today`, which is a bad
+        // substitution — a runtime failure, so `sh -n` sees nothing wrong and
+        // the hook silently emits nothing.
+        let braced = chars.get(i + 1) == Some(&'{');
+        let start = i + if braced { 2 } else { 1 };
+        let end = chars[start..]
+            .iter()
+            .position(|c| !c.is_ascii_alphanumeric() && *c != '_')
+            .map_or(chars.len(), |n| start + n);
+        let name: String = chars[start..end].iter().collect();
+
+        if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
+            anyhow::bail!(
+                "{whence}: `{}` is not a variable name. A shell reads that as a bad \
+                 substitution and the hook emits nothing at all.",
+                chars[i..(end + 1).min(chars.len())]
+                    .iter()
+                    .collect::<String>()
+            );
+        }
+        if braced
+            && !matches!(
+                chars.get(end),
+                Some('}' | ':' | '-' | '+' | '?' | '#' | '%')
+            )
+        {
+            anyhow::bail!(
+                "{whence}: `${{{name}` is never closed with `}}`. A shell reads that as \
+                 a bad substitution and the hook emits nothing at all."
+            );
+        }
+        if !known.contains(&name.as_str()) {
+            anyhow::bail!(
+                "{whence}: `${name}` is not something omh sets, so it expands to \
+                 whatever the sandbox happens to hold — or to nothing. Available: {}.",
+                known.join(", ")
+            );
+        }
+        i = end;
     }
     Ok(())
 }
@@ -472,8 +519,8 @@ mod tests {
         let err =
             Hook::parse(r#"{"on":"turn-end","inject":"costs $5 a month"}"#, "h.json").unwrap_err();
         assert!(
-            err.to_string().contains("$$"),
-            "must say how to write one: {err}"
+            err.to_string().contains("not a variable name"),
+            "must say what is wrong with it: {err}"
         );
     }
 
@@ -494,27 +541,19 @@ mod tests {
         assert!(err.to_string().contains("capture"), "got: {err}");
     }
 
-    /// An unclosed `${` reaches the shell as an unterminated expansion, and
-    /// the hook then fails to *parse* — `sh: unexpected EOF`. The invariant
-    /// CONTRIBUTING lists as "every hook command parses and runs under `sh`"
-    /// was enforced only for omh's own five; a user hook could pass validation
-    /// and be unparseable.
+    /// Anything that validates has to *run*, not merely parse.
+    ///
+    /// This used `sh -n`, which is a parse check — and the failure that matters
+    /// here, a bad substitution, is a runtime diagnostic `sh -n` returns 0 for.
+    /// So it asserted half the invariant CONTRIBUTING states ("every hook
+    /// command parses **and runs** under `sh`") while reading as all of it.
     #[test]
-    fn an_unclosed_brace_is_refused_before_it_reaches_a_shell() {
-        let err = Hook::parse(r#"{"on":"turn-end","inject":"cost is ${ high"}"#, "h.json")
-            .expect_err("an unterminated expansion is not prose");
-        assert!(err.to_string().contains('}'), "say what is missing: {err}");
-    }
-
-    /// Anything that validates has to survive `sh -n`. Asserting on the text
-    /// proves the characters are there, never that a shell will accept them —
-    /// and this is the one field where prose and syntax share a string.
-    #[test]
-    fn every_accepted_inject_renders_something_sh_can_parse() {
+    fn every_accepted_inject_reaches_the_agent_intact() {
         for prose in [
             "plain words",
             "a $OMH_GRAPH_PROJECT reference",
             "a ${OMH_GRAPH_PROJECT} braced one",
+            "a ${OMH_GRAPH_PROJECT:-none} defaulted one",
             "a $$5 literal dollar",
             "quotes \" and \\ and ` backticks",
             "a trailing brace } on its own",
@@ -526,13 +565,26 @@ mod tests {
             .unwrap_or_else(|e| panic!("{prose:?} should validate: {e}"));
 
             let out = std::process::Command::new("sh")
-                .args(["-n", "-c", &rendered("p", &h, hooks_binding()).command])
+                .arg("-c")
+                .arg(&rendered("p", &h, hooks_binding()).command)
+                .env("OMH_GRAPH_PROJECT", "repo-s01")
+                .stdin(std::process::Stdio::null())
                 .output()
                 .expect("sh must run");
             assert!(
-                out.status.success(),
-                "{prose:?} rendered something sh refuses: {}",
-                String::from_utf8_lossy(&out.stderr)
+                out.status.success() && out.stderr.is_empty(),
+                "{prose:?} did not run: {} {:?}",
+                String::from_utf8_lossy(&out.stderr),
+                out.status.code()
+            );
+            let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+                .unwrap_or_else(|e| panic!("{prose:?} emitted no JSON: {e}"));
+            assert!(
+                !doc["hookSpecificOutput"]["additionalContext"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .is_empty(),
+                "{prose:?} injected nothing"
             );
         }
     }
@@ -549,6 +601,62 @@ mod tests {
         )
         .unwrap();
         assert_eq!(h.fields(), BTreeSet::from([Field::ToolFile]));
+    }
+
+    /// A `$` in prose has to name something the sandbox will actually set.
+    ///
+    /// The rule was "followed by a letter", which accepts `$PATH`, `$USER` and
+    /// `$HOME` — each of which expands to something real and wrong inside the
+    /// container, so the sentence arrives mangled rather than merely empty.
+    /// And `$OMH_CAPTURE` without a `capture` expands to nothing at all.
+    #[test]
+    fn a_dollar_naming_something_omh_never_sets_is_refused() {
+        for prose in [
+            "your $PATH is long",
+            "run as $USER",
+            "captured $OMH_CAPTURE",
+        ] {
+            let err = Hook::parse(
+                &serde_json::json!({ "on": "turn-end", "inject": prose }).to_string(),
+                "h.json",
+            )
+            .expect_err(&format!("{prose:?} names nothing omh binds"));
+            assert!(
+                err.to_string().contains("OMH_"),
+                "must name what is available: {err}"
+            );
+        }
+    }
+
+    /// A malformed `${…}` is a **bad substitution** — a runtime failure, not a
+    /// parse failure.
+    ///
+    /// The first guard asked whether a `}` appeared anywhere later in the
+    /// string, so `${ high } today` passed; and its companion used `sh -n`,
+    /// which returns 0 for a bad substitution because the script parses fine.
+    /// The hook then exits non-zero before `jq` runs, nothing is injected, and
+    /// every assertion about the hook's text still holds.
+    #[test]
+    fn a_malformed_expansion_is_refused_even_when_a_brace_appears_later() {
+        for prose in [
+            "cost is ${ high } today",
+            "a ${} placeholder",
+            "cost is ${ high",
+            "${1bad} name",
+            // A `}` *before* an unclosed `${`. The first version of this guard
+            // asked whether a `}` appeared anywhere in the string, so one
+            // closer satisfied an opener that came after it.
+            "a } brace, then cost is ${ high",
+        ] {
+            assert!(
+                Hook::parse(
+                    &serde_json::json!({ "on": "turn-end", "inject": prose }).to_string(),
+                    "h.json",
+                )
+                .is_err(),
+                "{prose:?} renders a bad substitution and must not validate"
+            );
+        }
     }
 
     /// `graph-first` fires on every search and reads no payload at all. A

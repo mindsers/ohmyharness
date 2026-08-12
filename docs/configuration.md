@@ -67,21 +67,24 @@ content back in the repo.
 
 ## What goes in the catalogue
 
-Four of the six are portable by standard rather than by omh's effort, which is
-what makes adopting the catalogue cheap: the files you already have are the
-files omh wants.
+Most of what you already have needs no translation, which is what makes
+adopting the catalogue cheap.
 
 **Skills follow [Agent Skills](https://agentskills.io/specification)** — a
 `SKILL.md` with `name` and `description` required, `license`, `compatibility`,
-`metadata` and `allowed-tools` optional, unknown fields ignored, in a directory
-named after the skill. Claude Code, opencode, Cursor and Codex CLI all read it.
-So `~/.omh/skills/<name>/SKILL.md` is copied to whichever harness you launch,
+`metadata` and `allowed-tools` optional, in a directory named after the skill.
+`metadata` is the spec's own extension point for anything a client needs that
+it does not define. Claude Code, opencode, Cursor and Codex CLI all read it, so
+`~/.omh/skills/<name>/SKILL.md` is copied to whichever harness you launch,
 unchanged, and nothing is lost in the trip.
 
 **Rules are markdown.** `~/.omh/rules/*.md` is prose, and prose travels.
 
 **MCP servers** are the MCP spec's own shape, re-rendered per harness — the one
 place omh has always translated.
+
+**Commands** are markdown with frontmatter, and both harnesses read the same
+shape. Copied.
 
 **Hooks** are omh's own vocabulary, translated at staging. See below.
 
@@ -136,16 +139,19 @@ Mention one in any body and omh reads it for you — `${OMH_TOOL_FILE:-none}`
 counts too. Mention neither and your hook pays for nothing, which matters:
 `before-tool` on `read` fires on the most frequent tool there is.
 
-### Two rules about `inject`
+### Three rules about `inject`
 
-It is prose that reaches a shell, and that combination fails quietly, so both
-are refused when the file is read rather than discovered at runtime:
+It is prose that reaches a shell, and that combination fails quietly, so all
+three are refused when the file is read rather than discovered at runtime:
 
 - **every `$` must name a variable.** A bare one expands to nothing and your
   sentence arrives with a hole in it, while every check on the text still
   passes. Write `$$` for a literal dollar.
 - **no `$(…)`.** Running a command from inside a sentence is what `capture` is
   for.
+- **`${…}` has to be a well-formed expansion.** `${ high }` is a *bad
+  substitution*, which a shell reports at run time — so the hook exits without
+  injecting anything, and every check on its text still passes.
 
 ### Degrade to a no-op, never to an error
 

@@ -126,7 +126,7 @@ anything read it. See [Troubleshooting](../troubleshooting.md#why-it-exists).
 ### The bar for shipping one
 
 Both bundled adapters are verified by `doctor` against a real container:
-`claude` passes 6 checks, `opencode` 4 (subagents and hooks correctly skipped).
+`claude` passes 7 checks, `opencode` 6 (hooks correctly skipped).
 Any third adapter inherits the same bar.
 
 `opencode` passing `doctor` is **not** the same as `opencode` being proven — it

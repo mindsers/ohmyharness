@@ -226,6 +226,27 @@ impl Adapter {
     /// settings document — indistinguishable from a harness that declares no
     /// hooks, except that this one claimed to have them.
     fn check_hook_maps(&self, path: &Path) -> Result<()> {
+        // The tool vocabulary is adapter-level, so its guard has to be too.
+        // Both directions matter: hooks without a vocabulary drop every
+        // tool-scoped hook and blame the harness, and a vocabulary without
+        // hooks is a map read by nobody — the failure this whole function
+        // exists for.
+        let hooks = self.capabilities.contains_key(&Capability::Hooks);
+        if hooks && self.tools.is_empty() {
+            anyhow::bail!(
+                "adapter {}: `hooks` is declared with no `[tools]`, so every hook that \
+                 names a tool would be dropped and reported as unsupported. Map at \
+                 least one of edit, read, shell, search.",
+                path.display()
+            );
+        }
+        if !hooks && !self.tools.is_empty() {
+            anyhow::bail!(
+                "adapter {}: `[tools]` is read by nobody here — only `hooks` uses it, \
+                 and this adapter declares none.",
+                path.display()
+            );
+        }
         for (cap, binding) in &self.capabilities {
             let declares = !binding.events.is_empty()
                 || !binding.fields.is_empty()
@@ -341,6 +362,42 @@ mod tests {
         );
     }
 
+    /// The paths a harness reads, pinned to what its documentation says.
+    ///
+    /// These are the claims CONTRIBUTING puts at the top: a wrong one does not
+    /// crash anything — the harness starts and simply never sees your profile,
+    /// and `omh doctor` cannot tell, because its `dir` check verifies that the
+    /// directory *omh mounted* holds what omh put there. It passes identically
+    /// whether the path is right or wrong.
+    ///
+    /// So the value is pinned here and the source is cited, which is the most a
+    /// test can do: it cannot verify the claim, but it can stop one drifting
+    /// silently, and it makes the citation reviewable.
+    ///
+    /// opencode names these directories in the plural — `agents/`, `commands/`,
+    /// `skills/` — per https://opencode.ai/docs/agents/ and
+    /// https://opencode.ai/docs/commands/, read 2026-08-12. Singular is
+    /// accepted as a legacy alias; omh follows the documented spelling.
+    #[test]
+    fn opencode_reads_where_its_documentation_says() {
+        let oc = Adapter::find(Path::new(REAL), "opencode").unwrap();
+        let path = |c: Capability| oc.supports(c).map(|b| b.path.as_str());
+        assert_eq!(
+            path(Capability::Skills),
+            Some("$HOME/.config/opencode/skills")
+        );
+        assert_eq!(
+            path(Capability::Commands),
+            Some("$HOME/.config/opencode/commands"),
+            "plural — omh spelled this `command` and opencode documents `commands`, \
+             so every custom command was mounted where nothing reads"
+        );
+        assert_eq!(
+            path(Capability::Subagents),
+            Some("$HOME/.config/opencode/agents")
+        );
+    }
+
     /// The tool vocabulary belongs to the harness, not to its hooks.
     ///
     /// `edit`/`read`/`shell`/`search` is omh's answer to "what did the agent
@@ -357,6 +414,58 @@ mod tests {
             claude.tools[&crate::hook::Tool::Edit],
             "Edit|Write|MultiEdit"
         );
+    }
+
+    /// A harness with hook moments and no tool vocabulary drops every hook that
+    /// names a tool, and blames the harness for it.
+    ///
+    /// This guard did not move when the map did. `check_hook_maps` refuses a
+    /// `hooks` binding with no `events` because a binding that can express no
+    /// moment "claimed to have them" — and forgetting to lift `[tools]` to the
+    /// top level has the same shape: `git-unavailable`, `graph-first` and
+    /// `graph-read` are all dropped, and the user reads "dropped 3 hooks
+    /// (unsupported)", which is never a true statement about any harness.
+    #[test]
+    fn a_harness_with_hooks_must_spell_the_tools() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "wordless.toml",
+            r#"
+            name = "wordless"
+            bin  = "wordless"
+            install = "x"
+            [capabilities.hooks]
+            path   = "$HOME/settings.json"
+            render = "claude-settings"
+            [capabilities.hooks.events]
+            before-tool = "PreToolUse"
+            "#,
+        );
+        let err = format!("{:#}", Adapter::find(d.path(), "wordless").unwrap_err());
+        assert!(err.contains("tools"), "must name what is missing: {err}");
+    }
+
+    /// And the other direction: a vocabulary nothing can read.
+    #[test]
+    fn a_harness_without_hooks_has_no_use_for_a_tool_vocabulary() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "odd.toml",
+            r#"
+            name = "odd"
+            bin  = "odd"
+            install = "x"
+            [tools]
+            shell = "Bash"
+            [capabilities.rules]
+            path   = "/work/AGENTS.md"
+            render = "concat"
+            "#,
+        );
+        let err = format!("{:#}", Adapter::find(d.path(), "odd").unwrap_err());
+        assert!(err.contains("tools"), "read by nobody, and said so: {err}");
     }
 
     /// And it is refused inside a capability, where the map it replaced used to
@@ -411,6 +520,35 @@ mod tests {
         assert!(msg.contains("hooks"), "and where it belongs: {msg}");
     }
 
+    /// Every hook map, not just `events`.
+    ///
+    /// `fields` and `inject` are legitimate `Binding` members on every
+    /// capability, so `deny_unknown_fields` does not catch them in the wrong
+    /// place — only this check does, and only `events` was asserted. Dropping
+    /// either of the other two disjuncts left the suite green while an adapter
+    /// declaring `[capabilities.rules.inject]` loaded cleanly and did nothing.
+    #[test]
+    fn every_hook_map_is_refused_outside_the_hooks_capability() {
+        for map in [
+            "[capabilities.rules.events]\nturn-end = \"Stop\"",
+            "[capabilities.rules.fields]\ntool-file = \".tool_input.file_path\"",
+            "[capabilities.rules.inject]\ntemplate = \"echo {{text}}\"",
+        ] {
+            let d = tempfile::tempdir().unwrap();
+            write(
+                d.path(),
+                "odd.toml",
+                &format!(
+                    "name = \"odd\"\nbin = \"odd\"\ninstall = \"x\"\n\
+                     [capabilities.rules]\npath = \"/work/AGENTS.md\"\n\
+                     render = \"concat\"\n{map}\n"
+                ),
+            );
+            let err = format!("{:#}", Adapter::find(d.path(), "odd").unwrap_err());
+            assert!(err.contains("rules"), "{map} must be refused: {err}");
+        }
+    }
+
     /// A hooks binding with no `events` can express no moment, so every hook is
     /// dropped and the harness receives an empty settings document — which is
     /// indistinguishable from a harness that declares no hooks at all, except
@@ -425,6 +563,8 @@ mod tests {
             name = "mute"
             bin  = "mute"
             install = "x"
+            [tools]
+            shell = "Bash"
             [capabilities.hooks]
             path   = "$HOME/settings.json"
             render = "claude-settings"

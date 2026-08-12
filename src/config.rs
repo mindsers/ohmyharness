@@ -162,10 +162,12 @@ fn read_layer(path: &Path) -> Result<Option<String>> {
 
 /// Every hook across all layers, resolved with provenance.
 ///
-/// Same shape as [`servers`] deliberately: `omh why` treats an MCP server and a
-/// hook as the same kind of thing — something installed, from some layer, that
-/// omh either chose or you did. `render::merge_hooks` merges for *rendering*
-/// and drops the layer, which is the one fact this needs.
+/// Reported the same way as [`servers`] — `omh why` treats a server and a hook
+/// as the same kind of thing, something installed from somewhere that omh
+/// either chose or you did — but resolved differently: hooks have two tiers and
+/// can genuinely shadow, servers have one catalogue and never do.
+/// `render::merge_hooks` merges for *rendering* and drops the tier, which is
+/// the one fact this needs.
 pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::ALL {
@@ -235,7 +237,12 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
                 // two stories, from the one command whose job is telling
                 // authorship straight.
                 let server: Server = serde_json::from_value(spec.clone()).with_context(|| {
-                    format!("{}: server `{name}` is not one omh can run", path.display())
+                    format!(
+                        "{}: server `{name}` is not one omh can run. omh launches \
+                         stdio servers — {{\"command\": …, \"args\": […], \"env\": {{…}}}} \
+                         — and has no support for remote/HTTP ones yet.",
+                        path.display()
+                    )
                 })?;
                 found.push((name.clone(), server.command, Layer::Personal));
             }
@@ -307,11 +314,17 @@ fn resolve(found: Vec<(String, String, Layer)>) -> Vec<Setting> {
         .collect()
 }
 
+/// Absent is not unreadable, and this is the function where conflating them
+/// **destroys** rather than merely misreports: every caller is a
+/// read-modify-write, so an error read as "empty" turns the write into a
+/// replacement. One byte that is not UTF-8 in `settings.toml` used to take
+/// every `[omh]` switch and every `[mcp.<name>.env]` token with it, and print
+/// success.
 fn read_table(path: &Path) -> Result<toml::Table> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => toml::from_str(&raw).with_context(|| format!("parsing {}", path.display())),
-        Err(_) => Ok(toml::Table::new()),
-    }
+    let Some(raw) = read_layer(path)? else {
+        return Ok(toml::Table::new());
+    };
+    toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
 }
 
 /// Accept TOML literals (`["a", "b"]`, `true`, `30`) and fall back to a bare
@@ -407,12 +420,18 @@ pub fn mcp_path(paths: &Paths) -> PathBuf {
 
 /// A layer's canonical file is itself `mcp-json`, so reading it is the same
 /// parser import uses — one code path, one set of round-trip tests.
+/// The same rule as `read_table`, and the same stakes. `mcp_add` starting from
+/// an empty map on an unreadable catalogue writes a file holding only the
+/// server just added — every other server, for every repo, gone with a success
+/// message. `mcp_import` is worse still: its "never clobber what you wrote by
+/// hand" guard is built on `all.get(&name)`, so an empty map classifies every
+/// incoming server as new and overwrites without `--force`.
 fn read_servers(path: &Path) -> Result<BTreeMap<String, Server>> {
-    match std::fs::read_to_string(path) {
-        Ok(raw) => crate::render::parse(Render::McpJson, &raw)
-            .with_context(|| format!("reading {}", path.display())),
-        Err(_) => Ok(BTreeMap::new()),
-    }
+    let Some(raw) = read_layer(path)? else {
+        return Ok(BTreeMap::new());
+    };
+    crate::render::parse(Render::McpJson, &raw)
+        .with_context(|| format!("reading {}", path.display()))
 }
 
 fn write_servers(path: &Path, servers: &BTreeMap<String, Server>) -> Result<()> {
@@ -621,6 +640,51 @@ mod tests {
         let err = format!("{:#}", servers(&paths).unwrap_err());
         assert!(err.contains("linear"), "must name the server: {err}");
         assert!(err.contains("mcp.json"), "and the file: {err}");
+    }
+
+    /// A file omh cannot read is never a file omh may overwrite.
+    ///
+    /// `set` and `mcp_add` are read-modify-write. Treating every read error as
+    /// "empty" meant one unreadable byte — a token pasted with a stray
+    /// character, a file an editor saved as UTF-16 — turned the write into a
+    /// **replacement**: `omh config set idle_timeout 30m` would report success
+    /// having deleted every `[omh]` switch and every `[mcp.<name>.env]` token
+    /// beside it.
+    ///
+    /// This got sharper in this PR, twice over: settings layers used to be a
+    /// `policy.toml` holding scalars, and now hold the feature switches and the
+    /// MCP environment; and `mcp.json` used to be one of three mergeable layers
+    /// and is now the single catalogue for every repo.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_file_is_never_overwritten_with_an_empty_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, paths) = fixture();
+
+        // Not a permissions trick: bytes that are not UTF-8, which is what a
+        // mispasted token actually looks like.
+        let settings = Layer::Local.file(&paths);
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, [b'k', b'=', b'"', 0xff, b'"']).unwrap();
+        assert!(
+            set(&paths, "idle_timeout", "30m", Layer::Local).is_err(),
+            "an unreadable settings file must stop the write, not replace it"
+        );
+
+        let catalogue = mcp_path(&paths);
+        std::fs::create_dir_all(catalogue.parent().unwrap()).unwrap();
+        std::fs::write(&catalogue, [0xff, 0xfe, b'{']).unwrap();
+        let before = std::fs::read(&catalogue).unwrap();
+        assert!(
+            mcp_add(&paths, "new", server("c")).is_err(),
+            "an unreadable catalogue must stop the write, not replace it"
+        );
+        assert_eq!(
+            std::fs::read(&catalogue).unwrap(),
+            before,
+            "and must leave every server you had on disk"
+        );
+        let _ = std::fs::set_permissions(&catalogue, std::fs::Permissions::from_mode(0o644));
     }
 
     /// A repo cannot declare an MCP server, and writing one is an error rather

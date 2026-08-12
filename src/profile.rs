@@ -156,12 +156,32 @@ impl Profile {
     /// Absent paths are skipped, so an empty result means "nothing declared" —
     /// and it stays a `Vec` rather than an `Option` because every caller
     /// downstream merges a list, and hooks would have needed the list anyway.
-    pub fn sources(&self, cap: Capability) -> Vec<PathBuf> {
+    ///
+    /// **Absent is not unreadable**, which `Path::exists()` cannot express: it
+    /// answers `false` for a dangling symlink, an `EACCES` parent and an
+    /// unmounted share alike. Read as "nothing declared" the launcher skips the
+    /// capability, mounts nothing, reports nothing dropped and exits 0 — and
+    /// `doctor` agrees, because it branches on the same empty list. With one
+    /// catalogue that is every skill, rule, command, subagent and server at
+    /// once, so `try_exists` and a `Result` rather than a silent `false`.
+    pub fn sources(&self, cap: Capability) -> Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        for path in self.candidates(cap) {
+            if path
+                .try_exists()
+                .with_context(|| format!("reading {}", path.display()))?
+            {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    }
+
+    fn candidates(&self, cap: Capability) -> Vec<PathBuf> {
         let mut out = vec![self.root.join(cap.source())];
         if cap == Capability::Hooks {
             out.push(self.repo.join(".omh").join(cap.source()));
         }
-        out.retain(|p| p.exists());
         out
     }
 
@@ -171,11 +191,14 @@ impl Profile {
     /// capabilities from the adapter side instead. Kept because it is the
     /// profile-side half of that answer and `omh eject` will need it.
     #[allow(dead_code)]
-    pub fn declared(&self) -> Vec<Capability> {
-        Capability::ALL
-            .into_iter()
-            .filter(|c| !self.sources(*c).is_empty())
-            .collect()
+    pub fn declared(&self) -> Result<Vec<Capability>> {
+        let mut out = Vec::new();
+        for cap in Capability::ALL {
+            if !self.sources(cap)?.is_empty() {
+                out.push(cap);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -231,6 +254,37 @@ mod tests {
         Fixture { _dir: dir, paths }
     }
 
+    /// A catalogue omh cannot read is not a catalogue that declares nothing.
+    ///
+    /// `Path::exists()` answers `false` for *every* error — a dangling symlink
+    /// into an unmounted volume, a parent directory created under `sudo`, a
+    /// network share not up yet — so an unreadable catalogue resolved to "you
+    /// declared none of this". The launcher then skips the capability, mounts
+    /// nothing, adds nothing to `dropped`, and exits 0; `omh doctor` takes the
+    /// same empty-sources branch and reports healthy. That is the closed loop
+    /// `config::read_layer` was written about, and one catalogue makes it total
+    /// rather than partial — before this there were three layers and one bad
+    /// path degraded a third of the way.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_catalogue_is_an_error_not_an_empty_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture(&[("catalogue", "skills/mine/SKILL.md", "s")]);
+        // The parent unreadable, so `stat` on the child fails with EACCES
+        // rather than ENOENT — a broken symlink or an absent mount reaches
+        // `exists()` exactly the same way.
+        std::fs::set_permissions(&f.paths.root, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = Profile::resolve(&f.paths).sources(Capability::Skills);
+        std::fs::set_permissions(&f.paths.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.expect_err("unreadable must not read as undeclared");
+        assert!(
+            format!("{err:#}").contains("skills"),
+            "must name the path: {err:#}"
+        );
+    }
+
     /// Absent is normal: a fresh catalogue declares most capabilities not at
     /// all, and an empty result has to mean that rather than a path invented on
     /// its behalf — the launcher mounts what this returns.
@@ -238,8 +292,8 @@ mod tests {
     fn absent_capabilities_are_skipped_not_faked() {
         let f = fixture(&[("catalogue", "rules/tdd.md", "only")]);
         let profile = Profile::resolve(&f.paths);
-        assert_eq!(profile.sources(Capability::Rules).len(), 1);
-        assert!(profile.sources(Capability::Skills).is_empty());
+        assert_eq!(profile.sources(Capability::Rules).unwrap().len(), 1);
+        assert!(profile.sources(Capability::Skills).unwrap().is_empty());
     }
 
     #[test]
@@ -249,7 +303,7 @@ mod tests {
             ("catalogue", "mcp.json", "{}"),
             ("catalogue", "skills/x/SKILL.md", "s"),
         ]);
-        let declared = Profile::resolve(&f.paths).declared();
+        let declared = Profile::resolve(&f.paths).declared().unwrap();
         assert_eq!(
             declared,
             vec![Capability::Rules, Capability::Skills, Capability::Mcp]
@@ -266,7 +320,9 @@ mod tests {
     fn a_capability_resolves_to_one_catalogue_path() {
         let f = fixture(&[("catalogue", "skills/mine/SKILL.md", "yours")]);
         assert_eq!(
-            Profile::resolve(&f.paths).sources(Capability::Skills),
+            Profile::resolve(&f.paths)
+                .sources(Capability::Skills)
+                .unwrap(),
             vec![f.paths.root.join("skills")]
         );
     }
@@ -285,8 +341,8 @@ mod tests {
             ("shared", "mcp.json", "{}"),
         ]);
         let profile = Profile::resolve(&f.paths);
-        assert!(profile.sources(Capability::Skills).is_empty());
-        assert!(profile.sources(Capability::Mcp).is_empty());
+        assert!(profile.sources(Capability::Skills).unwrap().is_empty());
+        assert!(profile.sources(Capability::Mcp).unwrap().is_empty());
     }
 
     /// Hooks are the one capability with a repo tier, because they are the one
@@ -302,7 +358,9 @@ mod tests {
             ("project", "hooks/format.json", "this repo's"),
         ]);
         assert_eq!(
-            Profile::resolve(&f.paths).sources(Capability::Hooks),
+            Profile::resolve(&f.paths)
+                .sources(Capability::Hooks)
+                .unwrap(),
             vec![f.paths.root.join("hooks"), f.paths.repo.join(".omh/hooks")],
             "project last, so project wins"
         );

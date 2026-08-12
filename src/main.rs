@@ -779,7 +779,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     // Resolved once and used for both the checks and the plan below, so the
     // probe cannot check a session different from the one it launches.
     let own = omh_own(&paths)?;
-    let mut checks = doctor::checks(&profile, &adapter, &own);
+    let mut checks = doctor::checks(&profile, &adapter, &own)?;
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
@@ -789,7 +789,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     // Read through `render::parse_layers` rather than `config::servers`, which
     // returns only each server's *command* — the arguments are what say which
     // directories it will look in, and those are the whole point of the check.
-    let declared = render::parse_layers(&profile.sources(adapter::Capability::Mcp))?;
+    let declared = render::parse_layers(&profile.sources(adapter::Capability::Mcp)?)?;
     // Not when this repo has switched the feature off: the server is left out
     // of the document on purpose, so checking for it is checking a claim omh
     // deliberately did not make.
@@ -1485,27 +1485,44 @@ fn say_rules(plan: &container::Plan) {
 /// are new or changed, and where detection and the directory disagree.
 ///
 /// Reported on every launch including a dry run — a dry run is exactly when you
-/// want to be told what a launch would hand your agent. **Recorded only on a
-/// real one**, which is the distinction the `Record` type carries: the snapshot
-/// is what makes "new or changed" fire exactly once, so writing it from a
-/// command that launches nothing spends the one notification about somebody
-/// else's executable content changing under you.
+/// want to be told what a launch would hand your agent. The returned `Record`
+/// is the *other* half: committing it is what spends the "new or changed"
+/// call-out, so only a session that actually started may do it.
 ///
 /// Never fatal. A repo whose hook drift cannot be computed is still a repo you
 /// can work in; and an unreadable hooks directory stops the launch anyway, in
 /// `render::merge_hooks`, which is where it should.
-fn say_hooks(paths: &Paths, commit: bool) {
-    let recorded = notice::hooks(paths, &detect::stacks(&paths.repo)).and_then(|(notices, rec)| {
-        for notice in notices {
-            eprintln!("omh: {notice}");
+fn say_hooks(paths: &Paths) -> Option<notice::Record> {
+    match notice::hooks(paths, &detect::stacks(&paths.repo)) {
+        Ok((notices, record)) => {
+            for notice in notices {
+                eprintln!("omh: {notice}");
+            }
+            Some(record)
         }
-        if commit {
-            rec.commit()?;
+        Err(e) => {
+            eprintln!("omh: could not check this repo's hooks — {e:#}");
+            None
         }
-        Ok(())
-    });
-    if let Err(e) = recorded {
-        eprintln!("omh: could not check this repo's hooks — {e:#}");
+    }
+}
+
+/// Mark this repo's hooks as seen, now that a session is actually running.
+///
+/// Deliberately after the container is up rather than beside the report. The
+/// snapshot is what makes "new or changed" fire exactly once, so writing it
+/// from a launch that then died — Docker not running, an image that would not
+/// build — spent the one notification about somebody else's executable content
+/// changing under you, and the retry was silent. A dry run never gets here at
+/// all, which is the other half of the same rule.
+fn remember_hooks(record: Option<notice::Record>) {
+    if let Some(record) = record {
+        if let Err(e) = record.commit() {
+            // The check succeeded and its notices are already printed; only the
+            // bookkeeping failed. Saying "could not check" would send the user
+            // looking at their hooks instead of at `~/.omh/run`.
+            eprintln!("omh: this repo's hooks were not recorded — {e:#}");
+        }
     }
 }
 
@@ -1625,7 +1642,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     plan.validate(&backend.caps())?;
 
     say_rules(&plan);
-    say_hooks(&paths, !cli.dry_run);
+    let hooks_seen = say_hooks(&paths);
 
     let status_line = match plan.degradation() {
         Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.label()),
@@ -1656,6 +1673,8 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
             ..opts.clone()
         },
     )?;
+    // The container is up, so the launch happened and the call-out is spent.
+    remember_hooks(hooks_seen);
     eprintln!("{status_line}");
     let status = Command::new(backend.program())
         .args(backend.exec_args(&name, &plan.argv, true))

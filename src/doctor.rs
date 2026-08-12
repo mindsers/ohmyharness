@@ -12,6 +12,7 @@
 
 use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::profile::Profile;
+use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::image::GUEST_HOME;
@@ -100,10 +101,10 @@ pub fn credential_checks(adapter: &Adapter) -> Vec<Check> {
 }
 
 /// What must be true inside the sandbox, given this profile and adapter.
-pub fn checks(profile: &Profile, adapter: &Adapter, own: &crate::base::Own) -> Vec<Check> {
+pub fn checks(profile: &Profile, adapter: &Adapter, own: &crate::base::Own) -> Result<Vec<Check>> {
     let mut out = Vec::new();
     for capability in Capability::ALL {
-        let sources = profile.sources(capability);
+        let sources = profile.sources(capability)?;
         // Two capabilities are mounted whether or not a layer sources them,
         // because omh generates part of them from the base manifest. Asking
         // the profile is the same mistake `container::plan` made about rules:
@@ -150,7 +151,7 @@ pub fn checks(profile: &Profile, adapter: &Adapter, own: &crate::base::Own) -> V
             dir: binding.render == Render::Dir,
         });
     }
-    out
+    Ok(out)
 }
 
 /// Union of entry names across layers — what the harness should be able to see.
@@ -352,6 +353,7 @@ mod tests {
     fn a_capability_the_profile_does_not_source_is_still_checked() {
         let fx = fixture();
         let names: Vec<String> = checks(&fx.profile, &adapter("claude"), &own())
+            .unwrap()
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -375,6 +377,7 @@ mod tests {
         let off = own_with(&["codegraph".to_string()].into());
 
         let mcp = checks(&fx.profile, &adapter("claude"), &off)
+            .unwrap()
             .into_iter()
             .find(|c| c.name == "mcp")
             .expect("claude stages mcp");
@@ -389,6 +392,7 @@ mod tests {
     fn every_declared_capability_is_checked() {
         let fx = fixture();
         let got: Vec<_> = checks(&fx.profile, &adapter("claude"), &own())
+            .unwrap()
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -405,6 +409,7 @@ mod tests {
     fn capabilities_the_harness_cannot_express_are_not_checked() {
         let fx = fixture();
         let caps: Vec<String> = checks(&fx.profile, &adapter("opencode"), &own())
+            .unwrap()
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -424,7 +429,7 @@ mod tests {
     #[test]
     fn checks_target_guest_paths_only() {
         let fx = fixture();
-        for check in checks(&fx.profile, &adapter("claude"), &own()) {
+        for check in checks(&fx.profile, &adapter("claude"), &own()).unwrap() {
             let p = check.guest.to_string_lossy().to_string();
             assert!(
                 p.starts_with("/work") || p.starts_with(GUEST_HOME),
@@ -436,7 +441,7 @@ mod tests {
     #[test]
     fn content_checks_name_what_must_be_present() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &own());
+        let cs = checks(&fx.profile, &adapter("claude"), &own()).unwrap();
 
         let skills = cs.iter().find(|c| c.name == "skills").unwrap();
         assert_eq!(skills.expect, Expect::Entries(vec!["graphify".into()]));
@@ -468,7 +473,7 @@ mod tests {
     #[test]
     fn the_probe_reports_one_line_per_check() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &own());
+        let cs = checks(&fx.profile, &adapter("claude"), &own()).unwrap();
         let script = probe_script(&cs);
         for c in &cs {
             assert!(

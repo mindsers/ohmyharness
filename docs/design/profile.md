@@ -294,20 +294,25 @@ translate — and an earlier draft of this page had it wrong in both directions.
 | `mcp` | the MCP spec | re-render per harness |
 | `hooks` | **nothing** — omh defines the vocabulary | translate at staging |
 | `commands` | markdown + frontmatter, converging with skills in Claude Code (unverified) | copy |
-| `subagents` | **nothing** — no cross-tool standard exists | copy, and say so |
+| `subagents` | **nothing** — no cross-tool standard exists | copy |
 
 **Skills needed no work.** The standard fixes `name` and `description` as
-required, `license` / `compatibility` / `metadata` / `allowed-tools` as
-optional, and says unknown fields are ignored — so a skill is portable by
-construction, and `Render::Dir` copying it unchanged is correct rather than a
-bet. opencode goes further and reads `~/.claude/skills/` directly.
+required and `license` / `compatibility` / `metadata` / `allowed-tools` as
+optional, with `metadata` as the declared extension point for anything a client
+wants that the spec does not define. That is what makes a skill portable by
+construction, and `Render::Dir` copying it unchanged correct rather than a bet.
+opencode's own documentation says it ignores unknown frontmatter fields and
+reads `~/.claude/skills/` as well as its own directory — its claim about
+itself, which no test here can settle.
 
 **Subagents are the real outlier.** [OpenPackage's frontmatter
 spec](https://github.com/enulus/OpenPackage/blob/main/specs/agents-frontmatter.md)
 documents the split: `name`, `description`, `tools`, `model`, `hidden` common;
 `disallowedTools`, `permissionMode`, `skills`, `hooks` Claude-only;
 `temperature`, `maxSteps`, `permissions`, `mode`, `prompt`, `disabled`
-opencode-only — and it explicitly defines **no** cross-tool mapping. omh copies
+opencode-only. It does sketch a Claude→opencode migration, which is a starting
+point rather than a specification — and it is one author's community guide, not
+a standards body, so the field split is worth more than the mapping. omh copies
 and does not translate. A map is buildable, and it should wait for P5: a
 translation with one harness on the far side is untested by construction, which
 is the whole reason that phase exists.
@@ -320,8 +325,9 @@ than inside the hooks capability, which is where it started when hooks were the
 only consumer.
 
 **Import follows from this.** `mcp` and `hooks` translate and refuse what they
-cannot; `skills`, `commands` and `rules` copy; `subagents` copies with a notice
-that the frontmatter is harness-specific. Nothing harness-shaped is ever stored
+cannot; `skills`, `commands` and `rules` copy; `subagents` copies unchanged — the
+frontmatter divergence is documented rather than announced per launch, because
+a line printed every time is a line nobody reads. Nothing harness-shaped is ever stored
 under a neutral name — an absent entry is reported at launch, whereas a Claude
 body mounted for opencode is silent and wrong.
 
@@ -355,17 +361,17 @@ staged.** No part of it needs to happen at runtime.
 **Names become adapter data**, like every other harness difference:
 
 ```toml
+[tools]                          # adapter-level: not only hooks name tools
+edit   = "Edit|Write|MultiEdit"
+read   = "Read"
+shell  = "Bash"
+search = "Grep|Glob"
+
 [capabilities.hooks.events]
 session-start = "SessionStart"
 turn-end      = "Stop"
 before-tool   = "PreToolUse"
 after-tool    = "PostToolUse"
-
-[capabilities.hooks.tools]
-edit   = "Edit|Write|MultiEdit"
-read   = "Read"
-shell  = "Bash"
-search = "Grep|Glob"
 ```
 
 An absent entry means this harness has no such moment — the same "absent key is

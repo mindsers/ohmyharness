@@ -137,7 +137,7 @@ pub fn plan(
     });
 
     for cap in Capability::ALL {
-        let sources = profile.sources(cap);
+        let sources = profile.sources(cap)?;
         // Every other capability is exactly what the profile carries. Rules are
         // not: the project's own `AGENTS.md` is composed in, and it is often the
         // only thing there — a fresh install has no rules layer of its own. So
@@ -1227,6 +1227,33 @@ mod tests {
         assert!(msg.contains("settings.toml"), "and say the way out: {msg}");
     }
 
+    /// What a hook may name and what the sandbox sets are one list.
+    ///
+    /// `hook::check_interpolation` refuses a `$` in `inject` that names
+    /// anything omh does not bind — which is only true while `SANDBOX_VARS`
+    /// and the env this function builds agree. Drift either way is silent: a
+    /// variable set and not nameable is a refusal nobody can act on, and a
+    /// variable nameable and not set expands to nothing in the middle of a
+    /// sentence, which is the failure the check exists for.
+    #[test]
+    fn the_sandbox_sets_what_a_hook_may_name() {
+        let fx = fixture();
+        let plan = plan_for(&fx, "claude");
+        let set: Vec<&str> = plan.env.iter().map(|(k, _)| k.as_str()).collect();
+
+        for var in crate::hook::SANDBOX_VARS {
+            assert!(
+                set.contains(&var),
+                "a hook may name ${var} and the sandbox does not set it: {set:?}"
+            );
+        }
+        assert_eq!(
+            set.len(),
+            crate::hook::SANDBOX_VARS.len(),
+            "and the sandbox sets nothing a hook is refused for naming: {set:?}"
+        );
+    }
+
     /// Switching a feature off does not hand you its names.
     ///
     /// `reserved` is built from every manifest hook whether or not its feature
@@ -1332,7 +1359,7 @@ mod tests {
         );
 
         // Every source a link can point into must actually be mounted.
-        for i in 0..fx.profile.sources(Capability::Skills).len() {
+        for i in 0..fx.profile.sources(Capability::Skills).unwrap().len() {
             assert!(
                 p.mounts
                     .iter()

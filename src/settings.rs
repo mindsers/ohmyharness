@@ -83,10 +83,17 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<Resolved> {
         };
         let file: File =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-        // A table that is neither of the two either reader knows about. A
-        // scalar falls through on purpose — `config::policy` resolves those.
+        // A table — or an array *of* tables, which `is_table()` answers `false`
+        // for, so `[[omhh]]` slipped through and was read by nobody. A scalar
+        // or a plain array falls through on purpose: `carry_in = [".env"]` is
+        // a setting, and `config::policy` resolves those.
+        let is_table_like = |v: &toml::Value| {
+            v.is_table()
+                || v.as_array()
+                    .is_some_and(|a| a.iter().any(toml::Value::is_table))
+        };
         for (key, value) in &file.rest {
-            if value.is_table() {
+            if is_table_like(value) {
                 anyhow::bail!(
                     "{}: `[{key}]` is read by nobody. This file holds settings at the \
                      top level, `[omh]` for omh's own features, and `[mcp.<name>.env]` \

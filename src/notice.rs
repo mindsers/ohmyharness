@@ -49,7 +49,7 @@ pub fn stack_hook_names(stack: &Stack) -> [String; 2] {
 /// So observing and recording are two acts, and this is the second one held as
 /// a value. A caller that is not really launching drops it; `run` commits it.
 /// The rule used to live in a doc comment two files away.
-#[must_use = "a launch that does not commit the record re-reports the same hooks forever"]
+#[must_use = "a launch that does not commit the record never calls out the next change"]
 pub struct Record {
     path: PathBuf,
     seen: BTreeMap<String, String>,
@@ -71,10 +71,10 @@ impl Record {
 /// if this turns out to be a real launch.
 ///
 /// Reporting never fails the launch — a stack that drifted is something to tell
-/// somebody about, not a reason to refuse to start work — but it does return
-/// `Err` for a hooks directory it cannot read, because a set of hooks running
-/// with nobody told about them is the one state this module exists to prevent.
-/// The caller decides which of those to do with it.
+/// somebody about, not a reason to refuse to start work. It does return `Err`
+/// for a hooks directory it cannot read, because reporting an empty set of
+/// hooks would be a lie; what actually stops the launch in that case is
+/// `render::merge_hooks`, which reads the same directory and refuses.
 pub fn hooks(paths: &Paths, stacks: &[Stack]) -> Result<(Vec<String>, Record)> {
     let dir = paths.repo.join(".omh/hooks");
     let present = read_dir(&dir)?;
