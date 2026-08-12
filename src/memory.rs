@@ -393,7 +393,7 @@ pub fn expand_key(template: &str, vars: &[(&str, &str)]) -> Result<String> {
 /// A key is slash-separated slugs, and a key is also a path under the store.
 ///
 /// `slug` guards what the *variable* can hold, but the template around it is
-/// `.omh/keys.toml` — a committed file, so a clone supplies it — and
+/// `.omh/memory.toml` — a committed file, so a clone supplies it — and
 /// `expand_key` copies its literal text through untouched. Since `remember`
 /// creates the key's parent directories, an unchecked template is an
 /// arbitrary write. `auth::validate_name` and `session::validate_id` are the
@@ -1008,9 +1008,18 @@ pub fn load(paths: &Paths) -> Result<Vec<Note>> {
 
 // ── key templates ───────────────────────────────────────────────────────────
 
-/// Seeded by `init` at `<repo>/.omh/keys.toml`, with `write_if_absent` and
+/// Seeded by `init` at `<repo>/.omh/memory.toml`, with `write_if_absent` and
 /// never refreshed: a shipped template that changed under an existing store
 /// would silently re-key every note in it.
+/// Where the repo's memory configuration lives.
+///
+/// It was `keys.toml`, which named one table as though it were the whole
+/// subsystem — key templates are one part of how the note store is configured,
+/// and expiry has settings of its own coming. `settings.toml` /
+/// `settings.local.toml` say what the file *is* rather than what one of its
+/// tables holds, and this follows them.
+pub const TEMPLATES: &str = "memory.toml";
+
 pub const SHIPPED_KEYS: &str = "\
 # How a note's key is derived. Identity, not a title — the agent never picks
 # one, so the same observation cannot be recorded twice under two spellings.
@@ -1045,10 +1054,27 @@ fn parse_templates(raw: &str) -> Result<BTreeMap<Kind, String>> {
 /// work in a repo where `init` has not run, and inventing a key on the spot is
 /// the one thing §6 forbids.
 pub fn templates(paths: &Paths) -> Result<BTreeMap<Kind, String>> {
-    let path = paths.repo.join(".omh").join("keys.toml");
+    let path = paths.repo.join(".omh").join(TEMPLATES);
     match std::fs::read_to_string(&path) {
         Ok(raw) => parse_templates(&raw).with_context(|| format!("{}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => parse_templates(SHIPPED_KEYS),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // The rename needs a check rather than a fallback, and this is the
+            // one place that can make it. That fallback above is the whole
+            // problem: an edited `keys.toml` would fail to find `memory.toml`,
+            // silently revert to the shipped templates, and re-key every note
+            // written from then on — while every existing key stopped being
+            // derivable from anything. Silent, and unrecoverable without
+            // knowing it happened.
+            let stale = paths.repo.join(".omh").join("keys.toml");
+            if stale.exists() {
+                anyhow::bail!(
+                    "{} is where key templates used to live; they are read from {} now.                      Renaming the file is the whole migration — but do it rather than                      leaving both, because the shipped defaults would silently re-key                      every note written from here on.",
+                    stale.display(),
+                    path.display()
+                );
+            }
+            parse_templates(SHIPPED_KEYS)
+        }
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
@@ -2613,6 +2639,43 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
     }
 
+    /// A `keys.toml` still present is a loud error naming both paths, never a
+    /// silent fallback.
+    ///
+    /// `templates` treats a missing file as "use the shipped defaults", which
+    /// is right for a repo where `init` has not run and catastrophic for a
+    /// rename: an edited `keys.toml` would fail to find `memory.toml`, revert
+    /// to the shipped templates, and re-key every note written from then on
+    /// while every existing key stopped being derivable. Nothing would say so.
+    ///
+    /// This is the whole of the migration, and it is a check rather than a move
+    /// because moving a file in somebody's repo behind their back is the larger
+    /// of the two surprises.
+    #[test]
+    fn a_leftover_keys_toml_is_an_error_naming_both_paths() {
+        let (_d, paths) = fixture();
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        std::fs::write(paths.repo.join(".omh/keys.toml"), SHIPPED_KEYS).unwrap();
+
+        let err = templates(&paths).unwrap_err().to_string();
+        assert!(err.contains("keys.toml"), "must name the old path: {err}");
+        assert!(err.contains("memory.toml"), "and the new one: {err}");
+    }
+
+    /// The other half: the new name is read where the old one was.
+    #[test]
+    fn key_templates_are_read_from_memory_toml() {
+        let (_d, paths) = fixture();
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        std::fs::write(
+            paths.repo.join(".omh/memory.toml"),
+            "[keys]\nsurprise = \"mine/{{slug}}\"\ntopic = \"{{slug}}\"\nstub = \"docs/{{path}}\"\n",
+        )
+        .unwrap();
+
+        assert_eq!(templates(&paths).unwrap()[&Kind::Surprise], "mine/{{slug}}");
+    }
+
     /// §6 derives keys from a template in the repo, so the template is input
     /// omh does not control — a clone carries one. `remember` creates the
     /// key's parent directories, so a template that leaves the store is an
@@ -2622,7 +2685,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let (dir, paths) = fixture();
         std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
         std::fs::write(
-            paths.repo.join(".omh/keys.toml"),
+            paths.repo.join(".omh/memory.toml"),
             "[keys]\nsurprise = \"../../escaped/{{slug}}\"\ntopic = \"{{slug}}\"\nstub = \"docs/{{path}}\"\n",
         )
         .unwrap();
@@ -2632,7 +2695,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             err.to_string().contains("not a key"),
             "the refusal must name the problem, got: {err}"
         );
-        // `.md` only: the fixture's own `keys.toml` lives outside the store
+        // `.md` only: the fixture's own `memory.toml` lives outside the store
         // by design, and it is notes that must not escape.
         for path in files_under(dir.path()).keys() {
             assert!(

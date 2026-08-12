@@ -129,7 +129,7 @@ enum Cmd {
 enum McpCmd {
     /// Servers, with the layer each comes from.
     Ls,
-    /// Add a server. Defaults to the gitignored layer, because MCP env holds tokens.
+    /// Add a server to your catalogue.
     Add {
         name: String,
         command: String,
@@ -137,15 +137,9 @@ enum McpCmd {
         args: Vec<String>,
         #[arg(long = "env", value_parser = parse_env)]
         env: Vec<(String, String)>,
-        #[arg(long, value_parser = parse_layer)]
-        layer: Option<config::Layer>,
     },
-    /// Remove a server from one layer.
-    Rm {
-        name: String,
-        #[arg(long, value_parser = parse_layer)]
-        layer: Option<config::Layer>,
-    },
+    /// Remove a server from your catalogue.
+    Rm { name: String },
     /// Import servers you already configured in an installed harness.
     Import {
         harness: String,
@@ -153,8 +147,6 @@ enum McpCmd {
         file: Option<std::path::PathBuf>,
         #[arg(long)]
         force: bool,
-        #[arg(long, value_parser = parse_layer)]
-        layer: Option<config::Layer>,
     },
 }
 
@@ -1307,35 +1299,32 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
             command,
             args,
             env,
-            layer,
         } => {
             let server = render::Server {
                 command: command.clone(),
                 args: args.clone(),
                 env: env.iter().cloned().collect(),
             };
-            let w = config::mcp_add(
-                &paths,
-                layer.unwrap_or(config::Layer::DEFAULT_WRITE),
-                name,
-                server,
-            )?;
+            let w = config::mcp_add(&paths, name, server)?;
             println!("wrote → {}", w.path.display());
-            if w.committed {
+            if !env.is_empty() {
+                // The catalogue is not committed, so nothing here reaches a
+                // teammate — but it does reach every repo you work in, which is
+                // the wrong scope for a token scoped to one of them.
                 println!(
-                    "warning: the {} layer is COMMITTED — MCP env often holds tokens",
-                    w.layer
+                    "note: this env applies in every repo. For one repo only, \
+                     put [mcp.{name}.env] in .omh/{}",
+                    settings::LOCAL
                 );
             }
             Ok(())
         }
 
-        McpCmd::Rm { name, layer } => {
-            let layer = layer.unwrap_or(config::Layer::DEFAULT_WRITE);
-            if config::mcp_remove(&paths, layer, name)? {
-                println!("removed {name} from the {layer} layer");
+        McpCmd::Rm { name } => {
+            if config::mcp_remove(&paths, name)? {
+                println!("removed {name} from your catalogue");
             } else {
-                println!("{name} was not set in the {layer} layer");
+                println!("{name} is not in your catalogue");
             }
             Ok(())
         }
@@ -1344,7 +1333,6 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
             harness,
             file,
             force,
-            layer,
         } => {
             let adapter = Adapter::find(&paths.adapters(), harness)?;
             let binding = adapter
@@ -1370,8 +1358,7 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
             })?;
             let incoming = render::parse(binding.render, &raw)?;
 
-            let layer = layer.unwrap_or(config::Layer::DEFAULT_WRITE);
-            let report = config::mcp_import(&paths, layer, incoming, *force, dry_run)?;
+            let report = config::mcp_import(&paths, incoming, *force, dry_run)?;
 
             println!("import from {harness} ({})", source.display());
             for name in &report.added {
@@ -1390,7 +1377,7 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
             if dry_run {
                 println!("\n--dry-run: nothing written");
             } else if !report.added.is_empty() {
-                println!("\nwrote → {}", layer.dir(&paths).join("mcp.json").display());
+                println!("\nwrote → {}", config::mcp_path(&paths).display());
             }
             Ok(())
         }
@@ -1463,10 +1450,12 @@ fn unset(cwd: &std::path::Path, key: &str, layer: Option<config::Layer>) -> Resu
 fn edit(cwd: &std::path::Path, layer: Option<config::Layer>) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let layer = layer.unwrap_or(config::Layer::DEFAULT_WRITE);
-    let dir = layer.dir(&paths);
-    std::fs::create_dir_all(&dir)?;
+    let file = layer.file(&paths);
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
-    Command::new(editor).arg(&dir).status()?;
+    Command::new(editor).arg(&file).status()?;
     Ok(())
 }
 
@@ -1731,21 +1720,27 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // reviewability actually lives. `omh why` reads the file init seeds from.
     install_bundled(&paths.base(), bundled::Shipped::Base)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
-    std::fs::create_dir_all(paths.root.join("profile/skills"))?;
     std::fs::create_dir_all(paths.worktrees())?;
+
+    // The catalogue, empty and ready. Created rather than left absent so
+    // `omh config edit` has somewhere to open and the shape is discoverable
+    // without reading a document.
+    for cap in adapter::Capability::ALL {
+        if cap != adapter::Capability::Mcp {
+            std::fs::create_dir_all(paths.root.join(cap.source()))?;
+        }
+    }
 
     // Detect rather than ask.
     let stacks = detect::stacks(&paths.repo);
     let names: Vec<String> = adapters.to_vec();
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h));
 
-    // Write layer 2 from what was detected. Never overwrite a human's file.
-    let shared = paths.repo.join(".omh/profile");
-    let local = paths.repo.join(".omh/local");
-    for dir in [&shared, &local] {
-        std::fs::create_dir_all(dir.join("skills"))?;
-    }
-    std::fs::create_dir_all(shared.join("hooks"))?;
+    // What a repo holds: settings, memory configuration, and hooks. No skills,
+    // no MCP servers, no commands, no subagents — those are yours, and a repo
+    // names them rather than shipping them.
+    let repo_omh = paths.repo.join(".omh");
+    std::fs::create_dir_all(repo_omh.join("hooks"))?;
     // Both halves of the note store. The committed half lives in the repo
     // because that is what makes it reach a teammate; the local half lives
     // under `~/.omh`, because a worktree holds only tracked files and
@@ -1756,49 +1751,53 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // `write_if_absent`, never the refresh path the adapters use: a shipped
     // template that changed under an existing store would silently re-key
     // every note in it, and every existing key would stop being derivable.
-    write_if_absent(&paths.repo.join(".omh/keys.toml"), memory::SHIPPED_KEYS)?;
-    // No `AGENTS.md` is written. omh's own sections are base-set entries now,
+    write_if_absent(&repo_omh.join(memory::TEMPLATES), memory::SHIPPED_KEYS)?;
+    // No `AGENTS.md` is written. omh's own sections are base-set entries,
     // composed into every session from the manifest, which is what lets a fix
     // reach a repo that ran `init` a year ago. The detected stack is not prose
     // either: it produces hooks, and a sentence describing a test command is
     // not the thing that runs it.
-    //
-    // A repo initialised before this keeps its `.omh/profile/AGENTS.md`. omh
-    // composes it as one more layer, so anything you added to it still
-    // reaches the agent — and omh's own sections arrive twice until the
-    // migration takes the file apart.
-    // The base set: omh's opinion, seeded into the committed layer where it is
+
+    // The base set: omh's opinion, seeded into your catalogue where it is
     // visible, reviewable, and removable rather than hidden in the binary.
+    // `write_if_absent`, so a server you removed does not come back.
     let base_mcp =
         serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": manifest.servers() }))?
             + "\n";
-    write_if_absent(&shared.join("mcp.json"), &base_mcp)?;
+    write_if_absent(&config::mcp_path(&paths), &base_mcp)?;
     write_if_absent(
-        &shared.join("policy.toml"),
-        "# Untracked files the worktree needs — a worktree holds only tracked\n\
+        &repo_omh.join("settings.toml"),
+        "# What this repo decided. Settings at the top level; `[omh]` switches\n\
+         # omh's own features off here without uninstalling anything.\n\
+         #\n\
+         # Untracked files the worktree needs — a worktree holds only tracked\n\
          # files, so without this the agent lands somewhere that cannot run your\n\
          # app. This is the ONLY path by which a secret reaches the agent, so\n\
          # keep it short and explicit. node_modules belongs in the image, not here.\n\
          #\n\
          # carry_in = [\".env.local\", \"certs/\"]\n\
-         carry_in = []\n",
+         carry_in = []\n\
+         \n\
+         # [omh]\n\
+         # codegraph = false\n",
     )?;
     // omh's own hooks are not seeded. They are generated from the manifest at
     // launch, which is the only arrangement in which omh can ship a fix to
     // them: `write_if_absent` never revisits, so a repo initialised before
     // `git-unavailable` was rewritten would have run the broken pattern
     // forever.
+    //
+    // The stack's two are files, because a toolset does not change weekly and
+    // when it does the thing you want is a file you can open, in the repo where
+    // the change belongs, reviewed with the commit that made it.
     for stack in &stacks {
         for (name, body) in stack_hooks(stack) {
-            write_if_absent(&shared.join("hooks").join(name), &body)?;
+            write_if_absent(&repo_omh.join("hooks").join(name), &body)?;
         }
     }
     // Appended, not overwritten: re-running init must not eat a line you added.
     let gitignore = paths.repo.join(".omh/.gitignore");
-    ensure_line(&gitignore, "local/")?;
-    // A file beside that directory, so the `local/` line does not cover it.
-    // Left tracked, a machine-local feature switch gets committed to the
-    // team's repo.
+    // Left tracked, a machine-local override gets committed to the team's repo.
     ensure_line(&gitignore, settings::LOCAL)?;
 
     // Report every decision, so `omh why` has something to explain. Printed as
@@ -1821,7 +1820,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     if stacks.is_empty() {
         println!(
             "  stack      none detected — write your test and format hooks into \
-             .omh/profile/hooks/"
+             .omh/hooks/"
         );
     } else {
         for s in &stacks {
@@ -1847,13 +1846,13 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     if stacks.len() > 1 {
         println!(
             "\n  ! {} stacks detected; hooks were written for all of them.\n    \
-             drop the ones you do not want: .omh/profile/hooks/",
+             drop the ones you do not want: .omh/hooks/",
             stacks.len()
         );
     }
 
-    println!("\n  layers     {}  (committed)", shared.display());
-    println!("             {}  (gitignored)", local.display());
+    println!("\n  catalogue  {}", paths.root.display());
+    println!("  this repo  {}  (committed)", repo_omh.display());
     // The image. Without it the headline command cannot run, so init is not
     // finished until this exists.
     if let Some(h) = &harness {

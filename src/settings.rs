@@ -1,4 +1,4 @@
-//! `settings.toml` — what this repo says about omh's own features.
+//! `[omh]` — which of omh's own features are on here.
 //!
 //! One table for now. `[omh]` names **features**, never entries: `codegraph`
 //! is the server, its four hooks and its section of the rules, and switching
@@ -10,9 +10,12 @@
 //! as you have it; the server is dropped from the document this session is
 //! given, and the next repo gets it back.
 //!
-//! Everything else — `carry_in`, `idle_timeout`, `[use]` — still lives in
-//! `policy.toml` and moves here when the catalogue does. A key that arrives
-//! early is refused by name rather than read and ignored.
+//! Everything else in these files — `carry_in`, `idle_timeout`, and `[use]`
+//! when it lands — is read by [`crate::config::policy`], which resolves the
+//! same three paths with provenance. Two readers of one file rather than two
+//! files: a setting and a feature switch are both something a repo decided, and
+//! `policy.toml` was a fourth name for that idea living inside a directory whose
+//! purpose was content.
 
 use crate::base::Manifest;
 use crate::profile::Paths;
@@ -21,8 +24,10 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
+/// Deliberately not `deny_unknown_fields`: this file holds settings too, and
+/// `config::policy` is what reads them. Denying here would make a `carry_in`
+/// beside `[omh]` an error in one reader and a value in the other.
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct File {
     #[serde(default)]
     omh: BTreeMap<String, bool>,
@@ -39,14 +44,10 @@ pub const LOCAL: &str = "settings.local.toml";
 
 /// Personal, then this repo's, then this repo's gitignored — later winning.
 ///
-/// The same order every other layered thing here uses, so a machine-wide
-/// preference and a one-repo exception are both expressible.
+/// Read from `config::Layer` rather than spelled again, so the file a feature
+/// switch is read from and the file a setting is read from cannot drift apart.
 fn layers(paths: &Paths) -> [PathBuf; 3] {
-    [
-        paths.root.join("settings.toml"),
-        paths.repo.join(".omh/settings.toml"),
-        paths.repo.join(".omh").join(LOCAL),
-    ]
+    crate::config::Layer::ALL.map(|l| l.file(paths))
 }
 
 /// Which of omh's features this repo has switched off.
@@ -224,40 +225,6 @@ mod tests {
         let err = features_off(&paths, &m).unwrap_err().to_string();
         assert!(err.contains("teleport"), "got: {err}");
         assert!(err.contains("codegraph") && err.contains("memory"), "{err}");
-    }
-
-    /// `settings.toml` holds one table today. A `carry_in` written here would
-    /// otherwise be read by nobody and reported by nothing, which is the exact
-    /// shape of a setting somebody swears they configured.
-    #[test]
-    fn a_key_that_does_not_live_here_yet_is_refused() {
-        let (_d, paths, m) = fixture();
-        write(
-            paths.repo.join(".omh/settings.toml"),
-            "carry_in = [\".env\"]\n",
-        );
-        // `{:#}` — the key is named by serde's own message, one level down
-        // the context chain from the file.
-        let err = format!("{:#}", features_off(&paths, &m).unwrap_err());
-        assert!(err.contains("carry_in"), "must name the key: {err}");
-        assert!(err.contains("settings.toml"), "and the file: {err}");
-    }
-
-    /// `[omh]` written into `policy.toml` is the likely mistake, not the
-    /// exotic one: `init` creates `policy.toml` with explanatory comments and
-    /// never creates `settings.toml`, so the discoverable file is the wrong
-    /// one. Read by nobody and reported by nothing is the same shape this
-    /// module's other guard exists for, pointing the other way.
-    #[test]
-    fn the_feature_table_in_the_old_settings_file_is_refused() {
-        let (_d, paths, _m) = fixture();
-        write(
-            paths.repo.join(".omh/profile/policy.toml"),
-            "carry_in = []\n\n[omh]\ncodegraph = false\n",
-        );
-        let err = format!("{:#}", crate::config::policy(&paths).unwrap_err());
-        assert!(err.contains("[omh]"), "must name the table: {err}");
-        assert!(err.contains("settings.toml"), "and where it belongs: {err}");
     }
 
     /// Absent is not unreadable — the `config::read_layer` lesson, which cost a

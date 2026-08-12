@@ -4,6 +4,12 @@
 //! "which layer is it coming from, and what is it shadowing". So the resolver
 //! reports origin alongside every value, the way `git config --show-origin`
 //! does — otherwise a three-layer merge is undebuggable.
+//!
+//! Content stopped having layers when the catalogue arrived; settings keep
+//! theirs, because a setting genuinely has one value and the question is which
+//! file decided it. What changed is that a layer is now a **file** rather than a
+//! directory, and `policy.toml` — a fourth name for the same idea, living inside
+//! a directory whose purpose was content — folded into it.
 
 use crate::adapter::Render;
 use crate::profile::Paths;
@@ -14,11 +20,11 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Layer {
-    /// `~/.omh/profile` — yours, every project.
+    /// `~/.omh/settings.toml` — yours, every project.
     Personal,
-    /// `<repo>/.omh/profile` — committed, shared with the team.
+    /// `<repo>/.omh/settings.toml` — committed, shared with the team.
     Shared,
-    /// `<repo>/.omh/local` — gitignored, yours alone.
+    /// `<repo>/.omh/settings.local.toml` — gitignored, yours alone.
     Local,
 }
 
@@ -47,11 +53,27 @@ impl Layer {
     /// committable by accident.
     pub const DEFAULT_WRITE: Layer = Self::Local;
 
-    pub fn dir(&self, paths: &Paths) -> PathBuf {
+    /// The file this layer's settings live in.
+    pub fn file(&self, paths: &Paths) -> PathBuf {
         match self {
-            Self::Personal => paths.root.join("profile"),
-            Self::Shared => paths.repo.join(".omh/profile"),
-            Self::Local => paths.repo.join(".omh/local"),
+            Self::Personal => paths.root.join("settings.toml"),
+            Self::Shared => paths.repo.join(".omh").join("settings.toml"),
+            Self::Local => paths.repo.join(".omh").join(crate::settings::LOCAL),
+        }
+    }
+
+    /// Where this layer's *content* lives, for the one capability that has more
+    /// than one tier.
+    ///
+    /// `None` for `Local`: a repo's gitignored tier is settings only. Hooks are
+    /// executable and arrive by `git clone`, which is exactly why they are
+    /// committed and disclosed rather than hidden — a gitignored hook would be
+    /// executable content with no reviewer at all.
+    pub fn content_dir(&self, paths: &Paths) -> Option<PathBuf> {
+        match self {
+            Self::Personal => Some(paths.root.clone()),
+            Self::Shared => Some(paths.repo.join(".omh")),
+            Self::Local => None,
         }
     }
 
@@ -81,28 +103,23 @@ impl std::fmt::Display for Layer {
     }
 }
 
-/// Every `policy.toml` key across all layers, resolved with provenance.
+/// Every settings key across all layers, resolved with provenance.
 pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::ALL {
-        let path = layer.dir(paths).join("policy.toml");
+        let path = layer.file(paths);
         let Some(raw) = read_layer(&path)? else {
             continue;
         };
         let table: toml::Table =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         for (key, value) in table {
-            // `settings.toml` owns `[omh]`, and this file is the one `init`
-            // creates and comments — so writing the feature switch here is the
-            // likely mistake rather than the exotic one. Read by nobody and
-            // reported by nothing is the shape `settings.rs` refuses in the
-            // other direction, and it has to be refused in both or the pair of
-            // files quietly swallows whichever key lands in the wrong one.
-            if key == "omh" {
-                anyhow::bail!(
-                    "{}: `[omh]` switches omh's own features and is read from                      .omh/settings.toml, not from this file",
-                    path.display()
-                );
+            // A table is configuration *for* something, not a setting with a
+            // value. `[omh]` shares this file, and `[mcp]` will — stringifying
+            // either would report a feature switch as a setting whose value is
+            // an inline table, and `omh config` would print it as one.
+            if value.is_table() {
+                continue;
             }
             found.push((key, repr(&value), layer));
         }
@@ -137,7 +154,9 @@ fn read_layer(path: &Path) -> Result<Option<String>> {
 pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::ALL {
-        let dir = layer.dir(paths).join("hooks");
+        let Some(dir) = layer.content_dir(paths).map(|d| d.join("hooks")) else {
+            continue;
+        };
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
@@ -174,7 +193,9 @@ pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
 pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
     for layer in Layer::ALL {
-        let path = layer.dir(paths).join("mcp.json");
+        let Some(path) = layer.content_dir(paths).map(|d| d.join("mcp.json")) else {
+            continue;
+        };
         let Some(raw) = read_layer(&path)? else {
             continue;
         };
@@ -192,7 +213,7 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
 }
 
 pub fn set(paths: &Paths, key: &str, raw: &str, layer: Layer) -> Result<Written> {
-    let path = layer.dir(paths).join("policy.toml");
+    let path = layer.file(paths);
     let mut table = read_table(&path)?;
     table.insert(key.to_string(), parse_value(raw));
     std::fs::create_dir_all(path.parent().unwrap())?;
@@ -205,7 +226,7 @@ pub fn set(paths: &Paths, key: &str, raw: &str, layer: Layer) -> Result<Written>
 }
 
 pub fn unset(paths: &Paths, key: &str, layer: Layer) -> Result<bool> {
-    let path = layer.dir(paths).join("policy.toml");
+    let path = layer.file(paths);
     let mut table = read_table(&path)?;
     if table.remove(key).is_none() {
         return Ok(false);
@@ -271,20 +292,20 @@ pub struct Imported {
     pub unchanged: Vec<String>,
 }
 
-pub fn mcp_add(paths: &Paths, layer: Layer, name: &str, server: Server) -> Result<Written> {
-    let path = mcp_path(paths, layer);
+pub fn mcp_add(paths: &Paths, name: &str, server: Server) -> Result<Written> {
+    let path = mcp_path(paths);
     let mut all = read_servers(&path)?;
     all.insert(name.to_string(), server);
     write_servers(&path, &all)?;
     Ok(Written {
         path,
-        layer,
-        committed: layer.is_committed(),
+        layer: Layer::Personal,
+        committed: false,
     })
 }
 
-pub fn mcp_remove(paths: &Paths, layer: Layer, name: &str) -> Result<bool> {
-    let path = mcp_path(paths, layer);
+pub fn mcp_remove(paths: &Paths, name: &str) -> Result<bool> {
+    let path = mcp_path(paths);
     let mut all = read_servers(&path)?;
     if all.remove(name).is_none() {
         return Ok(false);
@@ -296,12 +317,11 @@ pub fn mcp_remove(paths: &Paths, layer: Layer, name: &str) -> Result<bool> {
 /// `dry_run` reports the same plan without writing.
 pub fn mcp_import(
     paths: &Paths,
-    layer: Layer,
     incoming: BTreeMap<String, Server>,
     force: bool,
     dry_run: bool,
 ) -> Result<Imported> {
-    let path = mcp_path(paths, layer);
+    let path = mcp_path(paths);
     let mut all = read_servers(&path)?;
     let mut report = Imported::default();
 
@@ -324,8 +344,14 @@ pub fn mcp_import(
     Ok(report)
 }
 
-fn mcp_path(paths: &Paths, layer: Layer) -> PathBuf {
-    layer.dir(paths).join("mcp.json")
+/// The catalogue's, and there is only one.
+///
+/// A server used to be declarable in any of three layers, which is what made
+/// `--layer` meaningful on these commands. With one catalogue there is one
+/// destination, and a per-repo override is a *setting* — `[mcp.<name>.env]` in
+/// `settings.local.toml` — rather than a second declaration of the server.
+pub fn mcp_path(paths: &Paths) -> PathBuf {
+    paths.root.join("mcp.json")
 }
 
 /// A layer's canonical file is itself `mcp-json`, so reading it is the same
@@ -379,10 +405,65 @@ mod tests {
         (dir, paths)
     }
 
+    /// Content, which now has one tier and a half: the catalogue, and the
+    /// repo's hooks. `Local` has none, so a test that seeds into it is asking
+    /// for something that no longer exists.
     fn seed(paths: &Paths, layer: Layer, name: &str, body: &str) {
-        let p = layer.dir(paths).join(name);
+        let p = layer
+            .content_dir(paths)
+            .unwrap_or_else(|| panic!("{layer} holds no content"))
+            .join(name);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
+    }
+
+    /// A settings key, in the file that layer reads.
+    fn settings(paths: &Paths, layer: Layer, body: &str) {
+        let p = layer.file(paths);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// A setting and a feature switch live in one file, because they are one
+    /// kind of thing: something this repo decided.
+    ///
+    /// `policy.toml` was a fourth file with a fourth name for the same idea,
+    /// and it sat inside a profile layer whose whole purpose was content — so
+    /// removing the content directories would have left one file behind for no
+    /// reason but where it happened to be written.
+    #[test]
+    fn a_setting_and_a_feature_switch_share_one_file() {
+        let (_d, paths) = fixture();
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        std::fs::write(
+            paths.repo.join(".omh/settings.toml"),
+            "carry_in = [\".env\"]\n\n[omh]\ncodegraph = false\n",
+        )
+        .unwrap();
+
+        let found = policy(&paths).unwrap();
+        assert_eq!(get(&found, "carry_in").value, "[\".env\"]");
+        assert_eq!(get(&found, "carry_in").layer, Layer::Shared);
+    }
+
+    /// A table is configuration *for* something, not a setting with a value.
+    ///
+    /// `policy` stringifies whatever it finds at the top level, so with `[omh]`
+    /// now sharing the file it would report a feature switch as a setting whose
+    /// value is an inline table — and `omh config` would print it as one.
+    #[test]
+    fn a_table_is_not_reported_as_a_setting() {
+        let (_d, paths) = fixture();
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        std::fs::write(
+            paths.repo.join(".omh/settings.toml"),
+            "[omh]\ncodegraph = false\n",
+        )
+        .unwrap();
+        assert!(
+            policy(&paths).unwrap().is_empty(),
+            "a table is not a setting with a value"
+        );
     }
 
     // ── hooks ───────────────────────────────────────────────────────────────
@@ -397,13 +478,13 @@ mod tests {
         let (_d, paths) = fixture();
         seed(
             &paths,
-            Layer::Shared,
+            Layer::Personal,
             "hooks/graph-read.json",
             r#"{"on":"turn-end","run":"a"}"#,
         );
         seed(
             &paths,
-            Layer::Local,
+            Layer::Shared,
             "hooks/mine.json",
             r#"{"on":"turn-end","run":"b"}"#,
         );
@@ -416,30 +497,30 @@ mod tests {
                 .unwrap_or_else(|| panic!("{k}"))
         };
         assert_eq!(by("graph-read").value, "a");
-        assert_eq!(by("graph-read").layer, Layer::Shared);
-        assert_eq!(by("mine").layer, Layer::Local);
+        assert_eq!(by("graph-read").layer, Layer::Personal, "your catalogue");
+        assert_eq!(by("mine").layer, Layer::Shared, "this repo's");
     }
 
     #[test]
-    fn a_later_layer_wins_and_names_what_it_shadowed() {
+    fn a_project_hook_shadows_a_catalogue_hook_of_the_same_name() {
         let (_d, paths) = fixture();
         seed(
             &paths,
-            Layer::Shared,
-            "hooks/x.json",
-            r#"{"on":"turn-end","run":"shared"}"#,
+            Layer::Personal,
+            "hooks/format.json",
+            r#"{"on":"turn-end","run":"yours"}"#,
         );
         seed(
             &paths,
-            Layer::Local,
-            "hooks/x.json",
-            r#"{"on":"turn-end","run":"local"}"#,
+            Layer::Shared,
+            "hooks/format.json",
+            r#"{"on":"turn-end","run":"this repo's"}"#,
         );
 
         let found = hooks(&paths).unwrap();
-        let x = found.iter().find(|s| s.key == "x").unwrap();
-        assert_eq!(x.value, "local");
-        assert_eq!(x.shadows, vec![Layer::Shared]);
+        let x = found.iter().find(|s| s.key == "format").unwrap();
+        assert_eq!(x.value, "this repo's", "project beats catalogue");
+        assert_eq!(x.shadows, vec![Layer::Personal]);
     }
 
     /// A hook file that says when but never what used to become an empty
@@ -480,11 +561,11 @@ mod tests {
         let (_d, paths) = fixture();
         seed(
             &paths,
-            Layer::Shared,
+            Layer::Personal,
             "mcp.json",
             r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
         );
-        let path = Layer::Shared.dir(&paths).join("mcp.json");
+        let path = mcp_path(&paths);
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let result = servers(&paths);
@@ -510,10 +591,10 @@ mod tests {
     #[test]
     fn a_non_json_file_in_the_hooks_directory_is_ignored() {
         let (_d, paths) = fixture();
-        seed(&paths, Layer::Shared, "hooks/notes.md", "not a hook");
+        seed(&paths, Layer::Personal, "hooks/notes.md", "not a hook");
         seed(
             &paths,
-            Layer::Shared,
+            Layer::Personal,
             "hooks/real.json",
             r#"{"on":"turn-end","run":"c"}"#,
         );
@@ -540,11 +621,29 @@ mod tests {
     }
 
     #[test]
-    fn layers_map_to_their_directories() {
+    fn layers_map_to_their_files() {
         let (_d, paths) = fixture();
-        assert_eq!(Layer::Personal.dir(&paths), paths.root.join("profile"));
-        assert_eq!(Layer::Shared.dir(&paths), paths.repo.join(".omh/profile"));
-        assert_eq!(Layer::Local.dir(&paths), paths.repo.join(".omh/local"));
+        assert_eq!(
+            Layer::Personal.file(&paths),
+            paths.root.join("settings.toml")
+        );
+        assert_eq!(
+            Layer::Shared.file(&paths),
+            paths.repo.join(".omh/settings.toml")
+        );
+        assert_eq!(
+            Layer::Local.file(&paths),
+            paths.repo.join(".omh/settings.local.toml")
+        );
+    }
+
+    /// The gitignored tier holds settings and no content. A hook is executable
+    /// and arrives by `git clone`, which is why it is committed and disclosed —
+    /// a gitignored one would be executable content with no reviewer at all.
+    #[test]
+    fn the_gitignored_layer_holds_no_content() {
+        let (_d, paths) = fixture();
+        assert!(Layer::Local.content_dir(&paths).is_none());
     }
 
     #[test]
@@ -560,12 +659,7 @@ mod tests {
     #[test]
     fn policy_reports_the_winning_layer() {
         let (_d, paths) = fixture();
-        seed(
-            &paths,
-            Layer::Personal,
-            "policy.toml",
-            "idle_timeout = \"30m\"",
-        );
+        settings(&paths, Layer::Personal, "idle_timeout = \"30m\"");
         let settings = policy(&paths).unwrap();
         assert_eq!(get(&settings, "idle_timeout").layer, Layer::Personal);
     }
@@ -573,19 +667,9 @@ mod tests {
     #[test]
     fn later_layers_win_and_the_loser_is_named() {
         let (_d, paths) = fixture();
-        seed(
-            &paths,
-            Layer::Personal,
-            "policy.toml",
-            "idle_timeout = \"30m\"",
-        );
-        seed(
-            &paths,
-            Layer::Shared,
-            "policy.toml",
-            "idle_timeout = \"5m\"",
-        );
-        seed(&paths, Layer::Local, "policy.toml", "idle_timeout = \"2h\"");
+        settings(&paths, Layer::Personal, "idle_timeout = \"30m\"");
+        settings(&paths, Layer::Shared, "idle_timeout = \"5m\"");
+        settings(&paths, Layer::Local, "idle_timeout = \"2h\"");
 
         let s = policy(&paths).unwrap();
         let t = get(&s, "idle_timeout");
@@ -601,12 +685,7 @@ mod tests {
     #[test]
     fn unshadowed_settings_report_no_losers() {
         let (_d, paths) = fixture();
-        seed(
-            &paths,
-            Layer::Shared,
-            "policy.toml",
-            "carry_in = [\".env\"]",
-        );
+        settings(&paths, Layer::Shared, "carry_in = [\".env\"]");
         assert!(get(&policy(&paths).unwrap(), "carry_in").shadows.is_empty());
     }
 
@@ -618,48 +697,24 @@ mod tests {
     }
 
     #[test]
-    fn mcp_servers_resolve_with_provenance() {
+    fn mcp_servers_resolve_from_the_catalogue() {
         let (_d, paths) = fixture();
         seed(
             &paths,
-            Layer::Shared,
+            Layer::Personal,
             "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
-        );
-        seed(
-            &paths,
-            Layer::Local,
-            "mcp.json",
-            r#"{"mcpServers":{"omh-memory":{"command":"omh-mcp"}}}"#,
+            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"},
+                              "omh-memory":{"command":"omh-mcp"}}}"#,
         );
 
         let s = servers(&paths).unwrap();
         assert_eq!(s.len(), 2);
-        assert_eq!(get(&s, "codegraph").layer, Layer::Shared);
-        assert_eq!(get(&s, "omh-memory").layer, Layer::Local);
+        assert_eq!(get(&s, "codegraph").layer, Layer::Personal);
         assert_eq!(get(&s, "codegraph").value, "codebase-memory-mcp");
-    }
-
-    #[test]
-    fn a_local_server_can_shadow_a_shared_one() {
-        let (_d, paths) = fixture();
-        seed(
-            &paths,
-            Layer::Shared,
-            "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"old"}}}"#,
+        assert!(
+            get(&s, "codegraph").shadows.is_empty(),
+            "one catalogue, so nothing to shadow"
         );
-        seed(
-            &paths,
-            Layer::Local,
-            "mcp.json",
-            r#"{"mcpServers":{"codegraph":{"command":"new"}}}"#,
-        );
-
-        let s = servers(&paths).unwrap();
-        assert_eq!(s.len(), 1);
-        assert_eq!(get(&s, "codegraph").value, "new");
-        assert_eq!(get(&s, "codegraph").shadows, vec![Layer::Shared]);
     }
 
     // ── writes ──────────────────────────────────────────────────────────────
@@ -675,7 +730,7 @@ mod tests {
     fn set_creates_the_layer_file_when_absent() {
         let (_d, paths) = fixture();
         let w = set(&paths, "idle_timeout", "30m", Layer::DEFAULT_WRITE).unwrap();
-        assert_eq!(w.path, Layer::Local.dir(&paths).join("policy.toml"));
+        assert_eq!(w.path, Layer::Local.file(&paths));
         assert!(!w.committed);
         assert_eq!(get(&policy(&paths).unwrap(), "idle_timeout").value, "30m");
     }
@@ -693,10 +748,9 @@ mod tests {
     #[test]
     fn set_preserves_unrelated_keys() {
         let (_d, paths) = fixture();
-        seed(
+        settings(
             &paths,
             Layer::Local,
-            "policy.toml",
             "carry_in = [\".env\"]\nidle_timeout = \"5m\"",
         );
         set(&paths, "idle_timeout", "1h", Layer::Local).unwrap();
@@ -723,13 +777,8 @@ mod tests {
     #[test]
     fn unset_touches_only_the_named_layer() {
         let (_d, paths) = fixture();
-        seed(
-            &paths,
-            Layer::Personal,
-            "policy.toml",
-            "idle_timeout = \"30m\"",
-        );
-        seed(&paths, Layer::Local, "policy.toml", "idle_timeout = \"2h\"");
+        settings(&paths, Layer::Personal, "idle_timeout = \"30m\"");
+        settings(&paths, Layer::Local, "idle_timeout = \"2h\"");
 
         assert!(unset(&paths, "idle_timeout", Layer::Local).unwrap());
 
@@ -762,57 +811,50 @@ mod tests {
     #[test]
     fn mcp_add_creates_the_file_when_absent() {
         let (_d, paths) = fixture();
-        let w = mcp_add(&paths, Layer::DEFAULT_WRITE, "g", server("c")).unwrap();
-        assert_eq!(w.path, Layer::Local.dir(&paths).join("mcp.json"));
+        let w = mcp_add(&paths, "g", server("c")).unwrap();
+        assert_eq!(w.path, mcp_path(&paths));
         assert_eq!(names(&paths), ["g"]);
     }
 
-    /// MCP entries carry env, and env carries tokens. An unqualified add must
-    /// land somewhere git will never see.
+    /// A server is a thing you hold, so it lands in your catalogue — and the
+    /// catalogue is not committed, so nothing here reaches a teammate by
+    /// `git clone`.
+    ///
+    /// This is what replaced `--layer`. A server used to be declarable in any
+    /// of three places, with the gitignored one the default because MCP env
+    /// carries tokens; one catalogue leaves one destination, and a token scoped
+    /// to a single repo is a *setting* — `[mcp.<name>.env]` — rather than a
+    /// second declaration of the server.
     #[test]
-    fn mcp_add_defaults_to_the_gitignored_layer() {
+    fn mcp_add_writes_to_the_catalogue_and_commits_nothing() {
         let (_d, paths) = fixture();
-        let w = mcp_add(&paths, Layer::DEFAULT_WRITE, "g", server("c")).unwrap();
+        let w = mcp_add(&paths, "g", server("c")).unwrap();
         assert!(!w.committed);
-        assert_eq!(w.layer, Layer::Local);
-    }
-
-    #[test]
-    fn mcp_add_to_the_shared_layer_is_flagged_as_committed() {
-        let (_d, paths) = fixture();
-        assert!(
-            mcp_add(&paths, Layer::Shared, "g", server("c"))
-                .unwrap()
-                .committed
-        );
+        assert!(w.path.starts_with(&paths.root), "got: {}", w.path.display());
     }
 
     #[test]
     fn mcp_add_preserves_existing_servers() {
         let (_d, paths) = fixture();
-        mcp_add(&paths, Layer::Local, "first", server("a")).unwrap();
-        mcp_add(&paths, Layer::Local, "second", server("b")).unwrap();
+        mcp_add(&paths, "first", server("a")).unwrap();
+        mcp_add(&paths, "second", server("b")).unwrap();
         assert_eq!(names(&paths), ["first", "second"]);
     }
 
     #[test]
-    fn mcp_rm_touches_only_the_named_layer() {
+    fn mcp_rm_takes_the_server_out_of_the_catalogue() {
         let (_d, paths) = fixture();
-        mcp_add(&paths, Layer::Shared, "g", server("shared-cmd")).unwrap();
-        mcp_add(&paths, Layer::Local, "g", server("local-cmd")).unwrap();
+        mcp_add(&paths, "keep", server("a")).unwrap();
+        mcp_add(&paths, "drop", server("b")).unwrap();
 
-        assert!(mcp_remove(&paths, Layer::Local, "g").unwrap());
-
-        let resolved = servers(&paths).unwrap();
-        let g = get(&resolved, "g");
-        assert_eq!(g.value, "shared-cmd", "the shared layer must resurface");
-        assert_eq!(g.layer, Layer::Shared);
+        assert!(mcp_remove(&paths, "drop").unwrap());
+        assert_eq!(names(&paths), ["keep"]);
     }
 
     #[test]
     fn mcp_rm_reports_when_nothing_was_removed() {
         let (_d, paths) = fixture();
-        assert!(!mcp_remove(&paths, Layer::Local, "absent").unwrap());
+        assert!(!mcp_remove(&paths, "absent").unwrap());
     }
 
     // ── import ──────────────────────────────────────────────────────────────
@@ -827,7 +869,7 @@ mod tests {
     #[test]
     fn import_reports_what_it_would_add() {
         let (_d, paths) = fixture();
-        let r = mcp_import(&paths, Layer::Local, incoming(), false, false).unwrap();
+        let r = mcp_import(&paths, incoming(), false, false).unwrap();
         assert_eq!(r.added, ["a", "b"]);
         assert!(r.conflicts.is_empty() && r.unchanged.is_empty());
         assert_eq!(names(&paths), ["a", "b"]);
@@ -836,7 +878,7 @@ mod tests {
     #[test]
     fn dry_run_writes_nothing() {
         let (_d, paths) = fixture();
-        let r = mcp_import(&paths, Layer::Local, incoming(), false, true).unwrap();
+        let r = mcp_import(&paths, incoming(), false, true).unwrap();
         assert_eq!(r.added, ["a", "b"], "the plan is still reported");
         assert!(names(&paths).is_empty(), "but nothing was written");
     }
@@ -846,8 +888,8 @@ mod tests {
     #[test]
     fn importing_twice_changes_nothing() {
         let (_d, paths) = fixture();
-        mcp_import(&paths, Layer::Local, incoming(), false, false).unwrap();
-        let second = mcp_import(&paths, Layer::Local, incoming(), false, false).unwrap();
+        mcp_import(&paths, incoming(), false, false).unwrap();
+        let second = mcp_import(&paths, incoming(), false, false).unwrap();
         assert_eq!(second.unchanged, ["a", "b"]);
         assert!(second.added.is_empty());
     }
@@ -855,9 +897,9 @@ mod tests {
     #[test]
     fn a_changed_server_is_a_conflict_not_a_silent_overwrite() {
         let (_d, paths) = fixture();
-        mcp_add(&paths, Layer::Local, "a", server("mine")).unwrap();
+        mcp_add(&paths, "a", server("mine")).unwrap();
 
-        let r = mcp_import(&paths, Layer::Local, incoming(), false, false).unwrap();
+        let r = mcp_import(&paths, incoming(), false, false).unwrap();
         assert_eq!(r.conflicts, ["a"]);
         assert_eq!(r.added, ["b"], "unconflicted servers still import");
         assert_eq!(
@@ -870,9 +912,9 @@ mod tests {
     #[test]
     fn force_resolves_a_conflict_by_overwriting() {
         let (_d, paths) = fixture();
-        mcp_add(&paths, Layer::Local, "a", server("mine")).unwrap();
+        mcp_add(&paths, "a", server("mine")).unwrap();
 
-        let r = mcp_import(&paths, Layer::Local, incoming(), true, false).unwrap();
+        let r = mcp_import(&paths, incoming(), true, false).unwrap();
         assert_eq!(r.added, ["a", "b"]);
         assert!(r.conflicts.is_empty());
         assert_eq!(get(&servers(&paths).unwrap(), "a").value, "a-cmd");
@@ -882,7 +924,7 @@ mod tests {
     fn importing_nothing_is_not_an_error() {
         let (_d, paths) = fixture();
         assert_eq!(
-            mcp_import(&paths, Layer::Local, BTreeMap::new(), false, false).unwrap(),
+            mcp_import(&paths, BTreeMap::new(), false, false).unwrap(),
             Imported::default()
         );
     }
@@ -890,12 +932,7 @@ mod tests {
     #[test]
     fn a_list_setting_comes_back_as_a_list() {
         let (_d, paths) = fixture();
-        seed(
-            &paths,
-            Layer::Shared,
-            "policy.toml",
-            "carry_in = [\".env\", \"certs/\"]",
-        );
+        settings(&paths, Layer::Shared, "carry_in = [\".env\", \"certs/\"]");
         assert_eq!(policy_list(&paths, "carry_in"), vec![".env", "certs/"]);
     }
 
@@ -910,18 +947,8 @@ mod tests {
     #[test]
     fn a_later_layer_replaces_the_list() {
         let (_d, paths) = fixture();
-        seed(
-            &paths,
-            Layer::Personal,
-            "policy.toml",
-            "carry_in = [\".env\"]",
-        );
-        seed(
-            &paths,
-            Layer::Local,
-            "policy.toml",
-            "carry_in = [\".env.local\"]",
-        );
+        settings(&paths, Layer::Personal, "carry_in = [\".env\"]");
+        settings(&paths, Layer::Local, "carry_in = [\".env.local\"]");
         assert_eq!(policy_list(&paths, "carry_in"), vec![".env.local"]);
     }
 }

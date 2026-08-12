@@ -157,7 +157,7 @@ fn remember_refuses_a_key_template_that_leaves_the_store() {
     let sb = sandbox();
     std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
     std::fs::write(
-        sb.repo.join(".omh/keys.toml"),
+        sb.repo.join(".omh/memory.toml"),
         "[keys]\nsurprise = \"../../escaped/{{slug}}\"\ntopic = \"{{slug}}\"\nstub = \"docs/{{path}}\"\n",
     )
     .unwrap();
