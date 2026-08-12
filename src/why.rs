@@ -101,6 +101,17 @@ pub enum Verdict<'a> {
     /// Considered and turned down. Recorded so the same candidate is not
     /// re-litigated every time somebody rediscovers it.
     Rejected { rejection: &'a Rejected },
+    /// A feature with no entry of its own — `git-notice` names the pairing of
+    /// a hook and a rules section, and nothing is called that.
+    ///
+    /// Answerable because feature names are user-facing: they are the whole
+    /// `[omh]` key space, and the manifest prints `git-notice = false` as the
+    /// way out of `git-unavailable`. A name omh tells you to type and then
+    /// does not recognise is this command's own failure mode, pointing inward.
+    Feature {
+        name: String,
+        gathers: Vec<&'a Entry>,
+    },
     /// Nothing known. Lists what is, rather than guessing.
     Unknown { known: Vec<String> },
 }
@@ -147,9 +158,24 @@ impl<'a> Catalog<'a> {
             },
             (None, None) => match self.manifest.rejection(name) {
                 Some(rejection) => Verdict::Rejected { rejection },
-                None => Verdict::Unknown {
-                    known: self.known(),
-                },
+                None => {
+                    let gathers: Vec<&Entry> = self
+                        .manifest
+                        .entries
+                        .iter()
+                        .filter(|e| e.feature == name)
+                        .collect();
+                    if gathers.is_empty() {
+                        Verdict::Unknown {
+                            known: self.known(),
+                        }
+                    } else {
+                        Verdict::Feature {
+                            name: name.to_string(),
+                            gathers,
+                        }
+                    }
+                }
             },
         }
     }
@@ -163,6 +189,10 @@ impl<'a> Catalog<'a> {
             .entries
             .iter()
             .map(|e| e.name.clone())
+            // Features too: they are the `[omh]` key space and the manifest
+            // instructs people to type them, so a list that omits them sends
+            // somebody looking for a name omh itself printed.
+            .chain(self.manifest.entries.iter().map(|e| e.feature.clone()))
             .chain(self.installed.iter().map(|s| s.key.clone()))
             .chain(self.manifest.rejected.iter().map(|r| r.name.clone()))
             .collect();
@@ -346,9 +376,12 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
             costs(entry, version, &mut out);
             alternatives(entry, &mut out);
             out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
-            // Line by line rather than one continued literal: `cargo fmt`
-            // collapses a `\`-continuation into the source's own indentation,
-            // which lands in the user's terminal.
+            // Line by line rather than one continued literal. The `\` escape
+            // does strip the next line's leading whitespace, so the source
+            // reads correctly and prints correctly — until `cargo fmt` joins
+            // the literal onto one line and keeps that indentation as literal
+            // spaces. Checked twice here, both times by reading the output of
+            // a real `omh why` rather than the source.
             match stale {
                 Some(stale) => {
                     out.push_str(&format!(
@@ -415,6 +448,30 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
                 rejection.name, rejection.considered
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", rejection.because));
+        }
+        Verdict::Feature { name, gathers } => {
+            let off = if catalog.off.contains(name) {
+                "  —  off in this repo"
+            } else {
+                ""
+            };
+            out.push_str(&format!("{name} — an omh feature{off}\n\n"));
+            let width = gathers
+                .iter()
+                .map(|e| e.name.chars().count())
+                .max()
+                .unwrap_or(0);
+            let mut label = "gathers";
+            for entry in gathers {
+                out.push_str(&format!(
+                    "  {label:<11} {:<width$}   {}\n",
+                    entry.name, entry.because
+                ));
+                label = "";
+            }
+            out.push_str(&format!("  {:<11} {}\n", "remove", gathers[0].remove));
+            out.push_str("\n  A feature is all or nothing — `omh why <name>` explains\n");
+            out.push_str("  each part, and there is no way to keep only some of them.\n");
         }
         Verdict::Unknown { known } => {
             out.push_str("omh has nothing recorded under that name.\n\n");
@@ -580,6 +637,36 @@ mod tests {
 
         let out = render(&c, &c.why("graph-refresh"), "2026.08");
         assert!(out.contains("off here"), "got: {out}");
+    }
+
+    /// `git-notice` is a feature with no entry of its own, and the manifest
+    /// prints `git-notice = false` as the way out of `git-unavailable`. Asked
+    /// about it, omh answered "nothing recorded under that name" and listed
+    /// names that did not include it.
+    ///
+    /// Feature names are user-facing vocabulary now — they are the whole
+    /// `[omh]` key space, and `settings::validate` errors in terms of them —
+    /// so the command built to explain omh's choices has to know them. An
+    /// instruction printed as the way out and then not recognised is the shape
+    /// CONTRIBUTING singles out: it worked, it said so, and it was wrong.
+    #[test]
+    fn a_feature_is_explained_even_when_no_entry_shares_its_name() {
+        let m = manifest();
+        let c = catalog(&m, vec![]);
+
+        let out = render(&c, &c.why("git-notice"), "2026.08");
+        assert!(
+            out.contains("git-unavailable") && out.contains("git-rules"),
+            "must list what the feature gathers: {out}"
+        );
+
+        match c.why("teleport") {
+            Verdict::Unknown { known } => assert!(
+                known.contains(&"git-notice".to_string()),
+                "a name omh tells you to type has to be discoverable: {known:?}"
+            ),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
     }
 
     /// The other half of the grouping: what a feature brought with it. Nobody

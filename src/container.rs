@@ -156,7 +156,13 @@ pub fn plan(
             // A harness with no hooks gives up omh's own as well as yours.
             let count = match cap {
                 Capability::Rules => count_entries(&sources).max(1),
-                Capability::Hooks => count_entries(&sources) + opts.omh.hooks.len(),
+                // Layer files answering to a manifest name are never staged,
+                // so counting them would report a harness giving up hooks it
+                // was never going to run. An upgraded repo carries five.
+                Capability::Hooks => {
+                    count_named(&sources, |name| !opts.omh.reserved.contains(name))
+                        + opts.omh.hooks.len()
+                }
                 _ => count_entries(&sources),
             };
             dropped.push((cap, count));
@@ -186,16 +192,28 @@ pub fn plan(
         file: false,
     });
 
+    // A feature is all or nothing, and that has to reach the mounts rather
+    // than stopping at the documents. With `memory` off the agent was still
+    // given a writable store it is never told about and a server binary
+    // nothing spawns — the half-configured state the design calls
+    // unrepresentable.
+    let memory_on = !opts
+        .omh
+        .disabled_servers
+        .contains(crate::memory::tools::SERVER_KEY);
+
     // The local note store, keyed by repo like the graph cache and for the
     // same reason: it must survive a container rebuild, a harness switch and
     // — unlike anything under /work — the removal of the session that wrote
     // it. Writable, because `remember` writes here.
-    mounts.push(Mount {
-        host: crate::memory::Layer::Local.dir(paths),
-        guest: PathBuf::from(crate::memory::GUEST_LOCAL_NOTES),
-        read_only: false,
-        file: false,
-    });
+    if memory_on {
+        mounts.push(Mount {
+            host: crate::memory::Layer::Local.dir(paths),
+            guest: PathBuf::from(crate::memory::GUEST_LOCAL_NOTES),
+            read_only: false,
+            file: false,
+        });
+    }
 
     // The memory server is `omh` itself, and the harness spawns MCP servers
     // inside the sandbox — so the base set's `command = "omh"` resolves to
@@ -205,7 +223,7 @@ pub fn plan(
     // Only when one exists. A bind mount of a missing host path makes docker
     // create a *directory*, and the failure then arrives as a permission error
     // about something nobody created.
-    if let Some(bin) = opts.memory_bin.clone() {
+    if let Some(bin) = opts.memory_bin.clone().filter(|_| memory_on) {
         mounts.push(Mount {
             host: bin,
             guest: PathBuf::from(crate::memory::deliver::GUEST_BIN),
@@ -409,6 +427,27 @@ fn place_destination(path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e).with_context(|| format!("placing {}", path.display())),
     }
+}
+
+/// Entries a harness would have been given, counting only the ones that pass
+/// `keep`. Names are matched without their extension, the way a hook's
+/// manifest name is written.
+fn count_named(sources: &[PathBuf], keep: impl Fn(&str) -> bool) -> usize {
+    sources
+        .iter()
+        .filter_map(|p| std::fs::read_dir(p).ok())
+        .flat_map(|entries| entries.flatten())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = std::path::Path::new(&name);
+            keep(
+                &name
+                    .file_stem()
+                    .unwrap_or(name.as_os_str())
+                    .to_string_lossy(),
+            )
+        })
+        .count()
 }
 
 /// How much a harness is giving up, for the one-line degradation warning.
@@ -982,6 +1021,53 @@ mod tests {
         }
     }
 
+    /// All or nothing has to reach the mounts, not stop at the document.
+    ///
+    /// With `memory = false` the server was dropped and the note rules with
+    /// it, while the writable note store and the `omh` binary were still
+    /// mounted — the agent given a store it is not told about and a server
+    /// binary nothing spawns. That is exactly the half-configured state three
+    /// doc comments call unrepresentable.
+    #[test]
+    fn a_disabled_feature_takes_its_mounts_too() {
+        let fx = fixture();
+        let bin = fake_server_binary(&fx);
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: Some(bin),
+                base: None,
+                omh: own_with(&["memory".to_string()].into()),
+            },
+        )
+        .unwrap();
+
+        let guests: Vec<String> = p
+            .mounts
+            .iter()
+            .map(|m| m.guest.display().to_string())
+            .collect();
+        assert!(
+            !guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES),
+            "no note store: {guests:?}"
+        );
+        assert!(
+            !guests
+                .iter()
+                .any(|g| g == crate::memory::deliver::GUEST_BIN),
+            "and no server binary: {guests:?}"
+        );
+    }
+
     /// A feature off in this repo takes its server, its hooks and its section
     /// of the rules together.
     ///
@@ -1267,6 +1353,38 @@ mod tests {
             hooks,
             1 + crate::base::hooks().len(),
             "the fixture's own hook plus omh's: {msg}"
+        );
+    }
+
+    /// An upgraded repo carries the five seeded files, none of which is ever
+    /// staged. Counting them told a user they were giving up eleven hooks
+    /// where they give up six — a wrong number presented as a measurement,
+    /// which is the one thing this repo's own docs will not do.
+    #[test]
+    fn what_a_harness_gives_up_does_not_count_files_that_were_never_staged() {
+        let fx = fixture();
+        for hook in crate::base::hooks() {
+            std::fs::write(
+                fx.paths
+                    .root
+                    .join("profile/hooks")
+                    .join(format!("{}.json", hook.name)),
+                r#"{"event":"Stop","command":"seeded by an older omh"}"#,
+            )
+            .unwrap();
+        }
+
+        let oc = plan_for(&fx, "opencode");
+        let hooks = oc
+            .dropped
+            .iter()
+            .find(|(c, _)| *c == Capability::Hooks)
+            .map(|(_, n)| *n)
+            .unwrap();
+        assert_eq!(
+            hooks,
+            1 + crate::base::hooks().len(),
+            "the leftovers are inert and must not be counted"
         );
     }
 

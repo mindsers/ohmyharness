@@ -28,6 +28,15 @@ struct File {
     omh: BTreeMap<String, bool>,
 }
 
+/// The gitignored layer's filename, so `init` ignores exactly the file this
+/// module reads.
+///
+/// It is not covered by the `local/` line `init` already writes — that ignores
+/// the *directory* `.omh/local`, and this is a file beside it. Documenting a
+/// tracked file as gitignored is how a machine-local override gets committed
+/// to somebody's team repo.
+pub const LOCAL: &str = "settings.local.toml";
+
 /// Personal, then this repo's, then this repo's gitignored — later winning.
 ///
 /// The same order every other layered thing here uses, so a machine-wide
@@ -36,7 +45,7 @@ fn layers(paths: &Paths) -> [PathBuf; 3] {
     [
         paths.root.join("settings.toml"),
         paths.repo.join(".omh/settings.toml"),
-        paths.repo.join(".omh/settings.local.toml"),
+        paths.repo.join(".omh").join(LOCAL),
     ]
 }
 
@@ -130,6 +139,19 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
+    /// `init` ignores a filename; this module reads a path. They have to be
+    /// the same file, and `.omh/.gitignore`'s existing `local/` line does not
+    /// cover it — that is a directory, this is a file beside it. A tracked
+    /// `settings.local.toml` is a machine-local override committed to a team
+    /// repo.
+    #[test]
+    fn the_gitignored_layer_is_the_file_init_ignores() {
+        let (_d, paths, _m) = fixture();
+        let last = layers(&paths).last().unwrap().clone();
+        assert_eq!(last.file_name().unwrap().to_string_lossy(), LOCAL);
+        assert!(last.starts_with(paths.repo.join(".omh")));
+    }
+
     #[test]
     fn a_repo_with_no_settings_has_everything_on() {
         let (_d, paths, m) = fixture();
@@ -219,6 +241,23 @@ mod tests {
         let err = format!("{:#}", features_off(&paths, &m).unwrap_err());
         assert!(err.contains("carry_in"), "must name the key: {err}");
         assert!(err.contains("settings.toml"), "and the file: {err}");
+    }
+
+    /// `[omh]` written into `policy.toml` is the likely mistake, not the
+    /// exotic one: `init` creates `policy.toml` with explanatory comments and
+    /// never creates `settings.toml`, so the discoverable file is the wrong
+    /// one. Read by nobody and reported by nothing is the same shape this
+    /// module's other guard exists for, pointing the other way.
+    #[test]
+    fn the_feature_table_in_the_old_settings_file_is_refused() {
+        let (_d, paths, _m) = fixture();
+        write(
+            paths.repo.join(".omh/profile/policy.toml"),
+            "carry_in = []\n\n[omh]\ncodegraph = false\n",
+        );
+        let err = format!("{:#}", crate::config::policy(&paths).unwrap_err());
+        assert!(err.contains("[omh]"), "must name the table: {err}");
+        assert!(err.contains("settings.toml"), "and where it belongs: {err}");
     }
 
     /// Absent is not unreadable — the `config::read_layer` lesson, which cost a

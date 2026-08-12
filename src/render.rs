@@ -194,12 +194,17 @@ struct Hook {
 
 /// Union by filename across layers; later layers shadow earlier ones.
 ///
-/// omh's own hooks are merged **last**, so they win. They are generated from
-/// the base manifest and belong to no layer, which is the point: a hook you can
-/// edit is a hook omh can never ship a fix to, and `git-unavailable` has
-/// already needed one. A repo initialised before this still has the seeded
-/// files sitting in its profile; they are read and then overridden, and the
-/// migration removes them.
+/// A file answering to a manifest name is **never read** — see `Own::reserved`.
+/// Read-and-then-override is not enough: with the feature off there is nothing
+/// to override it with, and a repo initialised before generation still has the
+/// five seeded files, so switching a feature off would leave it running.
+///
+/// omh's own are inserted after the layers, but that ordering is not what makes
+/// them win. They are generated from the manifest and belong to no layer, which
+/// is the point: a hook you can edit is a hook omh can never ship a fix to, and
+/// `git-unavailable` has already needed one. A planned migration deletes the
+/// leftovers (`docs/design/profile.md`, P3); until then they are inert, and
+/// `omh why` says so rather than reporting one as yours.
 fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<String, Hook>> {
     let reserved: BTreeMap<String, ()> = own
         .reserved

@@ -1793,7 +1793,12 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         }
     }
     // Appended, not overwritten: re-running init must not eat a line you added.
-    ensure_line(&paths.repo.join(".omh/.gitignore"), "local/")?;
+    let gitignore = paths.repo.join(".omh/.gitignore");
+    ensure_line(&gitignore, "local/")?;
+    // A file beside that directory, so the `local/` line does not cover it.
+    // Left tracked, a machine-local feature switch gets committed to the
+    // team's repo.
+    ensure_line(&gitignore, settings::LOCAL)?;
 
     // Report every decision, so `omh why` has something to explain. Printed as
     // each one is made rather than collected for the end, which is why the
@@ -1999,14 +2004,6 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// Add a section to a file omh does not own, once.
-///
-/// Appending rather than rewriting is the whole point: the file's own header
-/// says *edit freely, omh will not overwrite*, so a shipped addition has to
-/// arrive without touching a line the human wrote. Keyed on the heading, so
-/// running `init` again is a no-op rather than a second copy.
-///
-/// Returns whether anything was written.
 /// The hooks a detected stack gets: run the tests at turn end, format on edit.
 ///
 /// Files rather than prose. A sentence in the rules describing `cargo test` is

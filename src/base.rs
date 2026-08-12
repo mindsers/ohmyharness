@@ -641,19 +641,23 @@ pub fn sections() -> Vec<Section> {
     ]
 }
 
-/// What the agent needs to write a note before there is a tool to write one.
+/// What the agent needs to write a note, and when to write one.
 ///
-/// This is the part of the surface that cannot move into a tool description:
-/// *record what surprised you* is a trigger, and an agent cannot look up a rule
-/// it does not know it needs. The note **shape** is here only because the
-/// agent has no *tool* to write through yet — `remember` already enforces the
-/// schema at the write, but nothing inside the sandbox can call it, so the
-/// agent writes the file by hand and needs to be told the shape. When the MCP
-/// surface lands, this shrinks back to the trigger.
+/// The **trigger** cannot move into a tool description: *record what surprised
+/// you* is a rule an agent cannot look up, because it does not know it needs
+/// it. That half stays here whatever the tool surface looks like.
 ///
-/// The condition is the MCP surface, not `remember`'s existence: `remember`
-/// exists, so a reader checking the wrong one deletes the staged shape while
-/// the agent still has no way to reach it.
+/// The note **shape** is a different claim, and the one to re-argue. It was
+/// written when nothing in the sandbox could call `remember`; that stopped
+/// being true when the memory server shipped — `remember` and `recall` are
+/// both offered inside the session, and `remember` enforces the schema at the
+/// write. What is left is the case `memory::deliver` documents: a released omh
+/// that finds no binary to deliver launches a session with no memory server,
+/// and the agent writes the file by hand. The shape is insurance against that,
+/// not a substitute for a tool that does not exist.
+///
+/// It is the largest single cost in the base set, so it is worth re-measuring
+/// against how often delivery actually fails rather than carrying forward.
 fn note_taking() -> String {
     format!(
         "## Memory\n\n\
@@ -695,10 +699,13 @@ fn note_taking() -> String {
 /// the rule `memory_bin` and `base` already follow: `plan` stays pure given a
 /// temp filesystem, and a probe inside it is a probe no test can reach.
 ///
-/// Empty is a legitimate value — every feature switched off — and is why this
-/// is constructed rather than defaulted: a caller that forgets to resolve it
-/// would otherwise silently ship a session none of omh's own material reaches.
-#[derive(Debug, Clone, Default)]
+/// Empty is a legitimate value — every feature switched off. What keeps a
+/// caller from shipping an empty one *by accident* is `container::Options`,
+/// which has no `Default` and so cannot be built without naming this field.
+///
+/// `Default` here is for tests, which construct the empty case deliberately.
+#[cfg_attr(test, derive(Default))]
+#[derive(Debug, Clone)]
 pub struct Own {
     pub hooks: Vec<Hook>,
     pub sections: Vec<Section>,
@@ -781,7 +788,7 @@ pub fn own(
         disabled_servers: manifest
             .entries
             .iter()
-            .filter(|e| e.kind == Kind::Mcp && off.contains(&e.feature))
+            .filter(|e| matches!(e.kind, Kind::Mcp) && off.contains(&e.feature))
             .map(|e| e.name.clone())
             .collect(),
         // Every hook the manifest owns, on or off — which is why this is built

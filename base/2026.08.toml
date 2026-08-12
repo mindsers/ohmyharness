@@ -278,13 +278,13 @@ name    = "memory-rules"
 kind    = "rules"
 feature = "memory"
 since   = "2026.08"
-because = "nothing inside the sandbox can call `remember` yet, so the rules file is the only thing that can teach the note shape — and the trigger, *record what surprised you*, is a rule an agent cannot look up because it does not know it needs it"
+because = "*record what surprised you* is a trigger, and an agent cannot look up a rule it does not know it needs — no tool description can carry that. The note shape rides along for the case `memory::deliver` documents: a session that got no memory server writes the file by hand"
 remove  = "omh config mcp rm memory"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
   value = "1963 B"
-  how   = "the section as shipped, byte for byte, computed by `every_rules_section_costs_what_it_says`. Larger than the other two because it carries the note template verbatim, which shrinks back to the trigger when the MCP surface reaches the sandbox"
+  how   = "the section as shipped, byte for byte, computed by `every_rules_section_costs_what_it_says`. Larger than the other two because it carries the note template verbatim — worth re-measuring against how often `memory::deliver` actually fails, since `remember` enforces the same schema at the write whenever the server is there"
   on    = "2026-08-12"
 
   [[entry.instead_of]]
