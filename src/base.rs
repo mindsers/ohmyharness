@@ -55,7 +55,6 @@ pub struct Entry {
     /// Required, like `because` and `since`: the grouping spent its life as a
     /// comment header, which is the one claim in the manifest no test could
     /// check.
-    #[serde(default)]
     pub feature: String,
     pub since: String,
     /// Argued, not measured. The honest half.
@@ -755,6 +754,7 @@ mod tests {
 [[entry]]
 name = "codegraph"
 kind = "mcp"
+feature = "codegraph"
 since = "2026.06"
 because = "b"
 remove = "r"

@@ -521,6 +521,7 @@ version = "2026.08"
 [[entry]]
 name = "x"
 kind = "mcp"
+feature = "x"
 since = "2026.08"
 because = "b"
 remove = "r"
