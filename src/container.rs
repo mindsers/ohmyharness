@@ -112,11 +112,29 @@ pub fn plan(
 
     for cap in Capability::ALL {
         let sources = profile.sources(cap);
-        if sources.is_empty() {
+        // Every other capability is exactly what the profile carries. Rules are
+        // not: the project's own `AGENTS.md` is composed in, and it is often the
+        // only thing there — a fresh install has no rules layer of its own. So
+        // asking the profile whether to stage threw the repo's conventions away
+        // in the configuration a clone lands in, which is the bug this module
+        // was written to fix.
+        let carries_something = if cap == Capability::Rules {
+            !rules_doc.trim().is_empty()
+        } else {
+            !sources.is_empty()
+        };
+        if !carries_something {
             continue;
         }
         let Some(binding) = adapter.supports(cap) else {
-            dropped.push((cap, count_entries(&sources)));
+            // The composed document is one thing however many layers fed it, so
+            // a rules-less harness drops at least the one it was handed — never
+            // zero, which is what counting empty sources would have reported.
+            let count = match cap {
+                Capability::Rules => count_entries(&sources).max(1),
+                _ => count_entries(&sources),
+            };
+            dropped.push((cap, count));
             continue;
         };
         stage_capability(
@@ -785,6 +803,40 @@ mod tests {
             .find(|m| m.guest == Path::new("/work/CLAUDE.md"))
             .expect("claude stages rules onto /work/CLAUDE.md");
         std::fs::read_to_string(&mount.host).unwrap()
+    }
+
+    /// Regression: the capability loop asked the *profile* whether there were
+    /// rules, and skipped everything when the answer was no.
+    ///
+    /// `Profile::sources` only ever looks at the three layer directories, so a
+    /// user with no `AGENTS.md` of their own — a fresh install, which is most
+    /// of them — took the `sources.is_empty()` branch and never staged or
+    /// mounted anything. The composed document existed and was thrown away, so
+    /// the repo's own rules went nowhere: the exact bug this module was written
+    /// to fix, surviving in the configuration a clone lands in.
+    ///
+    /// Worse than silent — `plan.rules` was still returned, so the launcher
+    /// could report "composed CLAUDE.md" about a document nobody was given.
+    #[test]
+    fn the_project_alone_is_reason_enough_to_mount_rules() {
+        let fx = fixture();
+        for layer in ["profile", ".omh/profile", ".omh/local"] {
+            let _ = std::fs::remove_file(fx.paths.root.join(layer).join("AGENTS.md"));
+            let _ = std::fs::remove_file(fx.paths.repo.join(layer).join("AGENTS.md"));
+        }
+        std::fs::write(fx.session.worktree.join("AGENTS.md"), "ONLY THE PROJECT").unwrap();
+        // `Profile` caches which layers exist, so re-resolve after removing.
+        let fx = Fx {
+            profile: Profile::resolve(&fx.paths),
+            ..fx
+        };
+
+        let p = plan_for(&fx, "claude");
+
+        assert!(
+            composed_rules(&p).contains("ONLY THE PROJECT"),
+            "a repo's own rules must reach the agent even when the profile has none"
+        );
     }
 
     /// The bug: surviving on disk is not the same as reaching the agent.
