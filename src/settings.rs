@@ -31,6 +31,18 @@ use std::path::{Path, PathBuf};
 struct File {
     #[serde(default)]
     omh: BTreeMap<String, bool>,
+    #[serde(default)]
+    mcp: BTreeMap<String, ServerOverride>,
+}
+
+/// What a repo may say about a catalogue server. Environment and nothing else:
+/// a repo names entries from your catalogue, it does not define one, so there
+/// is deliberately no `command` here to redeclare it with.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerOverride {
+    #[serde(default)]
+    env: BTreeMap<String, String>,
 }
 
 /// The gitignored layer's filename, so `init` ignores exactly the file this
@@ -50,9 +62,14 @@ fn layers(paths: &Paths) -> [PathBuf; 3] {
     crate::config::Layer::ALL.map(|l| l.file(paths))
 }
 
-/// Which of omh's features this repo has switched off.
-pub fn features_off(paths: &Paths, manifest: &Manifest) -> Result<BTreeSet<String>> {
+/// Which of omh's features this repo has switched off, and what it says about
+/// the environment of the servers it uses.
+///
+/// One pass for both, because they come from the same three files and a second
+/// pass would be a second chance for the two to disagree about which layer won.
+pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<Resolved> {
     let mut state: BTreeMap<String, bool> = BTreeMap::new();
+    let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     for path in layers(paths) {
         let Some(raw) = read(&path)? else {
             continue;
@@ -63,12 +80,27 @@ pub fn features_off(paths: &Paths, manifest: &Manifest) -> Result<BTreeSet<Strin
             validate(&key, manifest, &path)?;
             state.insert(key, on);
         }
+        // Variable by variable, so a later layer adding a token does not drop
+        // the one an earlier layer set.
+        for (name, over) in file.mcp {
+            mcp_env.entry(name).or_default().extend(over.env);
+        }
     }
-    Ok(state
-        .into_iter()
-        .filter(|(_, on)| !on)
-        .map(|(name, _)| name)
-        .collect())
+    Ok(Resolved {
+        off: state
+            .into_iter()
+            .filter(|(_, on)| !on)
+            .map(|(name, _)| name)
+            .collect(),
+        mcp_env,
+    })
+}
+
+/// What the settings files say that the launcher acts on.
+#[derive(Debug, Default)]
+pub struct Resolved {
+    pub off: BTreeSet<String>,
+    pub mcp_env: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// A key has to be a feature. Checked where the value is minted, the rule
@@ -156,7 +188,7 @@ mod tests {
     #[test]
     fn a_repo_with_no_settings_has_everything_on() {
         let (_d, paths, m) = fixture();
-        assert!(features_off(&paths, &m).unwrap().is_empty());
+        assert!(resolve(&paths, &m).unwrap().off.is_empty());
     }
 
     #[test]
@@ -167,7 +199,7 @@ mod tests {
             "[omh]\ncodegraph = false\n",
         );
         assert_eq!(
-            features_off(&paths, &m).unwrap(),
+            resolve(&paths, &m).unwrap().off,
             BTreeSet::from(["codegraph".to_string()])
         );
     }
@@ -183,7 +215,7 @@ mod tests {
             "[omh]\nmemory = true\n",
         );
         assert!(
-            features_off(&paths, &m).unwrap().is_empty(),
+            resolve(&paths, &m).unwrap().off.is_empty(),
             "this repo turned it back on"
         );
     }
@@ -204,7 +236,7 @@ mod tests {
         // Not "mentions codegraph": the unknown-key error lists every feature
         // and would satisfy that while saying nothing about the grouping. The
         // guard is that this key is *part of* something, and which.
-        let err = features_off(&paths, &m).unwrap_err().to_string();
+        let err = resolve(&paths, &m).unwrap_err().to_string();
         assert!(
             err.contains("`graph-first` is part of the `codegraph` feature"),
             "must say what it belongs to: {err}"
@@ -222,9 +254,49 @@ mod tests {
             paths.repo.join(".omh/settings.toml"),
             "[omh]\nteleport = false\n",
         );
-        let err = features_off(&paths, &m).unwrap_err().to_string();
+        let err = resolve(&paths, &m).unwrap_err().to_string();
         assert!(err.contains("teleport"), "got: {err}");
         assert!(err.contains("codegraph") && err.contains("memory"), "{err}");
+    }
+
+    /// A repo says what a catalogue server's environment should be here, and
+    /// nothing more — there is no `command`, so a repo cannot define a server
+    /// by pretending to configure one.
+    #[test]
+    fn a_repo_overrides_a_servers_env_and_only_that() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.repo.join(".omh/settings.local.toml"),
+            "[mcp.linear.env]\nLINEAR_API_KEY = \"secret\"\n",
+        );
+        let r = resolve(&paths, &m).unwrap();
+        assert_eq!(r.mcp_env["linear"]["LINEAR_API_KEY"], "secret");
+
+        write(
+            paths.repo.join(".omh/settings.local.toml"),
+            "[mcp.linear]\ncommand = \"mine\"\n",
+        );
+        let err = format!("{:#}", resolve(&paths, &m).unwrap_err());
+        assert!(err.contains("command"), "must name the key: {err}");
+    }
+
+    /// Variable by variable, so a machine-wide token and a per-repo region are
+    /// both expressible — merging entry by entry would make the later layer
+    /// silently drop the earlier one's variables.
+    #[test]
+    fn env_overrides_merge_variable_by_variable() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.root.join("settings.toml"),
+            "[mcp.linear.env]\nTOKEN = \"t\"\n",
+        );
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[mcp.linear.env]\nREGION = \"eu\"\n",
+        );
+        let env = &resolve(&paths, &m).unwrap().mcp_env["linear"];
+        assert_eq!(env["TOKEN"], "t");
+        assert_eq!(env["REGION"], "eu");
     }
 
     /// Absent is not unreadable — the `config::read_layer` lesson, which cost a
@@ -238,7 +310,7 @@ mod tests {
         write(path.clone(), "[omh]\ncodegraph = false\n");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let err = features_off(&paths, &m).unwrap_err().to_string();
+        let err = resolve(&paths, &m).unwrap_err().to_string();
         assert!(err.contains("settings.toml"), "must name the file: {err}");
     }
 }

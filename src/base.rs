@@ -747,6 +747,18 @@ pub struct Own {
     /// lists them. The feature is off *here*; nothing was uninstalled, and the
     /// file is left exactly as the user has it.
     pub disabled_servers: BTreeSet<String>,
+    /// Per-repo MCP environment, by server name, from `[mcp.<name>.env]`.
+    ///
+    /// Not omh's contribution but the repo's, and here for the reason
+    /// `disabled_servers` is: both are decisions about the rendered document
+    /// that come from settings rather than from a profile source, and both have
+    /// to travel to `plan` rather than be probed inside it.
+    ///
+    /// An override rather than a redeclaration, which is the whole point: a
+    /// repo used to hold a token by copying the entire server entry into its
+    /// own `mcp.json`, so a catalogue fix never reached it and the copy was
+    /// invisible until it drifted.
+    pub mcp_env: BTreeMap<String, BTreeMap<String, String>>,
     /// Every hook name the manifest owns, whether or not its feature is on.
     ///
     /// A file in a layer answering to one of these is never read. With the
@@ -829,6 +841,7 @@ pub fn own(
         // from the manifest rather than from `hooks()`. A file answering to one
         // of these is never read, and with the feature off there would be
         // nothing to override it with.
+        mcp_env: BTreeMap::new(),
         reserved: manifest
             .entries
             .iter()

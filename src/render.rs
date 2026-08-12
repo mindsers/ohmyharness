@@ -49,6 +49,20 @@ pub fn document(
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
             let mut servers = merge_servers(sources)?;
             servers.retain(|name, _| !own.disabled_servers.contains(name));
+            // Variable by variable, not entry by entry: a repo overriding one
+            // token must not silently inherit the rest of a catalogue entry it
+            // never saw. Named where it is applied rather than merged into the
+            // sources, so `omh config` still shows the catalogue as written.
+            for (name, env) in &own.mcp_env {
+                let server = servers.get_mut(name).with_context(|| {
+                    format!(
+                        "[mcp.{name}.env] overrides a server that is not in your \
+                         catalogue — nothing would read it. `omh config mcp ls` \
+                         lists what is there."
+                    )
+                })?;
+                server.env.extend(env.clone());
+            }
             Ok(mcp(binding.render, &servers)?.into())
         }
         Render::ClaudeSettings => {
@@ -491,6 +505,71 @@ mod tests {
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "cargo test");
+    }
+
+    /// A repo may override an MCP server's environment without redeclaring the
+    /// server.
+    ///
+    /// This is what replaced a `<repo>/.omh/local/mcp.json` holding a token for
+    /// one project. Redeclaring meant copying the whole entry — command, args
+    /// and all — so a catalogue fix never reached the repos that had one, and
+    /// the copy was invisible until it drifted. An override is configuration:
+    /// it names the server and the variable, and nothing else.
+    #[test]
+    fn a_repo_overrides_a_servers_env_without_redeclaring_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = file(
+            dir.path(),
+            "mcp.json",
+            r#"{"mcpServers":{"linear":{"command":"npx","args":["-y","mcp-remote"],
+                                        "env":{"LINEAR_API_KEY":"","REGION":"eu"}}}}"#,
+        );
+
+        let own = crate::base::Own {
+            mcp_env: BTreeMap::from([(
+                "linear".to_string(),
+                BTreeMap::from([("LINEAR_API_KEY".to_string(), "secret".to_string())]),
+            )]),
+            ..Default::default()
+        };
+        let adapter = claude_hooks();
+        let out = document(
+            Capability::Mcp,
+            adapter.supports(Capability::Mcp).unwrap(),
+            &[mcp],
+            &own,
+        )
+        .unwrap();
+
+        let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
+        let server = &v["mcpServers"]["linear"];
+        assert_eq!(server["env"]["LINEAR_API_KEY"], "secret");
+        assert_eq!(
+            server["env"]["REGION"], "eu",
+            "an override, not a replacement"
+        );
+        assert_eq!(server["command"], "npx", "the server itself is untouched");
+    }
+
+    /// An override for a server nobody has is a token going nowhere, which is
+    /// exactly the shape of a setting somebody swears they configured.
+    #[test]
+    fn an_override_for_a_server_that_is_not_installed_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let mcp = file(dir.path(), "mcp.json", r#"{"mcpServers":{}}"#);
+        let own = crate::base::Own {
+            mcp_env: BTreeMap::from([("linear".to_string(), BTreeMap::new())]),
+            ..Default::default()
+        };
+        let adapter = claude_hooks();
+        let err = document(
+            Capability::Mcp,
+            adapter.supports(Capability::Mcp).unwrap(),
+            &[mcp],
+            &own,
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("linear"), "got: {err:#}");
     }
 
     /// A manifest name is omh's, and a file answering to one is an error naming

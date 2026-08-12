@@ -1633,12 +1633,14 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
 /// inside `plan` is a probe no test can reach.
 fn omh_own(paths: &Paths) -> Result<base::Own> {
     let manifest = base::Manifest::load_dir(&paths.base())?;
-    let off = settings::features_off(paths, &manifest)?;
-    // What the profile still declares, so removing a server takes its feature
+    let settings = settings::resolve(paths, &manifest)?;
+    // What the catalogue still declares, so removing a server takes its feature
     // with it. `omh config mcp rm codegraph` edits `mcp.json` and nothing
     // else, so this read is where that instruction is kept or broken.
     let installed = config::servers(paths)?.into_iter().map(|s| s.key).collect();
-    base::own(&manifest, &off, &installed)
+    let mut own = base::own(&manifest, &settings.off, &installed)?;
+    own.mcp_env = settings.mcp_env;
+    Ok(own)
 }
 
 /// `omh why <thing>` — who put this here, and on what grounds.
@@ -1691,7 +1693,7 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
     let source = manifest.source();
     let version = manifest.version.clone();
     let catalog = why::Catalog {
-        off: settings::features_off(&paths, &manifest)?,
+        off: settings::resolve(&paths, &manifest)?.off,
         manifest: &manifest,
         baselines,
         installed,
