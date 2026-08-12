@@ -549,6 +549,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             account_dir: account,
             memory_bin: memory::deliver::available(&paths),
             base: Some(session::default_branch(&paths.repo)),
+            omh: omh_own(&paths)?,
         },
     )?;
 
@@ -812,6 +813,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         // The probe has to compose the same rules a launch would, or it proves
         // the harness reads a document nobody will be given.
         base: Some(session::default_branch(&paths.repo)),
+        omh: omh_own(&paths)?,
     };
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
@@ -1554,6 +1556,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         account_dir: account,
         memory_bin: memory::deliver::available(&paths),
         base: Some(base.clone()),
+        omh: omh_own(&paths)?,
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
@@ -1620,6 +1623,17 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         .status()?;
     eprintln!("\nomh: review with  omh diff {}", session.id);
     std::process::exit(status.code().unwrap_or(1));
+}
+
+/// What omh contributes to a session here: the hooks and rules sections the
+/// base manifest generates, minus the features this repo switched off.
+///
+/// Resolved by the caller of `container::plan` rather than inside it, the rule
+/// `memory_bin` and `base` already follow — the manifest is a file, and a probe
+/// inside `plan` is a probe no test can reach.
+fn omh_own(paths: &Paths) -> Result<base::Own> {
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    Ok(base::own(&manifest, &Default::default()))
 }
 
 /// `omh why <thing>` — who put this here, and on what grounds.
@@ -2084,6 +2098,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
             // `session.ensure(&paths.repo, "")`: a login is not work on the
             // project, so there are no project rules to look up.
             base: None,
+            omh: omh_own(&paths)?,
         },
     )?;
     plan.validate(&backend.caps())?;

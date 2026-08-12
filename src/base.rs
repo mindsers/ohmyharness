@@ -16,7 +16,7 @@
 use crate::render::Server;
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The base set as data.
@@ -687,6 +687,49 @@ fn note_taking() -> String {
          one without the other.\n",
         crate::memory::GUEST_LOCAL_NOTES,
     )
+}
+
+/// What omh itself contributes to a session, once this repo has had its say.
+///
+/// Resolved from the manifest by the caller and handed to `container::plan`,
+/// the rule `memory_bin` and `base` already follow: `plan` stays pure given a
+/// temp filesystem, and a probe inside it is a probe no test can reach.
+///
+/// Empty is a legitimate value — every feature switched off — and is why this
+/// is constructed rather than defaulted: a caller that forgets to resolve it
+/// would otherwise silently ship a session none of omh's own material reaches.
+#[derive(Debug, Clone, Default)]
+pub struct Own {
+    pub hooks: Vec<Hook>,
+    pub sections: Vec<Section>,
+    /// Servers to drop from the rendered document even though `mcp.json` still
+    /// lists them. The feature is off *here*; nothing was uninstalled, and the
+    /// file is left exactly as the user has it.
+    pub disabled_servers: BTreeSet<String>,
+}
+
+/// Everything the manifest generates, minus the features this repo turned off.
+///
+/// A feature is all-or-nothing on purpose. `codegraph` on with `graph-refresh`
+/// off is a graph that quietly stops tracking the code, which is the one
+/// combination that manufactures confident wrong answers — so it is
+/// unrepresentable rather than warned about.
+pub fn own(manifest: &Manifest, off: &BTreeSet<String>) -> Own {
+    let on = |name: &str| {
+        manifest
+            .entry(name)
+            .is_some_and(|e| !off.contains(&e.feature))
+    };
+    Own {
+        hooks: hooks().into_iter().filter(|h| on(h.name)).collect(),
+        sections: sections().into_iter().filter(|s| on(s.name)).collect(),
+        disabled_servers: manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind == Kind::Mcp && off.contains(&e.feature))
+            .map(|e| e.name.clone())
+            .collect(),
+    }
 }
 
 /// Index a repository into the shared graph.

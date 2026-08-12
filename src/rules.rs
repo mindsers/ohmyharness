@@ -43,6 +43,9 @@ enum Origin {
         name: String,
         from_base: Option<String>,
     },
+    /// omh's own, generated from the base manifest. Named by entry, so the
+    /// marker is something `omh why` can answer for rather than a label.
+    Omh { name: String },
 }
 
 impl std::fmt::Display for Origin {
@@ -57,6 +60,7 @@ impl std::fmt::Display for Origin {
                 name,
                 from_base: None,
             } => write!(f, "<repo>/{name}"),
+            Self::Omh { name } => write!(f, "omh:{name}"),
         }
     }
 }
@@ -130,6 +134,7 @@ pub fn compose(
     adapter: &Adapter,
     worktree: &Path,
     base: Option<&str>,
+    own: &[crate::base::Section],
 ) -> Result<(String, Report)> {
     let (project, report) = match adapter.supports(Capability::Rules) {
         Some(binding) => project(binding, paths, worktree, base)?,
@@ -165,6 +170,18 @@ pub fn compose(
         if layer == Layer::Personal {
             sections.extend(project.take());
         }
+    }
+
+    // omh's own last: they describe the sandbox — what git does here, where
+    // notes go, which graph answers what — and a convention the project wrote
+    // down should not have omh's account of the box sitting in front of it.
+    for section in own {
+        sections.push(Section {
+            origin: Origin::Omh {
+                name: section.name.to_string(),
+            },
+            body: section.body.clone(),
+        });
     }
 
     Ok((render(&sections), report))
@@ -428,9 +445,47 @@ mod tests {
     }
 
     /// No base: these cases are about files, and consulting git would drag a
-    /// repository into tests that do not need one.
+    /// repository into tests that do not need one. No sections either: what omh
+    /// generates is the same on every launch, and every case here is about
+    /// something else.
     fn composed(fx: &Fx) -> (String, Report) {
-        compose(&fx.paths, &claude(), &fx.worktree, None).unwrap()
+        compose(&fx.paths, &claude(), &fx.worktree, None, &[]).unwrap()
+    }
+
+    /// omh's own sections close the document, after every layer and after the
+    /// project's own rules.
+    ///
+    /// Last because they describe the sandbox rather than the work: what git
+    /// does here, where notes go, which graph to ask. A convention the project
+    /// wrote down should be read first, and anything omh has to say about the
+    /// box it is running in should not be sitting in front of it.
+    #[test]
+    fn omhs_sections_close_the_document() {
+        let fx = fixture();
+        layer(&fx, Layer::Personal, "PERSONAL");
+        layer(&fx, Layer::Local, "LOCAL");
+        write(fx.worktree.join("AGENTS.md"), "PROJECT");
+
+        let (body, _) = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            None,
+            &crate::base::sections(),
+        )
+        .unwrap();
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing:\n{body}"))
+        };
+
+        for section in crate::base::sections() {
+            assert!(
+                at(section.body.trim_end()) > at("LOCAL"),
+                "{} must come after every layer:\n{body}",
+                section.name
+            );
+        }
     }
 
     /// Position, not presence. A `contains` assertion stays green when the
@@ -599,7 +654,7 @@ mod tests {
         write(path.clone(), "SECRET RULES");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let out = compose(&fx.paths, &claude(), &fx.worktree, None);
+        let out = compose(&fx.paths, &claude(), &fx.worktree, None, &[]);
 
         // Restore before asserting, or a failure leaves an unreadable temp file.
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
@@ -618,7 +673,7 @@ mod tests {
         let fx = fixture();
         committed(&fx, "WHAT MAIN SAYS");
 
-        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main")).unwrap();
+        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
 
         assert!(
             body.contains("<!-- omh: main:AGENTS.md -->"),
@@ -718,7 +773,7 @@ mod tests {
         committed(&fx, "WHAT MAIN SAYS");
         write(fx.worktree.join("AGENTS.md"), "   \n");
 
-        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main")).unwrap();
+        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
 
         assert!(body.contains("WHAT MAIN SAYS"), "got:\n{body}");
     }
@@ -767,7 +822,7 @@ mod tests {
         committed(&fx, "WHAT MAIN SAYS");
         write(fx.worktree.join("AGENTS.md"), "WHAT THIS BRANCH SAYS");
 
-        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main")).unwrap();
+        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
 
         assert!(body.contains("WHAT THIS BRANCH SAYS"), "got:\n{body}");
         assert!(!body.contains("WHAT MAIN SAYS"), "got:\n{body}");
@@ -781,7 +836,7 @@ mod tests {
         let fx = fixture();
         committed(&fx, "WHAT MAIN SAYS");
 
-        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main")).unwrap();
+        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
 
         assert!(body.contains("WHAT MAIN SAYS"), "got:\n{body}");
     }
@@ -795,7 +850,8 @@ mod tests {
         std::fs::create_dir_all(&fx.paths.repo).unwrap();
         git(&fx.paths.repo, &["init", "-q", "-b", "main"]);
 
-        let (body, report) = compose(&fx.paths, &claude(), &fx.worktree, Some("main")).unwrap();
+        let (body, report) =
+            compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
 
         assert!(body.contains("PERSONAL"), "got:\n{body}");
         assert!(report.notices().is_empty());
@@ -814,7 +870,7 @@ mod tests {
         let fx = fixture();
         std::fs::create_dir_all(&fx.paths.repo).unwrap(); // deliberately not a repo
 
-        let err = compose(&fx.paths, &claude(), &fx.worktree, Some("main"))
+        let err = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[])
             .expect_err("a broken repository must not read as 'no rules'");
 
         let msg = format!("{err:#}");

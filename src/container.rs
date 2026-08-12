@@ -85,6 +85,14 @@ pub struct Options {
     /// that ever leaked past its guard would silently compose the staging area
     /// as the project's rules. `Option` makes that a compile error.
     pub base: Option<String>,
+    /// What omh itself contributes — the hooks and rules sections the base
+    /// manifest generates, with the features this repo switched off already
+    /// removed.
+    ///
+    /// Resolved by the caller for the reason `base` and `memory_bin` are: the
+    /// manifest lives on disk under `~/.omh/base` and reading it here would put
+    /// a probe in a function whose purity is what makes it testable.
+    pub omh: crate::base::Own,
 }
 
 pub fn plan(
@@ -105,8 +113,13 @@ pub fn plan(
     // inside it: it creates the empty placeholder at every declared name, and
     // composing afterwards would read omh's own file as the project's rules on
     // the very first launch.
-    let (rules_doc, rules_report) =
-        crate::rules::compose(paths, adapter, &session.worktree, opts.base.as_deref())?;
+    let (rules_doc, rules_report) = crate::rules::compose(
+        paths,
+        adapter,
+        &session.worktree,
+        opts.base.as_deref(),
+        &opts.omh.sections,
+    )?;
 
     // The agent's entire world. Never the host working tree.
     mounts.push(Mount {
@@ -124,10 +137,14 @@ pub fn plan(
         // asking the profile whether to stage threw the repo's conventions away
         // in the configuration a clone lands in, which is the bug this module
         // was written to fix.
-        let carries_something = if cap == Capability::Rules {
-            !rules_doc.trim().is_empty()
-        } else {
-            !sources.is_empty()
+        //
+        // Hooks are the same story: omh's five are generated from the manifest
+        // and belong to no layer at all, so a repo with no `hooks/` directory
+        // still has them to stage.
+        let carries_something = match cap {
+            Capability::Rules => !rules_doc.trim().is_empty(),
+            Capability::Hooks => !sources.is_empty() || !opts.omh.hooks.is_empty(),
+            _ => !sources.is_empty(),
         };
         if !carries_something {
             continue;
@@ -136,8 +153,10 @@ pub fn plan(
             // The composed document is one thing however many layers fed it, so
             // a rules-less harness drops at least the one it was handed — never
             // zero, which is what counting empty sources would have reported.
+            // A harness with no hooks gives up omh's own as well as yours.
             let count = match cap {
                 Capability::Rules => count_entries(&sources).max(1),
+                Capability::Hooks => count_entries(&sources) + opts.omh.hooks.len(),
                 _ => count_entries(&sources),
             };
             dropped.push((cap, count));
@@ -148,6 +167,7 @@ pub fn plan(
             binding,
             &sources,
             &rules_doc,
+            &opts.omh,
             Destination {
                 stage: &stage,
                 worktree: &session.worktree,
@@ -255,6 +275,7 @@ fn stage_capability(
     binding: &Binding,
     sources: &[PathBuf],
     rules_doc: &str,
+    own: &crate::base::Own,
     to: Destination<'_>,
     mounts: &mut Vec<Mount>,
 ) -> Result<()> {
@@ -346,7 +367,7 @@ fn stage_capability(
             let file = stage.join(format!("{cap}.rendered"));
             // Rendered even when skipped, so a dry run still surfaces a
             // malformed mcp.json instead of deferring it to launch.
-            let rendered = crate::render::document(cap, r, sources)?;
+            let rendered = crate::render::document(cap, r, sources, own)?;
             if staging == Staging::Apply {
                 std::fs::create_dir_all(stage)?;
                 std::fs::write(&file, rendered)?;
@@ -453,6 +474,15 @@ mod tests {
     use super::*;
 
     const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+    const BASE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/base");
+
+    /// What omh contributes, from the manifest this repo ships. Every plan
+    /// built here gets the real thing rather than an empty stand-in, because
+    /// the hooks and rules sections are part of what a launch *is*.
+    fn own() -> crate::base::Own {
+        let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
+        crate::base::own(&manifest, &Default::default())
+    }
 
     struct Fx {
         _dir: tempfile::TempDir,
@@ -531,6 +561,7 @@ mod tests {
                 account_dir: None,
                 memory_bin,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap()
@@ -672,6 +703,7 @@ mod tests {
                 account_dir: Some(account.to_path_buf()),
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap()
@@ -871,13 +903,26 @@ mod tests {
         );
     }
 
-    fn staged_hooks(p: &Plan) -> String {
+    /// Every hook command the harness would actually run, read back out of the
+    /// rendered document. Parsed rather than grepped: the commands are shell
+    /// with quotes in them, and a substring check against JSON compares
+    /// escaped text with unescaped and fails on hooks that are present.
+    fn staged_hooks(p: &Plan) -> Vec<String> {
         let mount = p
             .mounts
             .iter()
             .find(|m| m.guest.ends_with(".claude/settings.json"))
             .expect("claude stages hooks into ~/.claude/settings.json");
-        std::fs::read_to_string(&mount.host).unwrap()
+        let body = std::fs::read_to_string(&mount.host).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+        doc["hooks"]
+            .as_object()
+            .expect("an object keyed by event")
+            .values()
+            .flat_map(|matchers| matchers.as_array().unwrap())
+            .flat_map(|m| m["hooks"].as_array().unwrap())
+            .map(|h| h["command"].as_str().unwrap().to_string())
+            .collect()
     }
 
     /// omh's own hooks are generated from the base manifest, so a profile with
@@ -901,7 +946,7 @@ mod tests {
         for hook in crate::base::hooks() {
             assert!(
                 staged.contains(&hook.command),
-                "{} must reach the harness with no hooks layer to read it: {staged}",
+                "{} must reach the harness with no hooks layer to read it: {staged:?}",
                 hook.name
             );
         }
@@ -929,11 +974,11 @@ mod tests {
             .expect("graph-refresh is in the base set");
         assert!(
             staged.contains(&ships.command),
-            "omh's own hook must be what runs: {staged}"
+            "omh's own hook must be what runs: {staged:?}"
         );
         assert!(
-            !staged.contains("the version from an older omh"),
-            "the leftover file must not decide: {staged}"
+            !staged.iter().any(|c| c == "the version from an older omh"),
+            "the leftover file must not decide: {staged:?}"
         );
     }
 
@@ -955,6 +1000,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -1049,6 +1095,21 @@ mod tests {
             msg.contains("subagents") && msg.contains("hooks"),
             "got: {msg}"
         );
+
+        // What is given up includes omh's own, which come from the manifest
+        // rather than from a layer. Counting only the profile's files would
+        // report a harness dropping one hook while it drops six.
+        let hooks = oc
+            .dropped
+            .iter()
+            .find(|(c, _)| *c == Capability::Hooks)
+            .map(|(_, n)| *n)
+            .unwrap();
+        assert_eq!(
+            hooks,
+            1 + crate::base::hooks().len(),
+            "the fixture's own hook plus omh's: {msg}"
+        );
     }
 
     /// Every declared filename gets the same bytes, and gets them as a mount.
@@ -1129,6 +1190,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap_err();
@@ -1176,6 +1238,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -1207,6 +1270,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -1249,6 +1313,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -1265,6 +1330,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -1292,6 +1358,7 @@ mod tests {
             account_dir: None,
             memory_bin: None,
             base: None,
+            omh: own(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
@@ -1310,6 +1377,7 @@ mod tests {
             account_dir: None,
             memory_bin: None,
             base: None,
+            omh: own(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);

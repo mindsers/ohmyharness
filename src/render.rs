@@ -10,12 +10,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub fn document(cap: Capability, render: Render, sources: &[PathBuf]) -> Result<String> {
+/// Render a capability into the shape this harness parses.
+///
+/// `own` is what omh itself contributes and what this repo has switched off.
+/// It is not a layer: omh's hooks belong to no directory, and a server whose
+/// feature is disabled here is still in your `mcp.json` — the file is yours and
+/// is left exactly as you have it.
+pub fn document(
+    cap: Capability,
+    render: Render,
+    sources: &[PathBuf],
+    own: &crate::base::Own,
+) -> Result<String> {
     match render {
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
-            mcp(render, &merge_servers(sources)?)
+            let mut servers = merge_servers(sources)?;
+            servers.retain(|name, _| !own.disabled_servers.contains(name));
+            mcp(render, &servers)
         }
-        Render::ClaudeSettings => claude_settings(&merge_hooks(sources)?),
+        Render::ClaudeSettings => claude_settings(&merge_hooks(sources, &own.hooks)?),
         Render::Dir | Render::Concat => {
             anyhow::bail!("{cap}: `{render:?}` is staged by the launcher, not rendered")
         }
@@ -180,7 +193,14 @@ struct Hook {
 }
 
 /// Union by filename across layers; later layers shadow earlier ones.
-fn merge_hooks(dirs: &[PathBuf]) -> Result<BTreeMap<String, Hook>> {
+///
+/// omh's own hooks are merged **last**, so they win. They are generated from
+/// the base manifest and belong to no layer, which is the point: a hook you can
+/// edit is a hook omh can never ship a fix to, and `git-unavailable` has
+/// already needed one. A repo initialised before this still has the seeded
+/// files sitting in its profile; they are read and then overridden, and the
+/// migration removes them.
+fn merge_hooks(dirs: &[PathBuf], own: &[crate::base::Hook]) -> Result<BTreeMap<String, Hook>> {
     let mut out = BTreeMap::new();
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -195,6 +215,16 @@ fn merge_hooks(dirs: &[PathBuf]) -> Result<BTreeMap<String, Hook>> {
                 );
             }
         }
+    }
+    for hook in own {
+        out.insert(
+            format!("{}.json", hook.name),
+            Hook {
+                event: hook.event.into(),
+                matcher: hook.matcher.into(),
+                command: hook.command.clone(),
+            },
+        );
     }
     Ok(out)
 }
@@ -337,7 +367,7 @@ mod tests {
             r#"{"event":"PostToolUse","matcher":"Edit","command":"three"}"#,
         );
 
-        let hooks = merge_hooks(&[dir.path().join("h")]).unwrap();
+        let hooks = merge_hooks(&[dir.path().join("h")], &[]).unwrap();
         let out = claude_settings(&hooks).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
 
@@ -346,9 +376,38 @@ mod tests {
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["type"], "command");
     }
 
+    /// Generation must not have changed omh's own behaviour on its way from
+    /// files to the manifest.
+    ///
+    /// Every repo initialised before this has the five hooks on disk as JSON
+    /// `init` wrote, and the harness reads one settings document either way. So
+    /// the two renderings are compared byte for byte: what the seeded files
+    /// produce, and what generating them produces. A difference here is omh
+    /// silently altering hooks people are already running.
+    #[test]
+    fn generated_hooks_render_what_the_seeded_files_render() {
+        let dir = tempfile::tempdir().unwrap();
+        for h in crate::base::hooks() {
+            file(
+                dir.path(),
+                &format!("h/{}.json", h.name),
+                &serde_json::to_string(&serde_json::json!({
+                    "event": h.event,
+                    "matcher": h.matcher,
+                    "command": h.command,
+                }))
+                .unwrap(),
+            );
+        }
+
+        let seeded = claude_settings(&merge_hooks(&[dir.path().join("h")], &[]).unwrap()).unwrap();
+        let generated = claude_settings(&merge_hooks(&[], &crate::base::hooks()).unwrap()).unwrap();
+        assert_eq!(seeded, generated);
+    }
+
     #[test]
     fn staged_renders_are_not_documents() {
-        let err = document(Capability::Skills, Render::Dir, &[]).unwrap_err();
+        let err = document(Capability::Skills, Render::Dir, &[], &Default::default()).unwrap_err();
         assert!(err.to_string().contains("staged by the launcher"));
     }
 
