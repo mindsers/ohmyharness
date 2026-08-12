@@ -133,6 +133,7 @@ pub fn plan(
         &session.worktree,
         opts.base.as_deref(),
         &opts.omh.sections,
+        &opts.repo.selection,
     )?;
 
     // The agent's entire world. Never the host working tree.
@@ -371,6 +372,21 @@ impl Stager<'_> {
                         continue;
                     };
                     for entry in entries.flatten() {
+                        // The selection decides what the harness is *offered*.
+                        // The layer behind these links is still mounted whole,
+                        // so an unselected skill is not loaded but stays
+                        // readable at a path an agent could go looking for —
+                        // curation, not confinement. The boundary that matters
+                        // is that `~/.omh` is mounted read-only and never
+                        // writable; per-entry mounts would close this one and
+                        // multiply the mount count by the size of the
+                        // catalogue, for a threat omh does not claim to stop.
+                        if !repo
+                            .selection
+                            .allows(cap, &crate::profile::entry_name(&entry.file_name()))
+                        {
+                            continue;
+                        }
                         let link = dst.join(entry.file_name());
                         let _ = std::fs::remove_file(&link);
                         symlink(&guest_layer(i, cap).join(entry.file_name()), &link)?;
@@ -574,14 +590,39 @@ mod tests {
     const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BASE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/base");
 
-    /// What omh contributes, from the manifest this repo ships. Every plan
-    /// built here gets the real thing rather than an empty stand-in, because
-    /// the hooks and rules sections are part of what a launch *is*.
     /// What omh contributes and what this repo decided — the two inputs a plan
     /// takes from outside, resolved together because a fixture that built one
     /// without the other could say `codegraph` is off while its server is not.
+    ///
+    /// Called twice per `Options` literal, once for each half, which is why the
+    /// manifest behind it is read once and leaked.
     fn decided() -> (crate::base::Own, crate::settings::RepoPolicy) {
         decided_with(Default::default())
+    }
+
+    /// The pair as a launch resolves it — from this fixture's settings files,
+    /// through `settings::resolve`, exactly as `main::resolved` does.
+    ///
+    /// `decided()` builds a policy by hand, which is right for a case that is
+    /// *about* a switched-off feature and wrong for everything else: a test that
+    /// writes `[use]` into `.omh/settings.toml` and then hands `plan` a policy
+    /// nobody read is asserting against its own struct literal.
+    fn decided_from(fx: &Fx) -> (crate::base::Own, crate::settings::RepoPolicy) {
+        let manifest = base_manifest();
+        let repo = crate::settings::resolve(&fx.paths, manifest).unwrap();
+        let installed = manifest.servers().into_keys().collect();
+        (
+            crate::base::own(manifest, &repo.off, &installed).unwrap(),
+            repo,
+        )
+    }
+
+    /// The shipped manifest, parsed once. Same reason `hook::tests::shipped`
+    /// leaks its adapter: every fixture wants the bytes a launch would read,
+    /// and re-parsing per call turned a fixture into a file-system benchmark.
+    fn base_manifest() -> &'static crate::base::Manifest {
+        static CELL: std::sync::OnceLock<crate::base::Manifest> = std::sync::OnceLock::new();
+        CELL.get_or_init(|| crate::base::Manifest::load_dir(Path::new(BASE)).unwrap())
     }
 
     /// Every server the manifest names is treated as installed unless a case
@@ -659,6 +700,7 @@ mod tests {
     /// constructed there at all.
     fn plan_with_memory_bin(fx: &Fx, harness: &str, memory_bin: Option<PathBuf>) -> Plan {
         let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
+        let (own, repo) = decided_from(fx);
         plan(
             &fx.paths,
             &fx.profile,
@@ -672,8 +714,8 @@ mod tests {
                 account_dir: None,
                 memory_bin,
                 base: None,
-                omh: decided().0,
-                repo: decided().1,
+                omh: own,
+                repo,
             },
         )
         .unwrap()
@@ -1014,6 +1056,199 @@ mod tests {
             body.contains("always run cargo fmt before finishing"),
             "the project's own rules must reach the agent, got:\n{body}"
         );
+    }
+
+    /// What a `dir` capability actually offers the harness: the names in the
+    /// staged directory it mounts, not the names in the catalogue behind it.
+    fn staged_entries(p: &Plan, cap: Capability, guest_suffix: &str) -> Vec<String> {
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(guest_suffix))
+            .unwrap_or_else(|| panic!("nothing staged for {cap}"));
+        let mut names: Vec<String> = std::fs::read_dir(&mount.host)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A catalogue you cannot subtract from is not a catalogue.
+    ///
+    /// One place for content was P3's answer to "where is this skill". It left
+    /// the other half unanswered: everything in it reaches every session, so
+    /// "these are my twelve skills, this project uses two" was unsayable and the
+    /// only lever was uninstalling globally — which is the opposite of curating.
+    ///
+    /// An allowlist, and one mechanism only. Removing something is deleting its
+    /// name, and there is one place to look to answer "is this on here".
+    #[test]
+    fn a_repo_uses_the_catalogue_entries_it_named() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.paths.repo.join(".omh")).unwrap();
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            "[use]\nskills = [\"review-diff\"]\n",
+        )
+        .unwrap();
+
+        let staged = staged_entries(
+            &plan_for(&fx, "claude"),
+            Capability::Skills,
+            ".claude/skills",
+        );
+        assert_eq!(
+            staged,
+            vec!["review-diff"],
+            "graphify is in the catalogue and was not named here"
+        );
+    }
+
+    /// Write a `[use]` table into this repo's committed settings.
+    fn selects(fx: &Fx, table: &str) {
+        std::fs::create_dir_all(fx.paths.repo.join(".omh")).unwrap();
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            format!("[use]\n{table}"),
+        )
+        .unwrap();
+    }
+
+    /// The servers the harness is actually handed, out of the rendered document.
+    fn staged_servers(p: &Plan) -> Vec<String> {
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".mcp.json"))
+            .expect("claude stages mcp into ~/.mcp.json");
+        let body = std::fs::read_to_string(&mount.host).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let mut names: Vec<String> = doc["mcpServers"]
+            .as_object()
+            .expect("an object keyed by server name")
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// A server this repo did not name is dropped from the document it is
+    /// handed, and left in `mcp.json` exactly as you have it — the same
+    /// distinction disabling a feature makes, for the same reason.
+    #[test]
+    fn a_server_this_repo_did_not_name_is_dropped_from_the_document() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.root.join("mcp.json"),
+            r#"{"mcpServers":{"linear":{"command":"l"},"sentry":{"command":"s"}}}"#,
+        )
+        .unwrap();
+        selects(&fx, "mcp = [\"linear\"]\n");
+
+        assert_eq!(staged_servers(&plan_for(&fx, "claude")), vec!["linear"]);
+        assert!(
+            std::fs::read_to_string(fx.paths.root.join("mcp.json"))
+                .unwrap()
+                .contains("sentry"),
+            "the catalogue is yours and is left as you have it"
+        );
+    }
+
+    /// A hook this repo did not name never reaches the harness. Both tiers:
+    /// the catalogue's and the repo's own `.omh/hooks/`.
+    #[test]
+    fn a_hook_this_repo_did_not_name_does_not_reach_the_harness() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.paths.repo.join(".omh/hooks")).unwrap();
+        std::fs::write(
+            fx.paths.repo.join(".omh/hooks/lint.json"),
+            r#"{"on":"turn-end","run":"repo lint"}"#,
+        )
+        .unwrap();
+        selects(&fx, "hooks = [\"lint\"]\n");
+
+        let staged = staged_hooks(&plan_for(&fx, "claude"));
+        assert!(staged.iter().any(|c| c == "repo lint"), "got: {staged:?}");
+        assert!(
+            !staged.iter().any(|c| c == "fmt"),
+            "the catalogue's `fmt` was not named here: {staged:?}"
+        );
+    }
+
+    /// `[use]` names *your* entries; a feature is `[omh]`'s business. With every
+    /// list empty, omh's own must arrive whole — server, hooks and rules section
+    /// together — or the table that is not allowed to take a feature apart has
+    /// taken one apart.
+    #[test]
+    fn an_empty_selection_leaves_every_omh_feature_whole() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.root.join("mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"},
+                              "linear":{"command":"l"}}}"#,
+        )
+        .unwrap();
+        selects(
+            &fx,
+            "rules = []\nskills = []\nmcp = []\ncommands = []\nsubagents = []\nhooks = []\n",
+        );
+
+        let p = plan_for(&fx, "claude");
+        assert_eq!(
+            staged_servers(&p),
+            vec!["codegraph", "memory"],
+            "omh's own survive an empty list; `linear` is yours and does not"
+        );
+        let hooks = staged_hooks(&p);
+        for (name, command) in own_commands() {
+            assert!(
+                hooks.iter().any(|c| *c == command),
+                "{name} is omh's and must still fire: {hooks:?}"
+            );
+        }
+        assert!(
+            composed_rules(&p).contains(crate::base::GIT_ABSENT),
+            "and omh's rules sections are part of the same features"
+        );
+    }
+
+    /// The list is the order — the thing P3 deferred, because ordering can only
+    /// really come from a list somebody wrote. Rules build on each other: a
+    /// general one followed by its exception reads differently reversed.
+    #[test]
+    fn the_use_list_is_the_rules_order() {
+        let fx = fixture();
+        let write = |name: &str, body: &str| {
+            std::fs::write(fx.paths.root.join("rules").join(name), body).unwrap()
+        };
+        write("apple.md", "APPLE RULE");
+        write("zebra.md", "ZEBRA RULE");
+        selects(&fx, "rules = [\"zebra\", \"apple\"]\n");
+
+        let body = composed_rules(&plan_for(&fx, "claude"));
+        let zebra = body.find("ZEBRA RULE").expect("zebra composed");
+        let apple = body.find("APPLE RULE").expect("apple composed");
+        assert!(zebra < apple, "declared order, not filename order:\n{body}");
+        assert!(
+            !body.contains("personal rules"),
+            "and `tdd` was not named, so it is not there:\n{body}"
+        );
+    }
+
+    /// Without a list, filename order still stands. It is the fallback P3
+    /// shipped and a repo that has not curated must not lose its rules.
+    #[test]
+    fn rules_fall_back_to_filename_order_without_a_list() {
+        let fx = fixture();
+        std::fs::write(fx.paths.root.join("rules/apple.md"), "APPLE RULE").unwrap();
+
+        let body = composed_rules(&plan_for(&fx, "claude"));
+        let apple = body.find("APPLE RULE").expect("apple composed");
+        let tdd = body.find("personal rules").expect("tdd composed");
+        assert!(apple < tdd, "alphabetical, and both there:\n{body}");
     }
 
     /// Every hook command the harness would actually run, read back out of the

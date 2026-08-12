@@ -626,3 +626,38 @@ fn a_dry_run_discloses_the_repos_hooks_and_records_nothing() {
         snapshot.display()
     );
 }
+
+/// The launcher says what this repo is *not* using from your catalogue.
+///
+/// Same wire, same gap: `notice::selection` and `Selection::unselected` are both
+/// covered, and deleting the `say_selection` call leaves every one of those
+/// tests green. It is the report that makes an expanded `[use]` safe — `init`
+/// writes the list once and never revisits it, so without this a skill added
+/// afterwards is off and nothing about the repo says why.
+///
+/// `#[ignore]`d because it needs git and a container runtime to reach `run()`.
+/// CI's linux job runs `--include-ignored`, which is where this bites.
+#[test]
+#[ignore]
+fn a_dry_run_names_the_catalogue_entries_this_repo_is_not_using() {
+    let sb = sandbox();
+    sb.git_init();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+    // Added to the catalogue *after* init wrote the list, which is the whole
+    // case: the entry is off, and the reason is invisible without this report.
+    std::fs::create_dir_all(sb.home.join(".omh/skills/refactor")).unwrap();
+    std::fs::write(sb.home.join(".omh/skills/refactor/SKILL.md"), "x").unwrap();
+
+    let said = String::from_utf8_lossy(&sb.omh(&["--dry-run", "claude"]).stderr).to_string();
+    assert!(
+        said.contains("skills/refactor"),
+        "a launch has to name what it is not doing: {said}"
+    );
+    assert!(
+        said.contains("omh use skills refactor"),
+        "and the command that fixes it: {said}"
+    );
+}

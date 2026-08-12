@@ -86,6 +86,19 @@ pub enum Kind {
     Rules,
 }
 
+impl Kind {
+    /// Which catalogue capability an entry of this kind competes with for a
+    /// name. `[use]` is keyed by capability and the manifest by kind, and this
+    /// is the one place the two vocabularies meet.
+    pub fn capability(&self) -> crate::adapter::Capability {
+        match self {
+            Self::Mcp => crate::adapter::Capability::Mcp,
+            Self::Hook => crate::adapter::Capability::Hooks,
+            Self::Rules => crate::adapter::Capability::Rules,
+        }
+    }
+}
+
 /// A cost, with the date it was taken and how.
 ///
 /// Never rendered in the same shape as a computed value: one is a fact about
@@ -232,6 +245,23 @@ impl Manifest {
 
     pub fn entry(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.name == name)
+    }
+
+    /// Every name omh owns, by capability, each pointing at its feature.
+    ///
+    /// One derivation with two readers — `own`'s `reserved`, which stops a file
+    /// standing in for a generated hook, and `[use]`, which refuses to let one
+    /// be selected. The question both ask is "is this name omh's?", and two
+    /// answers to it is how a feature gets taken apart by one of them while the
+    /// other still thinks it is whole.
+    pub fn owns(&self) -> crate::selection::Owned {
+        let mut out = crate::selection::Owned::new();
+        for entry in &self.entries {
+            out.entry(entry.kind.capability())
+                .or_default()
+                .insert(entry.name.clone(), entry.feature.clone());
+        }
+        out
     }
 
     pub fn rejection(&self, name: &str) -> Option<&Rejected> {

@@ -38,6 +38,12 @@ struct File {
     omh: BTreeMap<String, bool>,
     #[serde(default)]
     mcp: BTreeMap<String, ServerOverride>,
+    /// What this repo uses from the catalogue. Named here as well as read by
+    /// [`crate::selection`], or the guard below would refuse `[use]` as a table
+    /// nobody reads — which it would be, since `config::policy` skips tables
+    /// and this is the reader.
+    #[serde(default, rename = "use")]
+    uses: BTreeMap<String, Vec<String>>,
     #[serde(flatten)]
     rest: toml::Table,
 }
@@ -78,6 +84,7 @@ fn layers(paths: &Paths) -> [PathBuf; 3] {
 pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut state: BTreeMap<String, bool> = BTreeMap::new();
     let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut selection = crate::selection::Selection::owning(manifest.owns());
     for path in layers(paths) {
         let Some(raw) = read(&path)? else {
             continue;
@@ -112,6 +119,10 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         for (name, over) in file.mcp {
             mcp_env.entry(name).or_default().extend(over.env);
         }
+        // Wholesale per capability, which is the opposite rule and deliberately
+        // so: an env override adds a variable, a selection *is* the list, and
+        // merging one would make removal unexpressible.
+        selection.apply(&file.uses, &path)?;
     }
     let off: BTreeSet<String> = state
         .into_iter()
@@ -120,6 +131,7 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         .collect();
     let mut policy = RepoPolicy::switching_off(manifest, off);
     policy.mcp_env = mcp_env;
+    policy.selection = selection;
     Ok(policy)
 }
 
@@ -144,6 +156,8 @@ pub struct RepoPolicy {
     /// own `mcp.json`, so a catalogue fix never reached it and the copy was
     /// invisible until it drifted.
     pub mcp_env: BTreeMap<String, BTreeMap<String, String>>,
+    /// What this repo uses from the catalogue, from `[use]`.
+    pub selection: crate::selection::Selection,
 }
 
 impl RepoPolicy {
@@ -163,6 +177,10 @@ impl RepoPolicy {
                 .collect(),
             off,
             mcp_env: BTreeMap::new(),
+            // Empty of choices but *not* of what omh owns. A `Selection::default()`
+            // here would let a fixture treat `codegraph` as an ordinary catalogue
+            // entry, which is the one thing this type exists to prevent.
+            selection: crate::selection::Selection::owning(manifest.owns()),
         }
     }
 }

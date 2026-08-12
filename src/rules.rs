@@ -141,6 +141,7 @@ pub fn compose(
     worktree: &Path,
     base: Option<&str>,
     own: &[crate::base::Section],
+    selection: &crate::selection::Selection,
 ) -> Result<(String, Report)> {
     let (project, report) = match adapter.supports(Capability::Rules) {
         Some(binding) => project(binding, paths, worktree, base)?,
@@ -155,7 +156,7 @@ pub fn compose(
     let mut sections = Vec::new();
     // Yours first: they are how you work everywhere, and the project's file is
     // the specific case that qualifies them.
-    for (name, body) in catalogue(paths)? {
+    for (name, body) in catalogue(paths, selection)? {
         sections.push(Section {
             origin: Origin::Catalogue { name },
             body,
@@ -386,20 +387,21 @@ fn neutralise(body: &str) -> String {
     body.replace(MARKER, "<!-- omh\u{200b}:")
 }
 
-/// Where each layer's rules live. Kept next to the composition so the two
-/// cannot drift.
-/// Your rules, in filename order.
+/// Your rules, in the order `[use]` names them.
 ///
-/// Stated as the placeholder it is: rules build on each other, a general one
-/// followed by its exception reads differently reversed, and the only place that
-/// ordering can really come from is the list you wrote. `[use]` is the phase
-/// that supplies one; until then the order has to be *some* order, and a stable
-/// one beats whatever `read_dir` happens to return.
+/// Rules build on each other — a general one followed by its exception reads
+/// differently reversed — and the only place that ordering can really come from
+/// is a list somebody wrote. So `[use].rules` **is** the order, and filename
+/// order is what a repo that has not written one falls back to: still *some*
+/// order, and a stable one beats whatever `read_dir` happens to return.
 ///
 /// `.md` only, and blank files are dropped for the reason `body` gives: a file
 /// with nothing in it states no rules, and emitting a bare marker with no text
 /// under it attributes silence to somebody.
-fn catalogue(paths: &Paths) -> Result<Vec<(String, String)>> {
+fn catalogue(
+    paths: &Paths,
+    selection: &crate::selection::Selection,
+) -> Result<Vec<(String, String)>> {
     let dir = paths.root.join(Capability::Rules.source());
     let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -422,14 +424,20 @@ fn catalogue(paths: &Paths) -> Result<Vec<(String, String)>> {
         let Some(body) = read(&path)?.filter(|b| !b.trim().is_empty()) else {
             continue;
         };
-        let name = path
-            .file_stem()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
+        let name = crate::profile::entry_name(path.file_name().unwrap_or_default());
+        if !selection.allows(Capability::Rules, &name) {
+            continue;
+        }
         out.push((name, body));
     }
-    out.sort();
+    match selection.order(Capability::Rules) {
+        // The declared order, and a name the list does not mention cannot be
+        // here — `allows` dropped it above. Nothing is appended after the
+        // listed ones, or "these rules, in this order" would quietly become
+        // "these rules first".
+        Some(order) => out.sort_by_key(|(name, _)| order.iter().position(|n| n == name)),
+        None => out.sort(),
+    }
     Ok(out)
 }
 
@@ -482,7 +490,15 @@ mod tests {
     /// generates is the same on every launch, and every case here is about
     /// something else.
     fn composed(fx: &Fx) -> (String, Report) {
-        compose(&fx.paths, &claude(), &fx.worktree, None, &[]).unwrap()
+        compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            None,
+            &[],
+            &Default::default(),
+        )
+        .unwrap()
     }
 
     /// omh's sections reach the agent once.
@@ -512,6 +528,7 @@ mod tests {
             &fx.worktree,
             None,
             &crate::base::sections(),
+            &Default::default(),
         )
         .unwrap();
 
@@ -585,6 +602,7 @@ mod tests {
             &fx.worktree,
             None,
             &crate::base::sections(),
+            &Default::default(),
         )
         .unwrap();
         let at = |needle: &str| {
@@ -619,6 +637,7 @@ mod tests {
             &fx.worktree,
             None,
             &crate::base::sections(),
+            &Default::default(),
         )
         .unwrap();
         let at = |needle: &str| {
@@ -774,7 +793,14 @@ mod tests {
         write(path.clone(), "SECRET RULES");
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let out = compose(&fx.paths, &claude(), &fx.worktree, None, &[]);
+        let out = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            None,
+            &[],
+            &Default::default(),
+        );
 
         // Restore before asserting, or a failure leaves an unreadable temp file.
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644));
@@ -793,7 +819,15 @@ mod tests {
         let fx = fixture();
         committed(&fx, "WHAT MAIN SAYS");
 
-        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
+        let (body, _) = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            Some("main"),
+            &[],
+            &Default::default(),
+        )
+        .unwrap();
 
         assert!(
             body.contains("<!-- omh: main:AGENTS.md -->"),
@@ -893,7 +927,15 @@ mod tests {
         committed(&fx, "WHAT MAIN SAYS");
         write(fx.worktree.join("AGENTS.md"), "   \n");
 
-        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
+        let (body, _) = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            Some("main"),
+            &[],
+            &Default::default(),
+        )
+        .unwrap();
 
         assert!(body.contains("WHAT MAIN SAYS"), "got:\n{body}");
     }
@@ -942,7 +984,15 @@ mod tests {
         committed(&fx, "WHAT MAIN SAYS");
         write(fx.worktree.join("AGENTS.md"), "WHAT THIS BRANCH SAYS");
 
-        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
+        let (body, _) = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            Some("main"),
+            &[],
+            &Default::default(),
+        )
+        .unwrap();
 
         assert!(body.contains("WHAT THIS BRANCH SAYS"), "got:\n{body}");
         assert!(!body.contains("WHAT MAIN SAYS"), "got:\n{body}");
@@ -956,7 +1006,15 @@ mod tests {
         let fx = fixture();
         committed(&fx, "WHAT MAIN SAYS");
 
-        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
+        let (body, _) = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            Some("main"),
+            &[],
+            &Default::default(),
+        )
+        .unwrap();
 
         assert!(body.contains("WHAT MAIN SAYS"), "got:\n{body}");
     }
@@ -970,8 +1028,15 @@ mod tests {
         std::fs::create_dir_all(&fx.paths.repo).unwrap();
         git(&fx.paths.repo, &["init", "-q", "-b", "main"]);
 
-        let (body, report) =
-            compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
+        let (body, report) = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            Some("main"),
+            &[],
+            &Default::default(),
+        )
+        .unwrap();
 
         assert!(body.contains("YOURS"), "got:\n{body}");
         assert!(report.notices().is_empty());
@@ -990,8 +1055,15 @@ mod tests {
         let fx = fixture();
         std::fs::create_dir_all(&fx.paths.repo).unwrap(); // deliberately not a repo
 
-        let err = compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[])
-            .expect_err("a broken repository must not read as 'no rules'");
+        let err = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            Some("main"),
+            &[],
+            &Default::default(),
+        )
+        .expect_err("a broken repository must not read as 'no rules'");
 
         let msg = format!("{err:#}");
         assert!(msg.contains("git show"), "must name what it ran: {msg}");

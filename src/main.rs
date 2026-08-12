@@ -27,6 +27,7 @@ mod profile;
 mod render;
 mod rules;
 mod runtime;
+mod selection;
 mod session;
 mod settings;
 mod ssh;
@@ -1510,6 +1511,24 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
     }
 }
 
+/// Say what this repo is not using from your catalogue, and what it named that
+/// nothing answers to.
+///
+/// Beside `say_hooks` and on the same terms: reported on every launch including
+/// a dry run, never fatal. A selection omh cannot compute is not a reason to
+/// refuse a session — and it cannot be one, because the report exists to cover a
+/// silence rather than to guard anything.
+fn say_selection(profile: &Profile, repo: &settings::RepoPolicy) {
+    match notice::selection(profile, &repo.selection) {
+        Ok(notices) => {
+            for notice in notices {
+                eprintln!("omh: {notice}");
+            }
+        }
+        Err(e) => eprintln!("omh: could not check what this repo uses — {e:#}"),
+    }
+}
+
 /// Mark this repo's hooks as seen, now that a session is actually running.
 ///
 /// Deliberately after the container is up rather than beside the report. The
@@ -1647,6 +1666,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     plan.validate(&backend.caps())?;
 
     say_rules(&plan);
+    say_selection(&profile, &opts.repo);
     let hooks_seen = say_hooks(&paths);
 
     let status_line = match plan.degradation() {

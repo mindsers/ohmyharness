@@ -145,6 +145,75 @@ fn record_path(paths: &Paths) -> PathBuf {
     paths.runs().join("hooks.json")
 }
 
+/// What this repo is *not* using, and what it named that nothing answers to.
+///
+/// The report that makes an expanded `[use]` safe. `omh init` writes the list
+/// with every catalogue entry named — an explicit list is editable and
+/// reviewable in a way `"*"` is not, and you curate by deleting lines — but that
+/// has one failure mode: an entry added to the catalogue *afterwards* is not in
+/// the list, so it is off, and the reason is invisible. So the launcher says so,
+/// which is the same principle every other notice here follows.
+///
+/// Neither line is fatal. A typo in a list is something to be told about, not a
+/// reason to refuse to start work, and a name that resolves to nothing costs
+/// only itself.
+///
+/// omh's own are excluded from both by [`crate::selection::Selection`] itself,
+/// so a `codegraph` sitting in the catalogue's `mcp.json` is never reported as
+/// something `omh use` could fix — `omh use` refuses to write it.
+pub fn selection(
+    profile: &crate::profile::Profile,
+    selection: &crate::selection::Selection,
+) -> Result<Vec<String>> {
+    let mut unselected: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for cap in crate::adapter::Capability::ALL {
+        let available = profile.entries(cap)?;
+        unselected.extend(
+            selection
+                .unselected(cap, &available)
+                .into_iter()
+                .map(|name| format!("{cap}/{name}")),
+        );
+        missing.extend(
+            selection
+                .missing(cap, &available)
+                .into_iter()
+                .map(|name| format!("{cap}/{name}")),
+        );
+    }
+
+    let mut out = Vec::new();
+    if !unselected.is_empty() {
+        out.push(format!(
+            "{} catalogue entr{} not selected here: {}",
+            unselected.len(),
+            if unselected.len() == 1 {
+                "y is"
+            } else {
+                "ies are"
+            },
+            unselected.join(", ")
+        ));
+        // The command, with a real name in it. A report that says something is
+        // off without saying how to turn it on is a report that gets read once.
+        let first = unselected[0].replace('/', " ");
+        out.push(format!("  omh use {first}    ·    omh use --all"));
+    }
+    if !missing.is_empty() {
+        out.push(format!(
+            "warning: [use] names {} nothing answers to: {}",
+            if missing.len() == 1 {
+                "an entry".to_string()
+            } else {
+                format!("{} entries", missing.len())
+            },
+            missing.join(", ")
+        ));
+    }
+    Ok(out)
+}
+
 /// Which hooks differ from what was recorded, or `None` when there is no record.
 ///
 /// `None` rather than an empty list, because the two mean different things: on
@@ -422,6 +491,107 @@ mod tests {
     fn a_repo_with_no_hooks_is_silent() {
         let fx = fixture(&[]);
         assert!(said(&fx).is_empty());
+    }
+
+    /// What the launcher says about a catalogue and a `[use]` table.
+    fn about_selection(fx: &Fx, catalogue: &[&str], table: &str) -> Vec<String> {
+        for entry in catalogue {
+            let p = fx.paths.root.join(entry);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        }
+        std::fs::create_dir_all(fx.paths.repo.join(".omh")).unwrap();
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            format!("[use]\n{table}"),
+        )
+        .unwrap();
+
+        let manifest = crate::base::Manifest::load_dir(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/base"
+        )))
+        .unwrap();
+        let policy = crate::settings::resolve(&fx.paths, &manifest).unwrap();
+        selection(
+            &crate::profile::Profile::resolve(&fx.paths),
+            &policy.selection,
+        )
+        .unwrap()
+    }
+
+    /// The report that makes an expanded `[use]` safe.
+    ///
+    /// `init` writes the list once and never revisits it, so a skill added to
+    /// the catalogue six months later is off here and nothing about the repo
+    /// says why. That is the same silence `init writes once` produces for hooks,
+    /// one table over.
+    #[test]
+    fn a_catalogue_entry_added_after_init_is_reported_unselected() {
+        let fx = fixture(&[]);
+        let out = about_selection(
+            &fx,
+            &["skills/refactor/SKILL.md", "skills/review-diff/SKILL.md"],
+            "skills = [\"review-diff\"]\n",
+        )
+        .join("\n");
+
+        assert!(out.contains("skills/refactor"), "by name: {out}");
+        assert!(!out.contains("review-diff"), "and only the one: {out}");
+        // A report that says something is off without saying how to turn it on
+        // gets read once.
+        assert!(
+            out.contains("omh use skills refactor"),
+            "and the command that fixes it: {out}"
+        );
+        assert!(out.contains("omh use --all"), "or all of them: {out}");
+    }
+
+    /// A typo in a list is something to be told about, not a reason to refuse to
+    /// start work — the same call every notice in this module makes.
+    #[test]
+    fn a_selected_name_nothing_answers_to_is_a_warning_not_a_failure() {
+        let fx = fixture(&[]);
+        let out = about_selection(
+            &fx,
+            &["skills/review-diff/SKILL.md"],
+            "skills = [\"reveiw-diff\"]\n",
+        )
+        .join("\n");
+        assert!(out.contains("skills/reveiw-diff"), "by name: {out}");
+        assert!(out.contains("nothing answers to"), "got: {out}");
+    }
+
+    /// A line printed every launch is a line nobody reads.
+    #[test]
+    fn a_full_selection_says_nothing() {
+        let fx = fixture(&[]);
+        assert!(about_selection(
+            &fx,
+            &["skills/review-diff/SKILL.md"],
+            "skills = [\"review-diff\"]\n"
+        )
+        .is_empty());
+        // And a repo that never curated is not nagged about a catalogue it has
+        // not been asked to curate.
+        assert!(about_selection(&fx, &["skills/refactor/SKILL.md"], "").is_empty());
+    }
+
+    /// omh's own live in the catalogue's `mcp.json` and are governed by `[omh]`.
+    /// Reporting one as unselected would advise `omh use mcp codegraph`, which
+    /// `omh use` refuses to write — a report pointing at a wall.
+    #[test]
+    fn omhs_own_servers_are_never_reported_as_unselected() {
+        let fx = fixture(&[]);
+        std::fs::create_dir_all(&fx.paths.root).unwrap();
+        std::fs::write(
+            fx.paths.root.join("mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"},
+                              "linear":{"command":"l"}}}"#,
+        )
+        .unwrap();
+        let out = about_selection(&fx, &[], "mcp = [\"linear\"]\n").join("\n");
+        assert!(out.is_empty(), "nothing of omh's is yours to select: {out}");
     }
 
     /// Absent is not unreadable. A hooks directory omh cannot read is a set of
