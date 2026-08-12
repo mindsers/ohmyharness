@@ -1,5 +1,0 @@
-{
-  "command": "a=$(codebase-memory-mcp cli get_architecture --project \"$OMH_GRAPH_PROJECT\" --aspects layers --aspects packages --aspects boundaries --aspects entry_points 2>/dev/null | tail -1); [ -n \"$a\" ] || exit 0; jq -nc --arg a \"$a\" --arg p \"$OMH_GRAPH_PROJECT\" '{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":(\"Code graph for project \" + $p + \" — modules, layers, boundaries and entry points. Query it with search_graph/trace_path/get_code_snippet rather than exploring by hand:\\n\" + $a)}}'",
-  "event": "SessionStart",
-  "matcher": ""
-}

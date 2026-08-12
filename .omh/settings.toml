@@ -1,0 +1,13 @@
+# What this repo decided. Settings at the top level; `[omh]` switches
+# omh's own features off here without uninstalling anything.
+#
+# Untracked files the worktree needs — a worktree holds only tracked
+# files, so without this the agent lands somewhere that cannot run your
+# app. This is the ONLY path by which a secret reaches the agent, so
+# keep it short and explicit. node_modules belongs in the image, not here.
+#
+# carry_in = [".env.local", "certs/"]
+carry_in = []
+
+# [omh]
+# codegraph = false
