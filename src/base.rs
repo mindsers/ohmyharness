@@ -73,11 +73,16 @@ pub struct Entry {
     pub instead_of: Vec<Alternative>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
     Mcp,
     Hook,
+    /// A section of the rules the agent is given. Ships as a base-set entry
+    /// like everything else omh chooses — the prose an agent is handed costs
+    /// context on every turn, and a cost nobody wrote down is one nobody can
+    /// argue with.
+    Rules,
 }
 
 /// A cost, with the date it was taken and how.
@@ -850,6 +855,63 @@ mod tests {
         }
     }
 
+    /// A feature is not a group of hooks. It is a group of entries **across
+    /// kinds** — a server, the hooks that make it used, the section telling the
+    /// agent it is there — and that is why it is the unit removal and disabling
+    /// work on. Half of `codegraph` is not a smaller version of it.
+    ///
+    /// Asserted on the one feature that has all three, and asserted because the
+    /// grouping used to be a comment header: removing the server left four
+    /// hooks nudging the agent toward something that was gone.
+    #[test]
+    fn a_feature_gathers_entries_across_kinds() {
+        let manifest = shipped();
+        let kinds: BTreeSet<Kind> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.feature == "codegraph")
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([Kind::Mcp, Kind::Hook, Kind::Rules]),
+            "codegraph is a server, the hooks that make it used, and the section \
+             that tells the agent it exists"
+        );
+    }
+
+    /// The rules are the one cost paid on every single turn, so the number in
+    /// the manifest has to be the number the agent is actually handed.
+    ///
+    /// The same guard as `the_grep_nudges_declared_cost_matches_the_string_it_ships`,
+    /// and for the same reason: `~40 B` sat in this file describing a 243-byte
+    /// string, through a review that read it twice, because a hand-written cost
+    /// and the string it describes have no relationship a test can check.
+    #[test]
+    fn every_rules_section_costs_what_it_says() {
+        let manifest = shipped();
+        for section in sections() {
+            let entry = manifest
+                .entry(section.name)
+                .unwrap_or_else(|| panic!("{} has no manifest entry", section.name));
+            let claim = &entry.measured[0].value;
+            let declared: usize = claim
+                .trim_end_matches(" B")
+                .replace(',', "")
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("{}: `{claim}` is not a byte count", section.name));
+            assert_eq!(
+                declared,
+                section.body.len(),
+                "{}: the manifest claims {declared} B and the section ships {} B. \
+                 Re-measure rather than trimming the prose to fit.",
+                section.name,
+                section.body.len()
+            );
+        }
+    }
+
     /// A hand-written cost and the thing it measures have no relationship a
     /// test can check — which is how `~40 B` sat in the manifest describing a
     /// 243-byte string, through a review that read it twice.
@@ -997,6 +1059,22 @@ command = "c"
         assert_eq!(
             declared, shipped_hooks,
             "hooks in the manifest vs hooks in the code"
+        );
+
+        // The rules sections have the same split for the same reason, and so
+        // the same failure available: a section shipped with no entry reaches
+        // every session unexplained and uncosted, and an entry with no section
+        // is `omh why` describing prose nobody receives.
+        let declared: BTreeSet<&str> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind == Kind::Rules)
+            .map(|e| e.name.as_str())
+            .collect();
+        let shipped_sections: BTreeSet<&str> = sections().iter().map(|s| s.name).collect();
+        assert_eq!(
+            declared, shipped_sections,
+            "rules sections in the manifest vs sections in the code"
         );
 
         // MCP servers are not checked here: since `Manifest::servers()` derives
