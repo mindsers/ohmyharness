@@ -468,6 +468,7 @@ fn session_up(
     // logged out while `--dry-run` advertised the mounts.
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate(&backend.caps())?;
+    say_rules(&plan);
     image::ensure(backend.program(), adapter)?;
     image::ensure_network(backend.program(), &plan.network)?;
 
@@ -547,7 +548,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             tty: false,
             account_dir: account,
             memory_bin: memory::deliver::available(&paths),
-            base: session::default_branch(&paths.repo),
+            base: Some(session::default_branch(&paths.repo)),
         },
     )?;
 
@@ -810,12 +811,13 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         memory_bin: memory::deliver::available(&paths),
         // The probe has to compose the same rules a launch would, or it proves
         // the harness reads a document nobody will be given.
-        base: session::default_branch(&paths.repo),
+        base: Some(session::default_branch(&paths.repo)),
     };
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
     let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
+    say_rules(&plan);
     plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
@@ -1455,6 +1457,18 @@ fn edit(cwd: &std::path::Path, layer: Option<config::Layer>) -> Result<()> {
     Ok(())
 }
 
+/// Say what composing the project's rules turned up, if anything.
+///
+/// Called from every path that builds a plan, not just `run`: `attach` and
+/// `doctor` compose the same document, and a fallback announced on one path in
+/// three is the same silence the notice exists to break. Only when there is
+/// something to say — a line printed every launch is a line nobody reads.
+fn say_rules(plan: &container::Plan) {
+    for notice in plan.rules.notices() {
+        eprintln!("omh: {notice}");
+    }
+}
+
 /// Copy the checkout's untracked essentials into a worktree, and say what
 /// happened — a `.env` you thought you were carrying and are not is exactly the
 /// failure that wastes an hour inside the sandbox.
@@ -1539,7 +1553,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         tty: true,
         account_dir: account,
         memory_bin: memory::deliver::available(&paths),
-        base: base.clone(),
+        base: Some(base.clone()),
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
@@ -1569,15 +1583,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     plan.validate(&backend.caps())?;
 
-    // Composing a file the user did not name is a fallback, and a fallback
-    // nobody is told about is indistinguishable from a bug. Only when there is
-    // something to say: a line printed every launch is a line nobody reads.
-    if let Some(name) = &plan.rules.read_instead {
-        eprintln!("omh: composed {name} — rename it to AGENTS.md");
-    }
-    if let Some(name) = &plan.rules.not_composed {
-        eprintln!("omh: warning: {name} differs from AGENTS.md and was not composed");
-    }
+    say_rules(&plan);
 
     let status_line = match plan.degradation() {
         Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.label()),
@@ -2060,10 +2066,10 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
             tty: true,
             account_dir: Some(account_dir.clone()),
             memory_bin: memory::deliver::available(&paths),
-            // Empty, like the base this scratch session was created with: a
-            // login is not work on the project, and its throwaway directory has
-            // no git behind it to read rules from.
-            base: String::new(),
+            // Empty, like the base this scratch session was created with at
+            // `session.ensure(&paths.repo, "")`: a login is not work on the
+            // project, so there are no project rules to look up.
+            base: None,
         },
     )?;
     plan.validate(&backend.caps())?;

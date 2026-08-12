@@ -76,11 +76,15 @@ pub struct Options {
     /// the guard against mounting a missing path only ran on macOS.
     pub memory_bin: Option<PathBuf>,
     /// The branch the project's own rules are read from when the worktree has
-    /// none of its own. Resolved by the caller for the reason `memory_bin` is:
-    /// `plan` stays pure given a temp filesystem, and a probe in here is a probe
-    /// no test can reach. Empty means "do not consult git" — a scratch session
-    /// has no repository behind it.
-    pub base: String,
+    /// none of its own. `None` asks git nothing.
+    ///
+    /// Resolved by the caller for the reason `memory_bin` is: `plan` stays pure
+    /// given a temp filesystem, and a probe in here is a probe no test can
+    /// reach. `Option` rather than an empty-string sentinel because
+    /// `git show :AGENTS.md` is *valid* — `:path` is the index — so a sentinel
+    /// that ever leaked past its guard would silently compose the staging area
+    /// as the project's rules. `Option` makes that a compile error.
+    pub base: Option<String>,
 }
 
 pub fn plan(
@@ -97,10 +101,12 @@ pub fn plan(
     let mut mounts = Vec::new();
     let mut dropped = Vec::new();
 
-    // Composed before the capability loop, because the mount that carries it is
-    // also the mount that hides the file it was read from.
+    // Composed before the capability loop because `place_destination` runs
+    // inside it: it creates the empty placeholder at every declared name, and
+    // composing afterwards would read omh's own file as the project's rules on
+    // the very first launch.
     let (rules_doc, rules_report) =
-        crate::rules::compose(paths, adapter, &session.worktree, &opts.base)?;
+        crate::rules::compose(paths, adapter, &session.worktree, opts.base.as_deref())?;
 
     // The agent's entire world. Never the host working tree.
     mounts.push(Mount {
@@ -141,10 +147,10 @@ pub fn plan(
             cap,
             binding,
             &sources,
-            &Destination {
+            &rules_doc,
+            Destination {
                 stage: &stage,
                 worktree: &session.worktree,
-                rules_doc: &rules_doc,
                 staging,
             },
             &mut mounts,
@@ -230,16 +236,17 @@ pub fn plan(
     })
 }
 
-/// Where a capability is being staged to, and under what rules.
+/// Where staging writes, and whether it writes at all.
 ///
-/// One struct rather than four parameters: every arm needs the destination and
-/// only one needs the composed document, and threading them separately put
-/// `stage_capability` over the argument count clippy is willing to accept.
+/// The three genuinely travel together — every render arm needs all of them —
+/// and bundling them is what keeps `stage_capability` under the argument count
+/// clippy accepts. The composed document is deliberately *not* in here: it is an
+/// input to one arm, not part of the destination, and folding it in turned a
+/// type into a parameter bag.
+#[derive(Clone, Copy)]
 struct Destination<'a> {
     stage: &'a Path,
     worktree: &'a Path,
-    /// The composed rules document, used by `Render::Concat` alone.
-    rules_doc: &'a str,
     staging: Staging,
 }
 
@@ -247,15 +254,15 @@ fn stage_capability(
     cap: Capability,
     binding: &Binding,
     sources: &[PathBuf],
-    to: &Destination<'_>,
+    rules_doc: &str,
+    to: Destination<'_>,
     mounts: &mut Vec<Mount>,
 ) -> Result<()> {
     let Destination {
         stage,
         worktree,
-        rules_doc,
         staging,
-    } = *to;
+    } = to;
     match binding.render {
         // Union layers by entry name; later layers shadow earlier ones. Links
         // point at each layer's *guest* mount path, so they are intentionally
@@ -523,7 +530,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin,
-                base: "main".into(),
+                base: None,
             },
         )
         .unwrap()
@@ -664,7 +671,7 @@ mod tests {
                 tty: true,
                 account_dir: Some(account.to_path_buf()),
                 memory_bin: None,
-                base: "main".into(),
+                base: None,
             },
         )
         .unwrap()
@@ -881,7 +888,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
-                base: "main".into(),
+                base: None,
             },
         )
         .unwrap();
@@ -990,16 +997,16 @@ mod tests {
     /// will not create one there — see `place_destination`. So the invariant is
     /// about the bytes, not the file's existence: omh's rules must never be
     /// what is on disk.
-    /// The bodies are compared to each other rather than to a literal: what this
-    /// guards is that both names carry *the same* document, and pinning the
-    /// exact text here made it a second copy of the composition tests that had
-    /// to be edited alongside them.
+    /// "Both names, one document" is asserted on the mount's **host path**, not
+    /// by reading the two files and comparing them. `Concat` stages one file and
+    /// points every target at it, so comparing the bytes back was two reads of
+    /// one path — an assertion no mutation could fail.
     #[test]
     fn rules_reach_every_declared_filename_without_writing_them_into_the_worktree() {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
 
-        let mut bodies = Vec::new();
+        let mut hosts = Vec::new();
         for name in ["CLAUDE.md", "AGENTS.md"] {
             let guest = PathBuf::from("/work").join(name);
             let m = p
@@ -1009,19 +1016,24 @@ mod tests {
                 .unwrap_or_else(|| panic!("no mount for {name}: {:?}", p.mounts));
             assert!(m.file, "{name} is one file, not a directory");
             assert!(m.read_only, "a rules file the agent can rewrite is not one");
-            bodies.push(std::fs::read_to_string(&m.host).unwrap());
+            hosts.push(m.host.clone());
             assert_eq!(
                 std::fs::read_to_string(fx.session.worktree.join(name)).unwrap(),
                 "",
                 "{name} in the worktree must stay empty — the rules arrive by mount"
             );
         }
+        assert_eq!(hosts[0], hosts[1], "both names, one staged document");
         assert!(
-            bodies[0].contains("personal rules") && bodies[0].contains("shared rules"),
-            "the layers must be in there: {}",
-            bodies[0]
+            !hosts[0].starts_with(&fx.session.worktree),
+            "the document is staged outside the worktree, not in it: {}",
+            hosts[0].display()
         );
-        assert_eq!(bodies[0], bodies[1], "both names, one document");
+        let body = std::fs::read_to_string(&hosts[0]).unwrap();
+        assert!(
+            body.contains("personal rules") && body.contains("shared rules"),
+            "the layers must be in there: {body}"
+        );
     }
 
     #[test]
@@ -1050,7 +1062,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
-                base: "main".into(),
+                base: None,
             },
         )
         .unwrap_err();
@@ -1097,7 +1109,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
-                base: "main".into(),
+                base: None,
             },
         )
         .unwrap();
@@ -1128,7 +1140,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
-                base: "main".into(),
+                base: None,
             },
         )
         .unwrap();
@@ -1170,7 +1182,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
-                base: "main".into(),
+                base: None,
             },
         )
         .unwrap();
@@ -1186,7 +1198,7 @@ mod tests {
                 tty: true,
                 account_dir: None,
                 memory_bin: None,
-                base: "main".into(),
+                base: None,
             },
         )
         .unwrap();
@@ -1213,7 +1225,7 @@ mod tests {
             tty: true,
             account_dir: None,
             memory_bin: None,
-            base: "main".into(),
+            base: None,
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
@@ -1231,7 +1243,7 @@ mod tests {
             tty: true,
             account_dir: None,
             memory_bin: None,
-            base: "main".into(),
+            base: None,
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);
