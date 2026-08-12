@@ -369,18 +369,29 @@ pub fn write_feature(paths: &Paths, layer: Layer, feature: &str, on: bool) -> Re
 /// curated one repo would be the worst of the three.
 pub fn declaring(paths: &Paths, table: &str, key: &str) -> Result<Vec<Layer>> {
     let mut out = vec![Layer::Shared];
-    let doc = read_doc(&Layer::Local.file(paths))?;
-    let declared = doc
+    if declares_key(paths, Layer::Local, table, key)? {
+        out.push(Layer::Local);
+    }
+    Ok(out)
+}
+
+/// Does this layer's file have a `[table]` at all?
+///
+/// `init` asks, to decide whether a repo already says what it uses — and the
+/// answer decides whether it overwrites a list somebody pruned, so absent and
+/// unreadable must not be the same answer. `read_doc` is what keeps them apart.
+pub fn declares(paths: &Paths, layer: Layer, table: &str) -> Result<bool> {
+    Ok(read_doc(&layer.file(paths))?.contains_key(table))
+}
+
+fn declares_key(paths: &Paths, layer: Layer, table: &str, key: &str) -> Result<bool> {
+    Ok(read_doc(&layer.file(paths))?
         .get(table)
         // `as_table_like`, so an inline `use = { skills = [...] }` counts. It is
         // valid TOML and `settings.rs` reads it, so a writer that could not see
         // it would be the same bug one spelling over.
         .and_then(|item| item.as_table_like())
-        .is_some_and(|t| t.contains_key(key));
-    if declared {
-        out.push(Layer::Local);
-    }
-    Ok(out)
+        .is_some_and(|t| t.contains_key(key)))
 }
 
 /// Read-modify-write one named table inside a layer's file.

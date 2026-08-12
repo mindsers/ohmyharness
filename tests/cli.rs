@@ -728,9 +728,14 @@ fn use_is_idempotent_and_unuse_refuses_a_name_this_repo_never_used() {
     sb.catalogue(&["skills/review-diff/SKILL.md"]);
     sb.omh(&["use", "skills", "review-diff"]);
 
+    // The invariant, not the message: "already used" is what it says, and
+    // "not a write" is what it means. Asserting the sentence left a mutation
+    // that writes the list back before printing it entirely green.
+    let before = sb.settings();
     let out = sb.omh(&["use", "skills", "review-diff"]);
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("already used"));
+    assert_eq!(sb.settings(), before, "selecting it again touched the file");
 
     // Refused rather than written as a no-op: a name this repo never used is a
     // typo, and writing the list back would report success for it.

@@ -656,6 +656,24 @@ mod tests {
             msg.contains("codegraph") || msg.contains("omh"),
             "and whose name it is: {msg}"
         );
+
+        // And whatever `[use]` says. The selection filter sits *after* this
+        // guard on purpose — a repo that shipped a file answering to nothing
+        // has to hear about it whether or not its list happens to name it, and
+        // `init` writes an expanded list, so a hook added later is unselected
+        // by default. With the two swapped, the check goes quiet for exactly
+        // the repos most likely to have the problem.
+        let mut repo = crate::settings::RepoPolicy::default();
+        repo.selection
+            .apply(
+                &BTreeMap::from([("hooks".to_string(), Vec::new())]),
+                Path::new("settings.toml"),
+            )
+            .unwrap();
+        assert!(
+            merge_hooks(&[dir.path().join("h")], &own, &repo).is_err(),
+            "an unselected hook file still may not claim a name omh ships"
+        );
     }
 
     /// A directory omh cannot read is not a directory with no hooks in it.

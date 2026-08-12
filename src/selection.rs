@@ -55,7 +55,14 @@ enum Chosen {
 }
 
 /// What this repo selected, per capability, with the names omh owns held out.
-#[derive(Debug, Clone, Default)]
+///
+/// **`Default` is test-only**, the arrangement `base::Own` already uses. A
+/// defaulted `Selection` knows nothing of what omh owns, so it treats
+/// `codegraph` as an ordinary catalogue entry — the one state this type exists
+/// to prevent, and the one `settings.rs` writes a comment forbidding three
+/// lines above a struct that derived it. `owning` is the only door in.
+#[cfg_attr(test, derive(Default))]
+#[derive(Debug, Clone)]
 pub struct Selection {
     chosen: BTreeMap<Capability, Chosen>,
     /// Names the manifest owns, each pointing at the feature it belongs to.

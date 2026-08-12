@@ -233,16 +233,44 @@ impl Hook {
                          With `run` the output is ignored, so capturing it says nothing."
                     );
                 }
+                non_empty(&run, "run", whence)?;
                 Action::Run(run)
             }
             (None, Some(text)) => {
+                non_empty(&text, "inject", whence)?;
                 check_interpolation(&text, whence, raw.capture.is_some())?;
+                if let Some(capture) = &raw.capture {
+                    non_empty(capture, "capture", whence)?;
+                    // A capture nothing reads is a subprocess per session for
+                    // nothing. `when` counts as a reader as well as `text`,
+                    // because `capture` is evaluated *before* the predicate on
+                    // purpose so a predicate can test it — which is exactly what
+                    // `graph-orient` does.
+                    let read = mentions(&text, CAPTURE_VAR)
+                        || raw
+                            .when
+                            .as_deref()
+                            .is_some_and(|w| mentions(w, CAPTURE_VAR));
+                    if !read {
+                        anyhow::bail!(
+                            "{whence}: `capture` runs a command and binds its output to \
+                             ${CAPTURE_VAR}, and nothing here reads it. Name it in \
+                             `inject` or in `when`, or drop the `capture`."
+                        );
+                    }
+                }
                 Action::Inject {
                     capture: raw.capture,
                     text,
                 }
             }
         };
+        if let Some(when) = &raw.when {
+            // An empty predicate renders `|| exit 0; …`, which `sh` refuses to
+            // parse — so the hook never runs while every assertion about its
+            // text still passes.
+            non_empty(when, "when", whence)?;
+        }
         Ok(Self {
             on: raw.on,
             tools: raw.tools,
@@ -282,6 +310,18 @@ impl Hook {
             .filter(|f| bodies.iter().flatten().any(|b| mentions(b, f.var())))
             .collect()
     }
+}
+
+/// A body has to say something. An empty one is a field somebody meant to fill
+/// in, and every one of them fails in the way this format exists to prevent: an
+/// empty `inject` renders a hook that hands the agent nothing, an empty `run`
+/// renders a hook that runs nothing, and an empty `when` renders a command `sh`
+/// will not parse — each satisfying every assertion about the hook's text.
+fn non_empty(body: &str, field: &str, whence: &str) -> Result<()> {
+    if body.trim().is_empty() {
+        anyhow::bail!("{whence}: `{field}` is empty, so this hook does nothing");
+    }
+    Ok(())
 }
 
 /// Does `body` reference `$var`? Checked with the following character so
@@ -626,6 +666,53 @@ mod tests {
     fn a_hook_that_both_runs_and_injects_is_refused_with_what_it_meant() {
         let err = Hook::parse(r#"{"on":"turn-end","run":"x","inject":"y"}"#, "h.json").unwrap_err();
         assert!(err.to_string().contains("capture"), "got: {err}");
+    }
+
+    /// A capture whose output nothing reads is a subprocess per session, for
+    /// nothing — and the module doc named it as one of the three meaningless
+    /// states and claimed it "cannot be written down". Moving `capture` inside
+    /// `Inject` killed only capture-beside-`run`; this half is a check on a
+    /// *value*, which no shape can make unconstructible.
+    ///
+    /// Both bodies count, because `capture` is evaluated before `when` on
+    /// purpose so a predicate can test it — `graph-orient` reads it in both.
+    #[test]
+    fn a_capture_nothing_reads_is_refused() {
+        let err = Hook::parse(
+            r#"{"on":"session-start","capture":"date","inject":"hello"}"#,
+            "h.json",
+        )
+        .expect_err("nothing reads $OMH_CAPTURE here");
+        assert!(
+            err.to_string().contains(CAPTURE_VAR),
+            "say which variable went unread: {err}"
+        );
+
+        // Read by the text, and read by the predicate: both are uses.
+        for body in [
+            r#"{"on":"session-start","capture":"date","inject":"it is $OMH_CAPTURE"}"#,
+            r#"{"on":"session-start","capture":"date","when":"[ -n \"$OMH_CAPTURE\" ]","inject":"hi"}"#,
+        ] {
+            Hook::parse(body, "h.json").unwrap_or_else(|e| panic!("{body} should validate: {e:#}"));
+        }
+    }
+
+    /// An empty predicate renders `|| exit 0; …`, which `sh` refuses to parse —
+    /// so the hook never runs, and every assertion about its text still passes.
+    /// CONTRIBUTING states the invariant it breaks: every hook command parses
+    /// **and runs** under `sh`.
+    #[test]
+    fn an_empty_body_is_not_a_body() {
+        for body in [
+            r#"{"on":"turn-end","when":"","run":"cargo test"}"#,
+            r#"{"on":"turn-end","run":""}"#,
+            r#"{"on":"turn-end","inject":""}"#,
+        ] {
+            let err = Hook::parse(body, "h.json")
+                .map(|_| ())
+                .expect_err("an empty body says nothing and can break the shell");
+            assert!(err.to_string().contains("h.json"), "name the file: {err}");
+        }
     }
 
     #[test]

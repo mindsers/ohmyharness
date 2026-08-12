@@ -9,12 +9,21 @@
 # carry_in = [".env.local", "certs/"]
 carry_in = []
 
+# What this repo takes from your catalogue. `omh init` writes this expanded
+# from whatever the machine that ran it happened to hold — which for the author
+# was nothing, so committing that verbatim would have handed every contributor
+# an empty catalogue and no reason why. This project has no opinion about your
+# skills, rules, commands or subagents, and `"*"` is how that is said.
+#
+# Hooks are the exception, and the only line here that is a decision: these two
+# are this repo's own, in `.omh/hooks/`, and a contributor's personal hooks are
+# not run by a project that never asked for them.
 [use]
-rules = []
-skills = []
-mcp = []
-commands = []
-subagents = []
+rules = ["*"]
+skills = ["*"]
+mcp = ["*"]
+commands = ["*"]
+subagents = ["*"]
 hooks = ["rust-format", "rust-test"]
 
 # [omh]

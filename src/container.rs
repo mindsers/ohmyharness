@@ -144,6 +144,18 @@ pub fn plan(
         file: false,
     });
 
+    // Built once, which is what the type is for. Constructed inside the loop it
+    // rebuilt all seven values six times and bought nothing its own doc claimed.
+    let stager = Stager {
+        adapter,
+        rules_doc: &rules_doc,
+        own: &opts.omh,
+        repo: &opts.repo,
+        stage: &stage,
+        worktree: &session.worktree,
+        staging,
+    };
+
     for cap in Capability::ALL {
         let sources = profile.sources(cap)?;
         // Every other capability is exactly what the profile carries. Rules are
@@ -183,19 +195,7 @@ pub fn plan(
             dropped.push((cap, count));
             continue;
         }
-        let gave_up = Stager {
-            adapter,
-            rules_doc: &rules_doc,
-            own: &opts.omh,
-            repo: &opts.repo,
-            to: Destination {
-                stage: &stage,
-                worktree: &session.worktree,
-                staging,
-            },
-        }
-        .stage(cap, &sources, &mut mounts)?;
-        dropped_hooks.extend(gave_up);
+        dropped_hooks.extend(stager.stage(cap, &sources, &mut mounts)?);
     }
 
     // The graph index, keyed by repo rather than harness — that is what lets
@@ -290,33 +290,27 @@ pub fn plan(
     })
 }
 
-/// Where staging writes, and whether it writes at all.
-///
-/// The three genuinely travel together — every render arm needs all of them —
-/// and bundling them is what keeps `stage_capability` under the argument count
-/// clippy accepts. The composed document is deliberately *not* in here: it is an
-/// input to one arm, not part of the destination, and folding it in turned a
-/// type into a parameter bag.
-#[derive(Clone, Copy)]
-struct Destination<'a> {
-    stage: &'a Path,
-    worktree: &'a Path,
-    staging: Staging,
-}
-
 /// What staging needs that does not change from one capability to the next.
 ///
-/// Five values, invariant across the six-capability loop, which is what a
-/// struct with a method is for. They were five parameters until `RepoPolicy`
-/// made a sixth, and `Destination`'s own comment already records that folding
-/// unrelated things into *it* was the wrong answer once — so the bundle is the
-/// staging context itself rather than a bag hung off the destination.
+/// Seven values, invariant across the six-capability loop, built once before it
+/// — which is what a struct with a method is for, and what this was not doing:
+/// the literal was inside the loop, so every field was rebuilt six times and
+/// the type bought nothing its doc claimed.
+///
+/// `Destination` used to hold the last three, on the argument that they keep
+/// `stage_capability` under clippy's argument count. That function is this
+/// method now, so the wrapper had one user and one reason, both gone. The part
+/// of its comment worth keeping: the composed document is an input to one arm
+/// rather than part of the destination, which is why `rules_doc` sits here as
+/// itself and is not folded into anything.
 struct Stager<'a> {
     adapter: &'a Adapter,
     rules_doc: &'a str,
     own: &'a crate::base::Own,
     repo: &'a crate::settings::RepoPolicy,
-    to: Destination<'a>,
+    stage: &'a Path,
+    worktree: &'a Path,
+    staging: Staging,
 }
 
 impl Stager<'_> {
@@ -331,8 +325,10 @@ impl Stager<'_> {
             rules_doc,
             own,
             repo,
-            to,
-        } = self;
+            stage,
+            worktree,
+            staging,
+        } = *self;
         let mut dropped_hooks = Vec::new();
         // Looked up here rather than threaded in, so the tool vocabulary — which
         // lives on the adapter, not the binding — arrives with the adapter it
@@ -342,11 +338,6 @@ impl Stager<'_> {
         let binding = adapter
             .supports(cap)
             .with_context(|| format!("{} declares no `{cap}` capability", adapter.name))?;
-        let Destination {
-            stage,
-            worktree,
-            staging,
-        } = *to;
         match binding.render {
             // Union layers by entry name; later layers shadow earlier ones. Links
             // point at each layer's *guest* mount path, so they are intentionally
@@ -1289,6 +1280,40 @@ mod tests {
         let apple = body.find("APPLE RULE").expect("apple composed");
         let tdd = body.find("personal rules").expect("tdd composed");
         assert!(apple < tdd, "alphabetical, and both there:\n{body}");
+    }
+
+    /// Every `dir` capability respects the selection, not just the one with a
+    /// test. They share a loop, so hardcoding `Capability::Skills` in the filter
+    /// left `commands` and `subagents` ignoring `[use]` entirely with the suite
+    /// green.
+    #[test]
+    fn every_dir_capability_respects_the_selection() {
+        let fx = fixture();
+        let write = |p: PathBuf| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        };
+        write(fx.paths.root.join("commands/ship.md"));
+        write(fx.paths.root.join("commands/drop.md"));
+        write(fx.paths.root.join("subagents/keep.md"));
+        write(fx.paths.root.join("subagents/lose.md"));
+        selects(
+            &fx,
+            "skills = [\"review-diff\"]\ncommands = [\"ship\"]\nsubagents = [\"keep\"]\n",
+        );
+
+        let p = plan_for(&fx, "claude");
+        for (cap, guest, want) in [
+            (Capability::Skills, ".claude/skills", "review-diff"),
+            (Capability::Commands, ".claude/commands", "ship.md"),
+            (Capability::Subagents, ".claude/agents", "keep.md"),
+        ] {
+            assert_eq!(
+                staged_entries(&p, cap, guest),
+                vec![want],
+                "{cap} did not respect the list"
+            );
+        }
     }
 
     /// Deselecting something has to reach a session that already staged it.

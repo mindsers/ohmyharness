@@ -545,6 +545,7 @@ fn session_up(
     // The account must reach *this* plan: this is the container that actually
     // runs. Building it without credentials is how every session started
     // logged out while `--dry-run` advertised the mounts.
+    say_selection(profile, &opts.repo);
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate(&backend.caps())?;
     say_rules(&plan);
@@ -909,6 +910,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
+    say_selection(&profile, &opts.repo);
     let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
     say_rules(&plan);
     plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
@@ -1479,13 +1481,12 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
 /// everywhere and is not this repo having decided anything, so treating it as
 /// one would leave a fresh checkout with no list of its own.
 fn repo_has_selection(paths: &Paths) -> Result<bool> {
-    let path = config::Layer::Shared.file(paths);
-    let Ok(raw) = std::fs::read_to_string(&path) else {
-        return Ok(false);
-    };
-    let doc: toml::Table =
-        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-    Ok(doc.contains_key(config::USE))
+    // Through `config`, which distinguishes absent from unreadable. Reading the
+    // file here with `let Ok(..) else { return Ok(false) }` reintroduced the
+    // exact conflation `config::read_layer` was written about, in the one place
+    // where the answer decides whether `init` overwrites a curated list — and
+    // it was a third parse strategy for a file that already had two.
+    config::declares(paths, config::Layer::Shared, config::USE)
 }
 
 /// The catalogue's MCP servers, with whose each one is.
@@ -1590,7 +1591,7 @@ fn use_cmd(
 /// Stop using a catalogue entry here.
 fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let (cap, mut names, _) = current_list(&paths, key, name)?;
+    let (cap, mut names, was_open) = current_list(&paths, key, name)?;
     if !names.iter().any(|n| n == name) {
         // Refused rather than written as a no-op: a name this repo never used
         // is a typo, and writing the list back would report success for it.
@@ -1605,6 +1606,17 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str) -> Result<()> {
         );
     }
     names.retain(|n| n != name);
+    if was_open {
+        // The same disclosure `use_cmd` makes, and for the same reason: this is
+        // the moment the capability stops following the catalogue. Discarding
+        // the flag here was an oversight rather than a decision — `unuse`
+        // performs the identical conversion, so a repo with no list at all
+        // freezes into one on the command that was meant to remove one name.
+        println!(
+            "{cap} was following your whole catalogue; wrote its remaining {} entries as the list",
+            names.len()
+        );
+    }
     for w in write_lists(&paths, &std::collections::BTreeMap::from([(cap, names)]))? {
         println!(
             "no longer using {cap}/{name} — wrote → {}",
@@ -1791,21 +1803,30 @@ fn show_repo(cwd: &std::path::Path) -> Result<()> {
     for cap in adapter::Capability::ALL {
         let entries = profile.entries(cap)?;
         let unselected = policy.selection.unselected(cap, &entries);
-        let taken: Vec<&String> = entries
-            .iter()
-            .filter(|n| policy.selection.allows(cap, n) && !policy.selection.is_omhs(cap, n))
-            .collect();
         // "everything" rather than a list identical to the catalogue's, because
         // the two are different states: one follows the catalogue as it grows
         // and the other is a list that happens to be complete today.
-        let summary = match (policy.selection.order(cap), taken.is_empty()) {
-            (None, _) => "everything".to_string(),
-            (Some(_), true) => "nothing".to_string(),
-            (Some(_), false) => taken
-                .iter()
-                .map(|n| n.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
+        //
+        // Printed in the **declared** order, not `entries`' alphabetical one.
+        // For `rules` that order is the whole feature — this page's own docs say
+        // "the list is the order" — and building the line from the sorted
+        // catalogue made `omh repo` the one place that contradicted it. Filtered
+        // by what the catalogue actually holds, so a name nothing answers to is
+        // reported as missing rather than listed as used.
+        let summary = match policy.selection.order(cap) {
+            None => "everything".to_string(),
+            Some(order) => {
+                let taken: Vec<&str> = order
+                    .iter()
+                    .filter(|n| entries.iter().any(|e| e == *n))
+                    .map(String::as_str)
+                    .collect();
+                if taken.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    taken.join(", ")
+                }
+            }
         };
         let note = if unselected.is_empty() {
             String::new()
@@ -2027,10 +2048,16 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
 /// Say what this repo is not using from your catalogue, and what it named that
 /// nothing answers to.
 ///
-/// Beside `say_hooks` and on the same terms: reported on every launch including
-/// a dry run, never fatal. A selection omh cannot compute is not a reason to
-/// refuse a session — and it cannot be one, because the report exists to cover a
-/// silence rather than to guard anything.
+/// Called from **every path that builds a plan**, which is the rule `say_rules`
+/// states and this broke on arrival: it was wired into `run` alone, so `attach`
+/// and `doctor` composed the same profile and said nothing. `attach` is the path
+/// where it matters most — it is how you rejoin a session that staged the
+/// selection you have since changed.
+///
+/// Beside `say_hooks` and on the same terms otherwise: reported on every launch
+/// including a dry run, never fatal. A selection omh cannot compute is not a
+/// reason to refuse a session — and it cannot be one, because the report exists
+/// to cover a silence rather than to guard anything.
 fn say_selection(profile: &Profile, repo: &settings::RepoPolicy) {
     match notice::selection(profile, &repo.selection) {
         Ok(notices) => {

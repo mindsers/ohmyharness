@@ -141,7 +141,11 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
 /// Both reach `container::plan` from outside, and keeping them separate is what
 /// stops "omh generated this" and "this repo asked for this" being answered by
 /// one field lookup — `omh why`'s whole job is telling those apart.
-#[derive(Debug, Default, Clone)]
+/// `Default` is test-only, because [`crate::selection::Selection`]'s is: a
+/// defaulted policy is one that thinks omh owns nothing, and the only callers
+/// that want it are fixtures saying "this repo decided nothing".
+#[cfg_attr(test, derive(Default))]
+#[derive(Debug, Clone)]
 pub struct RepoPolicy {
     /// Features switched off here. Nothing is uninstalled.
     pub off: BTreeSet<String>,
@@ -379,6 +383,49 @@ mod tests {
         let env = &resolve(&paths, &m).unwrap().mcp_env["linear"];
         assert_eq!(env["TOKEN"], "t");
         assert_eq!(env["REGION"], "eu");
+    }
+
+    /// `[use]` is read from all three files, and a later one replaces a
+    /// capability's list outright.
+    ///
+    /// The unit tests for this live in `selection.rs` and call `apply` directly
+    /// with invented paths, so guarding the *resolve* with a layer check —
+    /// making a personal `[use]` read by nobody, or a local one unable to
+    /// override the committed list — left the whole suite green. Both are
+    /// stated behaviours: a personal list is your default everywhere, and a
+    /// local one is what `omh use` now has to write through.
+    #[test]
+    fn use_is_read_from_every_layer_and_the_last_one_wins() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.root.join("settings.toml"),
+            "[use]\nskills = [\"mine\"]\nrules = [\"tdd\"]\n",
+        );
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[use]\nskills = [\"ours\"]\n",
+        );
+        let s = resolve(&paths, &m).unwrap().selection;
+        assert!(s.allows(crate::adapter::Capability::Skills, "ours"));
+        assert!(
+            !s.allows(crate::adapter::Capability::Skills, "mine"),
+            "the repo replaced the personal list rather than adding to it"
+        );
+        assert!(
+            s.allows(crate::adapter::Capability::Rules, "tdd"),
+            "and a capability only the personal layer named still stands"
+        );
+
+        write(
+            paths.repo.join(".omh/settings.local.toml"),
+            "[use]\nskills = [\"just-here\"]\n",
+        );
+        let s = resolve(&paths, &m).unwrap().selection;
+        assert!(s.allows(crate::adapter::Capability::Skills, "just-here"));
+        assert!(
+            !s.allows(crate::adapter::Capability::Skills, "ours"),
+            "the gitignored layer has the last word, which is why omh use writes it too"
+        );
     }
 
     /// A table nobody reads is refused by name.
