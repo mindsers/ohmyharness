@@ -319,12 +319,20 @@ mod tests {
     }
 
     fn own() -> crate::base::Own {
+        own_with(&Default::default())
+    }
+
+    /// Every server the manifest names counts as installed: `own` also
+    /// switches a feature off when its server is gone from the profile, and a
+    /// fixture declaring none would disable everything for the wrong reason.
+    fn own_with(off: &std::collections::BTreeSet<String>) -> crate::base::Own {
         let manifest = crate::base::Manifest::load_dir(Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/base"
         )))
         .unwrap();
-        crate::base::own(&manifest, &Default::default())
+        let installed = manifest.servers().into_keys().collect();
+        crate::base::own(&manifest, off, &installed).unwrap()
     }
 
     fn adapter(name: &str) -> Adapter {
@@ -364,12 +372,7 @@ mod tests {
     #[test]
     fn a_server_this_repo_switched_off_is_not_demanded() {
         let fx = fixture();
-        let manifest = crate::base::Manifest::load_dir(Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/base"
-        )))
-        .unwrap();
-        let off = crate::base::own(&manifest, &["codegraph".to_string()].into());
+        let off = own_with(&["codegraph".to_string()].into());
 
         let mcp = checks(&fx.profile, &adapter("claude"), &off)
             .into_iter()

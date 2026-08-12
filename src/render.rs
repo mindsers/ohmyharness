@@ -208,8 +208,18 @@ fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<Stri
         .collect();
     let mut out = BTreeMap::new();
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
+        // Absent is not unreadable — `config::read_layer` records what
+        // conflating them cost, and `config::hooks` reads these same
+        // directories the careful way. The two disagreeing meant `omh why`
+        // errored on a `chmod 000` hooks directory while a launch shipped a
+        // session without those hooks and said nothing. Generation made that
+        // quieter, not louder: omh's own are merged in afterwards, so the
+        // document is never empty and `omh doctor`'s hooks check passes while
+        // the user's whole layer is missing.
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -429,6 +439,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(seeded, generated);
+    }
+
+    /// A directory omh cannot read is not a directory with no hooks in it.
+    ///
+    /// The `config::read_layer` lesson, in the function generation rewrote —
+    /// and generation made it quieter rather than louder: omh's own five are
+    /// merged in afterwards, so the rendered document is never empty and
+    /// `omh doctor`'s hooks check passes while the user's entire layer is
+    /// gone. `config::hooks` reads these same directories and errors; the two
+    /// commands disagreed about whether the same filesystem state was a
+    /// problem.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_hooks_directory_is_an_error_not_an_empty_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/a.json",
+            r#"{"event":"Stop","command":"one"}"#,
+        );
+        let hooks = dir.path().join("h");
+        std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let err = merge_hooks(&[hooks.clone()], &Default::default())
+            .expect_err("an unreadable layer must be reported, not skipped");
+        // Restore before the assertion so a failure cannot leave the temp dir
+        // undeletable.
+        std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(err.to_string().contains("h"), "must name the path: {err}");
     }
 
     #[test]

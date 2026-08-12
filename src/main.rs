@@ -1644,7 +1644,11 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
 fn omh_own(paths: &Paths) -> Result<base::Own> {
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let off = settings::features_off(paths, &manifest)?;
-    Ok(base::own(&manifest, &off))
+    // What the profile still declares, so removing a server takes its feature
+    // with it. `omh config mcp rm codegraph` edits `mcp.json` and nothing
+    // else, so this read is where that instruction is kept or broken.
+    let installed = config::servers(paths)?.into_iter().map(|s| s.key).collect();
+    base::own(&manifest, &off, &installed)
 }
 
 /// `omh why <thing>` — who put this here, and on what grounds.
@@ -2318,6 +2322,56 @@ mod tests {
 
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");
+
+    /// `omh_own` is the wiring between the manifest and every launch, and
+    /// nothing reached it: replacing its body with `Ok(base::Own::default())`
+    /// — omh contributing no hooks, no rules sections, nothing — left the
+    /// whole suite green.
+    ///
+    /// That is the failure `tests/cli.rs` says in its own module doc it exists
+    /// to notice: a guard correct while the wiring that reaches it is missing.
+    /// `container` and `doctor` each build an `Own` in their fixtures, so they
+    /// prove a plan handles one and say nothing about whether one arrives.
+    #[test]
+    fn omh_own_resolves_the_manifest_and_reads_this_repos_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let write = |p: std::path::PathBuf, body: &str| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        install_bundled(&paths.base(), bundled::Shipped::Base).unwrap();
+        // The servers a profile declares decide whether a feature was removed
+        // rather than merely switched off, so the fixture has to declare them.
+        write(
+            paths.repo.join(".omh/profile/mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"}}}"#,
+        );
+
+        let own = omh_own(&paths).unwrap();
+        assert!(
+            !own.hooks.is_empty() && !own.sections.is_empty(),
+            "a launch must be given what the manifest ships"
+        );
+
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[omh]\ncodegraph = false\n",
+        );
+        let off = omh_own(&paths).unwrap();
+        assert!(
+            !off.hooks.iter().any(|h| h.name.starts_with("graph-")),
+            "and `[omh]` in this repo has to reach it: {:?}",
+            off.hooks.iter().map(|h| h.name).collect::<Vec<_>>()
+        );
+        assert!(
+            off.hooks.iter().any(|h| h.name == "git-unavailable"),
+            "without taking a different feature with it"
+        );
+    }
 
     /// A detected stack earns hooks, not prose. The guard that used to cover
     /// this read the generated `AGENTS.md` — a sentence saying `cargo test`

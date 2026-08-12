@@ -480,8 +480,17 @@ mod tests {
     /// built here gets the real thing rather than an empty stand-in, because
     /// the hooks and rules sections are part of what a launch *is*.
     fn own() -> crate::base::Own {
+        own_with(&Default::default())
+    }
+
+    /// Every server the manifest names is treated as installed unless a case
+    /// is about removal: `own` switches a feature off when its server is gone
+    /// from the profile, and a fixture that declared none would silently
+    /// disable everything.
+    fn own_with(off: &std::collections::BTreeSet<String>) -> crate::base::Own {
         let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
-        crate::base::own(&manifest, &Default::default())
+        let installed = manifest.servers().into_keys().collect();
+        crate::base::own(&manifest, off, &installed).unwrap()
     }
 
     struct Fx {
@@ -952,6 +961,27 @@ mod tests {
         }
     }
 
+    /// The other half of `omhs_hooks_reach_a_profile_with_no_hooks_layer`, and
+    /// it was missing: nothing asserted omh's rules sections reach the agent
+    /// through a plan at all.
+    ///
+    /// The only section assertion here was a negative one — that a disabled
+    /// feature's section is absent — so handing `rules::compose` an empty
+    /// slice left the whole suite green while every session lost the git
+    /// notice, the note protocol and the graph orientation.
+    #[test]
+    fn omhs_sections_reach_the_agent_through_the_plan() {
+        let fx = fixture();
+        let composed = composed_rules(&plan_for(&fx, "claude"));
+        for section in crate::base::sections() {
+            assert!(
+                composed.contains(section.body.trim_end()),
+                "{} must reach the agent: {composed}",
+                section.name
+            );
+        }
+    }
+
     /// A feature off in this repo takes its server, its hooks and its section
     /// of the rules together.
     ///
@@ -967,8 +997,7 @@ mod tests {
             r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
         )
         .unwrap();
-        let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
-        let own = crate::base::own(&manifest, &["codegraph".to_string()].into());
+        let own = own_with(&["codegraph".to_string()].into());
 
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
@@ -1045,8 +1074,7 @@ mod tests {
             )
             .unwrap();
         }
-        let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
-        let own = crate::base::own(&manifest, &["codegraph".to_string()].into());
+        let own = own_with(&["codegraph".to_string()].into());
 
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
