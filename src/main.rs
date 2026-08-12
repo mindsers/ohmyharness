@@ -781,7 +781,10 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         .unwrap_or(None)
         .map(|a| auth::dir(&paths, &name, &a));
 
-    let mut checks = doctor::checks(&profile, &adapter);
+    // Resolved once and used for both the checks and the plan below, so the
+    // probe cannot check a session different from the one it launches.
+    let own = omh_own(&paths)?;
+    let mut checks = doctor::checks(&profile, &adapter, &own);
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
@@ -813,7 +816,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         // The probe has to compose the same rules a launch would, or it proves
         // the harness reads a document nobody will be given.
         base: Some(session::default_branch(&paths.repo)),
-        omh: omh_own(&paths)?,
+        omh: own,
     };
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
