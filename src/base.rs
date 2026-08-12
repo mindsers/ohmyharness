@@ -1765,6 +1765,40 @@ command = "c"
         );
     }
 
+    /// omh's five are held to the format they impose on everybody else.
+    ///
+    /// `base::hooks()` builds `hook::Hook` by struct literal, so `parse` — the
+    /// function whose doc says "no caller can hold an unchecked hook" — is
+    /// never reached for the hooks that ship to every user. They were the only
+    /// ones exempt from every rule the format enforces, on the highest-blast-
+    /// radius path there is.
+    ///
+    /// The trap this closes is specific: put a `$` in `GIT_ABSENT` or
+    /// `GREP_NUDGE` — a price, a `$PATH` mention, a shell example — and the
+    /// sandbox shell expands it to nothing, so the agent reads a sentence with
+    /// a hole in it. Every assertion about the hook's text still passes,
+    /// because the text is right; only the expansion is wrong.
+    #[test]
+    fn omhs_own_hooks_obey_the_format_they_impose() {
+        for h in hooks() {
+            let json = serde_json::to_string(&serde_json::json!({
+                "on": h.hook.on.to_string(),
+                "tools": h.hook.tools.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+                "when": h.hook.when,
+                "capture": h.hook.capture,
+                "run": h.hook.run,
+                "inject": h.hook.inject,
+            }))
+            .unwrap();
+            // Round-tripped through the real parser rather than calling a
+            // private validator: a hook omh ships must be a hook you could
+            // have written, and the file is the contract.
+            let back = crate::hook::Hook::parse(&json, h.name)
+                .unwrap_or_else(|e| panic!("{} is not a hook a user could write: {e:#}", h.name));
+            assert_eq!(back, h.hook, "and it must survive the round trip");
+        }
+    }
+
     /// Every hook is a shell one-liner, and nothing else here would notice one
     /// that cannot parse.
     ///

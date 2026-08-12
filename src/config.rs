@@ -177,8 +177,15 @@ pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        for entry in entries {
+            // Not `.flatten()`, for the reason `render::merge_hooks` gives: a
+            // `readdir` failing part-way through would drop a hook from this
+            // listing while the launcher still ships it, and the two telling
+            // different stories about one directory is what this module's
+            // other guards exist to stop.
+            let path = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
             if !path.extension().is_some_and(|e| e == "json") {
                 continue;
             }
@@ -204,27 +211,56 @@ pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
     Ok(resolve(found))
 }
 
-/// Every MCP server across all layers, resolved with provenance.
+/// Every MCP server, resolved with provenance.
+///
+/// The catalogue and nowhere else. A server is a thing you hold: a repo names
+/// entries from your catalogue and overrides their environment, but cannot
+/// define one — so there is one path to read, and a file anywhere else is a
+/// mistake to report rather than a tier to merge.
 pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
+    refuse_a_repo_server(paths)?;
+
     let mut found = Vec::new();
-    for layer in Layer::ALL {
-        let Some(path) = layer.content_dir(paths).map(|d| d.join("mcp.json")) else {
-            continue;
-        };
-        let Some(raw) = read_layer(&path)? else {
-            continue;
-        };
+    let path = mcp_path(paths);
+    if let Some(raw) = read_layer(&path)? {
         let doc: serde_json::Value =
             serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
-        let Some(servers) = doc.get("mcpServers").and_then(|v| v.as_object()) else {
-            continue;
-        };
-        for (name, spec) in servers {
-            let command = spec.get("command").and_then(|c| c.as_str()).unwrap_or("");
-            found.push((name.clone(), command.to_string(), layer));
+        if let Some(servers) = doc.get("mcpServers").and_then(|v| v.as_object()) {
+            for (name, spec) in servers {
+                // Through the same parser the renderer uses, for the reason
+                // `hooks` gives: an entry omh cannot understand used to become
+                // a server with a blank command here, which compares unequal to
+                // every baseline — so `omh why` accused you of modifying it
+                // while a launch failed hard on the same file. Two subsystems,
+                // two stories, from the one command whose job is telling
+                // authorship straight.
+                let server: Server = serde_json::from_value(spec.clone()).with_context(|| {
+                    format!("{}: server `{name}` is not one omh can run", path.display())
+                })?;
+                found.push((name.clone(), server.command, Layer::Personal));
+            }
         }
     }
     Ok(resolve(found))
+}
+
+/// `<repo>/.omh/` holds `settings.toml`, `memory.toml` and `hooks/`, and it
+/// used to hold `mcp.json` too — so writing one there is the natural mistake
+/// rather than the exotic one, and it is silent in the worst way: reported as
+/// installed by `omh config mcp ls`, never mounted, and counted as `installed`
+/// when deciding whether a feature's server is still there.
+fn refuse_a_repo_server(paths: &Paths) -> Result<()> {
+    let stray = paths.repo.join(".omh").join("mcp.json");
+    if stray.exists() {
+        anyhow::bail!(
+            "{}: a repo names servers from your catalogue, it cannot declare one — \
+             nothing reads this file. Add it with `omh config mcp add`, and put a \
+             token for this repo alone under `[mcp.<name>.env]` in .omh/{}.",
+            stray.display(),
+            crate::settings::LOCAL
+        );
+    }
+    Ok(())
 }
 
 pub fn set(paths: &Paths, key: &str, raw: &str, layer: Layer) -> Result<Written> {
@@ -560,6 +596,58 @@ mod tests {
         assert!(
             err.contains("run") && err.contains("inject"),
             "must say what is missing: {err}"
+        );
+    }
+
+    /// An entry omh cannot run is an error, not a server with a blank command.
+    ///
+    /// This is `hooks`' lesson applied to its stated twin. A `"command"` that
+    /// is an array — the natural confusion with the opencode form — used to
+    /// yield `""` here, which compares unequal to every baseline, so `omh why`
+    /// told you *you* had modified a server you had not touched. Meanwhile a
+    /// launch failed hard on the same file, because the renderer requires a
+    /// string. Two subsystems, two stories, from the command whose whole job
+    /// is telling authorship straight.
+    #[test]
+    fn a_server_omh_cannot_run_is_an_error_not_a_blank_command() {
+        let (_d, paths) = fixture();
+        seed(
+            &paths,
+            Layer::Personal,
+            "mcp.json",
+            r#"{"mcpServers":{"linear":{"command":["npx","-y","mcp-remote"]}}}"#,
+        );
+
+        let err = format!("{:#}", servers(&paths).unwrap_err());
+        assert!(err.contains("linear"), "must name the server: {err}");
+        assert!(err.contains("mcp.json"), "and the file: {err}");
+    }
+
+    /// A repo cannot declare an MCP server, and writing one is an error rather
+    /// than a file nobody reads.
+    ///
+    /// `<repo>/.omh/` holds `settings.toml`, `memory.toml` and `hooks/`, so
+    /// dropping an `mcp.json` beside them is the natural mistake — and it used
+    /// to be the *documented* place for one. Reported as installed by
+    /// `omh config mcp ls` and never mounted, it is a server you would swear
+    /// you configured; worse, it fed `installed`, so naming `codegraph` there
+    /// kept the graph hooks generated against a server no session receives —
+    /// the exact state `base::own`'s `gone` set exists to prevent.
+    #[test]
+    fn a_repo_declaring_an_mcp_server_is_an_error_naming_the_catalogue() {
+        let (_d, paths) = fixture();
+        seed(
+            &paths,
+            Layer::Shared,
+            "mcp.json",
+            r#"{"mcpServers":{"linear":{"command":"npx"}}}"#,
+        );
+
+        let err = format!("{:#}", servers(&paths).unwrap_err());
+        assert!(err.contains("mcp.json"), "must name the file: {err}");
+        assert!(
+            err.contains("omh config mcp add"),
+            "and where a server goes instead: {err}"
         );
     }
 

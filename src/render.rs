@@ -48,20 +48,33 @@ pub fn document(
     match binding.render {
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
             let mut servers = merge_servers(sources)?;
+            // Checked against the catalogue as written, *before* the disabled
+            // ones are dropped. Checked after, an override for a feature this
+            // repo switched off reported "not in your catalogue" about a
+            // server that is plainly in it — advice pointing at
+            // `omh config mcp ls`, which lists it, and no way forward.
+            for name in own.mcp_env.keys() {
+                if !servers.contains_key(name) {
+                    anyhow::bail!(
+                        "[mcp.{name}.env] overrides a server that is not in your \
+                         catalogue — nothing would read it. `omh config mcp ls` \
+                         lists what is there."
+                    );
+                }
+            }
             servers.retain(|name, _| !own.disabled_servers.contains(name));
             // Variable by variable, not entry by entry: a repo overriding one
             // token must not silently inherit the rest of a catalogue entry it
             // never saw. Named where it is applied rather than merged into the
             // sources, so `omh config` still shows the catalogue as written.
+            //
+            // A server whose feature is off here is simply gone by now, so its
+            // override is a no-op rather than an error: switching a feature off
+            // is not a reason to make you delete a token you will want back.
             for (name, env) in &own.mcp_env {
-                let server = servers.get_mut(name).with_context(|| {
-                    format!(
-                        "[mcp.{name}.env] overrides a server that is not in your \
-                         catalogue — nothing would read it. `omh config mcp ls` \
-                         lists what is there."
-                    )
-                })?;
-                server.env.extend(env.clone());
+                if let Some(server) = servers.get_mut(name) {
+                    server.env.extend(env.clone());
+                }
             }
             Ok(mcp(binding.render, &servers)?.into())
         }
@@ -277,8 +290,15 @@ fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<Stri
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        for entry in entries {
+            // Not `.flatten()`. `readdir` can fail part-way through — a network
+            // or synced mount dropping out, a disk erroring — and skipping the
+            // entry ships a session missing a hook, with the document still
+            // well-formed because omh's own are merged in afterwards. A hook
+            // that is not there behaves exactly like one with nothing to say.
+            let path = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
             if path.extension().is_some_and(|e| e == "json") {
                 let name = path
                     .file_stem()

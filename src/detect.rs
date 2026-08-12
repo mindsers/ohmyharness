@@ -18,7 +18,11 @@ pub struct Stack {
     pub format: &'static str,
 }
 
-const KNOWN: [Stack; 4] = [
+/// Every stack omh can detect. Public so `init`'s guard can seed a hook for
+/// each of them rather than only for whatever stack this repo happens to be —
+/// the test iterated `stacks(CARGO_MANIFEST_DIR)`, which is rust and nothing
+/// else, so three quarters of what `init` writes went unexercised.
+pub const KNOWN: [Stack; 4] = [
     Stack {
         name: "rust",
         marker: "Cargo.toml",

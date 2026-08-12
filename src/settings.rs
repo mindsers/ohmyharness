@@ -27,12 +27,19 @@ use std::path::{Path, PathBuf};
 /// Deliberately not `deny_unknown_fields`: this file holds settings too, and
 /// `config::policy` is what reads them. Denying here would make a `carry_in`
 /// beside `[omh]` an error in one reader and a value in the other.
+///
+/// That argument covers *scalars* and stops there. `[omh]` and `[mcp]` are the
+/// complete set of tables either reader understands, so an unrecognised one is
+/// read by nobody and reported by nothing — which is why `rest` is collected
+/// and checked rather than ignored.
 #[derive(Debug, Default, Deserialize)]
 struct File {
     #[serde(default)]
     omh: BTreeMap<String, bool>,
     #[serde(default)]
     mcp: BTreeMap<String, ServerOverride>,
+    #[serde(flatten)]
+    rest: toml::Table,
 }
 
 /// What a repo may say about a catalogue server. Environment and nothing else:
@@ -76,6 +83,18 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<Resolved> {
         };
         let file: File =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        // A table that is neither of the two either reader knows about. A
+        // scalar falls through on purpose — `config::policy` resolves those.
+        for (key, value) in &file.rest {
+            if value.is_table() {
+                anyhow::bail!(
+                    "{}: `[{key}]` is read by nobody. This file holds settings at the \
+                     top level, `[omh]` for omh's own features, and `[mcp.<name>.env]` \
+                     for a server's environment in this repo.",
+                    path.display()
+                );
+            }
+        }
         for (key, on) in file.omh {
             validate(&key, manifest, &path)?;
             state.insert(key, on);
@@ -297,6 +316,37 @@ mod tests {
         let env = &resolve(&paths, &m).unwrap().mcp_env["linear"];
         assert_eq!(env["TOKEN"], "t");
         assert_eq!(env["REGION"], "eu");
+    }
+
+    /// A table nobody reads is refused by name.
+    ///
+    /// `deny_unknown_fields` came off `File` so a `carry_in` beside `[omh]`
+    /// would not be an error in one reader and a value in the other — right
+    /// for scalars, which `config::policy` does read. It does not extend to
+    /// tables: `[omh]` and `[mcp]` are the complete set either reader
+    /// understands, so `[omhh]` or `[mcpp]` is read by nobody and reported by
+    /// nothing. A token that reaches nothing, silently, is the shape both
+    /// modules exist to refuse.
+    #[test]
+    fn a_table_nobody_reads_is_refused_by_name() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[omhh]\ncodegraph = false\n",
+        );
+        let err = format!("{:#}", resolve(&paths, &m).unwrap_err());
+        assert!(err.contains("omhh"), "must name the table: {err}");
+        assert!(err.contains("settings.toml"), "and the file: {err}");
+
+        // And a scalar still is not: `config::policy` reads those.
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "carry_in = [\".env\"]\n",
+        );
+        assert!(
+            resolve(&paths, &m).is_ok(),
+            "a setting is not an unknown key"
+        );
     }
 
     /// Absent is not unreadable — the `config::read_layer` lesson, which cost a

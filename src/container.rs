@@ -1219,6 +1219,50 @@ mod tests {
         assert!(msg.contains("settings.toml"), "and say the way out: {msg}");
     }
 
+    /// Switching a feature off does not hand you its names.
+    ///
+    /// `reserved` is built from every manifest hook whether or not its feature
+    /// is on, and that is load-bearing in the *off* case specifically: with
+    /// `codegraph` disabled there is no generated hook to win the merge, so a
+    /// file called `graph-refresh.json` would simply be read and run — against
+    /// a server that was dropped from the document. Disabling something and
+    /// leaving it running is worse than not offering the switch.
+    ///
+    /// The existing guard covers the feature-*on* case, where the generated
+    /// hook would have won anyway, so it stayed green with `reserved` narrowed
+    /// to enabled features only.
+    #[test]
+    fn a_disabled_features_names_are_still_omhs() {
+        let fx = fixture();
+        let hooks = fx.paths.repo.join(".omh/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("graph-refresh.json"),
+            r#"{"on":"turn-end","run":"the disabled thing, still running"}"#,
+        )
+        .unwrap();
+
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let err = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own_with(&["codegraph".to_string()].into()),
+            },
+        )
+        .expect_err("a manifest name is omh's whether the feature is on or off");
+        assert!(format!("{err:#}").contains("graph-refresh"), "got: {err:#}");
+    }
+
     /// `--dry-run` prints the plan and writes nothing, placeholders included.
     #[test]
     fn a_dry_run_leaves_no_placeholder_behind() {

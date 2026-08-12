@@ -1484,22 +1484,28 @@ fn say_rules(plan: &container::Plan) {
 /// What the launcher noticed about this repo's hooks: which ones it has, which
 /// are new or changed, and where detection and the directory disagree.
 ///
-/// Only from `run`, and deliberately. It *records* what it saw, so calling it
-/// from `doctor` as well would spend the "new or changed" call-out on a command
-/// that launches nothing — and that call-out is the one that matters, because
-/// it fires when somebody else's executable content changed under you.
+/// Reported on every launch including a dry run — a dry run is exactly when you
+/// want to be told what a launch would hand your agent. **Recorded only on a
+/// real one**, which is the distinction the `Record` type carries: the snapshot
+/// is what makes "new or changed" fire exactly once, so writing it from a
+/// command that launches nothing spends the one notification about somebody
+/// else's executable content changing under you.
 ///
 /// Never fatal. A repo whose hook drift cannot be computed is still a repo you
 /// can work in; and an unreadable hooks directory stops the launch anyway, in
 /// `render::merge_hooks`, which is where it should.
-fn say_hooks(paths: &Paths) {
-    match notice::hooks(paths, &detect::stacks(&paths.repo)) {
-        Ok(notices) => {
-            for notice in notices {
-                eprintln!("omh: {notice}");
-            }
+fn say_hooks(paths: &Paths, commit: bool) {
+    let recorded = notice::hooks(paths, &detect::stacks(&paths.repo)).and_then(|(notices, rec)| {
+        for notice in notices {
+            eprintln!("omh: {notice}");
         }
-        Err(e) => eprintln!("omh: could not check this repo's hooks — {e:#}"),
+        if commit {
+            rec.commit()?;
+        }
+        Ok(())
+    });
+    if let Err(e) = recorded {
+        eprintln!("omh: could not check this repo's hooks — {e:#}");
     }
 }
 
@@ -1619,7 +1625,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     plan.validate(&backend.caps())?;
 
     say_rules(&plan);
-    say_hooks(&paths);
+    say_hooks(&paths, !cli.dry_run);
 
     let status_line = match plan.degradation() {
         Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.label()),
@@ -2381,10 +2387,15 @@ mod tests {
             std::fs::write(p, body).unwrap();
         };
         install_bundled(&paths.base(), bundled::Shipped::Base).unwrap();
-        // The servers a profile declares decide whether a feature was removed
-        // rather than merely switched off, so the fixture has to declare them.
+        // Which servers the catalogue declares decides whether a feature was
+        // *removed* rather than merely switched off, so the fixture has to
+        // declare them — in the catalogue, which is the only place a server
+        // lives. Seeded into `.omh/profile/mcp.json` this asserted nothing:
+        // `installed` came back empty, every feature was already `gone` by the
+        // removed-server path, and the `[omh]` half below was asserting an
+        // absence that was there before the setting was written.
         write(
-            paths.repo.join(".omh/profile/mcp.json"),
+            paths.root.join("mcp.json"),
             r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"}}}"#,
         );
 
@@ -2393,10 +2404,15 @@ mod tests {
             !own.hooks.is_empty() && !own.sections.is_empty(),
             "a launch must be given what the manifest ships"
         );
+        assert!(
+            own.hooks.iter().any(|h| h.name.starts_with("graph-")),
+            "with every feature on, the graph hooks are what `[omh]` below removes: {:?}",
+            own.hooks.iter().map(|h| h.name).collect::<Vec<_>>()
+        );
 
         write(
             paths.repo.join(".omh/settings.toml"),
-            "[omh]\ncodegraph = false\n",
+            "[omh]\ncodegraph = false\n\n[mcp.memory.env]\nOMH_TEST = \"seen\"\n",
         );
         let off = omh_own(&paths).unwrap();
         assert!(
@@ -2408,6 +2424,14 @@ mod tests {
             off.hooks.iter().any(|h| h.name == "git-unavailable"),
             "without taking a different feature with it"
         );
+        // The other half of the same wire. `settings::resolve` produces this
+        // and `render::document` applies it, both tested — and the assignment
+        // between them was asserted nowhere, so deleting it left the suite
+        // green and a token reached no server.
+        assert_eq!(
+            off.mcp_env["memory"]["OMH_TEST"], "seen",
+            "a per-repo MCP environment has to reach the plan too"
+        );
     }
 
     /// A detected stack earns hooks, not prose. The guard that used to cover
@@ -2416,7 +2440,10 @@ mod tests {
     /// were asserted nowhere.
     #[test]
     fn a_detected_stack_gets_a_hook_that_runs_its_commands() {
-        for stack in detect::stacks(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))) {
+        // Every stack omh knows, not `stacks(CARGO_MANIFEST_DIR)` — which is
+        // rust and nothing else, so `init` in a node, python or go repo could
+        // write files the renderer rejects and the suite would not notice.
+        for stack in detect::KNOWN {
             let hooks = stack_hooks(&stack);
             let by = |suffix: &str| {
                 hooks
@@ -2443,9 +2470,20 @@ mod tests {
                 "when a file is written: {format}"
             );
 
-            for (_, body) in hooks {
-                serde_json::from_str::<serde_json::Value>(&body)
-                    .unwrap_or_else(|e| panic!("{}: {e} in {body}", stack.name));
+            // Through `hook::Hook::parse`, not `serde_json::Value`. Valid
+            // JSON is not a valid hook: a seeded file saying `"on": "Stop"` or
+            // `"tools": ["Edit"]` parses as a document and is refused by the
+            // renderer at launch, breaking every session in that repo. And
+            // `stack_hooks` interpolates a command into a JSON string literal
+            // with no escaping, so a future command containing a quote would
+            // produce a file nothing could read.
+            for (name, body) in hooks {
+                crate::hook::Hook::parse(&body, &name).unwrap_or_else(|e| {
+                    panic!(
+                        "{} seeds a file omh cannot read: {e:#} in {body}",
+                        stack.name
+                    )
+                });
             }
         }
     }

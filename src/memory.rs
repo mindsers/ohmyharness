@@ -1055,31 +1055,34 @@ fn parse_templates(raw: &str) -> Result<BTreeMap<Kind, String>> {
 /// the one thing §6 forbids.
 pub fn templates(paths: &Paths) -> Result<BTreeMap<Kind, String>> {
     let path = paths.repo.join(".omh").join(TEMPLATES);
+
+    // Checked before the read, not only when the new file is absent. `init`
+    // writes `memory.toml` whether or not a `keys.toml` is beside it, so "both
+    // present" is the *likely* state after a half-finished move — and it was
+    // the one state this said nothing about, while the message it would have
+    // printed says "rather than leaving both".
+    //
+    // A check rather than a fallback, because the fallback is the disaster:
+    // `templates` reads a missing file as "use the shipped defaults", so an
+    // edited `keys.toml` would silently re-key every note written from then on
+    // while every existing key stopped being derivable from anything.
+    let stale = paths.repo.join(".omh").join("keys.toml");
+    if stale.exists() {
+        // Built line by line rather than as one `\`-continued literal.
+        // `cargo fmt` re-indents a continued string and the leading
+        // whitespace survives into the message, so the user reads a
+        // wall of spaces mid-sentence. It has happened twice here.
+        let mut msg = format!("{} is where key templates used to live.\n", stale.display());
+        msg.push_str(&format!("They are read from {} now.\n", path.display()));
+        msg.push_str("Rename it rather than leaving both: the shipped defaults ");
+        msg.push_str("would silently re-key every note written from here on, ");
+        msg.push_str("and every existing key would stop being derivable.");
+        anyhow::bail!(msg);
+    }
+
     match std::fs::read_to_string(&path) {
         Ok(raw) => parse_templates(&raw).with_context(|| format!("{}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // The rename needs a check rather than a fallback, and this is the
-            // one place that can make it. That fallback above is the whole
-            // problem: an edited `keys.toml` would fail to find `memory.toml`,
-            // silently revert to the shipped templates, and re-key every note
-            // written from then on — while every existing key stopped being
-            // derivable from anything. Silent, and unrecoverable without
-            // knowing it happened.
-            let stale = paths.repo.join(".omh").join("keys.toml");
-            if stale.exists() {
-                // Built line by line rather than as one `\`-continued literal.
-                // `cargo fmt` re-indents a continued string and the leading
-                // whitespace survives into the message, so the user reads a
-                // wall of spaces mid-sentence. It has happened twice here.
-                let mut msg = format!("{} is where key templates used to live.\n", stale.display());
-                msg.push_str(&format!("They are read from {} now.\n", path.display()));
-                msg.push_str("Rename it rather than leaving both: the shipped defaults ");
-                msg.push_str("would silently re-key every note written from here on, ");
-                msg.push_str("and every existing key would stop being derivable.");
-                anyhow::bail!(msg);
-            }
-            parse_templates(SHIPPED_KEYS)
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => parse_templates(SHIPPED_KEYS),
         Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
     }
 }
@@ -2665,6 +2668,18 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let err = templates(&paths).unwrap_err().to_string();
         assert!(err.contains("keys.toml"), "must name the old path: {err}");
         assert!(err.contains("memory.toml"), "and the new one: {err}");
+
+        // And with both present, which is the likelier half-migrated state and
+        // the one the check used to miss entirely: `init` writes `memory.toml`
+        // beside an untouched `keys.toml`, the new file wins, and the edited
+        // templates are ignored without a word. The message says "rather than
+        // leaving both" — so "both" has to be a state it detects.
+        std::fs::write(paths.repo.join(".omh/memory.toml"), SHIPPED_KEYS).unwrap();
+        let err = templates(&paths).unwrap_err().to_string();
+        assert!(
+            err.contains("keys.toml"),
+            "both present is still an error: {err}"
+        );
     }
 
     /// The other half: the new name is read where the old one was.

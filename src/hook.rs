@@ -214,8 +214,12 @@ fn mentions(body: &str, var: &str) -> bool {
     body.match_indices(var).any(|(i, _)| {
         let before = &body[..i];
         let rest = &body[i + var.len()..];
-        (before.ends_with('$') && boundary(rest))
-            || (before.ends_with("${") && rest.starts_with('}'))
+        // The braced form takes the same boundary test rather than requiring
+        // `}` immediately: `${OMH_TOOL_FILE:-none}` is how anybody writes a
+        // defensive reference, and reading it as *not* a reference skips the
+        // preamble, leaves the variable unset, and makes the hook take its
+        // default on every call — silently, with its text still correct.
+        (before.ends_with('$') || before.ends_with("${")) && boundary(rest)
     })
 }
 
@@ -238,6 +242,15 @@ fn check_interpolation(text: &str, whence: &str) -> Result<()> {
             Some('(') => anyhow::bail!(
                 "{whence}: `$(` in `inject` runs a command from inside a sentence. \
                  Use `capture` and interpolate ${CAPTURE_VAR}."
+            ),
+            // An unclosed `${` reaches the shell as an unterminated expansion,
+            // so the hook does not merely say the wrong thing — it fails to
+            // parse. Refused here because this is the one field where prose
+            // and shell syntax share a string.
+            Some('{') if !chars[i + 2..].contains(&'}') => anyhow::bail!(
+                "{whence}: `${{` in `inject` is never closed with `}}`. \
+                 A shell reads that as an unterminated expansion and refuses \
+                 the whole hook."
             ),
             Some(c) if c.is_ascii_alphabetic() || *c == '_' || *c == '{' => i += 2,
             _ => anyhow::bail!(
@@ -474,6 +487,63 @@ mod tests {
     fn command_substitution_in_prose_points_at_capture() {
         let err = Hook::parse(r#"{"on":"turn-end","inject":"now $(date)"}"#, "h.json").unwrap_err();
         assert!(err.to_string().contains("capture"), "got: {err}");
+    }
+
+    /// An unclosed `${` reaches the shell as an unterminated expansion, and
+    /// the hook then fails to *parse* — `sh: unexpected EOF`. The invariant
+    /// CONTRIBUTING lists as "every hook command parses and runs under `sh`"
+    /// was enforced only for omh's own five; a user hook could pass validation
+    /// and be unparseable.
+    #[test]
+    fn an_unclosed_brace_is_refused_before_it_reaches_a_shell() {
+        let err = Hook::parse(r#"{"on":"turn-end","inject":"cost is ${ high"}"#, "h.json")
+            .expect_err("an unterminated expansion is not prose");
+        assert!(err.to_string().contains('}'), "say what is missing: {err}");
+    }
+
+    /// Anything that validates has to survive `sh -n`. Asserting on the text
+    /// proves the characters are there, never that a shell will accept them —
+    /// and this is the one field where prose and syntax share a string.
+    #[test]
+    fn every_accepted_inject_renders_something_sh_can_parse() {
+        for prose in [
+            "plain words",
+            "a $OMH_GRAPH_PROJECT reference",
+            "a ${OMH_GRAPH_PROJECT} braced one",
+            "a $$5 literal dollar",
+            "quotes \" and \\ and ` backticks",
+            "a trailing brace } on its own",
+        ] {
+            let h = Hook::parse(
+                &serde_json::json!({ "on": "turn-end", "inject": prose }).to_string(),
+                "h.json",
+            )
+            .unwrap_or_else(|e| panic!("{prose:?} should validate: {e}"));
+
+            let out = std::process::Command::new("sh")
+                .args(["-n", "-c", &rendered("p", &h, hooks_binding()).command])
+                .output()
+                .expect("sh must run");
+            assert!(
+                out.status.success(),
+                "{prose:?} rendered something sh refuses: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    /// `${VAR:-default}` is how anybody writes a defensive reference, and it
+    /// has to count as reading the field — otherwise the preamble is skipped,
+    /// the variable is unset, and the hook silently takes its default on every
+    /// call while every assertion about its text still passes.
+    #[test]
+    fn a_braced_reference_with_a_default_still_reads_the_field() {
+        let h = Hook::parse(
+            r#"{"on":"before-tool","run":"echo ${OMH_TOOL_FILE:-none}"}"#,
+            "h.json",
+        )
+        .unwrap();
+        assert_eq!(h.fields(), BTreeSet::from([Field::ToolFile]));
     }
 
     /// `graph-first` fires on every search and reads no payload at all. A
