@@ -468,7 +468,7 @@ mod tests {
         let hooks = dir.path().join("h");
         std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let err = merge_hooks(&[hooks.clone()], &Default::default())
+        let err = merge_hooks(std::slice::from_ref(&hooks), &Default::default())
             .expect_err("an unreadable layer must be reported, not skipped");
         // Restore before the assertion so a failure cannot leave the temp dir
         // undeletable.
