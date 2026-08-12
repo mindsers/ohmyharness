@@ -394,7 +394,7 @@ mod tests {
             .collect();
         assert_eq!(
             got,
-            vec!["AGENTS", "skills", "mcp", "subagents", "hooks"],
+            vec!["rules", "skills", "mcp", "subagents", "hooks"],
             "hooks are checked with no hooks layer, because omh generates them"
         );
     }

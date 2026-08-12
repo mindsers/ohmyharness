@@ -38,3 +38,31 @@ render = "dir"
 [capabilities.hooks]
 path   = "$HOME/.claude/settings.json"
 render = "claude-settings"
+
+# How this harness spells each word of omh's hook vocabulary. A hook is authored
+# once, in omh's words; everything below is where that stops being portable.
+# An absent entry means this harness has no such moment — the hooks wanting it
+# are dropped by name, and the rest still ship.
+
+[capabilities.hooks.events]
+session-start = "SessionStart"   # re-fires on resume and compact, not once
+turn-end      = "Stop"
+before-tool   = "PreToolUse"
+after-tool    = "PostToolUse"
+
+[capabilities.hooks.tools]
+edit   = "Edit|Write|MultiEdit"
+read   = "Read"
+shell  = "Bash"
+search = "Grep|Glob"
+
+# Where each canonical field lives in this harness's stdin schema.
+[capabilities.hooks.fields]
+tool-file    = ".tool_input.file_path"
+tool-command = ".tool_input.command"
+
+# `hookSpecificOutput.additionalContext` is the documented channel a hook uses
+# to reach the model. Bare stdout on exit 0 is not, and the first version of the
+# grep nudge wrote there — it may never have been seen.
+[capabilities.hooks.inject]
+template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","additionalContext":$m}}'"""

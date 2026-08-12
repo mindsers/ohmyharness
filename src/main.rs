@@ -16,6 +16,7 @@ mod container;
 mod detect;
 mod doctor;
 mod editor;
+mod hook;
 mod idle;
 mod image;
 mod mcp;
@@ -2015,17 +2016,17 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
 /// The guard that used to cover them read the generated `AGENTS.md`, which no
 /// longer exists.
 fn stack_hooks(stack: &detect::Stack) -> [(String, String); 2] {
-    let hook = |event: &str, matcher: &str, command: &str| {
-        format!("{{ \"event\": \"{event}\", \"matcher\": \"{matcher}\", \"command\": \"{command}\" }}\n")
-    };
     [
         (
             format!("{}-test.json", stack.name),
-            hook("Stop", "", stack.test),
+            format!("{{ \"on\": \"turn-end\", \"run\": \"{}\" }}\n", stack.test),
         ),
         (
             format!("{}-format.json", stack.name),
-            hook("PostToolUse", "Edit|Write", stack.format),
+            format!(
+                "{{ \"on\": \"after-tool\", \"tools\": [\"edit\"], \"run\": \"{}\" }}\n",
+                stack.format
+            ),
         ),
     ]
 }
@@ -2386,9 +2387,12 @@ mod tests {
                     .unwrap_or_else(|| panic!("{} has no {suffix}", stack.name))
             };
 
+            // omh's words, not a harness's. A seeded file spelling `Stop`
+            // would work on exactly one harness, and the file `init` writes is
+            // the example every hand-written one is copied from.
             let test = by("-test.json");
             assert!(test.contains(stack.test), "must run the tests: {test}");
-            assert!(test.contains("\"Stop\""), "at turn end: {test}");
+            assert!(test.contains("\"turn-end\""), "at turn end: {test}");
 
             let format = by("-format.json");
             assert!(
@@ -2396,7 +2400,7 @@ mod tests {
                 "must format the code: {format}"
             );
             assert!(
-                format.contains("Edit|Write"),
+                format.contains("\"edit\""),
                 "when a file is written: {format}"
             );
 

@@ -13,6 +13,7 @@
 //! The manifest is the single source of truth: `omh init` seeds from it and
 //! `omh why` explains from it, so they cannot disagree.
 
+use crate::hook::Field;
 use crate::render::Server;
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -360,13 +361,17 @@ pub fn drop_graph_command(project: &str) -> Vec<String> {
     ]
 }
 
-/// Canonical hook, in the shape a profile layer stores.
+/// One of omh's own hooks: the manifest entry it answers to, and the hook
+/// itself in exactly the shape a `<repo>/.omh/hooks/` file holds.
+///
+/// Same shape deliberately. omh's are generated and yours are files, but a
+/// harness receives one hooks configuration and cannot tell the tiers apart —
+/// so if omh's could be written in a format yours cannot, the format would be
+/// documentation rather than a contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Hook {
     pub name: &'static str,
-    pub event: &'static str,
-    pub matcher: &'static str,
-    pub command: String,
+    pub hook: crate::hook::Hook,
 }
 
 /// The env var carrying the graph's project name into the sandbox.
@@ -409,43 +414,46 @@ pub fn grep_nudge(project: &str) -> String {
     )
 }
 
-/// Wrap a string for `sh`, so prose with punctuation cannot end the argument
-/// it is inside. Single quotes, and the only character that matters inside them
-/// is the single quote itself.
-fn shell_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', r"'\''"))
-}
-
 /// Hooks that make the graph actually get used. Without them the server is
 /// installed and never called, which is how most of these end up.
+///
+/// Written in omh's own vocabulary — see `crate::hook`. None of them names a
+/// harness event, a harness tool, or a harness's payload schema, which is what
+/// they all did until the format landed: the interception is `when`, the text is
+/// `inject`, and how either reaches a particular harness is adapter data.
 pub fn hooks() -> Vec<Hook> {
-    // Nudges speak through `hookSpecificOutput.additionalContext` — the
-    // documented channel a hook uses to reach the model. Bare stdout on exit 0
-    // is not, and the first version of the grep nudge may never have been seen.
-    let nudge = |body: &str| {
-        format!(
-            "jq -nc --arg p \"${PROJECT_ENV}\" '{{\"hookSpecificOutput\":{{\
-             \"hookEventName\":\"PreToolUse\",\"additionalContext\":{body}}}}}'"
-        )
-    };
+    use crate::hook::{Event, Hook as Canonical, Tool};
+
+    // Every source extension worth not reading whole. A `case` arm rather than
+    // a list omh iterates: it is evaluated by the shell inside the sandbox,
+    // where omh is not running.
+    const SOURCE: &str = "*.rs|*.ts|*.tsx|*.js|*.jsx|*.py|*.go|*.java|*.rb|*.php|*.c|*.h|*.cc|\
+                          *.cpp|*.hpp|*.cs|*.swift|*.kt|*.scala";
 
     vec![
         Hook {
             name: "graph-refresh",
-            event: "Stop",
-            matcher: "",
             // 0.14s incrementally. A graph describing the code as it was when
             // the session started is worse than none: it answers confidently
             // about code the agent has since rewritten.
-            command: format!(
-                "{GRAPH_BIN} cli index_repository --repo-path /work \
-                 --name \"${PROJECT_ENV}\" --mode fast >/dev/null 2>&1 || true"
-            ),
+            //
+            // `|| true` stays the author's job, not the renderer's: a hook has
+            // to degrade to a no-op rather than to an error, and a missing
+            // `codebase-memory-mcp` must not fail somebody's turn.
+            hook: Canonical {
+                on: Event::TurnEnd,
+                tools: vec![],
+                when: None,
+                capture: None,
+                run: Some(format!(
+                    "{GRAPH_BIN} cli index_repository --repo-path /work \
+                     --name \"${PROJECT_ENV}\" --mode fast >/dev/null 2>&1 || true"
+                )),
+                inject: None,
+            },
         },
         Hook {
             name: "graph-orient",
-            event: "SessionStart",
-            matcher: "",
             // The only graph tool that costs nothing per tool call: orientation
             // the agent is given once instead of discovering by reading files.
             //
@@ -453,67 +461,88 @@ pub fn hooks() -> Vec<Hook> {
             // time context is rebuilt, not once. `overview` is 6,173 bytes; the
             // four aspects that actually orient are 2,138. The flag repeats — a
             // comma-separated list returns empty, verified against the binary.
-            command: format!(
-                "a=$({GRAPH_BIN} cli get_architecture --project \"${PROJECT_ENV}\" \
-                 --aspects layers --aspects packages --aspects boundaries \
-                 --aspects entry_points 2>/dev/null | tail -1); \
-                 [ -n \"$a\" ] || exit 0; \
-                 jq -nc --arg a \"$a\" --arg p \"${PROJECT_ENV}\" \
-                 '{{\"hookSpecificOutput\":{{\"hookEventName\":\"SessionStart\",\
-                 \"additionalContext\":(\"Code graph for project \" + $p + \
-                 \" — modules, layers, boundaries and entry points. Query it with \
-                 search_graph/trace_path/get_code_snippet rather than exploring by \
-                 hand:\\n\" + $a)}}}}'"
-            ),
+            //
+            // The one hook that needs `capture`: the text it injects is not
+            // known until the graph has been asked, and `when` then keeps it
+            // silent when the graph answered nothing.
+            hook: Canonical {
+                on: Event::SessionStart,
+                tools: vec![],
+                when: Some(format!("[ -n \"${}\" ]", crate::hook::CAPTURE_VAR)),
+                capture: Some(format!(
+                    "{GRAPH_BIN} cli get_architecture --project \"${PROJECT_ENV}\" \
+                     --aspects layers --aspects packages --aspects boundaries \
+                     --aspects entry_points 2>/dev/null | tail -1"
+                )),
+                run: None,
+                inject: Some(format!(
+                    "Code graph for project ${PROJECT_ENV} — modules, layers, boundaries \
+                     and entry points. Query it with search_graph/trace_path/get_code_snippet \
+                     rather than exploring by hand:\n${}",
+                    crate::hook::CAPTURE_VAR
+                )),
+            },
         },
         Hook {
             name: "git-unavailable",
-            event: "PreToolUse",
-            matcher: "Bash",
             // Silent unless the command is actually git, for the reason
-            // `graph-read` is silent on small files: a nudge on every Bash call
-            // is noise the model tunes out, and Bash is most of what an agent
-            // runs.
+            // `graph-read` is silent on small files: a nudge on every shell call
+            // is noise the model tunes out, and the shell is most of what an
+            // agent runs.
             //
             // git is matched anywhere a command can start, not just at the
             // front. `cd /work && git status` is the same mistake with a prefix,
             // and a **newline** is the separator that matters most — multi-line
-            // Bash is one of the most common shapes an agent emits, and an
-            // earlier version of this pattern missed every one of them. `[:blank:]`
-            // rather than `[:space:]` for the leading-whitespace case, so the
-            // newline arm stays the thing doing that work.
+            // shell is one of the most common shapes an agent emits, and an
+            // earlier version of this pattern missed every one of them.
+            // `[:blank:]` rather than `[:space:]` for the leading-whitespace
+            // case, so the newline arm stays the thing doing that work.
             //
-            // Built from `GIT_ABSENT` so the sentence the agent meets here
-            // and the one the `git-rules` section carries cannot drift.
-            command: format!(
-                "c=$(jq -r '.tool_input.command // empty'); \
-                 case \"$c\" in \
-                 git\\ *|git) ;; \
-                 *[\\;\\&\\|\\(]*git\\ *|*[[:blank:]]git\\ *) ;; \
-                 *) case \"$c\" in *\"\
-                 \"git\\ *) ;; *) exit 0 ;; esac ;; esac; \
-                 jq -nc --arg m {} '{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\
-                 \"additionalContext\":$m}}}}'",
-                shell_quote(GIT_ABSENT)
-            ),
+            // A predicate now rather than an early `exit 0`, which is the one
+            // thing the translation changed: a `case` that matches nothing exits
+            // 0, so the no-match arm has to say `false` out loud or every shell
+            // call would be answered.
+            //
+            // Injects `GIT_ABSENT` so the sentence the agent meets here and the
+            // one the `git-rules` section carries cannot drift.
+            hook: Canonical {
+                on: Event::BeforeTool,
+                tools: vec![Tool::Shell],
+                when: Some(format!(
+                    "case \"${}\" in \
+                     git\\ *|git) ;; \
+                     *[\\;\\&\\|\\(]*git\\ *|*[[:blank:]]git\\ *) ;; \
+                     *\"\n\"git\\ *) ;; \
+                     *) false ;; esac",
+                    Field::ToolCommand.var()
+                )),
+                capture: None,
+                run: None,
+                inject: Some(GIT_ABSENT.to_string()),
+            },
         },
         Hook {
             name: "graph-first",
-            event: "PreToolUse",
-            matcher: "Grep|Glob",
             // A nudge, not a wall: grep is right for a literal string, and a
             // hook that blocks correct work gets disabled.
+            //
             // Built from GREP_NUDGE so the string the agent sees and the cost
-            // the manifest claims cannot drift apart.
-            command: nudge(&format!(
-                r#"("{}" + $p + "{}" + $p + "{}")"#,
-                GREP_NUDGE[0], GREP_NUDGE[1], GREP_NUDGE[2]
-            )),
+            // the manifest claims cannot drift apart. It reads no payload field,
+            // so the rendered command pays for no `jq` — search is frequent.
+            hook: Canonical {
+                on: Event::BeforeTool,
+                tools: vec![Tool::Search],
+                when: None,
+                capture: None,
+                run: None,
+                inject: Some(format!(
+                    "{}${PROJECT_ENV}{}${PROJECT_ENV}{}",
+                    GREP_NUDGE[0], GREP_NUDGE[1], GREP_NUDGE[2]
+                )),
+            },
         },
         Hook {
             name: "graph-read",
-            event: "PreToolUse",
-            matcher: "Read",
             // The largest avoidable cost in a session: reading a whole module to
             // see one function, when get_code_snippet answers in ~1,500 bytes.
             // No file size named on purpose — the figure that used to be here
@@ -522,20 +551,25 @@ pub fn hooks() -> Vec<Hook> {
             // Read is also the most frequent tool there is, so this speaks only
             // when a symbol lookup would actually be cheaper — a source file big
             // enough to be worth not reading whole. Otherwise silent: a nudge on
-            // every call becomes noise the model tunes out.
-            command: format!(
-                "f=$(jq -r '.tool_input.file_path // empty'); \
-                 case \"$f\" in \
-                 *.rs|*.ts|*.tsx|*.js|*.jsx|*.py|*.go|*.java|*.rb|*.php|*.c|*.h|*.cc|\
-                 *.cpp|*.hpp|*.cs|*.swift|*.kt|*.scala) ;; *) exit 0 ;; esac; \
-                 [ -f \"$f\" ] || exit 0; \
-                 [ \"$(wc -c < \"$f\")\" -gt 8000 ] || exit 0; \
-                 jq -nc --arg p \"${PROJECT_ENV}\" --arg f \"$f\" \
-                 '{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\
-                 \"additionalContext\":($f + \" is large. For one symbol rather than the \
-                 whole file: get_code_snippet --project \" + $p + \" --qualified-name \
-                 <name>, and search_graph finds the name.\")}}}}'"
-            ),
+            // every call becomes noise the model tunes out. The extension test
+            // comes first so the common case costs a `case` and not a `wc`.
+            hook: Canonical {
+                on: Event::BeforeTool,
+                tools: vec![Tool::Read],
+                when: Some(format!(
+                    "case \"${f}\" in {SOURCE}) ;; *) false ;; esac && \
+                     [ -f \"${f}\" ] && [ \"$(wc -c < \"${f}\")\" -gt 8000 ]",
+                    f = Field::ToolFile.var()
+                )),
+                capture: None,
+                run: None,
+                inject: Some(format!(
+                    "${f} is large. For one symbol rather than the whole file: \
+                     get_code_snippet --project ${PROJECT_ENV} --qualified-name <name>, \
+                     and search_graph finds the name.",
+                    f = Field::ToolFile.var()
+                )),
+            },
         },
     ]
 }
@@ -1594,12 +1628,41 @@ command = "c"
             .unwrap_or_else(|| panic!("no {name} hook"))
     }
 
+    const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+
+    /// A hook as a harness actually receives it.
+    ///
+    /// Every assertion below is made here rather than against the authored
+    /// hook, and that is the point: authored, `graph-read` says `before-tool`
+    /// and `$OMH_TOOL_FILE`, which is a claim about nothing until an adapter
+    /// has spelled both. Running these against the rendering is what makes the
+    /// suite prove the translation as well as the hook — and the shipped
+    /// adapter is the one whose maps have to be right.
+    fn rendered(name: &str) -> crate::hook::Rendered {
+        let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let binding = adapter
+            .supports(crate::adapter::Capability::Hooks)
+            .expect("claude has hooks");
+        match crate::hook::render(name, &hook(name).hook, binding).unwrap() {
+            crate::hook::Outcome::Rendered(r) => r,
+            crate::hook::Outcome::Dropped(d) => panic!("claude cannot express {d}"),
+        }
+    }
+
+    /// Every shipped hook, rendered for the shipped adapter.
+    fn all_rendered() -> Vec<(&'static str, crate::hook::Rendered)> {
+        hooks()
+            .into_iter()
+            .map(|h| (h.name, rendered(h.name)))
+            .collect()
+    }
+
     /// A graph that describes the code as it was when the session started is
     /// worse than none: it answers confidently about code the agent has since
     /// rewritten. Re-indexing costs 0.14s.
     #[test]
     fn the_graph_refreshes_when_a_turn_ends() {
-        let h = hook("graph-refresh");
+        let h = rendered("graph-refresh");
         assert_eq!(h.event, "Stop");
         assert!(h.command.contains("index_repository"), "got: {}", h.command);
         assert!(
@@ -1612,7 +1675,7 @@ command = "c"
     /// and inert.
     #[test]
     fn the_agent_is_pointed_at_the_graph_before_it_greps() {
-        let h = hook("graph-first");
+        let h = rendered("graph-first");
         assert_eq!(h.event, "PreToolUse");
         assert!(h.matcher.contains("Grep"), "got: {}", h.matcher);
         assert!(
@@ -1626,7 +1689,7 @@ command = "c"
     /// hook that blocks correct work gets disabled.
     #[test]
     fn the_nudge_never_blocks_the_tool() {
-        let h = hook("graph-first");
+        let h = rendered("graph-first");
         for forbidden in ["exit 1", "deny", "block"] {
             assert!(
                 !h.command.contains(forbidden),
@@ -1646,20 +1709,19 @@ command = "c"
     /// would only force a variable into text that does not use it.
     #[test]
     fn hooks_that_query_the_graph_name_their_project_through_the_environment() {
-        let querying: Vec<_> = hooks()
+        let querying: Vec<_> = all_rendered()
             .into_iter()
-            .filter(|h| h.command.contains(GRAPH_BIN))
+            .filter(|(_, r)| r.command.contains(GRAPH_BIN))
             .collect();
         assert!(
             !querying.is_empty(),
             "the filter must still match something"
         );
-        for h in querying {
+        for (name, r) in querying {
             assert!(
-                h.command.contains(PROJECT_ENV),
-                "{} must name its project: {}",
-                h.name,
-                h.command
+                r.command.contains(PROJECT_ENV),
+                "{name} must name its project: {}",
+                r.command
             );
         }
     }
@@ -1670,7 +1732,7 @@ command = "c"
     /// agent is deciding, which is where naming it actually lands.
     #[test]
     fn the_nudge_names_the_project_to_query() {
-        let h = hook("graph-first");
+        let h = rendered("graph-first");
         assert!(h.command.contains(PROJECT_ENV), "got: {}", h.command);
     }
 
@@ -1680,7 +1742,7 @@ command = "c"
     /// git, which is where the sentence actually lands.
     #[test]
     fn the_git_notice_fires_on_the_call_that_would_fail() {
-        let h = hook("git-unavailable");
+        let h = rendered("git-unavailable");
         assert_eq!(h.event, "PreToolUse");
         assert_eq!(h.matcher, "Bash", "git arrives as a shell command");
         assert!(
@@ -1702,17 +1764,16 @@ command = "c"
     /// binaries are not installed here.
     #[test]
     fn every_hook_command_is_valid_shell() {
-        for h in hooks() {
+        for (name, r) in all_rendered() {
             let out = std::process::Command::new("sh")
-                .args(["-n", "-c", &h.command])
+                .args(["-n", "-c", &r.command])
                 .output()
                 .expect("sh must run");
             assert!(
                 out.status.success(),
-                "{} is not parseable by sh: {}\n{}",
-                h.name,
+                "{name} is not parseable by sh: {}\n{}",
                 String::from_utf8_lossy(&out.stderr),
-                h.command
+                r.command
             );
         }
     }
@@ -1743,10 +1804,10 @@ command = "c"
             std::env::var("PATH").unwrap_or_default()
         );
 
-        for h in hooks() {
+        for (name, r) in all_rendered() {
             let out = std::process::Command::new("sh")
                 .arg("-c")
-                .arg(&h.command)
+                .arg(&r.command)
                 .env("PATH", &path)
                 .env(PROJECT_ENV, "repo-s01")
                 .stdin(std::process::Stdio::null())
@@ -1754,15 +1815,13 @@ command = "c"
                 .expect("sh must run");
             assert!(
                 out.status.success(),
-                "{} exited {:?}: {}",
-                h.name,
+                "{name} exited {:?}: {}",
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr)
             );
             assert!(
                 out.stderr.is_empty(),
-                "{} wrote to stderr, which the harness shows the user: {}",
-                h.name,
+                "{name} wrote to stderr, which the harness shows the user: {}",
                 String::from_utf8_lossy(&out.stderr)
             );
         }
@@ -1780,7 +1839,7 @@ command = "c"
         use std::io::Write;
         let mut child = std::process::Command::new("sh")
             .arg("-c")
-            .arg(&hook("git-unavailable").command)
+            .arg(&rendered("git-unavailable").command)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1983,21 +2042,19 @@ command = "c"
     /// mechanism — the first nudge shipped that way and may never have been seen.
     #[test]
     fn nudges_speak_through_additional_context() {
-        for h in hooks() {
-            if h.event == "Stop" {
+        for (name, r) in all_rendered() {
+            if r.event == "Stop" {
                 continue; // refreshes the index, says nothing to the model
             }
             assert!(
-                h.command.contains("additionalContext"),
-                "{}: {}",
-                h.name,
-                h.command
+                r.command.contains("additionalContext"),
+                "{name}: {}",
+                r.command
             );
             assert!(
-                h.command.contains("hookSpecificOutput"),
-                "{}: {}",
-                h.name,
-                h.command
+                r.command.contains("hookSpecificOutput"),
+                "{name}: {}",
+                r.command
             );
         }
     }
@@ -2008,7 +2065,7 @@ command = "c"
     /// the commit that wrote it, and it appeared in four places.
     #[test]
     fn reading_a_file_points_at_the_symbol_lookup() {
-        let h = hook("graph-read");
+        let h = rendered("graph-read");
         assert_eq!(h.event, "PreToolUse");
         assert_eq!(h.matcher, "Read");
         assert!(h.command.contains("get_code_snippet"), "got: {}", h.command);
@@ -2019,7 +2076,7 @@ command = "c"
     /// when a symbol lookup would actually be cheaper.
     #[test]
     fn the_read_nudge_stays_silent_when_it_has_nothing_to_say() {
-        let cmd = hook("graph-read").command.clone();
+        let cmd = rendered("graph-read").command;
         assert!(cmd.contains("file_path"), "must inspect the target: {cmd}");
         assert!(cmd.contains("wc -c"), "and its size: {cmd}");
     }
@@ -2028,7 +2085,7 @@ command = "c"
     /// files. The only graph tool that costs nothing per tool call.
     #[test]
     fn a_session_starts_with_the_module_map() {
-        let h = hook("graph-orient");
+        let h = rendered("graph-orient");
         assert_eq!(h.event, "SessionStart");
         assert!(h.command.contains("get_architecture"), "got: {}", h.command);
     }
@@ -2038,7 +2095,7 @@ command = "c"
     /// the four aspects that actually orient cost 2,138.
     #[test]
     fn orientation_is_kept_small_because_it_repeats() {
-        let cmd = hook("graph-orient").command.clone();
+        let cmd = rendered("graph-orient").command;
         assert!(
             !cmd.contains("overview"),
             "too broad for something that repeats: {cmd}"
@@ -2052,7 +2109,7 @@ command = "c"
     /// against the real binary.
     #[test]
     fn aspects_are_passed_as_repeated_flags() {
-        let cmd = hook("graph-orient").command.clone();
+        let cmd = rendered("graph-orient").command;
         assert!(
             !cmd.contains("layers,packages"),
             "comma form returns empty: {cmd}"

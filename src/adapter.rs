@@ -76,16 +76,25 @@ impl Capability {
     ];
 }
 
+/// The capability's own name, which is also the key an adapter declares it
+/// under. Derived from `source()` until an error message had to name one and
+/// called the rules capability `AGENTS` — a filename is where a capability
+/// lives, not what it is, and the two stop matching the moment either moves.
 impl std::fmt::Display for Capability {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            self.source()
-                .trim_end_matches(".md")
-                .trim_end_matches(".json"),
-        )
+        f.write_str(match self {
+            Self::Rules => "rules",
+            Self::Skills => "skills",
+            Self::Mcp => "mcp",
+            Self::Commands => "commands",
+            Self::Subagents => "subagents",
+            Self::Hooks => "hooks",
+        })
     }
 }
 
+/// Deliberately not `Default`: a binding always comes from an adapter file, and
+/// a defaulted `render` would be a claim about a harness nobody made.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
@@ -99,6 +108,29 @@ pub struct Binding {
     /// is where the *container* expects the file.
     #[serde(default)]
     pub import: Option<String>,
+    /// How this harness spells each moment omh knows about. An absent entry
+    /// means it has no such moment, so the hooks wanting it are dropped by name
+    /// and the rest still ship.
+    #[serde(default)]
+    pub events: BTreeMap<crate::hook::Event, String>,
+    /// How this harness names the tools each moment happens to.
+    #[serde(default)]
+    pub tools: BTreeMap<crate::hook::Tool, String>,
+    /// Where each canonical payload field lives in this harness's stdin schema.
+    #[serde(default)]
+    pub fields: BTreeMap<crate::hook::Field, String>,
+    /// This harness's protocol for putting text in the agent's context.
+    #[serde(default)]
+    pub inject: Option<Inject>,
+}
+
+/// The one piece of a harness's hook protocol that is a shape rather than a
+/// name. `{{text}}` receives a shell word, `{{event}}` the harness's own word
+/// for the moment — some protocols name the event back at you in the payload.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Inject {
+    pub template: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
@@ -163,11 +195,48 @@ impl Adapter {
                 path.display()
             );
         }
+        adapter.check_hook_maps(&path)?;
         Ok(adapter)
     }
 
     pub fn supports(&self, cap: Capability) -> Option<&Binding> {
         self.capabilities.get(&cap)
+    }
+
+    /// The hook maps belong to `hooks` and nowhere else, and a `hooks` binding
+    /// without them says nothing.
+    ///
+    /// Both halves are the `deny_unknown_fields` rule one level in. A map on
+    /// `rules` is read by nobody, which is how a key somebody swears they
+    /// configured comes to do nothing; a `hooks` binding with no `events` can
+    /// express no moment, so every hook is dropped and the harness gets an empty
+    /// settings document — indistinguishable from a harness that declares no
+    /// hooks, except that this one claimed to have them.
+    fn check_hook_maps(&self, path: &Path) -> Result<()> {
+        for (cap, binding) in &self.capabilities {
+            let declares = !binding.events.is_empty()
+                || !binding.tools.is_empty()
+                || !binding.fields.is_empty()
+                || binding.inject.is_some();
+            match cap {
+                Capability::Hooks if binding.events.is_empty() => anyhow::bail!(
+                    "adapter {}: `hooks` declares no `events`, so it can express no \
+                     moment and every hook would be dropped. Map at least one of \
+                     session-start, turn-end, before-tool, after-tool — or omit the \
+                     `hooks` capability, which is how a harness says it has none.",
+                    path.display()
+                ),
+                Capability::Hooks => {}
+                _ if declares => anyhow::bail!(
+                    "adapter {}: `{cap}` declares hook maps (`events`, `tools`, \
+                     `fields` or `inject`), which are read only under `hooks`. \
+                     Nothing would use them.",
+                    path.display()
+                ),
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -252,6 +321,57 @@ mod tests {
             format!("{err:#}").contains("rules"),
             "must name the stray key: {err:#}"
         );
+    }
+
+    /// The hook maps say how a harness spells omh's hook vocabulary, so on any
+    /// other capability they are read by nobody. That is the same failure
+    /// `deny_unknown_fields` exists for, one level in: a key in the wrong place
+    /// parses cleanly, does nothing, and reports success.
+    #[test]
+    fn hook_maps_only_appear_on_the_hooks_capability() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "odd.toml",
+            r#"
+            name = "odd"
+            bin = "odd"
+            install = "x"
+            [capabilities.rules]
+            path   = "/work/AGENTS.md"
+            render = "concat"
+            [capabilities.rules.events]
+            turn-end = "Stop"
+            "#,
+        );
+        let err = Adapter::find(d.path(), "odd").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("rules"), "must name the capability: {msg}");
+        assert!(msg.contains("hooks"), "and where it belongs: {msg}");
+    }
+
+    /// A hooks binding with no `events` can express no moment, so every hook is
+    /// dropped and the harness receives an empty settings document — which is
+    /// indistinguishable from a harness that declares no hooks at all, except
+    /// that this one claimed to have them.
+    #[test]
+    fn a_hooks_binding_that_names_no_moment_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "mute.toml",
+            r#"
+            name = "mute"
+            bin  = "mute"
+            install = "x"
+            [capabilities.hooks]
+            path   = "$HOME/settings.json"
+            render = "claude-settings"
+            "#,
+        );
+        let err = Adapter::find(d.path(), "mute").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("events"), "must name what is missing: {msg}");
     }
 
     #[test]

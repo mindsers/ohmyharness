@@ -150,30 +150,21 @@ pub fn hooks(paths: &Paths) -> Result<Vec<Setting>> {
             }
             let raw = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let doc: serde_json::Value = serde_json::from_str(&raw)
-                .with_context(|| format!("parsing {}", path.display()))?;
             let name = path
                 .file_stem()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            // Not `unwrap_or("")`. An empty command compares unequal to every
-            // baseline, so a hook file that is truncated, half-written, or
-            // hand-edited with the wrong key was reported to the user as
-            // "modified by you" — a false accusation, with a blank value as the
-            // only tell, from the one command whose job is telling authorship
+            // Parsed, never probed for a key. A hook file that is truncated,
+            // half-written, or hand-edited with the wrong key used to yield a
+            // blank command here, which compares unequal to every baseline and
+            // so was reported to the user as "modified by you" — a false
+            // accusation, from the one command whose job is telling authorship
             // straight. `render.rs` treats the same file as a hard error, so
-            // two subsystems told two stories about it.
-            let command = doc
-                .get("command")
-                .and_then(|c| c.as_str())
-                .with_context(|| {
-                    format!(
-                        "{} has no `command` string — it is not a usable hook",
-                        path.display()
-                    )
-                })?;
-            found.push((name, command.to_string(), layer));
+            // two subsystems told two stories about it; going through the same
+            // parser is what keeps them agreeing.
+            let hook = crate::hook::Hook::parse(&raw, &path.display().to_string())?;
+            found.push((name, hook.does().to_string(), layer));
         }
     }
     Ok(resolve(found))
@@ -408,13 +399,13 @@ mod tests {
             &paths,
             Layer::Shared,
             "hooks/graph-read.json",
-            r#"{"command":"a"}"#,
+            r#"{"on":"turn-end","run":"a"}"#,
         );
         seed(
             &paths,
             Layer::Local,
             "hooks/mine.json",
-            r#"{"command":"b"}"#,
+            r#"{"on":"turn-end","run":"b"}"#,
         );
 
         let found = hooks(&paths).unwrap();
@@ -436,13 +427,13 @@ mod tests {
             &paths,
             Layer::Shared,
             "hooks/x.json",
-            r#"{"command":"shared"}"#,
+            r#"{"on":"turn-end","run":"shared"}"#,
         );
         seed(
             &paths,
             Layer::Local,
             "hooks/x.json",
-            r#"{"command":"local"}"#,
+            r#"{"on":"turn-end","run":"local"}"#,
         );
 
         let found = hooks(&paths).unwrap();
@@ -451,24 +442,29 @@ mod tests {
         assert_eq!(x.shadows, vec![Layer::Shared]);
     }
 
-    /// A hook file with no `command` used to become an empty string, which
-    /// compares unequal to every baseline — so a truncated or hand-edited file
-    /// was reported to the user as their own edit, with a blank value as the
-    /// only tell. `render.rs` treats the same file as a hard error, so the two
-    /// subsystems told two different stories about it.
+    /// A hook file that says when but never what used to become an empty
+    /// command string here, which compares unequal to every baseline — so a
+    /// truncated or hand-edited file was reported to the user as their own
+    /// edit, with a blank value as the only tell. `render.rs` treats the same
+    /// file as a hard error, so the two subsystems told two different stories
+    /// about it; both go through `hook::Hook::parse` now, which is what keeps
+    /// them agreeing.
     #[test]
-    fn a_hook_without_a_command_is_an_error_not_an_empty_string() {
+    fn a_hook_that_does_nothing_is_an_error_not_an_empty_string() {
         let (_d, paths) = fixture();
         seed(
             &paths,
             Layer::Shared,
             "hooks/broken.json",
-            r#"{"event":"Stop"}"#,
+            r#"{"on":"turn-end"}"#,
         );
 
-        let err = hooks(&paths).unwrap_err().to_string();
+        let err = format!("{:#}", hooks(&paths).unwrap_err());
         assert!(err.contains("broken.json"), "must name the file: {err}");
-        assert!(err.contains("command"), "must say what is missing: {err}");
+        assert!(
+            err.contains("run") && err.contains("inject"),
+            "must say what is missing: {err}"
+        );
     }
 
     /// A layer that cannot be read is not a layer that declares nothing.
@@ -519,7 +515,7 @@ mod tests {
             &paths,
             Layer::Shared,
             "hooks/real.json",
-            r#"{"command":"c"}"#,
+            r#"{"on":"turn-end","run":"c"}"#,
         );
 
         let found = hooks(&paths).unwrap();

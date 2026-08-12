@@ -4,11 +4,34 @@
 //! the target harness parses. This is how `omh-mcp` (memory) and the wired
 //! code-graph server reach every harness without being configured twice.
 
-use crate::adapter::{Capability, Render};
+use crate::adapter::{Binding, Capability, Render};
+use crate::hook::{self, Outcome};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// A rendered capability, and what did not fit in it.
+///
+/// Dropping used to be all-or-nothing — a harness expressed a capability or it
+/// did not — and hooks broke that: a harness can have `turn-end` and no
+/// `before-tool`, so some hooks ship and some cannot. A count of capabilities
+/// cannot say that, and a hook silently missing is a hook whose absence looks
+/// exactly like working.
+#[derive(Debug, Default)]
+pub struct Document {
+    pub body: String,
+    pub dropped: Vec<hook::Dropped>,
+}
+
+impl From<String> for Document {
+    fn from(body: String) -> Self {
+        Self {
+            body,
+            dropped: Vec::new(),
+        }
+    }
+}
 
 /// Render a capability into the shape this harness parses.
 ///
@@ -18,19 +41,28 @@ use std::path::{Path, PathBuf};
 /// is left exactly as you have it.
 pub fn document(
     cap: Capability,
-    render: Render,
+    binding: &Binding,
     sources: &[PathBuf],
     own: &crate::base::Own,
-) -> Result<String> {
-    match render {
+) -> Result<Document> {
+    match binding.render {
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
             let mut servers = merge_servers(sources)?;
             servers.retain(|name, _| !own.disabled_servers.contains(name));
-            mcp(render, &servers)
+            Ok(mcp(binding.render, &servers)?.into())
         }
-        Render::ClaudeSettings => claude_settings(&merge_hooks(sources, own)?),
+        Render::ClaudeSettings => {
+            let (rendered, dropped) = translate(&merge_hooks(sources, own)?, binding)?;
+            Ok(Document {
+                body: claude_settings(&rendered)?,
+                dropped,
+            })
+        }
         Render::Dir | Render::Concat => {
-            anyhow::bail!("{cap}: `{render:?}` is staged by the launcher, not rendered")
+            anyhow::bail!(
+                "{cap}: `{:?}` is staged by the launcher, not rendered",
+                binding.render
+            )
         }
     }
 }
@@ -183,13 +215,23 @@ pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
 
 // ── Hooks ───────────────────────────────────────────────────────────────────
 
-/// Canonical hook: one JSON file per hook in a layer's `hooks/` directory.
-#[derive(Debug, Deserialize)]
-struct Hook {
-    event: String,
-    #[serde(default)]
-    matcher: String,
-    command: String,
+/// Every hook, translated into this harness's words. A hook it cannot spell is
+/// dropped by name rather than taking the capability with it.
+fn translate(
+    hooks: &BTreeMap<String, hook::Hook>,
+    binding: &Binding,
+) -> Result<(BTreeMap<String, hook::Rendered>, Vec<hook::Dropped>)> {
+    let mut rendered = BTreeMap::new();
+    let mut dropped = Vec::new();
+    for (name, h) in hooks {
+        match hook::render(name, h, binding)? {
+            Outcome::Rendered(r) => {
+                rendered.insert(name.clone(), r);
+            }
+            Outcome::Dropped(d) => dropped.push(d),
+        }
+    }
+    Ok((rendered, dropped))
 }
 
 /// Union by filename across layers; later layers shadow earlier ones.
@@ -205,12 +247,7 @@ struct Hook {
 /// `git-unavailable` has already needed one. A planned migration deletes the
 /// leftovers (`docs/design/profile.md`, P3); until then they are inert, and
 /// `omh why` says so rather than reporting one as yours.
-fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<String, Hook>> {
-    let reserved: BTreeMap<String, ()> = own
-        .reserved
-        .iter()
-        .map(|name| (format!("{name}.json"), ()))
-        .collect();
+fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<String, hook::Hook>> {
     let mut out = BTreeMap::new();
     for dir in dirs {
         // Absent is not unreadable — `config::read_layer` records what
@@ -229,32 +266,31 @@ fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<Stri
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json") {
-                let name = entry.file_name().to_string_lossy().into_owned();
+                let name = path
+                    .file_stem()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 // A manifest name is omh's, on or off. Read and then
                 // overridden is not enough: with the feature off there is
                 // nothing to override it with, and the file would go on
                 // running.
-                if reserved.contains_key(&name) {
+                if own.reserved.contains(&name) {
                     continue;
                 }
-                out.insert(name, read_json(&path)?);
+                let raw = std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                out.insert(name, hook::Hook::parse(&raw, &path.display().to_string())?);
             }
         }
     }
-    for hook in &own.hooks {
-        out.insert(
-            format!("{}.json", hook.name),
-            Hook {
-                event: hook.event.into(),
-                matcher: hook.matcher.into(),
-                command: hook.command.clone(),
-            },
-        );
+    for own_hook in &own.hooks {
+        out.insert(own_hook.name.to_string(), own_hook.hook.clone());
     }
     Ok(out)
 }
 
-fn claude_settings(hooks: &BTreeMap<String, Hook>) -> Result<String> {
+fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>) -> Result<String> {
     let mut by_event: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
     for h in hooks.values() {
         by_event
@@ -373,77 +409,76 @@ mod tests {
             .expect("must stay valid TOML when values contain quotes");
     }
 
+    const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+
+    /// The shipped adapter's hooks binding, so these render through the same
+    /// maps a launch does rather than through a fixture that could be wrong in
+    /// the same direction as the code.
+    fn claude_hooks() -> crate::adapter::Adapter {
+        crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap()
+    }
+
+    fn hooks_binding(a: &crate::adapter::Adapter) -> &Binding {
+        a.supports(Capability::Hooks).expect("claude has hooks")
+    }
+
     #[test]
     fn hooks_group_by_event() {
         let dir = tempfile::tempdir().unwrap();
-        file(
-            dir.path(),
-            "h/a.json",
-            r#"{"event":"Stop","command":"one"}"#,
-        );
-        file(
-            dir.path(),
-            "h/b.json",
-            r#"{"event":"Stop","command":"two"}"#,
-        );
+        file(dir.path(), "h/a.json", r#"{"on":"turn-end","run":"one"}"#);
+        file(dir.path(), "h/b.json", r#"{"on":"turn-end","run":"two"}"#);
         file(
             dir.path(),
             "h/c.json",
-            r#"{"event":"PostToolUse","matcher":"Edit","command":"three"}"#,
+            r#"{"on":"after-tool","tools":["edit"],"run":"three"}"#,
         );
 
-        let hooks = merge_hooks(&[dir.path().join("h")], &Default::default()).unwrap();
-        let out = claude_settings(&hooks).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let adapter = claude_hooks();
+        let out = document(
+            Capability::Hooks,
+            hooks_binding(&adapter),
+            &[dir.path().join("h")],
+            &Default::default(),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
 
         assert_eq!(v["hooks"]["Stop"].as_array().unwrap().len(), 2);
-        assert_eq!(v["hooks"]["PostToolUse"][0]["matcher"], "Edit");
+        assert_eq!(
+            v["hooks"]["PostToolUse"][0]["matcher"],
+            "Edit|Write|MultiEdit"
+        );
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["type"], "command");
     }
 
-    /// Generation must not have changed omh's own behaviour on its way from
-    /// files to the manifest.
+    /// A hook says *when* it wants to fire. Which word this harness uses for
+    /// that moment is the adapter's business, exactly as every path in an
+    /// adapter already is.
     ///
-    /// Every repo initialised before this has the five hooks on disk as JSON
-    /// `init` wrote, and the harness reads one settings document either way. So
-    /// the two renderings are compared byte for byte: what the seeded files
-    /// produce, and what generating them produces. A difference here is omh
-    /// silently altering hooks people are already running.
+    /// Today a hook file has to say `"event": "Stop"` — Claude Code's
+    /// vocabulary, in a file omh presents as its own — and `matcher` and the
+    /// `hookSpecificOutput` payload are the same leak one level down. Nothing
+    /// has had to translate one only because opencode declares no hooks
+    /// capability at all.
     #[test]
-    fn generated_hooks_render_what_the_seeded_files_render() {
+    fn a_hook_written_in_omhs_words_reaches_the_harness() {
         let dir = tempfile::tempdir().unwrap();
-        for h in crate::base::hooks() {
-            file(
-                dir.path(),
-                &format!("h/{}.json", h.name),
-                &serde_json::to_string(&serde_json::json!({
-                    "event": h.event,
-                    "matcher": h.matcher,
-                    "command": h.command,
-                }))
-                .unwrap(),
-            );
-        }
+        file(
+            dir.path(),
+            "h/rust-test.json",
+            r#"{"on":"turn-end","run":"cargo test"}"#,
+        );
 
-        // The seeded side is given an `Own` that reserves nothing, so the
-        // files are read; the real one skips them, which the test above
-        // covers. What is compared here is the two renderings of the same
-        // hooks.
-        let seeded =
-            claude_settings(&merge_hooks(&[dir.path().join("h")], &Default::default()).unwrap())
-                .unwrap();
-        let generated = claude_settings(
-            &merge_hooks(
-                &[],
-                &crate::base::Own {
-                    hooks: crate::base::hooks(),
-                    ..Default::default()
-                },
-            )
-            .unwrap(),
+        let adapter = claude_hooks();
+        let out = document(
+            Capability::Hooks,
+            hooks_binding(&adapter),
+            &[dir.path().join("h")],
+            &Default::default(),
         )
         .unwrap();
-        assert_eq!(seeded, generated);
+        let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
+        assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "cargo test");
     }
 
     /// A directory omh cannot read is not a directory with no hooks in it.
@@ -460,11 +495,7 @@ mod tests {
     fn an_unreadable_hooks_directory_is_an_error_not_an_empty_one() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        file(
-            dir.path(),
-            "h/a.json",
-            r#"{"event":"Stop","command":"one"}"#,
-        );
+        file(dir.path(), "h/a.json", r#"{"on":"turn-end","run":"one"}"#);
         let hooks = dir.path().join("h");
         std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o000)).unwrap();
 
@@ -478,7 +509,9 @@ mod tests {
 
     #[test]
     fn staged_renders_are_not_documents() {
-        let err = document(Capability::Skills, Render::Dir, &[], &Default::default()).unwrap_err();
+        let adapter = claude_hooks();
+        let skills = adapter.supports(Capability::Skills).unwrap();
+        let err = document(Capability::Skills, skills, &[], &Default::default()).unwrap_err();
         assert!(err.to_string().contains("staged by the launcher"));
     }
 

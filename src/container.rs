@@ -23,6 +23,12 @@ pub struct Plan {
     pub argv: Vec<String>,
     /// Capabilities the profile carries that this harness cannot express.
     pub dropped: Vec<(Capability, usize)>,
+    /// Hooks this harness *nearly* expressed — it has the capability but not
+    /// the moment, tool or payload field they asked for. Separate from
+    /// `dropped` because the granularity differs: a capability is given up
+    /// whole, a hook individually, and reporting the second as the first would
+    /// say a harness has no hooks when it has all but one.
+    pub dropped_hooks: Vec<crate::hook::Dropped>,
     /// What composing the project's rules turned up that the user should hear.
     pub rules: crate::rules::Report,
     /// Interactive harnesses need a terminal; a captured probe must not ask.
@@ -108,6 +114,7 @@ pub fn plan(
     let opts = &opts;
     let mut mounts = Vec::new();
     let mut dropped = Vec::new();
+    let mut dropped_hooks = Vec::new();
 
     // Composed before the capability loop because `place_destination` runs
     // inside it: it creates the empty placeholder at every declared name, and
@@ -168,7 +175,7 @@ pub fn plan(
             dropped.push((cap, count));
             continue;
         };
-        stage_capability(
+        let gave_up = stage_capability(
             cap,
             binding,
             &sources,
@@ -181,6 +188,7 @@ pub fn plan(
             },
             &mut mounts,
         )?;
+        dropped_hooks.extend(gave_up);
     }
 
     // The graph index, keyed by repo rather than harness — that is what lets
@@ -269,6 +277,7 @@ pub fn plan(
                 .collect(),
         ),
         dropped,
+        dropped_hooks,
         rules: rules_report,
         tty: opts.tty,
     })
@@ -296,7 +305,8 @@ fn stage_capability(
     own: &crate::base::Own,
     to: Destination<'_>,
     mounts: &mut Vec<Mount>,
-) -> Result<()> {
+) -> Result<Vec<crate::hook::Dropped>> {
+    let mut dropped_hooks = Vec::new();
     let Destination {
         stage,
         worktree,
@@ -381,14 +391,15 @@ fn stage_capability(
         }
 
         // Everything else reshapes a merged canonical document.
-        r => {
+        _ => {
             let file = stage.join(format!("{cap}.rendered"));
             // Rendered even when skipped, so a dry run still surfaces a
             // malformed mcp.json instead of deferring it to launch.
-            let rendered = crate::render::document(cap, r, sources, own)?;
+            let rendered = crate::render::document(cap, binding, sources, own)?;
+            dropped_hooks.extend(rendered.dropped);
             if staging == Staging::Apply {
                 std::fs::create_dir_all(stage)?;
-                std::fs::write(&file, rendered)?;
+                std::fs::write(&file, rendered.body)?;
             }
             mounts.push(Mount {
                 host: file,
@@ -398,7 +409,7 @@ fn stage_capability(
             });
         }
     }
-    Ok(())
+    Ok(dropped_hooks)
 }
 
 /// Put an empty file where a mount is about to land, if nothing is there yet.
@@ -495,16 +506,28 @@ impl Plan {
     }
 
     /// One line, once, naming what this harness cannot do.
+    ///
+    /// Two granularities, because there are two kinds of loss. A capability is
+    /// given up whole and counting is enough — nobody needs the names of nine
+    /// skills. A hook is given up one at a time, and a count would be a lie
+    /// dressed as a summary: "hooks: 0" while three are missing. So a dropped
+    /// hook is named, with the word it asked for, because a hook that was never
+    /// installed behaves exactly like one that has nothing to say.
     pub fn degradation(&self) -> Option<String> {
-        if self.dropped.is_empty() {
-            return None;
+        let mut parts = Vec::new();
+        if !self.dropped.is_empty() {
+            let caps: Vec<_> = self
+                .dropped
+                .iter()
+                .map(|(cap, n)| format!("{n} {cap}"))
+                .collect();
+            parts.push(format!("dropped {} (unsupported)", caps.join(", ")));
         }
-        let parts: Vec<_> = self
-            .dropped
-            .iter()
-            .map(|(cap, n)| format!("{n} {cap}"))
-            .collect();
-        Some(format!("dropped {} (unsupported)", parts.join(", ")))
+        if !self.dropped_hooks.is_empty() {
+            let hooks: Vec<_> = self.dropped_hooks.iter().map(|d| d.to_string()).collect();
+            parts.push(format!("dropped hooks: {}", hooks.join(", ")));
+        }
+        (!parts.is_empty()).then(|| parts.join("; "))
     }
 }
 
@@ -561,7 +584,7 @@ mod tests {
         write(personal.join("subagents/explorer.md"), "explorer");
         write(
             personal.join("hooks/fmt.json"),
-            r#"{"event":"Stop","command":"fmt"}"#,
+            r#"{"on":"turn-end","run":"fmt"}"#,
         );
 
         let shared = paths.repo.join(".omh/profile");
@@ -973,6 +996,28 @@ mod tests {
             .collect()
     }
 
+    /// omh's own hooks as *this harness* receives them.
+    ///
+    /// A hook is authored in omh's words and staged in Claude's, so the thing
+    /// to look for in a settings document is the rendering — asserting the
+    /// authored `run` string would pass against a harness that was handed
+    /// nothing.
+    fn own_commands() -> Vec<(&'static str, String)> {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let binding = adapter
+            .supports(Capability::Hooks)
+            .expect("claude has hooks");
+        crate::base::hooks()
+            .into_iter()
+            .map(
+                |h| match crate::hook::render(h.name, &h.hook, binding).unwrap() {
+                    crate::hook::Outcome::Rendered(r) => (h.name, r.command),
+                    crate::hook::Outcome::Dropped(d) => panic!("claude cannot express {d}"),
+                },
+            )
+            .collect()
+    }
+
     /// omh's own hooks are generated from the base manifest, so a profile with
     /// no `hooks/` directory anywhere still gets them.
     ///
@@ -991,11 +1036,10 @@ mod tests {
         };
 
         let staged = staged_hooks(&plan_for(&fx, "claude"));
-        for hook in crate::base::hooks() {
+        for (name, command) in own_commands() {
             assert!(
-                staged.contains(&hook.command),
-                "{} must reach the harness with no hooks layer to read it: {staged:?}",
-                hook.name
+                staged.contains(&command),
+                "{name} must reach the harness with no hooks layer to read it: {staged:?}"
             );
         }
     }
@@ -1153,10 +1197,7 @@ mod tests {
                     .root
                     .join("profile/hooks")
                     .join(format!("{}.json", hook.name)),
-                format!(
-                    r#"{{"event":"{}","matcher":"{}","command":"{}"}}"#,
-                    hook.event, hook.matcher, hook.command
-                ),
+                r#"{"on":"turn-end","run":"a leftover file omh once seeded"}"#,
             )
             .unwrap();
         }
@@ -1207,17 +1248,17 @@ mod tests {
         let fx = fixture();
         std::fs::write(
             fx.paths.root.join("profile/hooks/graph-refresh.json"),
-            r#"{"event":"Stop","command":"the version from an older omh"}"#,
+            r#"{"on":"turn-end","run":"the version from an older omh"}"#,
         )
         .unwrap();
 
         let staged = staged_hooks(&plan_for(&fx, "claude"));
-        let ships = crate::base::hooks()
+        let (_, ships) = own_commands()
             .into_iter()
-            .find(|h| h.name == "graph-refresh")
+            .find(|(name, _)| *name == "graph-refresh")
             .expect("graph-refresh is in the base set");
         assert!(
-            staged.contains(&ships.command),
+            staged.contains(&ships),
             "omh's own hook must be what runs: {staged:?}"
         );
         assert!(
@@ -1356,6 +1397,70 @@ mod tests {
         );
     }
 
+    /// A harness can have the hooks capability and still not have every moment
+    /// in it, which is a granularity `dropped` cannot express: a count per
+    /// capability says "hooks: 0" while three of them are missing.
+    ///
+    /// The failure this prevents is the quietest one there is. A hook that was
+    /// never installed behaves exactly like a hook that is installed and has
+    /// nothing to say — `graph-read` is silent on small files by design — so
+    /// nothing about a session would ever reveal it.
+    #[test]
+    fn a_hook_this_harness_cannot_express_is_named_at_launch() {
+        let fx = fixture();
+
+        // Claude with no `before-tool`. Everything else it can still spell, so
+        // this is a harness that keeps hooks and loses three of them.
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::read_to_string(Path::new(ADAPTERS).join("claude.toml")).unwrap();
+        std::fs::write(
+            dir.path().join("partial.toml"),
+            real.replace("name    = \"claude\"", "name    = \"partial\"")
+                .replace("before-tool   = \"PreToolUse\"", ""),
+        )
+        .unwrap();
+
+        let adapter = Adapter::find(dir.path(), "partial").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own(),
+            },
+        )
+        .unwrap();
+
+        let named: Vec<_> = p.dropped_hooks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(named, ["git-unavailable", "graph-first", "graph-read"]);
+
+        let msg = p
+            .degradation()
+            .expect("a dropped hook has to be said out loud");
+        assert!(msg.contains("graph-read"), "by name: {msg}");
+        assert!(msg.contains("before-tool"), "and what it wanted: {msg}");
+
+        // The rest of the capability survives, which is the whole point of
+        // dropping one hook rather than all of them.
+        let staged = staged_hooks(&p);
+        let (_, refresh) = own_commands()
+            .into_iter()
+            .find(|(name, _)| *name == "graph-refresh")
+            .unwrap();
+        assert!(
+            staged.contains(&refresh),
+            "turn-end still works: {staged:?}"
+        );
+    }
+
     /// An upgraded repo carries the five seeded files, none of which is ever
     /// staged. Counting them told a user they were giving up eleven hooks
     /// where they give up six — a wrong number presented as a measurement,
@@ -1369,7 +1474,7 @@ mod tests {
                     .root
                     .join("profile/hooks")
                     .join(format!("{}.json", hook.name)),
-                r#"{"event":"Stop","command":"seeded by an older omh"}"#,
+                r#"{"on":"turn-end","run":"seeded by an older omh"}"#,
             )
             .unwrap();
         }
