@@ -7,8 +7,9 @@ $ ./scripts/test-install.sh     # install.sh, and every refusal it should make
 $ omh doctor                    # the only thing that verifies an adapter
 ```
 
-One test is `#[ignore]`d because it needs a container runtime; `cargo test --
---include-ignored` runs it, and so does CI.
+A few tests are `#[ignore]`d because they need a container runtime — the wiring
+between a guard and the command that reaches it, which nothing in process can
+observe. `cargo test -- --include-ignored` runs them, and so does CI.
 
 ## Read this first
 

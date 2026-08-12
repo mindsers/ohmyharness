@@ -236,6 +236,16 @@ omh: warning: [use] names an entry nothing answers to: skills/reveiw-diff
 Neither is fatal. A typo in a list is something to be told about, not a reason
 to refuse to start work.
 
+### Curation, not confinement
+
+`[use]` decides what the harness is **offered**. The catalogue directory behind
+it is mounted into the sandbox whole and read-only, so an unselected skill is
+not loaded but is still readable at an internal path by an agent that goes
+looking for it. Selection is for keeping a project's context to what the project
+needs — it is not a boundary, and omh does not claim it as one. What is
+guaranteed is the read-only part: the agent can read a selected skill and cannot
+write one.
+
 ## Settings, and their three layers
 
 Content has one home; **settings** keep their layers, because a setting has one
@@ -308,12 +318,23 @@ not serve both:
 | `omh use` / `unuse` | `settings.toml`, **committed** | what a project uses is a fact about the project, and a teammate cloning should get it |
 | `omh repo set` | `settings.local.toml`, **gitignored** | these carry `carry_in` paths and MCP env; a mistyped key must not be committable by accident |
 
-Neither default can reach version control without asking:
+**The committed file is never reached by accident, only on purpose.** `omh use`,
+`omh unuse` and `omh repo enable`/`disable` write it by default, because what a
+project uses and which of omh's features it runs with are facts about the
+project. What they write is a name, never a value you typed. The commands that
+do take a value — `omh repo set` and `omh config set` — default away from it,
+and say so when you ask for it:
 
 ```console
 $ omh repo set --shared carry_in '[".env"]'
 warning: the shared layer is COMMITTED — never put a secret here
 ```
+
+Where a repo already carries a `[use]` or `[omh]` table in its **gitignored**
+file, the write reaches that too — it is the layer that decides, and a command
+that reported success while the layer beneath overruled it would be lying.
+Never a layer that did not already declare the key: a selection appearing in a
+gitignored file is how a teammate stops getting what the repo says it uses.
 
 **Two verb pairs, mirroring the two tables.** `use`/`unuse` for catalogue
 entries, `enable`/`disable` for omh's features. The CLI teaches the file's
@@ -326,8 +347,8 @@ what lets the layer beneath take over again — the difference matters when you
 are overriding a team default temporarily.
 
 > **`--layer` is going away.** `omh config set --layer shared` still works and
-> prints the `omh repo` form that replaces it. It is removed in the release
-> after next.
+> prints the `omh repo` form that replaces it. It is accepted for one release,
+> then removed.
 
 ## `[omh]` — omh's own features
 

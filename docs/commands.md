@@ -10,7 +10,9 @@ omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
 omh sessions ls|diff|commit|push|down|rm  s   omh s diff, omh s push fix/x
-omh config [set|unset|edit|mcp] c omh c mcp import claude
+omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
+omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
+omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
 ```
 
 ## The shape of the CLI
@@ -212,7 +214,8 @@ Error: config.toml is listed in carry_in and git tracks it, so what is in the
 worktree is your local copy rather than the branch's.
   omh will neither publish that nor drop it silently.
 
-  fix the cause:  omh config edit
+  fix the cause:  omh repo set carry_in   (carry_in is for files git does not
+                  track; a tracked file is already in the worktree)
   or just this once:  omh s commit --skip-carried
 ```
 
@@ -292,8 +295,9 @@ catalogue; a repo overrides a server's environment without redeclaring it. See
 
 `edit` takes a name, so it validates one: `omh config edit skills ../../.ssh/id_rsa`
 is refused before `$EDITOR` sees it. Past that there is no fence to draw —
-`$EDITOR` is a full program running as you, and `~/.omh` is never mounted into a
-sandbox anyway.
+`$EDITOR` is a full program running as you, and the boundary that matters is
+elsewhere: every catalogue directory omh mounts into a sandbox is mounted
+**read-only**, so the agent can read a selected skill and cannot write one.
 
 ## `omh repo …`
 

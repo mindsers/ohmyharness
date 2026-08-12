@@ -66,9 +66,17 @@ enum Chosen {
 pub struct Selection {
     chosen: BTreeMap<Capability, Chosen>,
     /// Names the manifest owns, each pointing at the feature it belongs to.
-    /// Always allowed, never reported, never written by `init` — one place, so
-    /// a mutation that drops the exemption goes red in the MCP, hook and rules
-    /// paths at once.
+    ///
+    /// Four things follow from a name being in here, and they are enforced in
+    /// **three** places, not one — the earlier claim that one branch held all
+    /// four was wrong, and the mutation that "confirmed" it happened to hit the
+    /// branch two of them share:
+    ///
+    /// - always allowed, and never reported as unselected — `allows`, which
+    ///   `unselected` is built on. One branch, genuinely.
+    /// - refused when a `[use]` list names one — `read_list`, below.
+    /// - never written by `init` or `omh use --all` — `main::catalogue_names`,
+    ///   which is a different file and needs its own guard.
     ///
     /// The feature rather than a bare set, because the useful half of refusing
     /// `[use] mcp = ["codegraph"]` is saying *which switch* does work.

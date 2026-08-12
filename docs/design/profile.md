@@ -586,11 +586,19 @@ is built to make unrepresentable rather than to warn about, and the state that
 shipped broken once when the graph hooks kept firing against a server dropped
 from the document.
 
-So a manifest name is refused in `[use]`, naming the feature and the switch;
-it is always allowed through the selection whatever the lists say; it is never
-reported as unselected; and neither `init` nor `omh use --all` writes one. One
-branch holds all four, so deleting it goes red in the MCP, hook and rules paths
-at once.
+So a manifest name is refused in `[use]`, naming the feature and the switch; it
+is always allowed through the selection whatever the lists say; it is never
+reported as unselected; neither `init` nor `omh use --all` writes one; and for
+`rules` it is refused as a **file** — a `~/.omh/rules/git-rules.md` is an error
+naming both, the way a hook file claiming a manifest name already was.
+
+That is five properties in **three** places across two files, not the one this
+paragraph used to claim. The claim mattered because it was the stated reason for
+trusting the arrangement, and the mutation that appeared to confirm it happened
+to hit the branch `allows` and `unselected` share. The rules-file case is the one
+that leaked: such a file composed regardless of `[use]`, sorted ahead of
+everything the repo declared, could not be deselected, and delivered omh's own
+section for the same feature twice.
 
 Settings stay top-level, exactly as `policy.toml` has them today, so
 `set` keeps writing one key at one depth on either command. That has a consequence in
@@ -694,9 +702,14 @@ they wrote.
 is spawned it is a full program running as you, and any fence omh drew around it
 would be decorative — there is no trust boundary between omh and the person whose
 home directory this is. The boundary that matters is the one that already exists
-structurally: `~/.omh` is not mounted into the sandbox, only the staged
-capability directories are, and those are read-only, so the agent can read a
-selected skill and cannot write one.
+structurally: every catalogue directory a sandbox is given is mounted
+**read-only**, so the agent can read a selected skill and cannot write one.
+
+This paragraph used to say `~/.omh` is not mounted at all. That was false —
+`container.rs` binds each catalogue source at `/omh/layers/<n>/<cap>`, which is
+what makes the staged symlinks resolve — and it survived into two more places
+before a review caught it. Read-only is the true version and carries the same
+argument; the false one carried a stronger claim than omh can support.
 
 What does need a guard is the **name**, the moment `edit` takes one and joins it
 to a directory: `omh config edit skills ../../../.ssh/id_rsa` is traversal, and

@@ -174,7 +174,7 @@ catalogue *afterwards* is off here until you say otherwise. That is the trade an
 explicit list makes, and this line is what stops it being silent. `omh repo`
 shows the same thing without launching.
 
-### `mcp/codegraph is omh's — part of the `codegraph` feature`
+### `mcp/codegraph is omh's`
 
 `codegraph` and `memory` are in `~/.omh/mcp.json` because `omh init` seeded them
 there, so they look exactly like servers you added. They are not selectable in

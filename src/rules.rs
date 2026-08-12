@@ -613,11 +613,11 @@ mod tests {
         assert!(body.contains("conventional commits"), "{body}");
     }
 
-    /// Filename order, and stated as the placeholder it is: rules build on each
-    /// other, a general one followed by its exception reads differently
-    /// reversed, and the only place that ordering can really come from is the
-    /// list you wrote. `[use]` is P4; until then the order has to be *some*
-    /// order, and a stable one beats whatever `read_dir` returns.
+    /// Filename order is the **fallback**, for a repo that has not written a
+    /// list. `[use].rules` is the order when there is one — rules build on each
+    /// other, and a general one followed by its exception reads differently
+    /// reversed — but a repo that has not curated must still get a stable order
+    /// rather than whatever `read_dir` returns.
     #[test]
     fn catalogue_rules_compose_in_filename_order() {
         let fx = fixture();

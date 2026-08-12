@@ -323,7 +323,7 @@ omh: graph at http://127.0.0.1:56286
 ```console
 $ omh auth claude personal
 $ omh auth claude work
-$ omh -a work claude          # or: omh config set account work
+$ omh -a work claude          # or, per project: omh repo set account work
 ```
 
 Accounts are per harness, and which one a session uses is a project-level

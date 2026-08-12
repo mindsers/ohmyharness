@@ -1909,8 +1909,13 @@ fn unset(cwd: &std::path::Path, key: &str, layer: config::Layer) -> Result<()> {
 /// Once `$EDITOR` is spawned it is a full program running as you, and any fence
 /// omh drew around it would be decorative — there is no trust boundary between
 /// omh and the person whose home directory this is. The boundary that matters
-/// is structural and already there: `~/.omh` is not mounted into the sandbox,
-/// only the staged capability directories are, and those are read-only.
+/// is structural and already there: every catalogue directory a sandbox is given
+/// is mounted **read-only**.
+///
+/// This used to say `~/.omh` is not mounted at all, which is simply false —
+/// `container.rs` binds each catalogue source at `/omh/layers/<n>/<cap>` — and
+/// it is the kind of claim a reader takes on trust. Read-only is the true
+/// version and carries the same argument.
 ///
 /// What does need a guard is the **name**, the moment this takes one and joins
 /// it to a directory: `omh config edit skills ../../../.ssh/id_rsa` is
@@ -2110,7 +2115,7 @@ fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
             // get; a tracked file is already on the branch.
             carry::Action::AlreadyTracked => eprintln!(
                 "omh: warning: carry_in lists {} — git already tracks it, so the worktree\n\
-                 \x20 has it already. Not carried; remove it with `omh config edit`.",
+                 \x20 has it already. Not carried; drop it with `omh repo set carry_in`.",
                 item.path
             ),
             carry::Action::Missing => {
@@ -2767,7 +2772,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     let all = auth::accounts(&paths, &adapter);
     if all.len() > 1 {
         println!("  accounts: {}", all.join(", "));
-        println!("  choose per project with `omh config set account <name>`");
+        println!("  choose per project with `omh repo set account <name>`");
     }
     Ok(())
 }
