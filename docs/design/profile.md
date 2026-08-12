@@ -1,12 +1,15 @@
 # The profile — catalogue, selection, composition
 
-> **Status: mostly built.** P1, P2 and P3 of the [build order](#build-order)
-> have landed — the project's own rules are composed rather than replaced, omh's
-> hooks and rules sections are generated from the base manifest, `[omh]` switches
-> a feature off per repo, there is one catalogue, and hooks are authored in omh's
-> own vocabulary and translated per harness at staging.
+> **Status: built, bar the part that needs somebody else.** P1 through P4 of
+> the [build order](#build-order) have landed — the project's own rules are
+> composed rather than replaced, omh's hooks and rules sections are generated
+> from the base manifest, `[omh]` switches a feature off per repo, there is one
+> catalogue, hooks are authored in omh's own vocabulary and translated per
+> harness at staging, and `[use]` says which catalogue entries a repo takes.
 > [Configuration](../configuration.md) describes the storage model as it now is.
-> Selection — `[use]`, `omh use` / `unuse`, `omh repo` — is P4.
+> P5 is not more machinery: it is the translation exercised by a **second**
+> harness that has hooks at all, which is a fact about the ecosystem rather than
+> a task.
 
 ## The three things wrong with what exists
 
@@ -562,7 +565,7 @@ carry_in     = [".env.local"]
 
 [use]
 rules     = ["tdd", "commit-style"]           # ~/.omh/rules/*.md, in this order
-mcp       = ["codegraph"]
+mcp       = ["linear"]
 skills    = ["review-diff"]
 hooks     = ["notify-on-stop", "rust-test"]   # yours and this repo's
 commands  = []
@@ -571,6 +574,23 @@ subagents = ["*"]
 [omh]
 codegraph = false          # an omh feature — server and hooks, off in this repo
 ```
+
+**`[use]` names your entries; `[omh]` names omh's, and the line between them
+runs through every capability.** An earlier draft of this section put the rule
+on hooks alone, which was wrong in the way that matters: `init` seeds
+`manifest.servers()` into `~/.omh/mcp.json`, so `codegraph` and `memory` sit in
+the catalogue file looking exactly like servers you added. `mcp = ["codegraph"]`
+without its four hooks — or an `mcp` list that names the servers around it and
+quietly omits `memory` — is the bundle taken apart, which is the state `[omh]`
+is built to make unrepresentable rather than to warn about, and the state that
+shipped broken once when the graph hooks kept firing against a server dropped
+from the document.
+
+So a manifest name is refused in `[use]`, naming the feature and the switch;
+it is always allowed through the selection whatever the lists say; it is never
+reported as unselected; and neither `init` nor `omh use --all` writes one. One
+branch holds all four, so deleting it goes red in the MCP, hook and rules paths
+at once.
 
 Settings stay top-level, exactly as `policy.toml` has them today, so
 `set` keeps writing one key at one depth on either command. That has a consequence in
@@ -660,6 +680,15 @@ this skill not here".
 **This renames a shipped command.** `omh config set --layer shared` exists today
 and would break. It gets the treatment `keys.toml` gets: `--layer` is accepted
 for one release, printing the `omh repo` form it maps to, then removed.
+
+**One thing this section did not anticipate**, found while building it: making
+the settings file something four commands write turned an old cosmetic problem
+into a data-loss one. The writers serialised through `toml::to_string_pretty`,
+which **deletes every comment in the file** — and `init` writes that file full
+of explanatory comments, so the first `omh use` in a fresh repo wiped what
+`init` had just written. The writers use a format-preserving document now: a
+settings file is one somebody maintains by hand, and a comment is part of what
+they wrote.
 
 **`edit` validates its argument; it does not confine the editor.** Once `$EDITOR`
 is spawned it is a full program running as you, and any fence omh drew around it
@@ -876,7 +905,7 @@ has hooks at all, which is a fact about the ecosystem rather than a task.
 | **P1** | compose the rules on a `concat` binding | **landed** — fixed a bug on its own; no storage change |
 | **P2** | `kind = "rules"` and `feature` in the base set, omh's own hooks **generated** rather than seeded, `remove` moved to the feature level | **landed**, plus `[omh]` read-only, brought forward so `remove` names something that works |
 | **P3** | catalogue move, the canonical hook format and its three maps | **landed**. No migration: omh had no users but its author, so the one repo and the one home directory holding the old layout were moved by hand |
-| **P4** | `[use]`, `omh use` / `unuse`, `omh repo`, `init` writing it expanded, the unselected report | |
+| **P4** | `[use]`, `omh use` / `unuse`, `omh repo`, `init` writing it expanded, the unselected report | **landed**, plus one rule the plan for it had wrong: a feature is not selectable in *any* capability, not just hooks — `init` seeds omh's servers into your `mcp.json`, where they look exactly like yours |
 | **P5** | the three maps exercised by a **second** harness | the only thing that can prove the translation |
 
 **Generation came before the move**, and an earlier draft had it the other way

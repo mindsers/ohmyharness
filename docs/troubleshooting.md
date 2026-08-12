@@ -158,6 +158,55 @@ or, if what you want is omh's version gone, switch the feature off:
 codegraph = false
 ```
 
+### A skill I have is not reaching the agent
+
+Check the launch output. If it names the entry, this repo has a `[use]` list and
+that entry is not in it:
+
+```console
+$ omh claude
+omh: 1 catalogue entry is not selected here: skills/refactor
+omh:   omh use skills refactor    ·    omh use --all
+```
+
+`omh init` writes `[use]` with every entry named, so anything added to your
+catalogue *afterwards* is off here until you say otherwise. That is the trade an
+explicit list makes, and this line is what stops it being silent. `omh repo`
+shows the same thing without launching.
+
+### `mcp/codegraph is omh's — part of the `codegraph` feature`
+
+`codegraph` and `memory` are in `~/.omh/mcp.json` because `omh init` seeded them
+there, so they look exactly like servers you added. They are not selectable in
+either direction: a feature is its server, its hooks and its rules section
+together, and keeping half of it is the one combination that manufactures
+confident wrong answers.
+
+```toml
+# <repo>/.omh/settings.toml
+[omh]
+codegraph = false
+```
+
+or `omh repo disable codegraph`. Nothing is uninstalled and the next repo gets
+it back.
+
+### `--layer is going away`
+
+`omh config set --layer shared` still works and prints the form that replaced
+it. Two scopes, two commands: `omh config` is you, `omh repo` is this checkout,
+and they want opposite defaults — what a project *uses* is committed, what it
+*overrides* is not. See [Configuration](configuration.md#two-scopes-two-commands).
+
+### `your catalogue has no skills called …`
+
+`omh use` names an entry that has to exist, so a typo is refused rather than
+written and reported at the next launch. `omh config edit skills <name>` creates
+one.
+
+The mirror of it: `omh unuse` refuses a name this repo was not using, instead of
+writing the list back unchanged and reporting success.
+
 ### `a repo names servers from your catalogue, it cannot declare one`
 
 There is an `mcp.json` in `<repo>/.omh/`. That was where servers lived before

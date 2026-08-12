@@ -9,5 +9,13 @@
 # carry_in = [".env.local", "certs/"]
 carry_in = []
 
+[use]
+rules = []
+skills = []
+mcp = []
+commands = []
+subagents = []
+hooks = ["rust-format", "rust-test"]
+
 # [omh]
 # codegraph = false

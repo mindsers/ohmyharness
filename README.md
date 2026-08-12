@@ -136,7 +136,9 @@ omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
 omh sessions ls|diff|commit|push|down|rm  s   omh s diff, omh s push fix/x
-omh config [set|unset|edit|mcp] c omh c mcp import claude
+omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
+omh repo [enable|disable|set|unset] this checkout: what it uses and why
+omh use|unuse <capability> <name> omh use skills tdd, omh use --all
 ```
 
 Noun-verb groups with single-letter aliases. A bare name is always a **harness**;
@@ -188,25 +190,48 @@ A repo holds configuration, and one kind of content:
 ```
 
 A project cannot declare a skill, an MCP server, a command or a subagent; it
-names ones from your catalogue. Hooks are the exception, because they are the
-one capability whose scope is genuinely the repo — `cargo test` here,
+**names** ones from your catalogue. Hooks are the exception, because they are
+the one capability whose scope is genuinely the repo — `cargo test` here,
 `pnpm test` next door, one name and two bodies.
 
-**Settings still layer**, and every value tells you where it came from —
-`~/.omh/settings.toml`, then the repo's, then the repo's gitignored one:
+Naming them is one table, and one mechanism — an allowlist, so removing
+something is deleting its name:
+
+```toml
+# <repo>/.omh/settings.toml
+[use]
+rules  = ["tdd", "commit-style"]   # for rules, the list is the order
+skills = ["review-diff"]
+mcp    = ["*"]                     # keep following the catalogue as it grows
+```
+
+Absent means everything, so upgrading changes nothing and a new checkout is
+useful before it's configured. `omh init` writes it out expanded, because a list
+you curate by deleting lines beats a wildcard — and anything in your catalogue
+this repo hasn't taken gets named at launch, so nothing is off for an invisible
+reason.
+
+**Two scopes, so two commands.** `omh config` means you; `omh repo` means this
+checkout. They want opposite defaults, which is why one flag couldn't serve
+both: what a project *uses* is a fact about the project and lands in the
+committed file, while what it *overrides* holds `carry_in` paths and API keys
+and lands in the gitignored one.
 
 ```console
-$ omh config
-settings:
+$ omh repo
+this repo  /Users/you/proj/.omh
+
+settings
   carry_in         [".env.local"]     ← local (overrides shared)
   idle_timeout     30m                ← personal
 
-mcp:
-  codegraph        codebase-memory-mcp  ← your catalogue
-```
+omh's features
+  codegraph        off here
 
-Writes default to the **gitignored** layer, so a mistyped API key can't be
-committed by accident. Writing to the committed one says so out loud.
+using
+  skills           review-diff   (1 not selected: refactor)
+  mcp              everything
+```
 
 ### The base set is data too, and it has to justify itself
 
