@@ -952,6 +952,72 @@ mod tests {
         }
     }
 
+    /// A feature off in this repo takes its server, its hooks and its section
+    /// of the rules together.
+    ///
+    /// All three or none: `codegraph` on with `graph-refresh` off is a graph
+    /// that quietly stops tracking the code, which is the one combination that
+    /// manufactures confident wrong answers. Nothing is uninstalled — the
+    /// server is still in `mcp.json`, and the next repo gets it.
+    #[test]
+    fn a_disabled_feature_takes_its_server_its_hooks_and_its_rules() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.repo.join(".omh/profile/mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
+        )
+        .unwrap();
+        let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
+        let own = crate::base::own(&manifest, &["codegraph".to_string()].into());
+
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+            },
+        )
+        .unwrap();
+
+        let hooks = staged_hooks(&p);
+        assert!(
+            !hooks.iter().any(|c| c.contains("codebase-memory-mcp")),
+            "no graph hooks: {hooks:?}"
+        );
+        let mcp = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".mcp.json"))
+            .map(|m| std::fs::read_to_string(&m.host).unwrap())
+            .expect("claude stages mcp");
+        assert!(
+            !mcp.contains("codegraph"),
+            "the server is dropped from the document, not from your file: {mcp}"
+        );
+        assert!(
+            fx.paths
+                .repo
+                .join(".omh/profile/mcp.json")
+                .metadata()
+                .is_ok_and(|m| m.len() > 0),
+            "your mcp.json is left exactly as you have it"
+        );
+        assert!(
+            !composed_rules(&p).contains("This repo is indexed as a graph"),
+            "no graph section"
+        );
+    }
+
     /// A hook file carrying a manifest name is a leftover: `init` seeded these
     /// before they were generated, and every repo initialised then still has
     /// five of them. omh's own must win, or the fix it ships never arrives —

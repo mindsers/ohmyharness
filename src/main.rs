@@ -26,6 +26,7 @@ mod render;
 mod rules;
 mod runtime;
 mod session;
+mod settings;
 mod ssh;
 mod why;
 
@@ -1636,7 +1637,8 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
 /// inside `plan` is a probe no test can reach.
 fn omh_own(paths: &Paths) -> Result<base::Own> {
     let manifest = base::Manifest::load_dir(&paths.base())?;
-    Ok(base::own(&manifest, &Default::default()))
+    let off = settings::features_off(paths, &manifest)?;
+    Ok(base::own(&manifest, &off))
 }
 
 /// `omh why <thing>` — who put this here, and on what grounds.
