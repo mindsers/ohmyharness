@@ -422,7 +422,7 @@ pub fn grep_nudge(project: &str) -> String {
 /// they all did until the format landed: the interception is `when`, the text is
 /// `inject`, and how either reaches a particular harness is adapter data.
 pub fn hooks() -> Vec<Hook> {
-    use crate::hook::{Event, Hook as Canonical, Tool};
+    use crate::hook::{Action, Event, Hook as Canonical, Tool};
 
     // Every source extension worth not reading whole. A `case` arm rather than
     // a list omh iterates: it is evaluated by the shell inside the sandbox,
@@ -444,12 +444,10 @@ pub fn hooks() -> Vec<Hook> {
                 on: Event::TurnEnd,
                 tools: vec![],
                 when: None,
-                capture: None,
-                run: Some(format!(
+                action: Action::Run(format!(
                     "{GRAPH_BIN} cli index_repository --repo-path /work \
                      --name \"${PROJECT_ENV}\" --mode fast >/dev/null 2>&1 || true"
                 )),
-                inject: None,
             },
         },
         Hook {
@@ -469,18 +467,19 @@ pub fn hooks() -> Vec<Hook> {
                 on: Event::SessionStart,
                 tools: vec![],
                 when: Some(format!("[ -n \"${}\" ]", crate::hook::CAPTURE_VAR)),
-                capture: Some(format!(
-                    "{GRAPH_BIN} cli get_architecture --project \"${PROJECT_ENV}\" \
-                     --aspects layers --aspects packages --aspects boundaries \
-                     --aspects entry_points 2>/dev/null | tail -1"
-                )),
-                run: None,
-                inject: Some(format!(
-                    "Code graph for project ${PROJECT_ENV} — modules, layers, boundaries \
-                     and entry points. Query it with search_graph/trace_path/get_code_snippet \
-                     rather than exploring by hand:\n${}",
-                    crate::hook::CAPTURE_VAR
-                )),
+                action: Action::Inject {
+                    capture: Some(format!(
+                        "{GRAPH_BIN} cli get_architecture --project \"${PROJECT_ENV}\" \
+                         --aspects layers --aspects packages --aspects boundaries \
+                         --aspects entry_points 2>/dev/null | tail -1"
+                    )),
+                    text: format!(
+                        "Code graph for project ${PROJECT_ENV} — modules, layers, boundaries \
+                         and entry points. Query it with search_graph/trace_path/get_code_snippet \
+                         rather than exploring by hand:\n${}",
+                        crate::hook::CAPTURE_VAR
+                    ),
+                },
             },
         },
         Hook {
@@ -516,9 +515,10 @@ pub fn hooks() -> Vec<Hook> {
                      *) false ;; esac",
                     Field::ToolCommand.var()
                 )),
-                capture: None,
-                run: None,
-                inject: Some(GIT_ABSENT.to_string()),
+                action: Action::Inject {
+                    capture: None,
+                    text: GIT_ABSENT.to_string(),
+                },
             },
         },
         Hook {
@@ -533,12 +533,13 @@ pub fn hooks() -> Vec<Hook> {
                 on: Event::BeforeTool,
                 tools: vec![Tool::Search],
                 when: None,
-                capture: None,
-                run: None,
-                inject: Some(format!(
-                    "{}${PROJECT_ENV}{}${PROJECT_ENV}{}",
-                    GREP_NUDGE[0], GREP_NUDGE[1], GREP_NUDGE[2]
-                )),
+                action: Action::Inject {
+                    capture: None,
+                    text: format!(
+                        "{}${PROJECT_ENV}{}${PROJECT_ENV}{}",
+                        GREP_NUDGE[0], GREP_NUDGE[1], GREP_NUDGE[2]
+                    ),
+                },
             },
         },
         Hook {
@@ -561,14 +562,15 @@ pub fn hooks() -> Vec<Hook> {
                      [ -f \"${f}\" ] && [ \"$(wc -c < \"${f}\")\" -gt 8000 ]",
                     f = Field::ToolFile.var()
                 )),
-                capture: None,
-                run: None,
-                inject: Some(format!(
-                    "${f} is large. For one symbol rather than the whole file: \
-                     get_code_snippet --project ${PROJECT_ENV} --qualified-name <name>, \
-                     and search_graph finds the name.",
-                    f = Field::ToolFile.var()
-                )),
+                action: Action::Inject {
+                    capture: None,
+                    text: format!(
+                        "${f} is large. For one symbol rather than the whole file: \
+                         get_code_snippet --project ${PROJECT_ENV} --qualified-name <name>, \
+                         and search_graph finds the name.",
+                        f = Field::ToolFile.var()
+                    ),
+                },
             },
         },
     ]
@@ -1769,30 +1771,25 @@ command = "c"
     ///
     /// `base::hooks()` builds `hook::Hook` by struct literal, so `parse` — the
     /// function whose doc says "no caller can hold an unchecked hook" — is
-    /// never reached for the hooks that ship to every user. They were the only
-    /// ones exempt from every rule the format enforces, on the highest-blast-
-    /// radius path there is.
+    /// never reached for the hooks that ship to every user.
     ///
-    /// The trap this closes is specific: put a `$` in `GIT_ABSENT` or
-    /// `GREP_NUDGE` — a price, a `$PATH` mention, a shell example — and the
-    /// sandbox shell expands it to nothing, so the agent reads a sentence with
-    /// a hole in it. Every assertion about the hook's text still passes,
-    /// because the text is right; only the expansion is wrong.
+    /// **What this covers narrowed when `Action` arrived**, and saying so is
+    /// the point. Run-and-inject, neither, and a capture nothing reads are no
+    /// longer things a struct literal can express, so no test is what stops
+    /// them. What is left is the one check on a *value*: put a `$` in
+    /// `GIT_ABSENT` or `GREP_NUDGE` — a price, a `$PATH` mention, a shell
+    /// example — and the sandbox shell expands it to nothing, so the agent
+    /// reads a sentence with a hole in it. Every assertion about the hook's
+    /// text still passes, because the text is right; only the expansion is
+    /// wrong. No type can take that one away.
     #[test]
     fn omhs_own_hooks_obey_the_format_they_impose() {
         for h in hooks() {
-            let json = serde_json::to_string(&serde_json::json!({
-                "on": h.hook.on.to_string(),
-                "tools": h.hook.tools.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
-                "when": h.hook.when,
-                "capture": h.hook.capture,
-                "run": h.hook.run,
-                "inject": h.hook.inject,
-            }))
-            .unwrap();
-            // Round-tripped through the real parser rather than calling a
-            // private validator: a hook omh ships must be a hook you could
-            // have written, and the file is the contract.
+            // Serialised through `Hook`'s own wire shape rather than a `json!`
+            // rebuilt by hand. A hand-built one is a second opinion about what
+            // a hook file looks like, and it can be wrong in the same direction
+            // as the code — this way the bytes are the ones omh would write.
+            let json = serde_json::to_string(&h.hook).unwrap();
             let back = crate::hook::Hook::parse(&json, h.name)
                 .unwrap_or_else(|e| panic!("{} is not a hook a user could write: {e:#}", h.name));
             assert_eq!(back, h.hook, "and it must survive the round trip");
