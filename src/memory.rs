@@ -1597,6 +1597,17 @@ mod tests {
         (dir, paths)
     }
 
+    /// The rules every session is given, as omh generates them. The note
+    /// protocol is one of them, and these guards are about what the agent is
+    /// actually handed rather than about any file on disk.
+    fn shipped_rules() -> String {
+        crate::base::sections()
+            .into_iter()
+            .map(|s| s.body)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     // ── layers ──────────────────────────────────────────────────────────────
 
     /// Invariant 3, as a constant rather than a rule. The risk this guards is
@@ -3687,7 +3698,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// the real schema, which is the only check that cannot drift from them.
     #[test]
     fn the_note_template_in_the_staged_rules_actually_parses() {
-        let rules = crate::detect::agents_md(&[]);
+        let rules = shipped_rules();
         let start = rules
             .find("```markdown\n")
             .expect("the rules must show a note template");
@@ -3732,7 +3743,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     /// the other one", so this is the part that has to be in the rules file.
     #[test]
     fn the_rules_say_which_of_the_two_graphs_answers_which_question() {
-        let rules = crate::detect::agents_md(&[]);
+        let rules = shipped_rules();
         let lower = rules.to_lowercase();
 
         assert!(
@@ -3942,7 +3953,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn the_staged_rules_name_the_path_the_store_is_mounted_at() {
         assert!(
-            crate::detect::agents_md(&[]).contains(GUEST_LOCAL_NOTES),
+            shipped_rules().contains(GUEST_LOCAL_NOTES),
             "the rules must point at {GUEST_LOCAL_NOTES}"
         );
     }

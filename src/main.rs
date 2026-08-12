@@ -1746,22 +1746,16 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // template that changed under an existing store would silently re-key
     // every note in it, and every existing key would stop being derivable.
     write_if_absent(&paths.repo.join(".omh/keys.toml"), memory::SHIPPED_KEYS)?;
-    let agents = shared.join("AGENTS.md");
-    write_if_absent(&agents, &detect::agents_md(&stacks))?;
-    // A repo that ran `init` before the note store existed has an AGENTS.md
-    // already, and that file promises omh will not overwrite it — so the
-    // rules are appended, never merged in. Without this the feature ships
-    // inert for every existing repo: M1 has no MCP surface, so this file is
-    // the only thing that tells the agent the store is there.
-    if append_section_if_absent(&agents, "## Memory", &section("memory-rules"))? {
-        println!("  memory     added the note rules to .omh/profile/AGENTS.md");
-    }
-    // Same delivery problem, same answer: every repo that exists today ran
-    // `init` before this section did, and without the append the notice reaches
-    // only repos nobody has created yet.
-    if append_section_if_absent(&agents, "## Git", &section("git-rules"))? {
-        println!("  git        added the git notice to .omh/profile/AGENTS.md");
-    }
+    // No `AGENTS.md` is written. omh's own sections are base-set entries now,
+    // composed into every session from the manifest, which is what lets a fix
+    // reach a repo that ran `init` a year ago. The detected stack is not prose
+    // either: it produces hooks, and a sentence describing a test command is
+    // not the thing that runs it.
+    //
+    // A repo initialised before this keeps its `.omh/profile/AGENTS.md`. omh
+    // composes it as one more layer, so anything you added to it still
+    // reaches the agent — and omh's own sections arrive twice until the
+    // migration takes the file apart.
     // The base set: omh's opinion, seeded into the committed layer where it is
     // visible, reviewable, and removable rather than hidden in the binary.
     let base_mcp =
@@ -1778,36 +1772,15 @@ fn init(cwd: &std::path::Path) -> Result<()> {
          # carry_in = [\".env.local\", \"certs/\"]\n\
          carry_in = []\n",
     )?;
-    // Base-set hooks: the graph is inert unless something makes the agent
-    // reach for it and something keeps it current.
-    for h in base::hooks() {
-        write_if_absent(
-            &shared.join("hooks").join(format!("{}.json", h.name)),
-            &(serde_json::to_string_pretty(&serde_json::json!({
-                "event": h.event,
-                "matcher": h.matcher,
-                "command": h.command,
-            }))? + "\n"),
-        )?;
-    }
-
+    // omh's own hooks are not seeded. They are generated from the manifest at
+    // launch, which is the only arrangement in which omh can ship a fix to
+    // them: `write_if_absent` never revisits, so a repo initialised before
+    // `git-unavailable` was rewritten would have run the broken pattern
+    // forever.
     for stack in &stacks {
-        write_if_absent(
-            &shared
-                .join("hooks")
-                .join(format!("{}-test.json", stack.name)),
-            &format!(
-                "{{ \"event\": \"Stop\", \"matcher\": \"\", \"command\": \"{}\" }}\n",
-                stack.test
-            ),
-        )?;
-        write_if_absent(
-            &shared.join("hooks").join(format!("{}-format.json", stack.name)),
-            &format!(
-                "{{ \"event\": \"PostToolUse\", \"matcher\": \"Edit|Write\", \"command\": \"{}\" }}\n",
-                stack.format
-            ),
-        )?;
+        for (name, body) in stack_hooks(stack) {
+            write_if_absent(&shared.join("hooks").join(name), &body)?;
+        }
     }
     // Appended, not overwritten: re-running init must not eat a line you added.
     ensure_line(&paths.repo.join(".omh/.gitignore"), "local/")?;
@@ -2021,43 +1994,30 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
 /// running `init` again is a no-op rather than a second copy.
 ///
 /// Returns whether anything was written.
-/// One of the rules sections omh ships, ready to append to a file.
+/// The hooks a detected stack gets: run the tests at turn end, format on edit.
 ///
-/// Panics on an unknown name, which is a programming error rather than a
-/// runtime one: the names are the base set's own, and the drift test in
-/// `base.rs` is what keeps them in step with the manifest.
-fn section(name: &str) -> String {
-    let body = base::sections()
-        .into_iter()
-        .find(|s| s.name == name)
-        .unwrap_or_else(|| panic!("`{name}` is not a section the base set ships"))
-        .body;
-    format!("\n{body}")
-}
-
-fn append_section_if_absent(path: &std::path::Path, heading: &str, section: &str) -> Result<bool> {
-    let existing = match std::fs::read_to_string(path) {
-        Ok(existing) => existing,
-        // Absent is the fresh-install case the caller just handled with
-        // `write_if_absent`. Every other error is real, and swallowing it
-        // ships the rules nowhere while reporting success.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+/// Files rather than prose. A sentence in the rules describing `cargo test` is
+/// a sentence; a hook is the thing that runs it — and once written it is the
+/// repo's, editable and committed, so a teammate cloning gets the project's
+/// test command with the project.
+///
+/// Extracted from `init` so the commands can be asserted without a container.
+/// The guard that used to cover them read the generated `AGENTS.md`, which no
+/// longer exists.
+fn stack_hooks(stack: &detect::Stack) -> [(String, String); 2] {
+    let hook = |event: &str, matcher: &str, command: &str| {
+        format!("{{ \"event\": \"{event}\", \"matcher\": \"{matcher}\", \"command\": \"{command}\" }}\n")
     };
-
-    // A whole line, not a substring: `## Memory management` is a different
-    // section, and prose naming this one is not this one.
-    if existing.lines().any(|line| line.trim() == heading) {
-        return Ok(false);
-    }
-
-    let mut out = existing;
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(section);
-    std::fs::write(path, out)?;
-    Ok(true)
+    [
+        (
+            format!("{}-test.json", stack.name),
+            hook("Stop", "", stack.test),
+        ),
+        (
+            format!("{}-format.json", stack.name),
+            hook("PostToolUse", "Edit|Write", stack.format),
+        ),
+    ]
 }
 
 /// Run the harness's own login inside a sandbox, with this account's credential
@@ -2350,97 +2310,41 @@ mod tests {
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");
 
-    /// `contains` is a substring test, so any prose mentioning the heading —
-    /// `## Memory management`, or a sentence pointing at `## Memory` in a
-    /// wiki — read as "already delivered" and suppressed the rules for good.
-    /// That ships the feature inert, which is the defect this exists to fix.
+    /// A detected stack earns hooks, not prose. The guard that used to cover
+    /// this read the generated `AGENTS.md` — a sentence saying `cargo test`
+    /// runs nothing, and once that file stopped being written the commands
+    /// were asserted nowhere.
     #[test]
-    fn a_heading_that_merely_starts_with_memory_is_not_the_memory_section() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("AGENTS.md");
-        std::fs::write(
-            &path,
-            "# Project rules\n\n## Memory management\n\nArena, not GC.\n",
-        )
-        .unwrap();
+    fn a_detected_stack_gets_a_hook_that_runs_its_commands() {
+        for stack in detect::stacks(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))) {
+            let hooks = stack_hooks(&stack);
+            let by = |suffix: &str| {
+                hooks
+                    .iter()
+                    .find(|(name, _)| name.ends_with(suffix))
+                    .map(|(_, body)| body.clone())
+                    .unwrap_or_else(|| panic!("{} has no {suffix}", stack.name))
+            };
 
-        assert!(
-            append_section_if_absent(&path, "## Memory", &section("memory-rules")).unwrap(),
-            "a different section that happens to share a prefix is not this one"
-        );
-        assert!(std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("## Memory management"));
-    }
+            let test = by("-test.json");
+            assert!(test.contains(stack.test), "must run the tests: {test}");
+            assert!(test.contains("\"Stop\""), "at turn end: {test}");
 
-    /// A file omh cannot read is not a file that needs nothing done to it.
-    /// Treating the two alike returned "nothing to do", printed nothing, and
-    /// exited 0 — the feature shipped inert and said so to no one.
-    #[test]
-    fn an_unreadable_agents_md_is_an_error_rather_than_a_quiet_no_op() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("AGENTS.md");
-        // Invalid UTF-8 rather than a permission bit: `read_to_string` fails
-        // on it for every user, including the one running CI as root.
-        std::fs::write(&path, [0x23, 0x20, 0xff, 0xfe, 0x0a]).unwrap();
+            let format = by("-format.json");
+            assert!(
+                format.contains(stack.format),
+                "must format the code: {format}"
+            );
+            assert!(
+                format.contains("Edit|Write"),
+                "when a file is written: {format}"
+            );
 
-        let err = append_section_if_absent(&path, "## Memory", &section("memory-rules"))
-            .expect_err("an unreadable file must be reported, not skipped");
-        assert!(
-            err.to_string().contains("AGENTS.md"),
-            "the error must name the file: {err}"
-        );
-    }
-
-    /// Every repo that ran `init` before the store existed already has an
-    /// `AGENTS.md`, and `write_if_absent` skips it — so the note rules, which
-    /// in M1 are the *only* thing telling the agent the store is there, never
-    /// arrived. The human's own file has to survive the delivery intact.
-    /// Same delivery problem as the note rules, and the same answer: every repo
-    /// that exists today ran `init` before this section did, and the file's own
-    /// header promises omh will not overwrite it. Without the append the notice
-    /// ships only to repos nobody has created yet.
-    #[test]
-    fn an_agents_md_that_predates_the_notice_still_gets_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("AGENTS.md");
-        let human = "# Project rules\n\n## House style\n\nTabs, and no adverbs.\n";
-        std::fs::write(&path, human).unwrap();
-
-        assert!(append_section_if_absent(&path, "## Git", &section("git-rules")).unwrap());
-        let body = std::fs::read_to_string(&path).unwrap();
-
-        assert!(body.starts_with(human), "a human's file must survive whole");
-        assert!(body.contains("omh s commit"), "the notice must arrive");
-
-        assert!(!append_section_if_absent(&path, "## Git", &section("git-rules")).unwrap());
-        assert_eq!(
-            body,
-            std::fs::read_to_string(&path).unwrap(),
-            "`init` is re-runnable; a second pass must not stack a second copy"
-        );
-    }
-
-    #[test]
-    fn an_agents_md_that_predates_the_store_still_gets_the_note_rules() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("AGENTS.md");
-        let human = "# Project rules\n\n## House style\n\nTabs, and no adverbs.\n";
-        std::fs::write(&path, human).unwrap();
-
-        assert!(append_section_if_absent(&path, "## Memory", &section("memory-rules")).unwrap());
-        let body = std::fs::read_to_string(&path).unwrap();
-
-        assert!(body.starts_with(human), "a human's file must survive whole");
-        assert!(body.contains("## Memory"), "the rules must arrive");
-
-        // `init` is re-runnable, so a second pass must not stack a second copy.
-        assert!(!append_section_if_absent(&path, "## Memory", &section("memory-rules")).unwrap());
-        assert_eq!(
-            body,
-            std::fs::read_to_string(&path).unwrap(),
-            "appending twice duplicates the rules"
-        );
+            for (_, body) in hooks {
+                serde_json::from_str::<serde_json::Value>(&body)
+                    .unwrap_or_else(|e| panic!("{}: {e} in {body}", stack.name));
+            }
+        }
     }
 
     /// `omh <name>` treats any unknown word as a harness, so a command that is

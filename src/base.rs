@@ -908,6 +908,54 @@ mod tests {
         }
     }
 
+    /// A tool the agent does not know about is a tool it will not use — half
+    /// of what makes the graph more than an installed package.
+    ///
+    /// Named tools, when *not* to use them, and which project is its own: the
+    /// store holds every session's graph, and querying another session's
+    /// answers confidently about code that is not in this worktree.
+    #[test]
+    fn the_graph_section_explains_the_tools_and_which_project_to_ask() {
+        let body = section_body("graph-rules");
+        assert!(body.contains("search_graph"), "must name the tools: {body}");
+        assert!(
+            body.to_lowercase().contains("grep"),
+            "and when not to use them: {body}"
+        );
+        assert!(
+            body.contains("OMH_GRAPH_PROJECT"),
+            "and which project is its own: {body}"
+        );
+    }
+
+    /// The agent meets `fatal: not a git repository` and has to explain it to
+    /// itself. Left to guess it reaches for `git init`, which refuses for the
+    /// same reason and changes nothing — so the notice says the repair is
+    /// futile rather than leaving that to be discovered a turn later.
+    ///
+    /// Naming what to run instead is the load-bearing half: an agent that
+    /// knows only that git is missing still promises a commit it cannot make.
+    #[test]
+    fn the_git_section_says_the_repair_is_futile_and_what_to_do_instead() {
+        let body = section_body("git-rules");
+        assert!(
+            body.contains("git init"),
+            "the move it would otherwise make has to be named: {body}"
+        );
+        assert!(
+            body.contains("omh s commit") && body.contains("omh s push"),
+            "and what the human runs instead: {body}"
+        );
+    }
+
+    fn section_body(name: &str) -> String {
+        sections()
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} is a section omh ships"))
+            .body
+    }
+
     /// A feature is not a group of hooks. It is a group of entries **across
     /// kinds** — a server, the hooks that make it used, the section telling the
     /// agent it is there — and that is why it is the unit removal and disabling
