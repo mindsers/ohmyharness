@@ -23,6 +23,7 @@ mod memory;
 mod persist;
 mod profile;
 mod render;
+mod rules;
 mod runtime;
 mod session;
 mod ssh;
@@ -546,6 +547,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             tty: false,
             account_dir: account,
             memory_bin: memory::deliver::available(&paths),
+            base: session::default_branch(&paths.repo),
         },
     )?;
 
@@ -806,6 +808,9 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         tty: false,
         account_dir: account.clone(),
         memory_bin: memory::deliver::available(&paths),
+        // The probe has to compose the same rules a launch would, or it proves
+        // the harness reads a document nobody will be given.
+        base: session::default_branch(&paths.repo),
     };
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
@@ -1511,6 +1516,15 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
 
+    // Always the trunk, never wherever HEAD happens to be: a session started on
+    // a feature branch produces a diff against the wrong baseline. You attach to
+    // a session, not to a branch — choosing a base was a knob nobody needed.
+    //
+    // Resolved before the options rather than beside the session, because the
+    // plan needs it too: it is where the project's own rules come from when the
+    // worktree has none of its own.
+    let base = session::default_branch(&paths.repo);
+
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
         staging: if cli.dry_run {
@@ -1525,6 +1539,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         tty: true,
         account_dir: account,
         memory_bin: memory::deliver::available(&paths),
+        base: base.clone(),
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
@@ -1532,10 +1547,6 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         session::validate_id(explicit)?;
     }
     let id = session::pick(&paths.worktrees(), cli.session.as_deref(), cli.new);
-    // Always the trunk, never wherever HEAD happens to be: a session started on
-    // a feature branch produces a diff against the wrong baseline. You attach to
-    // a session, not to a branch — choosing a base was a knob nobody needed.
-    let base = session::default_branch(&paths.repo);
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;
@@ -1557,6 +1568,16 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
 
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     plan.validate(&backend.caps())?;
+
+    // Composing a file the user did not name is a fallback, and a fallback
+    // nobody is told about is indistinguishable from a bug. Only when there is
+    // something to say: a line printed every launch is a line nobody reads.
+    if let Some(name) = &plan.rules.read_instead {
+        eprintln!("omh: composed {name} — rename it to AGENTS.md");
+    }
+    if let Some(name) = &plan.rules.not_composed {
+        eprintln!("omh: warning: {name} differs from AGENTS.md and was not composed");
+    }
 
     let status_line = match plan.degradation() {
         Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.label()),
@@ -2039,6 +2060,10 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
             tty: true,
             account_dir: Some(account_dir.clone()),
             memory_bin: memory::deliver::available(&paths),
+            // Empty, like the base this scratch session was created with: a
+            // login is not work on the project, and its throwaway directory has
+            // no git behind it to read rules from.
+            base: String::new(),
         },
     )?;
     plan.validate(&backend.caps())?;
