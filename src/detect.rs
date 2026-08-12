@@ -53,6 +53,12 @@ pub struct Seed {
     pub fact: String,
 }
 
+/// A stack by name, for reading a hook filename back into the marker it
+/// implies. The launcher needs this to notice a hook whose stack has gone.
+pub fn known(name: &str) -> Option<Stack> {
+    KNOWN.into_iter().find(|s| s.name == name)
+}
+
 pub fn stacks(repo: &Path) -> Vec<Stack> {
     KNOWN
         .into_iter()

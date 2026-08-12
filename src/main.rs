@@ -21,6 +21,7 @@ mod idle;
 mod image;
 mod mcp;
 mod memory;
+mod notice;
 mod persist;
 mod profile;
 mod render;
@@ -1471,6 +1472,28 @@ fn say_rules(plan: &container::Plan) {
     }
 }
 
+/// What the launcher noticed about this repo's hooks: which ones it has, which
+/// are new or changed, and where detection and the directory disagree.
+///
+/// Only from `run`, and deliberately. It *records* what it saw, so calling it
+/// from `doctor` as well would spend the "new or changed" call-out on a command
+/// that launches nothing — and that call-out is the one that matters, because
+/// it fires when somebody else's executable content changed under you.
+///
+/// Never fatal. A repo whose hook drift cannot be computed is still a repo you
+/// can work in; and an unreadable hooks directory stops the launch anyway, in
+/// `render::merge_hooks`, which is where it should.
+fn say_hooks(paths: &Paths) {
+    match notice::hooks(paths, &detect::stacks(&paths.repo)) {
+        Ok(notices) => {
+            for notice in notices {
+                eprintln!("omh: {notice}");
+            }
+        }
+        Err(e) => eprintln!("omh: could not check this repo's hooks — {e:#}"),
+    }
+}
+
 /// Copy the checkout's untracked essentials into a worktree, and say what
 /// happened — a `.env` you thought you were carrying and are not is exactly the
 /// failure that wastes an hour inside the sandbox.
@@ -1587,6 +1610,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     plan.validate(&backend.caps())?;
 
     say_rules(&plan);
+    say_hooks(&paths);
 
     let status_line = match plan.degradation() {
         Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.label()),
@@ -2017,13 +2041,18 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
 /// The guard that used to cover them read the generated `AGENTS.md`, which no
 /// longer exists.
 fn stack_hooks(stack: &detect::Stack) -> [(String, String); 2] {
+    // Names from `notice::stack_hook_names`, never spelled again here: the
+    // launcher compares what detection expects against what the directory
+    // holds, and two spellings of `rust-test` would make it report a hook
+    // missing that `init` had just written.
+    let [test, format] = notice::stack_hook_names(stack);
     [
         (
-            format!("{}-test.json", stack.name),
+            format!("{test}.json"),
             format!("{{ \"on\": \"turn-end\", \"run\": \"{}\" }}\n", stack.test),
         ),
         (
-            format!("{}-format.json", stack.name),
+            format!("{format}.json"),
             format!(
                 "{{ \"on\": \"after-tool\", \"tools\": [\"edit\"], \"run\": \"{}\" }}\n",
                 stack.format
