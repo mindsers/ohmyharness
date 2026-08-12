@@ -4,7 +4,7 @@ This is the product. Everything else in omh is a place to put it.
 
 It lives in a versioned TOML file — `~/.omh/base/2026.08.toml`, shipped with the
 binary and installed by `init` the same way [adapters](adapters.md) and editors
-are. **`init` seeds from it and [`omh why`](../commands.md#omh-why-thing)
+are. **every session is built from it and [`omh why`](../commands.md#omh-why-thing)
 explains from it**, so the two cannot disagree about what is installed or why.
 
 ## An entry
@@ -14,10 +14,11 @@ version = "2026.08"
 
 [[entry]]
 name    = "codegraph"
-kind    = "mcp"                 # mcp | hook
+kind    = "mcp"                 # mcp | hook | rules
+feature = "codegraph"           # what it is part of; `[omh]` switches features, not entries
 since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
-remove  = "omh config mcp rm codegraph"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 command = "codebase-memory-mcp" # what init seeds; also the baseline `why` compares against
 
   [[entry.measured]]
@@ -34,6 +35,36 @@ command = "codebase-memory-mcp" # what init seeds; also the baseline `why` compa
 `deny_unknown_fields`, matching `Adapter`, and for the same reason: a misspelled
 key must fail loudly rather than parse into a base set that quietly contains
 less than you think.
+
+## A feature, not a flat list
+
+`feature` is what an entry belongs to. `codegraph` is one thing: the MCP
+server, the four hooks that make it *used* rather than merely installed, and
+the section of the rules that tells the agent it exists. Half of that is not a
+smaller version of it — a graph with no `graph-refresh` keeps answering
+confidently about code the session has since rewritten.
+
+So the feature is the unit that matters:
+
+| | |
+|---|---|
+| **removal** | `omh config mcp rm codegraph` takes the server and its four hooks together. Before this it left them behind, nudging the agent toward something that was gone |
+| **disabling** | `[omh] codegraph = false` in `<repo>/.omh/settings.toml`. Per repo, and nothing is uninstalled — your `mcp.json` is untouched and the next repo gets it back |
+| **explaining** | `omh why graph-first` answers "part of codegraph"; `omh why codegraph` lists what it brought |
+
+`[omh]` takes feature names only. `graph-first = false` is refused, naming the
+feature it belongs to — which is also how the grouping is discoverable without
+reading this file. That keeps "graph on, refresher off" unrepresentable rather
+than warned about, and an earlier draft that allowed it needed a warning at
+every launch, a manifest field declaring whether disabling cost correctness,
+and a rule about which kind may switch off silently. Taking the granularity
+away took all three with it.
+
+The grouping lived as a comment header in the manifest — the one claim in that
+file no test could check, while every other claim an entry makes is a field
+with a guard demanding it be filled. `every_base_set_entry_names_its_feature`
+is that guard, and it is load-bearing rather than documentary: an entry
+belonging to nothing is an entry nobody can switch off.
 
 ## The curation standard is a test, not a convention
 
@@ -114,32 +145,48 @@ entry was added and `since` never moves, so no shipped number was flaggable in
 2027 or 2035. Against the version it fires whenever the base set is re-cut,
 which is exactly when carried-over numbers should be re-taken or re-affirmed.
 
-## Seeded, not live
+## Seeded, or generated
 
-Worth understanding before changing anything here: `init` **copies** the base
-set into your profile — `mcp.json` and `hooks/*.json` in the shared layer — and
-then never revisits it. It uses `write_if_absent`, so your edits survive.
+`mcp.json` is **seeded**: `init` copies the servers into your profile with
+`write_if_absent` and never revisits, so your edits survive. Two consequences
+follow, and both caused bugs:
 
-Two consequences follow, and both caused bugs:
-
-- An omh-seeded entry and one you added are **byte-identical in the same file**.
-  Nothing marks which is which, which is why `omh why` recovers authorship by
-  comparing against the manifest rather than by reading a marker.
+- An omh-seeded server and one you added are **byte-identical in the same
+  file**. Nothing marks which is which, which is why `omh why` recovers
+  authorship by comparing against the manifest rather than by reading a marker.
 - The manifest is refreshed on upgrade while your profile is not, so the two
-  drift by design. `omh why` therefore reports *"not what omh ships now"* and
-  explicitly declines to say who caused the difference — it cannot know, and an
-  earlier version that guessed told every user they had edited files they never
-  opened.
+  drift by design. `omh why` reports *"not what omh ships now"* and declines to
+  say who caused the difference — it cannot know, and an earlier version that
+  guessed told every user they had edited files they never opened.
+
+Hooks and rules sections are **generated**. They are written into the session
+at launch, from the manifest, and exist as a file nowhere. That is the only
+arrangement in which omh can ship a fix to its own machinery: seeding never
+revisits, so `git-unavailable` — rewritten once, after the old pattern was
+found to miss the multi-line scripts agents most often emit — would have gone
+on running broken in every repo initialised before the fix.
+
+A manifest name is omh's, on or off. A file in a layer answering to one is
+never read: with the feature on the generated hook would win anyway, and with
+it off there would be nothing to override the file with, so switching a feature
+off would leave the disabled thing running.
+
+`omh why` says so rather than treating the file as yours — a repo initialised
+before generation still has the five sitting in `.omh/profile/hooks/`, and
+editing one changes nothing.
 
 ## Data versus code
 
 MCP servers are pure data and live entirely in the manifest. Hook **commands**
 stay in `src/base.rs`: they are intricate shell that interpolates `GRAPH_BIN`
 and `$OMH_GRAPH_PROJECT`, and flattening them into TOML would break that
-compile-time coupling.
+compile-time coupling. Rules **bodies** stay there for the same reason —
+`memory-rules` interpolates the guest note path and `git-rules` reads the
+string the `git-unavailable` hook also emits, and two copies of a safety notice
+drift, with the one that drifts never being the one you are reading.
 
-So the manifest carries hook *curation metadata* while the code carries the
-hook itself — two sources describing one base set, which can drift. A test
+So the manifest carries *curation metadata* while the code carries the thing
+itself — two sources describing one base set, which can drift. A test
 asserts the name sets match exactly **in both directions**, because the drift is
 silent in the worst way: `omh why` confidently explaining an entry that is no
 longer installed, or an entry shipping with no explanation at all.
@@ -151,8 +198,12 @@ longer installed, or an entry shipping with no explanation at all.
    place yet — that is the test working, not an obstacle.
 3. Measure the cost rather than estimating it, and record how. If it can be
    computed in-process, compute it in a test instead of typing it.
-4. If it is a hook, add the command to `base::hooks()` too; the drift guard will
-   tell you if you forget.
+4. If it is a hook or a rules section, add it to `base::hooks()` or
+   `base::sections()` too; the drift guard will tell you if you forget. A
+   section's size is computed from the string it ships, so the manifest has to
+   agree with the prose rather than with your estimate of it.
+5. Name the feature it serves. If none of the existing three fits, the entry is
+   introducing a feature, and that is a bigger claim than adding a package.
 
 If an eighth entry needs a paragraph to justify itself, it belongs in a profile
 rather than the base set.
