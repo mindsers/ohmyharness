@@ -16,7 +16,7 @@
 use crate::render::Server;
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The base set as data.
@@ -48,6 +48,14 @@ pub struct Manifest {
 pub struct Entry {
     pub name: String,
     pub kind: Kind,
+    /// What this entry is part of. A server, its hooks and its section of the
+    /// rules are one thing, and this is the field that says so — `[omh]` takes
+    /// feature names, so an entry belonging to nothing cannot be switched off.
+    ///
+    /// Required, like `because` and `since`: the grouping spent its life as a
+    /// comment header, which is the one claim in the manifest no test could
+    /// check.
+    pub feature: String,
     pub since: String,
     /// Argued, not measured. The honest half.
     pub because: String,
@@ -65,11 +73,16 @@ pub struct Entry {
     pub instead_of: Vec<Alternative>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Kind {
     Mcp,
     Hook,
+    /// A section of the rules the agent is given. Ships as a base-set entry
+    /// like everything else omh chooses — the prose an agent is handed costs
+    /// context on every turn, and a cost nobody wrote down is one nobody can
+    /// argue with.
+    Rules,
 }
 
 /// A cost, with the date it was taken and how.
@@ -135,8 +148,18 @@ impl Manifest {
             }
             let raw = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let manifest: Self =
-                toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+            // A manifest an older omh seeded can be missing a field this one
+            // requires, and every command loads the manifest — so the failure
+            // is the whole tool, not one command. `init` refreshes bundled
+            // files and keeps the old one, so saying that here is a way out
+            // rather than the advice-that-does-nothing loop `read_layer`
+            // documents.
+            let manifest: Self = toml::from_str(&raw).with_context(|| {
+                format!(
+                    "parsing {} — if it was seeded by an older omh, `omh init` refreshes it",
+                    path.display()
+                )
+            })?;
 
             // A file whose declared version is unreadable is not a candidate.
             // Accepting one on filename alone is what let `zz-notes.toml` win.
@@ -460,8 +483,8 @@ pub fn hooks() -> Vec<Hook> {
             // rather than `[:space:]` for the leading-whitespace case, so the
             // newline arm stays the thing doing that work.
             //
-            // Built from `detect::GIT_ABSENT` so the sentence the agent sees
-            // here and the one `init` writes into the rules cannot drift.
+            // Built from `GIT_ABSENT` so the sentence the agent meets here
+            // and the one the `git-rules` section carries cannot drift.
             command: format!(
                 "c=$(jq -r '.tool_input.command // empty'); \
                  case \"$c\" in \
@@ -471,7 +494,7 @@ pub fn hooks() -> Vec<Hook> {
                  \"git\\ *) ;; *) exit 0 ;; esac ;; esac; \
                  jq -nc --arg m {} '{{\"hookSpecificOutput\":{{\"hookEventName\":\"PreToolUse\",\
                  \"additionalContext\":$m}}}}'",
-                shell_quote(crate::detect::GIT_ABSENT)
+                shell_quote(GIT_ABSENT)
             ),
         },
         Hook {
@@ -515,6 +538,281 @@ pub fn hooks() -> Vec<Hook> {
             ),
         },
     ]
+}
+
+/// A section of the rules omh ships, in the shape a layer would store one.
+///
+/// The `name` is the manifest entry it answers to, exactly as a hook's is —
+/// `the_manifest_and_the_code_describe_the_same_base_set` compares the two
+/// name sets in both directions, so a section cannot ship unexplained and an
+/// entry cannot explain a section nobody writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Section {
+    pub name: &'static str,
+    pub body: String,
+}
+
+/// What the agent is told about git, in one place.
+///
+/// Both deliveries read from here — the `git-rules` section and the
+/// `git-unavailable` hook — because two copies of a safety notice drift, and
+/// the one that drifts is never the one you are reading.
+///
+/// Written as a claim about *this session*, not about git: an agent told "git
+/// is broken" spends its turns trying to fix it, and the repair cannot work.
+///
+/// It also does no harm, which was checked rather than assumed — `git init`
+/// against an unreachable gitdir refuses (git 2.55.0), naming the missing
+/// directory, and leaves the pointer file exactly as it was. So this says the
+/// attempt is futile, not that it is dangerous. The expensive failure here is
+/// the agent promising a commit it cannot make.
+pub const GIT_ABSENT: &str = "git does not work in this session, by design and not by fault. \
+     The worktree's .git is a pointer at an admin directory on the host, which omh does not \
+     mount — so every git command fails with `fatal: not a git repository`. Do not try to \
+     repair it: `git init` refuses for the same reason, and re-cloning would only give you a \
+     second repository nobody is reviewing. Nothing here is broken and nothing is lost. Your \
+     work is already visible outside the sandbox, where the person you are working with \
+     reviews it with `omh s diff`, commits it with `omh s commit`, and pushes it with \
+     `omh s push`. Say that rather than offering to commit yourself.";
+
+/// The rules omh ships, one section per base-set entry.
+///
+/// They live here rather than in the manifest for the reason hook commands do:
+/// `memory-rules` interpolates `GUEST_LOCAL_NOTES` and `git-rules` reads
+/// `GIT_ABSENT`, which the hook reads too. Flattened into TOML both couplings
+/// become two strings that can drift, and the drift is silent — a safety notice
+/// saying one thing in the rules and another in the hook.
+///
+/// They were prose `init` appended to `.omh/profile/AGENTS.md`, which meant they
+/// reached the repos where somebody remembered and nowhere else, could not be
+/// explained by `omh why`, and were invisible to the cost rollup.
+pub fn sections() -> Vec<Section> {
+    vec![
+        Section {
+            name: "graph-rules",
+            body: "## Code graph\n\n\
+                 This repo is indexed as a graph, refreshed after every turn. Prefer it over\n\
+                 reading or grepping files when the question is structural:\n\n\
+                 - `search_graph` — where is X defined, what is named like Y\n\
+                 - `trace_path` — how does A reach B\n\
+                 - `get_architecture` — what the modules are and how they depend on each other\n\
+                 - `get_code_snippet` — read one symbol instead of a whole file\n\n\
+                 Grep is still right for literal text: a string, a config value, a TODO.\n\n\
+                 **Use the project named by `$OMH_GRAPH_PROJECT`.** Other sessions of this\n\
+                 repo have their own graphs in the same store; querying one of those answers\n\
+                 confidently about code that is not in this worktree.\n"
+                .into(),
+        },
+        Section {
+            name: "git-rules",
+            // Orientation, where the hook is interception: a hook can only fire
+            // once the agent has decided to run git, and by then it may already
+            // have promised the user a commit. This is what stops the plan being
+            // made.
+            body: format!("## Git\n\n{GIT_ABSENT}\n"),
+        },
+        Section {
+            name: "memory-rules",
+            // "Which graph to ask" ships with memory rather than with the graph
+            // because the decision it teaches is *when to reach for `recall`*,
+            // and `recall` is what this feature introduces. With memory off the
+            // agent should not be told to ask a tool it does not have; with the
+            // graph off it loses a comparison, which is the cheaper of the two
+            // wrong documents.
+            body: format!(
+                "## Which graph to ask\n\n\
+                 There are two, and they do not overlap:\n\n\
+                 - **the code graph** knows **what the code is** — where a symbol lives, how\n  \
+                   one module reaches another. Re-derived from the code every turn, so it is\n  \
+                   never out of date and never needs to be told anything.\n\
+                 - **`recall`** knows **why** it is that way — what was tried and failed, what\n  \
+                   turned out not to work, what surprised somebody. None of that is in the\n  \
+                   code, so no amount of reading will recover it.\n\n\
+                 A *where* or *what* question goes to the code graph. A *why*, *is this safe*,\n\
+                 or *has this been tried* question goes to `recall`. When you are about to\n\
+                 assume how something here behaves, ask `recall` first — that is exactly the\n\
+                 assumption somebody already got wrong once.\n\n\
+                 They compose: find the code with the code graph, then ask `recall` what is\n\
+                 known about it before changing it.\n\n\
+                 {}",
+                note_taking()
+            ),
+        },
+    ]
+}
+
+/// What the agent needs to write a note, and when to write one.
+///
+/// The **trigger** cannot move into a tool description: *record what surprised
+/// you* is a rule an agent cannot look up, because it does not know it needs
+/// it. That half stays here whatever the tool surface looks like.
+///
+/// The note **shape** is a different claim, and the one to re-argue. It was
+/// written when nothing in the sandbox could call `remember`; that stopped
+/// being true when the memory server shipped — `remember` and `recall` are
+/// both offered inside the session, and `remember` enforces the schema at the
+/// write. What is left is the case `memory::deliver` documents: a released omh
+/// that finds no binary to deliver launches a session with no memory server,
+/// and the agent writes the file by hand. The shape is insurance against that,
+/// not a substitute for a tool that does not exist.
+///
+/// It is the largest single cost in the base set, so it is worth re-measuring
+/// against how often delivery actually fails rather than carrying forward.
+fn note_taking() -> String {
+    format!(
+        "## Memory\n\n\
+         When something surprises you — you expected one thing and the repo did\n\
+         another — record it. Not what you did; what you were wrong about.\n\n\
+         Write a Markdown file into `{}/`, named after the\n\
+         observation, in this shape:\n\n\
+         ```markdown\n\
+         ---\n\
+         key: <the filename, without .md>\n\
+         type: surprise\n\
+         source: session $OMH_SESSION, <this harness>\n\
+         recorded: <YYYY-MM-DD, the day it happened>\n\
+         ---\n\n\
+         # One line naming the surprise\n\n\
+         ## Expected\n\n\
+         ## Observed\n\n\
+         ## Evidence\n\n\
+         ## Answers\n\n\
+         - <the question somebody would later ask to find this>\n\n\
+         ## Related\n\n\
+         - [[another-notes-key]]\n\
+         ```\n\n\
+         **Answers** is what makes the note findable later, and only you know it:\n\
+         write the question you would have asked five minutes ago, in the words you\n\
+         would have used. A note nobody can find is a note nobody wrote.\n\n\
+         Store uncertainty rather than false precision, and date by when the thing\n\
+         happened rather than when you mentioned it. If you have nothing to put\n\
+         under **Expected**, there is nothing here worth recording.\n\n\
+         Rename a note by rewriting its `key` and its filename together — never\n\
+         one without the other.\n",
+        crate::memory::GUEST_LOCAL_NOTES,
+    )
+}
+
+/// What omh itself contributes to a session, once this repo has had its say.
+///
+/// Resolved from the manifest by the caller and handed to `container::plan`,
+/// the rule `memory_bin` and `base` already follow: `plan` stays pure given a
+/// temp filesystem, and a probe inside it is a probe no test can reach.
+///
+/// Empty is a legitimate value — every feature switched off. What keeps a
+/// caller from shipping an empty one *by accident* is `container::Options`,
+/// which has no `Default` and so cannot be built without naming this field.
+///
+/// `Default` here is for tests, which construct the empty case deliberately.
+#[cfg_attr(test, derive(Default))]
+#[derive(Debug, Clone)]
+pub struct Own {
+    pub hooks: Vec<Hook>,
+    pub sections: Vec<Section>,
+    /// Servers to drop from the rendered document even though `mcp.json` still
+    /// lists them. The feature is off *here*; nothing was uninstalled, and the
+    /// file is left exactly as the user has it.
+    pub disabled_servers: BTreeSet<String>,
+    /// Every hook name the manifest owns, whether or not its feature is on.
+    ///
+    /// A file in a layer answering to one of these is never read. With the
+    /// feature on the generated hook wins anyway; with it off, nothing runs —
+    /// and it was the second case that shipped broken: the four graph hooks
+    /// kept firing from files `init` seeded, against a server that had been
+    /// taken out of the document. Disabling that leaves the disabled thing
+    /// running is worse than not offering it.
+    pub reserved: BTreeSet<String>,
+}
+
+/// Everything the manifest generates, minus the features this repo turned off.
+///
+/// A feature is all-or-nothing on purpose. `codegraph` on with `graph-refresh`
+/// off is a graph that quietly stops tracking the code, which is the one
+/// combination that manufactures confident wrong answers — so it is
+/// unrepresentable rather than warned about.
+///
+/// Two ways a feature is off, and they are different acts:
+///
+/// - **switched off here**, by `[omh]`. Nothing is uninstalled.
+/// - **removed**, by taking its server out of your profile. `remove` promises
+///   that `omh config mcp rm codegraph` takes the hooks and the rules section
+///   with it, and that command only edits `mcp.json` — so the promise is kept
+///   here or nowhere. Before generation the hooks were files and removing the
+///   server left four of them behind; generating them unconditionally would
+///   have rebuilt that defect with no file left to delete.
+///
+/// `installed` is the servers the resolved profile declares. A feature with no
+/// server of its own — `git-notice` — is unaffected by it.
+///
+/// Fails rather than filters when the binary ships a hook or a section this
+/// manifest does not describe. That is omh disagreeing with itself, not a
+/// preference somebody expressed, and the two were the same silent `false`:
+/// the entry was not generated *and* `reserved` blocked any layer file from
+/// standing in, so it existed nowhere and nothing said so.
+pub fn own(
+    manifest: &Manifest,
+    off: &BTreeSet<String>,
+    installed: &BTreeSet<String>,
+) -> Result<Own> {
+    // A feature keeps its non-server parts only while a server it owns is
+    // still there. `any` rather than `all`: a feature with two servers and one
+    // removed is a judgement nothing here can make, and keeping it is the
+    // conservative half.
+    let gone: BTreeSet<&str> = manifest
+        .entries
+        .iter()
+        .filter(|e| e.kind == Kind::Mcp)
+        .fold(BTreeMap::<&str, bool>::new(), |mut acc, e| {
+            let present = installed.contains(&e.name);
+            *acc.entry(e.feature.as_str()).or_insert(false) |= present;
+            acc
+        })
+        .into_iter()
+        .filter(|(_, present)| !present)
+        .map(|(feature, _)| feature)
+        .collect();
+
+    let on = |name: &str| -> Result<bool> {
+        let entry = manifest.entry(name).with_context(|| {
+            format!(
+                "this omh ships `{name}` and {} describes no entry for it — the                  binary and the manifest disagree about the base set.                  `omh init` refreshes the bundled manifest.",
+                manifest.source()
+            )
+        })?;
+        Ok(!off.contains(&entry.feature) && !gone.contains(entry.feature.as_str()))
+    };
+
+    let mut own = Own {
+        hooks: Vec::new(),
+        sections: Vec::new(),
+        disabled_servers: manifest
+            .entries
+            .iter()
+            .filter(|e| matches!(e.kind, Kind::Mcp) && off.contains(&e.feature))
+            .map(|e| e.name.clone())
+            .collect(),
+        // Every hook the manifest owns, on or off — which is why this is built
+        // from the manifest rather than from `hooks()`. A file answering to one
+        // of these is never read, and with the feature off there would be
+        // nothing to override it with.
+        reserved: manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind == Kind::Hook)
+            .map(|e| e.name.clone())
+            .collect(),
+    };
+    for hook in hooks() {
+        if on(hook.name)? {
+            own.hooks.push(hook);
+        }
+    }
+    for section in sections() {
+        if on(section.name)? {
+            own.sections.push(section);
+        }
+    }
+    Ok(own)
 }
 
 /// Index a repository into the shared graph.
@@ -652,6 +950,207 @@ mod tests {
         }
     }
 
+    /// An entry that names no feature is an entry nobody can switch off.
+    ///
+    /// `[omh]` is keyed on features, so this is load-bearing rather than
+    /// documentary: the field is the only thing standing between a new entry
+    /// and a default with no way out — which is the one thing the base set's
+    /// own rule forbids.
+    ///
+    /// The grouping it records existed as a comment header in the manifest,
+    /// the single claim in that file no test could check, while every other
+    /// claim an entry makes is a field with a guard demanding it be filled.
+    #[test]
+    fn every_base_set_entry_names_its_feature() {
+        for e in &shipped().entries {
+            assert!(
+                !e.feature.trim().is_empty(),
+                "{}: names no feature. An entry belonging to nothing cannot be \
+                 disabled, because `[omh]` takes feature names.",
+                e.name
+            );
+        }
+    }
+
+    /// `remove` is printed by `omh why` as the way out, so an instruction that
+    /// silently does nothing is worse than none at all.
+    ///
+    /// The five hooks each said `rm .omh/profile/hooks/<name>.json`, naming a
+    /// file omh no longer writes. Removal is feature-level now: the graph hooks
+    /// go with the server, and the git notice has nothing to uninstall.
+    #[test]
+    fn no_remove_instruction_names_a_path_omh_no_longer_writes() {
+        for e in &shipped().entries {
+            assert!(
+                !e.remove.contains(".omh/profile/"),
+                "{}: `remove` says `{}`, and that path is not written any more — \
+                 the hooks are generated from this manifest",
+                e.name,
+                e.remove
+            );
+        }
+    }
+
+    /// A tool the agent does not know about is a tool it will not use — half
+    /// of what makes the graph more than an installed package.
+    ///
+    /// Named tools, when *not* to use them, and which project is its own: the
+    /// store holds every session's graph, and querying another session's
+    /// answers confidently about code that is not in this worktree.
+    #[test]
+    fn the_graph_section_explains_the_tools_and_which_project_to_ask() {
+        let body = section_body("graph-rules");
+        assert!(body.contains("search_graph"), "must name the tools: {body}");
+        assert!(
+            body.to_lowercase().contains("grep"),
+            "and when not to use them: {body}"
+        );
+        assert!(
+            body.contains("OMH_GRAPH_PROJECT"),
+            "and which project is its own: {body}"
+        );
+    }
+
+    /// The agent meets `fatal: not a git repository` and has to explain it to
+    /// itself. Left to guess it reaches for `git init`, which refuses for the
+    /// same reason and changes nothing — so the notice says the repair is
+    /// futile rather than leaving that to be discovered a turn later.
+    ///
+    /// Naming what to run instead is the load-bearing half: an agent that
+    /// knows only that git is missing still promises a commit it cannot make.
+    #[test]
+    fn the_git_section_says_the_repair_is_futile_and_what_to_do_instead() {
+        let body = section_body("git-rules");
+        assert!(
+            body.contains("git init"),
+            "the move it would otherwise make has to be named: {body}"
+        );
+        assert!(
+            body.contains("omh s commit") && body.contains("omh s push"),
+            "and what the human runs instead: {body}"
+        );
+    }
+
+    fn section_body(name: &str) -> String {
+        sections()
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("{name} is a section omh ships"))
+            .body
+    }
+
+    /// A feature is not a group of hooks. It is a group of entries **across
+    /// kinds** — a server, the hooks that make it used, the section telling the
+    /// agent it is there — and that is why it is the unit removal and disabling
+    /// work on. Half of `codegraph` is not a smaller version of it.
+    ///
+    /// Asserted on the one feature that has all three, and asserted because the
+    /// grouping used to be a comment header: removing the server left four
+    /// hooks nudging the agent toward something that was gone.
+    #[test]
+    fn a_feature_gathers_entries_across_kinds() {
+        let manifest = shipped();
+        let kinds: BTreeSet<Kind> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.feature == "codegraph")
+            .map(|e| e.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            BTreeSet::from([Kind::Mcp, Kind::Hook, Kind::Rules]),
+            "codegraph is a server, the hooks that make it used, and the section \
+             that tells the agent it exists"
+        );
+    }
+
+    /// The rules are the one cost paid on every single turn, so the number in
+    /// the manifest has to be the number the agent is actually handed.
+    ///
+    /// The same guard as `the_grep_nudges_declared_cost_matches_the_string_it_ships`,
+    /// and for the same reason: `~40 B` sat in this file describing a 243-byte
+    /// string, through a review that read it twice, because a hand-written cost
+    /// and the string it describes have no relationship a test can check.
+    #[test]
+    fn every_rules_section_costs_what_it_says() {
+        let manifest = shipped();
+        for section in sections() {
+            let entry = manifest
+                .entry(section.name)
+                .unwrap_or_else(|| panic!("{} has no manifest entry", section.name));
+            let claim = &entry.measured[0].value;
+            let declared: usize = claim
+                .trim_end_matches(" B")
+                .replace(',', "")
+                .trim()
+                .parse()
+                .unwrap_or_else(|_| panic!("{}: `{claim}` is not a byte count", section.name));
+            assert_eq!(
+                declared,
+                section.body.len(),
+                "{}: the manifest claims {declared} B and the section ships {} B. \
+                 Re-measure rather than trimming the prose to fit.",
+                section.name,
+                section.body.len()
+            );
+        }
+    }
+
+    /// `omh config mcp rm codegraph` has to take the hooks and the rules
+    /// section with it. Before generation the four hooks were files and
+    /// removing the server left them behind, nudging the agent toward
+    /// something that was gone; generation would have reintroduced exactly
+    /// that, because what omh generates was decided by the manifest alone.
+    ///
+    /// The `remove` field promises this. A guard on the *string* — which is
+    /// what shipped first — passes just as happily when the instruction does
+    /// nothing, so this asserts the behaviour instead.
+    #[test]
+    fn removing_a_feature_server_stops_generating_the_rest_of_it() {
+        let manifest = shipped();
+        let installed = BTreeSet::from(["memory".to_string()]);
+        let own = own(&manifest, &BTreeSet::new(), &installed).unwrap();
+
+        assert!(
+            !own.hooks.iter().any(|h| h.name.starts_with("graph-")),
+            "no graph hook may outlive its server: {:?}",
+            own.hooks.iter().map(|h| h.name).collect::<Vec<_>>()
+        );
+        assert!(
+            !own.sections.iter().any(|s| s.name == "graph-rules"),
+            "and neither may the section telling the agent to query it"
+        );
+        assert!(
+            own.sections.iter().any(|s| s.name == "memory-rules"),
+            "memory is still installed, so its section stays"
+        );
+        assert!(
+            own.hooks.iter().any(|h| h.name == "git-unavailable"),
+            "git-notice has no server to remove, so nothing about it changes"
+        );
+    }
+
+    /// A name the code ships and the manifest does not describe is not a
+    /// feature somebody switched off — it is omh disagreeing with itself, and
+    /// the two states were the same `false`.
+    ///
+    /// What made it destructive rather than merely lossy: the hook was not
+    /// generated *and* `reserved` blocked any layer file of that name from
+    /// substituting, so it existed nowhere and nothing said so. Reachable by
+    /// hand-editing `~/.omh/base`, which `omh why`'s own comment calls a
+    /// directory anyone can drop a file into.
+    #[test]
+    fn a_shipped_hook_the_manifest_does_not_describe_is_an_error() {
+        let dir = manifest_dir(&[("2026.08.toml", &format!("version = \"2026.08\"{ONE_ENTRY}"))]);
+        let manifest = Manifest::load_dir(dir.path()).unwrap();
+
+        let err = own(&manifest, &BTreeSet::new(), &BTreeSet::new())
+            .expect_err("the binary ships hooks this manifest never mentions");
+        let err = format!("{err:#}");
+        assert!(err.contains("graph-refresh"), "must name it: {err}");
+        assert!(err.contains("omh init"), "and the way out: {err}");
+    }
+
     /// A hand-written cost and the thing it measures have no relationship a
     /// test can check — which is how `~40 B` sat in the manifest describing a
     /// 243-byte string, through a review that read it twice.
@@ -705,11 +1204,34 @@ mod tests {
 [[entry]]
 name = "codegraph"
 kind = "mcp"
+feature = "codegraph"
 since = "2026.06"
 because = "b"
 remove = "r"
 command = "c"
 "#;
+
+    /// The manifest in `~/.omh/base` is whatever the last `init` seeded, and a
+    /// newer omh can require a field it does not have — `feature` did exactly
+    /// that. Every command loads the manifest, so the upgrade turns the whole
+    /// tool off until it is refreshed, and the way to refresh it is the one
+    /// thing the error has to say.
+    ///
+    /// The closed loop this repo already paid for once: `chmod 000` on
+    /// `mcp.json` made `omh why` advise `omh init`, which did nothing. Here
+    /// `init` genuinely fixes it — bundled files are refreshed, with the old
+    /// one kept — so the advice is worth giving and worth pinning.
+    #[test]
+    fn a_manifest_an_older_omh_wrote_says_how_to_refresh_it() {
+        let dir = manifest_dir(&[(
+            "2026.08.toml",
+            "version = \"2026.08\"\n[[entry]]\nname = \"codegraph\"\nkind = \"mcp\"\n\
+             since = \"2026.06\"\nbecause = \"b\"\nremove = \"r\"\ncommand = \"c\"\n",
+        )]);
+        let err = format!("{:#}", Manifest::load_dir(dir.path()).unwrap_err());
+        assert!(err.contains("2026.08.toml"), "must name the file: {err}");
+        assert!(err.contains("omh init"), "must say the way out: {err}");
+    }
 
     /// A stray `.toml` sorting after the real manifest used to *become* the
     /// base set: `init` seeded `{}` and reported success, and `omh why` called
@@ -798,6 +1320,22 @@ command = "c"
         assert_eq!(
             declared, shipped_hooks,
             "hooks in the manifest vs hooks in the code"
+        );
+
+        // The rules sections have the same split for the same reason, and so
+        // the same failure available: a section shipped with no entry reaches
+        // every session unexplained and uncosted, and an entry with no section
+        // is `omh why` describing prose nobody receives.
+        let declared: BTreeSet<&str> = manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind == Kind::Rules)
+            .map(|e| e.name.as_str())
+            .collect();
+        let shipped_sections: BTreeSet<&str> = sections().iter().map(|s| s.name).collect();
+        assert_eq!(
+            declared, shipped_sections,
+            "rules sections in the manifest vs sections in the code"
         );
 
         // MCP servers are not checked here: since `Manifest::servers()` derives
@@ -1273,7 +1811,7 @@ command = "c"
             parsed["hookSpecificOutput"]["additionalContext"]
                 .as_str()
                 .unwrap(),
-            crate::detect::GIT_ABSENT,
+            GIT_ABSENT,
             "the prose has to survive shell quoting intact"
         );
     }

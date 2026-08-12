@@ -121,6 +121,8 @@ $ omh why codegraph
 codegraph — omh's choice, in the base set since 2026.06
 
   because     structural queries instead of re-grepping the repo every task
+  part of     codegraph
+  brings      graph-orient, graph-first, graph-read, graph-refresh, graph-rules
   costs       0.46s to index this repo, cold   measured 2026-08-06
               index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
               3.4 MB on disk                   measured 2026-08-06
@@ -129,10 +131,16 @@ codegraph — omh's choice, in the base set since 2026.06
               codegraphcontext    needs a Neo4j service running
               @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
   installed   shared
-  remove      omh config mcp rm codegraph
+  remove      omh config mcp rm codegraph — the feature, server and hooks together
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```
+
+**Everything omh ships belongs to a feature**, and removal follows the feature:
+`omh config mcp rm codegraph` takes the server and its four hooks together.
+`omh why graph-first` answers "part of codegraph" from the other direction, and
+says `(off here)` when this repo has switched the feature off in
+`.omh/settings.toml`.
 
 **Cost is measured; benefit is argued.** Every cost carries the date it was
 taken *and how*, and one predating the current base-set version is marked stale
@@ -141,11 +149,12 @@ re-affirmation. The `because` line is a judgment you are free to disagree with �
 see
 [measure the cost, argue the benefit](design/trust.md#measure-the-cost-argue-the-benefit).
 
-### Six answers, because authorship differs
+### Seven answers, because authorship differs
 
 | | |
 |---|---|
 | **omh's choice** | in the base set, and your copy matches what omh ships |
+| **omh's own, generated at launch** | a hook or a rules section. Not a file anywhere — omh writes it into the session and nothing else, which is what lets a fix reach you with the upgrade. A leftover of the same name in your profile is named as no longer read |
 | **not what omh ships now** | omh's entry, and your copy differs. Both values shown, and **no claim about who changed it** — omh cannot tell an edit from an upgrade |
 | **not installed here** | in the base set, absent from your profile. Not an error |
 | **written by omh init** | derived from your repo, like `rust-format` from `Cargo.toml`. omh's writing, not omh's opinion |

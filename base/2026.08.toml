@@ -20,9 +20,10 @@ version = "2026.08"
 [[entry]]
 name    = "codegraph"
 kind    = "mcp"
+feature = "codegraph"
 since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
-remove  = "omh config mcp rm codegraph"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 command = "codebase-memory-mcp"
 
   [[entry.measured]]
@@ -56,9 +57,10 @@ command = "codebase-memory-mcp"
 [[entry]]
 name    = "graph-orient"
 kind    = "hook"
+feature = "codegraph"
 since   = "2026.08"
 because = "the agent is given the module map instead of discovering it by reading files"
-remove  = "rm .omh/profile/hooks/graph-orient.json"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "per context rebuild"
@@ -73,9 +75,10 @@ remove  = "rm .omh/profile/hooks/graph-orient.json"
 [[entry]]
 name    = "graph-first"
 kind    = "hook"
+feature = "codegraph"
 since   = "2026.08"
 because = "structural questions answer in one call instead of an iterative grep"
-remove  = "rm .omh/profile/hooks/graph-first.json"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "per grep"
@@ -90,9 +93,10 @@ remove  = "rm .omh/profile/hooks/graph-first.json"
 [[entry]]
 name    = "graph-read"
 kind    = "hook"
+feature = "codegraph"
 since   = "2026.08"
 because = "one symbol instead of a whole file, when the file is big enough for that to matter"
-remove  = "rm .omh/profile/hooks/graph-read.json"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "when it fires"
@@ -113,9 +117,10 @@ remove  = "rm .omh/profile/hooks/graph-read.json"
 [[entry]]
 name    = "graph-refresh"
 kind    = "hook"
+feature = "codegraph"
 since   = "2026.08"
 because = "the graph describes the code as it is now, not as the session found it"
-remove  = "rm .omh/profile/hooks/graph-refresh.json"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "per turn"
@@ -127,6 +132,24 @@ remove  = "rm .omh/profile/hooks/graph-refresh.json"
   name = "indexing once at init"
   why  = "a session's worktree is not the checkout it started from; the graph would describe code the agent has since changed"
 
+[[entry]]
+name    = "graph-rules"
+kind    = "rules"
+feature = "codegraph"
+since   = "2026.08"
+because = "a graph the agent has not been told about is a graph it never queries — the four hooks fire while it is already doing something, and this is what is true before it starts"
+remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
+
+  [[entry.measured]]
+  what  = "in the agent's context, every turn"
+  value = "673 B"
+  how   = "the section as shipped, byte for byte. Computed by `every_rules_section_costs_what_it_says` against the string omh sends rather than typed in — a hand-written cost and the prose it describes have no relationship a test can check"
+  on    = "2026-08-12"
+
+  [[entry.instead_of]]
+  name = "the graph-orient hook alone"
+  why  = "orientation is re-paid at every context rebuild and describes the modules; this names the tools and the project variable once. Different claims, and the hook's 2,300 B is the one that repeats"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Git, which the session does not have
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,9 +157,10 @@ remove  = "rm .omh/profile/hooks/graph-refresh.json"
 [[entry]]
 name    = "git-unavailable"
 kind    = "hook"
+feature = "git-notice"
 since   = "2026.08"
 because = "an agent that meets `fatal: not a git repository` explains it to itself, and the explanation it reaches for is that something is broken — so it spends turns repairing what cannot be repaired, and offers the user a commit it has no way to make"
-remove  = "rm .omh/profile/hooks/git-unavailable.json"
+remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml"
 
   [[entry.measured]]
   what  = "when it fires"
@@ -151,12 +175,30 @@ remove  = "rm .omh/profile/hooks/git-unavailable.json"
   on    = "2026-08-11"
 
   [[entry.instead_of]]
-  name = "only the AGENTS.md section"
+  name = "only the git-rules section"
   why  = "a rules file decays as context grows, and this one has to hold at the moment the agent reaches for git. Both ship: the section stops the plan being made, the hook catches the call. They read from one string so they cannot drift"
 
   [[entry.instead_of]]
   name = "blocking the call outright"
   why  = "the same reason `graph-first` nudges rather than blocks. Verified 2026-08-11 that the call is harmless: `git init` against an unreachable gitdir refuses, names the missing directory, and leaves the pointer file untouched — the worktree survives intact. What it costs is turns and a promise the agent cannot keep, which a nudge answers and a wall does not"
+
+[[entry]]
+name    = "git-rules"
+kind    = "rules"
+feature = "git-notice"
+since   = "2026.08"
+because = "the hook can only fire once the agent has decided to run git, and by then it may already have offered the user a commit — this is what stops the plan being made rather than catching the call"
+remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml"
+
+  [[entry.measured]]
+  what  = "in the agent's context, every turn"
+  value = "649 B"
+  how   = "the section as shipped, byte for byte, computed by `every_rules_section_costs_what_it_says`. It is the same sentence the hook emits — one string, two deliveries, so the size is paid twice only when the hook fires"
+  on    = "2026-08-12"
+
+  [[entry.instead_of]]
+  name = "only the git-unavailable hook"
+  why  = "interception without orientation. Both ship and read from `GIT_ABSENT`, so they cannot drift; the pairing is argued from the other side under `git-unavailable`"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Considered and rejected.
@@ -192,6 +234,7 @@ because    = "looks like a cheaper grep, but `--pattern 'fn unfilled' --mode com
 [[entry]]
 name    = "memory"
 kind    = "mcp"
+feature = "memory"
 since   = "2026.08"
 because = "what a session learned outlives it — a removed session leaves no transcript to grep"
 remove  = "omh config mcp rm memory"
@@ -229,3 +272,21 @@ args    = [
   [[entry.instead_of]]
   name = "letting the agent grep the notes directory"
   why  = "grep cannot attach a note's date and layer, and an undated claim of unknown origin cannot be judged"
+
+[[entry]]
+name    = "memory-rules"
+kind    = "rules"
+feature = "memory"
+since   = "2026.08"
+because = "*record what surprised you* is a trigger, and an agent cannot look up a rule it does not know it needs — no tool description can carry that. The note shape rides along for the case `memory::deliver` documents: a session that got no memory server writes the file by hand"
+remove  = "omh config mcp rm memory"
+
+  [[entry.measured]]
+  what  = "in the agent's context, every turn"
+  value = "1963 B"
+  how   = "the section as shipped, byte for byte, computed by `every_rules_section_costs_what_it_says`. Larger than the other two because it carries the note template verbatim — worth re-measuring against how often `memory::deliver` actually fails, since `remember` enforces the same schema at the write whenever the server is there"
+  on    = "2026-08-12"
+
+  [[entry.instead_of]]
+  name = "the tool descriptions alone"
+  why  = "a description is attached to one tool and cannot say `prefer the other one`, which is exactly what the code-graph-or-recall choice needs. The 1512 B of tool surface is already counted under `memory`; this is the part that cannot live there"

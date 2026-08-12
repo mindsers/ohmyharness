@@ -10,12 +10,25 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub fn document(cap: Capability, render: Render, sources: &[PathBuf]) -> Result<String> {
+/// Render a capability into the shape this harness parses.
+///
+/// `own` is what omh itself contributes and what this repo has switched off.
+/// It is not a layer: omh's hooks belong to no directory, and a server whose
+/// feature is disabled here is still in your `mcp.json` — the file is yours and
+/// is left exactly as you have it.
+pub fn document(
+    cap: Capability,
+    render: Render,
+    sources: &[PathBuf],
+    own: &crate::base::Own,
+) -> Result<String> {
     match render {
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
-            mcp(render, &merge_servers(sources)?)
+            let mut servers = merge_servers(sources)?;
+            servers.retain(|name, _| !own.disabled_servers.contains(name));
+            mcp(render, &servers)
         }
-        Render::ClaudeSettings => claude_settings(&merge_hooks(sources)?),
+        Render::ClaudeSettings => claude_settings(&merge_hooks(sources, own)?),
         Render::Dir | Render::Concat => {
             anyhow::bail!("{cap}: `{render:?}` is staged by the launcher, not rendered")
         }
@@ -180,21 +193,63 @@ struct Hook {
 }
 
 /// Union by filename across layers; later layers shadow earlier ones.
-fn merge_hooks(dirs: &[PathBuf]) -> Result<BTreeMap<String, Hook>> {
+///
+/// A file answering to a manifest name is **never read** — see `Own::reserved`.
+/// Read-and-then-override is not enough: with the feature off there is nothing
+/// to override it with, and a repo initialised before generation still has the
+/// five seeded files, so switching a feature off would leave it running.
+///
+/// omh's own are inserted after the layers, but that ordering is not what makes
+/// them win. They are generated from the manifest and belong to no layer, which
+/// is the point: a hook you can edit is a hook omh can never ship a fix to, and
+/// `git-unavailable` has already needed one. A planned migration deletes the
+/// leftovers (`docs/design/profile.md`, P3); until then they are inert, and
+/// `omh why` says so rather than reporting one as yours.
+fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<String, Hook>> {
+    let reserved: BTreeMap<String, ()> = own
+        .reserved
+        .iter()
+        .map(|name| (format!("{name}.json"), ()))
+        .collect();
     let mut out = BTreeMap::new();
     for dir in dirs {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            continue;
+        // Absent is not unreadable — `config::read_layer` records what
+        // conflating them cost, and `config::hooks` reads these same
+        // directories the careful way. The two disagreeing meant `omh why`
+        // errored on a `chmod 000` hooks directory while a launch shipped a
+        // session without those hooks and said nothing. Generation made that
+        // quieter, not louder: omh's own are merged in afterwards, so the
+        // document is never empty and `omh doctor`'s hooks check passes while
+        // the user's whole layer is missing.
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json") {
-                out.insert(
-                    entry.file_name().to_string_lossy().into_owned(),
-                    read_json(&path)?,
-                );
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // A manifest name is omh's, on or off. Read and then
+                // overridden is not enough: with the feature off there is
+                // nothing to override it with, and the file would go on
+                // running.
+                if reserved.contains_key(&name) {
+                    continue;
+                }
+                out.insert(name, read_json(&path)?);
             }
         }
+    }
+    for hook in &own.hooks {
+        out.insert(
+            format!("{}.json", hook.name),
+            Hook {
+                event: hook.event.into(),
+                matcher: hook.matcher.into(),
+                command: hook.command.clone(),
+            },
+        );
     }
     Ok(out)
 }
@@ -337,7 +392,7 @@ mod tests {
             r#"{"event":"PostToolUse","matcher":"Edit","command":"three"}"#,
         );
 
-        let hooks = merge_hooks(&[dir.path().join("h")]).unwrap();
+        let hooks = merge_hooks(&[dir.path().join("h")], &Default::default()).unwrap();
         let out = claude_settings(&hooks).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
 
@@ -346,9 +401,84 @@ mod tests {
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["type"], "command");
     }
 
+    /// Generation must not have changed omh's own behaviour on its way from
+    /// files to the manifest.
+    ///
+    /// Every repo initialised before this has the five hooks on disk as JSON
+    /// `init` wrote, and the harness reads one settings document either way. So
+    /// the two renderings are compared byte for byte: what the seeded files
+    /// produce, and what generating them produces. A difference here is omh
+    /// silently altering hooks people are already running.
+    #[test]
+    fn generated_hooks_render_what_the_seeded_files_render() {
+        let dir = tempfile::tempdir().unwrap();
+        for h in crate::base::hooks() {
+            file(
+                dir.path(),
+                &format!("h/{}.json", h.name),
+                &serde_json::to_string(&serde_json::json!({
+                    "event": h.event,
+                    "matcher": h.matcher,
+                    "command": h.command,
+                }))
+                .unwrap(),
+            );
+        }
+
+        // The seeded side is given an `Own` that reserves nothing, so the
+        // files are read; the real one skips them, which the test above
+        // covers. What is compared here is the two renderings of the same
+        // hooks.
+        let seeded =
+            claude_settings(&merge_hooks(&[dir.path().join("h")], &Default::default()).unwrap())
+                .unwrap();
+        let generated = claude_settings(
+            &merge_hooks(
+                &[],
+                &crate::base::Own {
+                    hooks: crate::base::hooks(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(seeded, generated);
+    }
+
+    /// A directory omh cannot read is not a directory with no hooks in it.
+    ///
+    /// The `config::read_layer` lesson, in the function generation rewrote —
+    /// and generation made it quieter rather than louder: omh's own five are
+    /// merged in afterwards, so the rendered document is never empty and
+    /// `omh doctor`'s hooks check passes while the user's entire layer is
+    /// gone. `config::hooks` reads these same directories and errors; the two
+    /// commands disagreed about whether the same filesystem state was a
+    /// problem.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_hooks_directory_is_an_error_not_an_empty_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/a.json",
+            r#"{"event":"Stop","command":"one"}"#,
+        );
+        let hooks = dir.path().join("h");
+        std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let err = merge_hooks(std::slice::from_ref(&hooks), &Default::default())
+            .expect_err("an unreadable layer must be reported, not skipped");
+        // Restore before the assertion so a failure cannot leave the temp dir
+        // undeletable.
+        std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(err.to_string().contains("h"), "must name the path: {err}");
+    }
+
     #[test]
     fn staged_renders_are_not_documents() {
-        let err = document(Capability::Skills, Render::Dir, &[]).unwrap_err();
+        let err = document(Capability::Skills, Render::Dir, &[], &Default::default()).unwrap_err();
         assert!(err.to_string().contains("staged by the launcher"));
     }
 

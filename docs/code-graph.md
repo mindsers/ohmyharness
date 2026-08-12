@@ -42,15 +42,20 @@ index built on the host lands where no session can read it.
 ## Current, used, and visible
 
 An MCP server on its own is inert: indexed once, never refreshed, never reached
-for. Four hooks are what make this a base-set entry rather than an installed
-package.
+for. Four hooks and a section of the rules are what make this a base-set entry
+rather than an installed package — and all six are one feature, `codegraph`,
+removed and disabled together.
 
 | Hook | Event | Cost | Buys |
 |---|---|---|---|
 | `graph-orient` | `SessionStart` | 2,300 B per context rebuild | modules, layers, boundaries, entry points |
-| `graph-first` | `PreToolUse` Grep\|Glob | ~40 B per grep | structural questions in one call |
+| `graph-first` | `PreToolUse` Grep\|Glob | 243 B per grep¹ | structural questions in one call |
 | `graph-read` | `PreToolUse` Read | 0 unless it speaks | **1,511 bytes** for one symbol instead of a whole module |
 | `graph-refresh` | `Stop` | 0.14s per turn | a graph describing the code as it is *now* |
+
+¹ For a `ohmyharness-s01`-length project name, which the nudge interpolates
+twice — the figure moves two bytes per character of `<repo>-<session>`.
+Computed from the shipped literals rather than typed in.
 
 **Kept current.** A session's worktree is not the checkout it started from; it
 holds whatever the agent has since written. Each session indexes its own, and
@@ -69,9 +74,16 @@ unless a symbol lookup would actually be cheaper — a source file large enough 
 be worth not reading whole. `Read` is the most frequent tool there is, and a
 nudge on every call becomes noise the model learns to skip.
 
-Hooks reference `$OMH_GRAPH_PROJECT` rather than baking in a session, so the
-files stay shared and reviewable, and the agent is told *which* graph is its own
-at the moment it is choosing.
+Hooks reference `$OMH_GRAPH_PROJECT` rather than baking in a session, so one
+hook serves every session and the agent is told *which* graph is its own at the
+moment it is choosing.
+
+They are **generated from the base manifest at launch**, not files you can edit
+— which is what lets omh ship a fix to one. Switching them off means switching
+off the graph: `omh config mcp rm codegraph` to remove it, or
+`[omh] codegraph = false` in `.omh/settings.toml` for one repo. There is
+deliberately no way to keep the graph and drop `graph-refresh`, because that is
+the combination that manufactures confident wrong answers.
 
 ### What the hook contract cost
 

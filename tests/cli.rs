@@ -135,31 +135,6 @@ fn lint_passes_a_store_that_only_has_warnings() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("warning"));
 }
 
-/// With no MCP surface in M1, `.omh/profile/AGENTS.md` is the only thing that
-/// tells the agent the store exists — so a repo that ran `init` before the
-/// store shipped got the feature and no way to know about it.
-///
-/// Ignored by default because `init` builds the base image, and this is the
-/// only test in the suite that needs a container runtime. Marking it beats
-/// excluding whole test targets per platform: the run *reports* it as ignored,
-/// and a new integration test is included everywhere by default instead of
-/// silently dropping off macOS. CI runs it with `-- --include-ignored`.
-#[test]
-#[ignore = "needs a container runtime; run with --include-ignored"]
-fn init_delivers_the_note_rules_to_a_repo_that_already_had_agents_md() {
-    let sb = sandbox();
-    let agents = sb.repo.join(".omh/profile/AGENTS.md");
-    std::fs::create_dir_all(agents.parent().unwrap()).unwrap();
-    let human = "# Project rules\n\n## House style\n\nTabs, and no adverbs.\n";
-    std::fs::write(&agents, human).unwrap();
-
-    assert!(sb.omh(&["init"]).status.success());
-
-    let body = std::fs::read_to_string(&agents).unwrap();
-    assert!(body.starts_with(human), "a human's file must survive whole");
-    assert!(body.contains("## Memory"), "the rules must arrive");
-}
-
 /// `--at` exists to reach one of two notes that share a key. Naming a file
 /// that holds neither must never fall through to deleting one of them.
 #[test]

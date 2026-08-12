@@ -92,6 +92,18 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
         let table: toml::Table =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         for (key, value) in table {
+            // `settings.toml` owns `[omh]`, and this file is the one `init`
+            // creates and comments — so writing the feature switch here is the
+            // likely mistake rather than the exotic one. Read by nobody and
+            // reported by nothing is the shape `settings.rs` refuses in the
+            // other direction, and it has to be refused in both or the pair of
+            // files quietly swallows whichever key lands in the wrong one.
+            if key == "omh" {
+                anyhow::bail!(
+                    "{}: `[omh]` switches omh's own features and is read from                      .omh/settings.toml, not from this file",
+                    path.display()
+                );
+            }
             found.push((key, repr(&value), layer));
         }
     }

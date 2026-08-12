@@ -100,11 +100,26 @@ pub fn credential_checks(adapter: &Adapter) -> Vec<Check> {
 }
 
 /// What must be true inside the sandbox, given this profile and adapter.
-pub fn checks(profile: &Profile, adapter: &Adapter) -> Vec<Check> {
+pub fn checks(profile: &Profile, adapter: &Adapter, own: &crate::base::Own) -> Vec<Check> {
     let mut out = Vec::new();
     for capability in Capability::ALL {
         let sources = profile.sources(capability);
-        if sources.is_empty() {
+        // Two capabilities are mounted whether or not a layer sources them,
+        // because omh generates part of them from the base manifest. Asking
+        // the profile is the same mistake `container::plan` made about rules:
+        // it answers about the layers, and the question is about the mount.
+        //
+        // Rules has one case this cannot see — a repo whose only rules are its
+        // own tracked file, with every omh feature off. That composes and
+        // mounts, and goes unchecked. Erring toward no check rather than a
+        // check that fails forever, which is the trade `omh doctor` has to
+        // make while it reads a profile rather than a plan.
+        let generated = match capability {
+            Capability::Rules => !own.sections.is_empty(),
+            Capability::Hooks => !own.hooks.is_empty(),
+            _ => false,
+        };
+        if sources.is_empty() && !generated {
             continue;
         }
         // A capability the harness cannot express was already reported as
@@ -123,7 +138,7 @@ pub fn checks(profile: &Profile, adapter: &Adapter) -> Vec<Check> {
             Render::Concat => Expect::NonEmptyFile,
             Render::Dir => Expect::Entries(entry_names(&sources)),
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
-                Expect::Mentions(server_names(&sources))
+                Expect::Mentions(server_names(&sources, own))
             }
             Render::ClaudeSettings => Expect::NonEmptyFile,
         };
@@ -158,9 +173,20 @@ fn entry_names(sources: &[PathBuf]) -> Vec<String> {
     names
 }
 
-fn server_names(sources: &[PathBuf]) -> Vec<String> {
+/// What the document is expected to mention — which is what the launcher
+/// renders, not what the layers declare.
+///
+/// A server whose feature is off here is deliberately left out of that
+/// document. Demanding it makes `omh doctor` fail forever and blame the
+/// harness for obeying, which is the opposite of what this command is for.
+fn server_names(sources: &[PathBuf], own: &crate::base::Own) -> Vec<String> {
     crate::render::parse_layers(sources)
-        .map(|servers| servers.into_keys().collect())
+        .map(|servers| {
+            servers
+                .into_keys()
+                .filter(|name| !own.disabled_servers.contains(name))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -292,18 +318,85 @@ mod tests {
         }
     }
 
+    fn own() -> crate::base::Own {
+        own_with(&Default::default())
+    }
+
+    /// Every server the manifest names counts as installed: `own` also
+    /// switches a feature off when its server is gone from the profile, and a
+    /// fixture declaring none would disable everything for the wrong reason.
+    fn own_with(off: &std::collections::BTreeSet<String>) -> crate::base::Own {
+        let manifest = crate::base::Manifest::load_dir(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/base"
+        )))
+        .unwrap();
+        let installed = manifest.servers().into_keys().collect();
+        crate::base::own(&manifest, off, &installed).unwrap()
+    }
+
     fn adapter(name: &str) -> Adapter {
         Adapter::find(Path::new(ADAPTERS), name).unwrap()
+    }
+
+    /// omh's own hooks and rules sections come from the base manifest, not
+    /// from a layer — so a profile that sources neither still has both mounted,
+    /// and both have to be checked.
+    ///
+    /// Asking the profile whether a capability is worth checking is the same
+    /// mistake `container::plan` made about rules: it answers about the layers
+    /// and the question is about the mount. A check that quietly disappears is
+    /// worse than one that fails, because `omh doctor` reporting 4/4 is the
+    /// evidence everything else here defers to.
+    #[test]
+    fn a_capability_the_profile_does_not_source_is_still_checked() {
+        let fx = fixture();
+        let names: Vec<String> = checks(&fx.profile, &adapter("claude"), &own())
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "hooks"),
+            "omh's own hooks are mounted with no hooks layer to source them: {names:?}"
+        );
+    }
+
+    /// A server whose feature is off here is deliberately absent from the
+    /// document the harness is given, so a check demanding it fails forever
+    /// and blames the harness for obeying.
+    ///
+    /// Found by running `omh doctor` with `[omh] codegraph = false`, not by
+    /// the suite: the checks were built from the layer files while the plan
+    /// renders from the layers *minus* what this repo switched off, and only
+    /// a real probe compares the two.
+    #[test]
+    fn a_server_this_repo_switched_off_is_not_demanded() {
+        let fx = fixture();
+        let off = own_with(&["codegraph".to_string()].into());
+
+        let mcp = checks(&fx.profile, &adapter("claude"), &off)
+            .into_iter()
+            .find(|c| c.name == "mcp")
+            .expect("claude stages mcp");
+        assert_eq!(
+            mcp.expect,
+            Expect::Mentions(vec![]),
+            "the only server in this profile is codegraph, and it is off here"
+        );
     }
 
     #[test]
     fn every_declared_capability_is_checked() {
         let fx = fixture();
-        let got: Vec<_> = checks(&fx.profile, &adapter("claude"))
+        let got: Vec<_> = checks(&fx.profile, &adapter("claude"), &own())
             .into_iter()
             .map(|c| c.name)
             .collect();
-        assert_eq!(got, vec!["AGENTS", "skills", "mcp", "subagents"]);
+        assert_eq!(
+            got,
+            vec!["AGENTS", "skills", "mcp", "subagents", "hooks"],
+            "hooks are checked with no hooks layer, because omh generates them"
+        );
     }
 
     /// A capability the harness cannot express is not a failure — it was
@@ -311,7 +404,7 @@ mod tests {
     #[test]
     fn capabilities_the_harness_cannot_express_are_not_checked() {
         let fx = fixture();
-        let caps: Vec<String> = checks(&fx.profile, &adapter("opencode"))
+        let caps: Vec<String> = checks(&fx.profile, &adapter("opencode"), &own())
             .into_iter()
             .map(|c| c.name)
             .collect();
@@ -327,7 +420,7 @@ mod tests {
     #[test]
     fn checks_target_guest_paths_only() {
         let fx = fixture();
-        for check in checks(&fx.profile, &adapter("claude")) {
+        for check in checks(&fx.profile, &adapter("claude"), &own()) {
             let p = check.guest.to_string_lossy().to_string();
             assert!(
                 p.starts_with("/work") || p.starts_with(GUEST_HOME),
@@ -339,7 +432,7 @@ mod tests {
     #[test]
     fn content_checks_name_what_must_be_present() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"));
+        let cs = checks(&fx.profile, &adapter("claude"), &own());
 
         let skills = cs.iter().find(|c| c.name == "skills").unwrap();
         assert_eq!(skills.expect, Expect::Entries(vec!["graphify".into()]));
@@ -371,7 +464,7 @@ mod tests {
     #[test]
     fn the_probe_reports_one_line_per_check() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"));
+        let cs = checks(&fx.profile, &adapter("claude"), &own());
         let script = probe_script(&cs);
         for c in &cs {
             assert!(

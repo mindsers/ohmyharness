@@ -19,14 +19,15 @@
 
 use crate::base::{Entry, Manifest, Rejected};
 use crate::config::{Layer, Setting};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// What omh knows, assembled from the manifest and the resolved profile.
 pub struct Catalog<'a> {
     pub manifest: &'a Manifest,
     /// Name → exactly what omh ships, for deciding whether your copy is
-    /// modified. Built by the caller because the baseline for an MCP server
-    /// lives in the manifest while a hook's lives in code.
+    /// modified. Only MCP servers are compared: everything else omh ships is
+    /// generated at launch, so there is no copy of yours for it to differ
+    /// from — a file of that name is a leftover, and `Generated` says so.
     pub baselines: BTreeMap<String, String>,
     /// What is actually installed, with the layer it won in.
     pub installed: Vec<Setting>,
@@ -36,6 +37,11 @@ pub struct Catalog<'a> {
     /// Carries the command and layer, not just a label, because the name alone
     /// proves nothing — anyone can create `rust-test.json`.
     pub derived: BTreeMap<String, Derived>,
+    /// Features this repo has switched off. Not a property of the entry —
+    /// `omh why` answers about the base set and about *here*, and an answer
+    /// that explains why something is installed while it is disabled three
+    /// feet away is only half true.
+    pub off: BTreeSet<String>,
 }
 
 /// What `init` writes for a detected stack, and where.
@@ -75,6 +81,18 @@ pub enum Verdict<'a> {
     /// omh chose it and it is not in your profile — removed, or `init` has not
     /// run. Not an error: leaving is supposed to be easy.
     Removed { entry: &'a Entry },
+    /// omh generates it from the manifest at launch. It is not a file
+    /// anywhere, which is the point — a hook you can edit is a hook omh can
+    /// never ship a fix to.
+    ///
+    /// `stale` is a copy an older omh seeded, still on disk and no longer
+    /// read. Carried rather than ignored: reporting it as what runs would be a
+    /// confident wrong answer, and not mentioning it leaves somebody editing a
+    /// file with no effect.
+    Generated {
+        entry: &'a Entry,
+        stale: Option<&'a Setting>,
+    },
     /// omh wrote it, from your repo rather than from its opinion. Nothing to
     /// argue about and nothing curated — `cargo fmt` is just what formats Rust.
     Derived { yours: &'a Setting, from: String },
@@ -83,6 +101,17 @@ pub enum Verdict<'a> {
     /// Considered and turned down. Recorded so the same candidate is not
     /// re-litigated every time somebody rediscovers it.
     Rejected { rejection: &'a Rejected },
+    /// A feature with no entry of its own — `git-notice` names the pairing of
+    /// a hook and a rules section, and nothing is called that.
+    ///
+    /// Answerable because feature names are user-facing: they are the whole
+    /// `[omh]` key space, and the manifest prints `git-notice = false` as the
+    /// way out of `git-unavailable`. A name omh tells you to type and then
+    /// does not recognise is this command's own failure mode, pointing inward.
+    Feature {
+        name: String,
+        gathers: Vec<&'a Entry>,
+    },
     /// Nothing known. Lists what is, rather than guessing.
     Unknown { known: Vec<String> },
 }
@@ -91,6 +120,15 @@ impl<'a> Catalog<'a> {
     pub fn why(&'a self, name: &str) -> Verdict<'a> {
         let entry = self.manifest.entry(name);
         let yours = self.installed.iter().find(|s| s.key == name);
+
+        // Resolved before the file lookup, because for these the file is not
+        // the answer even when there is one.
+        if let Some(entry) = entry.filter(|e| e.kind != crate::base::Kind::Mcp) {
+            return Verdict::Generated {
+                entry,
+                stale: yours,
+            };
+        }
 
         match (entry, yours) {
             (Some(entry), Some(yours)) => match self.baselines.get(name) {
@@ -120,9 +158,24 @@ impl<'a> Catalog<'a> {
             },
             (None, None) => match self.manifest.rejection(name) {
                 Some(rejection) => Verdict::Rejected { rejection },
-                None => Verdict::Unknown {
-                    known: self.known(),
-                },
+                None => {
+                    let gathers: Vec<&Entry> = self
+                        .manifest
+                        .entries
+                        .iter()
+                        .filter(|e| e.feature == name)
+                        .collect();
+                    if gathers.is_empty() {
+                        Verdict::Unknown {
+                            known: self.known(),
+                        }
+                    } else {
+                        Verdict::Feature {
+                            name: name.to_string(),
+                            gathers,
+                        }
+                    }
+                }
             },
         }
     }
@@ -136,6 +189,10 @@ impl<'a> Catalog<'a> {
             .entries
             .iter()
             .map(|e| e.name.clone())
+            // Features too: they are the `[omh]` key space and the manifest
+            // instructs people to type them, so a list that omits them sends
+            // somebody looking for a name omh itself printed.
+            .chain(self.manifest.entries.iter().map(|e| e.feature.clone()))
             .chain(self.installed.iter().map(|s| s.key.clone()))
             .chain(self.manifest.rejected.iter().map(|r| r.name.clone()))
             .collect();
@@ -210,6 +267,33 @@ fn costs(entry: &Entry, version: &str, out: &mut String) {
     }
 }
 
+/// What this entry is part of, and whether that is on here.
+///
+/// Both halves or neither: "part of codegraph" is only half an answer in a
+/// repo where codegraph is switched off, and that is exactly the repo where
+/// somebody is asking. A feature's own entry also lists what it brought,
+/// because the question "what does removing this take with it" has no other
+/// answer once the grouping stopped being a comment.
+fn feature(catalog: &Catalog, entry: &Entry, out: &mut String) {
+    let off = if catalog.off.contains(&entry.feature) {
+        "   (off here)"
+    } else {
+        ""
+    };
+    out.push_str(&format!("  {:<11} {}{off}\n", "part of", entry.feature));
+
+    let brings: Vec<&str> = catalog
+        .manifest
+        .entries
+        .iter()
+        .filter(|e| e.feature == entry.feature && e.name != entry.name)
+        .map(|e| e.name.as_str())
+        .collect();
+    if entry.name == entry.feature && !brings.is_empty() {
+        out.push_str(&format!("  {:<11} {}\n", "brings", brings.join(", ")));
+    }
+}
+
 fn alternatives(entry: &Entry, out: &mut String) {
     let width = entry
         .instead_of
@@ -231,13 +315,18 @@ fn alternatives(entry: &Entry, out: &mut String) {
 /// edit, a permissions error read as "not installed" — were all invisible for
 /// the same reason: nothing said which manifest, at which version, answered.
 /// One line turns each of them from a confident wrong answer into a visible one.
-pub fn render_with_source(verdict: &Verdict, version: &str, source: &str) -> String {
-    let mut out = render(verdict, version);
+pub fn render_with_source(
+    catalog: &Catalog,
+    verdict: &Verdict,
+    version: &str,
+    source: &str,
+) -> String {
+    let mut out = render(catalog, verdict, version);
     out.push_str(&format!("\n  answered from {source}\n"));
     out
 }
 
-pub fn render(verdict: &Verdict, version: &str) -> String {
+pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
     let mut out = String::new();
     match verdict {
         Verdict::Omh { entry, yours } => {
@@ -246,6 +335,7 @@ pub fn render(verdict: &Verdict, version: &str) -> String {
                 entry.name, entry.since
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
+            feature(catalog, entry, &mut out);
             costs(entry, version, &mut out);
             alternatives(entry, &mut out);
             out.push_str(&format!("  {:<11} {}\n", "installed", yours.layer));
@@ -266,6 +356,7 @@ pub fn render(verdict: &Verdict, version: &str) -> String {
                 "on disk", yours.value, yours.layer
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
+            feature(catalog, entry, &mut out);
             costs(entry, version, &mut out);
             out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
             // Which of the two it is, omh does not know — so it says so rather
@@ -275,12 +366,45 @@ pub fn render(verdict: &Verdict, version: &str) -> String {
                  `init` seeds your profile once and never rewrites it.\n",
             );
         }
+        Verdict::Generated { entry, stale } => {
+            out.push_str(&format!(
+                "{} — omh's own, generated at launch since {}\n\n",
+                entry.name, entry.since
+            ));
+            out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
+            feature(catalog, entry, &mut out);
+            costs(entry, version, &mut out);
+            alternatives(entry, &mut out);
+            out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
+            // Line by line rather than one continued literal. The `\` escape
+            // does strip the next line's leading whitespace, so the source
+            // reads correctly and prints correctly — until `cargo fmt` joins
+            // the literal onto one line and keeps that indentation as literal
+            // spaces. Checked twice here, both times by reading the output of
+            // a real `omh why` rather than the source.
+            match stale {
+                Some(stale) => {
+                    out.push_str(&format!(
+                        "\n  A file of this name is in your {} layer and is no longer read.\n",
+                        stale.layer
+                    ));
+                    out.push_str("  `init` seeded these before omh generated them, so editing\n");
+                    out.push_str("  it changes nothing.\n");
+                }
+                None => {
+                    out.push_str("\n  Not a file anywhere — omh writes it into the session and\n");
+                    out.push_str("  nothing else. That is what lets a fix reach you with the\n");
+                    out.push_str("  upgrade.\n");
+                }
+            }
+        }
         Verdict::Removed { entry } => {
             out.push_str(&format!(
                 "{} — omh's choice, not installed here\n\n",
                 entry.name
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", entry.because));
+            feature(catalog, entry, &mut out);
             costs(entry, version, &mut out);
             alternatives(entry, &mut out);
             out.push_str(&format!("  {:<11} omh init\n", "restore"));
@@ -325,6 +449,30 @@ pub fn render(verdict: &Verdict, version: &str) -> String {
             ));
             out.push_str(&format!("  {:<11} {}\n", "because", rejection.because));
         }
+        Verdict::Feature { name, gathers } => {
+            let off = if catalog.off.contains(name) {
+                "  —  off in this repo"
+            } else {
+                ""
+            };
+            out.push_str(&format!("{name} — an omh feature{off}\n\n"));
+            let width = gathers
+                .iter()
+                .map(|e| e.name.chars().count())
+                .max()
+                .unwrap_or(0);
+            let mut label = "gathers";
+            for entry in gathers {
+                out.push_str(&format!(
+                    "  {label:<11} {:<width$}   {}\n",
+                    entry.name, entry.because
+                ));
+                label = "";
+            }
+            out.push_str(&format!("  {:<11} {}\n", "remove", gathers[0].remove));
+            out.push_str("\n  A feature is all or nothing — `omh why <name>` explains\n");
+            out.push_str("  each part, and there is no way to keep only some of them.\n");
+        }
         Verdict::Unknown { known } => {
             out.push_str("omh has nothing recorded under that name.\n\n");
             out.push_str("  known:\n");
@@ -368,6 +516,7 @@ mod tests {
             baselines,
             installed,
             derived: BTreeMap::new(),
+            off: BTreeSet::new(),
         }
     }
 
@@ -403,6 +552,133 @@ mod tests {
         let m = manifest();
         let c = catalog(&m, vec![]);
         assert!(matches!(c.why("codegraph"), Verdict::Removed { .. }));
+    }
+
+    /// `graph-first` is not a hook that happens to mention the graph; it is
+    /// part of the graph, and removing the server takes it too.
+    ///
+    /// Unanswerable while the grouping was a comment header in the manifest,
+    /// which is the whole reason `feature` became a field. Asserted on all
+    /// three entry verdicts because a removed or edited entry is exactly when
+    /// somebody is asking what it belonged to.
+    #[test]
+    fn every_entry_answer_names_the_feature_it_is_part_of() {
+        let m = manifest();
+        for c in [
+            catalog(&m, vec![setting("graph-first", "nudge", Layer::Shared)]),
+            catalog(&m, vec![]),
+            catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]),
+            catalog(
+                &m,
+                vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
+            ),
+        ] {
+            let name = if c.installed.iter().any(|s| s.key == "codegraph") {
+                "codegraph"
+            } else {
+                "graph-first"
+            };
+            let verdict = c.why(name);
+            // One line, not two `contains` — `remove` already names the
+            // feature for these entries, so a split assertion passes on
+            // output that never says what anything is part of.
+            let out = render(&c, &verdict, "2026.08");
+            assert!(
+                out.lines()
+                    .any(|l| l.trim().starts_with("part of") && l.trim().ends_with("codegraph")),
+                "must say what it belongs to: {out}"
+            );
+        }
+    }
+
+    /// A hook or a rules section is generated from the manifest at launch and
+    /// is not a file anywhere, so the file-shaped answers are all wrong about
+    /// it: `Removed` says "not installed here" about something that is
+    /// running, and `Omh` points at a layer nothing reads.
+    ///
+    /// The leftover case is the one that matters. Every repo initialised
+    /// before generation still has five hook files sitting in its profile;
+    /// they lose the merge, so reporting one as what omh ships would be a
+    /// confident wrong answer about the thing this command exists to be right
+    /// about.
+    #[test]
+    fn a_generated_entry_is_generated_not_missing_and_not_yours() {
+        let m = manifest();
+
+        for name in ["graph-refresh", "git-rules"] {
+            assert!(
+                matches!(catalog(&m, vec![]).why(name), Verdict::Generated { .. }),
+                "{name} with no file"
+            );
+        }
+
+        let leftover = setting("graph-refresh", "what an older omh wrote", Layer::Shared);
+        let c = catalog(&m, vec![leftover]);
+        let verdict = c.why("graph-refresh");
+        assert!(
+            matches!(verdict, Verdict::Generated { .. }),
+            "a leftover file does not decide, so it cannot be the answer"
+        );
+        let out = render(&c, &verdict, "2026.08");
+        assert!(
+            out.contains("shared") && out.contains("no longer read"),
+            "the dead file is named rather than ignored: {out}"
+        );
+    }
+
+    /// Off here is a fact about this repo, and the answer has to carry it —
+    /// otherwise `omh why` explains why something is installed while it is
+    /// switched off three feet away.
+    #[test]
+    fn a_verdict_says_whether_the_feature_is_on_here() {
+        let m = manifest();
+        let mut c = catalog(&m, vec![]);
+        c.off = ["codegraph".to_string()].into();
+
+        let out = render(&c, &c.why("graph-refresh"), "2026.08");
+        assert!(out.contains("off here"), "got: {out}");
+    }
+
+    /// `git-notice` is a feature with no entry of its own, and the manifest
+    /// prints `git-notice = false` as the way out of `git-unavailable`. Asked
+    /// about it, omh answered "nothing recorded under that name" and listed
+    /// names that did not include it.
+    ///
+    /// Feature names are user-facing vocabulary now — they are the whole
+    /// `[omh]` key space, and `settings::validate` errors in terms of them —
+    /// so the command built to explain omh's choices has to know them. An
+    /// instruction printed as the way out and then not recognised is the shape
+    /// CONTRIBUTING singles out: it worked, it said so, and it was wrong.
+    #[test]
+    fn a_feature_is_explained_even_when_no_entry_shares_its_name() {
+        let m = manifest();
+        let c = catalog(&m, vec![]);
+
+        let out = render(&c, &c.why("git-notice"), "2026.08");
+        assert!(
+            out.contains("git-unavailable") && out.contains("git-rules"),
+            "must list what the feature gathers: {out}"
+        );
+
+        match c.why("teleport") {
+            Verdict::Unknown { known } => assert!(
+                known.contains(&"git-notice".to_string()),
+                "a name omh tells you to type has to be discoverable: {known:?}"
+            ),
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    /// The other half of the grouping: what a feature brought with it. Nobody
+    /// can answer "what does removing codegraph take" from a comment header.
+    #[test]
+    fn why_a_feature_lists_what_it_brings() {
+        let m = manifest();
+        let c = catalog(&m, vec![]);
+        let out = render(&c, &c.why("codegraph"), "2026.08");
+        for name in ["graph-orient", "graph-first", "graph-read", "graph-refresh"] {
+            assert!(out.contains(name), "{name} is part of codegraph: {out}");
+        }
     }
 
     /// The load-bearing case: omh must not claim authorship of your choices.
@@ -447,18 +723,20 @@ mod tests {
         }
     }
 
-    /// Hooks have no `command` in the manifest — theirs lives in code — so
-    /// without a baseline omh cannot tell modified from untouched. It must not
-    /// assume the worse answer and accuse you of an edit you did not make.
+    /// Without a baseline omh cannot tell modified from untouched, and it must
+    /// not assume the worse answer and accuse you of an edit you did not make.
+    ///
+    /// A manifest can reach this: `command` is optional, and `~/.omh/base` is
+    /// a directory anyone can drop a file into.
     #[test]
     fn an_entry_with_no_baseline_is_not_reported_as_modified() {
         let m = manifest();
         let mut c = catalog(
             &m,
-            vec![setting("graph-read", "anything at all", Layer::Shared)],
+            vec![setting("codegraph", "anything at all", Layer::Shared)],
         );
-        c.baselines.remove("graph-read");
-        assert!(matches!(c.why("graph-read"), Verdict::Omh { .. }));
+        c.baselines.remove("codegraph");
+        assert!(matches!(c.why("codegraph"), Verdict::Omh { .. }));
     }
 
     // ── rendering ────────────────────────────────────────────────────────────
@@ -470,7 +748,7 @@ mod tests {
             &m,
             vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
         );
-        let out = render(&c.why("codegraph"), "2026.08");
+        let out = render(&c, &c.why("codegraph"), "2026.08");
 
         assert!(out.contains("omh's choice"), "{out}");
         assert!(
@@ -495,7 +773,7 @@ mod tests {
     fn every_measured_cost_carries_the_date_it_was_taken() {
         let m = manifest();
         for entry in &m.entries {
-            let out = render(&Verdict::Removed { entry }, "2026.08");
+            let out = render(&catalog(&m, vec![]), &Verdict::Removed { entry }, "2026.08");
             for measured in &entry.measured {
                 let line = out
                     .lines()
@@ -521,6 +799,7 @@ version = "2026.08"
 [[entry]]
 name = "x"
 kind = "mcp"
+feature = "x"
 since = "2026.08"
 because = "b"
 remove = "r"
@@ -538,7 +817,9 @@ why = "w"
         .unwrap();
         // Measured in 2026-01, shipped in a base set cut in 2026.08: the number
         // predates the version it is being presented as evidence for.
+        let c = catalog(&m, vec![]);
         let out = render(
+            &c,
             &Verdict::Removed {
                 entry: &m.entries[0],
             },
@@ -553,6 +834,7 @@ why = "w"
         // not stale. Without this the check could be `=> true` and stay green —
         // which it was, and did.
         let fresh = render(
+            &c,
             &Verdict::Removed {
                 entry: &m.entries[0],
             },
@@ -576,14 +858,18 @@ why = "w"
         let m = manifest();
         let entry = m.entry("codegraph").unwrap();
 
-        let current = render(&Verdict::Removed { entry }, &m.version);
+        let current = render(
+            &catalog(&m, vec![]),
+            &Verdict::Removed { entry },
+            &m.version,
+        );
         assert!(
             !current.contains("stale"),
             "shipped numbers are current:\n{current}"
         );
 
         // A later cut of the base set, with the same measurements carried over.
-        let later = render(&Verdict::Removed { entry }, "2027.01");
+        let later = render(&catalog(&m, vec![]), &Verdict::Removed { entry }, "2027.01");
 
         // Assert the marker on the cost line itself, not merely the word
         // "stale" somewhere in the output. There are two call sites — the
@@ -609,7 +895,11 @@ why = "w"
     fn the_method_is_shown_for_every_cost_not_only_stale_ones() {
         let m = manifest();
         let entry = m.entry("codegraph").unwrap();
-        let out = render(&Verdict::Removed { entry }, &m.version);
+        let out = render(
+            &catalog(&m, vec![]),
+            &Verdict::Removed { entry },
+            &m.version,
+        );
 
         for measured in &entry.measured {
             assert!(
@@ -678,7 +968,7 @@ why = "w"
             other => panic!("expected Derived, got {other:?}"),
         }
 
-        let out = render(&c.why("rust-format"), "2026.08");
+        let out = render(&c, &c.why("rust-format"), "2026.08");
         assert!(!out.contains("base set"), "claims it is curated:\n{out}");
         assert!(
             !out.contains("your choice"),
@@ -696,7 +986,7 @@ why = "w"
     fn your_own_choice_never_borrows_omhs_authority() {
         let m = manifest();
         let c = catalog(&m, vec![setting("linear", "npx", Layer::Local)]);
-        let out = render(&c.why("linear"), "2026.08");
+        let out = render(&c, &c.why("linear"), "2026.08");
 
         assert!(out.contains("your choice"), "{out}");
         assert!(!out.contains("base set"), "claims omh installed it:\n{out}");
@@ -717,7 +1007,7 @@ why = "w"
     fn a_differing_entry_pairs_each_value_with_its_own_label() {
         let m = manifest();
         let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
-        let out = render(&c.why("codegraph"), "2026.08");
+        let out = render(&c, &c.why("codegraph"), "2026.08");
 
         let line = |label: &str| {
             out.lines()
@@ -738,7 +1028,7 @@ why = "w"
     fn a_difference_never_claims_who_caused_it() {
         let m = manifest();
         let c = catalog(&m, vec![setting("codegraph", "my-fork", Layer::Local)]);
-        let out = render(&c.why("codegraph"), "2026.08");
+        let out = render(&c, &c.why("codegraph"), "2026.08");
         assert!(
             !out.contains("modified by you") && !out.contains("you set"),
             "omh does not know who changed it:\n{out}"
@@ -758,6 +1048,7 @@ why = "w"
             vec![setting("codegraph", "codebase-memory-mcp", Layer::Shared)],
         );
         let out = render_with_source(
+            &c,
             &c.why("codegraph"),
             "2026.08",
             "/home/x/.omh/base/2026.08.toml · 2026.08",
@@ -774,7 +1065,7 @@ why = "w"
     fn a_rejection_prints_its_reasoning_and_when_it_was_considered() {
         let m = manifest();
         let c = catalog(&m, vec![]);
-        let out = render(&c.why("gitnexus"), &m.version);
+        let out = render(&c, &c.why("gitnexus"), &m.version);
 
         let r = m.rejection("gitnexus").unwrap();
         assert!(
@@ -797,7 +1088,7 @@ why = "w"
     fn a_removed_entry_says_how_to_get_it_back() {
         let m = manifest();
         let c = catalog(&m, vec![]);
-        let out = render(&c.why("codegraph"), &m.version);
+        let out = render(&c, &c.why("codegraph"), &m.version);
         assert!(out.contains("not installed here"), "{out}");
         assert!(out.contains("omh init"), "no way back:\n{out}");
     }
@@ -806,7 +1097,7 @@ why = "w"
     fn an_unknown_name_prints_the_alternatives_it_does_know() {
         let m = manifest();
         let c = catalog(&m, vec![]);
-        let out = render(&c.why("lienar"), "2026.08");
+        let out = render(&c, &c.why("lienar"), "2026.08");
         assert!(out.contains("codegraph"), "{out}");
         assert!(!out.contains("omh's choice"), "guessed at a match:\n{out}");
     }

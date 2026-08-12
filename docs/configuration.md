@@ -76,6 +76,34 @@ warning: the shared layer is COMMITTED — never put a secret here
 what lets the layer beneath take over again — the difference matters when you
 are overriding a team default temporarily.
 
+## `settings.toml`
+
+`<repo>/.omh/settings.toml` says what this repo does with **omh's own
+features**:
+
+```toml
+[omh]
+codegraph = false     # the server, its four hooks and its section of the rules
+```
+
+Feature names only. `graph-first = false` is refused, naming the feature it
+belongs to — keeping the graph while dropping one of the things that make it
+used is taking a bundle apart, not changing a setting, and "graph on, refresher
+off" is a graph that quietly stops tracking the code.
+
+Disabling is not removal: your `mcp.json` is untouched, the server is left out
+of the document *this* session is given, and the next repo gets it back.
+**Removing the server is the other door** — `omh config mcp rm codegraph` takes
+the feature with it, hooks and rules section included, because a hook nudging
+the agent toward a server that is gone is worse than no hook.
+
+It layers like everything else — `~/.omh/settings.toml`, then this file, then
+`<repo>/.omh/settings.local.toml`, which `omh init` adds to `.omh/.gitignore`.
+
+Nothing else lives here yet. A `carry_in` written into it is refused by name
+rather than read and ignored; it belongs in `policy.toml` until the layer model
+below is replaced.
+
 ## `policy.toml`
 
 | Key | Values | Meaning |
@@ -170,11 +198,27 @@ into the document the agent gets, after your personal layer and before the
 project ones:
 
 ```
-<!-- omh: personal -->      ~/.omh/profile/AGENTS.md
+<!-- omh: personal -->           ~/.omh/profile/AGENTS.md
 <!-- omh: <repo>/AGENTS.md -->   the project's own, tracked
-<!-- omh: shared -->        <repo>/.omh/profile/AGENTS.md
-<!-- omh: local -->         <repo>/.omh/local/AGENTS.md
+<!-- omh: shared -->             <repo>/.omh/profile/AGENTS.md
+<!-- omh: local -->              <repo>/.omh/local/AGENTS.md
+<!-- omh: base:graph-rules -->   omh's own, from the base set
 ```
+
+**omh's own sections come last**, generated from the
+[base set](design/base-set.md) rather than written into a file. They describe
+the sandbox — what git does here, where notes go, which graph answers what — and
+a convention the project wrote down should not have omh's account of the box
+sitting in front of it. Each is an entry: `omh why git-rules` states what it
+costs and how to switch it off.
+
+A repo that ran `omh init` before this still has those sections inside
+`.omh/profile/AGENTS.md`, where init used to write them. They are composed as
+part of that layer, so **all three of omh's sections currently appear twice** —
+about 3.3 KB of duplicated context on every turn, and a safety notice the base
+set treats as one string reaching the agent as two. Deleting the sections from
+that file fixes it today; a planned migration off `.omh/profile`
+([the profile](design/profile.md), P3) removes them for good.
 
 Content comes from the worktree if the branch has a copy, otherwise from the
 default branch — so a session that has just written its rules is governed by

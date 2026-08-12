@@ -85,6 +85,14 @@ pub struct Options {
     /// that ever leaked past its guard would silently compose the staging area
     /// as the project's rules. `Option` makes that a compile error.
     pub base: Option<String>,
+    /// What omh itself contributes — the hooks and rules sections the base
+    /// manifest generates, with the features this repo switched off already
+    /// removed.
+    ///
+    /// Resolved by the caller for the reason `base` and `memory_bin` are: the
+    /// manifest lives on disk under `~/.omh/base` and reading it here would put
+    /// a probe in a function whose purity is what makes it testable.
+    pub omh: crate::base::Own,
 }
 
 pub fn plan(
@@ -105,8 +113,13 @@ pub fn plan(
     // inside it: it creates the empty placeholder at every declared name, and
     // composing afterwards would read omh's own file as the project's rules on
     // the very first launch.
-    let (rules_doc, rules_report) =
-        crate::rules::compose(paths, adapter, &session.worktree, opts.base.as_deref())?;
+    let (rules_doc, rules_report) = crate::rules::compose(
+        paths,
+        adapter,
+        &session.worktree,
+        opts.base.as_deref(),
+        &opts.omh.sections,
+    )?;
 
     // The agent's entire world. Never the host working tree.
     mounts.push(Mount {
@@ -124,10 +137,14 @@ pub fn plan(
         // asking the profile whether to stage threw the repo's conventions away
         // in the configuration a clone lands in, which is the bug this module
         // was written to fix.
-        let carries_something = if cap == Capability::Rules {
-            !rules_doc.trim().is_empty()
-        } else {
-            !sources.is_empty()
+        //
+        // Hooks are the same story: omh's five are generated from the manifest
+        // and belong to no layer at all, so a repo with no `hooks/` directory
+        // still has them to stage.
+        let carries_something = match cap {
+            Capability::Rules => !rules_doc.trim().is_empty(),
+            Capability::Hooks => !sources.is_empty() || !opts.omh.hooks.is_empty(),
+            _ => !sources.is_empty(),
         };
         if !carries_something {
             continue;
@@ -136,8 +153,16 @@ pub fn plan(
             // The composed document is one thing however many layers fed it, so
             // a rules-less harness drops at least the one it was handed — never
             // zero, which is what counting empty sources would have reported.
+            // A harness with no hooks gives up omh's own as well as yours.
             let count = match cap {
                 Capability::Rules => count_entries(&sources).max(1),
+                // Layer files answering to a manifest name are never staged,
+                // so counting them would report a harness giving up hooks it
+                // was never going to run. An upgraded repo carries five.
+                Capability::Hooks => {
+                    count_named(&sources, |name| !opts.omh.reserved.contains(name))
+                        + opts.omh.hooks.len()
+                }
                 _ => count_entries(&sources),
             };
             dropped.push((cap, count));
@@ -148,6 +173,7 @@ pub fn plan(
             binding,
             &sources,
             &rules_doc,
+            &opts.omh,
             Destination {
                 stage: &stage,
                 worktree: &session.worktree,
@@ -166,16 +192,28 @@ pub fn plan(
         file: false,
     });
 
+    // A feature is all or nothing, and that has to reach the mounts rather
+    // than stopping at the documents. With `memory` off the agent was still
+    // given a writable store it is never told about and a server binary
+    // nothing spawns — the half-configured state the design calls
+    // unrepresentable.
+    let memory_on = !opts
+        .omh
+        .disabled_servers
+        .contains(crate::memory::tools::SERVER_KEY);
+
     // The local note store, keyed by repo like the graph cache and for the
     // same reason: it must survive a container rebuild, a harness switch and
     // — unlike anything under /work — the removal of the session that wrote
     // it. Writable, because `remember` writes here.
-    mounts.push(Mount {
-        host: crate::memory::Layer::Local.dir(paths),
-        guest: PathBuf::from(crate::memory::GUEST_LOCAL_NOTES),
-        read_only: false,
-        file: false,
-    });
+    if memory_on {
+        mounts.push(Mount {
+            host: crate::memory::Layer::Local.dir(paths),
+            guest: PathBuf::from(crate::memory::GUEST_LOCAL_NOTES),
+            read_only: false,
+            file: false,
+        });
+    }
 
     // The memory server is `omh` itself, and the harness spawns MCP servers
     // inside the sandbox — so the base set's `command = "omh"` resolves to
@@ -185,7 +223,7 @@ pub fn plan(
     // Only when one exists. A bind mount of a missing host path makes docker
     // create a *directory*, and the failure then arrives as a permission error
     // about something nobody created.
-    if let Some(bin) = opts.memory_bin.clone() {
+    if let Some(bin) = opts.memory_bin.clone().filter(|_| memory_on) {
         mounts.push(Mount {
             host: bin,
             guest: PathBuf::from(crate::memory::deliver::GUEST_BIN),
@@ -255,6 +293,7 @@ fn stage_capability(
     binding: &Binding,
     sources: &[PathBuf],
     rules_doc: &str,
+    own: &crate::base::Own,
     to: Destination<'_>,
     mounts: &mut Vec<Mount>,
 ) -> Result<()> {
@@ -346,7 +385,7 @@ fn stage_capability(
             let file = stage.join(format!("{cap}.rendered"));
             // Rendered even when skipped, so a dry run still surfaces a
             // malformed mcp.json instead of deferring it to launch.
-            let rendered = crate::render::document(cap, r, sources)?;
+            let rendered = crate::render::document(cap, r, sources, own)?;
             if staging == Staging::Apply {
                 std::fs::create_dir_all(stage)?;
                 std::fs::write(&file, rendered)?;
@@ -388,6 +427,27 @@ fn place_destination(path: &Path) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
         Err(e) => Err(e).with_context(|| format!("placing {}", path.display())),
     }
+}
+
+/// Entries a harness would have been given, counting only the ones that pass
+/// `keep`. Names are matched without their extension, the way a hook's
+/// manifest name is written.
+fn count_named(sources: &[PathBuf], keep: impl Fn(&str) -> bool) -> usize {
+    sources
+        .iter()
+        .filter_map(|p| std::fs::read_dir(p).ok())
+        .flat_map(|entries| entries.flatten())
+        .filter(|e| {
+            let name = e.file_name();
+            let name = std::path::Path::new(&name);
+            keep(
+                &name
+                    .file_stem()
+                    .unwrap_or(name.as_os_str())
+                    .to_string_lossy(),
+            )
+        })
+        .count()
 }
 
 /// How much a harness is giving up, for the one-line degradation warning.
@@ -453,6 +513,24 @@ mod tests {
     use super::*;
 
     const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+    const BASE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/base");
+
+    /// What omh contributes, from the manifest this repo ships. Every plan
+    /// built here gets the real thing rather than an empty stand-in, because
+    /// the hooks and rules sections are part of what a launch *is*.
+    fn own() -> crate::base::Own {
+        own_with(&Default::default())
+    }
+
+    /// Every server the manifest names is treated as installed unless a case
+    /// is about removal: `own` switches a feature off when its server is gone
+    /// from the profile, and a fixture that declared none would silently
+    /// disable everything.
+    fn own_with(off: &std::collections::BTreeSet<String>) -> crate::base::Own {
+        let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
+        let installed = manifest.servers().into_keys().collect();
+        crate::base::own(&manifest, off, &installed).unwrap()
+    }
 
     struct Fx {
         _dir: tempfile::TempDir,
@@ -531,6 +609,7 @@ mod tests {
                 account_dir: None,
                 memory_bin,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap()
@@ -672,6 +751,7 @@ mod tests {
                 account_dir: Some(account.to_path_buf()),
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap()
@@ -871,6 +951,281 @@ mod tests {
         );
     }
 
+    /// Every hook command the harness would actually run, read back out of the
+    /// rendered document. Parsed rather than grepped: the commands are shell
+    /// with quotes in them, and a substring check against JSON compares
+    /// escaped text with unescaped and fails on hooks that are present.
+    fn staged_hooks(p: &Plan) -> Vec<String> {
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".claude/settings.json"))
+            .expect("claude stages hooks into ~/.claude/settings.json");
+        let body = std::fs::read_to_string(&mount.host).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
+        doc["hooks"]
+            .as_object()
+            .expect("an object keyed by event")
+            .values()
+            .flat_map(|matchers| matchers.as_array().unwrap())
+            .flat_map(|m| m["hooks"].as_array().unwrap())
+            .map(|h| h["command"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// omh's own hooks are generated from the base manifest, so a profile with
+    /// no `hooks/` directory anywhere still gets them.
+    ///
+    /// This is the configuration a fresh clone lands in, and the same shape as
+    /// the bug that hid a repo's rules: asking the profile whether to stage
+    /// answers "nothing here" and skips the whole capability, when what omh
+    /// contributes does not come from the profile at all.
+    #[test]
+    fn omhs_hooks_reach_a_profile_with_no_hooks_layer() {
+        let fx = fixture();
+        std::fs::remove_dir_all(fx.paths.root.join("profile/hooks")).unwrap();
+        // `Profile` caches which layers exist, so re-resolve after removing.
+        let fx = Fx {
+            profile: Profile::resolve(&fx.paths),
+            ..fx
+        };
+
+        let staged = staged_hooks(&plan_for(&fx, "claude"));
+        for hook in crate::base::hooks() {
+            assert!(
+                staged.contains(&hook.command),
+                "{} must reach the harness with no hooks layer to read it: {staged:?}",
+                hook.name
+            );
+        }
+    }
+
+    /// The other half of `omhs_hooks_reach_a_profile_with_no_hooks_layer`, and
+    /// it was missing: nothing asserted omh's rules sections reach the agent
+    /// through a plan at all.
+    ///
+    /// The only section assertion here was a negative one — that a disabled
+    /// feature's section is absent — so handing `rules::compose` an empty
+    /// slice left the whole suite green while every session lost the git
+    /// notice, the note protocol and the graph orientation.
+    #[test]
+    fn omhs_sections_reach_the_agent_through_the_plan() {
+        let fx = fixture();
+        let composed = composed_rules(&plan_for(&fx, "claude"));
+        for section in crate::base::sections() {
+            assert!(
+                composed.contains(section.body.trim_end()),
+                "{} must reach the agent: {composed}",
+                section.name
+            );
+        }
+    }
+
+    /// All or nothing has to reach the mounts, not stop at the document.
+    ///
+    /// With `memory = false` the server was dropped and the note rules with
+    /// it, while the writable note store and the `omh` binary were still
+    /// mounted — the agent given a store it is not told about and a server
+    /// binary nothing spawns. That is exactly the half-configured state three
+    /// doc comments call unrepresentable.
+    #[test]
+    fn a_disabled_feature_takes_its_mounts_too() {
+        let fx = fixture();
+        let bin = fake_server_binary(&fx);
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: Some(bin),
+                base: None,
+                omh: own_with(&["memory".to_string()].into()),
+            },
+        )
+        .unwrap();
+
+        let guests: Vec<String> = p
+            .mounts
+            .iter()
+            .map(|m| m.guest.display().to_string())
+            .collect();
+        assert!(
+            !guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES),
+            "no note store: {guests:?}"
+        );
+        assert!(
+            !guests
+                .iter()
+                .any(|g| g == crate::memory::deliver::GUEST_BIN),
+            "and no server binary: {guests:?}"
+        );
+    }
+
+    /// A feature off in this repo takes its server, its hooks and its section
+    /// of the rules together.
+    ///
+    /// All three or none: `codegraph` on with `graph-refresh` off is a graph
+    /// that quietly stops tracking the code, which is the one combination that
+    /// manufactures confident wrong answers. Nothing is uninstalled — the
+    /// server is still in `mcp.json`, and the next repo gets it.
+    #[test]
+    fn a_disabled_feature_takes_its_server_its_hooks_and_its_rules() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.repo.join(".omh/profile/mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
+        )
+        .unwrap();
+        let own = own_with(&["codegraph".to_string()].into());
+
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+            },
+        )
+        .unwrap();
+
+        let hooks = staged_hooks(&p);
+        assert!(
+            !hooks.iter().any(|c| c.contains("codebase-memory-mcp")),
+            "no graph hooks: {hooks:?}"
+        );
+        let mcp = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".mcp.json"))
+            .map(|m| std::fs::read_to_string(&m.host).unwrap())
+            .expect("claude stages mcp");
+        assert!(
+            !mcp.contains("codegraph"),
+            "the server is dropped from the document, not from your file: {mcp}"
+        );
+        assert!(
+            fx.paths
+                .repo
+                .join(".omh/profile/mcp.json")
+                .metadata()
+                .is_ok_and(|m| m.len() > 0),
+            "your mcp.json is left exactly as you have it"
+        );
+        assert!(
+            !composed_rules(&p).contains("This repo is indexed as a graph"),
+            "no graph section"
+        );
+    }
+
+    /// Switching a feature off has to take the leftovers with it.
+    ///
+    /// Found by running `omh doctor` with `[omh] codegraph = false`, not by
+    /// the suite: generation dropped the four graph hooks and the seeded files
+    /// of the same name were still sitting in the profile, so the graph hooks
+    /// went on firing against a server that had been removed from the
+    /// document. Disabling that leaves the disabled thing running is worse
+    /// than not offering it.
+    ///
+    /// The rule is that a manifest name is omh's, on or off. Nothing in a
+    /// layer answers to one.
+    #[test]
+    fn switching_a_feature_off_silences_the_files_it_seeded() {
+        let fx = fixture();
+        for hook in crate::base::hooks() {
+            std::fs::write(
+                fx.paths
+                    .root
+                    .join("profile/hooks")
+                    .join(format!("{}.json", hook.name)),
+                format!(
+                    r#"{{"event":"{}","matcher":"{}","command":"{}"}}"#,
+                    hook.event, hook.matcher, hook.command
+                ),
+            )
+            .unwrap();
+        }
+        let own = own_with(&["codegraph".to_string()].into());
+
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+            },
+        )
+        .unwrap();
+
+        let hooks = staged_hooks(&p);
+        assert!(
+            !hooks
+                .iter()
+                .any(|c| c.contains("codebase-memory-mcp") || c.contains("OMH_GRAPH_PROJECT")),
+            "no graph hook may survive as a seeded file: {hooks:?}"
+        );
+        assert!(
+            hooks
+                .iter()
+                .any(|c| c.contains("fatal") || c.contains("git")),
+            "git-notice is a different feature and stays on: {hooks:?}"
+        );
+    }
+
+    /// A hook file carrying a manifest name is a leftover: `init` seeded these
+    /// before they were generated, and every repo initialised then still has
+    /// five of them. omh's own must win, or the fix it ships never arrives —
+    /// `git-unavailable` was already rewritten once, and every profile written
+    /// before that carries the version that misses the multi-line scripts
+    /// agents most often emit.
+    #[test]
+    fn a_seeded_copy_no_longer_decides_what_runs() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.root.join("profile/hooks/graph-refresh.json"),
+            r#"{"event":"Stop","command":"the version from an older omh"}"#,
+        )
+        .unwrap();
+
+        let staged = staged_hooks(&plan_for(&fx, "claude"));
+        let ships = crate::base::hooks()
+            .into_iter()
+            .find(|h| h.name == "graph-refresh")
+            .expect("graph-refresh is in the base set");
+        assert!(
+            staged.contains(&ships.command),
+            "omh's own hook must be what runs: {staged:?}"
+        );
+        assert!(
+            !staged.iter().any(|c| c == "the version from an older omh"),
+            "the leftover file must not decide: {staged:?}"
+        );
+    }
+
     /// `--dry-run` prints the plan and writes nothing, placeholders included.
     #[test]
     fn a_dry_run_leaves_no_placeholder_behind() {
@@ -889,6 +1244,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -983,6 +1339,53 @@ mod tests {
             msg.contains("subagents") && msg.contains("hooks"),
             "got: {msg}"
         );
+
+        // What is given up includes omh's own, which come from the manifest
+        // rather than from a layer. Counting only the profile's files would
+        // report a harness dropping one hook while it drops six.
+        let hooks = oc
+            .dropped
+            .iter()
+            .find(|(c, _)| *c == Capability::Hooks)
+            .map(|(_, n)| *n)
+            .unwrap();
+        assert_eq!(
+            hooks,
+            1 + crate::base::hooks().len(),
+            "the fixture's own hook plus omh's: {msg}"
+        );
+    }
+
+    /// An upgraded repo carries the five seeded files, none of which is ever
+    /// staged. Counting them told a user they were giving up eleven hooks
+    /// where they give up six — a wrong number presented as a measurement,
+    /// which is the one thing this repo's own docs will not do.
+    #[test]
+    fn what_a_harness_gives_up_does_not_count_files_that_were_never_staged() {
+        let fx = fixture();
+        for hook in crate::base::hooks() {
+            std::fs::write(
+                fx.paths
+                    .root
+                    .join("profile/hooks")
+                    .join(format!("{}.json", hook.name)),
+                r#"{"event":"Stop","command":"seeded by an older omh"}"#,
+            )
+            .unwrap();
+        }
+
+        let oc = plan_for(&fx, "opencode");
+        let hooks = oc
+            .dropped
+            .iter()
+            .find(|(c, _)| *c == Capability::Hooks)
+            .map(|(_, n)| *n)
+            .unwrap();
+        assert_eq!(
+            hooks,
+            1 + crate::base::hooks().len(),
+            "the leftovers are inert and must not be counted"
+        );
     }
 
     /// Every declared filename gets the same bytes, and gets them as a mount.
@@ -1063,6 +1466,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap_err();
@@ -1110,6 +1514,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -1141,6 +1546,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -1183,6 +1589,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -1199,6 +1606,7 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
+                omh: own(),
             },
         )
         .unwrap();
@@ -1226,6 +1634,7 @@ mod tests {
             account_dir: None,
             memory_bin: None,
             base: None,
+            omh: own(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
@@ -1244,6 +1653,7 @@ mod tests {
             account_dir: None,
             memory_bin: None,
             base: None,
+            omh: own(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);
