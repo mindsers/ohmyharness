@@ -1656,16 +1656,14 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
     installed.extend(config::hooks(&paths)?);
 
     // What omh ships, for deciding whether your copy has been changed. MCP
-    // baselines come from the manifest; a hook's command lives in code, so it
-    // comes from there — the split the drift test keeps honest.
-    let mut baselines: std::collections::BTreeMap<String, String> = manifest
+    // servers only: hooks and rules sections are generated at launch, so there
+    // is nothing of yours to compare — a file of that name is a leftover, and
+    // the `Generated` verdict names it as one rather than as your edit.
+    let baselines: std::collections::BTreeMap<String, String> = manifest
         .entries
         .iter()
         .filter_map(|e| e.command.clone().map(|c| (e.name.clone(), c)))
         .collect();
-    for h in base::hooks() {
-        baselines.insert(h.name.to_string(), h.command.clone());
-    }
 
     // Hooks init generates from stack detection are omh's writing but not omh's
     // opinion. Reported as neither the base set nor yours, because claiming
@@ -1693,6 +1691,7 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
     let source = manifest.source();
     let version = manifest.version.clone();
     let catalog = why::Catalog {
+        off: settings::features_off(&paths, &manifest)?,
         manifest: &manifest,
         baselines,
         installed,
@@ -1700,7 +1699,7 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
     };
     print!(
         "{}",
-        why::render_with_source(&catalog.why(thing), &version, &source)
+        why::render_with_source(&catalog, &catalog.why(thing), &version, &source)
     );
     Ok(())
 }
