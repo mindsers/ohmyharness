@@ -148,8 +148,18 @@ impl Manifest {
             }
             let raw = std::fs::read_to_string(&path)
                 .with_context(|| format!("reading {}", path.display()))?;
-            let manifest: Self =
-                toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+            // A manifest an older omh seeded can be missing a field this one
+            // requires, and every command loads the manifest — so the failure
+            // is the whole tool, not one command. `init` refreshes bundled
+            // files and keeps the old one, so saying that here is a way out
+            // rather than the advice-that-does-nothing loop `read_layer`
+            // documents.
+            let manifest: Self = toml::from_str(&raw).with_context(|| {
+                format!(
+                    "parsing {} — if it was seeded by an older omh, `omh init` refreshes it",
+                    path.display()
+                )
+            })?;
 
             // A file whose declared version is unreadable is not a candidate.
             // Accepting one on filename alone is what let `zz-notes.toml` win.
@@ -971,6 +981,28 @@ because = "b"
 remove = "r"
 command = "c"
 "#;
+
+    /// The manifest in `~/.omh/base` is whatever the last `init` seeded, and a
+    /// newer omh can require a field it does not have — `feature` did exactly
+    /// that. Every command loads the manifest, so the upgrade turns the whole
+    /// tool off until it is refreshed, and the way to refresh it is the one
+    /// thing the error has to say.
+    ///
+    /// The closed loop this repo already paid for once: `chmod 000` on
+    /// `mcp.json` made `omh why` advise `omh init`, which did nothing. Here
+    /// `init` genuinely fixes it — bundled files are refreshed, with the old
+    /// one kept — so the advice is worth giving and worth pinning.
+    #[test]
+    fn a_manifest_an_older_omh_wrote_says_how_to_refresh_it() {
+        let dir = manifest_dir(&[(
+            "2026.08.toml",
+            "version = \"2026.08\"\n[[entry]]\nname = \"codegraph\"\nkind = \"mcp\"\n\
+             since = \"2026.06\"\nbecause = \"b\"\nremove = \"r\"\ncommand = \"c\"\n",
+        )]);
+        let err = format!("{:#}", Manifest::load_dir(dir.path()).unwrap_err());
+        assert!(err.contains("2026.08.toml"), "must name the file: {err}");
+        assert!(err.contains("omh init"), "must say the way out: {err}");
+    }
 
     /// A stray `.toml` sorting after the real manifest used to *become* the
     /// base set: `init` seeded `{}` and reported success, and `omh why` called
