@@ -12,20 +12,32 @@ The shape of the answer matters as much as the commands: omh's curation is
 legitimate because it is **stated, visible, and reversible**, not because it is
 proven. See [measure the cost, argue the benefit](#measure-the-cost-argue-the-benefit).
 
-## `omh config` — provenance ✅
+## `omh repo` — provenance ✅
 
 Every value says where it came from and what it beat.
 
 ```console
-$ omh config
-carry_in   [".env.local"]   ← local (overrides shared)
+$ omh repo
+settings
+  carry_in   [".env.local"]   ← local (overrides shared)
 ```
 
 No competitor does this. It is what makes layered settings debuggable instead of
 mysterious, and it is cheap — the resolver already knows the answer; the only
 work was refusing to throw it away.
 
-See [Configuration](../configuration.md#settings-and-their-three-layers).
+It grew a second half when selection landed, and the new half is the one people
+will actually use. With a curated catalogue the interesting question stops being
+"what is this set to" and becomes **"why is this skill not here"** — so `omh
+repo` answers that too, naming what this checkout uses, what it does not, and
+which of omh's features are off:
+
+```console
+using
+  skills      review-diff   (1 not selected: refactor)
+```
+
+See [Configuration](../configuration.md#two-scopes-two-commands).
 
 ## `omh doctor` — verification ✅
 

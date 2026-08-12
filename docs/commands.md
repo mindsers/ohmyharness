@@ -10,7 +10,9 @@ omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
 omh sessions ls|diff|commit|push|down|rm  s   omh s diff, omh s push fix/x
-omh config [set|unset|edit|mcp] c omh c mcp import claude
+omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
+omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
+omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
 ```
 
 ## The shape of the CLI
@@ -212,7 +214,8 @@ Error: config.toml is listed in carry_in and git tracks it, so what is in the
 worktree is your local copy rather than the branch's.
   omh will neither publish that nor drop it silently.
 
-  fix the cause:  omh config edit
+  fix the cause:  omh repo set carry_in   (carry_in is for files git does not
+                  track; a tracked file is already in the worktree)
   or just this once:  omh s commit --skip-carried
 ```
 
@@ -258,11 +261,13 @@ namespace filling with dead refs trains you to ignore the ones that matter.
 
 ## `omh config …` · `c`
 
+**You**, everywhere. Your defaults and your catalogue.
+
 ```
-omh config                            effective settings, with provenance
-omh config set <key> <value>          → the gitignored layer by default
-omh config unset <key> [--layer]      lets the layer beneath resurface
-omh config edit [--layer]             $EDITOR escape hatch
+omh config                            your defaults, and what the catalogue holds
+omh config set <key> <value>          → ~/.omh/settings.toml
+omh config unset <key>                remove one of your defaults
+omh config edit [<capability> [name]] $EDITOR on your settings, or on one entry
 
 omh config mcp ls
 omh config mcp add <name> <cmd> [args…] [--env K=V]
@@ -270,18 +275,77 @@ omh config mcp rm <name>
 omh config mcp import <harness> [--file] [--force]
 ```
 
-Every value reports where it came from and what it beat:
-
 ```console
 $ omh config
-settings:
-  carry_in         [".env.local"]     ← local (overrides shared)
-  idle_timeout     30m                ← personal
+your defaults  /Users/you/.omh/settings.toml
+  idle_timeout     30m
+
+your catalogue  /Users/you/.omh
+  rules         2  commit-style, tdd
+  skills        3  graphify, refactor, review-diff
+  mcp           3  codegraph, linear, memory
+  commands      0
+  subagents     1  explorer
+  hooks         1  notify-on-stop
 ```
 
 MCP lives under `config` because MCP servers **are** configuration. They live in your
 catalogue; a repo overrides a server's environment without redeclaring it. See
 [Configuration](configuration.md).
+
+`edit` takes a name, so it validates one: `omh config edit skills ../../.ssh/id_rsa`
+is refused before `$EDITOR` sees it. Past that there is no fence to draw —
+`$EDITOR` is a full program running as you, and the boundary that matters is
+elsewhere: every catalogue directory omh mounts into a sandbox is mounted
+**read-only**, so the agent can read a selected skill and cannot write one.
+
+## `omh repo …`
+
+**This checkout.** What it uses, what it decided, and what decided it.
+
+```
+omh repo                              effective here, with provenance
+omh repo enable <feature>             → [omh] in <repo>/.omh/settings.toml
+omh repo disable <feature>            off here; nothing is uninstalled
+omh repo set <key> <value> [--shared] → settings.local.toml, gitignored
+omh repo unset <key> [--shared]       lets the layer beneath resurface
+```
+
+## `omh use` · `omh unuse`
+
+Which catalogue entries this project takes.
+
+```
+omh use <capability> <name>           → <repo>/.omh/settings.toml, committed
+omh unuse <capability> <name>
+omh use --all                         resync every list to the whole catalogue
+```
+
+Capabilities: `rules`, `skills`, `mcp`, `commands`, `subagents`, `hooks`.
+
+The write target is the **committed** file, the opposite of `omh repo set` —
+what a project uses is a fact about the project, while what it overrides holds
+`carry_in` paths and MCP env. One flag could not express two opposite defaults,
+which is why `--layer` became two commands.
+
+A capability with no list is following the whole catalogue, so the first
+`omh use` on it writes the catalogue out rather than narrowing to one name, and
+says so:
+
+```console
+$ omh use skills review-diff
+skills was following your whole catalogue; wrote its 3 entries as the list
+using skills/review-diff — wrote → /Users/you/proj/.omh/settings.toml
+```
+
+`unuse` refuses a name this repo never used, rather than writing the list back
+and reporting success for a typo. `omh use` refuses one your catalogue does not
+have, and names `omh config edit` as the way to create it.
+
+omh's own — `codegraph`, `memory`, the five generated hooks and their rules
+sections — are not selectable in either direction. `omh repo enable` and
+`omh repo disable` are their switches, because a feature is all or nothing. See
+[Configuration](configuration.md#a-feature-is-not-selectable).
 
 ## `omh memory …`
 

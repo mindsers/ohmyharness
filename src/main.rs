@@ -27,6 +27,7 @@ mod profile;
 mod render;
 mod rules;
 mod runtime;
+mod selection;
 mod session;
 mod settings;
 mod ssh;
@@ -65,9 +66,9 @@ struct Cli {
 
 /// Built-ins and their aliases always beat a harness name — otherwise an
 /// adapter called `s` or `config` would silently shadow a command.
-pub const RESERVED: [&str; 15] = [
+pub const RESERVED: [&str; 18] = [
     "init", "doctor", "d", "auth", "ls", "attach", "a", "sessions", "s", "config", "c", "graph",
-    "why", "memory", "help",
+    "why", "memory", "help", "use", "unuse", "repo",
 ];
 
 #[derive(Subcommand)]
@@ -110,12 +111,30 @@ enum Cmd {
         #[command(subcommand)]
         cmd: SessionsCmd,
     },
-    /// Show settings with provenance, or change them.
+    /// Your defaults and your catalogue, or change them.
     #[command(visible_alias = "c")]
     Config {
         #[command(subcommand)]
         cmd: Option<ConfigCmd>,
     },
+    /// This checkout: what it uses, what it decided, and what decided it.
+    Repo {
+        #[command(subcommand)]
+        cmd: Option<RepoCmd>,
+    },
+    /// Select a catalogue entry for this repo. Writes the committed file: what
+    /// a project uses is a fact about the project, and a teammate cloning it
+    /// should get the same one.
+    Use {
+        /// One of rules, skills, mcp, commands, subagents, hooks.
+        capability: Option<String>,
+        name: Option<String>,
+        /// Resync every list to the whole catalogue.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Stop using a catalogue entry here.
+    Unuse { capability: String, name: String },
     /// The note store: what is in it, and what is wrong with it.
     Memory {
         #[command(subcommand)]
@@ -187,30 +206,67 @@ enum SessionsCmd {
     },
 }
 
+/// Two scopes, so two commands. `omh config` narrows to mean **you** — your
+/// catalogue and your defaults. `omh repo` means **this checkout**.
+///
+/// `--layer` used to carry both, and it strained because the two want opposite
+/// defaults: what a project *uses* is a fact about the project and should be
+/// committed, while what a project *overrides* holds `carry_in` paths and MCP
+/// env and must not be committable by accident. One flag cannot express two
+/// opposite defaults.
 #[derive(Subcommand)]
 enum ConfigCmd {
-    /// Set a value. Defaults to the gitignored layer so secrets cannot leak.
+    /// Set one of your defaults, in `~/.omh/settings.toml`.
     Set {
         key: String,
         value: String,
-        #[arg(long, value_parser = parse_layer)]
+        #[arg(long, value_parser = parse_layer, hide = true)]
         layer: Option<config::Layer>,
     },
-    /// Remove a value from one layer, letting any lower layer resurface.
+    /// Remove one of your defaults.
     Unset {
         key: String,
-        #[arg(long, value_parser = parse_layer)]
+        #[arg(long, value_parser = parse_layer, hide = true)]
         layer: Option<config::Layer>,
     },
-    /// Open a layer's profile in $EDITOR.
+    /// Open your settings, or one catalogue entry, in $EDITOR.
     Edit {
-        #[arg(long, value_parser = parse_layer)]
+        /// One of rules, skills, mcp, commands, subagents, hooks. Without it,
+        /// your settings file.
+        capability: Option<String>,
+        /// Which entry. Without it, the capability's directory.
+        name: Option<String>,
+        #[arg(long, value_parser = parse_layer, hide = true)]
         layer: Option<config::Layer>,
     },
     /// MCP servers — configuration, so it lives here.
     Mcp {
         #[command(subcommand)]
         cmd: McpCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum RepoCmd {
+    /// Switch one of omh's features on here.
+    Enable { feature: String },
+    /// Switch one of omh's features off here. Nothing is uninstalled.
+    Disable { feature: String },
+    /// Set a value for this checkout. Gitignored by default, because these
+    /// carry `carry_in` paths and MCP env and a mistyped key must not be
+    /// committable by accident.
+    Set {
+        key: String,
+        value: String,
+        /// Write the committed file instead, and say so.
+        #[arg(long)]
+        shared: bool,
+    },
+    /// Remove a value, letting any lower layer resurface.
+    Unset {
+        key: String,
+        #[arg(long)]
+        shared: bool,
     },
 }
 
@@ -335,12 +391,40 @@ fn main() -> Result<()> {
         },
 
         Cmd::Config { cmd } => match cmd {
-            None => show_config(&cwd, None),
-            Some(ConfigCmd::Set { key, value, layer }) => set(&cwd, key, value, *layer),
-            Some(ConfigCmd::Unset { key, layer }) => unset(&cwd, key, *layer),
-            Some(ConfigCmd::Edit { layer }) => edit(&cwd, *layer),
+            None => show_config(&cwd),
+            Some(ConfigCmd::Set { key, value, layer }) => {
+                set(&cwd, key, value, layer_or(*layer, config::Layer::Personal))
+            }
+            Some(ConfigCmd::Unset { key, layer }) => {
+                unset(&cwd, key, layer_or(*layer, config::Layer::Personal))
+            }
+            Some(ConfigCmd::Edit {
+                capability,
+                name,
+                layer,
+            }) => edit(
+                &cwd,
+                capability.as_deref(),
+                name.as_deref(),
+                layer_or(*layer, config::Layer::Personal),
+            ),
             Some(ConfigCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run),
         },
+
+        Cmd::Repo { cmd } => match cmd {
+            None => show_repo(&cwd),
+            Some(RepoCmd::Enable { feature }) => feature_switch(&cwd, feature, true),
+            Some(RepoCmd::Disable { feature }) => feature_switch(&cwd, feature, false),
+            Some(RepoCmd::Set { key, value, shared }) => set(&cwd, key, value, repo_layer(*shared)),
+            Some(RepoCmd::Unset { key, shared }) => unset(&cwd, key, repo_layer(*shared)),
+        },
+
+        Cmd::Use {
+            capability,
+            name,
+            all,
+        } => use_cmd(&cwd, capability.as_deref(), name.as_deref(), *all),
+        Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name),
 
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
@@ -461,6 +545,7 @@ fn session_up(
     // The account must reach *this* plan: this is the container that actually
     // runs. Building it without credentials is how every session started
     // logged out while `--dry-run` advertised the mounts.
+    say_selection(profile, &opts.repo);
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate(&backend.caps())?;
     say_rules(&plan);
@@ -518,6 +603,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
         .context("no adapters installed — run `omh init`")?;
     let adapter = Adapter::find(&paths.adapters(), &harness)?;
+    let (own, repo) = resolved(&paths)?;
 
     std::fs::create_dir_all(paths.worktrees())?;
     let id = session::pick(&paths.worktrees(), id, false);
@@ -544,7 +630,8 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             account_dir: account,
             memory_bin: memory::deliver::available(&paths),
             base: Some(session::default_branch(&paths.repo)),
-            omh: omh_own(&paths)?,
+            omh: own,
+            repo,
         },
     )?;
 
@@ -778,8 +865,8 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
 
     // Resolved once and used for both the checks and the plan below, so the
     // probe cannot check a session different from the one it launches.
-    let own = omh_own(&paths)?;
-    let mut checks = doctor::checks(&profile, &adapter, &own)?;
+    let (own, repo) = resolved(&paths)?;
+    let mut checks = doctor::checks(&profile, &adapter, &own, &repo)?;
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
@@ -795,7 +882,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     // deliberately did not make.
     if let Some(server) = declared
         .get(memory::tools::SERVER_KEY)
-        .filter(|_| !own.disabled_servers.contains(memory::tools::SERVER_KEY))
+        .filter(|_| !repo.disabled_servers.contains(memory::tools::SERVER_KEY))
     {
         checks.extend(doctor::memory_checks(server));
     }
@@ -818,10 +905,12 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         // the harness reads a document nobody will be given.
         base: Some(session::default_branch(&paths.repo)),
         omh: own,
+        repo,
     };
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
+    say_selection(&profile, &opts.repo);
     let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
     say_rules(&plan);
     plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
@@ -1293,7 +1382,7 @@ fn parse_env(s: &str) -> std::result::Result<(String, String), String> {
 fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     match cmd {
-        McpCmd::Ls => show_config(cwd, Some("mcp")),
+        McpCmd::Ls => show_servers(cwd),
 
         McpCmd::Add {
             name,
@@ -1385,56 +1474,415 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
     }
 }
 
-fn show_config(cwd: &std::path::Path, section: Option<&str>) -> Result<()> {
-    let paths = Paths::discover(cwd)?;
-    // `settings` rather than `policy`: the file is `settings.toml` now, and a
-    // section named after a file that no longer exists is a section nobody can
-    // look up.
-    let sections: Vec<(&str, Vec<config::Setting>)> = match section {
-        Some("settings") => vec![("settings", config::policy(&paths)?)],
-        Some("mcp") => vec![("mcp", config::servers(&paths)?)],
-        None => vec![
-            ("settings", config::policy(&paths)?),
-            ("mcp", config::servers(&paths)?),
-        ],
-        Some(other) => anyhow::bail!("unknown section `{other}` — expected settings or mcp"),
-    };
+/// Does this repo already say what it uses?
+///
+/// Read from the committed file directly rather than through `settings::resolve`,
+/// which merges three layers: a `[use]` in *your* personal file is your default
+/// everywhere and is not this repo having decided anything, so treating it as
+/// one would leave a fresh checkout with no list of its own.
+fn repo_has_selection(paths: &Paths) -> Result<bool> {
+    // Through `config`, which distinguishes absent from unreadable. Reading the
+    // file here with `let Ok(..) else { return Ok(false) }` reintroduced the
+    // exact conflation `config::read_layer` was written about, in the one place
+    // where the answer decides whether `init` overwrites a curated list — and
+    // it was a third parse strategy for a file that already had two.
+    config::declares(paths, config::Layer::Shared, config::USE)
+}
 
-    for (name, settings) in sections {
-        println!("{name}:");
-        if settings.is_empty() {
-            println!("  (nothing set)");
-        }
-        for s in settings {
-            // Provenance is the point: a three-layer merge you cannot trace is
-            // worse than no layering at all.
-            let shadowed = if s.shadows.is_empty() {
-                String::new()
-            } else {
-                let names: Vec<_> = s.shadows.iter().map(|l| l.to_string()).collect();
-                format!(" (overrides {})", names.join(", "))
-            };
-            // Content says whose it is; a setting says which file decided it.
-            let from = if name == "settings" {
-                s.layer.to_string()
-            } else {
-                s.layer.whose().to_string()
-            };
-            println!("  {:<16} {:<28} ← {from}{shadowed}", s.key, s.value);
-        }
-        println!();
+/// The catalogue's MCP servers, with whose each one is.
+fn show_servers(cwd: &std::path::Path) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let servers = config::servers(&paths)?;
+    println!("mcp:");
+    if servers.is_empty() {
+        println!("  (nothing set)");
+    }
+    for s in servers {
+        // Content says whose it is; a setting says which file decided it.
+        println!("  {:<16} {:<28} ← {}", s.key, s.value, s.layer.whose());
     }
     Ok(())
 }
 
-fn set(cwd: &std::path::Path, key: &str, value: &str, layer: Option<config::Layer>) -> Result<()> {
+/// Select a catalogue entry for this repo, or resync the whole list.
+///
+/// Writes the **committed** file. What a project uses is a fact about the
+/// project, and a teammate cloning it should get the same selection — the
+/// opposite default from `omh repo set`, which holds secrets.
+///
+/// A capability with no list is following the whole catalogue, so adding one
+/// name to it has to write the catalogue out first. Writing `["tdd"]` alone
+/// would silently turn off everything else, which is the one thing a command
+/// called `use` must never do.
+fn use_cmd(
+    cwd: &std::path::Path,
+    capability: Option<&str>,
+    name: Option<&str>,
+    all: bool,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let w = config::set(
+    if all {
+        if capability.is_some() {
+            anyhow::bail!("`--all` resyncs every capability — it takes no arguments");
+        }
+        let lists = catalogue_lists(&paths)?;
+        for w in write_lists(&paths, &lists)? {
+            println!("resynced to your catalogue — wrote → {}", w.path.display());
+        }
+        for (cap, names) in &lists {
+            println!("  {:<11} {}", cap.to_string(), names.len());
+        }
+        return Ok(());
+    }
+
+    let (Some(key), Some(name)) = (capability, name) else {
+        anyhow::bail!(
+            "omh use <capability> <name>, or omh use --all\n  capabilities: {}",
+            capability_list()
+        );
+    };
+    let (cap, mut names, was_open) = current_list(&paths, key, name)?;
+    // A name nothing answers to is a typo far more often than a plan, and the
+    // launcher would only report it later. `omh config edit` is how you create
+    // the entry first.
+    let available = catalogue_names(&paths, cap)?;
+    if !available.iter().any(|n| n == name) {
+        anyhow::bail!(
+            "your catalogue has no {cap} called `{name}`. `omh config edit {cap} {name}` \
+             creates it.\n  {cap}: {}",
+            if available.is_empty() {
+                "(empty)".to_string()
+            } else {
+                available.join(", ")
+            }
+        );
+    }
+    let already = names.iter().any(|n| n == name);
+    // "Already used" only means something once there *is* a list. While a
+    // capability is still following the whole catalogue every name is used, and
+    // saying so would leave `omh use` unable to start a selection at all.
+    if already && !was_open {
+        println!("{cap}/{name} is already used here");
+        return Ok(());
+    }
+    if !already {
+        names.push(name.to_string());
+    }
+    let written = write_lists(
         &paths,
-        key,
-        value,
-        layer.unwrap_or(config::Layer::DEFAULT_WRITE),
+        &std::collections::BTreeMap::from([(cap, names.clone())]),
     )?;
+    if was_open {
+        // Said out loud, because this is the moment a capability turns from
+        // "follows the catalogue" into "this list" — everything is still
+        // selected, but from now on by name, and an entry added later will not
+        // be.
+        println!(
+            "{cap} was following your whole catalogue; wrote its {} entries as the list",
+            names.len()
+        );
+    }
+    for w in written {
+        println!("using {cap}/{name} — wrote → {}", w.path.display());
+    }
+    Ok(())
+}
+
+/// Stop using a catalogue entry here.
+fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let (cap, mut names, was_open) = current_list(&paths, key, name)?;
+    if !names.iter().any(|n| n == name) {
+        // Refused rather than written as a no-op: a name this repo never used
+        // is a typo, and writing the list back would report success for it.
+        anyhow::bail!(
+            "{cap}/{name} is not used here. `omh repo` lists what is.\n  \
+             using: {}",
+            if names.is_empty() {
+                "nothing".to_string()
+            } else {
+                names.join(", ")
+            }
+        );
+    }
+    names.retain(|n| n != name);
+    if was_open {
+        // The same disclosure `use_cmd` makes, and for the same reason: this is
+        // the moment the capability stops following the catalogue. Discarding
+        // the flag here was an oversight rather than a decision — `unuse`
+        // performs the identical conversion, so a repo with no list at all
+        // freezes into one on the command that was meant to remove one name.
+        println!(
+            "{cap} was following your whole catalogue; wrote its remaining {} entries as the list",
+            names.len()
+        );
+    }
+    for w in write_lists(&paths, &std::collections::BTreeMap::from([(cap, names)]))? {
+        println!(
+            "no longer using {cap}/{name} — wrote → {}",
+            w.path.display()
+        );
+    }
+    Ok(())
+}
+
+/// Write these lists to every repo layer that has a say in them.
+///
+/// One capability at a time, because which layers declare `skills` and which
+/// declare `mcp` are different questions — `omh use --all` in a repo whose
+/// gitignored file overrides exactly one capability must not acquire the other
+/// five there.
+fn write_lists(
+    paths: &Paths,
+    lists: &std::collections::BTreeMap<adapter::Capability, Vec<String>>,
+) -> Result<Vec<config::Written>> {
+    let mut out = Vec::new();
+    for (cap, names) in lists {
+        let one = std::collections::BTreeMap::from([(*cap, names.clone())]);
+        for layer in config::declaring(paths, config::USE, &cap.to_string())? {
+            out.push(config::write_selection(paths, layer, &one)?);
+        }
+    }
+    // Two capabilities can share a layer, and reporting the same file twice
+    // reads as two writes.
+    out.dedup_by(|a, b| a.path == b.path);
+    Ok(out)
+}
+
+/// This capability's effective list, and whether it had one at all.
+///
+/// The name is validated here rather than at the write, which is the same rule
+/// `[use]` follows: a name is checked where it is minted, so `omh use` cannot
+/// put something in the file that reading the file would refuse.
+fn current_list(
+    paths: &Paths,
+    key: &str,
+    name: &str,
+) -> Result<(adapter::Capability, Vec<String>, bool)> {
+    let cap = adapter::Capability::from_key(key).with_context(|| {
+        format!(
+            "`{key}` is not a capability — expected {}",
+            capability_list()
+        )
+    })?;
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    let policy = settings::resolve(paths, &manifest)?;
+    let file = config::Layer::Shared.file(paths);
+    selection::validate_entry_name(name, cap, &file)?;
+    if let Some(feature) = manifest
+        .owns()
+        .get(&cap)
+        .and_then(|owned| owned.get(name))
+        .cloned()
+    {
+        anyhow::bail!(
+            "{cap}/{name} is omh's — part of the `{feature}` feature. `[use]` names \
+             your entries; a feature is all or nothing, so `omh repo enable {feature}` \
+             and `omh repo disable {feature}` are its switches."
+        );
+    }
+    match policy.selection.order(cap) {
+        Some(names) => Ok((cap, names.to_vec(), false)),
+        // No list: this capability follows the whole catalogue, so the list
+        // that keeps that true is the catalogue itself.
+        None => Ok((cap, catalogue_names(paths, cap)?, true)),
+    }
+}
+
+/// Every capability's catalogue entries, minus the ones omh owns.
+fn catalogue_lists(
+    paths: &Paths,
+) -> Result<std::collections::BTreeMap<adapter::Capability, Vec<String>>> {
+    let mut out = std::collections::BTreeMap::new();
+    for cap in adapter::Capability::ALL {
+        out.insert(cap, catalogue_names(paths, cap)?);
+    }
+    Ok(out)
+}
+
+/// The names a `[use]` list may hold for `cap`: what the catalogue and this
+/// repo declare, minus omh's own, which `[omh]` governs and `[use]` refuses.
+fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String>> {
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    let owned = manifest.owns();
+    Ok(Profile::resolve(paths)
+        .entries(cap)?
+        .into_iter()
+        .filter(|n| !owned.get(&cap).is_some_and(|o| o.contains_key(n)))
+        .collect())
+}
+
+/// Your defaults and your catalogue.
+///
+/// Deliberately not the resolved three-layer merge any more — that question is
+/// "what is effective *here*", and it moved to `omh repo` with the rest of the
+/// repo-scoped reporting. This command narrows to mean **you**.
+fn show_config(cwd: &std::path::Path) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let profile = Profile::resolve(&paths);
+
+    println!(
+        "your defaults  {}",
+        config::Layer::Personal.file(&paths).display()
+    );
+    let yours: Vec<config::Setting> = config::policy(&paths)?
+        .into_iter()
+        .filter(|s| s.layer == config::Layer::Personal)
+        .collect();
+    if yours.is_empty() {
+        println!("  (nothing set)");
+    }
+    for s in yours {
+        println!("  {:<16} {}", s.key, s.value);
+    }
+
+    println!("\nyour catalogue  {}", paths.root.display());
+    for cap in adapter::Capability::ALL {
+        let entries = profile.entries(cap)?;
+        // The count as well as the names: a catalogue is a thing that grows,
+        // and "12" is the number the unselected report will be talking about.
+        println!(
+            "  {:<11} {:>2}  {}",
+            cap.to_string(),
+            entries.len(),
+            entries.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// What is effective in this checkout, and which file decided it.
+///
+/// Where the reporting this design keeps promising actually surfaces. With a
+/// curated list the useful question stops being "what is this set to" and
+/// becomes "why is this skill not here", and that needs the selection, the
+/// features and the settings in one place.
+fn show_repo(cwd: &std::path::Path) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let profile = Profile::resolve(&paths);
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    let policy = settings::resolve(&paths, &manifest)?;
+
+    println!("this repo  {}", paths.repo.join(".omh").display());
+
+    println!("\nsettings");
+    let settings = config::policy(&paths)?;
+    if settings.is_empty() {
+        println!("  (nothing set)");
+    }
+    for s in settings {
+        // Provenance is the point: a three-layer merge you cannot trace is
+        // worse than no layering at all.
+        let shadowed = if s.shadows.is_empty() {
+            String::new()
+        } else {
+            let names: Vec<_> = s.shadows.iter().map(|l| l.to_string()).collect();
+            format!(" (overrides {})", names.join(", "))
+        };
+        println!("  {:<16} {:<24} ← {}{shadowed}", s.key, s.value, s.layer);
+    }
+
+    println!("\nomh's features");
+    let mut features: Vec<&str> = manifest
+        .entries
+        .iter()
+        .map(|e| e.feature.as_str())
+        .collect();
+    features.sort();
+    features.dedup();
+    for feature in features {
+        let state = if policy.off.contains(feature) {
+            "off here"
+        } else {
+            "on"
+        };
+        println!("  {feature:<16} {state}");
+    }
+
+    println!("\nusing");
+    for cap in adapter::Capability::ALL {
+        let entries = profile.entries(cap)?;
+        let unselected = policy.selection.unselected(cap, &entries);
+        // "everything" rather than a list identical to the catalogue's, because
+        // the two are different states: one follows the catalogue as it grows
+        // and the other is a list that happens to be complete today.
+        //
+        // Printed in the **declared** order, not `entries`' alphabetical one.
+        // For `rules` that order is the whole feature — this page's own docs say
+        // "the list is the order" — and building the line from the sorted
+        // catalogue made `omh repo` the one place that contradicted it. Filtered
+        // by what the catalogue actually holds, so a name nothing answers to is
+        // reported as missing rather than listed as used.
+        let summary = match policy.selection.order(cap) {
+            None => "everything".to_string(),
+            Some(order) => {
+                let taken: Vec<&str> = order
+                    .iter()
+                    .filter(|n| entries.iter().any(|e| e == *n))
+                    .map(String::as_str)
+                    .collect();
+                if taken.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    taken.join(", ")
+                }
+            }
+        };
+        let note = if unselected.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "   ({} not selected: {})",
+                unselected.len(),
+                unselected.join(", ")
+            )
+        };
+        println!("  {:<11} {summary}{note}", cap.to_string());
+    }
+
+    for line in notice::selection(&profile, &policy.selection)? {
+        println!("\n{line}");
+    }
+    Ok(())
+}
+
+/// `--layer` is going away. Accepted for one release, saying what replaced it.
+///
+/// The `keys.toml` treatment minus the refusal: this one is recoverable by
+/// retyping, so a hard error would cost more than it protects. What it must not
+/// do is keep working silently — a flag that outlives its documentation is how
+/// people learn a command by copying a form that is about to stop existing.
+fn layer_or(named: Option<config::Layer>, default: config::Layer) -> config::Layer {
+    let Some(layer) = named else {
+        return default;
+    };
+    let replacement = match layer {
+        config::Layer::Personal => "omh config set",
+        config::Layer::Shared => "omh repo set --shared",
+        config::Layer::Local => "omh repo set",
+    };
+    eprintln!(
+        "omh: --layer {layer} is going away — that is `{replacement}` now. \
+         Two scopes, two commands: `omh config` is you, `omh repo` is this checkout."
+    );
+    layer
+}
+
+/// `omh repo set` writes the gitignored file; `--shared` writes the committed
+/// one. The opposite default from `omh use`, deliberately: these carry
+/// `carry_in` paths and MCP env, and a mistyped key must not be committable by
+/// accident.
+fn repo_layer(shared: bool) -> config::Layer {
+    if shared {
+        config::Layer::Shared
+    } else {
+        config::Layer::Local
+    }
+}
+
+fn set(cwd: &std::path::Path, key: &str, value: &str, layer: config::Layer) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let w = config::set(&paths, key, value, layer)?;
     println!("wrote → {}", w.path.display());
     if w.committed {
         // The one mistake git makes unrecoverable.
@@ -1446,9 +1894,8 @@ fn set(cwd: &std::path::Path, key: &str, value: &str, layer: Option<config::Laye
     Ok(())
 }
 
-fn unset(cwd: &std::path::Path, key: &str, layer: Option<config::Layer>) -> Result<()> {
+fn unset(cwd: &std::path::Path, key: &str, layer: config::Layer) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let layer = layer.unwrap_or(config::Layer::DEFAULT_WRITE);
     if config::unset(&paths, key, layer)? {
         println!("removed {key} from the {layer} layer");
     } else {
@@ -1457,15 +1904,111 @@ fn unset(cwd: &std::path::Path, key: &str, layer: Option<config::Layer>) -> Resu
     Ok(())
 }
 
-fn edit(cwd: &std::path::Path, layer: Option<config::Layer>) -> Result<()> {
+/// `$EDITOR` on your settings, or on one catalogue entry.
+///
+/// Once `$EDITOR` is spawned it is a full program running as you, and any fence
+/// omh drew around it would be decorative — there is no trust boundary between
+/// omh and the person whose home directory this is. The boundary that matters
+/// is structural and already there: every catalogue directory a sandbox is given
+/// is mounted **read-only**.
+///
+/// This used to say `~/.omh` is not mounted at all, which is simply false —
+/// `container.rs` binds each catalogue source at `/omh/layers/<n>/<cap>` — and
+/// it is the kind of claim a reader takes on trust. Read-only is the true
+/// version and carries the same argument.
+///
+/// What does need a guard is the **name**, the moment this takes one and joins
+/// it to a directory: `omh config edit skills ../../../.ssh/id_rsa` is
+/// traversal. Same rule and same function as `[use]` uses, because it is the
+/// same act — a name being minted.
+fn edit(
+    cwd: &std::path::Path,
+    capability: Option<&str>,
+    name: Option<&str>,
+    layer: config::Layer,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let layer = layer.unwrap_or(config::Layer::DEFAULT_WRITE);
-    let file = layer.file(&paths);
+    let file = match capability {
+        None => layer.file(&paths),
+        Some(key) => {
+            let cap = adapter::Capability::from_key(key).with_context(|| {
+                format!(
+                    "`{key}` is not a capability — expected {}",
+                    capability_list()
+                )
+            })?;
+            let dir = paths.root.join(cap.source());
+            match name {
+                None => dir,
+                Some(name) => {
+                    selection::validate_entry_name(name, cap, &dir)?;
+                    dir.join(name)
+                }
+            }
+        }
+    };
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".into());
     Command::new(editor).arg(&file).status()?;
+    Ok(())
+}
+
+fn capability_list() -> String {
+    adapter::Capability::ALL
+        .iter()
+        .map(adapter::Capability::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Switch one of omh's features on or off in this checkout.
+///
+/// `enable`/`disable` rather than `use`/`unuse`, because the CLI should teach
+/// the file's structure rather than flatten it: if `omh repo disable` took a
+/// skill name, the difference between *an entry you chose* and *a feature omh
+/// ships* would exist only in the docs.
+fn feature_switch(cwd: &std::path::Path, feature: &str, on: bool) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    let features: std::collections::BTreeSet<&str> = manifest
+        .entries
+        .iter()
+        .map(|e| e.feature.as_str())
+        .collect();
+    if !features.contains(feature) {
+        // The entry-name case is the interesting error: it is how somebody
+        // discovers the grouping without reading the manifest.
+        if let Some(entry) = manifest.entry(feature) {
+            anyhow::bail!(
+                "`{feature}` is part of the `{}` feature, not a feature itself. \
+                 A feature is all or nothing — `omh repo disable {}` switches all of it off.",
+                entry.feature,
+                entry.feature
+            );
+        }
+        anyhow::bail!(
+            "`{feature}` is not one of omh's features ({}). \
+             A catalogue entry of yours is `omh use`/`omh unuse`.",
+            features.into_iter().collect::<Vec<_>>().join(", ")
+        );
+    }
+    // The committed file: which of omh's features a project runs with is a fact
+    // about the project, the same argument `omh use` writes there on.
+    // ...and the gitignored one too when it already declares this feature, or
+    // the switch reports a change the layer beneath it overrules.
+    for layer in config::declaring(&paths, config::OMH, feature)? {
+        let w = config::write_feature(&paths, layer, feature, on)?;
+        println!(
+            "{feature} is {} here — wrote → {}",
+            if on { "on" } else { "off" },
+            w.path.display()
+        );
+    }
+    if !on {
+        println!("nothing was uninstalled; the next repo gets it back");
+    }
     Ok(())
 }
 
@@ -1504,6 +2047,30 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
             eprintln!("omh: could not check this repo's hooks — {e:#}");
             None
         }
+    }
+}
+
+/// Say what this repo is not using from your catalogue, and what it named that
+/// nothing answers to.
+///
+/// Called from **every path that builds a plan**, which is the rule `say_rules`
+/// states and this broke on arrival: it was wired into `run` alone, so `attach`
+/// and `doctor` composed the same profile and said nothing. `attach` is the path
+/// where it matters most — it is how you rejoin a session that staged the
+/// selection you have since changed.
+///
+/// Beside `say_hooks` and on the same terms otherwise: reported on every launch
+/// including a dry run, never fatal. A selection omh cannot compute is not a
+/// reason to refuse a session — and it cannot be one, because the report exists
+/// to cover a silence rather than to guard anything.
+fn say_selection(profile: &Profile, repo: &settings::RepoPolicy) {
+    match notice::selection(profile, &repo.selection) {
+        Ok(notices) => {
+            for notice in notices {
+                eprintln!("omh: {notice}");
+            }
+        }
+        Err(e) => eprintln!("omh: could not check what this repo uses — {e:#}"),
     }
 }
 
@@ -1548,7 +2115,7 @@ fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
             // get; a tracked file is already on the branch.
             carry::Action::AlreadyTracked => eprintln!(
                 "omh: warning: carry_in lists {} — git already tracks it, so the worktree\n\
-                 \x20 has it already. Not carried; remove it with `omh config edit`.",
+                 \x20 has it already. Not carried; drop it with `omh repo set carry_in`.",
                 item.path
             ),
             carry::Action::Missing => {
@@ -1595,6 +2162,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     // plan needs it too: it is where the project's own rules come from when the
     // worktree has none of its own.
     let base = session::default_branch(&paths.repo);
+    let (own, repo) = resolved(&paths)?;
 
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
@@ -1611,7 +2179,8 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         account_dir: account,
         memory_bin: memory::deliver::available(&paths),
         base: Some(base.clone()),
-        omh: omh_own(&paths)?,
+        omh: own,
+        repo,
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
@@ -1642,6 +2211,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     plan.validate(&backend.caps())?;
 
     say_rules(&plan);
+    say_selection(&profile, &opts.repo);
     let hooks_seen = say_hooks(&paths);
 
     let status_line = match plan.degradation() {
@@ -1683,22 +2253,25 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     std::process::exit(status.code().unwrap_or(1));
 }
 
-/// What omh contributes to a session here: the hooks and rules sections the
-/// base manifest generates, minus the features this repo switched off.
+/// The two things a launch needs from outside the plan: what omh contributes,
+/// and what this repo decided.
 ///
 /// Resolved by the caller of `container::plan` rather than inside it, the rule
 /// `memory_bin` and `base` already follow — the manifest is a file, and a probe
 /// inside `plan` is a probe no test can reach.
-fn omh_own(paths: &Paths) -> Result<base::Own> {
+///
+/// Returned as a pair rather than merged. They arrive together and travel
+/// together, which is exactly what made one struct tempting, but "omh generated
+/// this" and "this repo asked for this" are the two answers `omh why` exists to
+/// keep apart — and a type that holds both cannot help blurring them.
+fn resolved(paths: &Paths) -> Result<(base::Own, settings::RepoPolicy)> {
     let manifest = base::Manifest::load_dir(&paths.base())?;
-    let settings = settings::resolve(paths, &manifest)?;
+    let repo = settings::resolve(paths, &manifest)?;
     // What the catalogue still declares, so removing a server takes its feature
     // with it. `omh config mcp rm codegraph` edits `mcp.json` and nothing
     // else, so this read is where that instruction is kept or broken.
     let installed = config::servers(paths)?.into_iter().map(|s| s.key).collect();
-    let mut own = base::own(&manifest, &settings.off, &installed)?;
-    own.mcp_env = settings.mcp_env;
-    Ok(own)
+    Ok((base::own(&manifest, &repo.off, &installed)?, repo))
 }
 
 /// `omh why <thing>` — who put this here, and on what grounds.
@@ -1855,6 +2428,23 @@ fn init(cwd: &std::path::Path) -> Result<()> {
             write_if_absent(&repo_omh.join("hooks").join(name), &body)?;
         }
     }
+    // The selection, written out with every catalogue entry named — after the
+    // stack hooks, so this repo's own two are in the list it writes.
+    //
+    // Expanded rather than `"*"`, because an explicit list is editable and
+    // reviewable in a way a wildcard is not: you curate by deleting lines. That
+    // has one failure mode — an entry added to the catalogue *afterwards* is not
+    // in the list, so it is off and the reason is invisible — and the launcher
+    // reports exactly that, which is what makes writing it expanded safe.
+    //
+    // Only when there is no `[use]` already: `write_if_absent` guards the file,
+    // not the table, and re-running `init` in a curated repo must not resync a
+    // list somebody pruned on purpose. `omh use --all` is how you ask for that.
+    if !repo_has_selection(&paths)? {
+        let lists = catalogue_lists(&paths)?;
+        config::write_selection(&paths, config::Layer::Shared, &lists)?;
+    }
+
     // Appended, not overwritten: re-running init must not eat a line you added.
     let gitignore = paths.repo.join(".omh/.gitignore");
     // Left tracked, a machine-local override gets committed to the team's repo.
@@ -2120,6 +2710,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     // A throwaway: logging in must not leave a branch behind.
     let session = Session::scratch(paths.scratch("auth"), "auth".into());
     session.ensure(&paths.repo, "")?;
+    let (own, repo) = resolved(&paths)?;
 
     let plan = container::plan(
         &paths,
@@ -2137,7 +2728,8 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
             // `session.ensure(&paths.repo, "")`: a login is not work on the
             // project, so there are no project rules to look up.
             base: None,
-            omh: omh_own(&paths)?,
+            omh: own,
+            repo,
         },
     )?;
     plan.validate(&backend.caps())?;
@@ -2180,7 +2772,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     let all = auth::accounts(&paths, &adapter);
     if all.len() > 1 {
         println!("  accounts: {}", all.join(", "));
-        println!("  choose per project with `omh config set account <name>`");
+        println!("  choose per project with `omh repo set account <name>`");
     }
     Ok(())
 }
@@ -2385,17 +2977,17 @@ mod tests {
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");
 
-    /// `omh_own` is the wiring between the manifest and every launch, and
-    /// nothing reached it: replacing its body with `Ok(base::Own::default())`
-    /// — omh contributing no hooks, no rules sections, nothing — left the
-    /// whole suite green.
+    /// `resolved` is the wiring between the manifest and every launch, and
+    /// nothing reached it: replacing its body with a pair of defaults — omh
+    /// contributing no hooks, no rules sections, nothing — left the whole suite
+    /// green.
     ///
     /// That is the failure `tests/cli.rs` says in its own module doc it exists
     /// to notice: a guard correct while the wiring that reaches it is missing.
-    /// `container` and `doctor` each build an `Own` in their fixtures, so they
+    /// `container` and `doctor` each build the pair in their fixtures, so they
     /// prove a plan handles one and say nothing about whether one arrives.
     #[test]
-    fn omh_own_resolves_the_manifest_and_reads_this_repos_settings() {
+    fn resolved_reads_the_manifest_and_this_repos_settings() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
             root: dir.path().join("home"),
@@ -2418,7 +3010,7 @@ mod tests {
             r#"{"mcpServers":{"codegraph":{"command":"c"},"memory":{"command":"omh"}}}"#,
         );
 
-        let own = omh_own(&paths).unwrap();
+        let (own, _) = resolved(&paths).unwrap();
         assert!(
             !own.hooks.is_empty() && !own.sections.is_empty(),
             "a launch must be given what the manifest ships"
@@ -2433,7 +3025,7 @@ mod tests {
             paths.repo.join(".omh/settings.toml"),
             "[omh]\ncodegraph = false\n\n[mcp.memory.env]\nOMH_TEST = \"seen\"\n",
         );
-        let off = omh_own(&paths).unwrap();
+        let (off, policy) = resolved(&paths).unwrap();
         assert!(
             !off.hooks.iter().any(|h| h.name.starts_with("graph-")),
             "and `[omh]` in this repo has to reach it: {:?}",
@@ -2448,8 +3040,16 @@ mod tests {
         // between them was asserted nowhere, so deleting it left the suite
         // green and a token reached no server.
         assert_eq!(
-            off.mcp_env["memory"]["OMH_TEST"], "seen",
+            policy.mcp_env["memory"]["OMH_TEST"], "seen",
             "a per-repo MCP environment has to reach the plan too"
+        );
+        // And the half that used to hang off `Own`: switching a feature off is
+        // what drops its server from the document, and it is a fact about this
+        // repo rather than about what omh generates.
+        assert!(
+            policy.disabled_servers.contains("codegraph"),
+            "the feature's server travels with the feature: {:?}",
+            policy.disabled_servers
         );
     }
 
@@ -2505,6 +3105,30 @@ mod tests {
                 });
             }
         }
+    }
+
+    /// The safety property, restated where it now lives.
+    ///
+    /// It used to be `Layer::DEFAULT_WRITE`: one flag, one default, and an
+    /// unqualified write could never reach version control. `--layer` split
+    /// into two commands because the two scopes want opposite defaults, so the
+    /// constant went — and the property it carried did not. Neither command's
+    /// default may be the committed file, and reaching it has to be asked for
+    /// in so many words.
+    #[test]
+    fn no_unqualified_write_can_reach_version_control() {
+        assert!(
+            !repo_layer(false).is_committed(),
+            "omh repo set holds carry_in paths and MCP env"
+        );
+        assert!(
+            !config::Layer::Personal.is_committed(),
+            "omh config set writes your own file"
+        );
+        assert!(
+            repo_layer(true).is_committed(),
+            "and --shared is how you say you meant it"
+        );
     }
 
     /// `omh <name>` treats any unknown word as a harness, so a command that is

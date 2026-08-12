@@ -185,6 +185,53 @@ impl Profile {
         out
     }
 
+    /// What this capability actually holds, by name.
+    ///
+    /// The names `[use]` selects from, `init` writes expanded, and the launcher
+    /// reports as unselected — one function, because a name that is spelled one
+    /// way by the report and another by the file that fixes it is worse than no
+    /// report at all.
+    ///
+    /// `mcp.json` is the lone irregular case: a server is a record inside a file
+    /// rather than a file in a directory, and it is read through the same parser
+    /// the renderer uses rather than a second one that could disagree about what
+    /// counts as a server.
+    pub fn entries(&self, cap: Capability) -> Result<Vec<String>> {
+        let mut out: Vec<String> = Vec::new();
+        for source in self.sources(cap)? {
+            if cap == Capability::Mcp {
+                out.extend(crate::render::parse_layers(&[source])?.into_keys());
+                continue;
+            }
+            let entries = std::fs::read_dir(&source)
+                .with_context(|| format!("reading {}", source.display()))?;
+            for entry in entries {
+                // Not `.flatten()`, the rule this codebase follows for every
+                // directory it lists: a `readdir` failing part-way through would
+                // silently shorten the catalogue, and the report built from it
+                // would say an entry is not selected because it was never seen.
+                let entry = entry.with_context(|| format!("reading {}", source.display()))?;
+                let name = entry_name(&entry.file_name());
+                // A name omh mints has to be a name a `[use]` list can hold, or
+                // `init` writes something every later read refuses. `.DS_Store`
+                // is the one that actually happens: Finder creates it in any
+                // directory somebody opens, and it bricked the repo.
+                //
+                // Skipped rather than reported, because it is not an entry that
+                // went missing — it is a file that was never a catalogue entry,
+                // and a launch that named it would be telling the user about
+                // their operating system.
+                if crate::selection::validate_entry_name(&name, cap, &source).is_err() {
+                    continue;
+                }
+                out.push(name);
+            }
+        }
+        out.sort();
+        out.dedup();
+        Ok(out)
+    }
+
     /// Capabilities the profile actually carries.
     ///
     /// Not currently called outside tests: the launcher reports dropped
@@ -200,6 +247,22 @@ impl Profile {
         }
         Ok(out)
     }
+}
+
+/// The catalogue name of one directory entry.
+///
+/// A skill is a directory and a rule is a file, so the extension comes off and
+/// nothing else does. One function rather than a `file_stem()` at each site,
+/// because the name a `[use]` list matches, the name a launch reports as
+/// unselected and the name `omh use` writes have to be the same string — three
+/// spellings of "drop the extension" is three chances for a skill called
+/// `review.diff` to be selectable under one name and reported under another.
+pub fn entry_name(file_name: &std::ffi::OsStr) -> String {
+    let path = Path::new(file_name);
+    path.file_stem()
+        .unwrap_or(file_name)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Walk up looking for `.git`. The worktree model needs a real repo, so a
@@ -294,6 +357,33 @@ mod tests {
         let profile = Profile::resolve(&f.paths);
         assert_eq!(profile.sources(Capability::Rules).unwrap().len(), 1);
         assert!(profile.sources(Capability::Skills).unwrap().is_empty());
+    }
+
+    /// A name omh mints has to be a name `[use]` can hold.
+    ///
+    /// `entries` is where `init` and `omh use --all` get the names they write,
+    /// and `Selection::read_list` refuses one that begins with a dot — so a
+    /// `.DS_Store` in `~/.omh/skills`, which Finder creates in any directory
+    /// somebody opens, was written into `[use]` and then refused by every
+    /// command that read the file afterwards. `omh repo`, `omh use`, and the
+    /// launch itself, all dead until the file was hand-edited.
+    ///
+    /// The rule this restores is `validate_entry_name`'s own: checked where a
+    /// name is **minted**. This is the fourth mint point and the only one that
+    /// was not on the list.
+    #[test]
+    fn a_name_omh_cannot_write_is_not_an_entry() {
+        let f = fixture(&[
+            ("catalogue", "skills/review-diff/SKILL.md", "s"),
+            ("catalogue", "skills/.DS_Store", "junk"),
+        ]);
+        assert_eq!(
+            Profile::resolve(&f.paths)
+                .entries(Capability::Skills)
+                .unwrap(),
+            vec!["review-diff"],
+            "a dotfile is not a skill, and naming it would poison the settings file"
+        );
     }
 
     #[test]

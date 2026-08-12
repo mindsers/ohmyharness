@@ -35,15 +35,17 @@ impl From<String> for Document {
 
 /// Render a capability into the shape this harness parses.
 ///
-/// `own` is what omh itself contributes and what this repo has switched off.
-/// It is not a layer: omh's hooks belong to no directory, and a server whose
-/// feature is disabled here is still in your `mcp.json` — the file is yours and
-/// is left exactly as you have it.
+/// Two inputs from outside, and they are deliberately two: `own` is what omh
+/// itself contributes, `repo` is what this checkout decided. Neither is a
+/// layer — omh's hooks belong to no directory, and a server whose feature is
+/// disabled here is still in your `mcp.json`, which is yours and is left
+/// exactly as you have it.
 pub fn document(
     cap: Capability,
     binding: &Binding,
     sources: &[PathBuf],
     own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
     tools: &BTreeMap<hook::Tool, String>,
 ) -> Result<Document> {
     match binding.render {
@@ -54,7 +56,7 @@ pub fn document(
             // repo switched off reported "not in your catalogue" about a
             // server that is plainly in it — advice pointing at
             // `omh config mcp ls`, which lists it, and no way forward.
-            for name in own.mcp_env.keys() {
+            for name in repo.mcp_env.keys() {
                 if !servers.contains_key(name) {
                     anyhow::bail!(
                         "[mcp.{name}.env] overrides a server that is not in your \
@@ -63,7 +65,12 @@ pub fn document(
                     );
                 }
             }
-            servers.retain(|name, _| !own.disabled_servers.contains(name));
+            // Two retains, deliberately not one condition: a server is dropped
+            // because its feature is off *here*, or because this repo never
+            // named it, and those are different sentences to say when somebody
+            // asks why a server is missing.
+            servers.retain(|name, _| !repo.disabled_servers.contains(name));
+            servers.retain(|name, _| repo.selection.allows(Capability::Mcp, name));
             // Variable by variable, not entry by entry: a repo overriding one
             // token must not silently inherit the rest of a catalogue entry it
             // never saw. Named where it is applied rather than merged into the
@@ -72,7 +79,7 @@ pub fn document(
             // A server whose feature is off here is simply gone by now, so its
             // override is a no-op rather than an error: switching a feature off
             // is not a reason to make you delete a token you will want back.
-            for (name, env) in &own.mcp_env {
+            for (name, env) in &repo.mcp_env {
                 if let Some(server) = servers.get_mut(name) {
                     server.env.extend(env.clone());
                 }
@@ -80,7 +87,7 @@ pub fn document(
             Ok(mcp(binding.render, &servers)?.into())
         }
         Render::ClaudeSettings => {
-            let (rendered, dropped) = translate(&merge_hooks(sources, own)?, binding, tools)?;
+            let (rendered, dropped) = translate(&merge_hooks(sources, own, repo)?, binding, tools)?;
             Ok(Document {
                 body: claude_settings(&rendered)?,
                 dropped,
@@ -274,7 +281,11 @@ fn translate(
 /// They are generated from the manifest and belong to no directory, which is
 /// the point: a hook you can edit is a hook omh can never ship a fix to, and
 /// `git-unavailable` has already needed one.
-fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<String, hook::Hook>> {
+fn merge_hooks(
+    dirs: &[PathBuf],
+    own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
+) -> Result<BTreeMap<String, hook::Hook>> {
     let mut out = BTreeMap::new();
     for dir in dirs {
         // Absent is not unreadable — `config::read_layer` records what
@@ -324,12 +335,23 @@ fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<Stri
                         path.display()
                     );
                 }
+                // Checked *after* the reserved-name guard, so a repo that
+                // shipped a `graph-refresh.json` still hears about it whether
+                // or not `[use].hooks` happens to name it. A file that answers
+                // to nothing is a mistake at any selection.
+                if !repo.selection.allows(Capability::Hooks, &name) {
+                    continue;
+                }
                 let raw = std::fs::read_to_string(&path)
                     .with_context(|| format!("reading {}", path.display()))?;
                 out.insert(name, hook::Hook::parse(&raw, &path.display().to_string())?);
             }
         }
     }
+    // omh's own, merged in unfiltered. They are a feature's parts, and `[omh]`
+    // has already had its say by deciding which ones `own.hooks` holds — a
+    // `[use].hooks` that could drop one would be a feature taken apart by the
+    // table that is not allowed to.
     for own_hook in &own.hooks {
         out.insert(own_hook.name.to_string(), own_hook.hook.clone());
     }
@@ -485,6 +507,7 @@ mod tests {
             hooks_binding(&adapter),
             &[dir.path().join("h")],
             &Default::default(),
+            &Default::default(),
             &adapter.tools,
         )
         .unwrap();
@@ -522,6 +545,7 @@ mod tests {
             hooks_binding(&adapter),
             &[dir.path().join("h")],
             &Default::default(),
+            &Default::default(),
             &adapter.tools,
         )
         .unwrap();
@@ -547,7 +571,7 @@ mod tests {
                                         "env":{"LINEAR_API_KEY":"","REGION":"eu"}}}}"#,
         );
 
-        let own = crate::base::Own {
+        let repo = crate::settings::RepoPolicy {
             mcp_env: BTreeMap::from([(
                 "linear".to_string(),
                 BTreeMap::from([("LINEAR_API_KEY".to_string(), "secret".to_string())]),
@@ -559,7 +583,8 @@ mod tests {
             Capability::Mcp,
             adapter.supports(Capability::Mcp).unwrap(),
             &[mcp],
-            &own,
+            &Default::default(),
+            &repo,
             &adapter.tools,
         )
         .unwrap();
@@ -580,7 +605,7 @@ mod tests {
     fn an_override_for_a_server_that_is_not_installed_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let mcp = file(dir.path(), "mcp.json", r#"{"mcpServers":{}}"#);
-        let own = crate::base::Own {
+        let repo = crate::settings::RepoPolicy {
             mcp_env: BTreeMap::from([("linear".to_string(), BTreeMap::new())]),
             ..Default::default()
         };
@@ -589,7 +614,8 @@ mod tests {
             Capability::Mcp,
             adapter.supports(Capability::Mcp).unwrap(),
             &[mcp],
-            &own,
+            &Default::default(),
+            &repo,
             &adapter.tools,
         )
         .unwrap_err();
@@ -622,13 +648,31 @@ mod tests {
             reserved: ["graph-refresh".to_string()].into(),
             ..Default::default()
         };
-        let err = merge_hooks(&[dir.path().join("h")], &own)
+        let err = merge_hooks(&[dir.path().join("h")], &own, &Default::default())
             .expect_err("a manifest name is not something a file may claim");
         let msg = format!("{err:#}");
         assert!(msg.contains("graph-refresh.json"), "name the file: {msg}");
         assert!(
             msg.contains("codegraph") || msg.contains("omh"),
             "and whose name it is: {msg}"
+        );
+
+        // And whatever `[use]` says. The selection filter sits *after* this
+        // guard on purpose — a repo that shipped a file answering to nothing
+        // has to hear about it whether or not its list happens to name it, and
+        // `init` writes an expanded list, so a hook added later is unselected
+        // by default. With the two swapped, the check goes quiet for exactly
+        // the repos most likely to have the problem.
+        let mut repo = crate::settings::RepoPolicy::default();
+        repo.selection
+            .apply(
+                &BTreeMap::from([("hooks".to_string(), Vec::new())]),
+                Path::new("settings.toml"),
+            )
+            .unwrap();
+        assert!(
+            merge_hooks(&[dir.path().join("h")], &own, &repo).is_err(),
+            "an unselected hook file still may not claim a name omh ships"
         );
     }
 
@@ -650,8 +694,12 @@ mod tests {
         let hooks = dir.path().join("h");
         std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let err = merge_hooks(std::slice::from_ref(&hooks), &Default::default())
-            .expect_err("an unreadable layer must be reported, not skipped");
+        let err = merge_hooks(
+            std::slice::from_ref(&hooks),
+            &Default::default(),
+            &Default::default(),
+        )
+        .expect_err("an unreadable layer must be reported, not skipped");
         // Restore before the assertion so a failure cannot leave the temp dir
         // undeletable.
         std::fs::set_permissions(&hooks, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -666,6 +714,7 @@ mod tests {
             Capability::Skills,
             skills,
             &[],
+            &Default::default(),
             &Default::default(),
             &adapter.tools,
         )

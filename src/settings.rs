@@ -38,6 +38,12 @@ struct File {
     omh: BTreeMap<String, bool>,
     #[serde(default)]
     mcp: BTreeMap<String, ServerOverride>,
+    /// What this repo uses from the catalogue. Named here as well as read by
+    /// [`crate::selection`], or the guard below would refuse `[use]` as a table
+    /// nobody reads — which it would be, since `config::policy` skips tables
+    /// and this is the reader.
+    #[serde(default, rename = "use")]
+    uses: BTreeMap<String, Vec<String>>,
     #[serde(flatten)]
     rest: toml::Table,
 }
@@ -69,14 +75,16 @@ fn layers(paths: &Paths) -> [PathBuf; 3] {
     crate::config::Layer::ALL.map(|l| l.file(paths))
 }
 
-/// Which of omh's features this repo has switched off, and what it says about
-/// the environment of the servers it uses.
+/// Everything this repo decided: which of omh's features are off here, and what
+/// it says about the environment of the servers it uses.
 ///
-/// One pass for both, because they come from the same three files and a second
-/// pass would be a second chance for the two to disagree about which layer won.
-pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<Resolved> {
+/// One pass for all of it, because it comes from the same three files and a
+/// second pass would be a second chance for two readers to disagree about which
+/// layer won.
+pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut state: BTreeMap<String, bool> = BTreeMap::new();
     let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+    let mut selection = crate::selection::Selection::owning(manifest.owns());
     for path in layers(paths) {
         let Some(raw) = read(&path)? else {
             continue;
@@ -111,22 +119,74 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<Resolved> {
         for (name, over) in file.mcp {
             mcp_env.entry(name).or_default().extend(over.env);
         }
+        // Wholesale per capability, which is the opposite rule and deliberately
+        // so: an env override adds a variable, a selection *is* the list, and
+        // merging one would make removal unexpressible.
+        selection.apply(&file.uses, &path)?;
     }
-    Ok(Resolved {
-        off: state
-            .into_iter()
-            .filter(|(_, on)| !on)
-            .map(|(name, _)| name)
-            .collect(),
-        mcp_env,
-    })
+    let off: BTreeSet<String> = state
+        .into_iter()
+        .filter(|(_, on)| !on)
+        .map(|(name, _)| name)
+        .collect();
+    let mut policy = RepoPolicy::switching_off(manifest, off);
+    policy.mcp_env = mcp_env;
+    policy.selection = selection;
+    Ok(policy)
 }
 
-/// What the settings files say that the launcher acts on.
-#[derive(Debug, Default)]
-pub struct Resolved {
+/// What this repo decided, resolved from its three settings files.
+///
+/// The counterpart to [`crate::base::Own`], which is what *omh* contributes.
+/// Both reach `container::plan` from outside, and keeping them separate is what
+/// stops "omh generated this" and "this repo asked for this" being answered by
+/// one field lookup — `omh why`'s whole job is telling those apart.
+/// `Default` is test-only, because [`crate::selection::Selection`]'s is: a
+/// defaulted policy is one that thinks omh owns nothing, and the only callers
+/// that want it are fixtures saying "this repo decided nothing".
+#[cfg_attr(test, derive(Default))]
+#[derive(Debug, Clone)]
+pub struct RepoPolicy {
+    /// Features switched off here. Nothing is uninstalled.
     pub off: BTreeSet<String>,
+    /// Servers to drop from the rendered document even though `mcp.json` still
+    /// lists them — the servers those switched-off features own. The file is
+    /// left exactly as the user has it, and the next repo gets them back.
+    pub disabled_servers: BTreeSet<String>,
+    /// Per-repo MCP environment, by server name, from `[mcp.<name>.env]`.
+    ///
+    /// An override rather than a redeclaration, which is the whole point: a
+    /// repo used to hold a token by copying the entire server entry into its
+    /// own `mcp.json`, so a catalogue fix never reached it and the copy was
+    /// invisible until it drifted.
     pub mcp_env: BTreeMap<String, BTreeMap<String, String>>,
+    /// What this repo uses from the catalogue, from `[use]`.
+    pub selection: crate::selection::Selection,
+}
+
+impl RepoPolicy {
+    /// The policy of a repo that switched off exactly these features.
+    ///
+    /// Public because the fixtures in `container` and `doctor` need it: a test
+    /// that builds `disabled_servers` by hand is a second opinion about which
+    /// servers a feature owns, and it can be wrong in the same direction as the
+    /// code. One derivation, and `resolve` goes through it too.
+    pub fn switching_off(manifest: &Manifest, off: BTreeSet<String>) -> Self {
+        Self {
+            disabled_servers: manifest
+                .entries
+                .iter()
+                .filter(|e| e.kind == crate::base::Kind::Mcp && off.contains(&e.feature))
+                .map(|e| e.name.clone())
+                .collect(),
+            off,
+            mcp_env: BTreeMap::new(),
+            // Empty of choices but *not* of what omh owns. A `Selection::default()`
+            // here would let a fixture treat `codegraph` as an ordinary catalogue
+            // entry, which is the one thing this type exists to prevent.
+            selection: crate::selection::Selection::owning(manifest.owns()),
+        }
+    }
 }
 
 /// A key has to be a feature. Checked where the value is minted, the rule
@@ -323,6 +383,49 @@ mod tests {
         let env = &resolve(&paths, &m).unwrap().mcp_env["linear"];
         assert_eq!(env["TOKEN"], "t");
         assert_eq!(env["REGION"], "eu");
+    }
+
+    /// `[use]` is read from all three files, and a later one replaces a
+    /// capability's list outright.
+    ///
+    /// The unit tests for this live in `selection.rs` and call `apply` directly
+    /// with invented paths, so guarding the *resolve* with a layer check —
+    /// making a personal `[use]` read by nobody, or a local one unable to
+    /// override the committed list — left the whole suite green. Both are
+    /// stated behaviours: a personal list is your default everywhere, and a
+    /// local one is what `omh use` now has to write through.
+    #[test]
+    fn use_is_read_from_every_layer_and_the_last_one_wins() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.root.join("settings.toml"),
+            "[use]\nskills = [\"mine\"]\nrules = [\"tdd\"]\n",
+        );
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[use]\nskills = [\"ours\"]\n",
+        );
+        let s = resolve(&paths, &m).unwrap().selection;
+        assert!(s.allows(crate::adapter::Capability::Skills, "ours"));
+        assert!(
+            !s.allows(crate::adapter::Capability::Skills, "mine"),
+            "the repo replaced the personal list rather than adding to it"
+        );
+        assert!(
+            s.allows(crate::adapter::Capability::Rules, "tdd"),
+            "and a capability only the personal layer named still stands"
+        );
+
+        write(
+            paths.repo.join(".omh/settings.local.toml"),
+            "[use]\nskills = [\"just-here\"]\n",
+        );
+        let s = resolve(&paths, &m).unwrap().selection;
+        assert!(s.allows(crate::adapter::Capability::Skills, "just-here"));
+        assert!(
+            !s.allows(crate::adapter::Capability::Skills, "ours"),
+            "the gitignored layer has the last word, which is why omh use writes it too"
+        );
     }
 
     /// A table nobody reads is refused by name.

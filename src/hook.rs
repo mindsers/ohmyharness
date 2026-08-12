@@ -23,11 +23,11 @@
 
 use crate::adapter::Binding;
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A moment every harness has, in omh's words.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Event {
     SessionStart,
@@ -38,7 +38,7 @@ pub enum Event {
 
 /// A class of thing an agent does, in omh's words. A harness spells each one
 /// however its own tools are named.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Tool {
     Edit,
@@ -115,31 +115,90 @@ impl std::fmt::Display for Field {
     }
 }
 
+/// What a hook does when its moment arrives. Exactly one of two things, which
+/// is why it is an enum rather than two optional fields.
+///
+/// As four `Option`s the format could express three states it has no meaning
+/// for — run *and* inject, neither, and capturing output that nothing reads —
+/// so every one of them was a `bail!` in a validator, and `does()` needed a
+/// fallback for a case the validator had already ruled out. Here they are not
+/// states to reject; they cannot be written down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Action {
+    /// Executes; output ignored.
+    Run(String),
+    /// Text into the agent's context, through whatever protocol this harness
+    /// uses to accept one.
+    Inject {
+        /// A command whose stdout binds to `$OMH_CAPTURE`, for the case `text`
+        /// alone cannot express: something not known until it has been asked.
+        /// Evaluated **before** `when`, so a predicate can test it.
+        ///
+        /// Inside this variant rather than beside it: capturing output for a
+        /// `run` that discards it is the third meaningless state, and this is
+        /// where it stops being expressible.
+        capture: Option<String>,
+        text: String,
+    },
+}
+
 /// A hook declares what it wants, never how a harness spells it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(into = "Raw")]
 pub struct Hook {
     pub on: Event,
     /// Empty means every tool this moment has — which is the only sensible
     /// reading for `turn-end`, where there is no tool to narrow to.
-    #[serde(default)]
     pub tools: Vec<Tool>,
     /// A predicate. Non-zero means this hook stays silent, which is how a hook
     /// degrades to a no-op rather than to an error.
-    #[serde(default)]
     pub when: Option<String>,
-    /// A command whose stdout binds to `$OMH_CAPTURE`, for the case `inject`
-    /// alone cannot express: text that is not known until something has been
-    /// asked. Evaluated **before** `when`, so a predicate can test it.
-    #[serde(default)]
-    pub capture: Option<String>,
-    /// Executes; output ignored.
-    #[serde(default)]
-    pub run: Option<String>,
-    /// Text into the agent's context, through whatever protocol this harness
-    /// uses to accept one.
-    #[serde(default)]
-    pub inject: Option<String>,
+    pub action: Action,
+}
+
+/// The shape of a hook *file*, and the only shape that deserializes.
+///
+/// A separate struct rather than `#[serde(flatten)]` on `Hook`: flatten
+/// **silently disables `deny_unknown_fields`**, and refusing `{"event":"Stop"}`
+/// by naming `on` is the first thing this format has to do. A hook file
+/// half-translated by hand, quietly accepted and never applied, is precisely
+/// the failure the canonical format exists to prevent.
+///
+/// It is also what keeps `Hook` unconstructible without validation. There is no
+/// `Deserialize` on `Hook` at all, so `from_raw` is the only door in, and
+/// `whence` reaches the message — which `#[serde(try_from)]` could not have
+/// done, since serde hands a conversion no idea which file it is reading.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Raw {
+    on: Event,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<Tool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    when: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    capture: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inject: Option<String>,
+}
+
+impl From<Hook> for Raw {
+    fn from(h: Hook) -> Self {
+        let (capture, run, inject) = match h.action {
+            Action::Run(cmd) => (None, Some(cmd), None),
+            Action::Inject { capture, text } => (capture, None, Some(text)),
+        };
+        Self {
+            on: h.on,
+            tools: h.tools,
+            when: h.when,
+            capture,
+            run,
+            inject,
+        }
+    }
 }
 
 impl Hook {
@@ -147,14 +206,19 @@ impl Hook {
     /// Validating where the value is minted is the rule `memory::expand_key`
     /// and `carry::validate_pattern` already follow.
     pub fn parse(raw: &str, whence: &str) -> Result<Self> {
-        let hook: Self =
+        let raw: Raw =
             serde_json::from_str(raw).with_context(|| format!("parsing hook {whence}"))?;
-        hook.validate(whence)?;
-        Ok(hook)
+        Self::from_raw(raw, whence)
     }
 
-    fn validate(&self, whence: &str) -> Result<()> {
-        match (&self.run, &self.inject) {
+    /// The wire shape, triaged into the canonical one.
+    ///
+    /// Two of the three checks this used to make are gone — not moved,
+    /// *deleted*: `Action` cannot hold a run and an inject, and cannot hold a
+    /// capture without one. What is left is the check on a **value** rather
+    /// than a shape, and no type can take that one away.
+    fn from_raw(raw: Raw, whence: &str) -> Result<Self> {
+        let action = match (raw.run, raw.inject) {
             (Some(_), Some(_)) => anyhow::bail!(
                 "{whence}: a hook either `run`s something or `inject`s text, not both. \
                  A command whose output should reach the agent is `capture` plus `inject`."
@@ -162,30 +226,66 @@ impl Hook {
             (None, None) => {
                 anyhow::bail!("{whence}: a hook does nothing without `run` or `inject`")
             }
-            _ => {}
+            (Some(run), None) => {
+                if raw.capture.is_some() {
+                    anyhow::bail!(
+                        "{whence}: `capture` collects output for `inject` to carry. \
+                         With `run` the output is ignored, so capturing it says nothing."
+                    );
+                }
+                non_empty(&run, "run", whence)?;
+                Action::Run(run)
+            }
+            (None, Some(text)) => {
+                non_empty(&text, "inject", whence)?;
+                check_interpolation(&text, whence, raw.capture.is_some())?;
+                if let Some(capture) = &raw.capture {
+                    non_empty(capture, "capture", whence)?;
+                    // A capture nothing reads is a subprocess per session for
+                    // nothing. `when` counts as a reader as well as `text`,
+                    // because `capture` is evaluated *before* the predicate on
+                    // purpose so a predicate can test it — which is exactly what
+                    // `graph-orient` does.
+                    let read = mentions(&text, CAPTURE_VAR)
+                        || raw
+                            .when
+                            .as_deref()
+                            .is_some_and(|w| mentions(w, CAPTURE_VAR));
+                    if !read {
+                        anyhow::bail!(
+                            "{whence}: `capture` runs a command and binds its output to \
+                             ${CAPTURE_VAR}, and nothing here reads it. Name it in \
+                             `inject` or in `when`, or drop the `capture`."
+                        );
+                    }
+                }
+                Action::Inject {
+                    capture: raw.capture,
+                    text,
+                }
+            }
+        };
+        if let Some(when) = &raw.when {
+            // An empty predicate renders `|| exit 0; …`, which `sh` refuses to
+            // parse — so the hook never runs while every assertion about its
+            // text still passes.
+            non_empty(when, "when", whence)?;
         }
-        if self.capture.is_some() && self.inject.is_none() {
-            anyhow::bail!(
-                "{whence}: `capture` collects output for `inject` to carry. \
-                 With `run` the output is ignored, so capturing it says nothing."
-            );
-        }
-        if let Some(text) = &self.inject {
-            check_interpolation(text, whence, self.capture.is_some())?;
-        }
-        Ok(())
+        Ok(Self {
+            on: raw.on,
+            tools: raw.tools,
+            when: raw.when,
+            action,
+        })
     }
 
     /// What this hook does, in one string, for the commands that report a hook
     /// rather than run one.
-    ///
-    /// `validate` guarantees exactly one of the two, so the fallback is
-    /// unreachable rather than a default that could be mistaken for an answer.
     pub fn does(&self) -> &str {
-        self.run
-            .as_deref()
-            .or(self.inject.as_deref())
-            .unwrap_or_default()
+        match &self.action {
+            Action::Run(cmd) => cmd,
+            Action::Inject { text, .. } => text,
+        }
     }
 
     /// The payload fields this hook actually reads, derived from the `$OMH_*`
@@ -196,17 +296,32 @@ impl Hook {
     /// edit. `graph-first` reads no payload at all and must not be charged a
     /// `jq` on every search.
     pub fn fields(&self) -> BTreeSet<Field> {
-        let bodies = [&self.when, &self.capture, &self.run, &self.inject];
+        let (capture, body) = match &self.action {
+            Action::Run(cmd) => (&None, cmd),
+            Action::Inject { capture, text } => (capture, text),
+        };
+        let bodies = [
+            self.when.as_deref(),
+            capture.as_deref(),
+            Some(body.as_str()),
+        ];
         Field::ALL
             .into_iter()
-            .filter(|f| {
-                bodies
-                    .iter()
-                    .flat_map(|b| b.iter())
-                    .any(|b| mentions(b, f.var()))
-            })
+            .filter(|f| bodies.iter().flatten().any(|b| mentions(b, f.var())))
             .collect()
     }
+}
+
+/// A body has to say something. An empty one is a field somebody meant to fill
+/// in, and every one of them fails in the way this format exists to prevent: an
+/// empty `inject` renders a hook that hands the agent nothing, an empty `run`
+/// renders a hook that runs nothing, and an empty `when` renders a command `sh`
+/// will not parse — each satisfying every assertion about the hook's text.
+fn non_empty(body: &str, field: &str, whence: &str) -> Result<()> {
+    if body.trim().is_empty() {
+        anyhow::bail!("{whence}: `{field}` is empty, so this hook does nothing");
+    }
+    Ok(())
 }
 
 /// Does `body` reference `$var`? Checked with the following character so
@@ -388,25 +503,31 @@ pub fn render(
         }
     }
 
-    if let Some(capture) = &hook.capture {
+    // Before `when`, so a predicate can test what was captured.
+    if let Action::Inject {
+        capture: Some(capture),
+        ..
+    } = &hook.action
+    {
         command.push_str(&format!("{CAPTURE_VAR}=$({capture}); "));
     }
     if let Some(when) = &hook.when {
         command.push_str(&format!("{when} || exit 0; "));
     }
 
-    if let Some(run) = &hook.run {
-        command.push_str(run);
-    } else if let Some(text) = &hook.inject {
-        let Some(inject) = &binding.inject else {
-            return dropped("way to inject text".into());
-        };
-        command.push_str(
-            &inject
-                .template
-                .replace("{{text}}", &interpolating(text))
-                .replace("{{event}}", event),
-        );
+    match &hook.action {
+        Action::Run(run) => command.push_str(run),
+        Action::Inject { text, .. } => {
+            let Some(inject) = &binding.inject else {
+                return dropped("way to inject text".into());
+            };
+            command.push_str(
+                &inject
+                    .template
+                    .replace("{{text}}", &interpolating(text))
+                    .replace("{{event}}", event),
+            );
+        }
     }
 
     Ok(Outcome::Rendered(Rendered {
@@ -489,6 +610,49 @@ mod tests {
         assert!(err.contains("`on`"), "and the field to use: {err}");
     }
 
+    /// A hook that is otherwise perfectly good, plus one word from somewhere
+    /// else. The case above cannot prove this: it has no `on` at all, so it
+    /// fails on the missing field whether unknown ones are refused or not.
+    ///
+    /// The guard exists for the shape of the type rather than for the user.
+    /// `#[serde(flatten)]` — the obvious way to spell a hook whose action is an
+    /// enum — **silently disables `deny_unknown_fields`**, and the failure it
+    /// buys is exactly the one this format was written to stop: a `matcher`
+    /// beside a canonical hook is a hook half-translated by hand, accepted, and
+    /// never applied.
+    #[test]
+    fn a_word_from_another_harness_is_refused_beside_good_ones() {
+        let err = Hook::parse(
+            r#"{"on":"before-tool","matcher":"Read","run":"cargo test"}"#,
+            "h.json",
+        )
+        .expect_err("`matcher` is Claude's word and omh does not read it");
+        assert!(format!("{err:#}").contains("matcher"), "by name: {err:#}");
+    }
+
+    /// The file is the contract, so a hook has to serialise back into one.
+    ///
+    /// Load-bearing beyond tidiness: `omhs_own_hooks_obey_the_format_they_impose`
+    /// round-trips the five omh ships through the real parser, and it can only
+    /// do that if the canonical type writes the wire shape rather than its own
+    /// internal one.
+    #[test]
+    fn a_hook_serialises_back_into_the_file_it_came_from() {
+        for body in [
+            r#"{"on":"turn-end","run":"cargo test"}"#,
+            r#"{"on":"before-tool","tools":["read"],"when":"[ -f \"$OMH_TOOL_FILE\" ]","inject":"about $OMH_TOOL_FILE"}"#,
+            r#"{"on":"session-start","capture":"date","inject":"it is $OMH_CAPTURE"}"#,
+        ] {
+            let hook = Hook::parse(body, "h.json").unwrap();
+            let written = serde_json::to_string(&hook).unwrap();
+            assert_eq!(
+                Hook::parse(&written, "h.json").unwrap(),
+                hook,
+                "{body} did not survive: {written}"
+            );
+        }
+    }
+
     #[test]
     fn a_hook_that_neither_runs_nor_injects_is_refused() {
         let err = Hook::parse(r#"{"on":"turn-end"}"#, "h.json").unwrap_err();
@@ -502,6 +666,53 @@ mod tests {
     fn a_hook_that_both_runs_and_injects_is_refused_with_what_it_meant() {
         let err = Hook::parse(r#"{"on":"turn-end","run":"x","inject":"y"}"#, "h.json").unwrap_err();
         assert!(err.to_string().contains("capture"), "got: {err}");
+    }
+
+    /// A capture whose output nothing reads is a subprocess per session, for
+    /// nothing — and the module doc named it as one of the three meaningless
+    /// states and claimed it "cannot be written down". Moving `capture` inside
+    /// `Inject` killed only capture-beside-`run`; this half is a check on a
+    /// *value*, which no shape can make unconstructible.
+    ///
+    /// Both bodies count, because `capture` is evaluated before `when` on
+    /// purpose so a predicate can test it — `graph-orient` reads it in both.
+    #[test]
+    fn a_capture_nothing_reads_is_refused() {
+        let err = Hook::parse(
+            r#"{"on":"session-start","capture":"date","inject":"hello"}"#,
+            "h.json",
+        )
+        .expect_err("nothing reads $OMH_CAPTURE here");
+        assert!(
+            err.to_string().contains(CAPTURE_VAR),
+            "say which variable went unread: {err}"
+        );
+
+        // Read by the text, and read by the predicate: both are uses.
+        for body in [
+            r#"{"on":"session-start","capture":"date","inject":"it is $OMH_CAPTURE"}"#,
+            r#"{"on":"session-start","capture":"date","when":"[ -n \"$OMH_CAPTURE\" ]","inject":"hi"}"#,
+        ] {
+            Hook::parse(body, "h.json").unwrap_or_else(|e| panic!("{body} should validate: {e:#}"));
+        }
+    }
+
+    /// An empty predicate renders `|| exit 0; …`, which `sh` refuses to parse —
+    /// so the hook never runs, and every assertion about its text still passes.
+    /// CONTRIBUTING states the invariant it breaks: every hook command parses
+    /// **and runs** under `sh`.
+    #[test]
+    fn an_empty_body_is_not_a_body() {
+        for body in [
+            r#"{"on":"turn-end","when":"","run":"cargo test"}"#,
+            r#"{"on":"turn-end","run":""}"#,
+            r#"{"on":"turn-end","inject":""}"#,
+        ] {
+            let err = Hook::parse(body, "h.json")
+                .map(|_| ())
+                .expect_err("an empty body says nothing and can break the shell");
+            assert!(err.to_string().contains("h.json"), "name the file: {err}");
+        }
     }
 
     #[test]
@@ -527,10 +738,7 @@ mod tests {
     #[test]
     fn a_doubled_dollar_is_a_literal_one() {
         let h = Hook::parse(r#"{"on":"turn-end","inject":"costs $$5"}"#, "h.json").unwrap();
-        assert_eq!(
-            interpolating(h.inject.as_deref().unwrap()),
-            r#""costs \$5""#
-        );
+        assert_eq!(interpolating(h.does()), r#""costs \$5""#);
     }
 
     /// Running a command from inside a sentence is how a hook body learns to be

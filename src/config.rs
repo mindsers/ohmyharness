@@ -49,10 +49,6 @@ pub struct Written {
 impl Layer {
     pub const ALL: [Layer; 3] = [Self::Personal, Self::Shared, Self::Local];
 
-    /// `omh set` with no `--layer` writes here: a mistyped secret must not be
-    /// committable by accident.
-    pub const DEFAULT_WRITE: Layer = Self::Local;
-
     /// The file this layer's settings live in.
     pub fn file(&self, paths: &Paths) -> PathBuf {
         match self {
@@ -271,11 +267,177 @@ fn refuse_a_repo_server(paths: &Paths) -> Result<()> {
 }
 
 pub fn set(paths: &Paths, key: &str, raw: &str, layer: Layer) -> Result<Written> {
+    edit_layer(paths, layer, |doc| {
+        refuse_a_table(doc, key)?;
+        doc[key] = toml_edit::Item::Value(parse_value(raw));
+        Ok(())
+    })
+}
+
+pub fn unset(paths: &Paths, key: &str, layer: Layer) -> Result<bool> {
     let path = layer.file(paths);
-    let mut table = read_table(&path)?;
-    table.insert(key.to_string(), parse_value(raw));
+    let mut doc = read_doc(&path)?;
+    refuse_a_table(&doc, key).with_context(|| format!("editing {}", path.display()))?;
+    if doc.remove(key).is_none() {
+        return Ok(false);
+    }
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
+/// A table is configuration *for* something, never a setting with a value.
+///
+/// `write_table` refuses the opposite direction and says why; the guard was
+/// one-way, so `omh repo set omh false` replaced the whole `[omh]` table with a
+/// scalar. That is worse than losing the switches it held: `settings::File`
+/// deserialises `omh` as a map, so every command afterwards failed to parse the
+/// file — while the write printed a path and exited 0.
+///
+/// `config::policy` already skips tables when *reading*, for the same reason.
+/// This is that rule on the way out.
+fn refuse_a_table(doc: &toml_edit::DocumentMut, key: &str) -> Result<()> {
+    // `as_table_like`, so an inline `omh = { codegraph = false }` counts — it is
+    // valid TOML and `settings.rs` reads it, so a guard that could not see it
+    // would be the same bug one spelling over.
+    if doc
+        .as_table()
+        .get(key)
+        .is_some_and(|item| item.as_table_like().is_some())
+    {
+        anyhow::bail!(
+            "`{key}` is a table, not a setting — omh will not replace it with a value. \
+             `[omh]` is `omh repo enable`/`disable`, `[use]` is `omh use`/`unuse`, and \
+             `[mcp.<name>.env]` is edited by hand."
+        );
+    }
+    Ok(())
+}
+
+/// The table `[use]` lives in, and the one `[omh]` lives in. Spelled once here
+/// rather than at each writer, so the reader in `settings.rs` and the writers
+/// below cannot drift about what a table is called.
+pub const USE: &str = "use";
+pub const OMH: &str = "omh";
+
+/// Write one capability's `[use]` list, or several.
+///
+/// A whole list per capability rather than an append, because that is what the
+/// table means: `[use]` is an allowlist and the value *is* the selection. The
+/// caller computes the new list — `omh use` from the effective one plus a name,
+/// `omh use --all` from the catalogue — so the one place that knows "absent
+/// means everything" stays [`crate::selection`] rather than being re-derived
+/// inside a writer.
+pub fn write_selection(
+    paths: &Paths,
+    layer: Layer,
+    lists: &BTreeMap<crate::adapter::Capability, Vec<String>>,
+) -> Result<Written> {
+    write_table(paths, layer, USE, |table| {
+        for (cap, names) in lists {
+            let mut array = toml_edit::Array::new();
+            for name in names {
+                array.push(name.as_str());
+            }
+            table[&cap.to_string()] = toml_edit::value(array);
+        }
+    })
+}
+
+/// Switch one of omh's features on or off here.
+pub fn write_feature(paths: &Paths, layer: Layer, feature: &str, on: bool) -> Result<Written> {
+    write_table(paths, layer, OMH, |table| {
+        table[feature] = toml_edit::value(on);
+    })
+}
+
+/// The repo layers a write to `table.key` has to reach.
+///
+/// Always the committed file: what a project uses, and which of omh's features
+/// it runs with, are facts about the project, and a teammate cloning it should
+/// get them. **And** the gitignored one when it already declares the same key —
+/// because `settings::resolve` applies the layers in order with that one last,
+/// so writing only the committed file made `omh unuse` report success while the
+/// entry it removed was still being staged. A command that removes something
+/// has to remove it.
+///
+/// Never a layer that does not already declare it. A `[use]` table appearing in
+/// a gitignored file because a committed one was edited is how a teammate stops
+/// getting what the repo says it uses — and `Personal` is absent for a
+/// different reason: it is *lower* precedence than `Shared`, so it can never
+/// shadow the write, and rewriting your default for every project because you
+/// curated one repo would be the worst of the three.
+pub fn declaring(paths: &Paths, table: &str, key: &str) -> Result<Vec<Layer>> {
+    let mut out = vec![Layer::Shared];
+    if declares_key(paths, Layer::Local, table, key)? {
+        out.push(Layer::Local);
+    }
+    Ok(out)
+}
+
+/// Does this layer's file have a `[table]` at all?
+///
+/// `init` asks, to decide whether a repo already says what it uses — and the
+/// answer decides whether it overwrites a list somebody pruned, so absent and
+/// unreadable must not be the same answer. `read_doc` is what keeps them apart.
+pub fn declares(paths: &Paths, layer: Layer, table: &str) -> Result<bool> {
+    Ok(read_doc(&layer.file(paths))?.contains_key(table))
+}
+
+fn declares_key(paths: &Paths, layer: Layer, table: &str, key: &str) -> Result<bool> {
+    Ok(read_doc(&layer.file(paths))?
+        .get(table)
+        // `as_table_like`, so an inline `use = { skills = [...] }` counts. It is
+        // valid TOML and `settings.rs` reads it, so a writer that could not see
+        // it would be the same bug one spelling over.
+        .and_then(|item| item.as_table_like())
+        .is_some_and(|t| t.contains_key(key)))
+}
+
+/// Read-modify-write one named table inside a layer's file.
+fn write_table(
+    paths: &Paths,
+    layer: Layer,
+    name: &str,
+    edit: impl FnOnce(&mut toml_edit::Table),
+) -> Result<Written> {
+    edit_layer(paths, layer, |doc| {
+        // The entry API, not `doc[name]`: indexing a document with a key it
+        // does not have *panics*, and the first `omh use` in a repo is exactly
+        // that case.
+        let item = doc
+            .as_table_mut()
+            .entry(name)
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        // A non-table under this name would be silently replaced, taking
+        // whatever somebody wrote with it. Refused instead, naming the file.
+        let Some(table) = item.as_table_mut() else {
+            anyhow::bail!("`{name}` is not a table — omh will not overwrite it");
+        };
+        edit(table);
+        Ok(())
+    })
+}
+
+/// Read a layer's file as a **document**, apply an edit, write it back.
+///
+/// `DocumentMut` rather than `toml::Table` and `to_string_pretty`, and the
+/// difference is not cosmetic: a settings file is one somebody maintains by
+/// hand, `omh init` writes it full of explanatory comments, and P4 turned
+/// writing it from something `omh config set` did occasionally into something
+/// `omh use`, `omh unuse` and `omh repo enable` all do. A serializer round trip
+/// deletes every comment in the file, which is deleting what the user wrote.
+fn edit_layer(
+    paths: &Paths,
+    layer: Layer,
+    edit: impl FnOnce(&mut toml_edit::DocumentMut) -> Result<()>,
+) -> Result<Written> {
+    let path = layer.file(paths);
+    let mut doc = read_doc(&path)?;
+    edit(&mut doc).with_context(|| format!("editing {}", path.display()))?;
     std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, toml::to_string_pretty(&table)?)?;
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("writing {}", path.display()))?;
     Ok(Written {
         path,
         layer,
@@ -283,14 +445,24 @@ pub fn set(paths: &Paths, key: &str, raw: &str, layer: Layer) -> Result<Written>
     })
 }
 
-pub fn unset(paths: &Paths, key: &str, layer: Layer) -> Result<bool> {
-    let path = layer.file(paths);
-    let mut table = read_table(&path)?;
-    if table.remove(key).is_none() {
-        return Ok(false);
-    }
-    std::fs::write(&path, toml::to_string_pretty(&table)?)?;
-    Ok(true)
+/// Absent is not unreadable, and this is where conflating them **destroys**:
+/// every caller is a read-modify-write, so an error read as "empty" turns the
+/// write into a replacement. One byte that is not UTF-8 in `settings.toml` used
+/// to take every `[omh]` switch and every `[mcp.<name>.env]` token with it, and
+/// print success.
+fn read_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
+    let Some(raw) = read_layer(path)? else {
+        return Ok(toml_edit::DocumentMut::new());
+    };
+    raw.parse()
+        .with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Accept TOML literals (`["a", "b"]`, `true`, `30`) and fall back to a bare
+/// string, so `omh set idle_timeout 30m` does not need quoting.
+fn parse_value(raw: &str) -> toml_edit::Value {
+    raw.parse::<toml_edit::Value>()
+        .unwrap_or_else(|_| toml_edit::Value::from(raw))
 }
 
 /// Last layer wins; every earlier declaration of the same key is recorded as
@@ -312,28 +484,6 @@ fn resolve(found: Vec<(String, String, Layer)>) -> Vec<Setting> {
             }
         })
         .collect()
-}
-
-/// Absent is not unreadable, and this is the function where conflating them
-/// **destroys** rather than merely misreports: every caller is a
-/// read-modify-write, so an error read as "empty" turns the write into a
-/// replacement. One byte that is not UTF-8 in `settings.toml` used to take
-/// every `[omh]` switch and every `[mcp.<name>.env]` token with it, and print
-/// success.
-fn read_table(path: &Path) -> Result<toml::Table> {
-    let Some(raw) = read_layer(path)? else {
-        return Ok(toml::Table::new());
-    };
-    toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
-}
-
-/// Accept TOML literals (`["a", "b"]`, `true`, `30`) and fall back to a bare
-/// string, so `omh set idle_timeout 30m` does not need quoting.
-fn parse_value(raw: &str) -> toml::Value {
-    toml::from_str::<toml::Table>(&format!("v = {raw}"))
-        .ok()
-        .and_then(|t| t.get("v").cloned())
-        .unwrap_or_else(|| toml::Value::String(raw.to_string()))
 }
 
 fn repr(value: &toml::Value) -> String {
@@ -886,20 +1036,70 @@ mod tests {
 
     // ── writes ──────────────────────────────────────────────────────────────
 
-    /// The safety property: an unqualified write can never reach version control.
-    #[test]
-    fn default_write_target_is_gitignored() {
-        assert_eq!(Layer::DEFAULT_WRITE, Layer::Local);
-        assert!(!Layer::DEFAULT_WRITE.is_committed());
-    }
-
     #[test]
     fn set_creates_the_layer_file_when_absent() {
         let (_d, paths) = fixture();
-        let w = set(&paths, "idle_timeout", "30m", Layer::DEFAULT_WRITE).unwrap();
+        let w = set(&paths, "idle_timeout", "30m", Layer::Local).unwrap();
         assert_eq!(w.path, Layer::Local.file(&paths));
         assert!(!w.committed);
         assert_eq!(get(&policy(&paths).unwrap(), "idle_timeout").value, "30m");
+    }
+
+    /// A scalar must not land where a table lives.
+    ///
+    /// `write_table` refuses the opposite direction and says why — "a non-table
+    /// under this name would be silently replaced, taking whatever somebody
+    /// wrote with it" — and the guard was one-way, so `omh repo set omh false`
+    /// replaced the whole `[omh]` table with `omh = false`. That is worse than
+    /// losing the switches: `settings::File` deserialises `omh` as a map, so
+    /// **every subsequent command** — launch, `omh repo`, `omh use` — failed to
+    /// parse the file, while the write itself printed a path and exited 0.
+    ///
+    /// `[use]` and `[mcp]` are the same shape of accident one key over.
+    #[test]
+    fn a_scalar_never_replaces_a_table() {
+        let (_d, paths) = fixture();
+        // Both tables have to exist, or this passes for the wrong reason: a key
+        // no table answers to is an ordinary setting and `set` is right to take
+        // it. The first draft of this test looped over three names and only one
+        // of them was a table.
+        write_feature(&paths, Layer::Shared, "codegraph", false).unwrap();
+        write_selection(
+            &paths,
+            Layer::Shared,
+            &BTreeMap::from([(crate::adapter::Capability::Skills, vec!["mine".to_string()])]),
+        )
+        .unwrap();
+
+        for key in [OMH, USE] {
+            let before = std::fs::read_to_string(Layer::Shared.file(&paths)).unwrap();
+            let err = set(&paths, key, "false", Layer::Shared)
+                .expect_err("`{key}` names a table, and a table is not a setting");
+            assert!(format!("{err:#}").contains(key), "name it: {err:#}");
+            assert_eq!(
+                std::fs::read_to_string(Layer::Shared.file(&paths)).unwrap(),
+                before,
+                "and the refusal has to leave the file alone"
+            );
+        }
+        // A key that is not a table is still an ordinary setting.
+        assert!(set(&paths, "idle_timeout", "30m", Layer::Shared).is_ok());
+    }
+
+    /// `unset` is the same read-modify-write and would drop the whole table.
+    #[test]
+    fn unset_refuses_to_take_a_table_away() {
+        let (_d, paths) = fixture();
+        write_feature(&paths, Layer::Shared, "codegraph", false).unwrap();
+        let err = unset(&paths, OMH, Layer::Shared)
+            .expect_err("removing `[omh]` is not removing a setting");
+        assert!(format!("{err:#}").contains(OMH), "name it: {err:#}");
+        assert!(
+            std::fs::read_to_string(Layer::Shared.file(&paths))
+                .unwrap()
+                .contains("codegraph"),
+            "and the table survives"
+        );
     }
 
     /// Writing to the committed layer must be flagged, because that is the one

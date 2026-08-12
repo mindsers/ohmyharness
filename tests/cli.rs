@@ -50,6 +50,32 @@ impl Sandbox {
             .expect("the binary under test must run")
     }
 
+    /// Put the shipped base manifest where `Paths::base()` looks.
+    ///
+    /// `omh init` would do it, and needs a container runtime to finish — so the
+    /// commands that only read the manifest get it this way instead, and stay
+    /// runnable on a box with no docker.
+    fn seed_base(&self) {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("base");
+        let dst = self.home.join(".omh/base");
+        std::fs::create_dir_all(&dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap().flatten() {
+            std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+        }
+    }
+
+    fn settings(&self) -> String {
+        std::fs::read_to_string(self.repo.join(".omh/settings.toml")).unwrap_or_default()
+    }
+
+    fn catalogue(&self, entries: &[&str]) {
+        for entry in entries {
+            let p = self.home.join(".omh").join(entry);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "x").unwrap();
+        }
+    }
+
     fn local_store(&self) -> PathBuf {
         self.home
             .join(".omh/notes")
@@ -624,5 +650,431 @@ fn a_dry_run_discloses_the_repos_hooks_and_records_nothing() {
         !snapshot.exists(),
         "a dry run recorded {} — the next real launch would be silent about a change",
         snapshot.display()
+    );
+}
+
+/// The launcher says what this repo is *not* using from your catalogue.
+///
+/// Same wire, same gap: `notice::selection` and `Selection::unselected` are both
+/// covered, and deleting the `say_selection` call leaves every one of those
+/// tests green. It is the report that makes an expanded `[use]` safe — `init`
+/// writes the list once and never revisits it, so without this a skill added
+/// afterwards is off and nothing about the repo says why.
+///
+/// `#[ignore]`d because it needs git and a container runtime to reach `run()`.
+/// CI's linux job runs `--include-ignored`, which is where this bites.
+#[test]
+#[ignore]
+fn a_dry_run_names_the_catalogue_entries_this_repo_is_not_using() {
+    let sb = sandbox();
+    sb.git_init();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+    // Added to the catalogue *after* init wrote the list, which is the whole
+    // case: the entry is off, and the reason is invisible without this report.
+    std::fs::create_dir_all(sb.home.join(".omh/skills/refactor")).unwrap();
+    std::fs::write(sb.home.join(".omh/skills/refactor/SKILL.md"), "x").unwrap();
+
+    let said = String::from_utf8_lossy(&sb.omh(&["--dry-run", "claude"]).stderr).to_string();
+    assert!(
+        said.contains("skills/refactor"),
+        "a launch has to name what it is not doing: {said}"
+    );
+    assert!(
+        said.contains("omh use skills refactor"),
+        "and the command that fixes it: {said}"
+    );
+}
+
+// ── selection, and the two scopes ───────────────────────────────────────────
+
+/// `omh use` writes the **committed** file. What a project uses is a fact about
+/// the project, and a teammate cloning it should get the same selection — the
+/// opposite default from `omh repo set`, which holds `carry_in` paths and MCP
+/// env and must not be committable by accident. One flag could not express both,
+/// which is why `--layer` split into two commands.
+#[test]
+fn use_writes_the_committed_file_and_unuse_takes_a_name_back_out() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/refactor/SKILL.md"]);
+
+    assert!(sb.omh(&["use", "skills", "review-diff"]).status.success());
+    let written = sb.settings();
+    assert!(written.contains("review-diff"), "got: {written}");
+    assert!(
+        written.contains("refactor"),
+        "a capability that was following the whole catalogue must not be \
+         narrowed to one name by adding one: {written}"
+    );
+    assert!(
+        !sb.repo.join(".omh/settings.local.toml").exists(),
+        "the gitignored file is `omh repo set`'s, not this command's"
+    );
+
+    assert!(sb.omh(&["unuse", "skills", "refactor"]).status.success());
+    let written = sb.settings();
+    assert!(written.contains("review-diff"), "got: {written}");
+    assert!(!written.contains("refactor"), "taken back out: {written}");
+}
+
+/// Selecting something already selected is not a write and not an error.
+#[test]
+fn use_is_idempotent_and_unuse_refuses_a_name_this_repo_never_used() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    sb.omh(&["use", "skills", "review-diff"]);
+
+    // The invariant, not the message: "already used" is what it says, and
+    // "not a write" is what it means. Asserting the sentence left a mutation
+    // that writes the list back before printing it entirely green.
+    let before = sb.settings();
+    let out = sb.omh(&["use", "skills", "review-diff"]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("already used"));
+    assert_eq!(sb.settings(), before, "selecting it again touched the file");
+
+    // Refused rather than written as a no-op: a name this repo never used is a
+    // typo, and writing the list back would report success for it.
+    let out = sb.omh(&["unuse", "skills", "nosuchthing"]);
+    assert!(!out.status.success(), "a typo must not report success");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nosuchthing"));
+}
+
+/// `[use]` names *your* entries; a feature is `[omh]`'s business, and the CLI
+/// has to teach that rather than leave it in the docs.
+#[test]
+fn use_refuses_a_feature_and_disable_refuses_an_entry() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+
+    let out = sb.omh(&["use", "mcp", "codegraph"]);
+    assert!(!out.status.success(), "codegraph is omh's, not yours");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("codegraph"), "must name it: {err}");
+    assert!(
+        err.contains("omh repo disable codegraph"),
+        "and point at the switch that does work: {err}"
+    );
+
+    // And the other direction, so the distinction is not one-way.
+    let out = sb.omh(&["repo", "disable", "review-diff"]);
+    assert!(!out.status.success(), "a skill is not a feature");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("omh use"), "point back the other way: {err}");
+}
+
+/// `omh repo disable` writes `[omh]` in the committed file, and says plainly
+/// that nothing was uninstalled — the distinction the whole feature rests on.
+#[test]
+fn repo_disable_switches_a_feature_off_here_without_uninstalling_it() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    let out = sb.omh(&["repo", "disable", "codegraph"]);
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sb.settings().contains("codegraph = false"),
+        "{}",
+        sb.settings()
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("nothing was uninstalled"));
+
+    assert!(sb.omh(&["repo", "enable", "codegraph"]).status.success());
+    assert!(
+        sb.settings().contains("codegraph = true"),
+        "{}",
+        sb.settings()
+    );
+}
+
+/// The two opposite defaults, side by side. `omh repo set` must not be able to
+/// put a token in a file git will commit unless asked in so many words.
+#[test]
+fn repo_set_is_gitignored_and_shared_says_it_is_not() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    assert!(sb
+        .omh(&["repo", "set", "carry_in", "[\".env\"]"])
+        .status
+        .success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(local.contains(".env"), "got: {local}");
+
+    let out = sb.omh(&["repo", "set", "--shared", "idle_timeout", "30m"]);
+    assert!(out.status.success());
+    assert!(sb.settings().contains("30m"), "{}", sb.settings());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("COMMITTED"),
+        "writing the committed file has to say so"
+    );
+}
+
+/// `omh config set` means **you** now. It used to default to the repo's
+/// gitignored file; the secret-safety argument survives intact, because the
+/// personal file is not committed either.
+#[test]
+fn config_set_writes_your_defaults() {
+    let sb = sandbox();
+    sb.seed_base();
+    assert!(sb
+        .omh(&["config", "set", "idle_timeout", "45m"])
+        .status
+        .success());
+    let personal = std::fs::read_to_string(sb.home.join(".omh/settings.toml")).unwrap();
+    assert!(personal.contains("45m"), "got: {personal}");
+    assert!(
+        !sb.repo.join(".omh/settings.local.toml").exists(),
+        "this is not a repo-scoped command any more"
+    );
+}
+
+/// `--layer` keeps working for one release and says what replaced it. A flag
+/// that outlives its documentation is how people learn a form that is about to
+/// stop existing; a hard error would cost more than it protects, since this one
+/// is recoverable by retyping.
+#[test]
+fn layer_still_works_and_names_what_replaced_it() {
+    let sb = sandbox();
+    sb.seed_base();
+    let out = sb.omh(&["config", "set", "--layer", "shared", "idle_timeout", "1h"]);
+    assert!(out.status.success(), "still works");
+    assert!(sb.settings().contains("1h"), "and writes where it said");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("going away"), "got: {said}");
+    assert!(
+        said.contains("omh repo set --shared"),
+        "and names the form that replaces it: {said}"
+    );
+}
+
+/// A name is checked where it is minted, so `edit` cannot be talked into
+/// joining a path to the catalogue directory.
+#[test]
+fn edit_refuses_a_name_that_climbs_out_of_the_catalogue() {
+    let sb = sandbox();
+    sb.seed_base();
+    let out = sb.omh(&["config", "edit", "skills", "../../../.ssh/id_rsa"]);
+    assert!(!out.status.success(), "traversal must not reach $EDITOR");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("never a path"));
+}
+
+/// Bare `omh repo` is where the reporting this design keeps promising surfaces:
+/// with a curated list the useful question stops being "what is this set to" and
+/// becomes "why is this skill not here".
+#[test]
+fn bare_repo_reports_what_is_used_what_is_not_and_what_decided_it() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/refactor/SKILL.md"]);
+    sb.omh(&["use", "skills", "review-diff"]);
+    sb.omh(&["unuse", "skills", "refactor"]);
+    sb.omh(&["repo", "disable", "codegraph"]);
+    sb.omh(&["repo", "set", "carry_in", "[\".env\"]"]);
+
+    let out = sb.omh(&["repo"]);
+    assert!(
+        out.status.success(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("review-diff"), "what is used: {said}");
+    assert!(said.contains("refactor"), "and what is not: {said}");
+    assert!(said.contains("codegraph"), "omh's features: {said}");
+    assert!(said.contains("off here"), "and their state: {said}");
+    assert!(said.contains("carry_in"), "settings: {said}");
+    assert!(
+        said.contains("local"),
+        "and which file decided each: {said}"
+    );
+}
+
+/// A settings file is a file somebody maintains by hand, and comments are part
+/// of what they wrote.
+///
+/// Before P4 a write to `.omh/settings.toml` was rare — `omh config set` and
+/// nothing else. Now `omh use`, `omh unuse` and `omh repo enable` all touch it,
+/// and `init` writes it *full* of explanatory comments, so a round trip through
+/// a serializer would have the first `omh use` silently delete everything init
+/// had just explained. That is data loss, not formatting.
+#[test]
+fn writing_a_setting_keeps_what_you_wrote_around_it() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        "# why this repo carries an env file\ncarry_in = [\".env.local\"]  # the app needs it\n",
+    )
+    .unwrap();
+
+    assert!(sb.omh(&["use", "skills", "review-diff"]).status.success());
+
+    let after = sb.settings();
+    assert!(
+        after.contains("# why this repo carries an env file"),
+        "the comment above a setting is part of the setting: {after}"
+    );
+    assert!(
+        after.contains("# the app needs it"),
+        "and so is the one beside it: {after}"
+    );
+    assert!(
+        after.contains("review-diff"),
+        "and the write happened: {after}"
+    );
+}
+
+/// `omh init` writes the selection out with every entry named.
+///
+/// Expanded rather than `"*"`, because an explicit list is editable and
+/// reviewable in a way a wildcard is not — you curate by deleting lines. The
+/// repo's own detected hooks are in it, because `init` wrote those a moment
+/// earlier and a list that omitted them would switch off what init just
+/// created; omh's own are not, because `[omh]` governs those and `[use]`
+/// refuses to name one.
+///
+/// `#[ignore]`d because `init` builds an image, so it needs a container runtime.
+/// CI's linux job runs `--include-ignored`, which is where this bites.
+#[test]
+#[ignore]
+fn init_writes_the_selection_expanded() {
+    let sb = sandbox();
+    sb.git_init();
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    assert!(sb.omh(&["init"]).status.success());
+
+    let written = sb.settings();
+    assert!(written.contains("[use]"), "got: {written}");
+    assert!(written.contains("review-diff"), "your catalogue: {written}");
+    assert!(
+        written.contains("rust-test") && written.contains("rust-format"),
+        "and the hooks init just wrote for the detected stack: {written}"
+    );
+    assert!(
+        !written.contains("codegraph") || !written.contains("mcp = [\"codegraph"),
+        "omh's own are `[omh]`'s, not `[use]`'s: {written}"
+    );
+    // The comment block init writes is what explains the file. A selection
+    // appended by a serializer round trip would have deleted all of it.
+    assert!(
+        written.contains("# carry_in"),
+        "init's own explanation has to survive its own write: {written}"
+    );
+
+    // Re-running must not resync a list somebody pruned on purpose.
+    assert!(sb.omh(&["unuse", "skills", "review-diff"]).status.success());
+    assert!(sb.omh(&["init"]).status.success());
+    assert!(
+        !sb.settings().contains("review-diff"),
+        "init writes the list once; `omh use --all` is how you ask for a resync"
+    );
+}
+
+/// A command that removes something has to remove it.
+///
+/// `omh use` and `omh unuse` write the committed file, but the selection is
+/// resolved across all three settings files with the gitignored one last and
+/// winning. So a `[use]` in `settings.local.toml` made `omh unuse` write
+/// correctly, report success, and change nothing the session could see — the
+/// shape the invariant table is built around ("nothing to commit is never a
+/// successful commit").
+///
+/// Both files are written when both declare it. Refusing was the other option
+/// and it is worse: the local table is usually there on purpose, and a command
+/// that will not act until you delete it teaches people to stop using it.
+#[test]
+fn use_writes_every_repo_layer_that_already_declares_the_capability() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/refactor/SKILL.md"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "[use]\nskills = [\"review-diff\", \"refactor\"]\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["unuse", "skills", "refactor"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        !local.contains("refactor"),
+        "the layer that decides has to be the layer that changed: {local}"
+    );
+    assert!(
+        local.contains("review-diff"),
+        "and only that name went: {local}"
+    );
+    assert!(
+        sb.settings().contains("review-diff") && !sb.settings().contains("refactor"),
+        "the committed file is still the one a teammate gets: {}",
+        sb.settings()
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("settings.local.toml"),
+        "and it says both files were written: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The other half: a local file that says nothing about this capability must
+/// not acquire a `[use]` table because a committed one was edited. A selection
+/// silently appearing in a gitignored file is how a teammate stops getting what
+/// the repo says it uses.
+#[test]
+fn a_local_file_that_declares_nothing_stays_that_way() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "carry_in = [\".env\"]\n",
+    )
+    .unwrap();
+
+    assert!(sb.omh(&["use", "skills", "review-diff"]).status.success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        !local.contains("[use]"),
+        "nothing was declared there: {local}"
+    );
+}
+
+/// `[omh]` layers the same way, so `omh repo enable` has the same hole.
+#[test]
+fn a_feature_switch_reaches_the_layer_that_decides() {
+    let sb = sandbox();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "[omh]\ncodegraph = false\n",
+    )
+    .unwrap();
+
+    assert!(sb.omh(&["repo", "enable", "codegraph"]).status.success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        local.contains("codegraph = true"),
+        "the local switch is what decides, so it is what has to move: {local}"
     );
 }

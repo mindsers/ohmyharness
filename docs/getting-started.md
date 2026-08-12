@@ -100,7 +100,7 @@ cleared it yet: see [derive, never interrogate](#derive-never-interrogate).
 1  repo check                     fail fast, before any work
 2  ensure ~/.omh: the catalogue, bundled adapters, editors, the base set
 3  detect the stack; read the host for a harness *preference*
-4  write ~/.omh/mcp.json and <repo>/.omh: settings, memory, a hook per stack
+4  write ~/.omh/mcp.json and <repo>/.omh: settings, [use], memory, a hook per stack
 5  seed memory by derivation       README, manifests, git log, existing rules
 6  ensure the image                ← the real blocker; nothing runs without it
 7  index the code graph            background, resumable
@@ -108,6 +108,11 @@ cleared it yet: see [derive, never interrogate](#derive-never-interrogate).
 
 The report is not a final step. It prints from 5 onward as each decision is
 made, which is why the image and graph lines appear inside it.
+
+`[use]` is written **expanded**, with every catalogue entry named, because a
+list you curate by deleting lines beats a wildcard you cannot review. Anything
+you add to your catalogue afterwards is not in it, so the launcher names what is
+not selected — see [Configuration](configuration.md#use--what-this-repo-takes-from-your-catalogue).
 
 Step 4 **never overwrites what you already wrote**, and writes no rules file at
 all: omh's own sections are [base-set entries](design/base-set.md), composed

@@ -19,7 +19,10 @@ these, the reason is what you need to argue with.
 | Content scope | **one personal catalogue** | "where is this skill" had three answers, and a union can add but never subtract |
 | Repo content | **hooks, and nothing else** | a hook binds to a repo's commands; a skill is a way you work |
 | Settings scope | **3 layers: personal / shared / local** | a machine-wide preference and a one-repo exception are both real |
-| Write default | **the gitignored layer** | a mistyped key must not be committable |
+| Selection | **an allowlist, `[use]`** | removing something is deleting its name; no `include`/`exclude` pair to reconcile |
+| Absent selection | **means everything** | upgrading changes nothing, and a new checkout is useful before it is configured |
+| Command scope | **`omh config` is you, `omh repo` is here** | the two want opposite write defaults, and one `--layer` flag cannot express both |
+| Write default | **a value never lands in the committed file; a name may** | `omh repo set`/`omh config set` take a value you typed and default away from git. `omh use`/`unuse` and `omh repo enable`/`disable` write only names, and what a project uses is a fact about the project |
 | Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
 | Tool vocabulary | **one closed set, per-adapter map** | the one thing skills, subagents and hooks all leak |
 | Portability | **store the standard where one exists** | skills and rules already travel; only hooks and subagents need omh |
