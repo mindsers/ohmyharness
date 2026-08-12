@@ -10,14 +10,19 @@ these, the reason is what you need to argue with.
 | Repo exposure | **git worktree, auto-branch** | the agent cannot reach your checkout or `main`; review is `git diff` |
 | Code graph | **wire an existing MCP server** | distributions package, they don't reinvent |
 | Language | **Rust** | single binary; `omh` wraps every invocation, so startup is felt |
-| LLM routing | **not ours** | one env var in `policy.toml` |
+| LLM routing | **not ours** | one env var in `settings.toml` |
 | Unit of work | **long-lived session** | keeps the index warm, makes harness switching instant |
 | Session persistence | **`dtach`, not tmux** | omh needs detach/reattach; SSH already provides multiplexing |
 | IDE access | **SSH into the session** | one dependency tree, shared with the agent |
 | Untracked files | **`carry_in` allowlist** | worktrees are pure git; secrets enter only by declaration |
 | Capability floor | **superset, adapters degrade** | omh must never cost you a feature you already had |
-| Profile scope | **3 layers: personal / shared / local** | team sharing without leaking secrets |
+| Content scope | **one personal catalogue** | "where is this skill" had three answers, and a union can add but never subtract |
+| Repo content | **hooks, and nothing else** | a hook binds to a repo's commands; a skill is a way you work |
+| Settings scope | **3 layers: personal / shared / local** | a machine-wide preference and a one-repo exception are both real |
 | Write default | **the gitignored layer** | a mistyped key must not be committable |
+| Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
+| Tool vocabulary | **one closed set, per-adapter map** | the one thing skills, subagents and hooks all leak |
+| Portability | **store the standard where one exists** | skills and rules already travel; only hooks and subagents need omh |
 
 Each is expanded where it applies: [architecture](architecture.md) for runtime
 and images, [sessions](../sessions.md) for the session model and persistence,

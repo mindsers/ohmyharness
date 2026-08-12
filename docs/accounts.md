@@ -16,7 +16,7 @@ provider still each need their own login, and there is no useful sense in which
 they share one.
 
 Which account a session uses is a **project-level setting**, resolved through
-the [usual three layers](configuration.md#the-three-layers) — because that is
+the [usual three layers](configuration.md#settings-and-their-three-layers) — because that is
 how it genuinely varies. This repo is work; that one is personal.
 
 ```

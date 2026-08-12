@@ -20,8 +20,25 @@ path   = "$HOME/.config/opencode/opencode.json"
 render = "opencode-json"
 import = "$HOME/.config/opencode/opencode.json"
 
+# Plural, per https://opencode.ai/docs/commands/ read 2026-08-12. omh spelled
+# this `command` and mounted every custom command where nothing reads it —
+# singular is accepted only as a legacy alias. No test can catch a wrong path
+# here and `omh doctor` cannot either: its `dir` check verifies the directory
+# omh mounted holds what omh put there, which passes either way.
 [capabilities.commands]
-path   = "$HOME/.config/opencode/command"
+path   = "$HOME/.config/opencode/commands"
 render = "dir"
 
-# no `subagents`, no `hooks` — omh reports these as dropped at launch
+# Agent markdown files, `mode: subagent` in the frontmatter. Plural, per
+# https://opencode.ai/docs/agents/ read 2026-08-12.
+#
+# omh declared none here and dropped them at every launch, which cost opencode
+# users a feature they had — the capability floor `docs/design/decisions.md`
+# calls out. That the mount lands is checked by `omh doctor`; that opencode
+# reads what is in it is a claim about external software, and the frontmatter
+# it accepts is *not* the same as Claude's — see `docs/design/profile.md`.
+[capabilities.subagents]
+path   = "$HOME/.config/opencode/agents"
+render = "dir"
+
+# no `hooks` — omh reports that as dropped at launch

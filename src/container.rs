@@ -7,7 +7,7 @@
 //! harness only ever sees a read-only mount, so there is still nothing to drift
 //! and nothing to clean up.
 
-use crate::adapter::{expand, Adapter, Binding, Capability, Render};
+use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::profile::{Paths, Profile};
 use crate::session::Session;
 use anyhow::{Context, Result};
@@ -23,6 +23,12 @@ pub struct Plan {
     pub argv: Vec<String>,
     /// Capabilities the profile carries that this harness cannot express.
     pub dropped: Vec<(Capability, usize)>,
+    /// Hooks this harness *nearly* expressed — it has the capability but not
+    /// the moment, tool or payload field they asked for. Separate from
+    /// `dropped` because the granularity differs: a capability is given up
+    /// whole, a hook individually, and reporting the second as the first would
+    /// say a harness has no hooks when it has all but one.
+    pub dropped_hooks: Vec<crate::hook::Dropped>,
     /// What composing the project's rules turned up that the user should hear.
     pub rules: crate::rules::Report,
     /// Interactive harnesses need a terminal; a captured probe must not ask.
@@ -108,6 +114,7 @@ pub fn plan(
     let opts = &opts;
     let mut mounts = Vec::new();
     let mut dropped = Vec::new();
+    let mut dropped_hooks = Vec::new();
 
     // Composed before the capability loop because `place_destination` runs
     // inside it: it creates the empty placeholder at every declared name, and
@@ -130,7 +137,7 @@ pub fn plan(
     });
 
     for cap in Capability::ALL {
-        let sources = profile.sources(cap);
+        let sources = profile.sources(cap)?;
         // Every other capability is exactly what the profile carries. Rules are
         // not: the project's own `AGENTS.md` is composed in, and it is often the
         // only thing there — a fresh install has no rules layer of its own. So
@@ -149,7 +156,7 @@ pub fn plan(
         if !carries_something {
             continue;
         }
-        let Some(binding) = adapter.supports(cap) else {
+        if adapter.supports(cap).is_none() {
             // The composed document is one thing however many layers fed it, so
             // a rules-less harness drops at least the one it was handed — never
             // zero, which is what counting empty sources would have reported.
@@ -167,10 +174,10 @@ pub fn plan(
             };
             dropped.push((cap, count));
             continue;
-        };
-        stage_capability(
+        }
+        let gave_up = stage_capability(
             cap,
-            binding,
+            adapter,
             &sources,
             &rules_doc,
             &opts.omh,
@@ -181,6 +188,7 @@ pub fn plan(
             },
             &mut mounts,
         )?;
+        dropped_hooks.extend(gave_up);
     }
 
     // The graph index, keyed by repo rather than harness — that is what lets
@@ -269,6 +277,7 @@ pub fn plan(
                 .collect(),
         ),
         dropped,
+        dropped_hooks,
         rules: rules_report,
         tty: opts.tty,
     })
@@ -290,13 +299,22 @@ struct Destination<'a> {
 
 fn stage_capability(
     cap: Capability,
-    binding: &Binding,
+    adapter: &Adapter,
     sources: &[PathBuf],
     rules_doc: &str,
     own: &crate::base::Own,
     to: Destination<'_>,
     mounts: &mut Vec<Mount>,
-) -> Result<()> {
+) -> Result<Vec<crate::hook::Dropped>> {
+    let mut dropped_hooks = Vec::new();
+    // Looked up here rather than threaded in, so the tool vocabulary — which
+    // lives on the adapter, not the binding — arrives without pushing this
+    // past the argument count clippy accepts. `plan` has already established
+    // the capability is supported; the error path exists because "the caller
+    // checked" is not something the type system carries.
+    let binding = adapter
+        .supports(cap)
+        .with_context(|| format!("{} declares no `{cap}` capability", adapter.name))?;
     let Destination {
         stage,
         worktree,
@@ -381,14 +399,15 @@ fn stage_capability(
         }
 
         // Everything else reshapes a merged canonical document.
-        r => {
+        _ => {
             let file = stage.join(format!("{cap}.rendered"));
             // Rendered even when skipped, so a dry run still surfaces a
             // malformed mcp.json instead of deferring it to launch.
-            let rendered = crate::render::document(cap, r, sources, own)?;
+            let rendered = crate::render::document(cap, binding, sources, own, &adapter.tools)?;
+            dropped_hooks.extend(rendered.dropped);
             if staging == Staging::Apply {
                 std::fs::create_dir_all(stage)?;
-                std::fs::write(&file, rendered)?;
+                std::fs::write(&file, rendered.body)?;
             }
             mounts.push(Mount {
                 host: file,
@@ -398,7 +417,7 @@ fn stage_capability(
             });
         }
     }
-    Ok(())
+    Ok(dropped_hooks)
 }
 
 /// Put an empty file where a mount is about to land, if nothing is there yet.
@@ -495,16 +514,28 @@ impl Plan {
     }
 
     /// One line, once, naming what this harness cannot do.
+    ///
+    /// Two granularities, because there are two kinds of loss. A capability is
+    /// given up whole and counting is enough — nobody needs the names of nine
+    /// skills. A hook is given up one at a time, and a count would be a lie
+    /// dressed as a summary: "hooks: 0" while three are missing. So a dropped
+    /// hook is named, with the word it asked for, because a hook that was never
+    /// installed behaves exactly like one that has nothing to say.
     pub fn degradation(&self) -> Option<String> {
-        if self.dropped.is_empty() {
-            return None;
+        let mut parts = Vec::new();
+        if !self.dropped.is_empty() {
+            let caps: Vec<_> = self
+                .dropped
+                .iter()
+                .map(|(cap, n)| format!("{n} {cap}"))
+                .collect();
+            parts.push(format!("dropped {} (unsupported)", caps.join(", ")));
         }
-        let parts: Vec<_> = self
-            .dropped
-            .iter()
-            .map(|(cap, n)| format!("{n} {cap}"))
-            .collect();
-        Some(format!("dropped {} (unsupported)", parts.join(", ")))
+        if !self.dropped_hooks.is_empty() {
+            let hooks: Vec<_> = self.dropped_hooks.iter().map(|d| d.to_string()).collect();
+            parts.push(format!("dropped hooks: {}", hooks.join(", ")));
+        }
+        (!parts.is_empty()).then(|| parts.join("; "))
     }
 }
 
@@ -539,8 +570,8 @@ mod tests {
         session: Session,
     }
 
-    /// Personal layer: skills(graphify), rules, hooks, subagents.
-    /// Shared layer:   skills(shared, graphify-override), rules, mcp.
+    /// Catalogue: rules, skills, subagents, mcp, one hook.
+    /// The repo:  one hook, which is the only content a project may declare.
     fn fixture() -> Fx {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
@@ -552,24 +583,17 @@ mod tests {
             std::fs::write(p, body).unwrap();
         };
 
-        let personal = paths.root.join("profile");
-        write(personal.join("AGENTS.md"), "personal rules");
+        let catalogue = &paths.root;
+        write(catalogue.join("rules/tdd.md"), "personal rules");
+        write(catalogue.join("skills/graphify/SKILL.md"), "graphify");
+        write(catalogue.join("skills/review-diff/SKILL.md"), "review-diff");
+        write(catalogue.join("subagents/explorer.md"), "explorer");
         write(
-            personal.join("skills/graphify/SKILL.md"),
-            "personal graphify",
+            catalogue.join("hooks/fmt.json"),
+            r#"{"on":"turn-end","run":"fmt"}"#,
         );
-        write(personal.join("subagents/explorer.md"), "explorer");
         write(
-            personal.join("hooks/fmt.json"),
-            r#"{"event":"Stop","command":"fmt"}"#,
-        );
-
-        let shared = paths.repo.join(".omh/profile");
-        write(shared.join("AGENTS.md"), "shared rules");
-        write(shared.join("skills/graphify/SKILL.md"), "shared graphify");
-        write(shared.join("skills/only-shared/SKILL.md"), "only shared");
-        write(
-            shared.join("mcp.json"),
+            catalogue.join("mcp.json"),
             r#"{"mcpServers":{"m":{"command":"m"}}}"#,
         );
 
@@ -973,6 +997,28 @@ mod tests {
             .collect()
     }
 
+    /// omh's own hooks as *this harness* receives them.
+    ///
+    /// A hook is authored in omh's words and staged in Claude's, so the thing
+    /// to look for in a settings document is the rendering — asserting the
+    /// authored `run` string would pass against a harness that was handed
+    /// nothing.
+    fn own_commands() -> Vec<(&'static str, String)> {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let binding = adapter
+            .supports(Capability::Hooks)
+            .expect("claude has hooks");
+        crate::base::hooks()
+            .into_iter()
+            .map(
+                |h| match crate::hook::render(h.name, &h.hook, binding, &adapter.tools).unwrap() {
+                    crate::hook::Outcome::Rendered(r) => (h.name, r.command),
+                    crate::hook::Outcome::Dropped(d) => panic!("claude cannot express {d}"),
+                },
+            )
+            .collect()
+    }
+
     /// omh's own hooks are generated from the base manifest, so a profile with
     /// no `hooks/` directory anywhere still gets them.
     ///
@@ -983,19 +1029,13 @@ mod tests {
     #[test]
     fn omhs_hooks_reach_a_profile_with_no_hooks_layer() {
         let fx = fixture();
-        std::fs::remove_dir_all(fx.paths.root.join("profile/hooks")).unwrap();
-        // `Profile` caches which layers exist, so re-resolve after removing.
-        let fx = Fx {
-            profile: Profile::resolve(&fx.paths),
-            ..fx
-        };
+        std::fs::remove_dir_all(fx.paths.root.join("hooks")).unwrap();
 
         let staged = staged_hooks(&plan_for(&fx, "claude"));
-        for hook in crate::base::hooks() {
+        for (name, command) in own_commands() {
             assert!(
-                staged.contains(&hook.command),
-                "{} must reach the harness with no hooks layer to read it: {staged:?}",
-                hook.name
+                staged.contains(&command),
+                "{name} must reach the harness with no hooks layer to read it: {staged:?}"
             );
         }
     }
@@ -1079,7 +1119,7 @@ mod tests {
     fn a_disabled_feature_takes_its_server_its_hooks_and_its_rules() {
         let fx = fixture();
         std::fs::write(
-            fx.paths.repo.join(".omh/profile/mcp.json"),
+            fx.paths.root.join("mcp.json"),
             r#"{"mcpServers":{"codegraph":{"command":"codebase-memory-mcp"}}}"#,
         )
         .unwrap();
@@ -1121,8 +1161,8 @@ mod tests {
         );
         assert!(
             fx.paths
-                .repo
-                .join(".omh/profile/mcp.json")
+                .root
+                .join("mcp.json")
                 .metadata()
                 .is_ok_and(|m| m.len() > 0),
             "your mcp.json is left exactly as you have it"
@@ -1142,28 +1182,30 @@ mod tests {
     /// document. Disabling that leaves the disabled thing running is worse
     /// than not offering it.
     ///
-    /// The rule is that a manifest name is omh's, on or off. Nothing in a
-    /// layer answers to one.
+    /// A hook answering to a manifest name stops the launch, naming the file.
+    ///
+    /// P2 skipped these silently, which was right while the only such files
+    /// were leftovers omh had seeded into `.omh/profile/hooks/` itself. Nothing
+    /// reads that directory any more, so a file with one of these names is
+    /// something somebody wrote on purpose — and a hook that is committed,
+    /// reviewed, and quietly never runs is worse than one that refuses to
+    /// start.
+    ///
+    /// It has to reach the *launch*, not just the renderer: the whole failure
+    /// is a hook the user believes is installed.
     #[test]
-    fn switching_a_feature_off_silences_the_files_it_seeded() {
+    fn a_repo_hook_answering_to_a_manifest_name_stops_the_launch() {
         let fx = fixture();
-        for hook in crate::base::hooks() {
-            std::fs::write(
-                fx.paths
-                    .root
-                    .join("profile/hooks")
-                    .join(format!("{}.json", hook.name)),
-                format!(
-                    r#"{{"event":"{}","matcher":"{}","command":"{}"}}"#,
-                    hook.event, hook.matcher, hook.command
-                ),
-            )
-            .unwrap();
-        }
-        let own = own_with(&["codegraph".to_string()].into());
+        let hooks = fx.paths.repo.join(".omh/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("graph-refresh.json"),
+            r#"{"on":"turn-end","run":"my own indexer"}"#,
+        )
+        .unwrap();
 
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
-        let p = plan(
+        let err = plan(
             &fx.paths,
             &fx.profile,
             &adapter,
@@ -1176,54 +1218,84 @@ mod tests {
                 account_dir: None,
                 memory_bin: None,
                 base: None,
-                omh: own,
+                omh: own(),
             },
         )
-        .unwrap();
+        .expect_err("a reserved name must not launch");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("graph-refresh"), "name it: {msg}");
+        assert!(msg.contains("settings.toml"), "and say the way out: {msg}");
+    }
 
-        let hooks = staged_hooks(&p);
-        assert!(
-            !hooks
-                .iter()
-                .any(|c| c.contains("codebase-memory-mcp") || c.contains("OMH_GRAPH_PROJECT")),
-            "no graph hook may survive as a seeded file: {hooks:?}"
-        );
-        assert!(
-            hooks
-                .iter()
-                .any(|c| c.contains("fatal") || c.contains("git")),
-            "git-notice is a different feature and stays on: {hooks:?}"
+    /// What a hook may name and what the sandbox sets are one list.
+    ///
+    /// `hook::check_interpolation` refuses a `$` in `inject` that names
+    /// anything omh does not bind — which is only true while `SANDBOX_VARS`
+    /// and the env this function builds agree. Drift either way is silent: a
+    /// variable set and not nameable is a refusal nobody can act on, and a
+    /// variable nameable and not set expands to nothing in the middle of a
+    /// sentence, which is the failure the check exists for.
+    #[test]
+    fn the_sandbox_sets_what_a_hook_may_name() {
+        let fx = fixture();
+        let plan = plan_for(&fx, "claude");
+        let set: Vec<&str> = plan.env.iter().map(|(k, _)| k.as_str()).collect();
+
+        for var in crate::hook::SANDBOX_VARS {
+            assert!(
+                set.contains(&var),
+                "a hook may name ${var} and the sandbox does not set it: {set:?}"
+            );
+        }
+        assert_eq!(
+            set.len(),
+            crate::hook::SANDBOX_VARS.len(),
+            "and the sandbox sets nothing a hook is refused for naming: {set:?}"
         );
     }
 
-    /// A hook file carrying a manifest name is a leftover: `init` seeded these
-    /// before they were generated, and every repo initialised then still has
-    /// five of them. omh's own must win, or the fix it ships never arrives —
-    /// `git-unavailable` was already rewritten once, and every profile written
-    /// before that carries the version that misses the multi-line scripts
-    /// agents most often emit.
+    /// Switching a feature off does not hand you its names.
+    ///
+    /// `reserved` is built from every manifest hook whether or not its feature
+    /// is on, and that is load-bearing in the *off* case specifically: with
+    /// `codegraph` disabled there is no generated hook to win the merge, so a
+    /// file called `graph-refresh.json` would simply be read and run — against
+    /// a server that was dropped from the document. Disabling something and
+    /// leaving it running is worse than not offering the switch.
+    ///
+    /// The existing guard covers the feature-*on* case, where the generated
+    /// hook would have won anyway, so it stayed green with `reserved` narrowed
+    /// to enabled features only.
     #[test]
-    fn a_seeded_copy_no_longer_decides_what_runs() {
+    fn a_disabled_features_names_are_still_omhs() {
         let fx = fixture();
+        let hooks = fx.paths.repo.join(".omh/hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
         std::fs::write(
-            fx.paths.root.join("profile/hooks/graph-refresh.json"),
-            r#"{"event":"Stop","command":"the version from an older omh"}"#,
+            hooks.join("graph-refresh.json"),
+            r#"{"on":"turn-end","run":"the disabled thing, still running"}"#,
         )
         .unwrap();
 
-        let staged = staged_hooks(&plan_for(&fx, "claude"));
-        let ships = crate::base::hooks()
-            .into_iter()
-            .find(|h| h.name == "graph-refresh")
-            .expect("graph-refresh is in the base set");
-        assert!(
-            staged.contains(&ships.command),
-            "omh's own hook must be what runs: {staged:?}"
-        );
-        assert!(
-            !staged.iter().any(|c| c == "the version from an older omh"),
-            "the leftover file must not decide: {staged:?}"
-        );
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let err = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own_with(&["codegraph".to_string()].into()),
+            },
+        )
+        .expect_err("a manifest name is omh's whether the feature is on or off");
+        assert!(format!("{err:#}").contains("graph-refresh"), "got: {err:#}");
     }
 
     /// `--dry-run` prints the plan and writes nothing, placeholders included.
@@ -1282,12 +1354,12 @@ mod tests {
         names.sort();
         assert_eq!(
             names,
-            ["graphify", "only-shared"],
-            "layers union by entry name"
+            ["graphify", "review-diff"],
+            "every catalogue entry is linked by name"
         );
 
-        // Every layer a link can point into must actually be mounted.
-        for i in 0..fx.profile.sources(Capability::Skills).len() {
+        // Every source a link can point into must actually be mounted.
+        for i in 0..fx.profile.sources(Capability::Skills).unwrap().len() {
             assert!(
                 p.mounts
                     .iter()
@@ -1333,12 +1405,14 @@ mod tests {
 
         let oc = plan_for(&fx, "opencode");
         let dropped: Vec<_> = oc.dropped.iter().map(|(c, _)| *c).collect();
-        assert_eq!(dropped, vec![Capability::Subagents, Capability::Hooks]);
-        let msg = oc.degradation().unwrap();
-        assert!(
-            msg.contains("subagents") && msg.contains("hooks"),
-            "got: {msg}"
+        assert_eq!(
+            dropped,
+            vec![Capability::Hooks],
+            "hooks and only hooks — opencode has agent files, and claiming \
+             otherwise dropped a capability the user had"
         );
+        let msg = oc.degradation().unwrap();
+        assert!(msg.contains("hooks"), "got: {msg}");
 
         // What is given up includes omh's own, which come from the manifest
         // rather than from a layer. Counting only the profile's files would
@@ -1356,6 +1430,70 @@ mod tests {
         );
     }
 
+    /// A harness can have the hooks capability and still not have every moment
+    /// in it, which is a granularity `dropped` cannot express: a count per
+    /// capability says "hooks: 0" while three of them are missing.
+    ///
+    /// The failure this prevents is the quietest one there is. A hook that was
+    /// never installed behaves exactly like a hook that is installed and has
+    /// nothing to say — `graph-read` is silent on small files by design — so
+    /// nothing about a session would ever reveal it.
+    #[test]
+    fn a_hook_this_harness_cannot_express_is_named_at_launch() {
+        let fx = fixture();
+
+        // Claude with no `before-tool`. Everything else it can still spell, so
+        // this is a harness that keeps hooks and loses three of them.
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::read_to_string(Path::new(ADAPTERS).join("claude.toml")).unwrap();
+        std::fs::write(
+            dir.path().join("partial.toml"),
+            real.replace("name    = \"claude\"", "name    = \"partial\"")
+                .replace("before-tool   = \"PreToolUse\"", ""),
+        )
+        .unwrap();
+
+        let adapter = Adapter::find(dir.path(), "partial").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own(),
+            },
+        )
+        .unwrap();
+
+        let named: Vec<_> = p.dropped_hooks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(named, ["git-unavailable", "graph-first", "graph-read"]);
+
+        let msg = p
+            .degradation()
+            .expect("a dropped hook has to be said out loud");
+        assert!(msg.contains("graph-read"), "by name: {msg}");
+        assert!(msg.contains("before-tool"), "and what it wanted: {msg}");
+
+        // The rest of the capability survives, which is the whole point of
+        // dropping one hook rather than all of them.
+        let staged = staged_hooks(&p);
+        let (_, refresh) = own_commands()
+            .into_iter()
+            .find(|(name, _)| *name == "graph-refresh")
+            .unwrap();
+        assert!(
+            staged.contains(&refresh),
+            "turn-end still works: {staged:?}"
+        );
+    }
+
     /// An upgraded repo carries the five seeded files, none of which is ever
     /// staged. Counting them told a user they were giving up eleven hooks
     /// where they give up six — a wrong number presented as a measurement,
@@ -1367,9 +1505,9 @@ mod tests {
             std::fs::write(
                 fx.paths
                     .root
-                    .join("profile/hooks")
+                    .join("hooks")
                     .join(format!("{}.json", hook.name)),
-                r#"{"event":"Stop","command":"seeded by an older omh"}"#,
+                r#"{"on":"turn-end","run":"seeded by an older omh"}"#,
             )
             .unwrap();
         }
@@ -1434,8 +1572,8 @@ mod tests {
         );
         let body = std::fs::read_to_string(&hosts[0]).unwrap();
         assert!(
-            body.contains("personal rules") && body.contains("shared rules"),
-            "the layers must be in there: {body}"
+            body.contains("personal rules"),
+            "the catalogue must be in there: {body}"
         );
     }
 

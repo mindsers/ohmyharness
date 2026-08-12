@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "codegraph": {
-      "args": [],
-      "command": "codebase-memory-mcp",
-      "env": {}
-    }
-  }
-}

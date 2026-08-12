@@ -157,7 +157,7 @@ fn remember_refuses_a_key_template_that_leaves_the_store() {
     let sb = sandbox();
     std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
     std::fs::write(
-        sb.repo.join(".omh/keys.toml"),
+        sb.repo.join(".omh/memory.toml"),
         "[keys]\nsurprise = \"../../escaped/{{slug}}\"\ntopic = \"{{slug}}\"\nstub = \"docs/{{path}}\"\n",
     )
     .unwrap();
@@ -575,4 +575,54 @@ fn a_session_that_does_not_exist_is_named_in_the_refusal() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("s99"), "the refusal must name it: {err}");
+}
+
+/// The launcher discloses this repo's hooks, and a dry run leaves no trace.
+///
+/// `notice::hooks` and `Record::commit` are both well covered by unit tests,
+/// and the wire between them and `run()` is not: deleting the `say_hooks` call
+/// entirely, or committing the snapshot on a dry run, leaves the whole suite
+/// green. That is the failure this file's module doc says it exists to notice,
+/// and it is the same shape as `own.mcp_env = settings.mcp_env` was.
+///
+/// The snapshot's *absence* is what makes the second half checkable without a
+/// container: a dry run that recorded would spend the one call-out about
+/// somebody else's executable content changing under you, and the next real
+/// launch would be silent.
+///
+/// `#[ignore]`d because it needs git and a container runtime to reach `run()`.
+/// CI's linux job runs `--include-ignored`, which is where this bites.
+#[test]
+#[ignore]
+fn a_dry_run_discloses_the_repos_hooks_and_records_nothing() {
+    let sb = sandbox();
+    sb.git_init();
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+    std::fs::write(
+        sb.repo.join(".omh/hooks/rust-test.json"),
+        r#"{ "on": "turn-end", "run": "cargo test" }"#,
+    )
+    .unwrap();
+
+    let out = sb.omh(&["--dry-run", "claude"]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("this repo's hooks") && said.contains("rust-test"),
+        "a launch has to name the executable content it was handed: {said}"
+    );
+
+    let snapshot = sb
+        .home
+        .join(".omh/run")
+        .join(sb.repo.file_name().unwrap())
+        .join("hooks.json");
+    assert!(
+        !snapshot.exists(),
+        "a dry run recorded {} — the next real launch would be silent about a change",
+        snapshot.display()
+    );
 }

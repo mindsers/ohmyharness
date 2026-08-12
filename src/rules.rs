@@ -16,10 +16,9 @@
 //! and composed into what the harness is given.
 
 use crate::adapter::{Adapter, Binding, Capability};
-use crate::config::Layer;
 use crate::profile::Paths;
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 
 /// The filename omh reads on the project's side. Harness-neutral on purpose:
@@ -34,8 +33,13 @@ const CANONICAL: &str = "AGENTS.md";
 /// `!body.contains("<repo>/")` is string-sniffing a discriminant.
 #[derive(Debug, PartialEq)]
 enum Origin {
-    /// One of the profile layers.
-    Layer(Layer),
+    /// A rule from your catalogue, named by the file you filed it under.
+    ///
+    /// A name rather than a layer: when content lived in three directories of
+    /// identical shape the only useful thing a marker could say was which of
+    /// them it came from, and with one catalogue that stops being a question.
+    /// `tdd` is what you actually want to see attributed.
+    Catalogue { name: String },
     /// The project's own file. `from_base` is the branch it was read from when
     /// the worktree had no copy — the agent is otherwise told its own branch
     /// says something it does not.
@@ -51,7 +55,7 @@ enum Origin {
 impl std::fmt::Display for Origin {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Layer(l) => write!(f, "{l}"),
+            Self::Catalogue { name } => write!(f, "{name}"),
             Self::Project {
                 name,
                 from_base: Some(base),
@@ -148,31 +152,16 @@ pub fn compose(
         None => (None, Report::default()),
     };
 
-    let mut project = project;
     let mut sections = Vec::new();
-    for layer in Layer::ALL {
-        // Blank here too, for the reason `body` gives: a layer file with nothing
-        // in it states no rules, and emitting a bare marker with no text under
-        // it attributes silence to somebody.
-        if let Some(body) = read(&layer_source(layer, paths))?.filter(|b| !b.trim().is_empty()) {
-            sections.push(Section {
-                origin: Origin::Layer(layer),
-                body,
-            });
-        }
-        // The project's own rules sit after your personal ones and before both
-        // repo layers. `.omh/profile/AGENTS.md` carries omh's generated
-        // sections, which belong last; `.omh/local/AGENTS.md` is your
-        // gitignored per-repo override, which has to be able to win.
-        //
-        // Both reasons expire together: P2 of docs/design/profile.md moves the
-        // generated sections to base-set `kind = "rules"` entries and P3 drops
-        // these layer directories, at which point this ordering needs re-stating
-        // rather than re-deriving.
-        if layer == Layer::Personal {
-            sections.extend(project.take());
-        }
+    // Yours first: they are how you work everywhere, and the project's file is
+    // the specific case that qualifies them.
+    for (name, body) in catalogue(paths)? {
+        sections.push(Section {
+            origin: Origin::Catalogue { name },
+            body,
+        });
     }
+    sections.extend(project);
 
     // omh's own last: they describe the sandbox — what git does here, where
     // notes go, which graph answers what — and a convention the project wrote
@@ -399,14 +388,55 @@ fn neutralise(body: &str) -> String {
 
 /// Where each layer's rules live. Kept next to the composition so the two
 /// cannot drift.
-fn layer_source(layer: Layer, paths: &Paths) -> PathBuf {
-    layer.dir(paths).join(CANONICAL)
+/// Your rules, in filename order.
+///
+/// Stated as the placeholder it is: rules build on each other, a general one
+/// followed by its exception reads differently reversed, and the only place that
+/// ordering can really come from is the list you wrote. `[use]` is the phase
+/// that supplies one; until then the order has to be *some* order, and a stable
+/// one beats whatever `read_dir` happens to return.
+///
+/// `.md` only, and blank files are dropped for the reason `body` gives: a file
+/// with nothing in it states no rules, and emitting a bare marker with no text
+/// under it attributes silence to somebody.
+fn catalogue(paths: &Paths) -> Result<Vec<(String, String)>> {
+    let dir = paths.root.join(Capability::Rules.source());
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        // Absent is not unreadable — `config::read_layer` records what
+        // conflating them cost. A catalogue with no rules is the ordinary state
+        // of a fresh install; one omh cannot read is a session composed without
+        // rules the user believes it has.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("reading {}", dir.display()))?
+            .path();
+        if !path.extension().is_some_and(|e| e == "md") {
+            continue;
+        }
+        let Some(body) = read(&path)?.filter(|b| !b.trim().is_empty()) else {
+            continue;
+        };
+        let name = path
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        out.push((name, body));
+    }
+    out.sort();
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
 
@@ -442,8 +472,9 @@ mod tests {
         std::fs::write(path, body).unwrap();
     }
 
-    fn layer(fx: &Fx, layer: Layer, body: &str) {
-        write(layer_source(layer, &fx.paths), body);
+    /// A rule in your catalogue: a named file, one of several you hold.
+    fn catalogue(fx: &Fx, name: &str, body: &str) {
+        write(fx.paths.root.join("rules").join(format!("{name}.md")), body);
     }
 
     /// No base: these cases are about files, and consulting git would drag a
@@ -454,26 +485,26 @@ mod tests {
         compose(&fx.paths, &claude(), &fx.worktree, None, &[]).unwrap()
     }
 
-    /// What an upgraded repo actually gets today: omh's sections twice.
+    /// omh's sections reach the agent once.
     ///
-    /// `init` used to append them to `.omh/profile/AGENTS.md`, and that file
-    /// is still composed as a layer — so every repo initialised before
-    /// generation pays all three sections twice per turn, and the git notice
-    /// the manifest calls a single string reaches the agent as two.
-    ///
-    /// Deliberate for this phase: the migration that takes that file apart is
-    /// P3 (`docs/design/profile.md`). This asserts the state rather than
-    /// describing it in a comment, so P3 has a test to turn red rather than a
-    /// sentence to remember — and so the duplication cannot quietly outlive
-    /// the phase that accepted it.
+    /// P2 generated them from the manifest but left `.omh/profile/AGENTS.md`
+    /// composed as a layer, so every repo initialised before generation paid
+    /// all three twice per turn and the git notice the manifest calls a single
+    /// string arrived as two. That was accepted for one phase with this test
+    /// asserting the duplication, so the state had a guard to turn red rather
+    /// than a comment to remember.
     #[test]
-    fn an_upgraded_repo_is_given_omhs_sections_twice() {
+    fn omhs_sections_reach_the_agent_once() {
         let fx = fixture();
         let git = crate::base::sections()
             .into_iter()
             .find(|s| s.name == "git-rules")
             .expect("git-rules is a section omh ships");
-        layer(&fx, Layer::Shared, &git.body);
+        // The file that used to carry it, in the place that used to be read.
+        write(
+            fx.paths.repo.join(".omh/profile").join(CANONICAL),
+            &git.body,
+        );
 
         let (body, _) = compose(
             &fx.paths,
@@ -486,13 +517,57 @@ mod tests {
 
         assert_eq!(
             body.matches(crate::base::GIT_ABSENT).count(),
-            2,
-            "the layer's copy and the generated one, until the P3 migration:\n{body}"
+            1,
+            "the generated one, and nothing else:\n{body}"
         );
     }
 
-    /// omh's own sections close the document, after every layer and after the
-    /// project's own rules.
+    /// Rules are a directory of named files, which is what makes selecting them
+    /// mean something: `tdd.md` and `commit-style.md` are separate things you
+    /// hold, and a repo takes the ones that apply to it.
+    #[test]
+    fn the_catalogue_composes_every_rule_it_holds() {
+        let fx = fixture();
+        catalogue(&fx, "tdd", "test first");
+        catalogue(&fx, "commit-style", "conventional commits");
+
+        let (body, _) = composed(&fx);
+        assert!(body.contains("test first"), "{body}");
+        assert!(body.contains("conventional commits"), "{body}");
+    }
+
+    /// Filename order, and stated as the placeholder it is: rules build on each
+    /// other, a general one followed by its exception reads differently
+    /// reversed, and the only place that ordering can really come from is the
+    /// list you wrote. `[use]` is P4; until then the order has to be *some*
+    /// order, and a stable one beats whatever `read_dir` returns.
+    #[test]
+    fn catalogue_rules_compose_in_filename_order() {
+        let fx = fixture();
+        catalogue(&fx, "02-second", "second");
+        catalogue(&fx, "01-first", "first");
+
+        let (body, _) = composed(&fx);
+        assert!(
+            body.find("first").unwrap() < body.find("second").unwrap(),
+            "{body}"
+        );
+    }
+
+    /// Each section says whose rule it is, by the name you filed it under —
+    /// a marker reading `personal` said which of three identical directories
+    /// it came from, which stops being a question worth answering when there
+    /// is one.
+    #[test]
+    fn a_catalogue_rule_is_marked_with_its_name() {
+        let fx = fixture();
+        catalogue(&fx, "tdd", "test first");
+        let (body, _) = composed(&fx);
+        assert!(body.contains("<!-- omh: tdd -->"), "{body}");
+    }
+
+    /// omh's own sections close the document, after your catalogue and after
+    /// the project's own rules.
     ///
     /// Last because they describe the sandbox rather than the work: what git
     /// does here, where notes go, which graph to ask. A convention the project
@@ -501,8 +576,7 @@ mod tests {
     #[test]
     fn omhs_sections_close_the_document() {
         let fx = fixture();
-        layer(&fx, Layer::Personal, "PERSONAL");
-        layer(&fx, Layer::Local, "LOCAL");
+        catalogue(&fx, "tdd", "YOURS");
         write(fx.worktree.join("AGENTS.md"), "PROJECT");
 
         let (body, _) = compose(
@@ -520,53 +594,60 @@ mod tests {
 
         for section in crate::base::sections() {
             assert!(
-                at(section.body.trim_end()) > at("LOCAL"),
-                "{} must come after every layer:\n{body}",
+                at(section.body.trim_end()) > at("PROJECT"),
+                "{} must come after the project's own:\n{body}",
                 section.name
             );
         }
     }
 
     /// Position, not presence. A `contains` assertion stays green when the
-    /// order is wrong, and the order is the whole question: omh's own sections
-    /// live in the shared layer today and have to come after the project's.
+    /// order is wrong, and the order is the whole question.
+    ///
+    /// Yours first because they are how you work everywhere and the project's
+    /// file is the specific case that qualifies them; omh's last because they
+    /// describe the box rather than the work.
     #[test]
-    fn sections_are_ordered_personal_project_shared_local() {
+    fn sections_are_ordered_catalogue_project_omh() {
         let fx = fixture();
-        layer(&fx, Layer::Personal, "PERSONAL");
-        layer(&fx, Layer::Shared, "SHARED");
-        layer(&fx, Layer::Local, "LOCAL");
+        catalogue(&fx, "tdd", "YOURS");
         write(fx.worktree.join("AGENTS.md"), "PROJECT");
 
-        let (body, _) = composed(&fx);
+        let (body, _) = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            None,
+            &crate::base::sections(),
+        )
+        .unwrap();
         let at = |needle: &str| {
             body.find(needle)
-                .unwrap_or_else(|| panic!("{needle} missing"))
+                .unwrap_or_else(|| panic!("{needle} missing:\n{body}"))
         };
 
         assert!(
-            at("PERSONAL") < at("PROJECT"),
-            "personal before project:\n{body}"
+            at("YOURS") < at("PROJECT"),
+            "yours before the project's:\n{body}"
         );
         assert!(
-            at("PROJECT") < at("SHARED"),
-            "project before shared:\n{body}"
+            at("PROJECT") < at(crate::base::GIT_ABSENT),
+            "the project's before omh's:\n{body}"
         );
-        assert!(at("SHARED") < at("LOCAL"), "shared before local:\n{body}");
     }
 
-    /// Four sources reach the agent as one document with no seam. Without a
+    /// Three sources reach the agent as one document with no seam. Without a
     /// marker per section, a project convention and an omh instruction are the
     /// same kind of sentence to whoever reads it next.
     #[test]
     fn each_section_names_where_it_came_from() {
         let fx = fixture();
-        layer(&fx, Layer::Personal, "PERSONAL");
+        catalogue(&fx, "tdd", "YOURS");
         write(fx.worktree.join("AGENTS.md"), "PROJECT");
 
         let (body, _) = composed(&fx);
 
-        assert!(body.contains("<!-- omh: personal -->"), "got:\n{body}");
+        assert!(body.contains("<!-- omh: tdd -->"), "got:\n{body}");
         assert!(
             body.contains("<!-- omh: <repo>/AGENTS.md -->"),
             "got:\n{body}"
@@ -755,22 +836,22 @@ mod tests {
         );
     }
 
-    /// A repo with no rules of its own must compose exactly what it did before
-    /// this module existed.
+    /// A repo with no rules of its own composes your catalogue and nothing
+    /// else — and says so, rather than reporting a file it never read.
     #[test]
-    fn a_repo_with_no_rules_file_composes_only_the_profile_layers() {
+    fn a_repo_with_no_rules_file_composes_only_the_catalogue() {
         let fx = fixture();
-        layer(&fx, Layer::Personal, "PERSONAL");
-        layer(&fx, Layer::Shared, "SHARED");
+        catalogue(&fx, "tdd", "TDD");
+        catalogue(&fx, "commit-style", "COMMITS");
 
         let (body, report) = composed(&fx);
 
         assert_eq!(
             body.matches(MARKER).count(),
             2,
-            "two layer sections and no project one:\n{body}"
+            "two catalogue sections and no project one:\n{body}"
         );
-        assert!(body.contains("PERSONAL") && body.contains("SHARED"));
+        assert!(body.contains("TDD") && body.contains("COMMITS"));
         assert_eq!(report, Report::default(), "nothing composed from the repo");
     }
 
@@ -885,14 +966,14 @@ mod tests {
     #[test]
     fn a_repo_with_no_commits_still_composes() {
         let fx = fixture();
-        layer(&fx, Layer::Personal, "PERSONAL");
+        catalogue(&fx, "tdd", "YOURS");
         std::fs::create_dir_all(&fx.paths.repo).unwrap();
         git(&fx.paths.repo, &["init", "-q", "-b", "main"]);
 
         let (body, report) =
             compose(&fx.paths, &claude(), &fx.worktree, Some("main"), &[]).unwrap();
 
-        assert!(body.contains("PERSONAL"), "got:\n{body}");
+        assert!(body.contains("YOURS"), "got:\n{body}");
         assert!(report.notices().is_empty());
     }
 

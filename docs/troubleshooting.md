@@ -6,7 +6,7 @@
 $ omh doctor
 omh doctor: claude (in omh/claude:2133265d, account personal)
 
-  ✓ AGENTS     /work/CLAUDE.md
+  ✓ rules      /work/CLAUDE.md
   ✓ skills     /home/agent/.claude/skills
   ✓ mcp        /home/agent/.mcp.json
   ✓ commands   /home/agent/.claude/commands
@@ -66,7 +66,7 @@ success would make `doctor` worse than useless, so silence is a failure.
 ## Current status
 
 Both shipped adapters are verified this way: `claude` passes 6 checks,
-`opencode` 4 (subagents and hooks correctly skipped). The "unverified claim"
+`opencode` 6 (hooks correctly skipped). The "unverified claim"
 caveat is retired for these two, and any third adapter inherits the same bar.
 
 ---
@@ -82,7 +82,7 @@ If doctor passes, check whether the capability was dropped at launch:
 
 ```console
 $ omh opencode
-omh: opencode on omh/s01 — dropped 1 subagents, 2 hooks (unsupported)
+omh: opencode on omh/s01 — dropped 7 hooks (unsupported)
 ```
 
 That is the harness genuinely not supporting the feature, not omh losing it.
@@ -132,14 +132,45 @@ directory became the base set, `init` seeded no MCP servers and reported success
 anyway, and every session came up running hooks that pointed at a server which
 was not installed.
 
-### `has no command string — it is not a usable hook`
+### `a hook does nothing without `run` or `inject``
 
-A file in a `hooks/` directory is not valid: truncated, half-written, or edited
-with the wrong key. The message names it.
+A file in a `hooks/` directory is not a usable hook: truncated, half-written, or
+written in a harness's words rather than omh's. Related messages from the same
+check: ``unknown field `event` `` (that is Claude Code's vocabulary — see
+[writing a hook](configuration.md#writing-a-hook)), ``a hook either `run`s
+something or `inject`s text, not both``, and ``$` in `inject` must name a
+variable`.
 
-Also loud on purpose. An unreadable hook used to be reported as *"modified by
-you"* with a blank value — a false accusation from the one command whose job is
-telling authorship straight.
+Loud on purpose, and checked when the file is read rather than at runtime. An
+unparseable hook used to be reported as *"modified by you"* with a blank value —
+a false accusation from the one command whose job is telling authorship
+straight — while a launch failed hard on the same file.
+
+### `` `graph-refresh` is a name omh ships ``
+
+You have a hook file answering to one of omh's own names. It does not override
+omh's and it does not run, so it is refused rather than left inert. Rename it —
+or, if what you want is omh's version gone, switch the feature off:
+
+```toml
+# <repo>/.omh/settings.toml
+[omh]
+codegraph = false
+```
+
+### `a repo names servers from your catalogue, it cannot declare one`
+
+There is an `mcp.json` in `<repo>/.omh/`. That was where servers lived before
+the catalogue, and nothing reads it now. `omh config mcp add` puts one in your
+catalogue; a token for this repo alone goes under `[mcp.<name>.env]` in
+`.omh/settings.local.toml`.
+
+### `keys.toml is where key templates used to live`
+
+Rename it to `memory.toml`. omh refuses rather than falling back, because the
+fallback is the disaster: the shipped defaults would silently re-key every note
+written from then on, and every existing key would stop being derivable from
+anything.
 
 ### `omh why` says something is not installed when it is
 
@@ -158,7 +189,7 @@ $ omh s ls
 $ omh s down s01
 ```
 
-N sessions is N containers. `policy.idle_timeout` stops unused ones; see
+N sessions is N containers. `idle_timeout` stops unused ones; see
 [Sessions](sessions.md#lifecycle).
 
 ### The graph shows a project I do not recognise

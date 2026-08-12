@@ -1,3 +1,0 @@
-# Untracked files the worktree needs. This is the ONLY path by which a
-# secret reaches the agent, so keep it short and explicit.
-carry_in = []

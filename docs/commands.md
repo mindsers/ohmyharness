@@ -55,7 +55,7 @@ launch rather than silently dropped:
 
 ```console
 $ omh opencode
-omh: opencode on omh/s01 — dropped 1 subagents, 2 hooks (unsupported)
+omh: opencode on omh/s01 — dropped 7 hooks (unsupported)
 ```
 
 `-a <account>` selects a credential set for this launch. See [Accounts](accounts.md).
@@ -130,7 +130,7 @@ codegraph — omh's choice, in the base set since 2026.06
   instead of  gitnexus            PolyForm-Noncommercial licence
               codegraphcontext    needs a Neo4j service running
               @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
-  installed   shared
+  installed   this repo
   remove      omh config mcp rm codegraph — the feature, server and hooks together
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
@@ -266,7 +266,7 @@ omh config edit [--layer]             $EDITOR escape hatch
 
 omh config mcp ls
 omh config mcp add <name> <cmd> [args…] [--env K=V]
-omh config mcp rm <name> [--layer]
+omh config mcp rm <name>
 omh config mcp import <harness> [--file] [--force]
 ```
 
@@ -274,13 +274,13 @@ Every value reports where it came from and what it beat:
 
 ```console
 $ omh config
-policy:
+settings:
   carry_in         [".env.local"]     ← local (overrides shared)
   idle_timeout     30m                ← personal
 ```
 
-MCP lives under `config` because MCP servers **are** configuration, resolved
-through the same three layers as everything else. See
+MCP lives under `config` because MCP servers **are** configuration. They live in your
+catalogue; a repo overrides a server's environment without redeclaring it. See
 [Configuration](configuration.md).
 
 ## `omh memory …`
@@ -331,7 +331,7 @@ The three arguments are the discipline. Something with nothing to put in
 `--expected` has learned nothing worth recording, so the filter runs for free.
 
 **The key is derived, never chosen.** It comes from a template in
-`.omh/keys.toml`, so the same observation cannot be recorded twice under two
+`.omh/memory.toml`, so the same observation cannot be recorded twice under two
 spellings — `Mounting a credential FILE returns EBUSY.` and `mounting a
 credential  file returns ebusy` produce one key, and the second write is a
 conflict that says *update that note instead*:

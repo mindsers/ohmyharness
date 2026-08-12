@@ -1,15 +1,33 @@
-//! Profile resolution. Three layers, later winning:
+//! One catalogue, and it is personal.
 //!
-//!   1. `~/.omh/profile`        personal, every project
-//!   2. `<repo>/.omh/profile`   project, committed, shared with the team
-//!   3. `<repo>/.omh/local`     project, gitignored, yours alone
+//! ```text
+//! ~/.omh/rules/ skills/ commands/ subagents/ hooks/ mcp.json
+//! ```
 //!
-//! Layer 2 is committed, so it must never hold a secret; that is what layer 3
-//! and `carry_in` are for.
+//! Content used to live in three layers of identical shape — `~/.omh/profile`,
+//! `<repo>/.omh/profile`, `<repo>/.omh/local` — which meant "where is this
+//! skill" had three answers, and `sources` was a union: a later layer could
+//! shadow a same-named entry, but nothing could turn one off. The only lever
+//! was not installing it globally, which is the opposite of a catalogue.
 //!
-//! Nothing here is ever copied into your home directory. Layers resolve to a
-//! list of paths and the launcher bind-mounts them, which is why there is no
-//! drift to fight and no daemon to run.
+//! **Hooks are the exception, and the reason is in the capability itself.** A
+//! skill is a way *you* work and travels with you across repos. A hook binds to
+//! a repo's own commands — `cargo test` here, `pnpm test` next door, one name
+//! and two bodies — so a capability that is project-specific by nature has to be
+//! declarable where the project is, or the catalogue fills with entries that are
+//! only ever right in one place. So the rule is not "no content in the repo", it
+//! is **content lives where its scope is**.
+//!
+//! What that costs, and it is real: a repo can no longer ship a skill, an MCP
+//! server or a command to your teammates. What it still shares is its rules
+//! file — which for the first time actually reaches the agent — its hooks, and
+//! its settings. Recorded, not built: a catalogue entry could carry a `source`
+//! and `omh sync` could fetch missing ones, which restores team sharing without
+//! putting content back in the repo.
+//!
+//! Nothing here is ever copied into your home directory. A capability resolves
+//! to a list of paths and the launcher bind-mounts them, which is why there is
+//! no drift to fight and no daemon to run.
 
 use crate::adapter::Capability;
 use anyhow::{Context, Result};
@@ -114,31 +132,57 @@ impl Paths {
 }
 
 pub struct Profile {
-    /// Existing layers, in application order.
-    pub layers: Vec<PathBuf>,
+    /// The catalogue — yours, every project.
+    root: PathBuf,
+    /// This checkout, which declares hooks and nothing else.
+    repo: PathBuf,
 }
 
 impl Profile {
     pub fn resolve(paths: &Paths) -> Self {
-        let layers = [
-            paths.root.join("profile"),
-            paths.repo.join(".omh/profile"),
-            paths.repo.join(".omh/local"),
-        ]
-        .into_iter()
-        .filter(|p| p.exists())
-        .collect();
-        Self { layers }
+        Self {
+            root: paths.root.clone(),
+            repo: paths.repo.clone(),
+        }
     }
 
-    /// Every layer's copy of `cap`'s source, in application order. Missing
-    /// layers are skipped, so an empty result means "nothing declared".
-    pub fn sources(&self, cap: Capability) -> Vec<PathBuf> {
-        self.layers
-            .iter()
-            .map(|l| l.join(cap.source()))
-            .filter(|p| p.exists())
-            .collect()
+    /// Where `cap` is declared, in application order — so a later path wins.
+    ///
+    /// One entry for five of the six. Hooks get a second because they are the
+    /// one capability with a repo tier, and the repo's come **last**: a project
+    /// overrides your personal `format` hook with the one it actually needs,
+    /// without either being renamed.
+    ///
+    /// Absent paths are skipped, so an empty result means "nothing declared" —
+    /// and it stays a `Vec` rather than an `Option` because every caller
+    /// downstream merges a list, and hooks would have needed the list anyway.
+    ///
+    /// **Absent is not unreadable**, which `Path::exists()` cannot express: it
+    /// answers `false` for a dangling symlink, an `EACCES` parent and an
+    /// unmounted share alike. Read as "nothing declared" the launcher skips the
+    /// capability, mounts nothing, reports nothing dropped and exits 0 — and
+    /// `doctor` agrees, because it branches on the same empty list. With one
+    /// catalogue that is every skill, rule, command, subagent and server at
+    /// once, so `try_exists` and a `Result` rather than a silent `false`.
+    pub fn sources(&self, cap: Capability) -> Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        for path in self.candidates(cap) {
+            if path
+                .try_exists()
+                .with_context(|| format!("reading {}", path.display()))?
+            {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    }
+
+    fn candidates(&self, cap: Capability) -> Vec<PathBuf> {
+        let mut out = vec![self.root.join(cap.source())];
+        if cap == Capability::Hooks {
+            out.push(self.repo.join(".omh").join(cap.source()));
+        }
+        out
     }
 
     /// Capabilities the profile actually carries.
@@ -147,11 +191,14 @@ impl Profile {
     /// capabilities from the adapter side instead. Kept because it is the
     /// profile-side half of that answer and `omh eject` will need it.
     #[allow(dead_code)]
-    pub fn declared(&self) -> Vec<Capability> {
-        Capability::ALL
-            .into_iter()
-            .filter(|c| !self.sources(*c).is_empty())
-            .collect()
+    pub fn declared(&self) -> Result<Vec<Capability>> {
+        let mut out = Vec::new();
+        for cap in Capability::ALL {
+            if !self.sources(cap)?.is_empty() {
+                out.push(cap);
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -191,6 +238,10 @@ mod tests {
         };
         for (layer, name, body) in layers {
             let base = match *layer {
+                "catalogue" => paths.root.clone(),
+                "project" => paths.repo.join(".omh"),
+                // The three that are going away, so a test can say what no
+                // longer reaches a session.
                 "personal" => paths.root.join("profile"),
                 "shared" => paths.repo.join(".omh/profile"),
                 "local" => paths.repo.join(".omh/local"),
@@ -203,41 +254,115 @@ mod tests {
         Fixture { _dir: dir, paths }
     }
 
+    /// A catalogue omh cannot read is not a catalogue that declares nothing.
+    ///
+    /// `Path::exists()` answers `false` for *every* error — a dangling symlink
+    /// into an unmounted volume, a parent directory created under `sudo`, a
+    /// network share not up yet — so an unreadable catalogue resolved to "you
+    /// declared none of this". The launcher then skips the capability, mounts
+    /// nothing, adds nothing to `dropped`, and exits 0; `omh doctor` takes the
+    /// same empty-sources branch and reports healthy. That is the closed loop
+    /// `config::read_layer` was written about, and one catalogue makes it total
+    /// rather than partial — before this there were three layers and one bad
+    /// path degraded a third of the way.
+    #[cfg(unix)]
     #[test]
-    fn layers_apply_personal_then_shared_then_local() {
-        let f = fixture(&[
-            ("personal", "AGENTS.md", "one"),
-            ("shared", "AGENTS.md", "two"),
-            ("local", "AGENTS.md", "three"),
-        ]);
-        let sources = Profile::resolve(&f.paths).sources(Capability::Rules);
-        let bodies: Vec<_> = sources
-            .iter()
-            .map(|p| std::fs::read_to_string(p).unwrap())
-            .collect();
-        assert_eq!(bodies, ["one", "two", "three"], "local must apply last");
+    fn an_unreadable_catalogue_is_an_error_not_an_empty_one() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture(&[("catalogue", "skills/mine/SKILL.md", "s")]);
+        // The parent unreadable, so `stat` on the child fails with EACCES
+        // rather than ENOENT — a broken symlink or an absent mount reaches
+        // `exists()` exactly the same way.
+        std::fs::set_permissions(&f.paths.root, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = Profile::resolve(&f.paths).sources(Capability::Skills);
+        std::fs::set_permissions(&f.paths.root, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = result.expect_err("unreadable must not read as undeclared");
+        assert!(
+            format!("{err:#}").contains("skills"),
+            "must name the path: {err:#}"
+        );
     }
 
+    /// Absent is normal: a fresh catalogue declares most capabilities not at
+    /// all, and an empty result has to mean that rather than a path invented on
+    /// its behalf — the launcher mounts what this returns.
     #[test]
-    fn absent_layers_are_skipped_not_faked() {
-        let f = fixture(&[("local", "AGENTS.md", "only")]);
+    fn absent_capabilities_are_skipped_not_faked() {
+        let f = fixture(&[("catalogue", "rules/tdd.md", "only")]);
         let profile = Profile::resolve(&f.paths);
-        assert_eq!(profile.layers.len(), 1);
-        assert_eq!(profile.sources(Capability::Rules).len(), 1);
-        assert!(profile.sources(Capability::Skills).is_empty());
+        assert_eq!(profile.sources(Capability::Rules).unwrap().len(), 1);
+        assert!(profile.sources(Capability::Skills).unwrap().is_empty());
     }
 
     #[test]
     fn declared_reports_only_present_capabilities() {
         let f = fixture(&[
-            ("personal", "AGENTS.md", "r"),
-            ("shared", "mcp.json", "{}"),
-            ("shared", "skills/x/SKILL.md", "s"),
+            ("catalogue", "rules/tdd.md", "r"),
+            ("catalogue", "mcp.json", "{}"),
+            ("catalogue", "skills/x/SKILL.md", "s"),
         ]);
-        let declared = Profile::resolve(&f.paths).declared();
+        let declared = Profile::resolve(&f.paths).declared().unwrap();
         assert_eq!(
             declared,
             vec![Capability::Rules, Capability::Skills, Capability::Mcp]
+        );
+    }
+
+    /// Content lives in one place.
+    ///
+    /// Three layers with identical shapes meant "where is this skill" had three
+    /// answers, and `sources` was a union — a later layer could shadow a
+    /// same-named entry but nothing could turn one off, so "these are my twelve
+    /// MCP servers, this project uses three" was unsayable.
+    #[test]
+    fn a_capability_resolves_to_one_catalogue_path() {
+        let f = fixture(&[("catalogue", "skills/mine/SKILL.md", "yours")]);
+        assert_eq!(
+            Profile::resolve(&f.paths)
+                .sources(Capability::Skills)
+                .unwrap(),
+            vec![f.paths.root.join("skills")]
+        );
+    }
+
+    /// A project names entries from your catalogue; it cannot declare one.
+    ///
+    /// The committed layer is what made a repo able to hand you a skill, an MCP
+    /// server or a command — content that arrives by `git clone` and runs
+    /// against your work. What a repo still shares is its rules file, its hooks,
+    /// its selection and its policy.
+    #[test]
+    fn a_repo_cannot_declare_content_of_its_own() {
+        let f = fixture(&[
+            ("shared", "skills/theirs/SKILL.md", "the repo's"),
+            ("local", "skills/secret/SKILL.md", "yours, here"),
+            ("shared", "mcp.json", "{}"),
+        ]);
+        let profile = Profile::resolve(&f.paths);
+        assert!(profile.sources(Capability::Skills).unwrap().is_empty());
+        assert!(profile.sources(Capability::Mcp).unwrap().is_empty());
+    }
+
+    /// Hooks are the one capability with a repo tier, because they are the one
+    /// whose scope is genuinely the repo: `cargo test` here, `pnpm test` next
+    /// door, one name and two bodies.
+    ///
+    /// The repo's come last, so a project overrides your personal `format` hook
+    /// with the one this project actually needs, without renaming anything.
+    #[test]
+    fn hooks_resolve_to_the_catalogue_then_the_repo() {
+        let f = fixture(&[
+            ("catalogue", "hooks/format.json", "yours"),
+            ("project", "hooks/format.json", "this repo's"),
+        ]);
+        assert_eq!(
+            Profile::resolve(&f.paths)
+                .sources(Capability::Hooks)
+                .unwrap(),
+            vec![f.paths.root.join("hooks"), f.paths.repo.join(".omh/hooks")],
+            "project last, so project wins"
         );
     }
 

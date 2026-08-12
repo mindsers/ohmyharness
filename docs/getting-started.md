@@ -98,9 +98,9 @@ cleared it yet: see [derive, never interrogate](#derive-never-interrogate).
 
 ```
 1  repo check                     fail fast, before any work
-2  ensure ~/.omh + bundled adapters, editors and the base set
+2  ensure ~/.omh: the catalogue, bundled adapters, editors, the base set
 3  detect the stack; read the host for a harness *preference*
-4  write <repo>/.omh/profile: mcp.json, policy, two hooks per stack
+4  write ~/.omh/mcp.json and <repo>/.omh: settings, memory, a hook per stack
 5  seed memory by derivation       README, manifests, git log, existing rules
 6  ensure the image                ← the real blocker; nothing runs without it
 7  index the code graph            background, resumable
@@ -187,7 +187,7 @@ and make it correctable:
 
 ```
 ! 2 stacks detected; hooks were written for all of them.
-  drop the ones you do not want: .omh/profile/hooks/
+  drop the ones you do not want: .omh/hooks/
 ```
 
 That is not a questionnaire. init still decided; it just showed its work.
@@ -195,5 +195,5 @@ That is not a questionnaire. init still decided; it just showed its work.
 ## Next
 
 - [Commands](commands.md) — the full surface
-- [Configuration](configuration.md) — the three layers, and where your settings go
+- [Configuration](configuration.md) — the catalogue, and where your settings go
 - [Why a distribution](design/distribution.md) — what omh is actually for

@@ -166,14 +166,15 @@ revisits, so `git-unavailable` — rewritten once, after the old pattern was
 found to miss the multi-line scripts agents most often emit — would have gone
 on running broken in every repo initialised before the fix.
 
-A manifest **hook** name is omh's, on or off. A file in a layer answering to one is
-never read: with the feature on the generated hook would win anyway, and with
-it off there would be nothing to override the file with, so switching a feature
-off would leave the disabled thing running.
+A manifest **hook** name is omh's, on or off. A file answering to one is an
+error naming both, never an override: with the feature on the generated hook
+would win anyway, and with it off there would be nothing to override the file
+with, so switching a feature off would leave the disabled thing running.
 
-`omh why` says so rather than treating the file as yours — a repo initialised
-before generation still has the five sitting in `.omh/profile/hooks/`, and
-editing one changes nothing.
+An error rather than a silent skip because `<repo>/.omh/hooks/` is somewhere
+people write on purpose. A hook that is committed, reviewed and quietly never
+runs is worse than one that refuses to start — and a repo that could replace
+`graph-refresh` could make the graph lie while looking installed.
 
 ## Data versus code
 

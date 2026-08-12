@@ -1,11 +1,12 @@
 # The profile — catalogue, selection, composition
 
-> **Status: partly built.** P1 and P2 of the [build order](#build-order) have
-> landed — the project's own rules are composed rather than replaced, omh's
-> hooks and rules sections are generated from the base manifest, and `[omh]`
-> switches a feature off per repo. The storage model in
-> [Configuration](../configuration.md) is still the three layers this page
-> replaces: the catalogue move and the migration are P3, selection is P4.
+> **Status: mostly built.** P1, P2 and P3 of the [build order](#build-order)
+> have landed — the project's own rules are composed rather than replaced, omh's
+> hooks and rules sections are generated from the base manifest, `[omh]` switches
+> a feature off per repo, there is one catalogue, and hooks are authored in omh's
+> own vocabulary and translated per harness at staging.
+> [Configuration](../configuration.md) describes the storage model as it now is.
+> Selection — `[use]`, `omh use` / `unuse`, `omh repo` — is P4.
 
 ## The three things wrong with what exists
 
@@ -79,13 +80,14 @@ holds. `memory.toml` replaces `keys.toml` for the same reason: key templates are
 one table of the memory subsystem's configuration, not the whole of it —
 [expiry](memory.md) has settings of its own coming.
 
-**The `keys.toml` rename needs a migration, not a fallback.** `templates()`
-treats a missing file as "use the shipped defaults", so renaming without one
-would take an edited `keys.toml`, fail to find `memory.toml`, silently revert to
-the shipped templates and re-key every note written from then on — the exact
-failure the "seeded once and never refreshed" rule exists to prevent. So P3
-moves the file and says it moved; a `keys.toml` still present after that is a
-loud error naming both paths, never a silent fallback.
+**The `keys.toml` rename needs a check, not a fallback.** `templates()` treats a
+missing file as "use the shipped defaults", so renaming without one would take an
+edited `keys.toml`, fail to find `memory.toml`, silently revert to the shipped
+templates and re-key every note written from then on — the exact failure the
+"seeded once and never refreshed" rule exists to prevent. **Built:** a `keys.toml`
+still present is a loud error naming both paths, never a silent fallback. A check
+rather than a move, because moving somebody's file behind their back is the
+larger of the two surprises.
 
 ### What that costs
 
@@ -280,7 +282,59 @@ broken one. Generated-at-launch means the fix arrives with the upgrade.
 
 What remains in `~/.omh/hooks/` is unambiguously yours.
 
+### What is already portable, and what is not
+
+Researched rather than assumed, because the answer decides how much omh has to
+translate — and an earlier draft of this page had it wrong in both directions.
+
+| Capability | Canonical because | omh's job |
+|---|---|---|
+| `skills` | [Agent Skills](https://agentskills.io/specification), open-standardised Dec 2025, read by Claude Code, opencode, Cursor, Codex CLI | copy |
+| `rules` | markdown | copy |
+| `mcp` | the MCP spec | re-render per harness |
+| `hooks` | **nothing** — omh defines the vocabulary | translate at staging |
+| `commands` | markdown + frontmatter, converging with skills in Claude Code (unverified) | copy |
+| `subagents` | **nothing** — no cross-tool standard exists | copy |
+
+**Skills needed no work.** The standard fixes `name` and `description` as
+required and `license` / `compatibility` / `metadata` / `allowed-tools` as
+optional, with `metadata` as the declared extension point for anything a client
+wants that the spec does not define. That is what makes a skill portable by
+construction, and `Render::Dir` copying it unchanged correct rather than a bet.
+opencode's own documentation says it ignores unknown frontmatter fields and
+reads `~/.claude/skills/` as well as its own directory — its claim about
+itself, which no test here can settle.
+
+**Subagents are the real outlier.** [OpenPackage's frontmatter
+spec](https://github.com/enulus/OpenPackage/blob/main/specs/agents-frontmatter.md)
+documents the split: `name`, `description`, `tools`, `model`, `hidden` common;
+`disallowedTools`, `permissionMode`, `skills`, `hooks` Claude-only;
+`temperature`, `maxSteps`, `permissions`, `mode`, `prompt`, `disabled`
+opencode-only. It does sketch a Claude→opencode migration, which is a starting
+point rather than a specification — and it is one author's community guide, not
+a standards body, so the field split is worth more than the mapping. omh copies
+and does not translate. A map is buildable, and it should wait for P5: a
+translation with one harness on the far side is untested by construction, which
+is the whole reason that phase exists.
+
+**The one thing that does not travel anywhere is tool names.** `allowed-tools`
+in a skill, `tools` in a subagent, a hook's matcher — three fields, one leak. It
+is why omh has a closed tool vocabulary (`edit` / `read` / `shell` / `search`)
+and why the map for it is declared **once per adapter** under `[tools]` rather
+than inside the hooks capability, which is where it started when hooks were the
+only consumer.
+
+**Import follows from this.** `mcp` and `hooks` translate and refuse what they
+cannot; `skills`, `commands` and `rules` copy; `subagents` copies unchanged — the
+frontmatter divergence is documented rather than announced per launch, because
+a line printed every time is a line nobody reads. Nothing harness-shaped is ever stored
+under a neutral name — an absent entry is reported at launch, whereas a Claude
+body mounted for opencode is silent and wrong.
+
 ### The canonical hook format
+
+> **Built.** One correction fell out of writing it, recorded below: two kinds do
+> *not* cover all seven hooks.
 
 `{ "event": "Stop", "matcher": "Edit|Write", "command": … }` is Claude Code's
 vocabulary wearing a neutral-looking hat. It has survived because opencode
@@ -307,17 +361,17 @@ staged.** No part of it needs to happen at runtime.
 **Names become adapter data**, like every other harness difference:
 
 ```toml
+[tools]                          # adapter-level: not only hooks name tools
+edit   = "Edit|Write|MultiEdit"
+read   = "Read"
+shell  = "Bash"
+search = "Grep|Glob"
+
 [capabilities.hooks.events]
 session-start = "SessionStart"
 turn-end      = "Stop"
 before-tool   = "PreToolUse"
 after-tool    = "PostToolUse"
-
-[capabilities.hooks.tools]
-edit   = "Edit|Write|MultiEdit"
-read   = "Read"
-shell  = "Bash"
-search = "Grep|Glob"
 ```
 
 An absent entry means this harness has no such moment — the same "absent key is
@@ -336,11 +390,38 @@ wanted.
   "inject": "…query the graph for one symbol instead…" }
 ```
 
-Two kinds, and they cover all seven shipped hooks: **`run`** executes and its
-output is ignored (`graph-refresh`, `rust-test`, `rust-format`), **`inject`**
-puts text in the agent's context (`graph-orient`, `graph-first`, `graph-read`,
-`git-unavailable`). The renderer owns the protocol that delivers each, which is
-exactly the knowledge that is hand-written into every hook body today.
+Two kinds: **`run`** executes and its output is ignored (`graph-refresh`,
+`rust-test`, `rust-format`), **`inject`** puts text in the agent's context
+(`graph-first`, `graph-read`, `git-unavailable`). The renderer owns the protocol
+that delivers each, which is exactly the knowledge that was hand-written into
+every hook body.
+
+**They did not cover all seven, and this draft said they did.** `graph-orient`
+runs `get_architecture` and injects that command's *output*, which is neither.
+So there is a third field, not a third kind: **`capture`** runs a command and
+binds its stdout to `$OMH_CAPTURE`, which `when` and `inject` may interpolate —
+evaluated before `when`, so a predicate can test it, which is how `graph-orient`
+stays silent when the graph answered nothing.
+
+```json
+{ "on": "session-start",
+  "capture": "codebase-memory-mcp cli get_architecture …",
+  "when": "[ -n \"$OMH_CAPTURE\" ]",
+  "inject": "Code graph for project $OMH_GRAPH_PROJECT …\n$OMH_CAPTURE" }
+```
+
+The alternative was letting `inject` hold `$(…)`, which needs no new field and
+puts shell back in the hook body — the thing the format exists to take out.
+
+Two consequences of `inject` being prose that reaches a shell, both of which
+fail quietly and so are refused at parse: every `$` must name a variable, since
+a bare one expands to nothing and the sentence arrives with a hole in it while
+every assertion about the text still passes; and `$$` is how a literal dollar is
+written. **Which payload fields a hook wants is derived**, not declared — from
+the `$OMH_*` names its bodies mention, so a `when` that stops testing the
+filename stops paying for the `jq` in the same edit. The payload is read once
+however many fields are wanted: stdin is consumable once, and a second bare `jq`
+would bind the field to blank.
 
 **The payload is names too**, which is what makes the whole thing one mechanism
 instead of two. `.tool_input.file_path` is Claude's spelling of a canonical
@@ -794,61 +875,43 @@ has hooks at all, which is a fact about the ecosystem rather than a task.
 |---|---|---|
 | **P1** | compose the rules on a `concat` binding | **landed** — fixed a bug on its own; no storage change |
 | **P2** | `kind = "rules"` and `feature` in the base set, omh's own hooks **generated** rather than seeded, `remove` moved to the feature level | **landed**, plus `[omh]` read-only, brought forward so `remove` names something that works |
-| **P3** | catalogue move, and the migration off `<repo>/.omh/profile` | |
-| **P4** | `[use]`, `[omh]`, `omh use` / `unuse`, `init` writing it expanded, the unselected report | |
+| **P3** | catalogue move, the canonical hook format and its three maps | **landed**. No migration: omh had no users but its author, so the one repo and the one home directory holding the old layout were moved by hand |
+| **P4** | `[use]`, `omh use` / `unuse`, `omh repo`, `init` writing it expanded, the unselected report | |
 | **P5** | the three maps exercised by a **second** harness | the only thing that can prove the translation |
 
-**Generation comes before migration**, and an earlier draft had it the other way
-round. The migration deletes omh's five hooks on the grounds that the manifest
-now produces them — so if it runs first, a repo spends a phase without them and
-no way to notice. Whatever replaces a file has to exist before the file is
-removed.
+**Generation came before the move**, and an earlier draft had it the other way
+round. Deleting omh's five hooks is only safe once the manifest produces them —
+run the other way, a repo spends a phase without them and no way to notice.
+Whatever replaces a file has to exist before the file is removed.
 
-P3 has to move the content that exists, and hooks are the interesting case
-because all three tiers are currently in one directory. A repo with
-`<repo>/.omh/profile/` present gets one prompt-free migration:
+**No migration was written, and that was a decision rather than an omission.**
+omh had no users but its author, so the one repo and the one home directory in
+the world holding the old layout were moved by hand, in the same diff, reviewable
+— `git mv`, not machinery for leaving a state nobody is in. What a migration
+would have cost is real (it has to prove the five hooks reproduced before
+deleting them, name by name, and splitting `AGENTS.md` by heading is a guess that
+must leave the original on disk), and none of it would ever have run.
 
-| Currently in `.omh/profile/hooks/` | Goes to |
+Two guards survive from it, because each is one branch and each protects
+something unrecoverable:
+
+- **a `keys.toml` still present is a loud error naming both paths**, per above.
+- **a file answering to a manifest hook name is an error naming both.** Silently
+  skipping it was right while the only such files were leftovers omh had seeded;
+  `<repo>/.omh/hooks/` is somewhere people write on purpose.
+
+What the old layout held, and where it went by hand:
+
+| Was | Went to |
 |---|---|
-| the five omh ships | nowhere; generated from the manifest |
-| `rust-test`, `rust-format` | `<repo>/.omh/hooks/` — moved, then yours |
-| anything you wrote | `<repo>/.omh/hooks/` — it is in a repo, so it is the repo's |
-
-Five deleted, the rest moved. The five have to be **proved reproduced by the
-manifest before removal**, name by name, with what it did printed per entry — a
-migration that quietly leaves a repo with fewer hooks than it had is
-indistinguishable from one that worked.
-
-The two stack hooks are moved rather than rewritten. They are already in the
-canonical format's reach — `{"event":"Stop","command":"cargo test"}` becomes
-`{"on":"turn-end","run":"cargo test"}` — and translating them is mechanical, but
-it is a rewrite of a file the user may have edited, so the old body is preserved
-in the printout.
-
-Everything else — skills, `mcp.json`, commands, subagents — moves to `~/.omh/`,
-and `settings.toml` is written naming what moved. It prints what it did, per
-entry.
-
-**`AGENTS.md` is the one that has to be taken apart**, because today it is a
-monolith holding four things with different destinations:
-
-| Section of `.omh/profile/AGENTS.md` | Goes to |
-|---|---|
-| the code-graph, memory and git sections | nowhere; base-set entries with `kind = "rules"` |
+| the five omh ships, in `.omh/profile/hooks/` | nowhere; generated from the manifest |
+| `rust-test`, `rust-format` | `<repo>/.omh/hooks/`, rewritten into the canonical format |
+| the code-graph, memory and git sections of `AGENTS.md` | nowhere; base-set entries with `kind = "rules"` |
 | the detected-stack section | nowhere; deleted, per above |
-| anything you wrote | `<repo>/AGENTS.md` — it is this project's, and that is where the project's rules live |
-| `~/.omh/profile/AGENTS.md`, the personal layer | `~/.omh/rules/personal.md`, as one file you can then split |
+| the rest of `.omh/profile/AGENTS.md` | `<repo>/AGENTS.md` |
+| `.omh/profile/mcp.json`, `policy.toml` | `~/.omh/mcp.json`, `<repo>/.omh/settings.toml` |
 
-Splitting a file by heading is a guess, so this is the one step that **leaves the
-original on disk** and tells you it did. A section omh does not recognise is
-never deleted — it is copied and the source is kept, because a rule somebody
-wrote and omh discarded is not recoverable from anywhere.
-
-A hook you wrote goes to the project tier rather than the catalogue because that
-is where it already is, and the migration should not guess that something written
-in a repo was meant to be universal. Promoting one later is `mv`.
-
-P2 rewrites five `remove` fields in the manifest. Each currently reads
+P2 rewrote five `remove` fields in the manifest. Each currently reads
 `rm .omh/profile/hooks/<name>.json`, which will name a path that no longer
 exists — and a `remove` instruction that silently does nothing is worse than
 none, because `omh why` presents it as the way out. The four graph hooks point at

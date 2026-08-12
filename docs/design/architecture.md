@@ -7,19 +7,24 @@ the runtime backend is kept swappable.
 
 ```
 ~/.omh/
-  profile/                    layer 1 — personal, every project
+  rules/ skills/ commands/    the catalogue — the only place content lives
+  subagents/ hooks/ mcp.json
+  settings.toml               your defaults
   adapters/*.toml             one file per harness (data, not code)
   editors/*.toml              one file per editor
   base/                       the curated base set, versioned
   creds/<harness>/<account>/  captured logins, one directory per account
   worktrees/<repo>/<session>/ the agent's working directory
   keys/<repo>/                per-repo ed25519 keypair
-  run/<session>/<harness>/    staged profile, regenerated per launch
+  run/<repo>/<session>/<harness>/  staged profile, regenerated per launch
   sessions.json               session → container, branch, port
 
 <repo>/.omh/
-  profile/                    layer 2 — project, COMMITTED, shared with the team
-  local/                      layer 3 — project, GITIGNORED, yours alone
+  settings.toml               COMMITTED — settings, and `[omh]`
+  settings.local.toml         GITIGNORED — overrides, and MCP env
+  memory.toml                 COMMITTED — how the note store keys and expires
+  hooks/                      COMMITTED — the one content kind a repo may declare
+<repo>/AGENTS.md              the project's own rules, tracked
 ```
 
 Two details that are load-bearing rather than incidental:
@@ -30,7 +35,7 @@ Two details that are load-bearing rather than incidental:
 - **Worktrees live outside the repo.** Nested, your IDE would index every
   session's full copy of the codebase.
 
-Merge rules are in [Configuration](../configuration.md#the-three-layers).
+Where things live is in [Configuration](../configuration.md#one-catalogue-and-it-is-personal).
 
 ## Images
 
@@ -92,15 +97,15 @@ Inside a real container, with the real mounts:
 ```
 user:   agent uid=1000    home: /home/agent    cwd: /work
 tools:  claude=ok dtach=ok git=ok rg=ok node=ok
-  rules      # Global rules              (layers 1+2 concatenated)
-  skills     graphify project-only       (unioned across layers)
+  rules      # tdd / <repo>/AGENTS.md    (your catalogue, then the project's)
+  skills     graphify, review-diff       (your catalogue)
   mcp        codegraph, filesystem, github, linear, omh-memory, sentry
   subagents  explorer.md
-  hooks      PostToolUse, Stop           (rendered to claude settings.json)
+  hooks      rust-test, graph-refresh …  (translated into settings.json)
   version    2.1.222 (Claude Code)
 ```
 
-Every capability class arrives, merged across three layers, in the harness's own
+Every capability class arrives, resolved from the catalogue, in the harness's own
 format. That is the thesis demonstrated rather than argued.
 
 ## Runtime backends
@@ -122,7 +127,7 @@ process invocation.
                credential injection
 ```
 
-Selection is `runtime = "auto" | "docker" | "sbx"` in `policy.toml`. `auto`
+Selection is `runtime = "auto" | "docker" | "sbx"` in `settings.toml`. `auto`
 prefers `sbx` when present.
 
 ### Why not simply adopt `sbx`
