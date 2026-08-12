@@ -48,6 +48,15 @@ pub struct Manifest {
 pub struct Entry {
     pub name: String,
     pub kind: Kind,
+    /// What this entry is part of. A server, its hooks and its section of the
+    /// rules are one thing, and this is the field that says so — `[omh]` takes
+    /// feature names, so an entry belonging to nothing cannot be switched off.
+    ///
+    /// Required, like `because` and `since`: the grouping spent its life as a
+    /// comment header, which is the one claim in the manifest no test could
+    /// check.
+    #[serde(default)]
+    pub feature: String,
     pub since: String,
     /// Argued, not measured. The honest half.
     pub because: String,
@@ -649,6 +658,47 @@ mod tests {
                     FIRST_COMMIT.2
                 );
             }
+        }
+    }
+
+    /// An entry that names no feature is an entry nobody can switch off.
+    ///
+    /// `[omh]` is keyed on features, so this is load-bearing rather than
+    /// documentary: the field is the only thing standing between a new entry
+    /// and a default with no way out — which is the one thing the base set's
+    /// own rule forbids.
+    ///
+    /// The grouping it records existed as a comment header in the manifest,
+    /// the single claim in that file no test could check, while every other
+    /// claim an entry makes is a field with a guard demanding it be filled.
+    #[test]
+    fn every_base_set_entry_names_its_feature() {
+        for e in &shipped().entries {
+            assert!(
+                !e.feature.trim().is_empty(),
+                "{}: names no feature. An entry belonging to nothing cannot be \
+                 disabled, because `[omh]` takes feature names.",
+                e.name
+            );
+        }
+    }
+
+    /// `remove` is printed by `omh why` as the way out, so an instruction that
+    /// silently does nothing is worse than none at all.
+    ///
+    /// The five hooks each said `rm .omh/profile/hooks/<name>.json`, naming a
+    /// file omh no longer writes. Removal is feature-level now: the graph hooks
+    /// go with the server, and the git notice has nothing to uninstall.
+    #[test]
+    fn no_remove_instruction_names_a_path_omh_no_longer_writes() {
+        for e in &shipped().entries {
+            assert!(
+                !e.remove.contains(".omh/profile/"),
+                "{}: `remove` says `{}`, and that path is not written any more — \
+                 the hooks are generated from this manifest",
+                e.name,
+                e.remove
+            );
         }
     }
 
