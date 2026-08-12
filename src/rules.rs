@@ -194,3 +194,242 @@ fn render(sections: &[Section]) -> String {
 fn layer_source(layer: Layer, paths: &Paths) -> PathBuf {
     layer.dir(paths).join(CANONICAL)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+
+    struct Fx {
+        _dir: tempfile::TempDir,
+        paths: Paths,
+        worktree: PathBuf,
+    }
+
+    /// The real `claude` adapter, so the filenames under test are the ones
+    /// omh actually ships rather than a fixture's idea of them.
+    fn claude() -> Adapter {
+        Adapter::find(Path::new(ADAPTERS), "claude").unwrap()
+    }
+
+    fn fixture() -> Fx {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let worktree = dir.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+        Fx {
+            _dir: dir,
+            paths,
+            worktree,
+        }
+    }
+
+    fn write(path: PathBuf, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    fn layer(fx: &Fx, layer: Layer, body: &str) {
+        write(layer_source(layer, &fx.paths), body);
+    }
+
+    /// No base: these cases are about files, and consulting git would drag a
+    /// repository into tests that do not need one.
+    fn composed(fx: &Fx) -> (String, Report) {
+        compose(&fx.paths, &claude(), &fx.worktree, "").unwrap()
+    }
+
+    /// Position, not presence. A `contains` assertion stays green when the
+    /// order is wrong, and the order is the whole question: omh's own sections
+    /// live in the shared layer today and have to come after the project's.
+    #[test]
+    fn sections_are_ordered_personal_project_shared_local() {
+        let fx = fixture();
+        layer(&fx, Layer::Personal, "PERSONAL");
+        layer(&fx, Layer::Shared, "SHARED");
+        layer(&fx, Layer::Local, "LOCAL");
+        write(fx.worktree.join("AGENTS.md"), "PROJECT");
+
+        let (body, _) = composed(&fx);
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing"))
+        };
+
+        assert!(
+            at("PERSONAL") < at("PROJECT"),
+            "personal before project:\n{body}"
+        );
+        assert!(
+            at("PROJECT") < at("SHARED"),
+            "project before shared:\n{body}"
+        );
+        assert!(at("SHARED") < at("LOCAL"), "shared before local:\n{body}");
+    }
+
+    /// Four sources reach the agent as one document with no seam. Without a
+    /// marker per section, a project convention and an omh instruction are the
+    /// same kind of sentence to whoever reads it next.
+    #[test]
+    fn each_section_names_where_it_came_from() {
+        let fx = fixture();
+        layer(&fx, Layer::Personal, "PERSONAL");
+        write(fx.worktree.join("AGENTS.md"), "PROJECT");
+
+        let (body, _) = composed(&fx);
+
+        assert!(body.contains("<!-- omh: personal -->"), "got:\n{body}");
+        assert!(
+            body.contains("<!-- omh: <repo>/AGENTS.md -->"),
+            "got:\n{body}"
+        );
+    }
+
+    /// Most repos that have used Claude Code have a `CLAUDE.md` and no
+    /// `AGENTS.md`. Refusing to read it would leave the agent with no project
+    /// rules at all, which is worse than the bug being fixed — so it is composed
+    /// and the user is told which file was used.
+    #[test]
+    fn claude_md_is_composed_when_agents_md_is_absent() {
+        let fx = fixture();
+        write(fx.worktree.join("CLAUDE.md"), "PROJECT VIA CLAUDE");
+
+        let (body, report) = composed(&fx);
+
+        assert!(body.contains("PROJECT VIA CLAUDE"), "got:\n{body}");
+        assert_eq!(report.read_instead.as_deref(), Some("CLAUDE.md"));
+        assert_eq!(report.not_composed, None);
+    }
+
+    /// `AGENTS.md` is canonical, so it wins — but silently dropping the other
+    /// file is how a repo loses rules it believes are in force.
+    #[test]
+    fn agents_md_wins_when_both_exist_and_claude_is_reported() {
+        let fx = fixture();
+        write(fx.worktree.join("AGENTS.md"), "THE CANONICAL ONE");
+        write(fx.worktree.join("CLAUDE.md"), "SOMETHING ELSE ENTIRELY");
+
+        let (body, report) = composed(&fx);
+
+        assert!(body.contains("THE CANONICAL ONE"), "got:\n{body}");
+        assert!(!body.contains("SOMETHING ELSE ENTIRELY"), "got:\n{body}");
+        assert_eq!(report.not_composed.as_deref(), Some("CLAUDE.md"));
+        assert_eq!(report.read_instead, None, "it read the canonical name");
+    }
+
+    /// The common shape is one file pointing at the other, or a symlink-like
+    /// copy. Warning about it every launch trains people to ignore the warning
+    /// that matters.
+    #[test]
+    fn identical_agents_and_claude_stay_quiet() {
+        let fx = fixture();
+        write(fx.worktree.join("AGENTS.md"), "SAME BYTES");
+        write(fx.worktree.join("CLAUDE.md"), "SAME BYTES");
+
+        let (_, report) = composed(&fx);
+
+        assert_eq!(
+            report,
+            Report::default(),
+            "identical files are not a problem"
+        );
+    }
+
+    /// A repo with no rules of its own must compose exactly what it did before
+    /// this module existed.
+    #[test]
+    fn a_repo_with_no_rules_file_composes_only_the_profile_layers() {
+        let fx = fixture();
+        layer(&fx, Layer::Personal, "PERSONAL");
+        layer(&fx, Layer::Shared, "SHARED");
+
+        let (body, report) = composed(&fx);
+
+        assert!(!body.contains("<repo>/"), "no project section:\n{body}");
+        assert!(body.contains("PERSONAL") && body.contains("SHARED"));
+        assert_eq!(report, Report::default());
+    }
+
+    // ── against a real repository ───────────────────────────────────────────
+    //
+    // `git show` is the half of this that no filesystem fixture can reach, and
+    // the half that decides what a session sees when its branch has no rules
+    // file of its own.
+
+    fn git(cwd: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// A repo whose default branch commits `AGENTS.md`.
+    fn committed(fx: &Fx, body: &str) {
+        std::fs::create_dir_all(&fx.paths.repo).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+        ] {
+            git(&fx.paths.repo, &args);
+        }
+        std::fs::write(fx.paths.repo.join("AGENTS.md"), body).unwrap();
+        git(&fx.paths.repo, &["add", "AGENTS.md"]);
+        git(&fx.paths.repo, &["commit", "-q", "-m", "rules"]);
+    }
+
+    /// A session that has just written its own rules should be governed by
+    /// them. Reading the default branch first would hand the agent the rules it
+    /// is in the middle of replacing.
+    #[test]
+    fn the_worktree_copy_wins_over_the_default_branch() {
+        let fx = fixture();
+        committed(&fx, "WHAT MAIN SAYS");
+        write(fx.worktree.join("AGENTS.md"), "WHAT THIS BRANCH SAYS");
+
+        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, "main").unwrap();
+
+        assert!(body.contains("WHAT THIS BRANCH SAYS"), "got:\n{body}");
+        assert!(!body.contains("WHAT MAIN SAYS"), "got:\n{body}");
+    }
+
+    /// The case the filesystem cannot answer: a session branch that deleted the
+    /// rules file, or a worktree checked out before it existed. Falling back to
+    /// the default branch is what keeps the project's conventions in force.
+    #[test]
+    fn the_default_branch_supplies_it_when_the_worktree_has_none() {
+        let fx = fixture();
+        committed(&fx, "WHAT MAIN SAYS");
+
+        let (body, _) = compose(&fx.paths, &claude(), &fx.worktree, "main").unwrap();
+
+        assert!(body.contains("WHAT MAIN SAYS"), "got:\n{body}");
+    }
+
+    /// `omh auth` and `omh doctor` run in scratch directories with no `.git` at
+    /// all, and a fresh repo has no commit to show. Neither is a reason to
+    /// refuse to launch — `git show` is best-effort by construction.
+    #[test]
+    fn a_repo_with_no_git_history_still_composes() {
+        let fx = fixture();
+        layer(&fx, Layer::Personal, "PERSONAL");
+        std::fs::create_dir_all(&fx.paths.repo).unwrap();
+
+        let (body, report) = compose(&fx.paths, &claude(), &fx.worktree, "main").unwrap();
+
+        assert!(body.contains("PERSONAL"), "got:\n{body}");
+        assert_eq!(report, Report::default());
+    }
+}
