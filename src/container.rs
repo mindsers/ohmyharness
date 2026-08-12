@@ -871,6 +871,72 @@ mod tests {
         );
     }
 
+    fn staged_hooks(p: &Plan) -> String {
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".claude/settings.json"))
+            .expect("claude stages hooks into ~/.claude/settings.json");
+        std::fs::read_to_string(&mount.host).unwrap()
+    }
+
+    /// omh's own hooks are generated from the base manifest, so a profile with
+    /// no `hooks/` directory anywhere still gets them.
+    ///
+    /// This is the configuration a fresh clone lands in, and the same shape as
+    /// the bug that hid a repo's rules: asking the profile whether to stage
+    /// answers "nothing here" and skips the whole capability, when what omh
+    /// contributes does not come from the profile at all.
+    #[test]
+    fn omhs_hooks_reach_a_profile_with_no_hooks_layer() {
+        let fx = fixture();
+        std::fs::remove_dir_all(fx.paths.root.join("profile/hooks")).unwrap();
+        // `Profile` caches which layers exist, so re-resolve after removing.
+        let fx = Fx {
+            profile: Profile::resolve(&fx.paths),
+            ..fx
+        };
+
+        let staged = staged_hooks(&plan_for(&fx, "claude"));
+        for hook in crate::base::hooks() {
+            assert!(
+                staged.contains(&hook.command),
+                "{} must reach the harness with no hooks layer to read it: {staged}",
+                hook.name
+            );
+        }
+    }
+
+    /// A hook file carrying a manifest name is a leftover: `init` seeded these
+    /// before they were generated, and every repo initialised then still has
+    /// five of them. omh's own must win, or the fix it ships never arrives —
+    /// `git-unavailable` was already rewritten once, and every profile written
+    /// before that carries the version that misses the multi-line scripts
+    /// agents most often emit.
+    #[test]
+    fn a_seeded_copy_no_longer_decides_what_runs() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.root.join("profile/hooks/graph-refresh.json"),
+            r#"{"event":"Stop","command":"the version from an older omh"}"#,
+        )
+        .unwrap();
+
+        let staged = staged_hooks(&plan_for(&fx, "claude"));
+        let ships = crate::base::hooks()
+            .into_iter()
+            .find(|h| h.name == "graph-refresh")
+            .expect("graph-refresh is in the base set");
+        assert!(
+            staged.contains(&ships.command),
+            "omh's own hook must be what runs: {staged}"
+        );
+        assert!(
+            !staged.contains("the version from an older omh"),
+            "the leftover file must not decide: {staged}"
+        );
+    }
+
     /// `--dry-run` prints the plan and writes nothing, placeholders included.
     #[test]
     fn a_dry_run_leaves_no_placeholder_behind() {
