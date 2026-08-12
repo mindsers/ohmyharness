@@ -178,7 +178,18 @@ project ones:
 
 Content comes from the worktree if the branch has a copy, otherwise from the
 default branch — so a session that has just written its rules is governed by
-them, and one that never had them still gets the project's.
+them, and one that never had them still gets the project's. The marker says
+which, because the two are not the same claim:
+
+```
+<!-- omh: <repo>/AGENTS.md -->   this branch's copy
+<!-- omh: main:AGENTS.md -->     the branch has none; read from main
+```
+
+A **blank** rules file counts as no rules file. omh has to place an empty file
+at each declared name for the mount to land on, so from a session's second
+launch its own placeholder is sitting in the worktree — read as content it would
+outrank the project's real rules under the canonical name.
 
 A repo with `CLAUDE.md` and no `AGENTS.md` is composed anyway, and omh says
 which file it read. Where both exist and differ, `AGENTS.md` wins and the other
