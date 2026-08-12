@@ -280,7 +280,7 @@ policy:
 ```
 
 MCP lives under `config` because MCP servers **are** configuration, resolved
-through the same three layers as everything else. See
+through the same three settings layers as everything else. See
 [Configuration](configuration.md).
 
 ## `omh memory …`
@@ -331,7 +331,7 @@ The three arguments are the discipline. Something with nothing to put in
 `--expected` has learned nothing worth recording, so the filter runs for free.
 
 **The key is derived, never chosen.** It comes from a template in
-`.omh/keys.toml`, so the same observation cannot be recorded twice under two
+`.omh/memory.toml`, so the same observation cannot be recorded twice under two
 spellings — `Mounting a credential FILE returns EBUSY.` and `mounting a
 credential  file returns ebusy` produce one key, and the second write is a
 conflict that says *update that note instead*:

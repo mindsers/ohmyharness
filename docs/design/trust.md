@@ -21,11 +21,11 @@ $ omh config
 carry_in   [".env.local"]   ← local (overrides shared)
 ```
 
-No competitor does this. It is what makes three layers debuggable instead of
+No competitor does this. It is what makes layered settings debuggable instead of
 mysterious, and it is cheap — the resolver already knows the answer; the only
 work was refusing to throw it away.
 
-See [Configuration](../configuration.md#provenance).
+See [Configuration](../configuration.md#settings-and-their-three-layers).
 
 ## `omh doctor` — verification ✅
 

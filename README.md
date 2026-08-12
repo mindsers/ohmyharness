@@ -167,29 +167,37 @@ harnesses take turns inhabiting.
 Harnesses run under `dtach`, so closing your terminal doesn't kill the agent —
 `omh claude` again reattaches to the one you left running.
 
-### The profile: three layers
+### One catalogue, and it is personal
 
 ```
-~/.omh/profile/          layer 1 — personal, every project
-<repo>/.omh/profile/     layer 2 — project, COMMITTED, shared with your team
-<repo>/.omh/local/       layer 3 — project, GITIGNORED, yours alone
+~/.omh/
+  rules/  skills/  commands/  subagents/  hooks/   the only place these live
+  mcp.json
+  settings.toml                                    your defaults
 ```
 
-Each layer holds the same things:
+A repo holds configuration, and one kind of content:
 
 ```
-AGENTS.md   skills/   mcp.json   commands/   hooks/   subagents/   policy.toml
+<repo>/.omh/
+  settings.toml        committed: settings, and which of omh's features are on
+  settings.local.toml  gitignored: your overrides, and the secrets the other must not hold
+  memory.toml          committed: how the note store keys and expires
+  hooks/               committed: hooks that only make sense in this repo
+<repo>/AGENTS.md       the project's own rules — tracked, and actually read
 ```
 
-Later layers win. `AGENTS.md` concatenates, directories union by name, MCP merges
-by server name, `policy.toml` overrides key by key.
+A project cannot declare a skill, an MCP server, a command or a subagent; it
+names ones from your catalogue. Hooks are the exception, because they are the
+one capability whose scope is genuinely the repo — `cargo test` here,
+`pnpm test` next door, one name and two bodies.
 
-**Every value tells you where it came from.** Three layers are undebuggable
-otherwise:
+**Settings still layer**, and every value tells you where it came from —
+`~/.omh/settings.toml`, then the repo's, then the repo's gitignored one:
 
 ```console
 $ omh config
-policy:
+settings:
   carry_in         [".env.local"]     ← local (overrides shared)
   idle_timeout     30m                ← personal
 

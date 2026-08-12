@@ -1,59 +1,95 @@
 # Configuration
 
 Your setup is declared once and rendered into whatever shape each harness reads.
-This page covers where it lives, how the layers merge, and how to change things.
+This page covers where it lives, how it resolves, and how to change things.
 
-> This page describes what ships today. The layer model is **being replaced** —
-> one personal catalogue, per-project selection instead of per-project content,
-> and a rules file composed with the project's own rather than mounted over it.
-> See [The profile](design/profile.md) for the model and the reasoning.
+> Selection — `[use]`, `omh use` / `unuse` — is not built yet. Until it is, a
+> repo gets your whole catalogue. See [The profile](design/profile.md) for the
+> model and the reasoning.
 
-## The three layers
-
-```
-~/.omh/profile/          layer 1 — personal, every project
-<repo>/.omh/profile/     layer 2 — project, COMMITTED, shared with your team
-<repo>/.omh/local/       layer 3 — project, GITIGNORED, yours alone
-```
-
-Every layer has the same shape:
+## One catalogue, and it is personal
 
 ```
-AGENTS.md   skills/   mcp.json   commands/   hooks/   subagents/   policy.toml
+~/.omh/
+  rules/  skills/  commands/  subagents/  hooks/   the only place these live
+  mcp.json
+  settings.toml                                    your defaults
 ```
 
-Merge order is 1 → 2 → 3, later winning:
+**Rules are a directory of named files, not one `AGENTS.md`.** `tdd.md`,
+`commit-style.md` and `rust-idiom.md` are separate things you hold. That also
+makes the catalogue uniform: every capability is a directory of named entries,
+with `mcp.json` the lone exception because a server is a record rather than a
+file.
 
-| File | How it merges |
-|---|---|
-| `AGENTS.md` | concatenated, in layer order |
-| `skills/`, `commands/`, `subagents/`, `hooks/` | union by entry name |
-| `mcp.json` | merged by server name |
-| `policy.toml` | overridden key by key |
+A repo holds configuration, and one kind of content:
 
-**Layer 2 is committed, so it must never contain a secret.** That is what layer
-3 and [`carry_in`](#carry_in) are for.
+```
+<repo>/.omh/
+  settings.toml        committed: settings, and which of omh's features are on
+  settings.local.toml  gitignored: your overrides, and the secrets the other must not hold
+  memory.toml          committed: how the note store keys and expires
+  hooks/               committed: hooks that only make sense in this repo
+<repo>/AGENTS.md       the project's own rules — tracked, and actually read
+```
 
-### Why three
+A project cannot declare a skill, an MCP server, a command or a subagent. It
+names ones from your catalogue.
 
-Two would force a choice between "shared with my team" and "mine alone" for
-things that are genuinely both. The rules for a project belong in the repo; the
-API key that makes one of them work does not.
+### Why hooks are the exception
 
-## Provenance
+A skill is a way *you* work — it travels with you across repos, which is why it
+belongs to you. A hook binds to a repo's own commands, and the stack hooks are
+the proof: `cargo test` here, `pnpm test` next door, one name and two bodies. A
+capability that is project-specific by nature has to be declarable where the
+project is, or the catalogue fills with entries that are only ever right in one
+place.
 
-Three layers are undebuggable without it, which is the standard complaint about
-oh-my-zsh and the thing [trust](design/trust.md) exists to prevent. So every
-effective value reports where it came from and what it beat:
+So the rule is not "no content in the repo". It is **content lives where its
+scope is**, and hooks are the one capability whose scope is the repo.
+
+**A project hook beats a catalogue hook of the same name**, which is how a repo
+overrides your personal `format` hook with the one it actually needs, without
+renaming anything. **Names from the base set are reserved** — a file answering
+to one is an error naming both, because a repo that could replace
+`graph-refresh` could make the graph lie while looking installed.
+
+### What that costs
+
+**A repo can no longer ship a skill, an MCP server or a command to your
+teammates.** The committed layer used to do exactly that. What a repo still
+shares is its rules file — which for the first time actually reaches the agent
+— its hooks, and its settings.
+
+Recorded, not built: a catalogue entry could carry a `source` and `omh sync`
+could fetch the missing ones, which restores team sharing without putting
+content back in the repo.
+
+## Settings, and their three layers
+
+Content has one home; **settings** keep their layers, because a setting has one
+value and the useful question is which file decided it:
+
+```
+~/.omh/settings.toml  →  <repo>/.omh/settings.toml  →  <repo>/.omh/settings.local.toml
+```
+
+Later wins. A machine-wide preference and a one-repo exception are both
+expressible, which two layers could not do: the rules for a project belong in
+the repo; the API key that makes one of them work does not.
+
+Undebuggable without provenance — the standard complaint about oh-my-zsh, and
+the thing [trust](design/trust.md) exists to prevent. So every effective value
+reports where it came from and what it beat:
 
 ```console
 $ omh config
-policy:
+settings:
   carry_in         [".env.local"]     ← local (overrides shared)
   idle_timeout     30m                ← personal
 
 mcp:
-  codegraph        codebase-memory-mcp  ← shared
+  codegraph        codebase-memory-mcp  ← your catalogue
 ```
 
 ## Changing settings
@@ -76,7 +112,7 @@ warning: the shared layer is COMMITTED — never put a secret here
 what lets the layer beneath take over again — the difference matters when you
 are overriding a team default temporarily.
 
-## `settings.toml`
+## `[omh]` — omh's own features
 
 `<repo>/.omh/settings.toml` says what this repo does with **omh's own
 features**:
@@ -97,14 +133,13 @@ of the document *this* session is given, and the next repo gets it back.
 the feature with it, hooks and rules section included, because a hook nudging
 the agent toward a server that is gone is worse than no hook.
 
-It layers like everything else — `~/.omh/settings.toml`, then this file, then
-`<repo>/.omh/settings.local.toml`, which `omh init` adds to `.omh/.gitignore`.
+It layers like every other setting — `~/.omh/settings.toml`, then this file,
+then `<repo>/.omh/settings.local.toml`, which `omh init` adds to
+`.omh/.gitignore`.
 
-Nothing else lives here yet. A `carry_in` written into it is refused by name
-rather than read and ignored; it belongs in `policy.toml` until the layer model
-below is replaced.
+## Settings
 
-## `policy.toml`
+Top-level keys of the same files:
 
 | Key | Values | Meaning |
 |---|---|---|
@@ -122,8 +157,27 @@ $ omh config mcp add linear npx -- -y mcp-remote https://mcp.linear.app/sse
 $ omh config mcp rm linear
 ```
 
-MCP lives under `config` because MCP servers **are** configuration — same three
-layers, same provenance, same gitignored-by-default write target.
+MCP lives under `config` because MCP servers **are** configuration. They live in
+your catalogue, and `omh config mcp add` writes there — the catalogue is not
+committed, so nothing here reaches a teammate by `git clone`.
+
+### A token for one repo
+
+A server's environment applies in every repo you work in, which is the wrong
+scope for a key scoped to one of them. So a repo overrides the environment
+without redeclaring the server:
+
+```toml
+# <repo>/.omh/settings.local.toml
+[mcp.linear.env]
+LINEAR_API_KEY = "..."
+```
+
+Variable by variable, so overriding one does not drop the rest of an entry you
+never saw. There is deliberately no `command` here: a repo configures a server
+from your catalogue, it does not define one. An override naming a server the
+catalogue does not have is an error — a token going nowhere is exactly the shape
+of a setting somebody swears they configured.
 
 ### Importing what you already have
 
@@ -166,7 +220,7 @@ omh: warning: carry_in lists .env.missing — not in this checkout
 
 **This is the only path by which a secret reaches the agent.** That is why it is
 an explicit allowlist, why omh prints what it carried, and why patterns are
-validated: `carry_in` is read from a *committed* layer, so an entry like
+validated: `carry_in` can be read from a *committed* file, so an entry like
 `../../.ssh` would otherwise copy host secrets into a sandbox the agent controls.
 
 A **missing** path is reported, never skipped — a `.env` you believe you are
@@ -194,16 +248,20 @@ made, and `omh s commit` published omh's rules over the project's conventions.
 
 **The mount composes your project's rules rather than replacing them.** The
 repo's own `AGENTS.md` is read before anything is mounted over it and joined
-into the document the agent gets, after your personal layer and before the
-project ones:
+into the document the agent gets, after your catalogue's rules:
 
 ```
-<!-- omh: personal -->           ~/.omh/profile/AGENTS.md
+<!-- omh: tdd -->                ~/.omh/rules/tdd.md
+<!-- omh: commit-style -->       ~/.omh/rules/commit-style.md
 <!-- omh: <repo>/AGENTS.md -->   the project's own, tracked
-<!-- omh: shared -->             <repo>/.omh/profile/AGENTS.md
-<!-- omh: local -->              <repo>/.omh/local/AGENTS.md
 <!-- omh: base:graph-rules -->   omh's own, from the base set
 ```
+
+Your rules come first because they are how you work everywhere and the project's
+file is the specific case that qualifies them. Within the catalogue they join in
+filename order — a placeholder, honestly: rules build on each other, and the
+only place an order can really come from is the list you wrote. `[use]` supplies
+one when it lands.
 
 **omh's own sections come last**, generated from the
 [base set](design/base-set.md) rather than written into a file. They describe
@@ -211,14 +269,6 @@ the sandbox — what git does here, where notes go, which graph answers what —
 a convention the project wrote down should not have omh's account of the box
 sitting in front of it. Each is an entry: `omh why git-rules` states what it
 costs and how to switch it off.
-
-A repo that ran `omh init` before this still has those sections inside
-`.omh/profile/AGENTS.md`, where init used to write them. They are composed as
-part of that layer, so **all three of omh's sections currently appear twice** —
-about 3.3 KB of duplicated context on every turn, and a safety notice the base
-set treats as one string reaching the agent as two. Deleting the sections from
-that file fixes it today; a planned migration off `.omh/profile`
-([the profile](design/profile.md), P3) removes them for good.
 
 Content comes from the worktree if the branch has a copy, otherwise from the
 default branch — so a session that has just written its rules is governed by

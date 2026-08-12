@@ -10,7 +10,7 @@ these, the reason is what you need to argue with.
 | Repo exposure | **git worktree, auto-branch** | the agent cannot reach your checkout or `main`; review is `git diff` |
 | Code graph | **wire an existing MCP server** | distributions package, they don't reinvent |
 | Language | **Rust** | single binary; `omh` wraps every invocation, so startup is felt |
-| LLM routing | **not ours** | one env var in `policy.toml` |
+| LLM routing | **not ours** | one env var in `settings.toml` |
 | Unit of work | **long-lived session** | keeps the index warm, makes harness switching instant |
 | Session persistence | **`dtach`, not tmux** | omh needs detach/reattach; SSH already provides multiplexing |
 | IDE access | **SSH into the session** | one dependency tree, shared with the agent |

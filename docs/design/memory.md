@@ -45,7 +45,7 @@ accuracy** — and it is the only way to keep what a removed session learned.
 |---|---|
 | **hub pages** | where the vendor's entire remaining quality gap lived; needs a calibrated lint first. [v2](#14-build-order) |
 | **a curator pass** | omh has no session transcript to replay, and capturing one is a much larger commitment with secret-handling consequences ([rationale](memory-rationale.md#a-curator-pass-instead-of-in-task-writing)) |
-| **a personal (`~/.omh`) layer** | machinery bought before anyone named a note needing it; `~/.omh/profile` already carries preferences as instructions |
+| **a personal (`~/.omh`) layer** | machinery bought before anyone named a note needing it; `~/.omh/rules/` already carries preferences as instructions |
 | **hooks** | not harness-agnostic. An enhancement where present, never load-bearing ([§9.4](#94-hooks-are-an-enhancement-only)) |
 | **semantic conflict sweeps** | measured to fail — rewriting wording breaks the phrasing retrieval matched on |
 
@@ -87,12 +87,12 @@ accuracy** — and it is the only way to keep what a removed session learned.
 
 `omh init` creates both. The committed layer needs no ignore rule; the local one
 needs no ignore rule either, because there is no git where it lives. The earlier
-claim that `init` adds `.omh/local/` to `info/exclude` was doubly wrong:
+claim that `init` adds the local store to `info/exclude` was doubly wrong:
 `info/exclude` is per-clone and never travels, so it could not have hidden a
 store from a teammate anyway. `init` already writes a committed `.omh/.gitignore`,
 which is the mechanism that does travel.
 
-**Layers do not merge.** `policy.toml` merges key by key because a setting has one
+**Layers do not merge.** `settings.toml` merges key by key because a setting has one
 value; a note is a *claim*, and two claims about one topic are two facts. So the
 layer is **part of a note's identity**: `team/deploy` and `local/deploy` are
 different notes and both retrieve. Shadowing would hide a teammate's note behind
