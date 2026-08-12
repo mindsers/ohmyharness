@@ -60,7 +60,9 @@ impl std::fmt::Display for Origin {
                 name,
                 from_base: None,
             } => write!(f, "<repo>/{name}"),
-            Self::Omh { name } => write!(f, "omh:{name}"),
+            // `base:` rather than `omh:` — the marker already opens with
+            // `<!-- omh:`, and it names the base set the section came from.
+            Self::Omh { name } => write!(f, "base:{name}"),
         }
     }
 }

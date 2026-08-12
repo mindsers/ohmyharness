@@ -138,7 +138,7 @@ pub fn checks(profile: &Profile, adapter: &Adapter, own: &crate::base::Own) -> V
             Render::Concat => Expect::NonEmptyFile,
             Render::Dir => Expect::Entries(entry_names(&sources)),
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
-                Expect::Mentions(server_names(&sources))
+                Expect::Mentions(server_names(&sources, own))
             }
             Render::ClaudeSettings => Expect::NonEmptyFile,
         };
@@ -173,9 +173,20 @@ fn entry_names(sources: &[PathBuf]) -> Vec<String> {
     names
 }
 
-fn server_names(sources: &[PathBuf]) -> Vec<String> {
+/// What the document is expected to mention — which is what the launcher
+/// renders, not what the layers declare.
+///
+/// A server whose feature is off here is deliberately left out of that
+/// document. Demanding it makes `omh doctor` fail forever and blame the
+/// harness for obeying, which is the opposite of what this command is for.
+fn server_names(sources: &[PathBuf], own: &crate::base::Own) -> Vec<String> {
     crate::render::parse_layers(sources)
-        .map(|servers| servers.into_keys().collect())
+        .map(|servers| {
+            servers
+                .into_keys()
+                .filter(|name| !own.disabled_servers.contains(name))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -339,6 +350,35 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "hooks"),
             "omh's own hooks are mounted with no hooks layer to source them: {names:?}"
+        );
+    }
+
+    /// A server whose feature is off here is deliberately absent from the
+    /// document the harness is given, so a check demanding it fails forever
+    /// and blames the harness for obeying.
+    ///
+    /// Found by running `omh doctor` with `[omh] codegraph = false`, not by
+    /// the suite: the checks were built from the layer files while the plan
+    /// renders from the layers *minus* what this repo switched off, and only
+    /// a real probe compares the two.
+    #[test]
+    fn a_server_this_repo_switched_off_is_not_demanded() {
+        let fx = fixture();
+        let manifest = crate::base::Manifest::load_dir(Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/base"
+        )))
+        .unwrap();
+        let off = crate::base::own(&manifest, &["codegraph".to_string()].into());
+
+        let mcp = checks(&fx.profile, &adapter("claude"), &off)
+            .into_iter()
+            .find(|c| c.name == "mcp")
+            .expect("claude stages mcp");
+        assert_eq!(
+            mcp.expect,
+            Expect::Mentions(vec![]),
+            "the only server in this profile is codegraph, and it is off here"
         );
     }
 

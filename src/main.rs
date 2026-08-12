@@ -796,7 +796,13 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     // returns only each server's *command* — the arguments are what say which
     // directories it will look in, and those are the whole point of the check.
     let declared = render::parse_layers(&profile.sources(adapter::Capability::Mcp))?;
-    if let Some(server) = declared.get(memory::tools::SERVER_KEY) {
+    // Not when this repo has switched the feature off: the server is left out
+    // of the document on purpose, so checking for it is checking a claim omh
+    // deliberately did not make.
+    if let Some(server) = declared
+        .get(memory::tools::SERVER_KEY)
+        .filter(|_| !own.disabled_servers.contains(memory::tools::SERVER_KEY))
+    {
         checks.extend(doctor::memory_checks(server));
     }
     if checks.is_empty() {
@@ -1803,7 +1809,10 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         None => println!("  harness    none — no adapters available"),
     }
     if stacks.is_empty() {
-        println!("  stack      none detected — add commands to .omh/profile/AGENTS.md");
+        println!(
+            "  stack      none detected — write your test and format hooks into \
+             .omh/profile/hooks/"
+        );
     } else {
         for s in &stacks {
             println!(

@@ -28,7 +28,7 @@ pub fn document(
             servers.retain(|name, _| !own.disabled_servers.contains(name));
             mcp(render, &servers)
         }
-        Render::ClaudeSettings => claude_settings(&merge_hooks(sources, &own.hooks)?),
+        Render::ClaudeSettings => claude_settings(&merge_hooks(sources, own)?),
         Render::Dir | Render::Concat => {
             anyhow::bail!("{cap}: `{render:?}` is staged by the launcher, not rendered")
         }
@@ -200,7 +200,12 @@ struct Hook {
 /// already needed one. A repo initialised before this still has the seeded
 /// files sitting in its profile; they are read and then overridden, and the
 /// migration removes them.
-fn merge_hooks(dirs: &[PathBuf], own: &[crate::base::Hook]) -> Result<BTreeMap<String, Hook>> {
+fn merge_hooks(dirs: &[PathBuf], own: &crate::base::Own) -> Result<BTreeMap<String, Hook>> {
+    let reserved: BTreeMap<String, ()> = own
+        .reserved
+        .iter()
+        .map(|name| (format!("{name}.json"), ()))
+        .collect();
     let mut out = BTreeMap::new();
     for dir in dirs {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -209,14 +214,19 @@ fn merge_hooks(dirs: &[PathBuf], own: &[crate::base::Hook]) -> Result<BTreeMap<S
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json") {
-                out.insert(
-                    entry.file_name().to_string_lossy().into_owned(),
-                    read_json(&path)?,
-                );
+                let name = entry.file_name().to_string_lossy().into_owned();
+                // A manifest name is omh's, on or off. Read and then
+                // overridden is not enough: with the feature off there is
+                // nothing to override it with, and the file would go on
+                // running.
+                if reserved.contains_key(&name) {
+                    continue;
+                }
+                out.insert(name, read_json(&path)?);
             }
         }
     }
-    for hook in own {
+    for hook in &own.hooks {
         out.insert(
             format!("{}.json", hook.name),
             Hook {
@@ -367,7 +377,7 @@ mod tests {
             r#"{"event":"PostToolUse","matcher":"Edit","command":"three"}"#,
         );
 
-        let hooks = merge_hooks(&[dir.path().join("h")], &[]).unwrap();
+        let hooks = merge_hooks(&[dir.path().join("h")], &Default::default()).unwrap();
         let out = claude_settings(&hooks).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
 
@@ -400,8 +410,24 @@ mod tests {
             );
         }
 
-        let seeded = claude_settings(&merge_hooks(&[dir.path().join("h")], &[]).unwrap()).unwrap();
-        let generated = claude_settings(&merge_hooks(&[], &crate::base::hooks()).unwrap()).unwrap();
+        // The seeded side is given an `Own` that reserves nothing, so the
+        // files are read; the real one skips them, which the test above
+        // covers. What is compared here is the two renderings of the same
+        // hooks.
+        let seeded =
+            claude_settings(&merge_hooks(&[dir.path().join("h")], &Default::default()).unwrap())
+                .unwrap();
+        let generated = claude_settings(
+            &merge_hooks(
+                &[],
+                &crate::base::Own {
+                    hooks: crate::base::hooks(),
+                    ..Default::default()
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(seeded, generated);
     }
 

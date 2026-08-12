@@ -1018,6 +1018,70 @@ mod tests {
         );
     }
 
+    /// Switching a feature off has to take the leftovers with it.
+    ///
+    /// Found by running `omh doctor` with `[omh] codegraph = false`, not by
+    /// the suite: generation dropped the four graph hooks and the seeded files
+    /// of the same name were still sitting in the profile, so the graph hooks
+    /// went on firing against a server that had been removed from the
+    /// document. Disabling that leaves the disabled thing running is worse
+    /// than not offering it.
+    ///
+    /// The rule is that a manifest name is omh's, on or off. Nothing in a
+    /// layer answers to one.
+    #[test]
+    fn switching_a_feature_off_silences_the_files_it_seeded() {
+        let fx = fixture();
+        for hook in crate::base::hooks() {
+            std::fs::write(
+                fx.paths
+                    .root
+                    .join("profile/hooks")
+                    .join(format!("{}.json", hook.name)),
+                format!(
+                    r#"{{"event":"{}","matcher":"{}","command":"{}"}}"#,
+                    hook.event, hook.matcher, hook.command
+                ),
+            )
+            .unwrap();
+        }
+        let manifest = crate::base::Manifest::load_dir(Path::new(BASE)).unwrap();
+        let own = crate::base::own(&manifest, &["codegraph".to_string()].into());
+
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+            },
+        )
+        .unwrap();
+
+        let hooks = staged_hooks(&p);
+        assert!(
+            !hooks
+                .iter()
+                .any(|c| c.contains("codebase-memory-mcp") || c.contains("OMH_GRAPH_PROJECT")),
+            "no graph hook may survive as a seeded file: {hooks:?}"
+        );
+        assert!(
+            hooks
+                .iter()
+                .any(|c| c.contains("fatal") || c.contains("git")),
+            "git-notice is a different feature and stays on: {hooks:?}"
+        );
+    }
+
     /// A hook file carrying a manifest name is a leftover: `init` seeded these
     /// before they were generated, and every repo initialised then still has
     /// five of them. omh's own must win, or the fix it ships never arrives —

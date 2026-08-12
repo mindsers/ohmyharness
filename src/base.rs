@@ -706,6 +706,15 @@ pub struct Own {
     /// lists them. The feature is off *here*; nothing was uninstalled, and the
     /// file is left exactly as the user has it.
     pub disabled_servers: BTreeSet<String>,
+    /// Every hook name the manifest owns, whether or not its feature is on.
+    ///
+    /// A file in a layer answering to one of these is never read. With the
+    /// feature on the generated hook wins anyway; with it off, nothing runs —
+    /// and it was the second case that shipped broken: the four graph hooks
+    /// kept firing from files `init` seeded, against a server that had been
+    /// taken out of the document. Disabling that leaves the disabled thing
+    /// running is worse than not offering it.
+    pub reserved: BTreeSet<String>,
 }
 
 /// Everything the manifest generates, minus the features this repo turned off.
@@ -729,6 +738,7 @@ pub fn own(manifest: &Manifest, off: &BTreeSet<String>) -> Own {
             .filter(|e| e.kind == Kind::Mcp && off.contains(&e.feature))
             .map(|e| e.name.clone())
             .collect(),
+        reserved: hooks().into_iter().map(|h| h.name.to_string()).collect(),
     }
 }
 

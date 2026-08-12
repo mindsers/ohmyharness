@@ -346,15 +346,23 @@ pub fn render(catalog: &Catalog, verdict: &Verdict, version: &str) -> String {
             costs(entry, version, &mut out);
             alternatives(entry, &mut out);
             out.push_str(&format!("  {:<11} {}\n", "remove", entry.remove));
-            if let Some(stale) = stale {
-                out.push_str(&format!(
-                    "\n  A file of this name is in your {} layer and is no longer read.\n                       `init` seeded these before omh generated them; editing it changes\n                       nothing.\n",
-                    stale.layer
-                ));
-            } else {
-                out.push_str(
-                    "\n  Not a file anywhere — omh writes it into the session and nothing\n                       else. That is what lets a fix reach you with the upgrade.\n",
-                );
+            // Line by line rather than one continued literal: `cargo fmt`
+            // collapses a `\`-continuation into the source's own indentation,
+            // which lands in the user's terminal.
+            match stale {
+                Some(stale) => {
+                    out.push_str(&format!(
+                        "\n  A file of this name is in your {} layer and is no longer read.\n",
+                        stale.layer
+                    ));
+                    out.push_str("  `init` seeded these before omh generated them, so editing\n");
+                    out.push_str("  it changes nothing.\n");
+                }
+                None => {
+                    out.push_str("\n  Not a file anywhere — omh writes it into the session and\n");
+                    out.push_str("  nothing else. That is what lets a fix reach you with the\n");
+                    out.push_str("  upgrade.\n");
+                }
             }
         }
         Verdict::Removed { entry } => {
