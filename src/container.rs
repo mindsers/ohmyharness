@@ -357,6 +357,7 @@ impl Stager<'_> {
                 let dst = stage.join(cap.source());
                 if staging == Staging::Apply {
                     std::fs::create_dir_all(&dst)?;
+                    prune(&dst, cap, repo)?;
                 }
                 for (i, src) in sources.iter().enumerate() {
                     mounts.push(Mount {
@@ -462,6 +463,45 @@ impl Stager<'_> {
         }
         Ok(dropped_hooks)
     }
+}
+
+/// Take out the links for entries this repo no longer uses.
+///
+/// The staging directory is keyed by session and harness, so the next launch
+/// finds the last one's links still in it. Before `[use]` that was harmless: an
+/// entry left the staged set only by being deleted from the catalogue, and the
+/// leftover link then dangled into a layer that no longer held it. Selection
+/// broke that — the layer behind the link is still mounted whole, deliberately
+/// — so the link **resolved**, and `omh unuse` reported success while the agent
+/// kept the entry forever.
+///
+/// Symlinks only, and only ones this selection excludes. The path is built by
+/// joining a directory entry's own name to the directory it came from, so it
+/// cannot escape; restricting to symlinks is what keeps this to removing things
+/// omh put here.
+fn prune(dst: &Path, cap: Capability, repo: &crate::settings::RepoPolicy) -> Result<()> {
+    let entries = match std::fs::read_dir(dst) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dst.display())),
+    };
+    for entry in entries {
+        // Not `.flatten()`: a `readdir` failing part-way through would leave a
+        // stale link in place, which is the state this function exists to end.
+        let entry = entry.with_context(|| format!("reading {}", dst.display()))?;
+        if !entry.file_type().is_ok_and(|t| t.is_symlink()) {
+            continue;
+        }
+        if repo
+            .selection
+            .allows(cap, &crate::profile::entry_name(&entry.file_name()))
+        {
+            continue;
+        }
+        std::fs::remove_file(entry.path())
+            .with_context(|| format!("removing {}", entry.path().display()))?;
+    }
+    Ok(())
 }
 
 /// Put an empty file where a mount is about to land, if nothing is there yet.
@@ -1249,6 +1289,62 @@ mod tests {
         let apple = body.find("APPLE RULE").expect("apple composed");
         let tdd = body.find("personal rules").expect("tdd composed");
         assert!(apple < tdd, "alphabetical, and both there:\n{body}");
+    }
+
+    /// Deselecting something has to reach a session that already staged it.
+    ///
+    /// The staging directory is keyed by session and harness, so it is the same
+    /// directory on the next launch, and nothing used to remove a link from it.
+    /// Before `[use]` that was harmless: an entry left the staged set only by
+    /// being deleted from the catalogue, and the leftover symlink then dangled
+    /// into a layer that no longer had it. Selection breaks that — the layer
+    /// behind the link is still mounted whole, deliberately — so the link
+    /// **still resolves** and the agent keeps the entry the user just removed.
+    ///
+    /// Exit 0, a success line naming the file it wrote, and the thing is still
+    /// there: the failure this project fears most, on the command whose entire
+    /// job is removal.
+    #[test]
+    fn deselecting_an_entry_takes_it_out_of_a_directory_already_staged() {
+        let fx = fixture();
+        let staged = |p: &Plan| staged_entries(p, Capability::Skills, ".claude/skills");
+
+        assert_eq!(
+            staged(&plan_for(&fx, "claude")),
+            vec!["graphify", "review-diff"],
+            "both, before this repo says otherwise"
+        );
+
+        selects(&fx, "skills = [\"review-diff\"]\n");
+        assert_eq!(
+            staged(&plan_for(&fx, "claude")),
+            vec!["review-diff"],
+            "the link from the earlier launch has to go, or `unuse` removed nothing"
+        );
+    }
+
+    /// And the pruning must not reach anything omh did not put there. The staged
+    /// directory is omh's, but a mistake here deletes from a path built by
+    /// joining a name to a directory, which is the shape worth being careful in.
+    #[test]
+    fn pruning_leaves_a_file_omh_did_not_stage() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        let dst = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".claude/skills"))
+            .expect("skills staged")
+            .host
+            .clone();
+        std::fs::write(dst.join("notes.txt"), "mine").unwrap();
+
+        selects(&fx, "skills = []\n");
+        plan_for(&fx, "claude");
+        assert!(
+            dst.join("notes.txt").exists(),
+            "only omh's own links are omh's to remove"
+        );
     }
 
     /// Every hook command the harness would actually run, read back out of the

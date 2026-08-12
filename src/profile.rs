@@ -211,7 +211,20 @@ impl Profile {
                 // silently shorten the catalogue, and the report built from it
                 // would say an entry is not selected because it was never seen.
                 let entry = entry.with_context(|| format!("reading {}", source.display()))?;
-                out.push(entry_name(&entry.file_name()));
+                let name = entry_name(&entry.file_name());
+                // A name omh mints has to be a name a `[use]` list can hold, or
+                // `init` writes something every later read refuses. `.DS_Store`
+                // is the one that actually happens: Finder creates it in any
+                // directory somebody opens, and it bricked the repo.
+                //
+                // Skipped rather than reported, because it is not an entry that
+                // went missing — it is a file that was never a catalogue entry,
+                // and a launch that named it would be telling the user about
+                // their operating system.
+                if crate::selection::validate_entry_name(&name, cap, &source).is_err() {
+                    continue;
+                }
+                out.push(name);
             }
         }
         out.sort();
@@ -344,6 +357,33 @@ mod tests {
         let profile = Profile::resolve(&f.paths);
         assert_eq!(profile.sources(Capability::Rules).unwrap().len(), 1);
         assert!(profile.sources(Capability::Skills).unwrap().is_empty());
+    }
+
+    /// A name omh mints has to be a name `[use]` can hold.
+    ///
+    /// `entries` is where `init` and `omh use --all` get the names they write,
+    /// and `Selection::read_list` refuses one that begins with a dot — so a
+    /// `.DS_Store` in `~/.omh/skills`, which Finder creates in any directory
+    /// somebody opens, was written into `[use]` and then refused by every
+    /// command that read the file afterwards. `omh repo`, `omh use`, and the
+    /// launch itself, all dead until the file was hand-edited.
+    ///
+    /// The rule this restores is `validate_entry_name`'s own: checked where a
+    /// name is **minted**. This is the fourth mint point and the only one that
+    /// was not on the list.
+    #[test]
+    fn a_name_omh_cannot_write_is_not_an_entry() {
+        let f = fixture(&[
+            ("catalogue", "skills/review-diff/SKILL.md", "s"),
+            ("catalogue", "skills/.DS_Store", "junk"),
+        ]);
+        assert_eq!(
+            Profile::resolve(&f.paths)
+                .entries(Capability::Skills)
+                .unwrap(),
+            vec!["review-diff"],
+            "a dotfile is not a skill, and naming it would poison the settings file"
+        );
     }
 
     #[test]

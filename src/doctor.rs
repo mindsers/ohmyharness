@@ -142,7 +142,7 @@ pub fn checks(
 
         let expect = match binding.render {
             Render::Concat => Expect::NonEmptyFile,
-            Render::Dir => Expect::Entries(entry_names(&sources)),
+            Render::Dir => Expect::Entries(entry_names(&sources, capability, repo)),
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
                 Expect::Mentions(server_names(&sources, repo))
             }
@@ -159,8 +159,25 @@ pub fn checks(
     Ok(out)
 }
 
-/// Union of entry names across layers — what the harness should be able to see.
-fn entry_names(sources: &[PathBuf]) -> Vec<String> {
+/// Entry names the harness should be able to see — which is what the launcher
+/// *stages*, not what the catalogue declares.
+///
+/// An entry this repo did not select is deliberately absent, for the reason
+/// `server_names` gives one capability over: demanding it makes `omh doctor`
+/// fail forever and blame the harness for obeying. That argument was applied to
+/// `disabled_servers` and not carried across when `[use]` landed, so a doctor
+/// run in any curated repo reported `missing: <name>` — a false alarm in the
+/// one command CONTRIBUTING puts above the test suite.
+///
+/// The **literal** filename is what gets asserted, because that is what omh
+/// symlinks; the selection is matched on `entry_name`, which is the name a
+/// `[use]` list holds. Comparing the same string on both sides would be wrong
+/// in one direction or the other for every capability whose entries are files.
+fn entry_names(
+    sources: &[PathBuf],
+    cap: Capability,
+    repo: &crate::settings::RepoPolicy,
+) -> Vec<String> {
     let mut names: Vec<String> = sources
         .iter()
         .filter_map(|d| std::fs::read_dir(d).ok())
@@ -170,9 +187,14 @@ fn entry_names(sources: &[PathBuf]) -> Vec<String> {
                 // The literal staged name. Stripping extensions would assert a
                 // guess about how the harness names things instead of asserting
                 // what omh actually mounted.
-                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .map(|e| e.file_name())
                 .collect::<Vec<_>>()
         })
+        .filter(|name| {
+            repo.selection
+                .allows(cap, &crate::profile::entry_name(name))
+        })
+        .map(|name| name.to_string_lossy().into_owned())
         .collect();
     names.sort();
     names.dedup();
@@ -291,6 +313,7 @@ pub fn passed(outcomes: &[Outcome]) -> bool {
 mod tests {
     use super::*;
     use crate::profile::Paths;
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
@@ -409,6 +432,42 @@ mod tests {
         );
     }
 
+    /// An entry this repo did not select is deliberately absent from the
+    /// directory the harness is given, so a check demanding it fails forever
+    /// and blames the harness for obeying — the same argument
+    /// `a_server_this_repo_switched_off_is_not_demanded` makes one capability
+    /// over, and the one this PR forgot to carry across.
+    ///
+    /// It matters more than the server case, because `omh init` now writes a
+    /// `[use]` list into every repo: any entry added to the catalogue
+    /// afterwards is unselected, so `omh doctor` would fail on an ordinary,
+    /// correctly configured checkout. A doctor that cries wolf on a normal
+    /// configuration is a doctor nobody reads when an adapter path really
+    /// breaks — and CONTRIBUTING puts this command above the test suite
+    /// precisely because nothing else can catch that class of bug.
+    #[test]
+    fn an_entry_this_repo_did_not_select_is_not_demanded() {
+        let fx = fixture();
+        let (own, mut repo) = decided();
+        repo.selection
+            .apply(
+                &BTreeMap::from([("skills".to_string(), Vec::new())]),
+                Path::new("settings.toml"),
+            )
+            .unwrap();
+
+        let skills = checks(&fx.profile, &adapter("claude"), &own, &repo)
+            .unwrap()
+            .into_iter()
+            .find(|c| c.name == "skills")
+            .expect("claude stages skills");
+        assert_eq!(
+            skills.expect,
+            Expect::Entries(vec![]),
+            "the only skill in this profile is graphify, and this repo did not name it"
+        );
+    }
+
     #[test]
     fn every_declared_capability_is_checked() {
         let fx = fixture();
@@ -489,7 +548,7 @@ mod tests {
         std::fs::create_dir_all(commands.join("nested")).unwrap();
 
         assert_eq!(
-            entry_names(&[commands]),
+            entry_names(&[commands], Capability::Commands, &decided().1),
             vec!["nested".to_string(), "ship.md".to_string()]
         );
     }

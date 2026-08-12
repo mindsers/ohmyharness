@@ -126,7 +126,7 @@ impl Selection {
         let mut out = Vec::with_capacity(names.len());
         for name in names {
             validate_entry_name(name, cap, whence)?;
-            if let Some(feature) = self.feature_owning(cap, name) {
+            if let Some(feature) = self.owner(cap, name) {
                 bail!(
                     "{}: `[use] {cap}` names `{name}`, which is omh's — part of the \
                      `{feature}` feature. `[use]` names your entries; a feature is all \
@@ -198,11 +198,15 @@ impl Selection {
 
     /// Is this one of omh's own?
     pub fn is_omhs(&self, cap: Capability, name: &str) -> bool {
-        self.feature_owning(cap, name).is_some()
+        self.owner(cap, name).is_some()
     }
 
     /// The feature that owns `name`, if omh does.
-    fn feature_owning(&self, cap: Capability, name: &str) -> Option<&str> {
+    ///
+    /// Public because a refusal is only actionable if it names the switch: the
+    /// interesting half of "`git-rules` is omh's" is `git-notice`, which is what
+    /// `omh repo disable` takes.
+    pub fn owner(&self, cap: Capability, name: &str) -> Option<&str> {
         self.owned.get(&cap)?.get(name).map(String::as_str)
     }
 }

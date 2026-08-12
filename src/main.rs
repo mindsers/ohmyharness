@@ -1525,8 +1525,9 @@ fn use_cmd(
             anyhow::bail!("`--all` resyncs every capability — it takes no arguments");
         }
         let lists = catalogue_lists(&paths)?;
-        let w = config::write_selection(&paths, config::Layer::Shared, &lists)?;
-        println!("resynced to your catalogue — wrote → {}", w.path.display());
+        for w in write_lists(&paths, &lists)? {
+            println!("resynced to your catalogue — wrote → {}", w.path.display());
+        }
         for (cap, names) in &lists {
             println!("  {:<11} {}", cap.to_string(), names.len());
         }
@@ -1566,9 +1567,8 @@ fn use_cmd(
     if !already {
         names.push(name.to_string());
     }
-    let w = config::write_selection(
+    let written = write_lists(
         &paths,
-        config::Layer::Shared,
         &std::collections::BTreeMap::from([(cap, names.clone())]),
     )?;
     if was_open {
@@ -1581,7 +1581,9 @@ fn use_cmd(
             names.len()
         );
     }
-    println!("using {cap}/{name} — wrote → {}", w.path.display());
+    for w in written {
+        println!("using {cap}/{name} — wrote → {}", w.path.display());
+    }
     Ok(())
 }
 
@@ -1603,16 +1605,36 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str) -> Result<()> {
         );
     }
     names.retain(|n| n != name);
-    let w = config::write_selection(
-        &paths,
-        config::Layer::Shared,
-        &std::collections::BTreeMap::from([(cap, names)]),
-    )?;
-    println!(
-        "no longer using {cap}/{name} — wrote → {}",
-        w.path.display()
-    );
+    for w in write_lists(&paths, &std::collections::BTreeMap::from([(cap, names)]))? {
+        println!(
+            "no longer using {cap}/{name} — wrote → {}",
+            w.path.display()
+        );
+    }
     Ok(())
+}
+
+/// Write these lists to every repo layer that has a say in them.
+///
+/// One capability at a time, because which layers declare `skills` and which
+/// declare `mcp` are different questions — `omh use --all` in a repo whose
+/// gitignored file overrides exactly one capability must not acquire the other
+/// five there.
+fn write_lists(
+    paths: &Paths,
+    lists: &std::collections::BTreeMap<adapter::Capability, Vec<String>>,
+) -> Result<Vec<config::Written>> {
+    let mut out = Vec::new();
+    for (cap, names) in lists {
+        let one = std::collections::BTreeMap::from([(*cap, names.clone())]);
+        for layer in config::declaring(paths, config::USE, &cap.to_string())? {
+            out.push(config::write_selection(paths, layer, &one)?);
+        }
+    }
+    // Two capabilities can share a layer, and reporting the same file twice
+    // reads as two writes.
+    out.dedup_by(|a, b| a.path == b.path);
+    Ok(out)
 }
 
 /// This capability's effective list, and whether it had one at all.
@@ -1948,12 +1970,16 @@ fn feature_switch(cwd: &std::path::Path, feature: &str, on: bool) -> Result<()> 
     }
     // The committed file: which of omh's features a project runs with is a fact
     // about the project, the same argument `omh use` writes there on.
-    let w = config::write_feature(&paths, config::Layer::Shared, feature, on)?;
-    println!(
-        "{feature} is {} here — wrote → {}",
-        if on { "on" } else { "off" },
-        w.path.display()
-    );
+    // ...and the gitignored one too when it already declares this feature, or
+    // the switch reports a change the layer beneath it overrules.
+    for layer in config::declaring(&paths, config::OMH, feature)? {
+        let w = config::write_feature(&paths, layer, feature, on)?;
+        println!(
+            "{feature} is {} here — wrote → {}",
+            if on { "on" } else { "off" },
+            w.path.display()
+        );
+    }
     if !on {
         println!("nothing was uninstalled; the next repo gets it back");
     }

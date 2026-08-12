@@ -977,3 +977,99 @@ fn init_writes_the_selection_expanded() {
         "init writes the list once; `omh use --all` is how you ask for a resync"
     );
 }
+
+/// A command that removes something has to remove it.
+///
+/// `omh use` and `omh unuse` write the committed file, but the selection is
+/// resolved across all three settings files with the gitignored one last and
+/// winning. So a `[use]` in `settings.local.toml` made `omh unuse` write
+/// correctly, report success, and change nothing the session could see — the
+/// shape the invariant table is built around ("nothing to commit is never a
+/// successful commit").
+///
+/// Both files are written when both declare it. Refusing was the other option
+/// and it is worse: the local table is usually there on purpose, and a command
+/// that will not act until you delete it teaches people to stop using it.
+#[test]
+fn use_writes_every_repo_layer_that_already_declares_the_capability() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/refactor/SKILL.md"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "[use]\nskills = [\"review-diff\", \"refactor\"]\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["unuse", "skills", "refactor"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        !local.contains("refactor"),
+        "the layer that decides has to be the layer that changed: {local}"
+    );
+    assert!(
+        local.contains("review-diff"),
+        "and only that name went: {local}"
+    );
+    assert!(
+        sb.settings().contains("review-diff") && !sb.settings().contains("refactor"),
+        "the committed file is still the one a teammate gets: {}",
+        sb.settings()
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("settings.local.toml"),
+        "and it says both files were written: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The other half: a local file that says nothing about this capability must
+/// not acquire a `[use]` table because a committed one was edited. A selection
+/// silently appearing in a gitignored file is how a teammate stops getting what
+/// the repo says it uses.
+#[test]
+fn a_local_file_that_declares_nothing_stays_that_way() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "carry_in = [\".env\"]\n",
+    )
+    .unwrap();
+
+    assert!(sb.omh(&["use", "skills", "review-diff"]).status.success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        !local.contains("[use]"),
+        "nothing was declared there: {local}"
+    );
+}
+
+/// `[omh]` layers the same way, so `omh repo enable` has the same hole.
+#[test]
+fn a_feature_switch_reaches_the_layer_that_decides() {
+    let sb = sandbox();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "[omh]\ncodegraph = false\n",
+    )
+    .unwrap();
+
+    assert!(sb.omh(&["repo", "enable", "codegraph"]).status.success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        local.contains("codegraph = true"),
+        "the local switch is what decides, so it is what has to move: {local}"
+    );
+}

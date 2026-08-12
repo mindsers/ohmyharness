@@ -425,16 +425,37 @@ fn catalogue(
             continue;
         };
         let name = crate::profile::entry_name(path.file_name().unwrap_or_default());
+        // A manifest name is omh's, on or off — an error naming both rather
+        // than a file that composes. The same rule `render::merge_hooks`
+        // applies to a hook file, and it became this module's business when
+        // `kind = "rules"` made rules sections manifest entries.
+        //
+        // Left composing, such a file was wrong four ways at once: it reached
+        // the document even when `[use]` did not name it, because `allows`
+        // short-circuits for anything omh owns; it sorted *ahead of* everything
+        // the repo declared, because `position()` answers `None`; it could not
+        // be removed, since `[use]` refuses to name it; and it arrived beside
+        // omh's own section for the same feature, delivering one notice twice.
+        if let Some(feature) = selection.owner(Capability::Rules, &name) {
+            anyhow::bail!(
+                "{}: `{name}` is a name omh ships, so this file answers to nothing \
+                 — it is not composed, and it does not override omh's. Rename it, \
+                 or switch the feature off with `omh repo disable {feature}` if \
+                 what you want is omh's gone.",
+                path.display()
+            );
+        }
         if !selection.allows(Capability::Rules, &name) {
             continue;
         }
         out.push((name, body));
     }
     match selection.order(Capability::Rules) {
-        // The declared order, and a name the list does not mention cannot be
-        // here — `allows` dropped it above. Nothing is appended after the
-        // listed ones, or "these rules, in this order" would quietly become
-        // "these rules first".
+        // The declared order. A name the list does not mention cannot be here:
+        // `allows` dropped it, and the one case that used to slip past — a file
+        // bearing a manifest name, which `allows` waves through — is refused
+        // above rather than sorted. Nothing is appended after the listed ones,
+        // or "these rules, in this order" would quietly become "these first".
         Some(order) => out.sort_by_key(|(name, _)| order.iter().position(|n| n == name)),
         None => out.sort(),
     }
@@ -499,6 +520,45 @@ mod tests {
             &Default::default(),
         )
         .unwrap()
+    }
+
+    /// A rules file answering to a manifest name is an error naming both — the
+    /// same rule `render::merge_hooks` applies to a hook file, for the same
+    /// reason and now that rules are manifest entries too.
+    ///
+    /// Left composing, such a file was wrong in four directions at once. It
+    /// reached the document even when `[use]` did not name it, because
+    /// `Selection::allows` short-circuits for anything omh owns. It sorted
+    /// **ahead of every rule the repo declared**, because `position()` answers
+    /// `None` and `None < Some(_)` — in a document whose entire premise is that
+    /// order is meaning. It could not be removed: `[use]` refuses to name it and
+    /// `omh unuse` refuses to take it out. And it arrived *beside* omh's own
+    /// generated section for the same feature, delivering the git notice twice
+    /// — the drift `GIT_ABSENT` exists as a single string to prevent.
+    ///
+    /// The comment that used to sit on the sort asserted this could not happen.
+    #[test]
+    fn a_rules_file_answering_to_a_manifest_name_is_an_error_naming_both() {
+        let fx = fixture();
+        catalogue(&fx, "git-rules", "my own version");
+        catalogue(&fx, "tdd", "test first");
+
+        let owned = std::collections::BTreeMap::from([(
+            Capability::Rules,
+            std::collections::BTreeMap::from([("git-rules".to_string(), "git-notice".to_string())]),
+        )]);
+        let err = compose(
+            &fx.paths,
+            &claude(),
+            &fx.worktree,
+            None,
+            &[],
+            &crate::selection::Selection::owning(owned),
+        )
+        .expect_err("a manifest name is not something a file may claim");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("git-rules.md"), "name the file: {msg}");
+        assert!(msg.contains("git-notice"), "and whose name it is: {msg}");
     }
 
     /// omh's sections reach the agent once.
