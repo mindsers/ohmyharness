@@ -1,1 +1,0 @@
-{ "on": "after-tool", "tools": ["edit"], "run": "cargo fmt" }
