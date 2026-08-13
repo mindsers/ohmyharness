@@ -545,8 +545,13 @@ pub fn hooks() -> Vec<Hook> {
                      *) false ;; esac",
                     Field::ToolCommand.var()
                 )),
-                action: Action::Inject {
-                    capture: None,
+                // A refusal, not a notice. As an `inject` the call went ahead:
+                // the agent read "git does not work here" and then ran
+                // `git status` anyway, spending a tool call to reach an error
+                // omh already knew was coming. git genuinely cannot work here —
+                // the worktree's `.git` points at an admin directory omh does
+                // not mount — so there is nothing for the call to discover.
+                action: Action::Refuse {
                     text: GIT_ABSENT.to_string(),
                 },
             },
@@ -1782,6 +1787,41 @@ command = "c"
         );
     }
 
+    /// The git notice blocks the call rather than advising against it.
+    ///
+    /// It was an `inject` — a notice, with the call going ahead — so the agent
+    /// read "git does not work here" and then ran `git status` anyway, spending
+    /// a tool call to reach an error omh already knew was coming. git genuinely
+    /// cannot work in this sandbox: there is no repository at `/work` that the
+    /// agent may commit to, which is the whole point of the worktree model.
+    ///
+    /// It is the one hook in the base set that should block. The graph nudges
+    /// must not — `graph-first` says so itself, "a nudge, not a wall" — and the
+    /// format now carries the difference rather than leaving each renderer to
+    /// guess it.
+    #[test]
+    fn the_git_notice_blocks_rather_than_advises() {
+        let git = hooks()
+            .into_iter()
+            .find(|h| h.name == "git-unavailable")
+            .expect("the base set ships it");
+        assert!(
+            matches!(git.hook.action, crate::hook::Action::Refuse { .. }),
+            "got: {:?}",
+            git.hook.action
+        );
+
+        // And the nudges still do not, or the change went too far.
+        for name in ["graph-first", "graph-read", "graph-orient"] {
+            let h = hooks().into_iter().find(|h| h.name == name).unwrap();
+            assert!(
+                matches!(h.hook.action, crate::hook::Action::Inject { .. }),
+                "{name} is a nudge and has to stay one: {:?}",
+                h.hook.action
+            );
+        }
+    }
+
     /// omh's five are held to the format they impose on everybody else.
     ///
     /// `base::hooks()` builds `hook::Hook` by struct literal, so `parse` — the
@@ -1920,15 +1960,22 @@ command = "c"
         String::from_utf8(out.stdout).unwrap()
     }
 
+    /// The prose survives shell quoting intact — and arrives as a *decision*,
+    /// not a notice. The hook blocks the call now, so the reason travels under
+    /// `permissionDecisionReason` rather than `additionalContext`.
     #[test]
     fn the_git_notice_reaches_the_agent_verbatim() {
         let fired = fire_hook("git status");
         let parsed: serde_json::Value =
             serde_json::from_str(&fired).unwrap_or_else(|e| panic!("not JSON: {fired} ({e})"));
+        let out = &parsed["hookSpecificOutput"];
         assert_eq!(
-            parsed["hookSpecificOutput"]["additionalContext"]
-                .as_str()
-                .unwrap(),
+            out["permissionDecision"].as_str(),
+            Some("deny"),
+            "the call is blocked, not merely commented on: {fired}"
+        );
+        assert_eq!(
+            out["permissionDecisionReason"].as_str().unwrap(),
             GIT_ABSENT,
             "the prose has to survive shell quoting intact"
         );
@@ -2096,23 +2143,30 @@ command = "c"
             .any(|w| w[0] == "--name" && w[1] == "omh-graph-r"));
     }
 
-    /// A hook talks to the model through `hookSpecificOutput.additionalContext`,
-    /// injected as a system reminder. Bare stdout on exit 0 is not that
-    /// mechanism — the first nudge shipped that way and may never have been seen.
+    /// A hook talks to the model through `hookSpecificOutput`, never bare stdout
+    /// — the first nudge shipped that way and may never have been seen.
+    ///
+    /// **Which** key depends on what the hook meant. An advisory nudge uses
+    /// `additionalContext` and the call proceeds; a refusal uses
+    /// `permissionDecision` and it does not. Asserting `additionalContext` for
+    /// everything was right while every talking hook advised, and would now
+    /// quietly demand that a refusal be downgraded to a notice.
     #[test]
-    fn nudges_speak_through_additional_context() {
+    fn hooks_speak_through_the_documented_channel() {
         for (name, r) in all_rendered() {
             if r.event == "Stop" {
                 continue; // refreshes the index, says nothing to the model
             }
             assert!(
-                r.command.contains("additionalContext"),
+                r.command.contains("hookSpecificOutput"),
                 "{name}: {}",
                 r.command
             );
+            let advises = r.command.contains("additionalContext");
+            let refuses = r.command.contains("permissionDecision");
             assert!(
-                r.command.contains("hookSpecificOutput"),
-                "{name}: {}",
+                advises ^ refuses,
+                "{name} must advise or refuse, and say which: {}",
                 r.command
             );
         }

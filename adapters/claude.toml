@@ -68,5 +68,19 @@ tool-command = ".tool_input.command"
 # `hookSpecificOutput.additionalContext` is the documented channel a hook uses
 # to reach the model. Bare stdout on exit 0 is not, and the first version of the
 # grep nudge wrote there — it may never have been seen.
+#
+# Advisory: the tool call goes ahead. That is the whole difference from `refuse`
+# below, and it is invisible in the text — which is why the *format* carries it.
 [capabilities.hooks.inject]
 template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","additionalContext":$m}}'"""
+
+# Blocking, with a reason the model is shown. A different protocol from the one
+# above rather than a flag on it, per https://code.claude.com/docs/en/hooks read
+# 2026-08-13: `additionalContext` advises, `permissionDecision` decides.
+#
+# `deny` rather than exit 2. Both block, and the docs say exit 2 wins over any
+# JSON — but exit 2 makes the *shell* the protocol, so a hook body that happened
+# to exit 2 for its own reasons would block a call it never meant to. A decision
+# said out loud is a decision omh can render and `omh why` can explain.
+[capabilities.hooks.refuse]
+template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","permissionDecision":"deny","permissionDecisionReason":$m}}'"""

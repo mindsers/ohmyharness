@@ -135,6 +135,15 @@ pub struct Binding {
     /// This harness's protocol for putting text in the agent's context.
     #[serde(default)]
     pub inject: Option<Inject>,
+    /// This harness's protocol for **blocking** a call and saying why.
+    ///
+    /// Separate from `inject` because the two are different protocols wherever
+    /// both exist — Claude Code takes `additionalContext` for one and
+    /// `permissionDecision` for the other — and absent wherever a harness can
+    /// advise but not block. An absent map drops the hook by name, the same
+    /// degradation an unmapped moment or field gets.
+    #[serde(default)]
+    pub refuse: Option<Inject>,
 }
 
 /// The one piece of a harness's hook protocol that is a shape rather than a
@@ -250,7 +259,8 @@ impl Adapter {
         for (cap, binding) in &self.capabilities {
             let declares = !binding.events.is_empty()
                 || !binding.fields.is_empty()
-                || binding.inject.is_some();
+                || binding.inject.is_some()
+                || binding.refuse.is_some();
             match cap {
                 Capability::Hooks if binding.events.is_empty() => anyhow::bail!(
                     "adapter {}: `hooks` declares no `events`, so it can express no \
