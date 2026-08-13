@@ -274,6 +274,31 @@ pub fn container_running(program: &str, name: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Can the session still be entered — not just "is it up"?
+///
+/// Running is not enough to reuse one. The directory `/work` is bound to can be
+/// deleted while the container stays up (`git worktree remove` by hand is the
+/// remaining way; `omh s rm` did it too until it learned to take the container
+/// with it). Recreating that directory gives it a new inode the live mount does
+/// not follow, and every `docker exec` from then on dies with
+///
+///   current working directory is outside of container mount namespace root
+///   -- possible container breakout detected
+///
+/// which no amount of relaunching clears, because a running container is never
+/// replaced. `args` is the backend's own exec line, so the probe enters exactly
+/// where a harness would — the workdir is the part that fails.
+///
+/// Unit tests cannot assert this: the fact being checked belongs to docker, not
+/// to omh. Verified by hand against a container in that state.
+pub fn container_enterable(program: &str, args: &[String]) -> bool {
+    std::process::Command::new(program)
+        .args(args)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Stopped-but-present containers block `run --name`, so clear them first.
 pub fn container_remove(program: &str, name: &str) -> Result<()> {
     let out = std::process::Command::new(program)

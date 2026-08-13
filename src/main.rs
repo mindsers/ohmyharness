@@ -174,7 +174,8 @@ enum McpCmd {
 enum SessionsCmd {
     /// Sessions, their branches, and how far they have drifted.
     Ls,
-    /// Remove a worktree. The branch is always kept.
+    /// Remove a session — its container and its worktree. A branch holding
+    /// commits is kept.
     Rm { session: String },
     /// Stop a sandbox. The worktree and branch survive.
     Down { session: Option<String> },
@@ -514,7 +515,19 @@ fn session_up(
     let backend = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))?;
     let name = paths.container(&session.id);
     if image::container_running(backend.program(), &name) {
-        return Ok((backend, name));
+        // Up is not the same as usable. A container whose worktree was deleted
+        // out from under it keeps running and refuses every exec — see
+        // `container_enterable`. Replacing it is the only way back, and it costs
+        // nothing: the worktree and branch are on the host.
+        let probe = backend.exec_args(&name, &["true".into()], false);
+        if image::container_enterable(backend.program(), &probe) {
+            return Ok((backend, name));
+        }
+        eprintln!(
+            "omh: session {} can no longer reach its worktree — restarting its sandbox",
+            session.id
+        );
+        let _ = image::container_remove(backend.program(), &name);
     }
 
     // Before planning, because the plan mounts the memory server only if a
@@ -2929,6 +2942,14 @@ fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
 
     // Drop the graph with the code it describes, while the container is still
     // around to do it. Otherwise the index outlives the worktree forever.
+    //
+    // Then take the container itself down. A session is the container *and* the
+    // worktree, and removing only the worktree leaves a half that can never be
+    // reached again: the bind mount still points at the deleted directory, the
+    // next launch recreates it at a new inode the mount does not follow, and
+    // `session_up` — seeing a container that is up — execs into it and gets
+    // "current working directory is outside of container mount namespace root"
+    // for every command from then on. Nothing else ever removes it.
     if let Ok(backend) = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)) {
         let name = paths.container(id);
         if image::container_running(backend.program(), &name) {
@@ -2937,6 +2958,9 @@ fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
                 .args(backend.exec_args(&name, &base::drop_graph_command(&project), false))
                 .output();
         }
+        // Best-effort: a container that was never started has nothing to
+        // remove, and that must not stop the worktree from going.
+        let _ = image::container_remove(backend.program(), &name);
     }
 
     // The branch is reported honestly rather than always claimed as kept: one

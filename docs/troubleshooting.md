@@ -124,6 +124,22 @@ as intermittent: the first launch of a session died, the second found the
 leftover and worked. omh places those files itself now, before docker sees the
 plan. On an older version, launching a second time is the workaround.
 
+### `current working directory is outside of container mount namespace root`
+
+Docker's full wording is `OCI runtime exec failed: ... -- possible container
+breakout detected`, which is alarming and misleading: nothing broke out. The
+session container is running with `/work` bound to a worktree directory that no
+longer exists. Recreating the directory does not help — a bind mount follows the
+inode, not the path — so every command into that container fails the same way.
+
+Fixed from both ends. `omh s rm` now takes the container down with the worktree,
+which is what created the mismatch, and a launch that finds a container it
+cannot enter replaces it instead of exec'ing into it, printing
+`session s01 can no longer reach its worktree — restarting its sandbox`. The
+worktree and branch are on the host, so the restart costs nothing.
+
+On an older version, `docker rm -f omh-<repo>-<session>` and relaunch.
+
 ### `omh s rm` says the session "is not a working tree"
 
 Worktree registration and the directory on disk disagreed. omh prunes before
