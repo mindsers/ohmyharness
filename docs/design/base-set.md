@@ -166,6 +166,19 @@ revisits, so `git-unavailable` — rewritten once, after the old pattern was
 found to miss the multi-line scripts agents most often emit — would have gone
 on running broken in every repo initialised before the fix.
 
+**`git-unavailable` blocks; the rest advise.** It is the one entry in the base
+set that refuses a call rather than commenting on it, and the reason is that git
+genuinely cannot work in the sandbox — the worktree's `.git` points at an admin
+directory omh does not mount. As a notice the agent read "git does not work
+here" and then ran `git status` anyway, spending a tool call to reach an error
+omh already knew was coming.
+
+The three graph hooks stay advisory on purpose, and `graph-first` states the
+rule: *a nudge, not a wall — a hook that blocks correct work gets disabled.* The
+distinction became load-bearing when a second harness arrived, because advising
+and blocking are one field apart on Claude Code and two different mechanisms on
+opencode; see [`refuse`](../configuration.md#advising-is-not-blocking).
+
 A manifest **hook** name is omh's, on or off. A file answering to one is an
 error naming both, never an override: with the feature on the generated hook
 would win anyway, and with it off there would be nothing to override the file

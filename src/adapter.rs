@@ -135,6 +135,15 @@ pub struct Binding {
     /// This harness's protocol for putting text in the agent's context.
     #[serde(default)]
     pub inject: Option<Inject>,
+    /// This harness's protocol for **blocking** a call and saying why.
+    ///
+    /// Separate from `inject` because the two are different protocols wherever
+    /// both exist — Claude Code takes `additionalContext` for one and
+    /// `permissionDecision` for the other — and absent wherever a harness can
+    /// advise but not block. An absent map drops the hook by name, the same
+    /// degradation an unmapped moment or field gets.
+    #[serde(default)]
+    pub refuse: Option<Inject>,
 }
 
 /// The one piece of a harness's hook protocol that is a shape rather than a
@@ -161,6 +170,13 @@ pub enum Render {
     OpencodeJson,
     /// Claude Code `settings.json` hook shape.
     ClaudeSettings,
+    /// An opencode plugin: a TypeScript module, not a configuration file.
+    ///
+    /// The one render that emits a **program**. opencode has no declarative
+    /// hook config — nor does any second harness omh looked at — so the phase
+    /// that was scoped as "the three maps exercised elsewhere" turned out to
+    /// need a code generator. The hook *bodies* stay shell; the module is glue.
+    OpencodePlugin,
 }
 
 impl Adapter {
@@ -250,7 +266,8 @@ impl Adapter {
         for (cap, binding) in &self.capabilities {
             let declares = !binding.events.is_empty()
                 || !binding.fields.is_empty()
-                || binding.inject.is_some();
+                || binding.inject.is_some()
+                || binding.refuse.is_some();
             match cap {
                 Capability::Hooks if binding.events.is_empty() => anyhow::bail!(
                     "adapter {}: `hooks` declares no `events`, so it can express no \
@@ -315,11 +332,14 @@ mod tests {
         }
 
         let oc = Adapter::find(Path::new(REAL), "opencode").unwrap();
-        assert!(oc.supports(Capability::Skills).is_some());
-        assert!(
-            oc.supports(Capability::Hooks).is_none(),
-            "opencode declares no hooks capability"
-        );
+        for cap in Capability::ALL {
+            assert!(oc.supports(cap).is_some(), "opencode should support {cap}");
+        }
+        // Hooks were the last absent one, and they are absent no longer:
+        // opencode grew a plugin system, so omh generates a module rather than
+        // a config file. Both shipped adapters express all six capabilities
+        // now, which is the capability floor `decisions.md` asks for reached
+        // rather than merely approached.
         // opencode *does* have subagents — agent markdown files under
         // `~/.config/opencode/agents/`, with `mode: subagent` in the
         // frontmatter. This adapter said otherwise, so omh dropped them at

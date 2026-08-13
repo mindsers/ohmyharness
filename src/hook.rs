@@ -127,8 +127,24 @@ impl std::fmt::Display for Field {
 pub enum Action {
     /// Executes; output ignored.
     Run(String),
+    /// Block the call and tell the model why.
+    ///
+    /// A separate variant from `Inject` because the difference is not in the
+    /// text but in what happens to the tool call, and no renderer can guess it.
+    /// On Claude Code an advisory `additionalContext` never blocks while a
+    /// `permissionDecision: "deny"` does; on opencode the only text channel
+    /// `tool.execute.before` has is a `throw`, which blocks whether you wanted
+    /// it to or not. A format that could not say which it meant would turn
+    /// `graph-first`'s nudge into a wall on the second harness — and a hook that
+    /// blocks correct work gets disabled, which is the nudge's own argument for
+    /// existing.
+    ///
+    /// No `capture`: a refusal is a fixed reason. `capture` exists because
+    /// injected text may not be known until something has been asked, and
+    /// nothing wants a computed refusal yet. Adding one later is additive.
+    Refuse { text: String },
     /// Text into the agent's context, through whatever protocol this harness
-    /// uses to accept one.
+    /// uses to accept one. **Advisory** — it never blocks the call.
     Inject {
         /// A command whose stdout binds to `$OMH_CAPTURE`, for the case `text`
         /// alone cannot express: something not known until it has been asked.
@@ -182,13 +198,16 @@ struct Raw {
     run: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     inject: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    refuse: Option<String>,
 }
 
 impl From<Hook> for Raw {
     fn from(h: Hook) -> Self {
-        let (capture, run, inject) = match h.action {
-            Action::Run(cmd) => (None, Some(cmd), None),
-            Action::Inject { capture, text } => (capture, None, Some(text)),
+        let (capture, run, inject, refuse) = match h.action {
+            Action::Run(cmd) => (None, Some(cmd), None, None),
+            Action::Inject { capture, text } => (capture, None, Some(text), None),
+            Action::Refuse { text } => (None, None, None, Some(text)),
         };
         Self {
             on: h.on,
@@ -197,6 +216,7 @@ impl From<Hook> for Raw {
             capture,
             run,
             inject,
+            refuse,
         }
     }
 }
@@ -218,15 +238,48 @@ impl Hook {
     /// capture without one. What is left is the check on a **value** rather
     /// than a shape, and no type can take that one away.
     fn from_raw(raw: Raw, whence: &str) -> Result<Self> {
-        let action = match (raw.run, raw.inject) {
-            (Some(_), Some(_)) => anyhow::bail!(
-                "{whence}: a hook either `run`s something or `inject`s text, not both. \
-                 A command whose output should reach the agent is `capture` plus `inject`."
-            ),
-            (None, None) => {
-                anyhow::bail!("{whence}: a hook does nothing without `run` or `inject`")
+        let action = match (raw.run, raw.inject, raw.refuse) {
+            (None, None, None) => {
+                anyhow::bail!("{whence}: a hook does nothing without `run`, `inject` or `refuse`")
             }
-            (Some(run), None) => {
+            // Three fields, one of which. Spelled as a catch-all rather than
+            // three pairs, because the message is the same whichever two were
+            // written and enumerating them would only invite a fourth arm.
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+                anyhow::bail!(
+                    "{whence}: a hook does one thing — `run` a command, `inject` advisory \
+                     text, or `refuse` the call. A command whose output should reach the \
+                     agent is `capture` plus `inject`."
+                )
+            }
+            (None, None, Some(text)) => {
+                // A refusal only means something before the call it refuses.
+                // After the tool has run there is nothing left to block, and at
+                // a moment with no call there was never anything — but both
+                // rendered a plausible-looking payload that the harness then
+                // ignored. Checked where the value is minted, the rule
+                // `capture`-needs-`inject` below already follows.
+                if raw.on != Event::BeforeTool {
+                    anyhow::bail!(
+                        "{whence}: `refuse` blocks a call, so it belongs to `before-tool` — \
+                         `{}` is too late or has no call to block. To say something without \
+                         stopping the call, use `inject`.",
+                        raw.on
+                    );
+                }
+                if raw.capture.is_some() {
+                    anyhow::bail!(
+                        "{whence}: `capture` collects output for `inject` to carry. \
+                         A refusal is a fixed reason, so capturing output says nothing."
+                    );
+                }
+                non_empty(&text, "refuse", whence)?;
+                // A refusal reaches a shell exactly as an injection does, so a
+                // stray `$` arrives as a hole in the sentence either way.
+                check_interpolation(&text, whence, false)?;
+                Action::Refuse { text }
+            }
+            (Some(run), None, None) => {
                 if raw.capture.is_some() {
                     anyhow::bail!(
                         "{whence}: `capture` collects output for `inject` to carry. \
@@ -236,7 +289,7 @@ impl Hook {
                 non_empty(&run, "run", whence)?;
                 Action::Run(run)
             }
-            (None, Some(text)) => {
+            (None, Some(text), None) => {
                 non_empty(&text, "inject", whence)?;
                 check_interpolation(&text, whence, raw.capture.is_some())?;
                 if let Some(capture) = &raw.capture {
@@ -284,7 +337,7 @@ impl Hook {
     pub fn does(&self) -> &str {
         match &self.action {
             Action::Run(cmd) => cmd,
-            Action::Inject { text, .. } => text,
+            Action::Inject { text, .. } | Action::Refuse { text } => text,
         }
     }
 
@@ -297,7 +350,7 @@ impl Hook {
     /// `jq` on every search.
     pub fn fields(&self) -> BTreeSet<Field> {
         let (capture, body) = match &self.action {
-            Action::Run(cmd) => (&None, cmd),
+            Action::Run(cmd) | Action::Refuse { text: cmd } => (&None, cmd),
             Action::Inject { capture, text } => (capture, text),
         };
         let bodies = [
@@ -456,8 +509,67 @@ impl std::fmt::Display for Dropped {
     }
 }
 
-/// Translate one hook for one harness. All of it is string generation, done
-/// once, at staging.
+/// What a harness's own vocabulary makes of one hook — or what it could not say.
+///
+/// The lookups are the same three every renderer needs (a moment, the tools, the
+/// payload fields a body mentions) and the drop *reasons* have to be identical
+/// whichever renderer asked, or two harnesses would report the same missing map
+/// two different ways. `render` and the plugin emitter both go through here.
+pub struct Wired<'a> {
+    pub event: &'a str,
+    /// This harness's names for the tools the hook narrows to. Empty means
+    /// every tool, which is the only sensible reading for a moment with none.
+    pub tools: Vec<&'a str>,
+    /// Where this harness keeps each field the hook actually reads.
+    pub fields: Vec<(Field, &'a str)>,
+}
+
+/// Resolve a hook against one harness's vocabulary.
+///
+/// The three lookups every renderer needs, in one place so the drop *reasons*
+/// are identical whichever renderer asked. Two harnesses reporting the same
+/// missing map two different ways is the drift this exists to prevent, and it
+/// is the reason this is a function rather than three inline `get`s.
+pub fn wire<'a>(
+    name: &str,
+    hook: &Hook,
+    binding: &'a Binding,
+    tools: &'a BTreeMap<Tool, String>,
+) -> std::result::Result<Wired<'a>, Dropped> {
+    let drop = |wanted: String| Dropped {
+        name: name.to_string(),
+        wanted,
+    };
+    let event = binding
+        .events
+        .get(&hook.on)
+        .ok_or_else(|| drop(format!("`{}` moment", hook.on)))?;
+    let mut named = Vec::new();
+    for tool in &hook.tools {
+        named.push(
+            tools
+                .get(tool)
+                .map(String::as_str)
+                .ok_or_else(|| drop(format!("`{tool}` tool")))?,
+        );
+    }
+    let mut fields = Vec::new();
+    for field in hook.fields() {
+        let at = binding
+            .fields
+            .get(&field)
+            .map(String::as_str)
+            .ok_or_else(|| drop(format!("`{field}` field")))?;
+        fields.push((field, at));
+    }
+    Ok(Wired {
+        event,
+        tools: named,
+        fields,
+    })
+}
+
+/// Translate one hook into the shape this harness parses.
 pub fn render(
     name: &str,
     hook: &Hook,
@@ -471,17 +583,14 @@ pub fn render(
         }))
     };
 
-    let Some(event) = binding.events.get(&hook.on) else {
-        return dropped(format!("`{}` moment", hook.on));
+    let Wired {
+        event,
+        tools: matchers,
+        fields,
+    } = match wire(name, hook, binding, tools) {
+        Ok(wired) => wired,
+        Err(d) => return Ok(Outcome::Dropped(d)),
     };
-
-    let mut matchers = Vec::new();
-    for tool in &hook.tools {
-        match tools.get(tool) {
-            Some(spelling) => matchers.push(spelling.clone()),
-            None => return dropped(format!("`{tool}` tool")),
-        }
-    }
 
     let mut command = String::new();
 
@@ -489,13 +598,9 @@ pub fn render(
     // bare `jq` would read an empty payload and the field would silently be
     // blank — the shape of bug that satisfies every assertion about a hook's
     // text while the hook does nothing.
-    let fields = hook.fields();
     if !fields.is_empty() {
         command.push_str("p=$(cat); ");
-        for field in &fields {
-            let Some(expr) = binding.fields.get(field) else {
-                return dropped(format!("`{field}` field"));
-            };
+        for (field, expr) in &fields {
             command.push_str(&format!(
                 "{}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); ",
                 field.var()
@@ -517,31 +622,44 @@ pub fn render(
 
     match &hook.action {
         Action::Run(run) => command.push_str(run),
+        // Advisory and blocking are two protocols, so they are two templates and
+        // either may be absent. A harness that can advise but not block drops a
+        // refusal by name rather than downgrading it to a notice the agent is
+        // free to ignore — silently turning a wall into a nudge is the mirror of
+        // the mistake this whole distinction exists to stop.
         Action::Inject { text, .. } => {
             let Some(inject) = &binding.inject else {
                 return dropped("way to inject text".into());
             };
-            command.push_str(
-                &inject
-                    .template
-                    .replace("{{text}}", &interpolating(text))
-                    .replace("{{event}}", event),
-            );
+            command.push_str(&fill(&inject.template, text, event));
+        }
+        Action::Refuse { text } => {
+            let Some(refuse) = &binding.refuse else {
+                return dropped("way to refuse a call".into());
+            };
+            command.push_str(&fill(&refuse.template, text, event));
         }
     }
 
     Ok(Outcome::Rendered(Rendered {
-        event: event.clone(),
+        event: event.to_string(),
         matcher: matchers.join("|"),
         command,
     }))
+}
+
+/// Put a hook's text and this harness's word for the moment into a template.
+fn fill(template: &str, text: &str, event: &str) -> String {
+    template
+        .replace("{{text}}", &interpolating(text))
+        .replace("{{event}}", event)
 }
 
 /// A double-quoted shell word: `$` stays live so a hook can name what it is
 /// talking about, everything that could end the word or start a command does
 /// not. `$$` is the literal dollar, resolved here rather than left for the
 /// shell, which reads `$$` as its own process id.
-fn interpolating(text: &str) -> String {
+pub fn interpolating(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     let mut chars = text.chars().peekable();
@@ -666,6 +784,71 @@ mod tests {
     fn a_hook_that_both_runs_and_injects_is_refused_with_what_it_meant() {
         let err = Hook::parse(r#"{"on":"turn-end","run":"x","inject":"y"}"#, "h.json").unwrap_err();
         assert!(err.to_string().contains("capture"), "got: {err}");
+    }
+
+    /// `inject` advises; `refuse` blocks. A hook has to say which it means,
+    /// and it cannot mean both.
+    ///
+    /// The distinction is not decoration: on Claude Code `before-tool` + inject
+    /// is advisory and never blocks, while the only text channel opencode's
+    /// `tool.execute.before` has is a `throw`, which does. Translating a nudge
+    /// into a wall breaks `graph-first`'s own rule — "a nudge, not a wall: a
+    /// hook that blocks correct work gets disabled" — so the *format* has to
+    /// carry the difference rather than each renderer guessing.
+    #[test]
+    fn a_hook_refuses_or_injects_but_not_both() {
+        for body in [
+            r#"{"on":"before-tool","refuse":"no","inject":"maybe"}"#,
+            r#"{"on":"before-tool","refuse":"no","run":"x"}"#,
+        ] {
+            let err = Hook::parse(body, "h.json").expect_err("a hook does one thing");
+            assert!(err.to_string().contains("h.json"), "name the file: {err}");
+        }
+
+        let refusal = Hook::parse(
+            r#"{"on":"before-tool","tools":["shell"],"refuse":"git does not work here"}"#,
+            "h.json",
+        )
+        .expect("a refusal on its own is a hook");
+        assert_eq!(refusal.does(), "git does not work here");
+    }
+
+    /// A refusal only means something before the call it refuses.
+    ///
+    /// Nothing checked the moment, so `{"on":"turn-end","refuse":"stop"}` parsed
+    /// and rendered on both harnesses — as `permissionDecision: "deny"` under
+    /// `Stop`, a key Claude Code honours only for `PreToolUse`, and as a `throw`
+    /// in a handler with no call in it. Installed, reported, doctor-green, and
+    /// blocking nothing.
+    ///
+    /// Refused where the value is minted, the rule `capture`-needs-`inject`
+    /// already follows: `after-tool` is the interesting one, because the tool
+    /// has already run by then and "block it" has no meaning left.
+    #[test]
+    fn a_refusal_belongs_to_the_moment_before_the_call() {
+        for moment in ["turn-end", "session-start", "after-tool"] {
+            let err = Hook::parse(&format!(r#"{{"on":"{moment}","refuse":"no"}}"#), "h.json")
+                .expect_err("a refusal after the fact refuses nothing");
+            let err = format!("{err:#}");
+            assert!(err.contains("before-tool"), "name the moment: {err}");
+        }
+        // And the one moment where it does mean something still parses.
+        Hook::parse(r#"{"on":"before-tool","refuse":"no"}"#, "h.json").unwrap();
+    }
+
+    /// A refusal reaches a shell exactly as an injection does, so the `$` rule
+    /// is the same one — prose with a stray dollar arrives with a hole in it.
+    #[test]
+    fn a_dollar_in_a_refusal_is_checked_like_one_in_an_inject() {
+        let err = Hook::parse(
+            r#"{"on":"before-tool","refuse":"costs $5 a month"}"#,
+            "h.json",
+        )
+        .expect_err("prose that expands to nothing");
+        assert!(
+            err.to_string().contains("not a variable name"),
+            "got: {err}"
+        );
     }
 
     /// A capture whose output nothing reads is a subprocess per session, for
@@ -993,6 +1176,52 @@ mod tests {
         )
         .unwrap();
         assert!(dropped("graph-read", &h, &b).wanted.contains("tool-file"));
+    }
+
+    /// A harness that can advise but not block drops the refusal by name.
+    ///
+    /// Never downgraded to a notice: a wall quietly becoming a nudge is the
+    /// mirror of the mistake `refuse` exists to stop, and it would be invisible
+    /// — the hook would appear to work while the call it was meant to prevent
+    /// went ahead.
+    #[test]
+    fn a_harness_that_cannot_refuse_drops_the_hook_by_name() {
+        let b = binding(
+            "path = \"/x\"\nrender = \"claude-settings\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
+             [inject]\ntemplate = \"echo {{text}}\"\n",
+        );
+        let h = Hook::parse(r#"{"on":"before-tool","refuse":"no git here"}"#, "h.json").unwrap();
+        let d = dropped("git-unavailable", &h, &b);
+        assert_eq!(d.name, "git-unavailable");
+        assert!(
+            d.wanted.contains("refuse"),
+            "say what it wanted: {}",
+            d.wanted
+        );
+    }
+
+    /// The refusal reaches the model through this harness's own protocol, which
+    /// for Claude Code is a permission decision rather than context.
+    ///
+    /// Verified against code.claude.com/docs/en/hooks (read 2026-08-13):
+    /// `additionalContext` advises, `permissionDecision: "deny"` with a
+    /// `permissionDecisionReason` blocks.
+    #[test]
+    fn a_refusal_reaches_the_model_through_the_harnesss_own_protocol() {
+        let h = Hook::parse(
+            r#"{"on":"before-tool","tools":["shell"],"refuse":"git does not work here"}"#,
+            "h.json",
+        )
+        .unwrap();
+        let cmd = rendered("git-unavailable", &h, hooks_binding()).command;
+        assert!(cmd.contains("permissionDecision"), "got: {cmd}");
+        assert!(cmd.contains("deny"), "got: {cmd}");
+        assert!(
+            !cmd.contains("additionalContext"),
+            "a refusal is not a notice: {cmd}"
+        );
+        assert!(cmd.contains("git does not work here"), "got: {cmd}");
     }
 
     /// A harness with the moment but no way to accept text drops the injectors

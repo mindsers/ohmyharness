@@ -84,13 +84,30 @@ turn-end      = "Stop"
 before-tool   = "PreToolUse"
 after-tool    = "PostToolUse"
 
-[capabilities.hooks.fields]        # where each field lives in this harness's stdin
+[capabilities.hooks.fields]        # where this harness keeps each field
 tool-file    = ".tool_input.file_path"
 tool-command = ".tool_input.command"
 
-[capabilities.hooks.inject]        # how this harness accepts text for the agent
+[capabilities.hooks.inject]        # how it accepts advisory text for the agent
 template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","additionalContext":$m}}'"""
+
+[capabilities.hooks.refuse]        # and how it blocks a call, with a reason
+template = """jq -nc --arg m {{text}} '{"hookSpecificOutput":{"hookEventName":"{{event}}","permissionDecision":"deny","permissionDecisionReason":$m}}'"""
 ```
+
+**`fields` is read in the renderer's own language.** Those values are jq paths
+because Claude Code hands a hook its payload on stdin; opencode's are property
+names, because a plugin receives the tool's arguments as an object. The map
+answers "where does this harness keep the file path", and there is no single
+syntax for which that is true — so each render reads it in the language it
+emits, and an adapter says which by its `render`.
+
+**Advising and blocking are two templates, and either may be absent.** They are
+one field apart on Claude Code and genuinely different mechanisms elsewhere: on
+opencode advisory text has no channel before a tool runs, and the only way to
+speak there is to throw, which blocks. A harness that can do one and not the
+other drops the hooks wanting the other **by name** — never substituting, in
+either direction.
 
 **An absent entry means this harness has no such thing** — the capability map's
 rule, one level down. The hooks wanting it are dropped **by name**, saying what
@@ -125,9 +142,14 @@ anything read it. See [Troubleshooting](../troubleshooting.md#why-it-exists).
 
 ### The bar for shipping one
 
-Both bundled adapters are verified by `doctor` against a real container:
-`claude` passes 7 checks, `opencode` 6 (hooks correctly skipped).
-Any third adapter inherits the same bar.
+Both bundled adapters are verified by `doctor` against a real container,
+hooks included on both — opencode's being a generated plugin rather than a
+config file, so it is checked by `node --check` inside the sandbox rather than
+by existing. Any third adapter inherits the same bar.
+
+Do not read the check *count* as an adapter fact: it varies with the
+capabilities your profile declares and with whether a login has been captured
+for that harness.
 
 `opencode` passing `doctor` is **not** the same as `opencode` being proven — it
 means the paths are right, not that the harness has been driven for real work.

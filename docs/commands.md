@@ -57,7 +57,9 @@ launch rather than silently dropped:
 
 ```console
 $ omh opencode
-omh: opencode on omh/s01 — dropped 7 hooks (unsupported)
+omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool),
+     graph-orient (no `session-start` moment),
+     graph-read (no way to inject text before a tool runs)
 ```
 
 `-a <account>` selects a credential set for this launch. See [Accounts](accounts.md).

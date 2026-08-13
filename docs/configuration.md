@@ -125,10 +125,34 @@ to know which repo it is in, and in `~/.omh/hooks/` if it works anywhere.
 | `when` | a shell predicate; non-zero keeps the hook silent |
 | `capture` | a command whose output binds to `$OMH_CAPTURE` |
 | `run` | executes; output ignored |
-| `inject` | text into the agent's context |
+| `inject` | **advisory** text into the agent's context; the call proceeds |
+| `refuse` | **blocks** the call and tells the model why |
 
-Exactly one of `run` or `inject`. `capture` needs `inject` — collecting output
-nobody reads says nothing. A hook wanting a moment, tool or field this harness
+Exactly one of `run`, `inject` or `refuse`. `capture` needs `inject` —
+collecting output nobody reads says nothing, and a refusal is a fixed reason.
+
+### Advising is not blocking
+
+The difference is invisible in the text and decisive in the translation. On
+Claude Code both travel in the same field and differ by one key —
+`additionalContext` advises, `permissionDecision` denies. On opencode they are
+not the same mechanism at all: the only way to say anything before a tool runs
+is to throw, which blocks, and advisory text has no channel there until the tool
+has produced a result to append to.
+
+So a hook says which it means, and a harness that cannot do the one it asked for
+**drops it by name** rather than substituting the other. A nudge that quietly
+became a wall would look exactly like working — and a wall that quietly became a
+nudge would let through the call it existed to stop.
+
+**`refuse` belongs to `before-tool`.** It blocks a call, and after the tool has
+run there is nothing left to block. Written at any other moment it is refused
+when the file is read, rather than rendering a payload the harness then ignores.
+
+**A moment with no call in it can express less.** `turn-end` and `session-start`
+hand the hook no tool call, so a hook there cannot read a payload field, narrow
+to a tool, or inject text — each is dropped by name saying so. A `run` is the
+thing those moments can do. A hook wanting a moment, tool or field this harness
 has no word for is **dropped by name at launch**, saying what it asked for; the
 rest still ship.
 
@@ -139,9 +163,9 @@ Mention one in any body and omh reads it for you — `${OMH_TOOL_FILE:-none}`
 counts too. Mention neither and your hook pays for nothing, which matters:
 `before-tool` on `read` fires on the most frequent tool there is.
 
-### Three rules about `inject`
+### Three rules about `inject` and `refuse`
 
-It is prose that reaches a shell, and that combination fails quietly, so all
+Both are prose that reaches a shell, and that combination fails quietly, so all
 three are refused when the file is read rather than discovered at runtime:
 
 - **every `$` must name a variable.** A bare one expands to nothing and your

@@ -1,15 +1,15 @@
 # The profile — catalogue, selection, composition
 
-> **Status: built, bar the part that needs somebody else.** P1 through P4 of
+> **Status: built.** P1 through P5 of
 > the [build order](#build-order) have landed — the project's own rules are
 > composed rather than replaced, omh's hooks and rules sections are generated
 > from the base manifest, `[omh]` switches a feature off per repo, there is one
 > catalogue, hooks are authored in omh's own vocabulary and translated per
 > harness at staging, and `[use]` says which catalogue entries a repo takes.
 > [Configuration](../configuration.md) describes the storage model as it now is.
-> P5 is not more machinery: it is the translation exercised by a **second**
-> harness that has hooks at all, which is a fact about the ecosystem rather than
-> a task.
+> P5 has landed too: opencode grew a plugin system, omh generates one, and the
+> translation is exercised end to end — a hook written once in omh's words
+> blocks a git call on a harness that is not Claude Code.
 
 ## The three things wrong with what exists
 
@@ -340,9 +340,12 @@ body mounted for opencode is silent and wrong.
 > *not* cover all seven hooks.
 
 `{ "event": "Stop", "matcher": "Edit|Write", "command": … }` is Claude Code's
-vocabulary wearing a neutral-looking hat. It has survived because opencode
-declares no hooks capability, so nothing has ever had to translate one. Three
-separate things leak, and they get harder in order:
+vocabulary wearing a neutral-looking hat. It survived as long as it did because
+opencode declared no hooks capability, so nothing had ever had to translate one
+— and when something finally did, it turned out to leak in a fourth way this
+list did not anticipate: whether a hook *advises* or *blocks*, which is one
+field on Claude and two mechanisms elsewhere. Three separate things leak here,
+and they get harder in order:
 
 **Event names.** `Stop`, `PreToolUse`, `SessionStart` are Claude's words for
 moments every harness has.
@@ -906,12 +909,45 @@ nothing; the same change after costs a migration and somebody's afternoon. So
 `on` / `run` / `inject` / `tools` ship as the format from the first commit that
 reads that directory, with the three adapter maps behind them.
 
-P5 is not more machinery — the maps are complete when P3 lands. It is the
-admission that **a translation with one harness on the far side is untested**. A
-map from `turn-end` to `Stop` proves nothing while `Stop` is the only word omh
-has ever emitted, and this repo already knows that adapter paths are claims about
-external software no unit test can settle. It is blocked on a second harness that
-has hooks at all, which is a fact about the ecosystem rather than a task.
+P5 was written as *"not more machinery — the maps are complete when P3 lands"*.
+**That was wrong, and finding out is what the phase was for.**
+
+The reasoning held only if a second harness expressed hooks as *configuration*.
+None does. opencode's are TypeScript plugin modules; oh-my-pi's are TS/JS
+modules, with YAML available only through a separately installed package. So
+reaching either meant generating a **program**, and `Render::OpencodePlugin` is
+the first render that emits one. The hook *bodies* stay shell; the module is
+glue.
+
+**And the format leaked Claude's shape in one place.** On Claude Code
+`before-tool` + `inject` is advisory — `additionalContext`, and the call
+proceeds. opencode's `tool.execute.before` can mutate the call or `throw`, and a
+throw blocks; there is no advisory channel until the tool has run and there is a
+result to append to. Three of omh's five hooks were `before-tool` injects, and
+`graph-first` says of itself *"a nudge, not a wall: a hook that blocks correct
+work gets disabled"* — so translating them to a throw would have broken a stated
+rule, silently, in a way that looks exactly like working.
+
+That is why the format gained [`refuse`](../configuration.md#writing-a-hook): a
+hook now says whether it advises or blocks, and each harness spells both in
+data. `git-unavailable` is the base set's one refusal — git genuinely cannot
+work in the sandbox, so advising and letting the call through spent a tool call
+to reach an error omh already knew about.
+
+**The result, measured rather than asserted.** Two of five cross to opencode and
+three are named:
+
+```console
+$ omh opencode
+omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool),
+     graph-orient (no `session-start` moment),
+     graph-read (no way to inject text before a tool runs)
+```
+
+Verified by running it, not by reading documentation — omh's git notice blocks a
+`git status` on opencode and the model relays the reason in its own words. Which
+is the claim the whole translation makes, and the one no unit test could ever
+have settled.
 
 | | | |
 |---|---|---|
@@ -919,7 +955,7 @@ has hooks at all, which is a fact about the ecosystem rather than a task.
 | **P2** | `kind = "rules"` and `feature` in the base set, omh's own hooks **generated** rather than seeded, `remove` moved to the feature level | **landed**, plus `[omh]` read-only, brought forward so `remove` names something that works |
 | **P3** | catalogue move, the canonical hook format and its three maps | **landed**. No migration: omh had no users but its author, so the one repo and the one home directory holding the old layout were moved by hand |
 | **P4** | `[use]`, `omh use` / `unuse`, `omh repo`, `init` writing it expanded, the unselected report | **landed**, plus one rule the plan for it had wrong: a feature is not selectable in *any* capability, not just hooks — `init` seeds omh's servers into your `mcp.json`, where they look exactly like yours |
-| **P5** | the three maps exercised by a **second** harness | the only thing that can prove the translation |
+| **P5** | the three maps exercised by a **second** harness | **landed**, and it disproved its own premise: no second harness takes hooks as config, so omh generates a plugin. The format gained `refuse`, because advisory and blocking are one field on Claude and two different mechanisms elsewhere |
 
 **Generation came before the move**, and an earlier draft had it the other way
 round. Deleting omh's five hooks is only safe once the manifest produces them —
