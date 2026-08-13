@@ -124,6 +124,12 @@ impl Runtime for Docker {
         }
         a.push("-e".into());
         a.push(format!("OMH_PUBKEY={pubkey}"));
+        // What this container is made of, so a later launch can tell whether it
+        // is still the session being asked for. See `Plan::labels`.
+        for (key, value) in plan.labels() {
+            a.push("--label".into());
+            a.push(format!("{key}={value}"));
+        }
         a.extend(["--network".into(), plan.network.clone()]);
         a.extend(["-w".into(), plan.workdir.clone()]);
         a.push(plan.image.clone());
@@ -226,6 +232,12 @@ impl Runtime for Sbx {
         }
         a.push("--env".into());
         a.push(format!("OMH_PUBKEY={pubkey}"));
+        // PROVISIONAL like the rest of this backend, but carried rather than
+        // dropped: a plan's stamp is information, and no backend may lose it.
+        for (key, value) in plan.labels() {
+            a.push("--label".into());
+            a.push(format!("{key}={value}"));
+        }
         a.push("--".into());
         a.push("omh-session".into());
         a
@@ -570,6 +582,25 @@ mod tests {
             );
         }
         assert_eq!(joined.matches(":ro").count(), plan.mounts.len() - 1);
+    }
+
+    /// A container is reusable only while it still matches the plan that built
+    /// it — and the comparison has nothing to read unless the launch writes it
+    /// down. Asserted for every backend: the invariant is about not losing
+    /// information, which is not Docker's alone to keep.
+    #[test]
+    fn the_session_records_what_it_was_built_from() {
+        let plan = sample_plan();
+        for backend in [&Docker as &dyn Runtime, &Sbx as &dyn Runtime] {
+            let args = backend.up_args(&plan, "n", 1, "k");
+            for (key, value) in plan.labels() {
+                assert!(
+                    args.iter().any(|a| *a == format!("{key}={value}")),
+                    "{} does not record {key}",
+                    backend.name()
+                );
+            }
+        }
     }
 
     #[test]

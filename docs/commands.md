@@ -183,11 +183,30 @@ omh s diff [id]       what the agent changed
 omh s commit [-m …]   commit that work onto the session branch
 omh s push [name]     push it to origin under a name a reviewer can read
 omh s down [id]       stop the container, keep the worktree and branch
-omh s rm <id>         remove the session — a branch with commits is kept
+omh s rm <id>         remove the session — its container, its worktree, its staging
 ```
 
 `diff`, `commit` and `push` default to the most recent session; `-s` names
 another. `rm` takes an id, and `down` with none stops every session.
+
+`s ls` also names ids that have a container or a run directory but no worktree —
+sessions removed by a version of omh that only took half of one down. `omh s rm
+<id>` clears them.
+
+### omh's flags come before the harness name
+
+Everything after a harness name is that harness's argv, so `omh claude
+--dry-run` would hand omh's own flag to claude. It is refused rather than
+obeyed by the wrong side:
+
+```console
+$ omh --dry-run claude     # omh's
+$ omh claude --resume x    # claude's
+$ omh claude -- --new      # claude's, even though omh has one too
+```
+
+Long forms only — `-s` and `-a` are left to the harness, which is likelier to
+want them.
 
 ### Getting work out of a session
 

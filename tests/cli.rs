@@ -74,8 +74,10 @@ impl Sandbox {
             &shim,
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n\
-                 if [ \"$1\" = inspect ]; then echo true; fi\nexit 0\n",
-                log.display()
+                 if [ \"$1\" = inspect ]; then echo true; fi\n\
+                 if [ \"$1\" = ps ]; then cat {} 2>/dev/null; fi\nexit 0\n",
+                log.display(),
+                self.bin.join("containers").display()
             ),
         )
         .unwrap();
@@ -1149,6 +1151,8 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
     let log = sb.fake_docker();
     let worktree = sb.home.join(".omh/worktrees/repo/s01");
     std::fs::create_dir_all(&worktree).unwrap();
+    let run = sb.home.join(".omh/run/repo/s01");
+    std::fs::create_dir_all(&run).unwrap();
 
     let out = sb.omh(&["s", "rm", "s01"]);
     assert!(
@@ -1157,6 +1161,10 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(!worktree.exists(), "the worktree must be gone");
+    assert!(
+        !run.exists(),
+        "the session's staging and its last-used marker outlived it"
+    );
 
     let calls = sb.docker_calls(&log);
     assert!(
@@ -1164,5 +1172,41 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
             .iter()
             .any(|c| c.starts_with("rm ") && c.contains("omh-repo-s01")),
         "the container outlived the worktree it mounts: {calls:?}"
+    );
+}
+
+/// The same half-removed state, seen from the other side. Nothing cleaned up
+/// after `s rm` before this, so every removed session left a run directory and
+/// often a container — and neither is visible from any command. The container
+/// is the one that matters: an orphan holding a session id is what produced the
+/// mount-namespace failure in the first place.
+///
+/// `doctor` and `auth` stage into the same tree under their own names and are
+/// not sessions anybody can resume, so the marker `idle::touch` writes is what
+/// separates a session that ran from scratch staging that never was one.
+#[test]
+fn s_ls_names_what_removed_sessions_left_behind() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
+
+    let launched = sb.home.join(".omh/run/repo/s02");
+    std::fs::create_dir_all(&launched).unwrap();
+    std::fs::write(launched.join("last-used"), "").unwrap();
+    std::fs::create_dir_all(sb.home.join(".omh/run/repo/doctor")).unwrap();
+
+    let out = sb.omh(&["s", "ls"]);
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        printed.contains("s02"),
+        "a run directory left behind: {printed}"
+    );
+    assert!(
+        printed.contains("s03"),
+        "a container left behind: {printed}"
+    );
+    assert!(
+        !printed.contains("doctor"),
+        "scratch staging is not a removed session: {printed}"
     );
 }

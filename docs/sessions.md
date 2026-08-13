@@ -21,8 +21,27 @@ branch**, which many harnesses take turns inhabiting.
 ```
 
 Making the session the unit of work — rather than the launch — is what keeps the
-index warm and makes switching harness instant. `omh claude`, then `omh opencode`
-against the same session, and everything the graph learned is still there.
+index warm. `omh claude`, then `omh opencode` against the same session, and
+everything the graph learned is still there: the graph lives in a volume keyed by
+repo, and the worktree and branch are on the host, so neither belongs to the
+container.
+
+**Switching harness is not free, though.** An image is built per harness, so a
+session started by `omh claude` is running the claude image and does not contain
+`opencode` at all. Asking for the other one restarts the sandbox:
+
+```console
+$ omh opencode
+omh: restarting the sandbox for omh/s01 — image (omh/claude:b4ed… → omh/opencode:1e1a…), mounts (6 added, 9 removed)
+```
+
+A few seconds, and nothing is lost. It used to be instant and wrong — omh execed
+`opencode` into the claude image, which does not have it, and the harness's whole
+staged profile stayed unmounted. See
+[what a container is compared against](#what-a-container-is-compared-against).
+
+A session with a harness still running in it is **not** restarted; see the same
+section.
 
 ## What the agent can reach
 
@@ -76,6 +95,42 @@ deletes a branch.
 Nested inside the repo, your IDE would index every session's full copy of the
 codebase — three sessions, four indexes, and a machine that sounds like it is
 about to take off.
+
+## What a container is compared against
+
+A launch plan is a pure description — image, mounts, network, environment — and a
+session container is one plan materialized. Everything in that list is fixed the
+moment the container starts: no later `exec` adds a mount or changes an image.
+
+So omh stamps the plan onto the container as labels at launch, and compares
+before reusing one. If they disagree the container is replaced, naming what
+moved. Two real failures came from never asking:
+
+- `omh opencode` on a session started by `omh claude` execed a binary that image
+  does not contain.
+- `--account work` on a session started as `personal` went on quietly using
+  `personal` — the exact thing `omh auth` refuses to guess about elsewhere.
+
+The harness's own arguments are deliberately **not** part of the comparison.
+`claude --resume x` is the same session as `claude`, and a stamp that moved would
+rebuild the sandbox on every flag.
+
+### It will not restart over running work
+
+Replacing a container kills whatever is inside it, so a session with a live
+harness is reported instead:
+
+```console
+$ omh claude
+Error: session s01 is running opencode and cannot be reused for this launch (image (…))
+  stop it with        omh s down s01
+  or start a fresh one  omh --new claude
+```
+
+Liveness is read from the `dtach` sockets, which exist only while their harness
+does. Not from the process table: PID 1 in the sandbox is `sleep infinity`, which
+reaps nothing, so an exited `dtach` lingers as a zombie and `pgrep` would answer
+"still running" for the life of the session.
 
 ## Persistence
 

@@ -291,12 +291,43 @@ pub fn container_running(program: &str, name: &str) -> bool {
 ///
 /// Unit tests cannot assert this: the fact being checked belongs to docker, not
 /// to omh. Verified by hand against a container in that state.
-pub fn container_enterable(program: &str, args: &[String]) -> bool {
+///
+/// Returns the command's stdout, so one exec answers both questions the
+/// launcher has — whether the container can be entered, and what is running
+/// inside it. They are wanted together and they are the same probe.
+pub fn container_probe(program: &str, args: &[String]) -> Option<String> {
     std::process::Command::new(program)
         .args(args)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// omh's own records from the label map docker reports.
+///
+/// Separated from everybody else's because a base image sets labels too, and a
+/// whole-map comparison would call `maintainer` drift. Anything unreadable —
+/// including the bare `null` docker prints for a container with no labels at
+/// all, which is every session started before omh stamped them — comes back
+/// empty, and the caller reads empty as "cannot be verified".
+pub fn omh_labels(json: &str) -> std::collections::BTreeMap<String, String> {
+    serde_json::from_str::<std::collections::BTreeMap<String, String>>(json)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|(k, _)| k.starts_with("omh."))
+        .collect()
+}
+
+/// What the running container says it was built from.
+pub fn container_stamp(program: &str, name: &str) -> std::collections::BTreeMap<String, String> {
+    std::process::Command::new(program)
+        .args(["inspect", "-f", "{{json .Config.Labels}}", name])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| omh_labels(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
 }
 
 /// Stopped-but-present containers block `run --name`, so clear them first.
@@ -672,5 +703,43 @@ mod tests {
             args.windows(2).any(|w| w[0] == "-f" && w[1] == "-"),
             "Dockerfile must come from stdin so nothing is written to disk: {args:?}"
         );
+    }
+
+    // ── what a container says it was built from ─────────────────────────────
+
+    /// Docker's own labels sit in the same map as omh's. Comparing the whole
+    /// map would report drift for `maintainer` or anything a base image sets.
+    #[test]
+    fn only_omhs_own_records_are_read_back() {
+        let got = omh_labels(r#"{"omh.image":"omh/claude:ab","maintainer":"nodejs"}"#);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got.get("omh.image").unwrap(), "omh/claude:ab");
+    }
+
+    /// Docker prints the bare word `null` for a container carrying no labels at
+    /// all — which is every session started before omh stamped them. Treating
+    /// that as a parse error would be indistinguishable from a broken daemon.
+    #[test]
+    fn a_container_with_no_labels_reads_as_none_rather_than_an_error() {
+        assert!(omh_labels("null").is_empty());
+        assert!(omh_labels("{}").is_empty());
+    }
+
+    /// An answer omh cannot parse is an answer it cannot verify, and the caller
+    /// treats "nothing recorded" as drift — which restarts the container. That
+    /// is the safe direction: the alternative is trusting a container on the
+    /// strength of output nobody understood.
+    #[test]
+    fn an_unreadable_answer_is_not_mistaken_for_a_match() {
+        assert!(omh_labels("").is_empty());
+        assert!(omh_labels("<html>error</html>").is_empty());
+    }
+
+    /// Values carry newlines — the mount list is one per line — and they have
+    /// to survive the round trip or every launch reads as drift.
+    #[test]
+    fn a_multi_line_value_survives_the_round_trip() {
+        let got = omh_labels(r#"{"omh.mounts":"ro /a -> /b\nrw /c -> /d"}"#);
+        assert_eq!(got.get("omh.mounts").unwrap().lines().count(), 2);
     }
 }

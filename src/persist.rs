@@ -54,8 +54,13 @@ impl std::fmt::Display for Mode {
 /// with the workspace, and a pure function of its inputs so a second
 /// `omh <harness>` reattaches instead of starting a second agent.
 pub fn socket(session: &str, harness: &str) -> PathBuf {
-    PathBuf::from(format!("/omh/sock/{session}-{harness}"))
+    PathBuf::from(format!("{SOCKET_DIR}/{session}-{harness}"))
 }
+
+/// Where the sockets live inside the sandbox. Named once, because the launcher
+/// also reads this directory to find out what is still running before it
+/// replaces a container.
+pub const SOCKET_DIR: &str = "/omh/sock";
 
 /// Wrap the harness invocation so it survives losing the terminal.
 pub fn wrap(mode: Mode, session: &str, harness: &str, argv: Vec<String>) -> Vec<String> {
@@ -71,6 +76,29 @@ pub fn wrap(mode: Mode, session: &str, harness: &str, argv: Vec<String>) -> Vec<
             out
         }
     }
+}
+
+/// Which harnesses are still live in a session, read from a listing of the
+/// socket directory inside the container.
+///
+/// A socket exists only while its `dtach` master does — verified by hand: dtach
+/// removes it when the wrapped program exits. `pgrep` looks like the more direct
+/// check and is not. The container's PID 1 is `sleep infinity`, which reaps
+/// nothing, so an exited dtach lingers as a zombie and `pgrep -a dtach` goes on
+/// matching `[dtach] <defunct>` for the life of the session — a liveness check
+/// that can never say no.
+pub fn live(session: &str, listing: &str) -> Vec<String> {
+    let prefix = format!("{session}-");
+    let mut out: Vec<String> = listing
+        .lines()
+        .map(str::trim)
+        .filter_map(|name| name.strip_prefix(&prefix))
+        .filter(|harness| !harness.is_empty())
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 #[cfg(test)]
@@ -146,5 +174,34 @@ mod tests {
         let err = Mode::from_str("tmux").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("dtach") && msg.contains("none"), "got: {msg}");
+    }
+
+    /// Restarting a session kills whatever is running in it, so the check that
+    /// decides whether to restart has to be able to say "something is".
+    #[test]
+    fn a_live_socket_names_the_harness_holding_the_session() {
+        assert_eq!(live("s01", "s01-claude\n"), vec!["claude"]);
+    }
+
+    #[test]
+    fn an_empty_socket_directory_means_nothing_is_running() {
+        assert!(live("s01", "").is_empty());
+        assert!(live("s01", "\n  \n").is_empty());
+    }
+
+    /// The directory is per-container and therefore per-session already, but
+    /// the prefix is what the name means — matching on it rather than taking
+    /// every entry keeps this the exact inverse of `socket`.
+    #[test]
+    fn another_sessions_socket_is_not_this_sessions_business() {
+        assert!(live("s01", "s02-claude\n").is_empty());
+        assert_eq!(live("s01", "s02-claude\ns01-opencode\n"), vec!["opencode"]);
+    }
+
+    /// `s1` is a prefix of `s10`, and a check that answered "s10 is busy"
+    /// because `s1` is running would refuse a restart nobody needs to refuse.
+    #[test]
+    fn a_session_id_that_prefixes_another_is_not_confused_with_it() {
+        assert!(live("s1", "s10-claude\n").is_empty());
     }
 }

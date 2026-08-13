@@ -53,7 +53,11 @@ struct Cli {
     session: Option<String>,
 
     /// Start a fresh session instead of resuming the most recent one.
-    #[arg(long, global = true)]
+    ///
+    /// Refused alongside `--session`, which names one: `session::pick` returns
+    /// the explicit id and never looks at `new`, so the two together used to
+    /// resolve by quietly dropping one of them.
+    #[arg(long, global = true, conflicts_with = "session")]
     new: bool,
 
     /// Which captured account to log in as.
@@ -62,6 +66,55 @@ struct Cli {
 
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+/// omh's own long flags, taken from the parser rather than written out.
+///
+/// A list would rot: the next global flag added would fall outside the guard
+/// below without anyone noticing, which is exactly how the guarded mistake
+/// happens in the first place.
+fn omh_globals() -> Vec<String> {
+    use clap::CommandFactory;
+    Cli::command()
+        .get_arguments()
+        .filter(|a| a.is_global_set())
+        .filter_map(|a| a.get_long().map(|long| format!("--{long}")))
+        .collect()
+}
+
+/// The harness's arguments, refusing any of omh's own flags among them.
+///
+/// `omh <harness> …` takes everything after the name as the harness's argv, so
+/// `omh opencode --dry-run` handed omh's flag to opencode and launched for
+/// real. Silent, and worst for exactly the flag whose meaning is "change
+/// nothing" — so this refuses rather than warns, and says the form that works.
+///
+/// Long forms only. `-s` is omh's session flag and is also a flag plenty of
+/// harnesses have; refusing shorts would break launches that work today to
+/// guard a mistake nobody has made. `--` ends the inspection and is consumed,
+/// for the day a harness really does have `--new`.
+fn passthrough(argv: &[String], globals: &[String]) -> Result<Vec<String>> {
+    let mut out = vec![argv[0].clone()];
+    let mut rest = argv[1..].iter();
+    for arg in rest.by_ref() {
+        if arg == "--" {
+            break;
+        }
+        if globals.iter().any(|g| g == arg) {
+            anyhow::bail!(
+                "`{arg}` is omh's flag, not {}'s, and everything after a harness \
+                 name belongs to the harness\n  \
+                 try  omh {arg} {}\n  \
+                 or   omh {} -- {arg}   to pass it on regardless",
+                argv[0],
+                argv[0],
+                argv[0]
+            );
+        }
+        out.push(arg.clone());
+    }
+    out.extend(rest.cloned());
+    Ok(out)
 }
 
 /// Built-ins and their aliases always beat a harness name — otherwise an
@@ -464,7 +517,10 @@ fn main() -> Result<()> {
             ),
         },
 
-        Cmd::Run(argv) => run(&cwd, argv, &cli),
+        // Before `run` looks anything up: which flags are whose is a question
+        // about the command line, and answering it after resolving an adapter
+        // would report an unknown harness for a mistyped flag.
+        Cmd::Run(argv) => run(&cwd, &passthrough(argv, &omh_globals())?, &cli),
     }
 }
 
@@ -502,6 +558,42 @@ fn unknown_tool(paths: &Paths, name: &str, original: anyhow::Error) -> anyhow::E
     anyhow::anyhow!("{}", tool_hint(name, &harnesses, &editors))
 }
 
+/// The docker half of `container::reuse`: gather the three facts it decides on.
+///
+/// One exec, not two. Whether the container can be entered and what is running
+/// inside it are the same question asked of the same command — and a container
+/// that refuses the exec cannot answer the second, which is why an unreadable
+/// probe short-circuits to "replace it" rather than to "nothing is running".
+fn reuse_decision(
+    backend: &dyn runtime::Runtime,
+    name: &str,
+    plan: &container::Plan,
+    session: &Session,
+) -> container::Reuse {
+    // `|| true` so an absent socket directory is an empty listing rather than a
+    // failed exec — the failure this reads is the mount namespace one, and
+    // conflating the two would replace every container that has never run a
+    // harness.
+    let probe = backend.exec_args(
+        name,
+        &[
+            "sh".into(),
+            "-c".into(),
+            format!("ls -1 {} 2>/dev/null || true", persist::SOCKET_DIR),
+        ],
+        false,
+    );
+    let Some(listing) = image::container_probe(backend.program(), &probe) else {
+        return container::reuse(false, &Default::default(), plan, &[]);
+    };
+    container::reuse(
+        true,
+        &image::container_stamp(backend.program(), name),
+        plan,
+        &persist::live(&session.id, &listing),
+    )
+}
+
 /// Bring a session's sandbox up if it is not already. A session is a *running
 /// container*, not a launch — that is what lets an editor attach to the same
 /// place the agent is working.
@@ -514,21 +606,7 @@ fn session_up(
 ) -> Result<(Box<dyn runtime::Runtime>, String)> {
     let backend = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))?;
     let name = paths.container(&session.id);
-    if image::container_running(backend.program(), &name) {
-        // Up is not the same as usable. A container whose worktree was deleted
-        // out from under it keeps running and refuses every exec — see
-        // `container_enterable`. Replacing it is the only way back, and it costs
-        // nothing: the worktree and branch are on the host.
-        let probe = backend.exec_args(&name, &["true".into()], false);
-        if image::container_enterable(backend.program(), &probe) {
-            return Ok((backend, name));
-        }
-        eprintln!(
-            "omh: session {} can no longer reach its worktree — restarting its sandbox",
-            session.id
-        );
-        let _ = image::container_remove(backend.program(), &name);
-    }
+    let running = image::container_running(backend.program(), &name);
 
     // Before planning, because the plan mounts the memory server only if a
     // binary exists. Degraded rather than fatal: a session without memory is
@@ -561,6 +639,34 @@ fn session_up(
     say_selection(profile, &opts.repo);
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate(&backend.caps())?;
+
+    // The plan is built before this rather than after, because the plan *is*
+    // the question: a running container is only this session if it was made
+    // from the same one. Cheap — `ensure` above is a path check once the binary
+    // is cached, and the staging the plan performs happens every launch anyway.
+    if running {
+        match reuse_decision(backend.as_ref(), &name, &plan, session) {
+            container::Reuse::Attach => return Ok((backend, name)),
+            container::Reuse::Blocked { live, changed } => anyhow::bail!(
+                "session {id} is running {} and cannot be reused for this launch \
+                 ({})\n  stop it with        omh s down {id}\n  \
+                 or start a fresh one  omh --new {}",
+                live.join(", "),
+                changed.join(", "),
+                adapter.name,
+                id = session.id,
+            ),
+            container::Reuse::Restart(why) => {
+                eprintln!(
+                    "omh: restarting the sandbox for {} — {}",
+                    session.label(),
+                    why.join(", ")
+                );
+                let _ = image::container_remove(backend.program(), &name);
+            }
+        }
+    }
+
     say_rules(&plan);
     image::ensure(backend.program(), adapter)?;
     image::ensure_network(backend.program(), &plan.network)?;
@@ -1010,7 +1116,63 @@ fn sessions_ls(cwd: &std::path::Path) -> Result<()> {
             work_state(&sess, &paths.repo, &base),
         );
     }
+
+    let left = leftovers(&paths, backend.as_deref());
+    if !left.is_empty() {
+        println!(
+            "\n{} removed but left something behind: {}",
+            if left.len() == 1 {
+                "1 session was"
+            } else {
+                "sessions were"
+            },
+            left.join(", ")
+        );
+        println!("  clear each with  omh s rm <id>");
+    }
     Ok(())
+}
+
+/// Session ids with a container or a run directory but no worktree.
+///
+/// Invisible until now, and not merely untidy: an orphan container holds a
+/// session id, and the next session to take that id used to exec straight into
+/// it. That was the mount-namespace failure. `s rm` cleans up after itself now,
+/// so this reports what older versions left — and anything a hand
+/// `git worktree remove` strands from here on.
+///
+/// A run directory counts only when it carries the marker `idle::touch` writes.
+/// `omh doctor` and `omh auth` stage into the same tree under their own names,
+/// and neither is a session anybody could resume or would want reported.
+fn leftovers(paths: &Paths, backend: Option<&dyn runtime::Runtime>) -> Vec<String> {
+    let live = session::list(&paths.worktrees());
+    let mut found: Vec<String> = std::fs::read_dir(paths.runs())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|id| idle::last_used(&paths.runs(), id).is_some())
+        .collect();
+
+    if let Some(backend) = backend {
+        let prefix = paths.container("");
+        if let Ok(out) = Command::new(backend.program())
+            .args(["ps", "-a", "--format", "{{.Names}}"])
+            .output()
+        {
+            found.extend(
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .filter_map(|n| n.trim().strip_prefix(&prefix))
+                    .map(str::to_string),
+            );
+        }
+    }
+
+    found.retain(|id| !live.contains(id));
+    found.sort();
+    found.dedup();
+    found
 }
 
 /// Where a session is in the cycle, phrased as the next thing to do about it.
@@ -2243,9 +2405,15 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         return Ok(());
     }
 
-    // The session is a running container many harnesses take turns inhabiting.
-    // Exec into it rather than starting a throwaway, so switching harness is
-    // instant, MCP daemons stay warm, and `omh code` has something to attach to.
+    // The session is a running container. Exec into it rather than starting a
+    // throwaway, so MCP daemons stay warm and `omh code` has something to
+    // attach to.
+    //
+    // "Many harnesses take turns inhabiting it" is what this comment used to
+    // claim, and it was not true: an image is built per harness, so the second
+    // harness execed a binary the image does not contain. `session_up` restarts
+    // on that mismatch now — a few seconds, not instant. Making it instant again
+    // means one image carrying every installed harness.
     let (backend, name) = session_up(
         &paths,
         &profile,
@@ -2963,6 +3131,12 @@ fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
         let _ = image::container_remove(backend.program(), &name);
     }
 
+    // The third thing a session owns. Staging is re-rendered on every launch so
+    // leaving it costs nothing that breaks — but the `last-used` marker beside
+    // it is what says a session ran here, and a marker with no session behind it
+    // is how `s ls` learns to report a leftover that is not there any more.
+    let _ = std::fs::remove_dir_all(paths.runs().join(id));
+
     // The branch is reported honestly rather than always claimed as kept: one
     // that never received a commit preserves nothing, and saying otherwise
     // trains people to ignore a namespace filling with dead refs.
@@ -3308,6 +3482,82 @@ mod tests {
             for alias in sub.get_visible_aliases() {
                 assert_eq!(alias.chars().count(), 1, "`{alias}` is not a shortcut");
             }
+        }
+    }
+
+    // ── omh's flags versus the harness's ────────────────────────────────────
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `omh opencode --dry-run` launched for real. Everything after the harness
+    /// name is the harness's argv, so omh's own flag went to opencode and omh
+    /// never saw it. Found by hand while investigating something else — and a
+    /// flag whose entire meaning is "change nothing" is the worst one to
+    /// swallow quietly.
+    #[test]
+    fn omhs_own_flag_after_the_harness_name_is_refused() {
+        let err = passthrough(&argv(&["opencode", "--dry-run"]), &omh_globals()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--dry-run"), "name the flag: {msg}");
+        assert!(
+            msg.contains("omh --dry-run opencode"),
+            "and show the form that works: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_flag_the_harness_owns_passes_through_untouched() {
+        let given = argv(&["claude", "--resume", "x"]);
+        assert_eq!(passthrough(&given, &omh_globals()).unwrap(), given);
+    }
+
+    /// Short flags are deliberately left alone. `-s` is omh's session flag and
+    /// is also a flag plenty of harnesses have; refusing it would break
+    /// launches that work today to guard a mistake nobody has made. The long
+    /// forms are the ones worth protecting — they are unlikely to collide and
+    /// they are what people actually type.
+    #[test]
+    fn short_flags_belong_to_the_harness() {
+        let given = argv(&["claude", "-s", "something"]);
+        assert_eq!(passthrough(&given, &omh_globals()).unwrap(), given);
+    }
+
+    /// The escape hatch, for the day a harness really does have `--new`.
+    /// Consumed on the way through, the way every tool that offers `--` does.
+    #[test]
+    fn a_double_dash_hands_the_rest_to_the_harness() {
+        let out = passthrough(&argv(&["claude", "--", "--dry-run"]), &omh_globals()).unwrap();
+        assert_eq!(out, argv(&["claude", "--dry-run"]));
+    }
+
+    /// The harness's own name is never a flag, and a session id that happens to
+    /// look like one is not omh's business either.
+    #[test]
+    fn only_the_arguments_are_inspected_not_the_harness_name() {
+        let given = argv(&["--dry-run"]);
+        assert_eq!(passthrough(&given, &omh_globals()).unwrap(), given);
+    }
+
+    /// Derived from the parser rather than typed out, so a global added later
+    /// inherits the guard instead of quietly falling outside it — the same
+    /// reason `RESERVED` is checked against the subcommand list.
+    #[test]
+    fn every_global_flag_is_covered_without_anyone_listing_them() {
+        let globals = omh_globals();
+        let declared: Vec<String> = Cli::command()
+            .get_arguments()
+            .filter(|a| a.is_global_set())
+            .filter_map(|a| a.get_long().map(|l| format!("--{l}")))
+            .collect();
+        assert!(!declared.is_empty(), "the parser must have globals at all");
+        for flag in declared {
+            assert!(globals.contains(&flag), "{flag} is not guarded");
+            assert!(
+                passthrough(&argv(&["claude", &flag]), &globals).is_err(),
+                "{flag} reaches the harness"
+            );
         }
     }
 }
