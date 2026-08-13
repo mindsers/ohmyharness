@@ -35,6 +35,100 @@ pub struct Plan {
     pub tty: bool,
 }
 
+/// What to do with the container already sitting under a session id.
+#[derive(Debug)]
+pub enum Reuse {
+    /// It is the session being asked for. Exec into it.
+    Attach,
+    /// It is not, and replacing it loses nothing. The reasons are for the user.
+    Restart(Vec<String>),
+    /// It is not, but something is running inside that a restart would kill.
+    Blocked {
+        /// Harnesses still live in the session.
+        live: Vec<String>,
+        /// Why it needed replacing in the first place.
+        changed: Vec<String>,
+    },
+}
+
+/// Whether the container under a session id is the session being asked for.
+///
+/// Both failures this answers were live bugs, and they are one question: a
+/// container is a plan materialized, and omh used to hand one back knowing only
+/// that it was *running*. It execed into containers whose worktree had been
+/// deleted, and into containers built for a different harness entirely.
+///
+/// Restarting is the remedy for both, because there is no lesser one — no
+/// `exec` adds a mount or changes an image — and it is nearly free: the worktree
+/// and branch live on the host and the graph in a volume. Nearly, not entirely.
+/// It also kills whatever is running inside, so a session with a live harness is
+/// reported rather than replaced. That is the same refusal-to-guess `idle`
+/// makes: the cost of being wrong is an agent stopped mid-task.
+pub fn reuse(
+    enterable: bool,
+    stamp: &std::collections::BTreeMap<String, String>,
+    plan: &Plan,
+    live: &[String],
+) -> Reuse {
+    // Nothing to compare and nothing to save: a container that refuses every
+    // exec cannot be holding usable work, and cannot be asked what it holds.
+    if !enterable {
+        return Reuse::Restart(vec!["it can no longer reach its worktree".into()]);
+    }
+    let changed = drift(&plan.labels(), stamp);
+    if changed.is_empty() {
+        return Reuse::Attach;
+    }
+    if !live.is_empty() {
+        return Reuse::Blocked {
+            live: live.to_vec(),
+            changed,
+        };
+    }
+    Reuse::Restart(changed)
+}
+
+/// What a running container no longer matches about the plan being asked for,
+/// phrased for someone to act on rather than as a digest comparison.
+///
+/// Empty means it can be reused as-is. Anything else and it has to be replaced:
+/// no `exec` adds a mount or changes an image, so there is no lesser remedy.
+pub fn drift(
+    expected: &[(String, String)],
+    actual: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
+    // A container omh started before it stamped anything. Reporting five
+    // separate missing facts would bury the one thing worth saying.
+    if actual.is_empty() {
+        return vec!["it predates this check, so nothing about it can be verified".into()];
+    }
+    let mut out = Vec::new();
+    for (key, want) in expected {
+        let name = key.strip_prefix("omh.").unwrap_or(key);
+        let Some(have) = actual.get(key) else {
+            out.push(format!("{name} (not recorded)"));
+            continue;
+        };
+        if have == want {
+            continue;
+        }
+        // A list is reported as a count of what moved; printing fourteen mount
+        // lines twice is not a message anybody reads.
+        out.push(if want.contains('\n') || have.contains('\n') {
+            let want_lines: std::collections::BTreeSet<&str> = want.lines().collect();
+            let have_lines: std::collections::BTreeSet<&str> = have.lines().collect();
+            format!(
+                "{name} ({} added, {} removed)",
+                want_lines.difference(&have_lines).count(),
+                have_lines.difference(&want_lines).count()
+            )
+        } else {
+            format!("{name} ({have} → {want})")
+        });
+    }
+    out
+}
+
 #[derive(Debug)]
 pub struct Mount {
     pub host: PathBuf,
@@ -586,6 +680,62 @@ impl Plan {
             "the selected runtime cannot honour this plan:\n  {}",
             problems.join("\n  ")
         )
+    }
+
+    /// What this container is made of, stamped onto it at launch.
+    ///
+    /// A `Plan` is a pure description; a container is one plan materialized.
+    /// Everything here is fixed the moment `docker run` returns — no later
+    /// `exec` can change the image, the mount set, the network or the
+    /// environment. So a running container is the session you asked for only if
+    /// these still match, and until this existed nothing asked: `omh opencode`
+    /// against a session started by `omh claude` execed a binary that image does
+    /// not contain, and `--account work` on one started as `personal` went on
+    /// quietly using `personal`.
+    ///
+    /// `argv` and `tty` are deliberately absent. They belong to the *launch*,
+    /// not to the container, and stamping them would rebuild the sandbox every
+    /// time you passed a different flag to the harness.
+    ///
+    /// Values are verbatim rather than hashed, for two reasons. A digest can
+    /// only say *that* something changed, and the line a user acts on has to say
+    /// *what*. And the obvious hasher is the one `image::base_tag` uses —
+    /// `DefaultHasher`, whose output std explicitly does not guarantee across
+    /// releases. Fine for a tag, which is rebuilt anyway; here it would restart
+    /// every running session on the day somebody upgrades Rust.
+    pub fn labels(&self) -> Vec<(String, String)> {
+        let mut mounts: Vec<String> = self
+            .mounts
+            .iter()
+            .map(|m| {
+                // Deliberately *not* docker's own `host:guest:ro` spelling. The
+                // stamp travels on the same command line as the `-v` flags, and
+                // a value that parses as a mount is one a reader — or a test
+                // counting `:ro` — will mistake for one.
+                format!(
+                    "{} {} -> {}",
+                    if m.read_only { "ro" } else { "rw" },
+                    m.host.display(),
+                    m.guest.display()
+                )
+            })
+            .collect();
+        mounts.sort();
+        let mut env: Vec<String> = self.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        env.sort();
+        // Sorted, because docker reports neither back in the order it was
+        // given, and a stamp whose value depends on iteration order reads as
+        // drift on the very next launch.
+        //
+        // Newline-separated: a mount is a pair of paths, and every other
+        // plausible separator is a character a path may legally contain.
+        vec![
+            ("omh.image".into(), self.image.clone()),
+            ("omh.network".into(), self.network.clone()),
+            ("omh.workdir".into(), self.workdir.clone()),
+            ("omh.mounts".into(), mounts.join("\n")),
+            ("omh.env".into(), env.join("\n")),
+        ]
     }
 
     /// One line, once, naming what this harness cannot do.
@@ -2274,5 +2424,220 @@ mod tests {
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);
+    }
+
+    // ── what a container was made of ────────────────────────────────────────
+
+    fn plan_argv(fx: &Fx, harness: &str, argv: &[String]) -> Plan {
+        let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
+        let (own, repo) = decided_from(fx);
+        plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            argv,
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+            },
+        )
+        .unwrap()
+    }
+
+    fn plan_account(fx: &Fx, harness: &str, account_dir: Option<PathBuf>) -> Plan {
+        let adapter = Adapter::find(Path::new(ADAPTERS), harness).unwrap();
+        let (own, repo) = decided_from(fx);
+        plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+            },
+        )
+        .unwrap()
+    }
+
+    fn stamped(labels: &[(String, String)], key: &str) -> String {
+        labels
+            .iter()
+            .find(|(k, _)| k == key)
+            .unwrap_or_else(|| panic!("no {key} in {labels:?}"))
+            .1
+            .clone()
+    }
+
+    fn as_running(labels: &[(String, String)]) -> std::collections::BTreeMap<String, String> {
+        labels.iter().cloned().collect()
+    }
+
+    /// The bug this exists for: a container is a materialization of *one* plan,
+    /// and `session_up` handed a running one back without ever asking which
+    /// plan that was. `omh opencode` against a session started by `omh claude`
+    /// execed a binary the image does not contain — verified live — and
+    /// `--account work` on a session started as `personal` silently went on
+    /// using `personal`.
+    #[test]
+    fn the_stamp_distinguishes_the_harness_a_session_was_built_for() {
+        let fx = fixture();
+        let claude = plan_for(&fx, "claude").labels();
+        let opencode = plan_for(&fx, "opencode").labels();
+        assert_ne!(
+            stamped(&claude, "omh.image"),
+            stamped(&opencode, "omh.image"),
+            "the image is per-harness, so the stamp must be too"
+        );
+    }
+
+    /// The other half, and the reason `argv` is left out: relaunching the same
+    /// harness with different arguments is the ordinary case. A stamp that moved
+    /// would restart the container on every `claude --resume`.
+    #[test]
+    fn the_stamp_ignores_the_harness_command_line() {
+        let fx = fixture();
+        let plain = plan_argv(&fx, "claude", &[]);
+        let resumed = plan_argv(&fx, "claude", &["--resume".into(), "x".into()]);
+        assert_ne!(plain.argv, resumed.argv, "the fixture must differ at all");
+        assert_eq!(plain.labels(), resumed.labels());
+    }
+
+    /// `run` already states the rule this enforces: "silently using the wrong
+    /// account is expensive and invisible".
+    #[test]
+    fn switching_account_moves_the_stamp() {
+        let fx = fixture();
+        let personal = plan_account(&fx, "claude", Some(fx.paths.root.join("creds/personal")));
+        let work = plan_account(&fx, "claude", Some(fx.paths.root.join("creds/work")));
+        assert_ne!(personal.labels(), work.labels());
+    }
+
+    #[test]
+    fn the_same_plan_stamps_the_same_way_twice() {
+        let fx = fixture();
+        let once = plan_for(&fx, "claude").labels();
+        let twice = plan_for(&fx, "claude").labels();
+        assert_eq!(once, twice, "an unstable stamp restarts every launch");
+    }
+
+    #[test]
+    fn a_container_built_from_this_plan_has_not_drifted() {
+        let fx = fixture();
+        let want = plan_for(&fx, "claude").labels();
+        assert!(drift(&want, &as_running(&want)).is_empty());
+    }
+
+    #[test]
+    fn drift_names_the_fact_that_changed() {
+        let fx = fixture();
+        let want = plan_for(&fx, "opencode").labels();
+        let have = as_running(&plan_for(&fx, "claude").labels());
+
+        let found = drift(&want, &have);
+        assert!(!found.is_empty(), "a harness switch is drift");
+        let joined = found.join("; ");
+        assert!(
+            joined.contains("image"),
+            "the reason has to be nameable, not a bare digest: {joined}"
+        );
+    }
+
+    /// A container omh started before it stamped anything cannot be verified,
+    /// and an unverifiable container is what this check exists to stop being
+    /// trusted. Restarting one costs nothing — the worktree and branch are on
+    /// the host.
+    #[test]
+    fn a_container_with_no_stamp_at_all_has_drifted() {
+        let fx = fixture();
+        let want = plan_for(&fx, "claude").labels();
+        assert!(!drift(&want, &Default::default()).is_empty());
+    }
+
+    // ── deciding whether a running container is the one you asked for ───────
+
+    fn stamp_of(p: &Plan) -> std::collections::BTreeMap<String, String> {
+        p.labels().into_iter().collect()
+    }
+
+    #[test]
+    fn a_container_matching_the_plan_is_handed_straight_back() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        assert!(matches!(reuse(true, &stamp_of(&p), &p, &[]), Reuse::Attach));
+    }
+
+    /// The first bug: `omh s rm` deleted the worktree and left the container
+    /// up, and every exec afterwards died on a mount pointing at a directory
+    /// that no longer existed. Nothing to compare — it simply cannot be used.
+    #[test]
+    fn a_container_that_cannot_be_entered_is_replaced_whatever_it_says() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        assert!(matches!(
+            reuse(false, &stamp_of(&p), &p, &[]),
+            Reuse::Restart(_)
+        ));
+    }
+
+    /// The second: `omh opencode` against a session started by `omh claude`.
+    #[test]
+    fn a_container_built_for_another_harness_is_replaced() {
+        let fx = fixture();
+        let want = plan_for(&fx, "opencode");
+        let have = stamp_of(&plan_for(&fx, "claude"));
+        let Reuse::Restart(why) = reuse(true, &have, &want, &[]) else {
+            panic!("a harness switch needs a new container");
+        };
+        assert!(
+            why.iter().any(|r| r.contains("image")),
+            "the user has to be told what moved: {why:?}"
+        );
+    }
+
+    /// Restarting is cheap — the worktree and branch are on the host — but it
+    /// is not free: it kills whatever is running inside. A detached agent
+    /// mid-task is exactly the thing `idle::expired` refuses to guess about.
+    #[test]
+    fn a_container_with_work_running_in_it_is_never_replaced_silently() {
+        let fx = fixture();
+        let want = plan_for(&fx, "opencode");
+        let have = stamp_of(&plan_for(&fx, "claude"));
+        let Reuse::Blocked { live, changed } = reuse(true, &have, &want, &["claude".to_string()])
+        else {
+            panic!("a live harness must block the restart, not be run over");
+        };
+        assert_eq!(live, vec!["claude"]);
+        assert!(
+            !changed.is_empty(),
+            "and it must still say why: {changed:?}"
+        );
+    }
+
+    /// A live harness is only a reason to stop when something actually needs
+    /// replacing. Relaunching the same harness into the same session is the
+    /// ordinary case and must stay silent.
+    #[test]
+    fn a_live_harness_does_not_block_a_container_that_matches() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        assert!(matches!(
+            reuse(true, &stamp_of(&p), &p, &["claude".to_string()]),
+            Reuse::Attach
+        ));
     }
 }

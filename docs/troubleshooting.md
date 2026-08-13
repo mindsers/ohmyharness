@@ -140,6 +140,37 @@ worktree and branch are on the host, so the restart costs nothing.
 
 On an older version, `docker rm -f omh-<repo>-<session>` and relaunch.
 
+### `restarting the sandbox for omh/s01 — …`
+
+Not an error. The container under that session id was not built from the plan
+you just asked for — a different harness, a different account, a changed mount
+set — and no `exec` can retrofit any of those. The line names what moved. The
+worktree and branch are on the host and the graph is in a volume, so the restart
+costs seconds and loses nothing.
+
+`it predates this check` means the container was started by a version of omh that
+did not stamp its plan, so nothing about it can be verified. It happens once per
+session after upgrading.
+
+### `session s01 is running opencode and cannot be reused for this launch`
+
+The same mismatch, but something is live inside and restarting would kill it. Use
+`omh s down s01` if you want it gone, or `omh --new <harness>` to leave it alone
+and work somewhere else.
+
+If you believe nothing is running, look at the sockets: `docker exec
+omh-<repo>-s01 ls /omh/sock`. One per live harness, removed when it exits.
+
+### `` `--dry-run` is omh's flag, not claude's ``
+
+Everything after a harness name is the harness's argv, so `omh claude --dry-run`
+handed omh's flag to claude and launched for real. omh's own flags go first:
+`omh --dry-run claude`. If the harness genuinely has a flag of the same name,
+`omh claude -- --dry-run` passes it on.
+
+Long forms only. `-s` and `-a` are left alone — plenty of harnesses use them, and
+refusing those would break launches that work.
+
 ### `omh s rm` says the session "is not a working tree"
 
 Worktree registration and the directory on disk disagreed. omh prunes before
