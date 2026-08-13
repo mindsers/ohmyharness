@@ -170,6 +170,13 @@ pub enum Render {
     OpencodeJson,
     /// Claude Code `settings.json` hook shape.
     ClaudeSettings,
+    /// An opencode plugin: a TypeScript module, not a configuration file.
+    ///
+    /// The one render that emits a **program**. opencode has no declarative
+    /// hook config — nor does any second harness omh looked at — so the phase
+    /// that was scoped as "the three maps exercised elsewhere" turned out to
+    /// need a code generator. The hook *bodies* stay shell; the module is glue.
+    OpencodePlugin,
 }
 
 impl Adapter {

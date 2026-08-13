@@ -497,6 +497,61 @@ impl std::fmt::Display for Dropped {
 
 /// Translate one hook for one harness. All of it is string generation, done
 /// once, at staging.
+/// What a harness's own vocabulary makes of one hook — or what it could not say.
+///
+/// The lookups are the same three every renderer needs (a moment, the tools, the
+/// payload fields a body mentions) and the drop *reasons* have to be identical
+/// whichever renderer asked, or two harnesses would report the same missing map
+/// two different ways. `render` and the plugin emitter both go through here.
+pub struct Wired<'a> {
+    pub event: &'a str,
+    /// This harness's names for the tools the hook narrows to. Empty means
+    /// every tool, which is the only sensible reading for a moment with none.
+    pub tools: Vec<&'a str>,
+    /// Where this harness keeps each field the hook actually reads.
+    pub fields: Vec<(Field, &'a str)>,
+}
+
+pub fn wire<'a>(
+    name: &str,
+    hook: &Hook,
+    binding: &'a Binding,
+    tools: &'a BTreeMap<Tool, String>,
+) -> std::result::Result<Wired<'a>, Dropped> {
+    let drop = |wanted: String| Dropped {
+        name: name.to_string(),
+        wanted,
+    };
+    let event = binding
+        .events
+        .get(&hook.on)
+        .ok_or_else(|| drop(format!("`{}` moment", hook.on)))?;
+    let mut named = Vec::new();
+    for tool in &hook.tools {
+        named.push(
+            tools
+                .get(tool)
+                .map(String::as_str)
+                .ok_or_else(|| drop(format!("`{tool}` tool")))?,
+        );
+    }
+    let mut fields = Vec::new();
+    for field in hook.fields() {
+        let at = binding
+            .fields
+            .get(&field)
+            .map(String::as_str)
+            .ok_or_else(|| drop(format!("`{field}` field")))?;
+        fields.push((field, at));
+    }
+    Ok(Wired {
+        event,
+        tools: named,
+        fields,
+    })
+}
+
+/// Translate one hook into the shape this harness parses.
 pub fn render(
     name: &str,
     hook: &Hook,
@@ -510,17 +565,14 @@ pub fn render(
         }))
     };
 
-    let Some(event) = binding.events.get(&hook.on) else {
-        return dropped(format!("`{}` moment", hook.on));
+    let Wired {
+        event,
+        tools: matchers,
+        fields,
+    } = match wire(name, hook, binding, tools) {
+        Ok(wired) => wired,
+        Err(d) => return Ok(Outcome::Dropped(d)),
     };
-
-    let mut matchers = Vec::new();
-    for tool in &hook.tools {
-        match tools.get(tool) {
-            Some(spelling) => matchers.push(spelling.clone()),
-            None => return dropped(format!("`{tool}` tool")),
-        }
-    }
 
     let mut command = String::new();
 
@@ -528,13 +580,9 @@ pub fn render(
     // bare `jq` would read an empty payload and the field would silently be
     // blank — the shape of bug that satisfies every assertion about a hook's
     // text while the hook does nothing.
-    let fields = hook.fields();
     if !fields.is_empty() {
         command.push_str("p=$(cat); ");
-        for field in &fields {
-            let Some(expr) = binding.fields.get(field) else {
-                return dropped(format!("`{field}` field"));
-            };
+        for (field, expr) in &fields {
             command.push_str(&format!(
                 "{}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); ",
                 field.var()
@@ -576,7 +624,7 @@ pub fn render(
     }
 
     Ok(Outcome::Rendered(Rendered {
-        event: event.clone(),
+        event: event.to_string(),
         matcher: matchers.join("|"),
         command,
     }))
@@ -593,7 +641,7 @@ fn fill(template: &str, text: &str, event: &str) -> String {
 /// talking about, everything that could end the word or start a command does
 /// not. `$$` is the literal dollar, resolved here rather than left for the
 /// shell, which reads `$$` as its own process id.
-fn interpolating(text: &str) -> String {
+pub fn interpolating(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 2);
     out.push('"');
     let mut chars = text.chars().peekable();

@@ -93,6 +93,9 @@ pub fn document(
                 dropped,
             })
         }
+        Render::OpencodePlugin => {
+            opencode_plugin(&merge_hooks(sources, own, repo)?, binding, tools)
+        }
         Render::Dir | Render::Concat => {
             anyhow::bail!(
                 "{cap}: `{:?}` is staged by the launcher, not rendered",
@@ -358,6 +361,209 @@ fn merge_hooks(
     Ok(out)
 }
 
+/// The two plugin hooks omh emits into. Anything else an adapter maps a moment
+/// to is a **bus event**, dispatched from the catch-all `event` hook.
+///
+/// opencode knowledge, in the opencode renderer, on purpose: an adapter says
+/// *which* word this harness uses for a moment, and only the renderer can know
+/// whether that word names a hook or a type on the bus.
+const PLUGIN_HOOKS: [&str; 2] = ["tool.execute.before", "tool.execute.after"];
+
+/// Generate the plugin module opencode loads.
+///
+/// A hook's bodies — `when`, `capture`, `run` — are shell in the canonical
+/// format and stay shell here; this module is glue that runs them and applies
+/// what they say. That is what keeps the format harness-neutral: the generated
+/// file is the only thing in omh that knows TypeScript.
+///
+/// **Advisory text has no channel at `before-tool` on this harness.** Verified
+/// in a container: `tool.execute.before` receives `(input, output)`, mutating
+/// `output.args` changes the call, and the only way to reach the model is to
+/// `throw` — which blocks. So an `inject` on that moment is dropped by name
+/// rather than promoted to a refusal, and `graph-first`'s "a nudge, not a wall"
+/// survives contact with a second harness.
+fn opencode_plugin(
+    hooks: &BTreeMap<String, hook::Hook>,
+    binding: &Binding,
+    tools: &BTreeMap<hook::Tool, String>,
+) -> Result<Document> {
+    let mut dropped = Vec::new();
+    // Keyed by plugin hook name, so several omh hooks sharing a moment land in
+    // one handler, in a stable order.
+    let mut bodies: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+
+    for (name, hook) in hooks {
+        let wired = match hook::wire(name, hook, binding, tools) {
+            Ok(wired) => wired,
+            Err(d) => {
+                dropped.push(d);
+                continue;
+            }
+        };
+        let give_up = |wanted: &str| hook::Dropped {
+            name: name.clone(),
+            wanted: wanted.to_string(),
+        };
+        let protocol = match &hook.action {
+            hook::Action::Run(_) => None,
+            hook::Action::Inject { .. } if wired.event == "tool.execute.before" => {
+                dropped.push(give_up("way to inject text before a tool runs"));
+                continue;
+            }
+            hook::Action::Inject { .. } => match &binding.inject {
+                Some(p) => Some(p),
+                None => {
+                    dropped.push(give_up("way to inject text"));
+                    continue;
+                }
+            },
+            hook::Action::Refuse { .. } => match &binding.refuse {
+                Some(p) => Some(p),
+                None => {
+                    dropped.push(give_up("way to refuse a call"));
+                    continue;
+                }
+            },
+        };
+        // A plugin hook, or a type the catch-all `event` dispatches. `event`
+        // fires for everything on the bus, so the type test is what stops
+        // `graph-refresh` re-indexing on every message part.
+        let (slot, guard) = match PLUGIN_HOOKS.contains(&wired.event) {
+            true => (wired.event, None),
+            false => ("event", Some(wired.event)),
+        };
+        bodies
+            .entry(slot)
+            .or_default()
+            .push(one_hook(name, hook, &wired, guard, protocol));
+    }
+
+    let mut out = String::from(PLUGIN_PREAMBLE);
+    for (slot, blocks) in &bodies {
+        let args = if *slot == "event" {
+            "(input)"
+        } else {
+            "(input, output)"
+        };
+        out.push_str(&format!("  {slot:?}: async {args} => {{\n"));
+        for block in blocks {
+            out.push_str(block);
+        }
+        out.push_str("  },\n");
+    }
+    out.push_str("}))\n");
+    Ok(Document { body: out, dropped })
+}
+
+/// One hook, as a block inside its handler.
+fn one_hook(
+    name: &str,
+    hook: &hook::Hook,
+    wired: &hook::Wired<'_>,
+    guard: Option<&str>,
+    protocol: Option<&crate::adapter::Inject>,
+) -> String {
+    // Each hook gets a function of its own. A bare block does not scope a
+    // `return`, so a hook whose tool guard did not match would leave the whole
+    // handler and cancel every hook after it — `git-unavailable` narrowing to
+    // `bash` silently cancelled the rest on every call that was not bash.
+    let mut b = format!("    // {name}\n    await (async () => {{\n");
+    if let Some(event) = guard {
+        b.push_str(&format!(
+            "      if (input?.event?.type !== {event:?}) return\n"
+        ));
+    }
+    if !wired.tools.is_empty() {
+        let names = wired
+            .tools
+            .iter()
+            .map(|t| format!("{t:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        b.push_str(&format!(
+            "      if (![{names}].includes(input.tool)) return\n"
+        ));
+    }
+    b.push_str("      const env = {}\n");
+    for (field, at) in &wired.fields {
+        b.push_str(&format!(
+            "      env[{:?}] = String(output?.args?.{at} ?? \"\")\n",
+            field.var()
+        ));
+    }
+    if let hook::Action::Inject {
+        capture: Some(capture),
+        ..
+    } = &hook.action
+    {
+        b.push_str(&format!(
+            "      env[{:?}] = sh({}, env).out\n",
+            hook::CAPTURE_VAR,
+            js(capture)
+        ));
+    }
+    if let Some(when) = &hook.when {
+        b.push_str(&format!(
+            "      if (sh({}, env).code !== 0) return\n",
+            js(when)
+        ));
+    }
+    match &hook.action {
+        hook::Action::Run(run) => b.push_str(&format!("      sh({}, env)\n", js(run))),
+        // The harness's protocol comes from the adapter, as it does for every
+        // other render. `{{text}}` receives an expression evaluating to the
+        // hook's text with its `$OMH_*` references expanded — which is what the
+        // shell does for the same string on a config-shaped harness.
+        hook::Action::Inject { text, .. } | hook::Action::Refuse { text } => {
+            let template = protocol.map(|p| p.template.as_str()).unwrap_or_default();
+            b.push_str(&format!(
+                "      {}\n",
+                template
+                    .replace(
+                        "{{text}}",
+                        &format!("t({}, env)", js(&hook::interpolating(text)))
+                    )
+                    .replace("{{event}}", wired.event)
+            ));
+        }
+    }
+    b.push_str("    })()\n");
+    b
+}
+
+/// A Rust string as a JavaScript string literal. Through `serde_json` because
+/// JSON string syntax is a subset of JavaScript's, and hand-rolling the escapes
+/// for a hook body — which holds quotes, backslashes and newlines by design —
+/// is how a generated program stops parsing.
+fn js(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
+}
+
+/// The module's fixed head: opencode's plugin shape, plus the shell bridge.
+///
+/// `node:child_process` rather than the `$` helper opencode passes each plugin.
+/// `$` is Bun's shell, and its behaviour around exit codes and quoting is a
+/// claim about a runtime omh does not control; `spawnSync` behaves the same on
+/// anything that can load this file at all.
+const PLUGIN_PREAMBLE: &str = r#"// Generated by omh. Edits are overwritten at launch.
+import { spawnSync } from "node:child_process"
+
+const sh = (script, env) => {
+  const r = spawnSync("sh", ["-c", script], {
+    env: { ...process.env, ...env },
+    encoding: "utf8",
+  })
+  return { code: r.status ?? 1, out: (r.stdout ?? "").trim() }
+}
+
+// A hook's text is written once, in omh's words, and may name the payload
+// fields bound above it. Expanding it through the same shell keeps one meaning
+// for `$OMH_TOOL_FILE` whether the harness takes configuration or code.
+const t = (word, env) => sh("printf '%s' " + word, env).out
+
+export default (async () => ({
+"#;
+
 fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>) -> Result<String> {
     let mut by_event: BTreeMap<&str, Vec<serde_json::Value>> = BTreeMap::new();
     for h in hooks.values() {
@@ -551,6 +757,254 @@ mod tests {
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "cargo test");
+    }
+
+    /// The opencode hooks binding, as the adapter will declare it.
+    fn opencode_hooks() -> Binding {
+        toml::from_str(
+            r#"
+path   = "$HOME/.config/opencode/plugin/omh.ts"
+render = "opencode-plugin"
+[events]
+before-tool   = "tool.execute.before"
+after-tool    = "tool.execute.after"
+turn-end      = "session.idle"
+[fields]
+tool-file    = "filePath"
+tool-command = "command"
+[inject]
+template = 'output.output = String(output.output ?? "") + "\n\n" + {{text}}'
+[refuse]
+template = "throw new Error({{text}})"
+"#,
+        )
+        .unwrap()
+    }
+
+    fn opencode_tools() -> BTreeMap<hook::Tool, String> {
+        BTreeMap::from([
+            (hook::Tool::Shell, "bash".to_string()),
+            (hook::Tool::Read, "read".to_string()),
+        ])
+    }
+
+    fn plugin(hooks: &[(&str, &str)]) -> Document {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in hooks {
+            file(dir.path(), &format!("h/{name}.json"), body);
+        }
+        document(
+            Capability::Hooks,
+            &opencode_hooks(),
+            &[dir.path().join("h")],
+            &Default::default(),
+            &Default::default(),
+            &opencode_tools(),
+        )
+        .unwrap()
+    }
+
+    /// The staged file has to be something opencode will load: a module whose
+    /// default export is a function returning the hook object.
+    ///
+    /// Structural only — that opencode *actually* loads it is a claim about
+    /// external software, settled by `omh doctor` and a real session, not here.
+    #[test]
+    fn a_plugin_is_a_module_opencode_can_load() {
+        let body = plugin(&[("fmt", r#"{"on":"turn-end","run":"cargo fmt"}"#)]).body;
+        assert!(
+            body.contains("export default"),
+            "opencode imports the default export: {body}"
+        );
+        assert_eq!(
+            body.matches('{').count(),
+            body.matches('}').count(),
+            "unbalanced braces would fail to parse: {body}"
+        );
+    }
+
+    /// A refusal blocks, and on opencode the only way to block is to throw.
+    #[test]
+    fn a_before_tool_refusal_becomes_a_throw() {
+        let body = plugin(&[(
+            "git-unavailable",
+            r#"{"on":"before-tool","tools":["shell"],"refuse":"git does not work here"}"#,
+        )])
+        .body;
+        assert!(body.contains("tool.execute.before"), "got: {body}");
+        assert!(body.contains("throw new Error"), "got: {body}");
+        assert!(body.contains("git does not work here"), "got: {body}");
+    }
+
+    /// Two hooks sharing a moment are independent, and the first must not be
+    /// able to skip the second.
+    ///
+    /// Each hook's guards are early returns, and a bare block does not scope a
+    /// `return` — it leaves the whole handler. So `git-unavailable` narrowing to
+    /// `bash` silently cancelled every other before-tool hook on any call that
+    /// was not bash, which is most of them. The generated program has to give
+    /// each hook a scope of its own.
+    ///
+    /// Asserted by running the module, because this is a property of JavaScript
+    /// rather than of the string omh built: a substring check would have been
+    /// satisfied by the broken version.
+    #[test]
+    #[ignore]
+    fn two_hooks_on_one_moment_do_not_cancel_each_other() {
+        let body = plugin(&[
+            (
+                "a-read",
+                r#"{"on":"before-tool","tools":["read"],"refuse":"read refused"}"#,
+            ),
+            (
+                "b-shell",
+                r#"{"on":"before-tool","tools":["shell"],"refuse":"shell refused"}"#,
+            ),
+        ])
+        .body;
+
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, &body).unwrap();
+        // Ask the module what it does for a `bash` call. The read-scoped hook
+        // comes first alphabetically and does not match, so a handler-wide
+        // return would answer "nothing".
+        let driver = dir.path().join("run.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import plugin from "file://{}"
+const hooks = await plugin({{}})
+try {{
+  await hooks["tool.execute.before"]({{ tool: "bash" }}, {{ args: {{ command: "git status" }} }})
+  console.log("NOTHING")
+}} catch (e) {{ console.log(e.message) }}
+"#,
+                module.display()
+            ),
+        )
+        .unwrap();
+
+        let out = std::process::Command::new("node").arg(&driver).output();
+        let out = match out {
+            Ok(out) => out,
+            // Ignored anyway; skip rather than fail where node is absent.
+            Err(_) => return,
+        };
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            said.contains("shell refused"),
+            "the second hook has to run: {said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Not an assertion — a window on what the generator writes, so a reviewer
+    /// reads the program rather than inferring it from six substring checks.
+    #[test]
+    #[ignore]
+    fn show_the_plugin() {
+        let doc = plugin(&[
+            (
+                "git-unavailable",
+                r#"{"on":"before-tool","tools":["shell"],"when":"case \"$OMH_TOOL_COMMAND\" in git*) ;; *) false ;; esac","refuse":"git does not work here"}"#,
+            ),
+            (
+                "graph-refresh",
+                r#"{"on":"turn-end","run":"index --repo /work || true"}"#,
+            ),
+            (
+                "note",
+                r#"{"on":"after-tool","tools":["read"],"inject":"about $OMH_TOOL_FILE"}"#,
+            ),
+        ]);
+        println!("{}", doc.body);
+        println!(
+            "dropped: {:?}",
+            doc.dropped
+                .iter()
+                .map(|d| d.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **The finding P5 exists to produce.** An advisory nudge has no channel
+    /// before a tool runs on this harness, so it is dropped by name rather than
+    /// promoted to a refusal — a nudge that silently became a wall would look
+    /// exactly like working, and `graph-first` says why that is unacceptable.
+    #[test]
+    fn a_before_tool_inject_is_dropped_by_name() {
+        let doc = plugin(&[(
+            "graph-first",
+            r#"{"on":"before-tool","tools":["read"],"inject":"use the graph"}"#,
+        )]);
+        let names: Vec<&str> = doc.dropped.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["graph-first"]);
+        assert!(
+            doc.dropped[0].wanted.contains("inject"),
+            "say what it wanted: {}",
+            doc.dropped[0].wanted
+        );
+        assert!(
+            !doc.body.contains("use the graph"),
+            "and it must not have leaked in as a throw: {}",
+            doc.body
+        );
+    }
+
+    /// After the tool has run there *is* a channel: the result is what the model
+    /// reads next, and mutating it is how a hook reaches the model. Verified in
+    /// a container — a hook that rewrote a read's output changed the answer.
+    #[test]
+    fn an_after_tool_inject_mutates_the_tool_result() {
+        let body = plugin(&[(
+            "note",
+            r#"{"on":"after-tool","tools":["read"],"inject":"and consider the graph"}"#,
+        )])
+        .body;
+        assert!(body.contains("tool.execute.after"), "got: {body}");
+        assert!(body.contains("output.output"), "got: {body}");
+        assert!(body.contains("and consider the graph"), "got: {body}");
+    }
+
+    /// A hook narrows to omh's tool vocabulary; the plugin tests the harness's
+    /// own word for it. Emitting omh's word would match nothing, silently.
+    #[test]
+    fn a_tool_scoped_hook_tests_the_harnesss_own_tool_name() {
+        let body = plugin(&[(
+            "git-unavailable",
+            r#"{"on":"before-tool","tools":["shell"],"refuse":"no git"}"#,
+        )])
+        .body;
+        assert!(
+            body.contains(r#"["bash"].includes(input.tool)"#),
+            "opencode calls it bash, not shell: {body}"
+        );
+    }
+
+    /// The payload field is read where *this* harness keeps it. On Claude that
+    /// is a jq path into stdin; here it is a property of the tool's arguments,
+    /// and the same map means both because each renderer reads it in its own
+    /// language.
+    #[test]
+    fn the_payload_field_is_read_where_this_harness_keeps_it() {
+        let body = plugin(&[(
+            "big",
+            r#"{"on":"after-tool","tools":["read"],"when":"[ -f \"$OMH_TOOL_FILE\" ]","inject":"large"}"#,
+        )])
+        .body;
+        assert!(
+            body.contains("output?.args?.filePath"),
+            "read from the tool's args: {body}"
+        );
+        assert!(
+            body.contains("OMH_TOOL_FILE"),
+            "bound to the name the hook wrote: {body}"
+        );
+        assert!(
+            !body.contains("jq"),
+            "jq is Claude's payload, not this one: {body}"
+        );
     }
 
     /// A repo may override an MCP server's environment without redeclaring the

@@ -146,7 +146,7 @@ pub fn checks(
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
                 Expect::Mentions(server_names(&sources, repo))
             }
-            Render::ClaudeSettings => Expect::NonEmptyFile,
+            Render::ClaudeSettings | Render::OpencodePlugin => Expect::NonEmptyFile,
         };
 
         out.push(Check {
