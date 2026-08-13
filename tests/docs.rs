@@ -251,6 +251,12 @@ fn every_docs_page_is_reachable() {
 /// this repo writes *its own* version — another project's goes with its tag
 /// prefix (`` `v0.19.0` `` for iwe) or with fewer parts (`` `2026.08` `` for a
 /// base manifest), and both stay out of the way here.
+///
+/// omh's *past* releases take the tag prefix for the same reason. "Fixed in
+/// `` `v0.2.1` ``" in troubleshooting is a fact about which release carried a
+/// fix, not a claim about what the crate is now: bumping it with the version
+/// would make it false, and leaving it bare would fail the guard below at every
+/// release until someone did. The prefix says "a release, not this one".
 fn stated_versions(body: &str) -> Vec<(usize, String)> {
     body.lines()
         .enumerate()

@@ -113,7 +113,7 @@ every unit test passed, and it is the archetypal case for why `doctor` exists.
 
 ### `create mountpoint for /work/AGENTS.md mount: ... is outside of rootfs`
 
-Fixed in `0.2.1`. omh mounts its rules onto `/work/CLAUDE.md` and
+Fixed in `v0.2.1`. omh mounts its rules onto `/work/CLAUDE.md` and
 `/work/AGENTS.md` — paths inside the worktree mount — and left creating those
 destinations to the runtime. Docker Desktop will not: `/work` is the host
 worktree, so it resolves the destination back to a host path and refuses to
