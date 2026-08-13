@@ -132,11 +132,15 @@ session container is running with `/work` bound to a worktree directory that no
 longer exists. Recreating the directory does not help — a bind mount follows the
 inode, not the path — so every command into that container fails the same way.
 
-Fixed from both ends. `omh s rm` now takes the container down with the worktree,
-which is what created the mismatch, and a launch that finds a container it
-cannot enter replaces it instead of exec'ing into it, printing
-`session s01 can no longer reach its worktree — restarting its sandbox`. The
-worktree and branch are on the host, so the restart costs nothing.
+Fixed in `v0.3.1`, from both ends. `omh s rm` now takes the container down with
+the worktree, which is what created the mismatch, and a launch that finds a
+container it cannot enter replaces it instead of exec'ing into it:
+
+```console
+omh: restarting the sandbox for omh/s01 — it can no longer reach its worktree
+```
+
+The worktree and branch are on the host, so the restart costs nothing.
 
 On an older version, `docker rm -f omh-<repo>-<session>` and relaunch.
 
