@@ -25,6 +25,15 @@ pub enum Expect {
     Mentions(Vec<String>),
     /// The directory holds an entry for each of these.
     Entries(Vec<String>),
+    /// `guest` is a JavaScript module that parses, and names each of these.
+    ///
+    /// The one render that emits a **program** rather than a configuration
+    /// file, so it is the one that can be well-formed bytes and still be
+    /// nonsense. `NonEmptyFile` passed for a module with a syntax error, for
+    /// one where every hook had been dropped, and for one that threw on every
+    /// event — while CONTRIBUTING puts this command above the suite as the only
+    /// thing that verifies an adapter.
+    Parses(Vec<String>),
     /// A temp file can be renamed over this path.
     ///
     /// The one failure omh cannot see from the host: a bind-mounted *file* is a
@@ -146,7 +155,12 @@ pub fn checks(
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
                 Expect::Mentions(server_names(&sources, repo))
             }
-            Render::ClaudeSettings | Render::OpencodePlugin => Expect::NonEmptyFile,
+            Render::ClaudeSettings => Expect::NonEmptyFile,
+            // A program gets a stronger check than a config file, not a weaker
+            // one: that it parses, and that the hooks omh did not drop are in it.
+            Render::OpencodePlugin => Expect::Parses(
+                hook_names(&sources, own, repo, binding, &adapter.tools).unwrap_or_default(),
+            ),
         };
 
         out.push(Check {
@@ -201,6 +215,30 @@ fn entry_names(
     names
 }
 
+/// The hooks that actually reached the generated module.
+///
+/// Rendered rather than listed, so a hook omh dropped is not demanded — the
+/// reason `server_names` gives one capability over: demanding what omh
+/// deliberately left out makes doctor fail forever and blame the harness.
+fn hook_names(
+    sources: &[PathBuf],
+    own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
+    binding: &crate::adapter::Binding,
+    tools: &std::collections::BTreeMap<crate::hook::Tool, String>,
+) -> Result<Vec<String>> {
+    let doc = crate::render::document(Capability::Hooks, binding, sources, own, repo, tools)?;
+    let dropped: Vec<&str> = doc.dropped.iter().map(|d| d.name.as_str()).collect();
+    let mut names: Vec<String> = own
+        .hooks
+        .iter()
+        .map(|h| h.name.to_string())
+        .filter(|n| !dropped.contains(&n.as_str()))
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
 /// What the document is expected to mention — which is what the launcher
 /// renders, not what the layers declare.
 ///
@@ -229,6 +267,25 @@ pub fn probe_script(checks: &[Check]) -> String {
             Expect::NonEmptyFile => out.push_str(&format!(
                 "if [ -s '{path}' ]; then printf 'ok\\t{name}\\t{path}\\n'; \
                  else printf 'fail\\t{name}\\t{path} missing or empty\\n'; fi\n"
+            )),
+            // `node --check` inside the sandbox, for the same reason
+            // `Expect::Speaks` runs a handshake there: the question is whether
+            // the thing omh generated will load where it has to load.
+            //
+            // Copied to `.mjs` first, and that is load-bearing rather than
+            // tidy: `node --check` on a `.ts` path **accepts anything** — it
+            // took `export default (async () => ({ oops` without complaint —
+            // so the obvious spelling of this probe would have been one more
+            // check that cannot fail. The staged file keeps its `.ts` name
+            // because that is what opencode loads.
+            Expect::Parses(names) => out.push_str(&format!(
+                "cp '{path}' /tmp/omh-probe.mjs 2>/dev/null; \
+                 if ! err=$(node --check /tmp/omh-probe.mjs 2>&1); then \
+                   printf 'fail\\t{name}\\tdoes not parse: %s\\n' \"$err\"; \
+                 else missing=''; for n in {}; do grep -q -- \"$n\" '{path}' || missing=\"$missing $n\"; done; \
+                   if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t{path}\\n'; \
+                   else printf 'fail\\t{name}\\tmissing:%s\\n' \"$missing\"; fi; fi\n",
+                shell_list(names)
             )),
             // Preserve what is there: a probe that costs the user their token
             // is worse than no probe. The directory case writes a scratch file
