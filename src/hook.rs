@@ -253,6 +253,20 @@ impl Hook {
                 )
             }
             (None, None, Some(text)) => {
+                // A refusal only means something before the call it refuses.
+                // After the tool has run there is nothing left to block, and at
+                // a moment with no call there was never anything — but both
+                // rendered a plausible-looking payload that the harness then
+                // ignored. Checked where the value is minted, the rule
+                // `capture`-needs-`inject` below already follows.
+                if raw.on != Event::BeforeTool {
+                    anyhow::bail!(
+                        "{whence}: `refuse` blocks a call, so it belongs to `before-tool` — \
+                         `{}` is too late or has no call to block. To say something without \
+                         stopping the call, use `inject`.",
+                        raw.on
+                    );
+                }
                 if raw.capture.is_some() {
                     anyhow::bail!(
                         "{whence}: `capture` collects output for `inject` to carry. \
@@ -793,6 +807,29 @@ mod tests {
         )
         .expect("a refusal on its own is a hook");
         assert_eq!(refusal.does(), "git does not work here");
+    }
+
+    /// A refusal only means something before the call it refuses.
+    ///
+    /// Nothing checked the moment, so `{"on":"turn-end","refuse":"stop"}` parsed
+    /// and rendered on both harnesses — as `permissionDecision: "deny"` under
+    /// `Stop`, a key Claude Code honours only for `PreToolUse`, and as a `throw`
+    /// in a handler with no call in it. Installed, reported, doctor-green, and
+    /// blocking nothing.
+    ///
+    /// Refused where the value is minted, the rule `capture`-needs-`inject`
+    /// already follows: `after-tool` is the interesting one, because the tool
+    /// has already run by then and "block it" has no meaning left.
+    #[test]
+    fn a_refusal_belongs_to_the_moment_before_the_call() {
+        for moment in ["turn-end", "session-start", "after-tool"] {
+            let err = Hook::parse(&format!(r#"{{"on":"{moment}","refuse":"no"}}"#), "h.json")
+                .expect_err("a refusal after the fact refuses nothing");
+            let err = format!("{err:#}");
+            assert!(err.contains("before-tool"), "name the moment: {err}");
+        }
+        // And the one moment where it does mean something still parses.
+        Hook::parse(r#"{"on":"before-tool","refuse":"no"}"#, "h.json").unwrap();
     }
 
     /// A refusal reaches a shell exactly as an injection does, so the `$` rule

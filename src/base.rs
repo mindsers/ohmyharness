@@ -2017,6 +2017,14 @@ command = "c"
         let parsed: serde_json::Value =
             serde_json::from_str(&fired).unwrap_or_else(|e| panic!("not JSON: {fired} ({e})"));
         let out = &parsed["hookSpecificOutput"];
+        // Claude Code discards a `hookSpecificOutput` that does not name its
+        // event, so this key is what makes the decision arrive at all — and
+        // deleting it from the template left the whole suite green.
+        assert_eq!(
+            out["hookEventName"].as_str(),
+            Some("PreToolUse"),
+            "a decision that does not name its moment is discarded: {fired}"
+        );
         assert_eq!(
             out["permissionDecision"].as_str(),
             Some("deny"),
@@ -2208,6 +2216,12 @@ command = "c"
             assert!(
                 r.command.contains("hookSpecificOutput"),
                 "{name}: {}",
+                r.command
+            );
+            assert!(
+                r.command
+                    .contains(&format!(r#""hookEventName":"{}""#, r.event)),
+                "{name}: a payload that does not name its moment is discarded: {}",
                 r.command
             );
             let advises = r.command.contains("additionalContext");

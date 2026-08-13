@@ -361,13 +361,69 @@ fn merge_hooks(
     Ok(out)
 }
 
-/// The two plugin hooks omh emits into. Anything else an adapter maps a moment
-/// to is a **bus event**, dispatched from the catch-all `event` hook.
+const BEFORE_TOOL: &str = "tool.execute.before";
+const AFTER_TOOL: &str = "tool.execute.after";
+/// The catch-all. Fires for every message on the bus, hence the type test.
+const BUS: &str = "event";
+
+/// Where a moment's handler puts things, which is not the same at every moment.
 ///
 /// opencode knowledge, in the opencode renderer, on purpose: an adapter says
-/// *which* word this harness uses for a moment, and only the renderer can know
-/// whether that word names a hook or a type on the bus.
-const PLUGIN_HOOKS: [&str; 2] = ["tool.execute.before", "tool.execute.after"];
+/// which *word* this harness uses for a moment, and only the renderer can know
+/// what that word implies about the handler it lands in.
+///
+/// Two things vary and neither is guessable from the name:
+///
+/// - **whether a call is in scope at all.** `event` is handed the bus message
+///   and nothing else, so `output` is an *undeclared identifier* there — a
+///   `ReferenceError`, which optional chaining does not prevent, and which takes
+///   every other hook in the handler with it.
+/// - **which parameter holds the arguments.** From the binary,
+///   `tool.execute.before` is triggered as `(…, {args})` and
+///   `tool.execute.after` as `({…, args}, result)`. They move. Reading
+///   `output.args` at `after` binds the empty string and the hook silently
+///   never fires.
+#[derive(Clone, Copy)]
+enum Slot<'a> {
+    /// A plugin hook: `(input, output)`, with a call in scope. `args` is the
+    /// parameter this moment keeps the tool's arguments on.
+    Call { hook: &'a str, args: &'static str },
+    /// The catch-all: `(input)` only, and no call to speak of.
+    Bus { ty: &'a str },
+}
+
+impl<'a> Slot<'a> {
+    fn of(event: &'a str) -> Self {
+        match event {
+            BEFORE_TOOL => Slot::Call {
+                hook: BEFORE_TOOL,
+                args: "output",
+            },
+            AFTER_TOOL => Slot::Call {
+                hook: AFTER_TOOL,
+                args: "input",
+            },
+            ty => Slot::Bus { ty },
+        }
+    }
+
+    /// The handler this hook is emitted into.
+    fn handler(&self) -> &'a str {
+        match self {
+            Slot::Call { hook, .. } => hook,
+            Slot::Bus { .. } => BUS,
+        }
+    }
+
+    /// What that handler is handed. The bus one has no `output`, which is the
+    /// whole reason this type exists.
+    fn args(&self) -> &'static str {
+        match self {
+            Slot::Call { .. } => "(input, output)",
+            Slot::Bus { .. } => "(input)",
+        }
+    }
+}
 
 /// Generate the plugin module opencode loads.
 ///
@@ -404,9 +460,39 @@ fn opencode_plugin(
             name: name.clone(),
             wanted: wanted.to_string(),
         };
+        let slot = Slot::of(wired.event);
+        // A moment with no call in scope can express none of the things that
+        // need one. Emitting them anyway referenced an undeclared `output` —
+        // a `ReferenceError` that takes every other hook in the handler with
+        // it — or, for a tool guard, tested a field that is never there and so
+        // never fired at all. Named, which is what this renderer does with
+        // everything else it cannot say.
+        if let Slot::Bus { .. } = slot {
+            let needs = match &hook.action {
+                _ if !wired.fields.is_empty() => Some("payload field"),
+                _ if !wired.tools.is_empty() => Some("way to narrow to a tool"),
+                hook::Action::Inject { .. } => Some("way to inject text"),
+                hook::Action::Refuse { .. } => Some("way to refuse a call"),
+                hook::Action::Run(_) => None,
+            };
+            if let Some(needs) = needs {
+                dropped.push(give_up(&format!("{needs} at `{}`", hook.on)));
+                continue;
+            }
+        }
         let protocol = match &hook.action {
             hook::Action::Run(_) => None,
-            hook::Action::Inject { .. } if wired.event == "tool.execute.before" => {
+            // Advisory text has no channel before the call: the only way to
+            // speak there is a throw, which blocks.
+            hook::Action::Inject { .. }
+                if matches!(
+                    slot,
+                    Slot::Call {
+                        hook: BEFORE_TOOL,
+                        ..
+                    }
+                ) =>
+            {
                 dropped.push(give_up("way to inject text before a tool runs"));
                 continue;
             }
@@ -425,27 +511,18 @@ fn opencode_plugin(
                 }
             },
         };
-        // A plugin hook, or a type the catch-all `event` dispatches. `event`
-        // fires for everything on the bus, so the type test is what stops
-        // `graph-refresh` re-indexing on every message part.
-        let (slot, guard) = match PLUGIN_HOOKS.contains(&wired.event) {
-            true => (wired.event, None),
-            false => ("event", Some(wired.event)),
-        };
         bodies
-            .entry(slot)
+            .entry(slot.handler())
             .or_default()
-            .push(one_hook(name, hook, &wired, guard, protocol));
+            .push(one_hook(name, hook, &wired, slot, protocol));
     }
 
     let mut out = String::from(PLUGIN_PREAMBLE);
-    for (slot, blocks) in &bodies {
-        let args = if *slot == "event" {
-            "(input)"
-        } else {
-            "(input, output)"
-        };
-        out.push_str(&format!("  {slot:?}: async {args} => {{\n"));
+    for (handler, blocks) in &bodies {
+        // Every hook in a handler shares its parameter list, which is why the
+        // drop above has to happen before a hook reaches one.
+        let args = Slot::of(handler).args();
+        out.push_str(&format!("  {handler:?}: async {args} => {{\n"));
         for block in blocks {
             out.push_str(block);
         }
@@ -460,7 +537,7 @@ fn one_hook(
     name: &str,
     hook: &hook::Hook,
     wired: &hook::Wired<'_>,
-    guard: Option<&str>,
+    slot: Slot<'_>,
     protocol: Option<&crate::adapter::Inject>,
 ) -> String {
     // Each hook gets a function of its own. A bare block does not scope a
@@ -468,9 +545,11 @@ fn one_hook(
     // handler and cancel every hook after it — `git-unavailable` narrowing to
     // `bash` silently cancelled the rest on every call that was not bash.
     let mut b = format!("    // {name}\n    await (async () => {{\n");
-    if let Some(event) = guard {
+    // The catch-all fires for everything on the bus, so the type test is what
+    // stops `graph-refresh` re-indexing on every message part.
+    if let Slot::Bus { ty } = slot {
         b.push_str(&format!(
-            "      if (input?.event?.type !== {event:?}) return\n"
+            "      if (input?.event?.type !== {ty:?}) return\n"
         ));
     }
     if !wired.tools.is_empty() {
@@ -485,11 +564,16 @@ fn one_hook(
         ));
     }
     b.push_str("      const env = {}\n");
-    for (field, at) in &wired.fields {
-        b.push_str(&format!(
-            "      env[{:?}] = String(output?.args?.{at} ?? \"\")\n",
-            field.var()
-        ));
+    // From the parameter this *moment* keeps them on — they are on `output` at
+    // `before` and on `input` at `after`, and reading the wrong one binds the
+    // empty string rather than failing.
+    if let Slot::Call { args, .. } = slot {
+        for (field, at) in &wired.fields {
+            b.push_str(&format!(
+                "      env[{:?}] = String({args}?.args?.{at} ?? \"\")\n",
+                field.var()
+            ));
+        }
     }
     if let hook::Action::Inject {
         capture: Some(capture),
@@ -683,6 +767,8 @@ mod tests {
             .expect("must stay valid TOML when values contain quotes");
     }
 
+    use crate::adapter::Adapter;
+
     const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
 
     /// The shipped adapter's hooks binding, so these render through the same
@@ -759,33 +845,24 @@ mod tests {
         assert_eq!(v["hooks"]["Stop"][0]["hooks"][0]["command"], "cargo test");
     }
 
-    /// The opencode hooks binding, as the adapter will declare it.
-    fn opencode_hooks() -> Binding {
-        toml::from_str(
-            r#"
-path   = "$HOME/.config/opencode/plugin/omh.ts"
-render = "opencode-plugin"
-[events]
-before-tool   = "tool.execute.before"
-after-tool    = "tool.execute.after"
-turn-end      = "session.idle"
-[fields]
-tool-file    = "filePath"
-tool-command = "command"
-[inject]
-template = 'output.output = String(output.output ?? "") + "\n\n" + {{text}}'
-[refuse]
-template = "throw new Error({{text}})"
-"#,
-        )
-        .unwrap()
+    /// The **shipped** opencode adapter, read once.
+    ///
+    /// Not a hand-built copy. `hook::tests::binding` already states the rule —
+    /// "an adapter always arrives as a file, and a hand-built one can be right
+    /// in exactly the way the code is wrong" — and these tests broke it: with a
+    /// copy in the fixture, five separate mutations to `adapters/opencode.toml`
+    /// left the whole suite green, including one that turns the refusal into
+    /// `console.error` and one that renames the tool so `git-unavailable` can
+    /// never match. The copy had already drifted, too: it omitted `edit`.
+    fn opencode() -> &'static Adapter {
+        static CELL: std::sync::OnceLock<Adapter> = std::sync::OnceLock::new();
+        CELL.get_or_init(|| Adapter::find(Path::new(ADAPTERS), "opencode").unwrap())
     }
 
-    fn opencode_tools() -> BTreeMap<hook::Tool, String> {
-        BTreeMap::from([
-            (hook::Tool::Shell, "bash".to_string()),
-            (hook::Tool::Read, "read".to_string()),
-        ])
+    fn opencode_hooks() -> &'static Binding {
+        opencode()
+            .supports(Capability::Hooks)
+            .expect("opencode has hooks")
     }
 
     fn plugin(hooks: &[(&str, &str)]) -> Document {
@@ -795,11 +872,11 @@ template = "throw new Error({{text}})"
         }
         document(
             Capability::Hooks,
-            &opencode_hooks(),
+            opencode_hooks(),
             &[dir.path().join("h")],
             &Default::default(),
             &Default::default(),
-            &opencode_tools(),
+            &opencode().tools,
         )
         .unwrap()
     }
@@ -928,6 +1005,192 @@ try {{
         );
     }
 
+    /// Run the generated module against the shapes opencode really passes.
+    ///
+    /// Returns the mutated tool result, or `THREW: …`. Substring assertions
+    /// over generated source cannot see any of what this checks: which object
+    /// holds the arguments, which identifiers are in scope in which handler,
+    /// and whether a hook fires at all.
+    ///
+    /// The shapes are from the binary, not the docs — `tool.execute.before` is
+    /// triggered as `(…, {args})` and `tool.execute.after` as `({…, args}, V)`,
+    /// so the arguments move between the two parameters.
+    fn drive(body: &str, slot: &str, input: &str, output: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, body).unwrap();
+        let driver = dir.path().join("run.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import plugin from "file://{}"
+const hooks = await plugin({{}})
+const input = {input}, output = {output}
+try {{
+  await hooks[{slot:?}]?.(input, output)
+  console.log(JSON.stringify(output))
+}} catch (e) {{ console.log("THREW: " + e.message) }}
+"#,
+                module.display()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&driver)
+            .output()
+            .expect("node is required: a probe that skips is a probe that passes");
+        assert!(
+            out.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// **`after-tool` keeps the arguments on `input`, not `output`.**
+    ///
+    /// From the binary: `tool.execute.before` is triggered as
+    /// `(…, {args: b})` and `tool.execute.after` as `({…, args: b}, V)` — the
+    /// arguments move between the two parameters and the result takes the
+    /// second. Reading `output.args` at `after` therefore binds the empty
+    /// string, silently: a `when` testing the field is false forever and the
+    /// hook never fires, which looks exactly like a hook with nothing to say.
+    ///
+    /// The adapter comment recorded `output.args` as verified — and it was, for
+    /// `before` only. The generalisation to `after` was never checked.
+    #[test]
+    #[ignore]
+    fn an_after_tool_hook_reads_the_arguments_where_this_moment_keeps_them() {
+        let body = plugin(&[(
+            "note",
+            r#"{"on":"after-tool","tools":["read"],"when":"[ -n \"$OMH_TOOL_FILE\" ]","inject":"about $OMH_TOOL_FILE"}"#,
+        )])
+        .body;
+        let said = drive(
+            &body,
+            "tool.execute.after",
+            r#"{ tool: "read", sessionID: "s", callID: "c", args: { filePath: "/work/note.txt" } }"#,
+            r#"{ title: "note.txt", output: "blue", metadata: {} }"#,
+        );
+        assert!(
+            said.contains("/work/note.txt"),
+            "the field has to reach the hook: {said}"
+        );
+    }
+
+    /// omh's own refusal, on the shipped adapter, actually blocks — and the
+    /// reason reaches the model.
+    ///
+    /// Every part of this was mutable in silence before the fixture read the
+    /// real file: renaming the tool (`bash` → `sh`) so nothing matches,
+    /// renaming the field so the predicate reads empty, or replacing the
+    /// `[refuse]` template with `console.error` so the wall becomes a log line.
+    /// The suite stayed green through all three.
+    #[test]
+    #[ignore]
+    fn the_shipped_refusal_blocks_a_git_call() {
+        let doc = plugin(&[(
+            "git-unavailable",
+            r#"{"on":"before-tool","tools":["shell"],"when":"case \"$OMH_TOOL_COMMAND\" in git*) ;; *) false ;; esac","refuse":"git does not work here"}"#,
+        )]);
+        assert!(doc.dropped.is_empty(), "{:?}", doc.dropped);
+
+        let blocked = drive(
+            &doc.body,
+            "tool.execute.before",
+            r#"{ tool: "bash", sessionID: "s", callID: "c" }"#,
+            r#"{ args: { command: "git status" } }"#,
+        );
+        assert_eq!(
+            blocked, "THREW: git does not work here",
+            "the call has to be blocked, with the reason"
+        );
+
+        // And a call it does not care about goes through untouched.
+        let allowed = drive(
+            &doc.body,
+            "tool.execute.before",
+            r#"{ tool: "bash", sessionID: "s", callID: "c" }"#,
+            r#"{ args: { command: "ls" } }"#,
+        );
+        assert!(
+            !allowed.contains("THREW"),
+            "a nudge is not a wall: {allowed}"
+        );
+    }
+
+    /// And the advisory half, on the shipped adapter: the note reaches the model
+    /// by being appended to the result, without replacing it.
+    #[test]
+    #[ignore]
+    fn a_shipped_inject_appends_to_the_result_rather_than_replacing_it() {
+        let doc = plugin(&[(
+            "note",
+            r#"{"on":"after-tool","tools":["read"],"inject":"consider the graph"}"#,
+        )]);
+        let said = drive(
+            &doc.body,
+            "tool.execute.after",
+            r#"{ tool: "read", sessionID: "s", callID: "c", args: { filePath: "/work/f" } }"#,
+            r#"{ title: "f", output: "the original bytes", metadata: {} }"#,
+        );
+        assert!(said.contains("the original bytes"), "kept: {said}");
+        assert!(said.contains("consider the graph"), "and added: {said}");
+    }
+
+    /// **The bus handler has no call in scope, so a hook needing one is dropped.**
+    ///
+    /// `event` is handed only the bus event — `async (input)`. Emitting
+    /// `output?.args?.…` or an inject template there references an *undeclared*
+    /// identifier, and optional chaining does not save that: it is a
+    /// `ReferenceError`, and because every block in a slot is awaited in one
+    /// handler it takes `graph-refresh` down with it, on every session.
+    ///
+    /// So a hook wanting a payload field, a tool, or text at a moment with no
+    /// call is named at launch, which is the degradation this module already
+    /// commits to everywhere else.
+    #[test]
+    fn a_hook_needing_a_call_is_dropped_at_a_moment_that_has_none() {
+        for (name, body) in [
+            (
+                "reads-a-field",
+                r#"{"on":"turn-end","when":"[ -n \"$OMH_TOOL_FILE\" ]","run":"reindex"}"#,
+            ),
+            (
+                "narrows-to-a-tool",
+                r#"{"on":"turn-end","tools":["shell"],"run":"x"}"#,
+            ),
+            (
+                "injects",
+                r#"{"on":"turn-end","inject":"remember to test"}"#,
+            ),
+        ] {
+            let doc = plugin(&[(name, body)]);
+            let named: Vec<&str> = doc.dropped.iter().map(|d| d.name.as_str()).collect();
+            assert_eq!(named, vec![name], "{name} must be named, not emitted");
+            assert!(
+                !doc.body.contains("output"),
+                "{name} leaked an out-of-scope reference: {}",
+                doc.body
+            );
+        }
+    }
+
+    /// And a plain `run` at that moment still works — the drop is about needing
+    /// a call, not about the moment.
+    #[test]
+    #[ignore]
+    fn a_bus_moment_still_runs_a_command() {
+        let body = plugin(&[("refresh", r#"{"on":"turn-end","run":"true"}"#)]).body;
+        let said = drive(
+            &body,
+            "event",
+            r#"{ event: { type: "session.idle" } }"#,
+            "undefined",
+        );
+        assert!(!said.contains("THREW"), "got: {said}");
+    }
+
     /// **The finding P5 exists to produce.** An advisory nudge has no channel
     /// before a tool runs on this harness, so it is dropped by name rather than
     /// promoted to a refusal — a nudge that silently became a wall would look
@@ -982,29 +1245,38 @@ try {{
         );
     }
 
-    /// The payload field is read where *this* harness keeps it. On Claude that
-    /// is a jq path into stdin; here it is a property of the tool's arguments,
-    /// and the same map means both because each renderer reads it in its own
-    /// language.
+    /// The payload field is read from the parameter **this moment** keeps it on.
+    ///
+    /// Not one expression for both: from the binary, `tool.execute.before` is
+    /// triggered as `(…, {args})` and `tool.execute.after` as `({…, args}, V)`.
+    /// This test asserted `output?.args?.filePath` for an *after*-tool hook and
+    /// so pinned the wrong one — the field bound the empty string, the `when`
+    /// testing it was false forever, and the hook never fired. An output-shape
+    /// assertion that passed while the thing it guarded was broken.
+    ///
+    /// Still a shape assertion, because the behavioural half is
+    /// `an_after_tool_hook_reads_the_arguments_where_this_moment_keeps_them`,
+    /// which runs the module. This one holds both moments side by side, where
+    /// the asymmetry is easy to see and easy to get wrong.
     #[test]
-    fn the_payload_field_is_read_where_this_harness_keeps_it() {
-        let body = plugin(&[(
-            "big",
-            r#"{"on":"after-tool","tools":["read"],"when":"[ -f \"$OMH_TOOL_FILE\" ]","inject":"large"}"#,
-        )])
-        .body;
-        assert!(
-            body.contains("output?.args?.filePath"),
-            "read from the tool's args: {body}"
-        );
-        assert!(
-            body.contains("OMH_TOOL_FILE"),
-            "bound to the name the hook wrote: {body}"
-        );
-        assert!(
-            !body.contains("jq"),
-            "jq is Claude's payload, not this one: {body}"
-        );
+    fn the_payload_field_is_read_where_this_moment_keeps_it() {
+        for (on, from) in [("before-tool", "output"), ("after-tool", "input")] {
+            let body = plugin(&[(
+                "big",
+                &format!(
+                    r#"{{"on":"{on}","tools":["read"],"when":"[ -f \"$OMH_TOOL_FILE\" ]","run":"x"}}"#
+                ),
+            )])
+            .body;
+            assert!(
+                body.contains(&format!("{from}?.args?.filePath")),
+                "{on} keeps its arguments on `{from}`: {body}"
+            );
+            assert!(
+                !body.contains("jq"),
+                "jq is Claude's payload, not this one: {body}"
+            );
+        }
     }
 
     /// A repo may override an MCP server's environment without redeclaring the
