@@ -540,8 +540,6 @@ mod tests {
         );
     }
 
-    /// A capability the harness cannot express is not a failure — it was
-    /// already reported as dropped at launch. Checking it would fail forever.
     /// A capability the harness cannot express is skipped rather than failed —
     /// it was already reported as dropped at launch, and checking it would fail
     /// forever and blame the harness for obeying.

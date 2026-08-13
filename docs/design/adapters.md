@@ -142,10 +142,14 @@ anything read it. See [Troubleshooting](../troubleshooting.md#why-it-exists).
 
 ### The bar for shipping one
 
-Both bundled adapters are verified by `doctor` against a real container:
-`claude` passes 8 checks and `opencode` 7, hooks included on both — opencode's
-being a generated plugin rather than a config file. Any third adapter inherits
-the same bar.
+Both bundled adapters are verified by `doctor` against a real container,
+hooks included on both — opencode's being a generated plugin rather than a
+config file, so it is checked by `node --check` inside the sandbox rather than
+by existing. Any third adapter inherits the same bar.
+
+Do not read the check *count* as an adapter fact: it varies with the
+capabilities your profile declares and with whether a login has been captured
+for that harness.
 
 `opencode` passing `doctor` is **not** the same as `opencode` being proven — it
 means the paths are right, not that the harness has been driven for real work.

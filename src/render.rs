@@ -864,7 +864,7 @@ mod tests {
     /// A hook file used to have to say `"event": "Stop"` — Claude Code's
     /// vocabulary, in a file omh presented as its own — with `matcher` and the
     /// `hookSpecificOutput` payload the same leak one level down. Nothing had
-    /// ever had to translate one, only because opencode declares no hooks
+    /// ever had to translate one, only because opencode declared no hooks
     /// capability at all.
     #[test]
     fn a_hook_written_in_omhs_words_reaches_the_harness() {

@@ -509,8 +509,6 @@ impl std::fmt::Display for Dropped {
     }
 }
 
-/// Translate one hook for one harness. All of it is string generation, done
-/// once, at staging.
 /// What a harness's own vocabulary makes of one hook — or what it could not say.
 ///
 /// The lookups are the same three every renderer needs (a moment, the tools, the
@@ -526,6 +524,12 @@ pub struct Wired<'a> {
     pub fields: Vec<(Field, &'a str)>,
 }
 
+/// Resolve a hook against one harness's vocabulary.
+///
+/// The three lookups every renderer needs, in one place so the drop *reasons*
+/// are identical whichever renderer asked. Two harnesses reporting the same
+/// missing map two different ways is the drift this exists to prevent, and it
+/// is the reason this is a function rather than three inline `get`s.
 pub fn wire<'a>(
     name: &str,
     hook: &Hook,
@@ -1174,8 +1178,6 @@ mod tests {
         assert!(dropped("graph-read", &h, &b).wanted.contains("tool-file"));
     }
 
-    /// A harness with the moment but no way to accept text drops the injectors
-    /// and keeps the runners.
     /// A harness that can advise but not block drops the refusal by name.
     ///
     /// Never downgraded to a notice: a wall quietly becoming a nudge is the
@@ -1222,6 +1224,8 @@ mod tests {
         assert!(cmd.contains("git does not work here"), "got: {cmd}");
     }
 
+    /// A harness with the moment but no way to accept text drops the injectors
+    /// and keeps the runners.
     #[test]
     fn a_harness_that_cannot_take_text_still_runs_commands() {
         let b =
