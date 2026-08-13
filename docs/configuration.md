@@ -125,10 +125,25 @@ to know which repo it is in, and in `~/.omh/hooks/` if it works anywhere.
 | `when` | a shell predicate; non-zero keeps the hook silent |
 | `capture` | a command whose output binds to `$OMH_CAPTURE` |
 | `run` | executes; output ignored |
-| `inject` | text into the agent's context |
+| `inject` | **advisory** text into the agent's context; the call proceeds |
+| `refuse` | **blocks** the call and tells the model why |
 
-Exactly one of `run` or `inject`. `capture` needs `inject` — collecting output
-nobody reads says nothing. A hook wanting a moment, tool or field this harness
+Exactly one of `run`, `inject` or `refuse`. `capture` needs `inject` —
+collecting output nobody reads says nothing, and a refusal is a fixed reason.
+
+### Advising is not blocking
+
+The difference is invisible in the text and decisive in the translation. On
+Claude Code both travel in the same field and differ by one key —
+`additionalContext` advises, `permissionDecision` denies. On opencode they are
+not the same mechanism at all: the only way to say anything before a tool runs
+is to throw, which blocks, and advisory text has no channel there until the tool
+has produced a result to append to.
+
+So a hook says which it means, and a harness that cannot do the one it asked for
+**drops it by name** rather than substituting the other. A nudge that quietly
+became a wall would look exactly like working — and a wall that quietly became a
+nudge would let through the call it existed to stop. A hook wanting a moment, tool or field this harness
 has no word for is **dropped by name at launch**, saying what it asked for; the
 rest still ship.
 

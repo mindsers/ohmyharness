@@ -65,9 +65,9 @@ success would make `doctor` worse than useless, so silence is a failure.
 
 ## Current status
 
-Both shipped adapters are verified this way: `claude` passes 6 checks,
-`opencode` 6 (hooks correctly skipped). The "unverified claim"
-caveat is retired for these two, and any third adapter inherits the same bar.
+Both shipped adapters are verified this way: `claude` passes 8 checks and
+`opencode` 7, hooks included on both. The "unverified claim" caveat is retired
+for these two, and any third adapter inherits the same bar.
 
 ---
 
@@ -82,7 +82,7 @@ If doctor passes, check whether the capability was dropped at launch:
 
 ```console
 $ omh opencode
-omh: opencode on omh/s01 — dropped 7 hooks (unsupported)
+omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool)
 ```
 
 That is the harness genuinely not supporting the feature, not omh losing it.

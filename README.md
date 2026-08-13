@@ -290,7 +290,7 @@ missing map entry, not special-case logic, and it is announced once:
 
 ```console
 $ omh opencode
-omh: opencode on omh/s01 — dropped 7 hooks (unsupported)
+omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool)
 ```
 
 Editors work the same way — `~/.omh/editors/zed.toml` is four lines.
