@@ -82,11 +82,15 @@ pub fn wrap(mode: Mode, session: &str, harness: &str, argv: Vec<String>) -> Vec<
 /// socket directory inside the container.
 ///
 /// A socket exists only while its `dtach` master does — verified by hand: dtach
-/// removes it when the wrapped program exits. `pgrep` looks like the more direct
-/// check and is not. The container's PID 1 is `sleep infinity`, which reaps
-/// nothing, so an exited dtach lingers as a zombie and `pgrep -a dtach` goes on
-/// matching `[dtach] <defunct>` for the life of the session — a liveness check
-/// that can never say no.
+/// removes it when the wrapped program exits.
+///
+/// `pgrep` looks like the more direct check, and was unusable when this was
+/// written: PID 1 was `sleep infinity`, which reaps nothing, so an exited dtach
+/// lingered as `[dtach] <defunct>` and the check could never answer no. The
+/// session runs under a real init now and that trap is gone, but the socket is
+/// still the better signal — it *is* the harness name, where the process table
+/// needs one parsed out of a command line, and a session started by an older omh
+/// still carries the zombies.
 pub fn live(session: &str, listing: &str) -> Vec<String> {
     let prefix = format!("{session}-");
     let mut out: Vec<String> = listing

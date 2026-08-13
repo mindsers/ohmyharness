@@ -102,7 +102,19 @@ impl Runtime for Docker {
     fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String> {
         // Detached and unnamed by --rm: a session must outlive the terminal
         // that started it, or `omh code` has nothing to attach to.
-        let mut a: Vec<String> = vec!["run".into(), "-d".into(), "--name".into(), name.into()];
+        let mut a: Vec<String> = vec![
+            "run".into(),
+            "-d".into(),
+            // A real init as PID 1. The entrypoint ends in `exec sleep
+            // infinity`, which reaps nothing, so every `dtach` that exited left
+            // a zombie behind for the life of the session. Harmless one at a
+            // time and unbounded over days — and it makes the process table
+            // useless for asking what is still running, which is why
+            // `persist::live` reads sockets instead.
+            "--init".into(),
+            "--name".into(),
+            name.into(),
+        ];
         // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
         // to the local network.
         // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
@@ -571,6 +583,23 @@ mod tests {
 
     /// The session carries the same mounts as a one-shot launch, or the harness
     /// execed into it later sees no profile.
+    /// The session's PID 1 was `sleep infinity`, which reaps nothing. Every
+    /// `dtach` that exits therefore left a zombie for the life of the session
+    /// — observed directly: after the wrapped program ended, the socket was
+    /// gone while `pgrep -a dtach` still matched `[dtach] <defunct>`.
+    ///
+    /// Only the long-lived container needs this. A one-shot `docker run --rm`
+    /// takes its process tree down with it.
+    #[test]
+    fn the_session_runs_under_an_init_that_reaps() {
+        let args = Docker.up_args(&sample_plan(), "n", 1, "k");
+        assert!(args.contains(&"--init".to_string()), "got: {args:?}");
+        assert!(
+            !Docker.args(&sample_plan()).contains(&"--init".to_string()),
+            "a throwaway has nothing to reap"
+        );
+    }
+
     #[test]
     fn the_session_carries_every_mount() {
         let plan = sample_plan();

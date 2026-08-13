@@ -128,9 +128,15 @@ Error: session s01 is running opencode and cannot be reused for this launch (ima
 ```
 
 Liveness is read from the `dtach` sockets, which exist only while their harness
-does. Not from the process table: PID 1 in the sandbox is `sleep infinity`, which
-reaps nothing, so an exited `dtach` lingers as a zombie and `pgrep` would answer
-"still running" for the life of the session.
+does — a socket *is* a harness name, where the process table needs one parsed
+out of a command line.
+
+It also used to be the only signal that worked. PID 1 in the sandbox was `sleep
+infinity`, which reaps nothing, so an exited `dtach` lingered as
+`[dtach] <defunct>` and `pgrep` would have answered "still running" for the life
+of the session. The container runs under a real init now, so those no longer
+accumulate — but a session started by an older omh keeps its zombies until it is
+next restarted.
 
 ## Persistence
 
