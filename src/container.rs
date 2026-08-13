@@ -720,6 +720,33 @@ mod tests {
         }
     }
 
+    /// A plan against an adapter the caller built, rather than a shipped one.
+    fn plan_with(
+        fx: &Fx,
+        adapter: &Adapter,
+        decided: (crate::base::Own, crate::settings::RepoPolicy),
+    ) -> Plan {
+        let (own, repo) = decided;
+        plan(
+            &fx.paths,
+            &fx.profile,
+            adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+            },
+        )
+        .unwrap()
+    }
+
     fn plan_for(fx: &Fx, harness: &str) -> Plan {
         plan_with_memory_bin(fx, harness, None)
     }
@@ -1800,26 +1827,67 @@ mod tests {
         );
     }
 
+    /// A harness with no hooks at all.
+    ///
+    /// opencode used to be one, and the tests about giving up a whole
+    /// capability used it. It grew a plugin system, so the *shipped* adapters
+    /// now express all six between them — which is the capability floor reached,
+    /// and leaves these guards without a subject. Synthesised rather than
+    /// deleted: "a harness that cannot express a capability says so" is the
+    /// invariant, not "opencode cannot express hooks".
+    fn without_hooks() -> (tempfile::TempDir, Adapter) {
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::read_to_string(Path::new(ADAPTERS).join("claude.toml")).unwrap();
+        let head = &real[..real.find("[capabilities.hooks]").expect("claude has hooks")];
+        // `[tools]` goes with them: it is read by nobody without hooks, and the
+        // adapter guard refuses a map nobody reads — correctly, and it is the
+        // reason this cannot be a one-line edit.
+        let tools = head.find("[tools]").expect("claude has a tool vocabulary");
+        let after = head[tools..]
+            .find("[capabilities.")
+            .expect("a capability follows the vocabulary")
+            + tools;
+        std::fs::write(
+            dir.path().join("plain.toml"),
+            format!("{}{}", &head[..tools], &head[after..])
+                .replace("name    = \"claude\"", "name    = \"plain\""),
+        )
+        .unwrap();
+        let adapter = Adapter::find(dir.path(), "plain").unwrap();
+        (dir, adapter)
+    }
+
     #[test]
     fn unsupported_capabilities_are_reported_not_silently_dropped() {
         let fx = fixture();
-        assert!(plan_for(&fx, "claude").degradation().is_none());
-
+        // Both shipped adapters express every capability now — what the
+        // capability floor asks for, reached by teaching omh to write a plugin.
+        for harness in ["claude", "opencode"] {
+            assert!(
+                plan_for(&fx, harness).dropped.is_empty(),
+                "{harness} gives up no whole capability"
+            );
+        }
+        // opencode still gives up three *hooks*, which is the finer grain
+        // `dropped_hooks` exists for and a different statement: the capability
+        // arrives, and three of the things in it cannot be said here.
         let oc = plan_for(&fx, "opencode");
-        let dropped: Vec<_> = oc.dropped.iter().map(|(c, _)| *c).collect();
-        assert_eq!(
-            dropped,
-            vec![Capability::Hooks],
-            "hooks and only hooks — opencode has agent files, and claiming \
-             otherwise dropped a capability the user had"
-        );
-        let msg = oc.degradation().unwrap();
+        let named: Vec<&str> = oc.dropped_hooks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(named, ["graph-first", "graph-orient", "graph-read"]);
+        let msg = oc.degradation().expect("and they are said out loud");
+        assert!(msg.contains("graph-read"), "by name: {msg}");
+
+        let (_dir, plain) = without_hooks();
+        let p = plan_with(&fx, &plain, decided());
+        let dropped: Vec<_> = p.dropped.iter().map(|(c, _)| *c).collect();
+        assert_eq!(dropped, vec![Capability::Hooks]);
+        let msg = p.degradation().unwrap();
         assert!(msg.contains("hooks"), "got: {msg}");
 
         // What is given up includes omh's own, which come from the manifest
         // rather than from a layer. Counting only the profile's files would
         // report a harness dropping one hook while it drops six.
-        let hooks = oc
+        let hooks = p
             .dropped
             .iter()
             .find(|(c, _)| *c == Capability::Hooks)
@@ -1915,8 +1983,9 @@ mod tests {
             .unwrap();
         }
 
-        let oc = plan_for(&fx, "opencode");
-        let hooks = oc
+        let (_dir, plain) = without_hooks();
+        let p = plan_with(&fx, &plain, decided());
+        let hooks = p
             .dropped
             .iter()
             .find(|(c, _)| *c == Capability::Hooks)

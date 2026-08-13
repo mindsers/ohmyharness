@@ -41,4 +41,63 @@ render = "dir"
 path   = "$HOME/.config/opencode/agents"
 render = "dir"
 
-# no `hooks` — omh reports that as dropped at launch
+# How this harness names the things an agent does. Verified by running one:
+# `tool.execute.before` receives `input.tool`, and a read arrived as `read` with
+# `output.args.filePath`, a shell call as `bash` with `output.args.command`.
+#
+# No `search`: opencode has `grep` and `glob` as separate tools and omh's
+# vocabulary has one word for both, so a hook narrowing to `search` is dropped
+# by name rather than silently matching half of what it asked for. A map is a
+# claim about another program, and half a claim is worse than none.
+[tools]
+edit  = "edit"
+read  = "read"
+shell = "bash"
+
+# Hooks are a **plugin**, not a config file: a TypeScript module, auto-loaded
+# from `.opencode/plugin/` in a project or `~/.config/opencode/plugin/`
+# globally. Both were verified to load, in that image, at this version.
+#
+# This is why P5 needed a code generator at all. `docs/design/profile.md` said
+# the maps would be complete when P3 landed; they are not, because no second
+# harness expresses hooks as configuration.
+[capabilities.hooks]
+path   = "$HOME/.config/opencode/plugin/omh.ts"
+render = "opencode-plugin"
+
+# `before-tool` and `after-tool` are plugin hooks. The other two are *bus event
+# types*, dispatched from the catch-all `event` hook — `session.idle` is what
+# fires when the agent stops, which is the moment `turn-end` means.
+#
+# No `session-start`: `session.created` fires, but nothing omh ships for that
+# moment can be expressed here anyway — `graph-orient` injects, and there is no
+# advisory channel outside a tool result. Mapping it would promise a moment that
+# every hook using it would then be dropped from.
+[capabilities.hooks.events]
+turn-end    = "session.idle"
+before-tool = "tool.execute.before"
+after-tool  = "tool.execute.after"
+
+# Where this harness keeps each field, as a property of the tool's arguments.
+# The same map holds jq paths for Claude Code; each renderer reads it in its own
+# language, because "where does this harness keep the file path" has no answer
+# that is true in both.
+[capabilities.hooks.fields]
+tool-file    = "filePath"
+tool-command = "command"
+
+# Advisory text, at the one moment there is a channel for it. The tool's result
+# is what the model reads next, so appending to it reaches the model — verified:
+# a hook that rewrote a read's output changed the model's answer.
+#
+# There is deliberately no way to say "advise before the tool runs". That moment
+# has only a `throw`, which blocks, and turning a nudge into a wall is the one
+# translation omh refuses to make silently.
+[capabilities.hooks.inject]
+template = 'output.output = String(output.output ?? "") + "\n\n" + {{text}}'
+
+# Blocking, with a reason. Verified: throwing from `tool.execute.before` stops
+# the call and the message reaches the model — omh's git notice came back
+# paraphrased in the reply.
+[capabilities.hooks.refuse]
+template = "throw new Error({{text}})"

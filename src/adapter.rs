@@ -332,11 +332,14 @@ mod tests {
         }
 
         let oc = Adapter::find(Path::new(REAL), "opencode").unwrap();
-        assert!(oc.supports(Capability::Skills).is_some());
-        assert!(
-            oc.supports(Capability::Hooks).is_none(),
-            "opencode declares no hooks capability"
-        );
+        for cap in Capability::ALL {
+            assert!(oc.supports(cap).is_some(), "opencode should support {cap}");
+        }
+        // Hooks were the last absent one, and they are absent no longer:
+        // opencode grew a plugin system, so omh generates a module rather than
+        // a config file. Both shipped adapters express all six capabilities
+        // now, which is the capability floor `decisions.md` asks for reached
+        // rather than merely approached.
         // opencode *does* have subagents — agent markdown files under
         // `~/.config/opencode/agents/`, with `mode: subagent` in the
         // frontmatter. This adapter said otherwise, so omh dropped them at

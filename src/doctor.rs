@@ -485,10 +485,51 @@ mod tests {
 
     /// A capability the harness cannot express is not a failure — it was
     /// already reported as dropped at launch. Checking it would fail forever.
+    /// A capability the harness cannot express is skipped rather than failed —
+    /// it was already reported as dropped at launch, and checking it would fail
+    /// forever and blame the harness for obeying.
+    ///
+    /// opencode used to be the subject: it declared no hooks. It declares them
+    /// now — as a plugin — so the case needs a harness that genuinely lacks one,
+    /// and `rules` on an adapter that omits it is the smallest honest example.
     #[test]
     fn capabilities_the_harness_cannot_express_are_not_checked() {
         let fx = fixture();
-        let caps: Vec<String> = checks(
+        let dir = tempfile::tempdir().unwrap();
+        let real = std::fs::read_to_string(Path::new(ADAPTERS).join("opencode.toml")).unwrap();
+        let at = real
+            .find("[capabilities.rules]")
+            .expect("opencode has rules");
+        let next = real[at + 1..]
+            .find("[capabilities.")
+            .expect("a capability follows")
+            + at
+            + 1;
+        std::fs::write(
+            dir.path().join("terse.toml"),
+            format!("{}{}", &real[..at], &real[next..])
+                .replace("name    = \"opencode\"", "name    = \"terse\""),
+        )
+        .unwrap();
+        let terse = Adapter::find(dir.path(), "terse").unwrap();
+
+        let caps: Vec<String> = checks(&fx.profile, &terse, &decided().0, &decided().1)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        assert!(
+            !caps.iter().any(|c| c == "rules"),
+            "a capability this harness cannot express is not checked: {caps:?}"
+        );
+        assert!(caps.iter().any(|c| c == "skills"));
+        // And one it *does* have is checked, which is the other half: a
+        // capability omh silently declines to check is a capability nobody
+        // ever finds out is broken.
+        assert!(caps.iter().any(|c| c == "subagents"));
+
+        // opencode itself now has every capability checked, hooks included.
+        let all: Vec<String> = checks(
             &fx.profile,
             &adapter("opencode"),
             &decided().0,
@@ -498,15 +539,7 @@ mod tests {
         .into_iter()
         .map(|c| c.name)
         .collect();
-        assert!(
-            !caps.iter().any(|c| c == "hooks"),
-            "opencode declares no hooks capability"
-        );
-        assert!(caps.iter().any(|c| c == "skills"));
-        // And one it *does* have is checked, which is the other half: a
-        // capability omh silently declines to check is a capability nobody
-        // ever finds out is broken.
-        assert!(caps.iter().any(|c| c == "subagents"));
+        assert!(all.iter().any(|c| c == "hooks"), "got: {all:?}");
     }
 
     /// The entire point: doctor must inspect where the *harness* looks, not

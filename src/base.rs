@@ -1787,6 +1787,54 @@ command = "c"
         );
     }
 
+    /// P5's whole point: the translation, exercised by a second harness.
+    ///
+    /// Two of the five cross and three do not, and *which* is the result rather
+    /// than a disappointment — `git-unavailable` crosses because `refuse` gave
+    /// it a way to say it blocks, and the three nudges do not because opencode
+    /// has no advisory channel before a tool runs. Named, not silent.
+    #[test]
+    fn omhs_hooks_translate_to_opencode_or_are_named() {
+        let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), "opencode").unwrap();
+        let binding = adapter
+            .supports(crate::adapter::Capability::Hooks)
+            .expect("opencode has hooks now");
+
+        // Through `render::document`, not `hook::render`: the rule that an
+        // advisory nudge has no channel before a tool runs is the *plugin*
+        // renderer's, because it is a fact about opencode's hook surface rather
+        // than about any map. Asking the Claude-shaped renderer answered that
+        // `graph-read` translates fine, which is how this test first passed
+        // three names short.
+        let own = crate::base::Own {
+            hooks: hooks(),
+            ..Default::default()
+        };
+        let doc = crate::render::document(
+            crate::adapter::Capability::Hooks,
+            binding,
+            &[],
+            &own,
+            &Default::default(),
+            &adapter.tools,
+        )
+        .unwrap();
+
+        let named: Vec<&str> = doc.dropped.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            named,
+            vec!["graph-first", "graph-orient", "graph-read"],
+            "the advisory ones are dropped by name, never downgraded to a wall"
+        );
+        for landed in ["graph-refresh", "git-unavailable"] {
+            assert!(
+                doc.body.contains(landed),
+                "a `run` and a `refuse` are what this harness can express: {}",
+                doc.body
+            );
+        }
+    }
+
     /// The git notice blocks the call rather than advising against it.
     ///
     /// It was an `inject` — a notice, with the call going ahead — so the agent
