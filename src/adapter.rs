@@ -134,7 +134,7 @@ pub struct Binding {
     pub fields: BTreeMap<crate::hook::Field, String>,
     /// This harness's protocol for putting text in the agent's context.
     #[serde(default)]
-    pub inject: Option<Inject>,
+    pub inject: Option<Template>,
     /// This harness's protocol for **blocking** a call and saying why.
     ///
     /// Separate from `inject` because the two are different protocols wherever
@@ -143,15 +143,56 @@ pub struct Binding {
     /// advise but not block. An absent map drops the hook by name, the same
     /// degradation an unmapped moment or field gets.
     #[serde(default)]
-    pub refuse: Option<Inject>,
+    pub refuse: Option<Template>,
+}
+
+impl Binding {
+    /// The template for what this hook *means*, or what this harness cannot say.
+    ///
+    /// The pairing of action to protocol, in one place. It used to be written
+    /// out in each renderer — two `match`es, two copies of the drop strings —
+    /// so a harness that could advise but not block had two chances to be told
+    /// the wrong thing, and `Wired`'s own doc already argues that drop reasons
+    /// must be identical whichever renderer asked.
+    ///
+    /// `Ok(None)` is a `run`: it needs no protocol, which is different from a
+    /// protocol this harness lacks.
+    pub fn protocol(
+        &self,
+        action: &crate::hook::Action,
+    ) -> std::result::Result<Option<&Template>, &'static str> {
+        match action {
+            crate::hook::Action::Run(_) => Ok(None),
+            crate::hook::Action::Inject { .. } => {
+                self.inject.as_ref().map(Some).ok_or("way to inject text")
+            }
+            crate::hook::Action::Refuse { .. } => {
+                self.refuse.as_ref().map(Some).ok_or("way to refuse a call")
+            }
+        }
+    }
 }
 
 /// The one piece of a harness's hook protocol that is a shape rather than a
 /// name. `{{text}}` receives a shell word, `{{event}}` the harness's own word
 /// for the moment — some protocols name the event back at you in the payload.
+///
+/// Named for what it *is* rather than for one of its two users. It was called
+/// `Inject`, so `Binding.refuse` had type `Inject` — the type asserting that the
+/// blocking protocol and the advisory one are the same thing, in the one place
+/// where the design turns on their not being.
+///
+/// **Two newtypes were tried and removed.** `Advise(Template)` and
+/// `Block(Template)` read as though they stopped the two being confused, and
+/// they do not: both deserialize identically and both reach the renderer as a
+/// template, so swapping the two *field types* still compiled. A type that
+/// looks like a guarantee and is not is worse than the honest name, so the
+/// protection lives where it can actually be checked — [`Binding::protocol`]
+/// pairs an action with its protocol once, and a test holds it in both
+/// directions.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Inject {
+pub struct Template {
     pub template: String,
 }
 
@@ -311,6 +352,54 @@ mod tests {
     use super::*;
 
     const REAL: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+
+    /// Each action reaches for the protocol that action *means*, and a harness
+    /// missing that one says which it lacked.
+    ///
+    /// The pairing lives here now because it used to live in both renderers —
+    /// two matches, two copies of the drop strings — and a harness that could
+    /// advise but not block had two chances to be told the wrong thing. Swapping
+    /// the two arms turned every wall into a nudge, which six behavioural tests
+    /// do catch; this is the guard on the single place they now share.
+    #[test]
+    fn each_action_asks_for_the_protocol_it_means() {
+        let advise_only: Binding = toml::from_str(
+            "path = \"/x\"\nrender = \"claude-settings\"\n[inject]\ntemplate = \"say {{text}}\"\n",
+        )
+        .unwrap();
+        let block_only: Binding = toml::from_str(
+            "path = \"/x\"\nrender = \"claude-settings\"\n[refuse]\ntemplate = \"deny {{text}}\"\n",
+        )
+        .unwrap();
+
+        let inject = crate::hook::Action::Inject {
+            capture: None,
+            text: "t".into(),
+        };
+        let refuse = crate::hook::Action::Refuse { text: "t".into() };
+        let run = crate::hook::Action::Run("x".into());
+
+        assert_eq!(
+            advise_only.protocol(&inject).unwrap().unwrap().template,
+            "say {{text}}"
+        );
+        assert_eq!(
+            advise_only.protocol(&refuse).err(),
+            Some("way to refuse a call"),
+            "a harness that can only advise must not block with the nudge protocol"
+        );
+        assert_eq!(
+            block_only.protocol(&refuse).unwrap().unwrap().template,
+            "deny {{text}}"
+        );
+        assert_eq!(
+            block_only.protocol(&inject).err(),
+            Some("way to inject text"),
+            "and must not promote a nudge to a wall"
+        );
+        // A `run` needs no protocol, which is not the same as lacking one.
+        assert!(advise_only.protocol(&run).unwrap().is_none());
+    }
 
     #[test]
     fn shipped_adapters_parse() {

@@ -627,17 +627,15 @@ pub fn render(
         // refusal by name rather than downgrading it to a notice the agent is
         // free to ignore — silently turning a wall into a nudge is the mirror of
         // the mistake this whole distinction exists to stop.
-        Action::Inject { text, .. } => {
-            let Some(inject) = &binding.inject else {
-                return dropped("way to inject text".into());
+        // Which protocol a hook's text travels by is decided once, on the
+        // binding, rather than matched again here — see `Binding::protocol`.
+        Action::Inject { text, .. } | Action::Refuse { text } => {
+            let template = match binding.protocol(&hook.action) {
+                Ok(Some(t)) => t,
+                Ok(None) => unreachable!("a run does not reach this arm"),
+                Err(wanted) => return dropped(wanted.into()),
             };
-            command.push_str(&fill(&inject.template, text, event));
-        }
-        Action::Refuse { text } => {
-            let Some(refuse) = &binding.refuse else {
-                return dropped("way to refuse a call".into());
-            };
-            command.push_str(&fill(&refuse.template, text, event));
+            command.push_str(&fill(&template.template, text, event));
         }
     }
 
@@ -1176,6 +1174,33 @@ mod tests {
         )
         .unwrap();
         assert!(dropped("graph-read", &h, &b).wanted.contains("tool-file"));
+    }
+
+    /// And the mirror: a harness that can block but not advise drops the
+    /// *injectors*, and does not quietly refuse the call instead.
+    ///
+    /// The guarded direction was only ever one way round. Six tests catch a
+    /// harness handing a refusal to the advisory protocol; nothing caught the
+    /// reverse, which is the worse half — a nudge promoted to a wall stops work
+    /// the user never asked to stop.
+    #[test]
+    fn a_harness_that_cannot_advise_drops_the_nudge_by_name() {
+        let b = binding(
+            "path = \"/x\"\nrender = \"claude-settings\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
+             [refuse]\ntemplate = \"deny {{text}}\"\n",
+        );
+        let h = Hook::parse(r#"{"on":"before-tool","inject":"a nudge"}"#, "h.json").unwrap();
+        let d = dropped("graph-first", &h, &b);
+        assert!(
+            d.wanted.contains("inject"),
+            "say what it wanted: {}",
+            d.wanted
+        );
+
+        // A `run` still lands: losing one protocol is not losing the capability.
+        let r = Hook::parse(r#"{"on":"before-tool","run":"x"}"#, "h.json").unwrap();
+        assert_eq!(rendered("r", &r, &b).command, "x");
     }
 
     /// A harness that can advise but not block drops the refusal by name.
