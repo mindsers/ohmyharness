@@ -480,36 +480,27 @@ fn opencode_plugin(
                 continue;
             }
         }
-        let protocol = match &hook.action {
-            hook::Action::Run(_) => None,
-            // Advisory text has no channel before the call: the only way to
-            // speak there is a throw, which blocks.
-            hook::Action::Inject { .. }
-                if matches!(
-                    slot,
-                    Slot::Call {
-                        hook: BEFORE_TOOL,
-                        ..
-                    }
-                ) =>
-            {
-                dropped.push(give_up("way to inject text before a tool runs"));
+        // Advisory text has no channel before the call on this harness: the
+        // only way to speak there is a throw, which blocks. Checked before the
+        // binding is asked, because the binding *can* advise — just not here.
+        if matches!(hook.action, hook::Action::Inject { .. })
+            && matches!(
+                slot,
+                Slot::Call {
+                    hook: BEFORE_TOOL,
+                    ..
+                }
+            )
+        {
+            dropped.push(give_up("way to inject text before a tool runs"));
+            continue;
+        }
+        let protocol = match binding.protocol(&hook.action) {
+            Ok(p) => p,
+            Err(wanted) => {
+                dropped.push(give_up(wanted));
                 continue;
             }
-            hook::Action::Inject { .. } => match &binding.inject {
-                Some(p) => Some(p),
-                None => {
-                    dropped.push(give_up("way to inject text"));
-                    continue;
-                }
-            },
-            hook::Action::Refuse { .. } => match &binding.refuse {
-                Some(p) => Some(p),
-                None => {
-                    dropped.push(give_up("way to refuse a call"));
-                    continue;
-                }
-            },
         };
         bodies
             .entry(slot.handler())
@@ -538,7 +529,7 @@ fn one_hook(
     hook: &hook::Hook,
     wired: &hook::Wired<'_>,
     slot: Slot<'_>,
-    protocol: Option<&crate::adapter::Inject>,
+    protocol: Option<&crate::adapter::Template>,
 ) -> String {
     // Each hook gets a function of its own. A bare block does not scope a
     // `return`, so a hook whose tool guard did not match would leave the whole
