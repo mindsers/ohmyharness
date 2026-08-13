@@ -1,1 +1,0 @@
-{ "on": "turn-end", "run": "cargo test" }

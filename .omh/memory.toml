@@ -1,6 +1,0 @@
-# How a note's key is derived. Identity, not a title — the agent never picks
-# one, so the same observation cannot be recorded twice under two spellings.
-[keys]
-surprise = "surprise/{{slug}}"
-topic    = "{{slug}}"
-stub     = "{{path}}"
