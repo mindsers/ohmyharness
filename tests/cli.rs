@@ -25,29 +25,80 @@ struct Sandbox {
     _dir: tempfile::TempDir,
     repo: PathBuf,
     home: PathBuf,
+    /// Prepended to `PATH`, so a test can put a recording `docker` in front of
+    /// the developer's real one.
+    bin: PathBuf,
 }
 
 fn sandbox() -> Sandbox {
     let dir = tempfile::tempdir().unwrap();
     let repo = dir.path().join("repo");
     let home = dir.path().join("home");
+    let bin = dir.path().join("bin");
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
     Sandbox {
         _dir: dir,
         repo,
         home,
+        bin,
     }
 }
 
 impl Sandbox {
     fn omh(&self, args: &[&str]) -> Output {
+        let path = match std::env::var("PATH") {
+            Ok(rest) => format!("{}:{rest}", self.bin.display()),
+            Err(_) => self.bin.display().to_string(),
+        };
         Command::new(env!("CARGO_BIN_EXE_omh"))
             .args(args)
             .current_dir(&self.repo)
             .env("HOME", &self.home)
+            .env("PATH", path)
             .output()
             .expect("the binary under test must run")
+    }
+
+    /// A `docker` that records every invocation and claims the session
+    /// container is up. Returns the log path.
+    ///
+    /// Which runtime gets picked is pinned too: `auto` prefers `sbx`, so on a
+    /// box that has one this shim would never be consulted and the test would
+    /// pass by not looking.
+    fn fake_docker(&self) -> PathBuf {
+        let log = self.bin.join("docker.log");
+        let shim = self.bin.join("docker");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n\
+                 if [ \"$1\" = inspect ]; then echo true; fi\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::create_dir_all(self.repo.join(".omh")).unwrap();
+        std::fs::write(
+            self.repo.join(".omh/settings.toml"),
+            "runtime = \"docker\"\n",
+        )
+        .unwrap();
+        log
+    }
+
+    fn docker_calls(&self, log: &Path) -> Vec<String> {
+        std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
     }
 
     /// Put the shipped base manifest where `Paths::base()` looks.
@@ -1076,5 +1127,42 @@ fn a_feature_switch_reaches_the_layer_that_decides() {
     assert!(
         local.contains("codegraph = true"),
         "the local switch is what decides, so it is what has to move: {local}"
+    );
+}
+
+/// Regression, seen live: `omh rm s01` deleted the worktree and left the
+/// session container running. The next launch recreated the directory — a new
+/// inode the running container's bind mount does not follow — and `session_up`,
+/// seeing a container that was up, execed into it. Docker answered
+///
+///   OCI runtime exec failed: ... current working directory is outside of
+///   container mount namespace root -- possible container breakout detected
+///
+/// on every command, forever: nothing in omh ever tears that container down, so
+/// the session id stayed bricked until the user ran `docker rm -f` by hand.
+///
+/// A session *is* the container plus the worktree. Removing half of it is what
+/// created a half that cannot be reached.
+#[test]
+fn rm_takes_the_session_container_down_with_the_worktree() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    let worktree = sb.home.join(".omh/worktrees/repo/s01");
+    std::fs::create_dir_all(&worktree).unwrap();
+
+    let out = sb.omh(&["s", "rm", "s01"]);
+    assert!(
+        out.status.success(),
+        "rm failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!worktree.exists(), "the worktree must be gone");
+
+    let calls = sb.docker_calls(&log);
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.starts_with("rm ") && c.contains("omh-repo-s01")),
+        "the container outlived the worktree it mounts: {calls:?}"
     );
 }
