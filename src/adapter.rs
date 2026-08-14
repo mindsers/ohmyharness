@@ -124,6 +124,24 @@ pub struct Binding {
     /// is where the *container* expects the file.
     #[serde(default)]
     pub import: Option<String>,
+    /// This harness's own command for listing what it loaded, run inside the
+    /// sandbox by `omh doctor`.
+    ///
+    /// `path` is a claim about external software, and the only thing that can
+    /// settle it is the harness saying it read the file. Nothing host-side can:
+    /// omh rendered a valid document and mounted it faithfully at
+    /// `$HOME/.mcp.json` for as long as that binding existed, and Claude Code
+    /// never read a byte of it. Every unit test was green throughout.
+    #[serde(default)]
+    pub verify: Option<String>,
+    /// What `verify`'s output calls a server that is actually running.
+    ///
+    /// Separate from being *listed*, and the distinction is the whole check: a
+    /// project-scoped document Claude Code has not been told to trust is listed
+    /// in full and loaded not at all. Matching on the name alone would pass in
+    /// exactly that state.
+    #[serde(default)]
+    pub ready: Option<String>,
     /// How this harness spells each moment omh knows about. An absent entry
     /// means it has no such moment, so the hooks wanting it are dropped by name
     /// and the rest still ship.

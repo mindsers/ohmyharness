@@ -32,10 +32,22 @@ render = "concat"
 path   = "$HOME/.claude/skills"
 render = "dir"
 
+# Project-scoped, because that is the only file of this shape Claude Code reads.
+# `$HOME/.mcp.json` was the binding here until `verify` below was able to ask:
+# omh rendered it correctly and mounted it faithfully, and the harness never
+# opened it — user scope for this harness lives *inside* `~/.claude.json`, nested
+# per project, and a bare `~/.mcp.json` is read by nothing.
+#
+# Mounted over the worktree rather than written into it, the way `rules` is, so
+# git has nothing to report. That does mean the mount hides a project's own
+# `.mcp.json`: `omh mcp import` is how those servers come along, deliberately a
+# command someone runs rather than a merge that happens quietly.
 [capabilities.mcp]
-path   = "$HOME/.mcp.json"
+path   = "/work/.mcp.json"
 render = "mcp-json"
-import = "$REPO/.mcp.json"   # project-scoped; ~/.claude.json nests by project
+import = "$REPO/.mcp.json"   # the same path on the host, read before the mount hides it
+verify = "claude mcp list"
+ready  = "Connected"
 
 [capabilities.commands]
 path   = "$HOME/.claude/commands"

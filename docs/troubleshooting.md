@@ -6,14 +6,15 @@
 $ omh doctor
 omh doctor: claude (in omh/claude:2133265d, account personal)
 
-  ✓ rules      /work/CLAUDE.md
-  ✓ skills     /home/agent/.claude/skills
-  ✓ mcp        /home/agent/.mcp.json
-  ✓ commands   /home/agent/.claude/commands
-  ✓ hooks      /home/agent/.claude/settings.json
-  ✓ token      /home/agent/.claude/.credentials.json (atomic write)
+  ✓ rules       /work/CLAUDE.md
+  ✓ skills      /home/agent/.claude/skills
+  ✓ mcp         /work/.mcp.json
+  ✓ mcp-loaded  /work (claude mcp list)
+  ✓ commands    /home/agent/.claude/commands
+  ✓ hooks       /home/agent/.claude/settings.json
+  ✓ token       /home/agent/.claude/.credentials.json (atomic write)
 
-  all 6 checks passed — claude's adapter paths are verified
+  all 7 checks passed — claude's adapter paths are verified
 ```
 
 Run it after changing an adapter, after upgrading a harness, and any time a
@@ -24,12 +25,19 @@ session behaves as though your profile is not there.
 **Factual correctness is not testable in process.**
 
 Adapters assert things about *external software* — that Claude Code reads MCP
-config from `$HOME/.mcp.json`, that skills live in `~/.claude/skills`. A green
+config from `/work/.mcp.json`, that skills live in `~/.claude/skills`. A green
 unit suite proves omh mounts a path faithfully. It cannot prove anything reads
 it, and that software ships weekly.
 
 Almost every bug this project has shipped lived at that boundary, and **not one
 was catchable by the test suite.** `doctor` is the only cure.
+
+The `mcp` binding is the cautionary tale. It said `$HOME/.mcp.json` — a path
+Claude Code does not read and never did — and omh rendered a correct document,
+mounted it faithfully, and reported `✓ mcp` for as long as that lasted. Not one
+session ever loaded an MCP server. Checking a document proves the document; only
+the harness can say whether it read it, which is what `mcp-loaded` asks and why
+its check runs the harness's own `mcp list` inside the sandbox.
 
 ## What it does
 

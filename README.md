@@ -281,8 +281,10 @@ also   = ["/work/AGENTS.md"]
 render = "concat"
 
 [capabilities.mcp]
-path   = "$HOME/.mcp.json"
+path   = "/work/.mcp.json"
 render = "mcp-json"
+verify = "claude mcp list"
+ready  = "Connected"
 ```
 
 **An absent key means the harness cannot do that thing.** Degradation is a
