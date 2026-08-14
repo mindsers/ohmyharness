@@ -617,8 +617,10 @@ mod tests {
             .collect();
         assert_eq!(
             got,
-            vec!["rules", "skills", "mcp", "subagents", "hooks"],
-            "hooks are checked with no hooks layer, because omh generates them"
+            vec!["rules", "skills", "mcp", "mcp-loaded", "subagents", "hooks"],
+            "hooks are checked with no hooks layer, because omh generates them; \
+             and `mcp` is checked twice — the document, then the harness that \
+             had to read it, which is the pair no single check can tell apart"
         );
     }
 
