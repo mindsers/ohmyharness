@@ -57,6 +57,37 @@ pub struct Seed {
     pub fact: String,
 }
 
+/// Which executable a command needs in order to run at all.
+///
+/// This is the generic kernel of toolchain detection, and it is deliberately
+/// ignorant of every stack in `KNOWN`: omh is not a rust tool that also knows
+/// npm. Give it a command string — one of ours or one somebody wrote by hand —
+/// and it names the program that has to be on PATH.
+///
+/// `None` means *cannot tell*, never *nothing is needed*. The two failure
+/// directions are not symmetric: missing a gap costs one confusing hook error,
+/// which is the status quo, while inventing one makes omh drop a working hook
+/// or interrogate somebody about a toolchain they already have. Everything
+/// ambiguous therefore resolves to `None`, and no caller may act on it.
+pub fn program(command: &str) -> Option<&str> {
+    command.split_whitespace().find(|w| !is_assignment(w))
+}
+
+/// `FOO=1 cargo test` runs cargo. A leading assignment is an ordinary shape for
+/// a test command and names no executable, so reporting `FOO=1` missing would
+/// be a gap omh invented. Recognising one word too many is safe — it costs a
+/// `None` — so this stays permissive on purpose.
+fn is_assignment(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        }
+        None => false,
+    }
+}
+
 /// A stack by name, for reading a hook filename back into the marker it
 /// implies. The launcher needs this to notice a hook whose stack has gone.
 pub fn known(name: &str) -> Option<Stack> {
@@ -149,6 +180,44 @@ mod tests {
             std::fs::write(p, body).unwrap();
         }
         (dir, root)
+    }
+
+    // ── the program a command needs ──────────────────────────────────────────
+
+    /// The generic kernel. omh is not a rust tool that also knows npm: it takes
+    /// a command string it was given and reports which executable has to exist
+    /// for that string to run. Every stack in `KNOWN` goes through here, and so
+    /// does a command somebody wrote by hand.
+    #[test]
+    fn the_program_a_command_needs_is_the_word_that_runs() {
+        for (command, want) in [
+            ("cargo test", "cargo"),
+            ("npm run format", "npm"),
+            ("pytest", "pytest"),
+            ("ruff format .", "ruff"),
+            ("go test ./...", "go"),
+            ("gofmt -w .", "gofmt"),
+        ] {
+            assert_eq!(program(command), Some(want), "for {command:?}");
+        }
+    }
+
+    /// The asymmetry that governs this whole feature. Failing to spot a
+    /// missing program costs one confusing hook error — the status quo. Naming
+    /// a program missing when it is not is worse: omh drops a hook that works,
+    /// or interrogates somebody about a toolchain they already have. So when a
+    /// command is not something we can read with confidence the answer is
+    /// `None` — *cannot tell* — and no caller is entitled to act on it.
+    #[test]
+    fn a_command_we_cannot_read_names_no_program_rather_than_a_wrong_one() {
+        assert_eq!(program(""), None, "an empty command runs nothing");
+        assert_eq!(program("   "), None, "and neither does whitespace");
+        // A leading environment assignment is an ordinary shape for a test
+        // command, and it names no executable. Reporting `RUST_LOG=debug`
+        // missing would be a gap omh invented.
+        assert_eq!(program("RUST_LOG=debug cargo test"), Some("cargo"));
+        assert_eq!(program("FOO=1 BAR=2 pytest"), Some("pytest"));
+        assert_eq!(program("FOO=1"), None, "assignments alone run nothing");
     }
 
     // ── stacks ──────────────────────────────────────────────────────────────

@@ -198,6 +198,28 @@ pub fn build_args(tag: &str, context: &Path) -> Vec<String> {
     ]
 }
 
+/// Arguments that run a short diagnostic script inside the image, and nothing
+/// else.
+///
+/// Deliberately mountless. `omh doctor` builds a full `container::plan` because
+/// it is checking mounted files; this probe asks only *what does this image
+/// have on PATH*, and every mount it does not take is a way it cannot end up
+/// answering about the host instead. That confusion — host evidence standing in
+/// for a fact about the sandbox — is what the probe exists to end, so it must
+/// not be reachable from inside the probe itself.
+///
+/// No `-w` either: the answer must not depend on where the script starts.
+pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
+    vec![
+        "run".into(),
+        "--rm".into(),
+        tag.into(),
+        "sh".into(),
+        "-c".into(),
+        script.into(),
+    ]
+}
+
 /// Build the base and the harness layer if they are missing. Progress goes
 /// straight to the terminal: a multi-minute silent step reads as a hang.
 pub fn ensure(program: &str, adapter: &Adapter) -> Result<()> {
@@ -456,7 +478,13 @@ mod tests {
     /// that the value never moves. `DefaultHasher` would pass every test here
     /// and change under a toolchain upgrade, marking every image-pinned note in
     /// every repo stale on the same day.
+    ///
+    /// `#[ignore]`d because it shells out to git, which does not work inside an
+    /// omh sandbox: the worktree's `.git` is a pointer at an admin directory
+    /// omh does not mount, so git fails where finding no repository at all
+    /// would have succeeded. Runs on the host and in CI.
     #[test]
+    #[ignore]
     fn an_image_recipe_digest_is_stable_across_toolchains() {
         assert_eq!(
             recipe_digest("hello\n").unwrap(),
@@ -692,6 +720,41 @@ mod tests {
                 .unwrap_or("");
             assert_eq!(last_user.trim(), "USER agent", "ended privileged:\n{df}");
         }
+    }
+
+    /// The probe exists to answer a question about the *sandbox*, so it must be
+    /// unable to see anything else. One bind mount of a host directory and
+    /// `command -v cargo` starts answering about the developer's laptop — which
+    /// is the exact confusion this whole feature was built to end, reintroduced
+    /// one layer down where nothing would notice.
+    ///
+    /// Asserted as an invariant — *no mount of any spelling* — rather than
+    /// against a fixed argument list, so a future flag cannot slip a mount in
+    /// beside an assertion that still passes.
+    #[test]
+    fn the_toolchain_probe_can_see_nothing_but_the_image() {
+        let args = probe_args("omh/x:latest", "#!/bin/sh\ntrue\n");
+        for flag in ["-v", "--volume", "--mount", "--volumes-from"] {
+            assert!(
+                !args
+                    .iter()
+                    .any(|a| a == flag || a.starts_with(&format!("{flag}="))),
+                "the probe would answer about the host, not the sandbox: {args:?}"
+            );
+        }
+        assert!(
+            args.contains(&"--rm".into()),
+            "a diagnostic must leave no container behind: {args:?}"
+        );
+        assert!(
+            args.contains(&"omh/x:latest".into()),
+            "and it runs in the image the session will use: {args:?}"
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("#!/bin/sh\ntrue\n"),
+            "the script is what runs, whole and unedited: {args:?}"
+        );
     }
 
     #[test]

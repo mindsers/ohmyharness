@@ -318,6 +318,50 @@ fn server_names(sources: &[PathBuf], repo: &crate::settings::RepoPolicy) -> Vec<
 
 /// Shell run inside the sandbox. Emits one `ok|fail<TAB>name<TAB>detail` line
 /// per check.
+/// A probe that reports, for each program, whether it resolves where the script
+/// runs.
+///
+/// A second builder rather than a fifth `Expect`: a `Check` is path-shaped —
+/// `guest` is documented as a path inside the sandbox — and a toolchain has no
+/// path, only a name. Widening `Check` to carry either would touch every check
+/// that already works, to express a subject the existing ones never have.
+///
+/// What is shared is the thing that matters: the wire protocol. These lines go
+/// through the same [`parse`] as every other probe, so there is one format and
+/// one reader, and `doctor` can concatenate this script with its own.
+///
+/// `command -v` rather than `which`: it is POSIX, it is a shell builtin so it
+/// needs nothing installed to answer, and it resolves builtins and functions
+/// as well as files on PATH. `which` is not in POSIX and is absent from some
+/// minimal images — a probe that needs a package installed to report a missing
+/// package is a probe that reports on itself.
+///
+/// **This must run where the hook will run.** Whether `cargo` resolves is a
+/// fact about one machine, and the machine that matters is the sandbox — not
+/// the host, and not a login shell whose profile has added to PATH.
+pub fn probe_programs(programs: &[&str]) -> String {
+    let mut out = String::from("#!/bin/sh\n");
+    for p in programs {
+        let q = single_quote(p);
+        out.push_str(&format!(
+            "if command -v {q} >/dev/null 2>&1; then printf 'ok\\t%s\\tresolves\\n' {q}; \
+             else printf 'fail\\t%s\\tnot installed in the sandbox\\n' {q}; fi\n"
+        ));
+    }
+    out
+}
+
+/// Wrap a word so the shell reads it as one literal, whatever is in it.
+///
+/// Program names reach here from commands a person wrote, so they are not
+/// omh's to trust: a stray quote would otherwise end the literal early and the
+/// rest of the name would be read as shell. Single quotes suspend every
+/// expansion, and the one character they cannot contain is closed, escaped and
+/// reopened — the standard `'\''` idiom.
+fn single_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
 pub fn probe_script(checks: &[Check]) -> String {
     let mut out = String::from("#!/bin/sh\n");
     for check in checks {
@@ -739,6 +783,78 @@ mod tests {
                 c.guest
             );
         }
+    }
+
+    // ── the toolchain probe ─────────────────────────────────────────────────
+
+    /// Run a generated probe through a real `/bin/sh` and hand back its stdout.
+    ///
+    /// The existing probes are asserted by searching their source text for a
+    /// substring, which cannot distinguish a script that works from one that
+    /// merely mentions the right word. This one is POSIX `sh` and needs no
+    /// container, so it can be *run* — and a probe is a program, so running it
+    /// is the only assertion that means anything.
+    fn run_probe(script: &str) -> String {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("a probe must be a script /bin/sh can run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// End to end: build the probe, run it, parse it back through the shared
+    /// protocol. `sh` is present in every environment omh could possibly run
+    /// in, and a name of that shape is present in none — so the two directions
+    /// are both asserted without depending on what this machine happens to have
+    /// installed.
+    #[test]
+    fn the_probe_answers_for_every_program_it_was_given() {
+        let outcomes = parse(&run_probe(&probe_programs(&[
+            "sh",
+            "omh-no-such-program-b7f3",
+        ])));
+
+        let by = |name: &str| {
+            outcomes
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap_or_else(|| panic!("the probe said nothing about {name}: {outcomes:?}"))
+        };
+        assert!(by("sh").ok, "sh resolves everywhere: {outcomes:?}");
+        assert!(
+            !by("omh-no-such-program-b7f3").ok,
+            "and this resolves nowhere: {outcomes:?}"
+        );
+    }
+
+    /// Program names are read out of commands a person wrote, so they are not
+    /// omh's to trust. Interpolated bare, a name carrying a quote ends the
+    /// shell literal early and everything after it is read as shell — which
+    /// would both run it and destroy the probe's answers for every *other*
+    /// program in the same script.
+    #[test]
+    fn a_program_name_with_a_quote_cannot_corrupt_the_probe() {
+        let hostile = "x'; echo pwned; :'";
+        let out = run_probe(&probe_programs(&[hostile, "sh"]));
+
+        // Line-wise, not `contains`: the marker is *inside the name*, so the
+        // report echoes it back as data on every run. Only execution can put
+        // it on a line of its own, and an assertion that cannot tell those
+        // apart fails against correct code — as this one first did.
+        assert!(
+            !out.lines().any(|l| l.trim() == "pwned"),
+            "the probe ran shell out of a program name: {out}"
+        );
+        let outcomes = parse(&out);
+        assert!(
+            outcomes.iter().any(|o| o.name == "sh" && o.ok),
+            "one hostile name must not cost the answers for the rest: {outcomes:?}"
+        );
+        assert!(
+            outcomes.iter().any(|o| o.name == hostile && !o.ok),
+            "and it is reported, not silently dropped: {outcomes:?}"
+        );
     }
 
     #[test]
