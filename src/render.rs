@@ -86,15 +86,27 @@ pub fn document(
             }
             Ok(mcp(binding.render, &servers)?.into())
         }
+        // Both hook renders suppress before translating, and neither may skip
+        // it: a rule applied on one harness and not the other is not a rule
+        // about this repo, it is a rule about which harness you happened to
+        // launch.
         Render::ClaudeSettings => {
-            let (rendered, dropped) = translate(&merge_hooks(sources, own, repo)?, binding, tools)?;
+            let mut hooks = merge_hooks(sources, own, repo)?;
+            let mut dropped = suppressed_by_toolchain(&mut hooks, &repo.toolchain);
+            let (rendered, unspellable) = translate(&hooks, binding, tools)?;
+            dropped.extend(unspellable);
             Ok(Document {
                 body: claude_settings(&rendered)?,
                 dropped,
             })
         }
         Render::OpencodePlugin => {
-            opencode_plugin(&merge_hooks(sources, own, repo)?, binding, tools)
+            let mut hooks = merge_hooks(sources, own, repo)?;
+            let mut dropped = suppressed_by_toolchain(&mut hooks, &repo.toolchain);
+            let mut doc = opencode_plugin(&hooks, binding, tools)?;
+            dropped.extend(std::mem::take(&mut doc.dropped));
+            doc.dropped = dropped;
+            Ok(doc)
         }
         Render::Dir | Render::Concat => {
             anyhow::bail!(
@@ -252,6 +264,49 @@ pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
 }
 
 // ── Hooks ───────────────────────────────────────────────────────────────────
+
+/// Remove the hooks this machine has been told it cannot run, and name them.
+///
+/// The division of labour behind `[toolchain]`. `.omh/hooks/` is the repo's
+/// statement about itself — committed, shared, the same for everybody who
+/// clones. Whether `cargo` is installed is a fact about one computer. So a
+/// missing toolchain never edits the repo; it stops a hook firing *here*, from
+/// a setting that layers like every other, and `settings.local.toml` is how one
+/// machine disagrees without telling the team anything.
+///
+/// Reported as [`hook::Dropped`], the same channel a hook a harness cannot
+/// spell already uses, so an absence is never silent — the failure this whole
+/// feature replaces was a hook that ran and said `cargo: not found`, and a hook
+/// that vanishes without a word is not obviously an improvement on it.
+///
+/// Keyed on the command, never on the stack that produced it: a hook somebody
+/// wrote by hand obeys the same answer, which is what makes this a rule about
+/// programs rather than a rule about the four stacks omh happens to detect.
+fn suppressed_by_toolchain(
+    hooks: &mut BTreeMap<String, hook::Hook>,
+    decided: &BTreeMap<String, crate::settings::Toolchain>,
+) -> Vec<hook::Dropped> {
+    let mut dropped = Vec::new();
+    hooks.retain(|name, hook| {
+        // `detect::program` answers `None` for a command it could not read, and
+        // that is *cannot tell* — never a licence to switch a hook off.
+        let blocked = hook.runs().into_iter().find_map(|cmd| {
+            let p = crate::detect::program(cmd)?;
+            (decided.get(p) == Some(&crate::settings::Toolchain::Skip)).then(|| p.to_string())
+        });
+        match blocked {
+            Some(program) => {
+                dropped.push(hook::Dropped {
+                    name: name.clone(),
+                    wanted: format!("`{program}` here — [toolchain] in this repo's settings"),
+                });
+                false
+            }
+            None => true,
+        }
+    });
+    dropped
+}
 
 /// Every hook, translated into this harness's words. A hook it cannot spell is
 /// dropped by name rather than taking the capability with it.
@@ -729,7 +784,112 @@ fn toml_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::io::Write;
+
+    // ── toolchain suppression ───────────────────────────────────────────────
+
+    fn hooks_named(pairs: &[(&str, &str)]) -> BTreeMap<String, hook::Hook> {
+        pairs
+            .iter()
+            .map(|(name, body)| {
+                (
+                    name.to_string(),
+                    hook::Hook::parse(body, name).expect("fixture must be a valid hook"),
+                )
+            })
+            .collect()
+    }
+
+    /// A repo states what its hooks are; a machine states what it can run. The
+    /// hook file is committed and travels, so a toolchain missing *here* must
+    /// never remove it from the repo — it stops the hook firing on this machine,
+    /// and is reported by name so the absence is never silent.
+    #[test]
+    fn a_hook_needing_a_program_this_machine_lacks_is_dropped_by_name() {
+        let mut hooks = hooks_named(&[
+            ("rust-test", r#"{"on":"turn-end","run":"cargo test"}"#),
+            ("greet", r#"{"on":"turn-end","run":"echo hi"}"#),
+        ]);
+        let decided = BTreeMap::from([("cargo".to_string(), crate::settings::Toolchain::Skip)]);
+        let dropped = suppressed_by_toolchain(&mut hooks, &decided);
+
+        assert_eq!(dropped.len(), 1, "one hook is held back: {dropped:?}");
+        assert_eq!(dropped[0].name, "rust-test");
+        assert!(
+            dropped[0].wanted.contains("cargo"),
+            "and it names the program: {:?}",
+            dropped[0]
+        );
+        assert!(
+            !hooks.contains_key("rust-test"),
+            "a suppressed hook must not reach the harness"
+        );
+        assert!(
+            hooks.contains_key("greet"),
+            "and nothing else is disturbed: {:?}",
+            hooks.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// `assume` answers *the sandbox will have this by launch*, so it must not
+    /// suppress anything — only `skip` does. Collapsing the two would make the
+    /// one answer that keeps a hook working behave like the one that turns it
+    /// off.
+    #[test]
+    fn only_skip_suppresses_and_an_unmentioned_program_never_does() {
+        let assumed = BTreeMap::from([("cargo".to_string(), crate::settings::Toolchain::Assume)]);
+        let mut hooks = hooks_named(&[("rust-test", r#"{"on":"turn-end","run":"cargo test"}"#)]);
+        assert!(
+            suppressed_by_toolchain(&mut hooks, &assumed).is_empty(),
+            "assume is not skip"
+        );
+        assert!(hooks.contains_key("rust-test"));
+
+        // And a program nobody has said anything about is simply run.
+        let mut hooks = hooks_named(&[("rust-test", r#"{"on":"turn-end","run":"cargo test"}"#)]);
+        assert!(
+            suppressed_by_toolchain(&mut hooks, &BTreeMap::new()).is_empty(),
+            "silence is not a decision to suppress"
+        );
+        assert!(hooks.contains_key("rust-test"));
+    }
+
+    /// Suppression follows the *command*, not the stack that produced it, so a
+    /// hook somebody wrote by hand is covered by the same answer. That is what
+    /// makes this general rather than a rule about the four stacks omh detects.
+    #[test]
+    fn a_hand_written_hook_obeys_the_same_answer() {
+        let mut hooks = hooks_named(&[
+            (
+                "mine",
+                r#"{"on":"after-tool","tools":["edit"],"run":"cargo clippy"}"#,
+            ),
+            // An injected capture shells out too, so it is judged the same way.
+            (
+                "ask",
+                r#"{"on":"turn-end","capture":"cargo metadata","inject":"$OMH_CAPTURE"}"#,
+            ),
+            // A refusal runs nothing at all and can never need a toolchain.
+            (
+                "refuse",
+                r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+            ),
+        ]);
+        let decided = BTreeMap::from([("cargo".to_string(), crate::settings::Toolchain::Skip)]);
+        let dropped = suppressed_by_toolchain(&mut hooks, &decided);
+
+        let names: BTreeSet<&str> = dropped.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            names,
+            BTreeSet::from(["mine", "ask"]),
+            "both shell out to cargo: {dropped:?}"
+        );
+        assert!(
+            hooks.contains_key("refuse"),
+            "a refusal runs nothing and cannot be blocked by a missing program"
+        );
+    }
 
     fn file(dir: &Path, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);

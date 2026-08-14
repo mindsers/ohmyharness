@@ -62,13 +62,17 @@ struct File {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Toolchain {
-    /// Write no hook whose command needs this program, and stop asking.
+    /// Do not run hooks whose command needs this program here, and stop asking.
     ///
-    /// The honest answer when the sandbox will not have the tool: a hook that
+    /// The honest answer when this sandbox will not have the tool: a hook that
     /// cannot run is not a safety net, it is a red mark at the end of every
     /// turn that everyone learns to scroll past.
+    ///
+    /// It suppresses a hook; it never deletes one. The file is the repo's
+    /// statement about itself and is committed, so the answer belongs in
+    /// `settings.local.toml` when only this machine lacks the tool.
     Skip,
-    /// Write the hook anyway.
+    /// Run the hook anyway.
     ///
     /// For a sandbox that gains the tool after `init` has looked — a base image
     /// the user maintains, something installed at launch. The probe is evidence

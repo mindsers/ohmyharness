@@ -2606,11 +2606,17 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // when it does the thing you want is a file you can open, in the repo where
     // the change belongs, reviewed with the commit that made it.
     //
-    // Written *after* the image exists, and only for commands that can run
-    // inside it. Detection happens here, on the host; the hook runs in the
-    // sandbox. Those are different machines, and a hook seeded because the host
-    // had a toolchain is a hook that fails on turn one — which is what shipped,
-    // and what `write_if_absent` then made permanent.
+    // Every detected stack gets its two, unconditionally. What the sandbox can
+    // run decides whether they *fire* — a setting, applied at render — never
+    // whether the file exists. `init` sets a preference; it does not decide a
+    // repo's contents on the strength of one machine's image.
+    for stack in &stacks {
+        for hook in stack_hooks(stack) {
+            write_if_absent(&repo_omh.join("hooks").join(hook.name), &hook.body)?;
+        }
+    }
+
+    // Then ask what this machine should do about the ones it cannot run.
     let mut gaps: Vec<Gap> = Vec::new();
     let mut declined: Vec<Gap> = Vec::new();
     let mut asked = 0usize;
@@ -2653,21 +2659,11 @@ fn init(cwd: &std::path::Path) -> Result<()> {
                 triage = triage_for(&stacks, &probe, &decided);
             }
         }
-        for hook in &triage.write {
-            write_if_absent(&repo_omh.join("hooks").join(&hook.name), &hook.body)?;
-        }
         gaps = triage.gaps;
         declined = triage.declined;
-    } else {
-        // No harness is no image, and no image is no sandbox to ask. Write what
-        // detection found, exactly as before: a question that cannot be put is
-        // not a reason to withhold a hook.
-        for stack in &stacks {
-            for hook in stack_hooks(stack) {
-                write_if_absent(&repo_omh.join("hooks").join(hook.name), &hook.body)?;
-            }
-        }
     }
+    // No harness is no image, and no image is no sandbox to ask about. The
+    // hooks are already written either way.
     // The selection, written out with every catalogue entry named — after the
     // stack hooks, so this repo's own two are in the list it writes.
     //
@@ -2734,7 +2730,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // which says nothing about who decided to run cargo or where it looked.
     for g in &gaps {
         println!(
-            "  gap        {} needs `{}`, absent from the sandbox → no hook for `{}`",
+            "  gap        {} needs `{}`, absent from this sandbox → `{}` will not run here",
             g.stack, g.program, g.command
         );
     }
@@ -2744,8 +2740,8 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // printed every run, with the one line that undoes it.
     for g in &declined {
         println!(
-            "  skipped    {} needs `{}` — you chose skip; no hook for `{}`\n             \
-             drop `{}` from [toolchain] in .omh/settings.toml to be asked again",
+            "  skipped    {} needs `{}` — you chose skip, so `{}` stays off here\n             \
+             the hook file is written; drop `{}` from [toolchain] to switch it on",
             g.stack, g.program, g.command, g.program
         );
     }
@@ -2906,16 +2902,6 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// The hooks a detected stack gets: run the tests at turn end, format on edit.
-///
-/// Files rather than prose. A sentence in the rules describing `cargo test` is
-/// a sentence; a hook is the thing that runs it — and once written it is the
-/// repo's, editable and committed, so a teammate cloning gets the project's
-/// test command with the project.
-///
-/// Extracted from `init` so the commands can be asserted without a container.
-/// The guard that used to cover them read the generated `AGENTS.md`, which no
-/// longer exists.
 /// One hook a detected stack earns: the file, its body, and the command inside
 /// it.
 ///
@@ -2943,11 +2929,13 @@ struct Gap {
     program: &'static str,
 }
 
-/// What `init` should do with a repo's detected stacks: the hooks it may write,
-/// and the gaps it has to raise.
+/// What `init` found missing, split by whether anybody has answered for it yet.
+///
+/// No list of hooks to write, deliberately. `init` writes them all: the file is
+/// the repo's statement about itself and it is committed, so a toolchain absent
+/// from one machine must not decide whether it exists.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Triage {
-    write: Vec<StackHook>,
     /// Gaps nobody has answered yet — the only ones `init` may ask about.
     gaps: Vec<Gap>,
     /// Gaps already answered `skip`. Kept rather than dropped: a hook that is
@@ -2957,18 +2945,6 @@ struct Triage {
     declined: Vec<Gap>,
 }
 
-/// Split a repo's stack hooks into the ones that can run in the sandbox and the
-/// ones that cannot.
-///
-/// Pure, with the sandbox injected as a predicate — the same shape as
-/// `detect::preferred_harness` and for the same reason it gives: *"the harness
-/// itself runs in the sandbox"*. Whether `cargo` exists is a fact about a
-/// machine, and the machine that matters is not the one running `init`. Folding
-/// the lookup in here would make the decision untestable and would tempt a
-/// caller into answering from the host, which is the bug this fixes.
-///
-/// Availability is judged per *command*, never per stack: `go test ./...` needs
-/// `go` and `gofmt -w .` needs `gofmt`, so one stack can be half-served.
 /// How a toolchain answer is spelled in `settings.toml`. One source, so the
 /// value written and the value `settings::Toolchain` reads back cannot drift.
 fn toolchain_word(t: settings::Toolchain) -> &'static str {
@@ -3014,9 +2990,11 @@ fn with_toolchain_answers(
     }
     out.push_str(
         "\n# Programs omh could not find in this repo's sandbox, and what you\n\
-         # said about each. Delete a line to be asked again on the next `omh init`.\n\
-         #   skip    write no hook whose command needs it\n\
-         #   assume  write the hook anyway; the sandbox will have it by launch\n\
+         # said about each. The hook files are written either way — this decides\n\
+         # whether they run here. Delete a line to be asked again by `omh init`.\n\
+         #   skip    do not run hooks whose command needs it\n\
+         #   assume  run them; the sandbox will have it by launch\n\
+         # Put a machine-only answer in settings.local.toml instead.\n\
          [toolchain]\n",
     );
     for line in &lines {
@@ -3157,20 +3135,17 @@ fn probe_sandbox(
     }
 }
 
-/// The triage `init` should act on, given whatever the sandbox probe managed to
-/// say.
+/// What `init` should raise, given whatever the sandbox probe managed to say.
 ///
 /// The fallback is the whole point of the function. An empty report means the
 /// probe never ran — the container failed, the image was missing, the runtime
 /// hiccuped — and that is indistinguishable from a sandbox with nothing
 /// installed if you only look at the outcomes. Treating it as the latter would
-/// withhold every hook in the repo and produce a page of questions about
-/// toolchains the user has.
+/// produce a page of questions about toolchains the user has.
 ///
-/// Silence is therefore *cannot tell*, and `init` falls back to what it did
-/// before this check existed: write the hooks. The same asymmetry `detect::
-/// program` documents — a missed gap costs one confusing hook error, an
-/// invented one costs trust in every answer omh gives.
+/// Silence is therefore *cannot tell*, and `init` asks nothing. The same
+/// asymmetry `detect::program` documents — a missed gap costs one confusing
+/// hook error, an invented one costs trust in every answer omh gives.
 fn triage_for(
     stacks: &[detect::Stack],
     probe: &[doctor::Outcome],
@@ -3181,14 +3156,17 @@ fn triage_for(
     let assumed = |p: &str| decided.get(p) == Some(&settings::Toolchain::Assume);
 
     let mut triage = if probe.is_empty() {
-        triage_stack_hooks(stacks, &|_| true)
+        Triage::default()
     } else {
         let resolved: std::collections::BTreeSet<&str> = probe
             .iter()
             .filter(|o| o.ok)
             .map(|o| o.name.as_str())
             .collect();
-        triage_stack_hooks(stacks, &|p| resolved.contains(p) || assumed(p))
+        Triage {
+            gaps: missing_programs(stacks, &|p| resolved.contains(p) || assumed(p)),
+            declined: Vec::new(),
+        }
     };
 
     // A question with an answer on file is not a question. Moved rather than
@@ -3202,26 +3180,56 @@ fn triage_for(
     triage
 }
 
-fn triage_stack_hooks(stacks: &[detect::Stack], available: &dyn Fn(&str) -> bool) -> Triage {
-    let mut out = Triage::default();
+/// Which of a repo's stack commands name a program the sandbox does not have.
+///
+/// Pure, with the sandbox injected as a predicate — the same shape as
+/// `detect::preferred_harness` and for the same reason it gives: *"the harness
+/// itself runs in the sandbox"*. Whether `cargo` exists is a fact about a
+/// machine, and the machine that matters is not the one running `init`. Folding
+/// the lookup in here would make the answer untestable and would tempt a caller
+/// into answering from the host, which is the confusion this exists to end.
+///
+/// Judged per *command*, never per stack: `go test ./...` needs `go` and
+/// `gofmt -w .` needs `gofmt`, so one stack can be half-served.
+fn missing_programs(stacks: &[detect::Stack], available: &dyn Fn(&str) -> bool) -> Vec<Gap> {
+    let mut gaps = Vec::new();
     for stack in stacks {
         for hook in stack_hooks(stack) {
             // `None` is *cannot tell*. Only a program omh positively read and
-            // positively failed to find is a gap; everything else is written,
-            // leaving the repo exactly as it was before this check existed.
-            match detect::program(hook.command) {
-                Some(p) if !available(p) => out.gaps.push(Gap {
-                    stack: stack.name,
-                    command: hook.command,
-                    program: p,
-                }),
-                _ => out.write.push(hook),
+            // positively failed to find is a gap; everything else is silence,
+            // and silence raises nothing.
+            if let Some(p) = detect::program(hook.command) {
+                if !available(p) {
+                    gaps.push(Gap {
+                        stack: stack.name,
+                        command: hook.command,
+                        program: p,
+                    });
+                }
             }
         }
     }
-    out
+    gaps
 }
 
+/// The hooks a detected stack gets: run the tests at turn end, format on edit.
+///
+/// Files rather than prose. A sentence in the rules describing `cargo test` is
+/// a sentence; a hook is the thing that runs it — and once written it is the
+/// repo's, editable and committed, so a teammate cloning gets the project's
+/// test command with the project.
+///
+/// Written for every detected stack, whatever the sandbox on *this* machine
+/// happens to hold. The file is committed and travels; whether `cargo` is
+/// installed is a fact about one computer, and letting it decide whether the
+/// file exists at all would let whoever ran `init` first impose their laptop on
+/// everybody who clones afterwards — permanently, because `write_if_absent`
+/// never revisits. What a missing toolchain governs is whether the hook *runs*
+/// here, which is `[toolchain]` in settings and is applied at render.
+///
+/// Extracted from `init` so the commands can be asserted without a container.
+/// The guard that used to cover them read the generated `AGENTS.md`, which no
+/// longer exists.
 fn stack_hooks(stack: &detect::Stack) -> [StackHook; 2] {
     // Names from `notice::stack_hook_names`, never spelled again here: the
     // launcher compares what detection expects against what the directory
@@ -3630,77 +3638,61 @@ mod tests {
         );
     }
 
-    /// The invariant this whole feature exists for: `init` may write a stack
-    /// hook only when the command in it can actually run where it will run.
-    /// Detection happens on the host and the hook runs in the sandbox, so a
-    /// hook written on the strength of the host having a toolchain is a hook
-    /// that fails on turn one — which is exactly what shipped.
+    /// A missing toolchain reports a gap and nothing more. It must not reach
+    /// back into what `init` writes: `.omh/hooks/` is committed and travels, so
+    /// deciding a file's existence from one machine's image lets whoever ran
+    /// `init` first impose their laptop on everyone who clones after —
+    /// permanently, because `write_if_absent` never revisits.
     ///
     /// Asserted over `detect::KNOWN` rather than this repo's own stack: a
     /// rust-shaped implementation would pass a rust-only guard.
     #[test]
-    fn a_stack_hook_is_written_only_when_its_command_can_run_in_the_sandbox() {
+    fn what_the_sandbox_lacks_is_reported_and_never_subtracted_from_the_repo() {
         let all = detect::KNOWN.to_vec();
-
-        // A sandbox holding none of the toolchains. Nothing may be written,
-        // and every hook omh withheld has to be accounted for as a gap —
-        // silently dropping them would be a different bug wearing this fix.
-        let bare = triage_stack_hooks(&all, &|_| false);
-        assert!(
-            bare.write.is_empty(),
-            "nothing runs here, so nothing may be seeded: {:?}",
-            bare.write.iter().map(|h| &h.name).collect::<Vec<_>>()
-        );
-        assert_eq!(
-            bare.gaps.len(),
-            all.len() * 2,
-            "every withheld hook must be reported, not merely skipped"
-        );
-
-        // A sandbox holding everything. No gap to raise, and the hooks are
-        // exactly what `stack_hooks` would have written unconditionally.
-        let stocked = triage_stack_hooks(&all, &|_| true);
-        assert!(stocked.gaps.is_empty(), "nothing is missing: {:?}", {
-            stocked.gaps.iter().map(|g| &g.program).collect::<Vec<_>>()
-        });
         let unconditional: Vec<_> = all.iter().flat_map(stack_hooks).collect();
+
+        // A sandbox holding none of the toolchains. Every command is a gap, and
+        // the hooks the repo gets are exactly the ones it would have got with
+        // no probe at all.
+        let bare = missing_programs(&all, &|_| false);
         assert_eq!(
-            stocked.write, unconditional,
-            "a stocked sandbox must lose nothing to the check"
+            bare.len(),
+            all.len() * 2,
+            "every unrunnable command must be reported, not silently dropped"
+        );
+        assert_eq!(
+            all.iter().flat_map(stack_hooks).collect::<Vec<_>>(),
+            unconditional,
+            "and what init writes is not a function of the probe at all"
+        );
+
+        // A sandbox holding everything: nothing to raise.
+        assert!(
+            missing_programs(&all, &|_| true).is_empty(),
+            "nothing is missing here"
         );
     }
 
     /// `go test ./...` needs `go`; `gofmt -w .` needs `gofmt`. One stack, two
     /// programs — so availability is a fact about a *command*, never about a
-    /// stack. A per-stack check writes both hooks or neither, and both answers
-    /// are wrong when only one of the two tools is installed.
+    /// stack. A per-stack check reports both or neither, and both answers are
+    /// wrong when only one of the two tools is installed.
     #[test]
     fn one_stack_can_need_two_programs_and_each_is_judged_alone() {
         let go = [detect::known("go").expect("go is a known stack")];
-        let t = triage_stack_hooks(&go, &|p| p == "go");
+        let gaps = missing_programs(&go, &|p| p == "go");
 
-        assert_eq!(
-            t.write.len(),
-            1,
-            "the test hook runs and must survive: {:?}",
-            t.write.iter().map(|h| &h.name).collect::<Vec<_>>()
-        );
-        assert!(
-            t.write[0].name.ends_with("-test.json"),
-            "and it is the one whose program is present: {}",
-            t.write[0].name
-        );
-        assert_eq!(t.gaps.len(), 1, "one hook is held back");
-        assert_eq!(t.gaps[0].program, "gofmt", "and it names what is missing");
+        assert_eq!(gaps.len(), 1, "only gofmt is missing: {gaps:?}");
+        assert_eq!(gaps[0].program, "gofmt", "and it names which: {gaps:?}");
+        assert_eq!(gaps[0].command, "gofmt -w .");
     }
 
     /// When `detect::program` cannot read a command it says `None`, and `None`
-    /// is *cannot tell* rather than *needs nothing*. Withholding a hook on that
-    /// basis would invent a gap: omh would drop a working hook and question
-    /// somebody about a toolchain they have. So an unreadable command is
-    /// written unchanged, exactly as it was before this check existed.
+    /// is *cannot tell* rather than *needs nothing*. Raising a gap on that
+    /// basis would question somebody about a toolchain they have, over a
+    /// command omh never managed to read.
     #[test]
-    fn a_command_omh_cannot_read_is_written_rather_than_withheld() {
+    fn a_command_omh_cannot_read_raises_no_gap() {
         let odd = detect::Stack {
             name: "odd",
             marker: "odd.toml",
@@ -3708,37 +3700,30 @@ mod tests {
             test: "FOO=1",
             format: "FOO=1",
         };
-        // A sandbox with nothing at all: the only thing that could withhold
-        // these hooks is the check itself.
-        let t = triage_stack_hooks(&[odd], &|_| false);
-        assert_eq!(t.write.len(), 2, "an unreadable command is not a gap");
+        // A sandbox with nothing at all: the only thing that could raise a gap
+        // here is the check itself.
         assert!(
-            t.gaps.is_empty(),
-            "and omh must not invent one: {:?}",
-            t.gaps
+            missing_programs(&[odd], &|_| false).is_empty(),
+            "omh must not invent a gap out of a command it could not read"
         );
     }
 
     /// A probe that reported nothing means the container never ran it — the
     /// failure `doctor::no_output_is_never_a_pass` already guards for the main
-    /// probe. Read as *no program is installed*, it would make `init` withhold
-    /// every hook in the repo and interrogate somebody about four toolchains
-    /// they have, because a runtime hiccup looks identical to an empty sandbox.
-    ///
-    /// So silence is *cannot tell*, and `init` behaves exactly as it did before
-    /// this check existed.
+    /// probe. Read as *no program is installed*, it would interrogate somebody
+    /// about four toolchains they have, because a runtime hiccup looks
+    /// identical to an empty sandbox.
     #[test]
-    fn a_probe_that_did_not_run_withholds_nothing() {
+    fn a_probe_that_did_not_run_asks_nothing() {
         let all = detect::KNOWN.to_vec();
         let t = triage_for(&all, &[], &BTreeMap::new());
 
-        assert_eq!(
-            t.write.len(),
-            all.len() * 2,
-            "an unanswered probe must cost no hooks: {:?}",
-            t.write.iter().map(|h| &h.name).collect::<Vec<_>>()
+        assert!(
+            t.gaps.is_empty(),
+            "silence raises no question: {:?}",
+            t.gaps
         );
-        assert!(t.gaps.is_empty(), "and raise no question: {:?}", t.gaps);
+        assert!(t.declined.is_empty(), "and settles none: {:?}", t.declined);
     }
 
     /// The wiring, through the real parser rather than a hand-built `Outcome`:
@@ -3750,9 +3735,7 @@ mod tests {
         let probe = doctor::parse("ok\tgo\tresolves\nfail\tgofmt\tnot installed in the sandbox\n");
         let t = triage_for(&go, &probe, &BTreeMap::new());
 
-        assert_eq!(t.write.len(), 1, "go resolved, so its hook is written");
-        assert!(t.write[0].name.ends_with("-test.json"));
-        assert_eq!(t.gaps.len(), 1, "gofmt did not");
+        assert_eq!(t.gaps.len(), 1, "only gofmt is missing: {:?}", t.gaps);
         assert_eq!(t.gaps[0].program, "gofmt");
     }
 
@@ -3762,30 +3745,32 @@ mod tests {
     /// knows more about the next one than omh does. So a recorded `assume`
     /// beats the probe, rather than being overruled by it every run.
     #[test]
-    fn an_assumed_program_writes_the_hook_the_probe_withheld() {
+    fn an_assumed_program_is_not_raised_however_the_probe_answered() {
         let go = [detect::known("go").expect("go is a known stack")];
         let probe = doctor::parse("fail\tgo\tnot installed\nfail\tgofmt\tnot installed\n");
         let decided = BTreeMap::from([("gofmt".to_string(), settings::Toolchain::Assume)]);
 
         let t = triage_for(&go, &probe, &decided);
-        assert_eq!(t.write.len(), 1, "the assumed one is written");
-        assert!(t.write[0].name.ends_with("-format.json"));
-        assert_eq!(t.gaps.len(), 1, "and the undecided one is still a gap");
+        assert_eq!(t.gaps.len(), 1, "only the undecided one: {:?}", t.gaps);
         assert_eq!(t.gaps[0].program, "go");
+        assert!(
+            t.declined.is_empty(),
+            "assume is not a decline: {:?}",
+            t.declined
+        );
     }
 
     /// The point of writing the answer down. A question re-asked on every
     /// `init` is a wizard, which is the thing omh sells itself as not being —
-    /// so a recorded `skip` withholds the hook *silently*, and the gap moves
-    /// out of the list `init` would raise.
+    /// so a recorded `skip` moves out of the list `init` would ask about,
+    /// without being forgotten.
     #[test]
-    fn a_recorded_skip_withholds_the_hook_without_asking_again() {
+    fn a_recorded_skip_is_not_asked_again_but_is_still_accounted_for() {
         let go = [detect::known("go").expect("go is a known stack")];
         let probe = doctor::parse("ok\tgo\tresolves\nfail\tgofmt\tnot installed\n");
         let decided = BTreeMap::from([("gofmt".to_string(), settings::Toolchain::Skip)]);
 
         let t = triage_for(&go, &probe, &decided);
-        assert_eq!(t.write.len(), 1, "go still runs");
         assert!(
             t.gaps.is_empty(),
             "an answered question is not asked again: {:?}",

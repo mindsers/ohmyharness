@@ -998,6 +998,13 @@ fn writing_a_setting_keeps_what_you_wrote_around_it() {
 /// created; omh's own are not, because `[omh]` governs those and `[use]`
 /// refuses to name one.
 ///
+/// Both halves are asserted, because they are different claims. That the
+/// detected stack's hooks exist at all is unconditional — `[toolchain]` governs
+/// whether a hook *runs* here, never whether the repo has it, so this holds on
+/// an image with no rust in it. That the selection then names them is the
+/// invariant `contains("rust-test")` alone was standing in for, and it is
+/// checked against the directory rather than against two spellings.
+///
 /// `#[ignore]`d because `init` builds an image, so it needs a container runtime.
 /// CI's linux job runs `--include-ignored`, which is where this bites.
 #[test]
@@ -1012,9 +1019,33 @@ fn init_writes_the_selection_expanded() {
     let written = sb.settings();
     assert!(written.contains("[use]"), "got: {written}");
     assert!(written.contains("review-diff"), "your catalogue: {written}");
+
+    // Everything init wrote is named in the list init then wrote. A hook on
+    // disk and absent from `[use]` is a hook switched off by the same run that
+    // created it.
+    let hooks: Vec<String> = std::fs::read_dir(sb.repo.join(".omh/hooks"))
+        .expect("init creates the hooks directory")
+        .flatten()
+        .map(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .trim_end_matches(".json")
+                .to_string()
+        })
+        .collect();
+    for h in &hooks {
+        assert!(
+            written.contains(h.as_str()),
+            "init wrote {h} and then left it out of the selection: {written}"
+        );
+    }
+    // And not vacuously. The detected stack's hooks are written whatever this
+    // machine's image holds — the file is the repo's, and `[toolchain]` decides
+    // whether it *runs*, never whether it exists. An empty directory would
+    // satisfy the loop above while meaning init had stopped writing hooks.
     assert!(
-        written.contains("rust-test") && written.contains("rust-format"),
-        "and the hooks init just wrote for the detected stack: {written}"
+        hooks.iter().any(|h| h == "rust-test") && hooks.iter().any(|h| h == "rust-format"),
+        "the detected stack's hooks are unconditional: {hooks:?}"
     );
     assert!(
         !written.contains("codegraph") || !written.contains("mcp = [\"codegraph"),

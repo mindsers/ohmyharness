@@ -275,17 +275,27 @@ write one.
 `omh init` detects your stack from its manifest and writes a test and a format
 hook for it. Detection runs on your machine; the hook runs in the sandbox, and
 those are different computers. So after building the image, init asks it which
-of those commands can actually run there — and writes only the hooks that can.
+of those commands can actually run there.
 
-A command whose program is missing produces one question, and your answer is
-kept so it is asked once rather than every `init`:
+**The hook files are written either way.** `.omh/hooks/` is your repo's
+statement about itself — committed, and the same for everybody who clones it.
+Whether `cargo` is installed is a fact about one computer, and it must not
+decide what is in the repo: otherwise whoever ran `init` first imposes their
+machine on the whole team, permanently, since init never rewrites a hook that
+already exists.
+
+What a missing program decides is whether the hook **runs here**, and that is a
+setting:
 
 ```toml
 # <repo>/.omh/settings.toml
 [toolchain]
-cargo = "skip"     # write no hook whose command needs cargo
-gofmt = "assume"   # write it anyway; the sandbox will have gofmt by launch
+cargo = "skip"     # do not run hooks whose command needs cargo
+gofmt = "assume"   # run them; the sandbox will have gofmt by launch
 ```
+
+A suppressed hook is reported at launch by name, in the same list as a hook your
+harness cannot spell — it is never silently absent.
 
 `assume` is for a sandbox that gains the tool after init looked — a base image
 you maintain, something installed at launch. It beats the probe, because you
@@ -294,13 +304,14 @@ know more about the next image than a measurement of the last one does.
 Keyed by **program**, not by stack or by hook: a decision about `cargo` settles
 both of rust's hooks and any hand-written command needing it too. Delete a line
 to be asked again. These layer like every other setting, so a toolchain missing
-on one machine belongs in `settings.local.toml` rather than in the team's file.
+on *your* machine belongs in `settings.local.toml`, where it says nothing to
+anyone else.
 
 Two things init will not do. It will not ask when there is nothing missing —
 which is most repos, most of the time — and it will not ask when there is no
-terminal, so a CI runner gets the hooks it can run and no prompt. Nor does it
-install anything: it names the gap and what would have run, and the decision is
-yours.
+terminal, so a CI runner gets a full set of hook files and no prompt. Nor does
+it install anything: it names the gap and what would have run, and the decision
+is yours.
 
 ## Settings, and their three layers
 

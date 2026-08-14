@@ -341,6 +341,22 @@ impl Hook {
         }
     }
 
+    /// Every shell command this hook would execute.
+    ///
+    /// Not [`Self::does`], which answers "what is this hook *for*" and returns
+    /// injected prose for the variants that inject. This answers "what will be
+    /// handed to a shell", which is a different question and the only one worth
+    /// asking about a missing program: a `refuse` runs nothing and can never be
+    /// blocked by a toolchain, while an `inject`'s `capture` shells out exactly
+    /// as a `run` does and is just as unable to.
+    pub fn runs(&self) -> Vec<&str> {
+        match &self.action {
+            Action::Run(cmd) => vec![cmd.as_str()],
+            Action::Inject { capture, .. } => capture.as_deref().into_iter().collect(),
+            Action::Refuse { .. } => Vec::new(),
+        }
+    }
+
     /// The payload fields this hook actually reads, derived from the `$OMH_*`
     /// names its bodies mention.
     ///
