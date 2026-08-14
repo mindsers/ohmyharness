@@ -39,6 +39,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use profile::{Paths, Profile};
 use session::Session;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
 #[derive(Parser)]
@@ -2611,6 +2612,8 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // had a toolchain is a hook that fails on turn one — which is what shipped,
     // and what `write_if_absent` then made permanent.
     let mut gaps: Vec<Gap> = Vec::new();
+    let mut declined: Vec<Gap> = Vec::new();
+    let mut asked = 0usize;
     if let Some(h) = &harness {
         let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
@@ -2627,14 +2630,34 @@ fn init(cwd: &std::path::Path) -> Result<()> {
             image::ensure(backend.program(), &adapter)?;
             println!("\n  image      {}", image::tag_for(&adapter));
         }
-        let triage = triage_for(
-            &stacks,
-            &probe_sandbox(backend.program(), &adapter, &stacks),
-        );
+        // Answers already on file, so a question is asked once and not once per
+        // `init`. Read through `settings::resolve` rather than the repo's file
+        // alone: a toolchain missing on *this* machine is a `settings.local`
+        // decision, and the team's answer must not be the only one that counts.
+        let mut decided = settings::resolve(&paths, &manifest)
+            .map(|p| p.toolchain)
+            .unwrap_or_default();
+        // Probed once. The answers change what omh does with the result, never
+        // what the sandbox contains, so asking the container twice would cost a
+        // second run to be told the same thing.
+        let probe = probe_sandbox(backend.program(), &adapter, &stacks);
+        let mut triage = triage_for(&stacks, &probe, &decided);
+        // Ask, then act — so a hook somebody asks for is written on this run
+        // rather than on the next one.
+        if !triage.gaps.is_empty() {
+            let answers = ask_about_gaps(&triage.gaps)?;
+            if !answers.is_empty() {
+                asked = answers.len();
+                record_toolchain_answers(&repo_omh, &answers)?;
+                decided.extend(answers);
+                triage = triage_for(&stacks, &probe, &decided);
+            }
+        }
         for hook in &triage.write {
             write_if_absent(&repo_omh.join("hooks").join(&hook.name), &hook.body)?;
         }
         gaps = triage.gaps;
+        declined = triage.declined;
     } else {
         // No harness is no image, and no image is no sandbox to ask. Write what
         // detection found, exactly as before: a question that cannot be put is
@@ -2670,7 +2693,16 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // Report every decision, so `omh why` has something to explain. Printed as
     // each one is made rather than collected for the end, which is why the
     // image and graph lines below appear inside the summary.
-    println!("omh init — decided, asked nothing\n");
+    // The headline is a claim about this run, so it has to be able to stop
+    // being true. omh derives what it can and asks only what a probe could not
+    // settle; printing "asked nothing" after putting a question on screen would
+    // make the promise the tagline is selling into a thing the user just
+    // watched it break.
+    match asked {
+        0 => println!("omh init — decided, asked nothing\n"),
+        1 => println!("omh init — decided all but one question\n"),
+        n => println!("omh init — decided the rest; asked {n} questions\n"),
+    }
     println!("  harnesses  {} ({})", adapters.len(), adapters.join(", "));
     println!("  editors    {} ({})", editors.len(), editors.join(", "));
     match &harness {
@@ -2704,6 +2736,17 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         println!(
             "  gap        {} needs `{}`, absent from the sandbox → no hook for `{}`",
             g.stack, g.program, g.command
+        );
+    }
+    // Reported, not merely obeyed. A hook missing because somebody said so and
+    // a hook missing because omh never thought of it look identical in
+    // `.omh/hooks/`, and the second one is a bug — so the answer on file is
+    // printed every run, with the one line that undoes it.
+    for g in &declined {
+        println!(
+            "  skipped    {} needs `{}` — you chose skip; no hook for `{}`\n             \
+             drop `{}` from [toolchain] in .omh/settings.toml to be asked again",
+            g.stack, g.program, g.command, g.program
         );
     }
 
@@ -2905,7 +2948,13 @@ struct Gap {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Triage {
     write: Vec<StackHook>,
+    /// Gaps nobody has answered yet — the only ones `init` may ask about.
     gaps: Vec<Gap>,
+    /// Gaps already answered `skip`. Kept rather than dropped: a hook that is
+    /// absent because somebody decided it should be, and a hook that is absent
+    /// because omh never thought of it, look identical on disk. Only this
+    /// distinguishes them, and `omh why` has to be able to.
+    declined: Vec<Gap>,
 }
 
 /// Split a repo's stack hooks into the ones that can run in the sandbox and the
@@ -2920,6 +2969,154 @@ struct Triage {
 ///
 /// Availability is judged per *command*, never per stack: `go test ./...` needs
 /// `go` and `gofmt -w .` needs `gofmt`, so one stack can be half-served.
+/// How a toolchain answer is spelled in `settings.toml`. One source, so the
+/// value written and the value `settings::Toolchain` reads back cannot drift.
+fn toolchain_word(t: settings::Toolchain) -> &'static str {
+    match t {
+        settings::Toolchain::Skip => "skip",
+        settings::Toolchain::Assume => "assume",
+    }
+}
+
+/// Put answers into a `settings.toml` without disturbing what it already says.
+///
+/// Textual, not a serialiser round-trip. `toml::to_string` would reformat the
+/// document and drop every comment in it — including the ones `init` wrote to
+/// explain `carry_in`, which exist precisely so somebody reading the file later
+/// knows what it is for.
+///
+/// The trap is the second answer. Appending another `[toolchain]` header makes
+/// a duplicate table, and TOML refuses the *whole document* — so the next
+/// `init` cannot read a file omh wrote itself, and every setting in it is lost
+/// at once. New keys therefore go inside the existing table when there is one.
+fn with_toolchain_answers(
+    existing: &str,
+    answers: &BTreeMap<String, settings::Toolchain>,
+) -> String {
+    let lines: Vec<String> = answers
+        .iter()
+        .map(|(program, t)| format!("{program} = \"{}\"", toolchain_word(*t)))
+        .collect();
+
+    if let Some(at) = existing
+        .lines()
+        .position(|l| l.trim_start().starts_with("[toolchain]"))
+    {
+        let mut out: Vec<&str> = existing.lines().collect();
+        let inserted: Vec<&str> = lines.iter().map(String::as_str).collect();
+        out.splice(at + 1..at + 1, inserted);
+        return out.join("\n") + "\n";
+    }
+
+    let mut out = existing.to_string();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(
+        "\n# Programs omh could not find in this repo's sandbox, and what you\n\
+         # said about each. Delete a line to be asked again on the next `omh init`.\n\
+         #   skip    write no hook whose command needs it\n\
+         #   assume  write the hook anyway; the sandbox will have it by launch\n\
+         [toolchain]\n",
+    );
+    for line in &lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Write the answers into this repo's `settings.toml`.
+fn record_toolchain_answers(
+    repo_omh: &std::path::Path,
+    answers: &BTreeMap<String, settings::Toolchain>,
+) -> Result<()> {
+    let path = repo_omh.join("settings.toml");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    std::fs::write(&path, with_toolchain_answers(&existing, answers))
+        .with_context(|| format!("recording your answer in {}", path.display()))
+}
+
+/// Put one question per missing program, and only when something is actually
+/// missing.
+///
+/// The rule that keeps this from being a wizard: a repo whose sandbox has
+/// everything is asked nothing at all, which is every repo until it is not.
+/// Each question carries its own evidence — what needs the program, and what
+/// would have run — because the failure this replaces was `cargo: not found`,
+/// which names neither who wanted cargo nor where omh looked for it.
+///
+/// Silence is `skip`, so pressing Enter through it writes no hook that cannot
+/// run. Not asking at all — no terminal, a CI runner — is the same answer, but
+/// it is *not recorded*: nobody chose it, and writing it down would answer a
+/// question on behalf of somebody who was never shown it.
+fn ask_about_gaps(gaps: &[Gap]) -> Result<BTreeMap<String, settings::Toolchain>> {
+    use std::io::IsTerminal;
+
+    if !std::io::stdin().is_terminal() {
+        return Ok(BTreeMap::new());
+    }
+    let stdin = std::io::stdin();
+    ask_about_gaps_with(gaps, &mut stdin.lock(), &mut std::io::stdout())
+}
+
+/// The questioning itself, with the terminal handed in.
+///
+/// Split from [`ask_about_gaps`] so it can be tested at all. Reading
+/// `std::io::stdin()` directly would leave the dedup, the default, and the EOF
+/// case — every rule that decides what gets written into somebody's committed
+/// settings file — asserted by nothing.
+fn ask_about_gaps_with(
+    gaps: &[Gap],
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn std::io::Write,
+) -> Result<BTreeMap<String, settings::Toolchain>> {
+    // By program, not by hook: `cargo` is one question even though it holds up
+    // two of rust's hooks, and the answer settles both.
+    let mut by_program: BTreeMap<&str, Vec<&Gap>> = BTreeMap::new();
+    for g in gaps {
+        by_program.entry(g.program).or_default().push(g);
+    }
+
+    let mut answers = BTreeMap::new();
+    for (program, blocked) in by_program {
+        let wanted_by: BTreeSet<&str> = blocked.iter().map(|g| g.stack).collect();
+        writeln!(
+            out,
+            "\n  ! `{program}` is not installed in this repo's sandbox.\n    \
+             {} detected it, and these will not run: {}",
+            wanted_by.into_iter().collect::<Vec<_>>().join(", "),
+            blocked
+                .iter()
+                .map(|g| format!("`{}`", g.command))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )?;
+        writeln!(
+            out,
+            "\n      [s] skip    write no hook needing {program}\n      \
+             [a] assume  write them anyway — the sandbox will have {program} by launch\n"
+        )?;
+        write!(out, "    {program} [S/a] ")?;
+        out.flush()?;
+
+        let mut line = String::new();
+        // EOF mid-question: the terminal went away. Stop asking rather than
+        // spinning through the rest reading empty strings and recording an
+        // answer for each — answers nobody gave, written into a committed file
+        // and never asked again because they are now on record.
+        if input.read_line(&mut line)? == 0 {
+            break;
+        }
+        let answer = match line.trim().to_ascii_lowercase().as_str() {
+            "a" | "assume" => settings::Toolchain::Assume,
+            _ => settings::Toolchain::Skip,
+        };
+        answers.insert(program.to_string(), answer);
+    }
+    Ok(answers)
+}
+
 /// Ask the sandbox which of the detected stacks' programs it actually has.
 ///
 /// Never fatal, and never fatal *silently*: every failure path returns no
@@ -2974,16 +3171,35 @@ fn probe_sandbox(
 /// before this check existed: write the hooks. The same asymmetry `detect::
 /// program` documents — a missed gap costs one confusing hook error, an
 /// invented one costs trust in every answer omh gives.
-fn triage_for(stacks: &[detect::Stack], probe: &[doctor::Outcome]) -> Triage {
-    if probe.is_empty() {
-        return triage_stack_hooks(stacks, &|_| true);
-    }
-    let resolved: std::collections::BTreeSet<&str> = probe
-        .iter()
-        .filter(|o| o.ok)
-        .map(|o| o.name.as_str())
-        .collect();
-    triage_stack_hooks(stacks, &|p| resolved.contains(p))
+fn triage_for(
+    stacks: &[detect::Stack],
+    probe: &[doctor::Outcome],
+    decided: &BTreeMap<String, settings::Toolchain>,
+) -> Triage {
+    // An `assume` outranks the probe: it is an answer about the sandbox a
+    // session will run in, and the probe only ever saw the one `init` built.
+    let assumed = |p: &str| decided.get(p) == Some(&settings::Toolchain::Assume);
+
+    let mut triage = if probe.is_empty() {
+        triage_stack_hooks(stacks, &|_| true)
+    } else {
+        let resolved: std::collections::BTreeSet<&str> = probe
+            .iter()
+            .filter(|o| o.ok)
+            .map(|o| o.name.as_str())
+            .collect();
+        triage_stack_hooks(stacks, &|p| resolved.contains(p) || assumed(p))
+    };
+
+    // A question with an answer on file is not a question. Moved rather than
+    // discarded, so `init` can still say what it did without asking again.
+    let (declined, unanswered) = triage
+        .gaps
+        .into_iter()
+        .partition(|g| decided.get(g.program) == Some(&settings::Toolchain::Skip));
+    triage.gaps = unanswered;
+    triage.declined = declined;
+    triage
 }
 
 fn triage_stack_hooks(stacks: &[detect::Stack], available: &dyn Fn(&str) -> bool) -> Triage {
@@ -3514,7 +3730,7 @@ mod tests {
     #[test]
     fn a_probe_that_did_not_run_withholds_nothing() {
         let all = detect::KNOWN.to_vec();
-        let t = triage_for(&all, &[]);
+        let t = triage_for(&all, &[], &BTreeMap::new());
 
         assert_eq!(
             t.write.len(),
@@ -3532,12 +3748,180 @@ mod tests {
     fn the_triage_acts_on_what_the_probe_reported() {
         let go = [detect::known("go").expect("go is a known stack")];
         let probe = doctor::parse("ok\tgo\tresolves\nfail\tgofmt\tnot installed in the sandbox\n");
-        let t = triage_for(&go, &probe);
+        let t = triage_for(&go, &probe, &BTreeMap::new());
 
         assert_eq!(t.write.len(), 1, "go resolved, so its hook is written");
         assert!(t.write[0].name.ends_with("-test.json"));
         assert_eq!(t.gaps.len(), 1, "gofmt did not");
         assert_eq!(t.gaps[0].program, "gofmt");
+    }
+
+    /// `assume` exists for the sandbox that gains a tool after `init` looked —
+    /// a base image the user maintains, something installed at launch. The
+    /// probe is evidence about one moment, and the person who owns the image
+    /// knows more about the next one than omh does. So a recorded `assume`
+    /// beats the probe, rather than being overruled by it every run.
+    #[test]
+    fn an_assumed_program_writes_the_hook_the_probe_withheld() {
+        let go = [detect::known("go").expect("go is a known stack")];
+        let probe = doctor::parse("fail\tgo\tnot installed\nfail\tgofmt\tnot installed\n");
+        let decided = BTreeMap::from([("gofmt".to_string(), settings::Toolchain::Assume)]);
+
+        let t = triage_for(&go, &probe, &decided);
+        assert_eq!(t.write.len(), 1, "the assumed one is written");
+        assert!(t.write[0].name.ends_with("-format.json"));
+        assert_eq!(t.gaps.len(), 1, "and the undecided one is still a gap");
+        assert_eq!(t.gaps[0].program, "go");
+    }
+
+    /// The point of writing the answer down. A question re-asked on every
+    /// `init` is a wizard, which is the thing omh sells itself as not being —
+    /// so a recorded `skip` withholds the hook *silently*, and the gap moves
+    /// out of the list `init` would raise.
+    #[test]
+    fn a_recorded_skip_withholds_the_hook_without_asking_again() {
+        let go = [detect::known("go").expect("go is a known stack")];
+        let probe = doctor::parse("ok\tgo\tresolves\nfail\tgofmt\tnot installed\n");
+        let decided = BTreeMap::from([("gofmt".to_string(), settings::Toolchain::Skip)]);
+
+        let t = triage_for(&go, &probe, &decided);
+        assert_eq!(t.write.len(), 1, "go still runs");
+        assert!(
+            t.gaps.is_empty(),
+            "an answered question is not asked again: {:?}",
+            t.gaps
+        );
+        assert_eq!(
+            t.declined.len(),
+            1,
+            "but it is still accounted for, not forgotten"
+        );
+        assert_eq!(t.declined[0].program, "gofmt");
+    }
+
+    /// The answer has to land in a file that still parses, and still says
+    /// everything it said before. Rewriting the document through a TOML
+    /// serialiser would round-trip away every comment in it — including the
+    /// ones `init` itself wrote to explain `carry_in`.
+    #[test]
+    fn an_answer_is_added_without_disturbing_what_the_file_already_said() {
+        let before =
+            "# what this repo decided\ncarry_in = [\".env\"]\n\n[omh]\ncodegraph = false\n";
+        let after = with_toolchain_answers(
+            before,
+            &BTreeMap::from([("cargo".to_string(), settings::Toolchain::Skip)]),
+        );
+
+        assert!(
+            after.contains("# what this repo decided"),
+            "the comments survive: {after}"
+        );
+        let parsed: toml::Table = toml::from_str(&after).expect("must still be TOML");
+        assert_eq!(
+            parsed["carry_in"].as_array().unwrap().len(),
+            1,
+            "and so does the setting: {after}"
+        );
+        assert_eq!(parsed["toolchain"]["cargo"].as_str(), Some("skip"));
+    }
+
+    /// The trap. A second `[toolchain]` header is a duplicate table, which is
+    /// not merely untidy — TOML refuses the whole document, so the next `init`
+    /// fails to read a file omh wrote itself, and every setting in it is lost
+    /// at once.
+    #[test]
+    fn a_second_answer_joins_the_table_rather_than_opening_another() {
+        let once = with_toolchain_answers(
+            "[toolchain]\ncargo = \"skip\"\n",
+            &BTreeMap::from([("gofmt".to_string(), settings::Toolchain::Assume)]),
+        );
+
+        assert_eq!(
+            once.matches("[toolchain]").count(),
+            1,
+            "one table, not two: {once}"
+        );
+        let parsed: toml::Table = toml::from_str(&once).expect("must still be TOML");
+        assert_eq!(parsed["toolchain"]["cargo"].as_str(), Some("skip"));
+        assert_eq!(parsed["toolchain"]["gofmt"].as_str(), Some("assume"));
+    }
+
+    // ── the question ────────────────────────────────────────────────────────
+
+    fn gap(stack: &'static str, command: &'static str, program: &'static str) -> Gap {
+        Gap {
+            stack,
+            command,
+            program,
+        }
+    }
+
+    fn ask(gaps: &[Gap], typed: &str) -> (BTreeMap<String, settings::Toolchain>, String) {
+        let mut out = Vec::new();
+        let answers = ask_about_gaps_with(
+            gaps,
+            &mut std::io::BufReader::new(typed.as_bytes()),
+            &mut out,
+        )
+        .unwrap();
+        (answers, String::from_utf8(out).unwrap())
+    }
+
+    /// A decision is about a program, so `cargo` is one question even though it
+    /// holds up both of rust's hooks. Asking twice would be asking the same
+    /// thing twice and would let somebody answer it two different ways.
+    #[test]
+    fn one_question_per_program_however_many_hooks_it_blocks() {
+        let gaps = [
+            gap("rust", "cargo test", "cargo"),
+            gap("rust", "cargo fmt", "cargo"),
+        ];
+        let (answers, shown) = ask(&gaps, "a\n");
+
+        assert_eq!(answers.len(), 1, "one program, one answer: {answers:?}");
+        assert_eq!(shown.matches("[S/a]").count(), 1, "asked once: {shown}");
+        // Both blocked commands still have to appear, or the question is
+        // cheaper to ask than it is to answer.
+        assert!(shown.contains("cargo test"), "{shown}");
+        assert!(shown.contains("cargo fmt"), "{shown}");
+    }
+
+    /// Enter has to be the safe answer. Somebody holding it down through a
+    /// first-run prompt must not end up with a hook that fails on every turn —
+    /// silence degrades to nothing, never to wrong.
+    #[test]
+    fn enter_is_skip_so_holding_it_down_writes_no_broken_hook() {
+        let (answers, _) = ask(&[gap("rust", "cargo test", "cargo")], "\n");
+        assert_eq!(answers.get("cargo"), Some(&settings::Toolchain::Skip));
+
+        // And a typo is not read as consent to the other branch either.
+        let (typo, _) = ask(&[gap("rust", "cargo test", "cargo")], "yes please\n");
+        assert_eq!(typo.get("cargo"), Some(&settings::Toolchain::Skip));
+
+        let (yes, _) = ask(&[gap("rust", "cargo test", "cargo")], "a\n");
+        assert_eq!(yes.get("cargo"), Some(&settings::Toolchain::Assume));
+    }
+
+    /// EOF means the terminal went away. Reading on would hand back an empty
+    /// line per remaining question and record `skip` for every one of them —
+    /// answers nobody gave, written into a committed file, and never asked
+    /// again because they are now on record.
+    #[test]
+    fn a_terminal_that_goes_away_records_no_answer_it_was_not_given() {
+        let gaps = [
+            gap("rust", "cargo test", "cargo"),
+            gap("go", "gofmt -w .", "gofmt"),
+        ];
+        let (answers, _) = ask(&gaps, "");
+        assert!(
+            answers.is_empty(),
+            "nothing was answered, so nothing is recorded: {answers:?}"
+        );
+
+        // One answer given, then the pipe closes: keep the one, invent nothing.
+        let (partial, _) = ask(&gaps, "a\n");
+        assert_eq!(partial.len(), 1, "only what was typed: {partial:?}");
+        assert_eq!(partial.get("cargo"), Some(&settings::Toolchain::Assume));
     }
 
     /// A detected stack earns hooks, not prose. The guard that used to cover

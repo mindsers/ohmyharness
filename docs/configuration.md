@@ -270,6 +270,38 @@ needs — it is not a boundary, and omh does not claim it as one. What is
 guaranteed is the read-only part: the agent can read a selected skill and cannot
 write one.
 
+## `[toolchain]` — what you told init about a missing tool
+
+`omh init` detects your stack from its manifest and writes a test and a format
+hook for it. Detection runs on your machine; the hook runs in the sandbox, and
+those are different computers. So after building the image, init asks it which
+of those commands can actually run there — and writes only the hooks that can.
+
+A command whose program is missing produces one question, and your answer is
+kept so it is asked once rather than every `init`:
+
+```toml
+# <repo>/.omh/settings.toml
+[toolchain]
+cargo = "skip"     # write no hook whose command needs cargo
+gofmt = "assume"   # write it anyway; the sandbox will have gofmt by launch
+```
+
+`assume` is for a sandbox that gains the tool after init looked — a base image
+you maintain, something installed at launch. It beats the probe, because you
+know more about the next image than a measurement of the last one does.
+
+Keyed by **program**, not by stack or by hook: a decision about `cargo` settles
+both of rust's hooks and any hand-written command needing it too. Delete a line
+to be asked again. These layer like every other setting, so a toolchain missing
+on one machine belongs in `settings.local.toml` rather than in the team's file.
+
+Two things init will not do. It will not ask when there is nothing missing —
+which is most repos, most of the time — and it will not ask when there is no
+terminal, so a CI runner gets the hooks it can run and no prompt. Nor does it
+install anything: it names the gap and what would have run, and the decision is
+yours.
+
 ## Settings, and their three layers
 
 Content has one home; **settings** keep their layers, because a setting has one
