@@ -694,7 +694,20 @@ fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>) -> Result<String> {
                 "hooks": [{ "type": "command", "command": h.command }],
             }));
     }
-    pretty(serde_json::json!({ "hooks": by_event }))
+    // Half of the `mcp` binding, and it has to live here because this is the
+    // only file this harness reads it from. A project-scoped MCP document is
+    // *listed* without it and *loaded* with it — the sandbox otherwise starts
+    // with servers sitting at "pending approval", waiting for a dialog nobody
+    // is there to answer.
+    //
+    // Blanket rather than per-server, because the only project document in
+    // there is the one omh mounted: the mount covers the worktree's own
+    // `.mcp.json`, so this approves omh's rendering of what the profile
+    // already decided, not whatever a checkout happened to ship.
+    pretty(serde_json::json!({
+        "hooks": by_event,
+        "enableAllProjectMcpServers": true,
+    }))
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -846,6 +859,47 @@ mod tests {
             "Edit|Write|MultiEdit"
         );
         assert_eq!(v["hooks"]["PostToolUse"][0]["hooks"][0]["type"], "command");
+    }
+
+    /// The other half of the `mcp` binding, which lands in this document
+    /// because this is the only file the harness reads it from.
+    ///
+    /// A project-scoped MCP document that has not been approved is *listed* and
+    /// not *loaded* — servers sit at "pending approval" waiting for a dialog no
+    /// unattended session can answer, and every check that reads the document
+    /// rather than asking the harness stays green throughout. Mounting the
+    /// document is therefore only half of handing it over.
+    #[test]
+    fn the_settings_document_approves_the_mcp_document_omh_mounts() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/a.json",
+            r#"{"on":"turn-end","run":"cargo test"}"#,
+        );
+
+        let adapter = claude_hooks();
+        let out = document(
+            Capability::Hooks,
+            hooks_binding(&adapter),
+            &[dir.path().join("h")],
+            &Default::default(),
+            &Default::default(),
+            &adapter.tools,
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
+
+        assert_eq!(
+            v["enableAllProjectMcpServers"], true,
+            "the mounted document would be listed and never loaded: {}",
+            out.body
+        );
+        assert!(
+            v["hooks"]["Stop"].is_array(),
+            "and the hooks this file exists for still ship: {}",
+            out.body
+        );
     }
 
     /// A hook says *when* it wants to fire. Which word this harness uses for

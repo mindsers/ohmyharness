@@ -18,9 +18,11 @@ also   = ["/work/AGENTS.md"]
 render = "concat"
 
 [capabilities.mcp]
-path   = "$HOME/.mcp.json"
+path   = "/work/.mcp.json"     # project-scoped; this harness reads no other
 render = "mcp-json"
 import = "$REPO/.mcp.json"     # host-side, for `omh config mcp import`
+verify = "claude mcp list"     # what `omh doctor` asks the harness itself
+ready  = "Connected"           # what that answer calls a server it loaded
 
 creds = ["$HOME/.claude/", "$HOME/.claude.json"]
 token = ["$HOME/.claude/.credentials.json"]
@@ -58,7 +60,26 @@ your setup is already there.
 
 `concat` is mounted, never written into the worktree — writing there made omh's
 staging indistinguishable from the agent's work and carried omh's rules into
-users' pull requests.
+users' pull requests. Any `path` under `/work` is handled the same way,
+whichever renderer produced it: omh places the mountpoint and binds over it, so
+a project's own file is hidden for the session and returned untouched.
+
+## `verify` and `ready`: asking the harness
+
+A `path` is a claim about software omh did not write, and the suite cannot check
+it. `verify` is the harness's own command for listing what it loaded; `ready` is
+the word its output uses for a server that is actually running. `omh doctor`
+runs the one and greps for the other, on the same line as the server's name.
+
+Both are optional. An adapter that declares neither is simply not asked — the
+same degradation as any absent key. What that costs is on record: the `claude`
+binding pointed `mcp` at `$HOME/.mcp.json`, which nothing reads, and every check
+omh had stayed green while no session ever loaded a server.
+
+Matching the name alone is not enough, and that is the point of `ready`. A
+project-scoped document Claude Code has not been told to trust is listed in full
+and loaded not at all, so a name-only check passes in exactly the state the
+feature is broken in.
 
 ## Hooks: three maps and a template
 

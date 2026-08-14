@@ -1,10 +1,18 @@
 //! `omh doctor` — the only thing that can validate an adapter.
 //!
 //! Adapters assert facts about *external software*: that Claude Code reads
-//! `~/.mcp.json`, that opencode reads `~/.config/opencode/command`. A green unit
-//! suite proves omh mounts a path faithfully; it proves nothing about whether
-//! anything reads it. Until this command runs, every adapter path is an
+//! `/work/.mcp.json`, that opencode reads `~/.config/opencode/command`. A green
+//! unit suite proves omh mounts a path faithfully; it proves nothing about
+//! whether anything reads it. Until this command runs, every adapter path is an
 //! unverified claim and the most likely place for omh to be confidently wrong.
+//!
+//! That is not hypothetical. This module's own doc claimed Claude Code reads
+//! `~/.mcp.json`; it does not, and never did. The binding said so, the renderer
+//! produced a valid document, the launcher mounted it at exactly the declared
+//! path, `Expect::Mentions` confirmed the document, `Expect::Speaks` confirmed
+//! the server behind it — and no session ever loaded a single MCP server.
+//! `Expect::Loaded` is the check that was missing, and the one that would have
+//! caught it on day one.
 //!
 //! So doctor launches the real image with the real mounts and inspects the
 //! **guest** paths the adapter declares. Checking anything host-side would test
@@ -52,6 +60,29 @@ pub enum Expect {
     /// consumed by a model rather than written anywhere inspectable. What this
     /// proves is the precondition.
     Speaks(Vec<String>),
+    /// The **harness's own** listing names each of these, on a line that also
+    /// says it is running.
+    ///
+    /// `Speaks` asks omh's server whether it works; `Mentions` asks whether the
+    /// document says what it should. Both passed for a year against a binding
+    /// that pointed at a path Claude Code does not read, because neither one
+    /// asks the only question that matters: did the harness load it. This is
+    /// the check that can answer, and the only one that goes red when a harness
+    /// changes where it looks.
+    ///
+    /// `ready` is matched on the same line as the name rather than anywhere in
+    /// the output, because every other line of a listing is another server that
+    /// may well be fine.
+    ///
+    /// `guest` is the **directory** the document lives in, and the probe runs
+    /// `command` from there. A harness that finds its config by project root
+    /// answers about whatever project it was asked from, so a probe run in the
+    /// wrong directory is a confident answer to a question nobody asked.
+    Loaded {
+        command: String,
+        names: Vec<String>,
+        ready: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +200,35 @@ pub fn checks(
             expect,
             dir: binding.render == Render::Dir,
         });
+
+        // Asking the harness itself, where one says how. Additive rather than a
+        // replacement: `Mentions` still answers *is the document what omh
+        // meant*, and telling those two apart is what makes a failure
+        // actionable — the document being wrong and the harness never reading
+        // it look identical from any single check.
+        //
+        // Skipped where an adapter declares no `verify`, which is the same
+        // trade the rest of this function makes: no check beats one that fails
+        // forever and blames the harness for a question omh never asked.
+        if let (Some(verify), Some(ready)) = (&binding.verify, &binding.ready) {
+            let names = server_names(&sources, repo);
+            let ask_from = expand(&binding.path, GUEST_HOME)
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/"));
+            if !names.is_empty() {
+                out.push(Check {
+                    name: format!("{capability}-loaded"),
+                    guest: ask_from,
+                    expect: Expect::Loaded {
+                        command: verify.clone(),
+                        names,
+                        ready: ready.clone(),
+                    },
+                    dir: true,
+                });
+            }
+        }
     }
     Ok(out)
 }
@@ -315,6 +375,28 @@ pub fn probe_script(checks: &[Check]) -> String {
             Expect::Speaks(names) => out.push_str(&format!(
                 "out=$( {{ printf '%s\\n'                  '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{{}},\"clientInfo\":{{\"name\":\"omh-doctor\",\"version\":\"0\"}}}}}}'                  '{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}'                  '{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{{}}}}'; }} | {path} 2>/dev/null );                  missing=''; for n in {}; do printf '%s' \"$out\" | grep -q \"$n\" || missing=\"$missing $n\"; done;                  if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t%s\\n' \"$(printf '%s' \"$out\" | grep -o 'The store [^.]*' | head -1)\";                  else printf 'fail\\t{name}\\tno reply naming:%s\\n' \"$missing\"; fi\n",
                 shell_list(names)
+            )),
+            // Run from the document's own directory, which is the check rather
+            // than incidental: a harness that finds its config by project root
+            // answers about whatever root it was asked from.
+            //
+            // `grep` twice down a pipe rather than one pattern, because the
+            // name and the ready word share a line in an order omh does not get
+            // to decide. Line-wise rather than over the whole output for the
+            // reason a note in this repo already records: a listing that names
+            // every server means `contains` cannot tell *this* server is
+            // running from *another* one being fine.
+            Expect::Loaded {
+                command,
+                names,
+                ready,
+            } => out.push_str(&format!(
+                "out=$( cd '{path}' 2>/dev/null && {command} 2>&1 ); missing=''; \
+                 for n in {}; do printf '%s\\n' \"$out\" | grep -- \"$n\" | grep -q -- '{ready}' || missing=\"$missing $n\"; done; \
+                 if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t{path} ({command})\\n'; \
+                 else printf 'fail\\t{name}\\t{command} in {path} does not report as {ready}:%s\\n' \"$missing\"; fi\n",
+                shell_list(names),
+                ready = ready.replace('\'', ""),
             )),
             Expect::Mentions(names) => out.push_str(&format!(
                 "missing=''; for n in {}; do grep -q \"$n\" '{path}' 2>/dev/null || missing=\"$missing $n\"; done; \
@@ -535,8 +617,10 @@ mod tests {
             .collect();
         assert_eq!(
             got,
-            vec!["rules", "skills", "mcp", "subagents", "hooks"],
-            "hooks are checked with no hooks layer, because omh generates them"
+            vec!["rules", "skills", "mcp", "mcp-loaded", "subagents", "hooks"],
+            "hooks are checked with no hooks layer, because omh generates them; \
+             and `mcp` is checked twice — the document, then the harness that \
+             had to read it, which is the pair no single check can tell apart"
         );
     }
 
@@ -801,6 +885,121 @@ mod tests {
         for tool in ["recall", "remember"] {
             assert!(script.contains(tool), "must require `{tool}`: {script}");
         }
+    }
+
+    // ── loaded ──────────────────────────────────────────────────────────────
+
+    /// Run the generated probe against a stubbed harness. Returns the outcome
+    /// of the single check, so a test can say what the harness said and let the
+    /// script decide — asserting on the script's *text* is how a probe that
+    /// cannot fail gets written.
+    fn probe_against(listing: &str, names: &[&str]) -> Outcome {
+        let stub = tempfile::tempdir().unwrap();
+        let at = stub.path().join("harness");
+        std::fs::write(&at, format!("#!/bin/sh\ncat <<'EOF'\n{listing}\nEOF\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let script = probe_script(&[Check {
+            name: "mcp-loaded".into(),
+            guest: stub.path().to_path_buf(),
+            expect: Expect::Loaded {
+                command: "harness list".into(),
+                names: names.iter().map(|n| n.to_string()).collect(),
+                ready: "Connected".into(),
+            },
+            dir: true,
+        }]);
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    stub.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("sh must run");
+        let outcomes = parse(&String::from_utf8_lossy(&out.stdout));
+        assert_eq!(outcomes.len(), 1, "one check, one line: {script}");
+        outcomes.into_iter().next().unwrap()
+    }
+
+    /// The bug this check exists for: omh's document was valid, mounted, and at
+    /// the path the adapter declared, and the harness read none of it. Nothing
+    /// host-side can see that, so the only honest question is the one the
+    /// harness answers itself.
+    #[test]
+    fn a_server_the_harness_never_loaded_fails_the_check() {
+        let out = probe_against("some-other-server: x - Connected", &["memory"]);
+        assert!(!out.ok, "a listing that never names it must fail: {out:?}");
+    }
+
+    /// The half that a name match alone would wave through, and the state a
+    /// project-scoped document actually lands in when nothing has approved it:
+    /// listed in full, loaded not at all. `Mentions` was already green here.
+    #[test]
+    fn a_server_listed_but_not_running_fails_the_check() {
+        let out = probe_against("memory: omh memory serve - Pending approval", &["memory"]);
+        assert!(
+            !out.ok,
+            "listed is not loaded — this is the state the fix had to clear: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_server_the_harness_reports_running_passes() {
+        let out = probe_against("memory: omh memory serve - Connected", &["memory"]);
+        assert!(out.ok, "{out:?}");
+    }
+
+    /// Line-wise, not over the whole output. Every listing names every server,
+    /// so a check that greps the output as one blob passes whenever *any*
+    /// server is healthy — which is the failure mode most likely to be hit,
+    /// since the remote servers in a real listing are always connected.
+    #[test]
+    fn one_healthy_server_does_not_vouch_for_a_broken_one() {
+        let out = probe_against(
+            "codegraph: c - Connected\nmemory: omh memory serve - Pending approval",
+            &["codegraph", "memory"],
+        );
+        assert!(
+            !out.ok,
+            "`memory` is not running and the check must say so: {out:?}"
+        );
+        assert!(
+            out.detail.contains("memory") && !out.detail.contains("codegraph"),
+            "and must name which one: {out:?}"
+        );
+    }
+
+    /// The probe asks in the directory the document lives in, because a harness
+    /// that finds config by project root answers about the root it was asked
+    /// from. Running it anywhere else is a confident answer to another
+    /// question.
+    #[test]
+    fn the_check_asks_where_the_document_is() {
+        let fx = fixture();
+        let cs = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap();
+        let loaded = cs
+            .iter()
+            .find(|c| matches!(c.expect, Expect::Loaded { .. }))
+            .expect("an adapter declaring `verify` must be asked");
+        let mcp = cs
+            .iter()
+            .find(|c| c.name == "mcp")
+            .expect("and the document itself is still checked");
+        assert_eq!(
+            Some(loaded.guest.as_path()),
+            mcp.guest.parent(),
+            "the probe must run where the document is"
+        );
     }
 
     /// `0 notes` is the signature of a store mounted at the wrong path — the

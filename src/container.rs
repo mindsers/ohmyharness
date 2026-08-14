@@ -264,7 +264,18 @@ pub fn plan(
         // still has them to stage.
         let carries_something = match cap {
             Capability::Rules => !rules_doc.trim().is_empty(),
-            Capability::Hooks => !sources.is_empty() || !opts.omh.hooks.is_empty(),
+            // And a `claude-settings` document is no longer only hooks: it also
+            // carries the approval without which the MCP document omh mounts is
+            // listed and never loaded. Skipping it when a repo has turned every
+            // hook off would turn that repo's MCP servers off with them, at a
+            // distance, through a file neither setting mentions.
+            Capability::Hooks => {
+                !sources.is_empty()
+                    || !opts.omh.hooks.is_empty()
+                    || adapter
+                        .supports(cap)
+                        .is_some_and(|b| b.render == Render::ClaudeSettings)
+            }
             _ => !sources.is_empty(),
         };
         if !carries_something {
@@ -538,9 +549,24 @@ impl Stager<'_> {
                     std::fs::create_dir_all(stage)?;
                     std::fs::write(&file, rendered.body)?;
                 }
+                let guest = expand(&binding.path, GUEST_HOME);
+                // A target inside the worktree needs the mountpoint to exist
+                // first, exactly as `concat` does. Everything above `/work` is
+                // omh's own image, where the mountpoint is built in; `/work` is
+                // the user's checkout, where a missing path makes the runtime
+                // create a **directory** and report the failure later as a
+                // permission error about something nobody created.
+                //
+                // Not an error when the target is elsewhere: `$HOME` paths are
+                // the normal case and this is the exception they do not need.
+                if staging == Staging::Apply {
+                    if let Ok(rel) = guest.strip_prefix("/work/") {
+                        place_destination(&worktree.join(rel))?;
+                    }
+                }
                 mounts.push(Mount {
                     host: file,
-                    guest: expand(&binding.path, GUEST_HOME),
+                    guest,
                     read_only: true,
                     file: true,
                 });
@@ -929,6 +955,58 @@ mod tests {
         .unwrap()
     }
 
+    /// A repo with every hook off still gets the settings document, because
+    /// that document is no longer only hooks: the approval that decides whether
+    /// the mounted MCP document is *loaded* rides in it too.
+    ///
+    /// Coupled at a distance and therefore worth pinning — nothing about
+    /// turning hooks off says anything about MCP, and the failure would be
+    /// silent in both directions: servers listed, never loaded, every other
+    /// check green.
+    #[test]
+    fn the_settings_document_ships_even_when_a_repo_runs_no_hooks() {
+        let fx = fixture();
+        // No hook layer *and* none of omh's own, which is the only arrangement
+        // that used to skip this document. The fixture ships one, so it has to
+        // go before the profile is resolved or this test passes without the
+        // change it exists for.
+        std::fs::remove_dir_all(fx.paths.root.join("hooks")).unwrap();
+        let profile = Profile::resolve(&fx.paths);
+
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let (_, repo) = decided_from(&fx);
+        let p = plan(
+            &fx.paths,
+            &profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: Default::default(),
+                repo,
+            },
+        )
+        .unwrap();
+
+        let mount = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".claude/settings.json"))
+            .expect("no hooks is not the same as no settings document");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&mount.host).unwrap()).unwrap();
+        assert_eq!(
+            doc["enableAllProjectMcpServers"], true,
+            "the mcp document would be listed and never loaded: {doc}"
+        );
+    }
+
     /// The security contract. The worktree is writable because that is the
     /// work; the graph cache because it is an index omh owns; credentials
     /// because OAuth tokens refresh in place and
@@ -1197,6 +1275,56 @@ mod tests {
         );
     }
 
+    /// The same mountpoint rule, for the documents the launcher *renders*
+    /// rather than concatenates. `concat` placed its destinations and the
+    /// generic arm did not, which was invisible for as long as every rendered
+    /// target happened to sit in `$HOME` — where the image builds the
+    /// mountpoint in and nothing has to place anything.
+    ///
+    /// The first `/work` target to arrive by that path would have had docker
+    /// create a **directory** in the user's checkout and report it later as a
+    /// permission error about something nobody created.
+    #[test]
+    fn a_rendered_document_bound_into_the_worktree_has_a_mountpoint_too() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+
+        let mcp = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.ends_with(".mcp.json"))
+            .expect("claude is handed an mcp document");
+        let Ok(rel) = mcp.guest.strip_prefix("/work") else {
+            return; // an adapter whose harness reads it from $HOME needs none
+        };
+        let host = fx.session.worktree.join(rel);
+        assert!(
+            host.is_file(),
+            "{} has nothing to mount onto: {} is missing",
+            mcp.guest.display(),
+            host.display()
+        );
+    }
+
+    /// And it is a placeholder, never a rewrite: a repo that commits its own
+    /// `.mcp.json` finds it byte-identical afterwards. The mount hides it for
+    /// the length of the session — `omh mcp import` is how those servers come
+    /// along — but hiding a file and truncating one look very different in
+    /// somebody's diff.
+    #[test]
+    fn a_repos_own_mcp_document_survives_staging() {
+        let fx = fixture();
+        let own = fx.session.worktree.join(".mcp.json");
+        std::fs::write(&own, r#"{"mcpServers":{"theirs":{"command":"t"}}}"#).unwrap();
+
+        plan_for(&fx, "claude");
+
+        assert_eq!(
+            std::fs::read_to_string(&own).unwrap(),
+            r#"{"mcpServers":{"theirs":{"command":"t"}}}"#
+        );
+    }
+
     /// Read the document staged for the `rules` capability, as the agent gets it.
     fn composed_rules(p: &Plan) -> String {
         let mount = p
@@ -1330,7 +1458,7 @@ mod tests {
             .mounts
             .iter()
             .find(|m| m.guest.ends_with(".mcp.json"))
-            .expect("claude stages mcp into ~/.mcp.json");
+            .expect("claude is handed its mcp document somewhere");
         let body = std::fs::read_to_string(&mount.host).unwrap();
         let doc: serde_json::Value = serde_json::from_str(&body).unwrap();
         let mut names: Vec<String> = doc["mcpServers"]
