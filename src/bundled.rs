@@ -1,5 +1,5 @@
-//! The definitions omh ships — adapters, editors, the base set — embedded in
-//! the binary at compile time.
+//! The definitions omh ships — adapters, editors, the base set, the stacks —
+//! embedded in the binary at compile time.
 //!
 //! They used to be read from `env!("CARGO_MANIFEST_DIR")` at *runtime*, which
 //! is the build machine's source path. On the machine that built it that path

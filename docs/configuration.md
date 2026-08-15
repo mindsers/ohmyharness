@@ -272,6 +272,13 @@ write one.
 
 ## `[toolchain]` — what you told init about a missing tool
 
+> **Superseded.** This describes what ships today. The design that replaces it —
+> provisioning the stack's toolchain, and deriving suppression from the probe
+> instead of recording an answer — is in
+> [Adoption §1.8](design/adoption.md). `[toolchain]` is expected to be removed
+> rather than extended, so prefer fixing the environment over writing a line
+> here.
+
 `omh init` detects your stack from its manifest and writes a test and a format
 hook for it. Detection runs on your machine; the hook runs in the sandbox, and
 those are different computers. So after building the image, init asks it which

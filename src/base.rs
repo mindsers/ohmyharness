@@ -104,13 +104,103 @@ impl Kind {
 /// Never rendered in the same shape as a computed value: one is a fact about
 /// this machine right now, the other is a recording that can go stale, and
 /// blurring them is how a document starts claiming more than it can support.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Measured {
     pub what: String,
     pub value: String,
     pub how: String,
     pub on: String,
+}
+
+/// `git log --reverse --date=short | head -1`. Nothing in this repo could have
+/// been measured before it existed.
+#[cfg(test)]
+pub(crate) const FIRST_COMMIT: (u32, u32, u32) = (2026, 8, 5);
+
+/// A measurement that could have been taken, stated in full.
+///
+/// Shared by the base set's curation test and the stacks' (`crate::stack`),
+/// because two copies of a date rule is how one of them starts accepting
+/// `2026-08-04` again. That is not hypothetical: every `on` in the first
+/// version of the base manifest read one day before this repository's first
+/// commit — they were typed, not taken — and the guard that walked them checked
+/// only that a date was *present*.
+///
+/// `label` is whatever the caller can name the owner by, so a failure says
+/// which entry or which provide.
+#[cfg(test)]
+pub(crate) fn assert_measured_states_its_case(label: &str, measured: &[Measured]) {
+    for m in measured {
+        for (field, value) in [
+            ("what", &m.what),
+            ("value", &m.value),
+            ("how", &m.how),
+            ("on", &m.on),
+        ] {
+            assert!(
+                !value.trim().is_empty(),
+                "{label}: measured `{field}` is blank"
+            );
+        }
+        // A date the tool cannot read is a defect, not a measurement. Left
+        // unchecked it silently disables staleness for that cost and prints
+        // itself to the user verbatim.
+        parse_ym(&m.on).unwrap_or_else(|| panic!("{label}: `{}` is not a date", m.on));
+
+        // Day precision, not month. A month-granular check passes 2026-08-04
+        // happily, which is how the first version of this very assertion failed
+        // to catch the thing it was written for.
+        let day: Vec<u32> = m.on.split('-').filter_map(|p| p.parse().ok()).collect();
+        assert_eq!(day.len(), 3, "{label}: `{}` needs YYYY-MM-DD", m.on);
+        assert!(
+            (day[0], day[1], day[2]) >= FIRST_COMMIT,
+            "{label}: measured {} predates this repository ({}-{:02}-{:02})",
+            m.on,
+            FIRST_COMMIT.0,
+            FIRST_COMMIT.1,
+            FIRST_COMMIT.2
+        );
+
+        // And the other end. A floor alone catches only half of a fabricated
+        // date: `2031-08-14` in a shipped stack file passed both curation
+        // guards in silence, and a date from next year is exactly as untaken as
+        // one from before the first commit — just harder to notice beside a
+        // plausible neighbour.
+        //
+        // Bounded by *today* rather than by a constant: a hardcoded ceiling
+        // goes wrong on a schedule and is then edited by whoever it blocks,
+        // which is how a guard becomes a formality.
+        assert!(
+            days_from_civil(day[0] as i64, day[1] as i64, day[2] as i64) <= today_in_days(),
+            "{label}: measured {} has not happened yet",
+            m.on
+        );
+    }
+}
+
+/// Days since 1970-01-01, or `i64::MAX` if this machine's clock is before the
+/// epoch — cannot-tell refuses nothing, the rule the rest of this codebase runs
+/// on. A broken clock must not turn every measurement into a curation failure.
+#[cfg(test)]
+fn today_in_days() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(i64::MAX, |d| (d.as_secs() / 86_400) as i64)
+}
+
+/// Days since 1970-01-01 for a civil date — Howard Hinnant's `days_from_civil`,
+/// exact across the proleptic Gregorian calendar and short enough not to be
+/// worth a dependency for one comparison.
+#[cfg(test)]
+fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// `YYYY.MM` or `YYYY-MM-DD` → (year, month). One parser, so a date that the
@@ -934,9 +1024,86 @@ mod tests {
     /// failure this whole module exists to prevent.
     const BUNDLED: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/base");
 
-    /// `git log --reverse --date=short | head -1`. Nothing in this repo could
-    /// have been measured before it existed.
-    const FIRST_COMMIT: (u32, u32, u32) = (2026, 8, 5);
+    fn a_measurement(on: &str) -> Measured {
+        Measured {
+            what: "on disk".into(),
+            value: "1 MB".into(),
+            how: "du -sh".into(),
+            on: on.into(),
+        }
+    }
+
+    /// The floor catches a date from before this repository existed. Nothing
+    /// caught one from *after today*, and a measurement dated next year is as
+    /// fabricated as one dated before the first commit — just harder to spot,
+    /// because it does not look obviously wrong beside a plausible neighbour.
+    ///
+    /// Found by planting `2031-08-14` in a shipped stack file: both curation
+    /// guards passed it in silence.
+    #[test]
+    #[should_panic(expected = "has not happened yet")]
+    fn a_measurement_from_the_future_is_refused() {
+        assert_measured_states_its_case("x", &[a_measurement("2031-08-14")]);
+    }
+
+    /// The bound is *today*, not a constant somebody has to bump — a hardcoded
+    /// ceiling becomes wrong on a schedule and is then edited by whoever it
+    /// blocks, which is how a guard turns into a formality.
+    #[test]
+    fn a_measurement_taken_when_this_repository_began_is_accepted() {
+        assert_measured_states_its_case("x", &[a_measurement("2026-08-05")]);
+    }
+
+    /// **Every** branch of the shared rule, not only the one added last.
+    ///
+    /// Moving these assertions into a helper is exactly the moment the helper
+    /// becomes gutable with a green suite: both callers feed it correct shipped
+    /// data, so deleting the floor, the day-precision check or the blank-field
+    /// checks changes nothing anybody notices. A mutation sweep confirmed all
+    /// three survived before this test existed — including the month-precision
+    /// one, which is the original defect this rule was written for.
+    #[test]
+    fn every_branch_of_the_measurement_rule_refuses_something() {
+        let blanked = |field: &str| {
+            let mut m = a_measurement("2026-08-14");
+            match field {
+                "what" => m.what.clear(),
+                "value" => m.value.clear(),
+                "how" => m.how.clear(),
+                _ => m.on.clear(),
+            }
+            m
+        };
+
+        let cases = [
+            (a_measurement("2026-08-04"), "predates this repository"),
+            (a_measurement("2026-08"), "has only month precision"),
+            (a_measurement("not-a-date"), "is not a date at all"),
+            (a_measurement("2031-08-14"), "has not happened yet"),
+            (blanked("what"), "does not say what was measured"),
+            (blanked("value"), "does not say what the value was"),
+            (blanked("how"), "does not say how it was taken"),
+            (blanked("on"), "does not say when"),
+        ];
+
+        // Silenced, or nine expected panics bury a real failure in the output.
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let outcomes: Vec<_> = cases
+            .into_iter()
+            .map(|(m, why)| {
+                let refused =
+                    std::panic::catch_unwind(|| assert_measured_states_its_case("x", &[m]))
+                        .is_err();
+                (refused, why)
+            })
+            .collect();
+        std::panic::set_hook(hook);
+
+        for (refused, why) in outcomes {
+            assert!(refused, "accepted a measurement that {why}");
+        }
+    }
 
     fn shipped() -> Manifest {
         Manifest::load_dir(Path::new(BUNDLED)).expect("bundled base manifest")
@@ -980,42 +1147,9 @@ mod tests {
             );
             assert!(!e.since.trim().is_empty(), "{}: no `since`", e.name);
 
-            for m in &e.measured {
-                for (field, value) in [
-                    ("what", &m.what),
-                    ("value", &m.value),
-                    ("how", &m.how),
-                    ("on", &m.on),
-                ] {
-                    assert!(
-                        !value.trim().is_empty(),
-                        "{}: measured `{field}` is blank",
-                        e.name
-                    );
-                }
-                // A date the tool cannot read is a manifest defect, not a
-                // measurement. Left unchecked it silently disables staleness
-                // for that cost and prints itself to the user verbatim.
-                parse_ym(&m.on).unwrap_or_else(|| panic!("{}: `{}` is not a date", e.name, m.on));
-
-                // Day precision, not month. Every `on` in this manifest once
-                // read 2026-08-04 — one day before this repository's first
-                // commit, so no measurement of this repo could have been taken
-                // then. A month-granular check passes that date happily, which
-                // is how the first version of this very assertion failed to
-                // catch the thing it was written for.
-                let day: Vec<u32> = m.on.split('-').filter_map(|p| p.parse().ok()).collect();
-                assert_eq!(day.len(), 3, "{}: `{}` needs YYYY-MM-DD", e.name, m.on);
-                assert!(
-                    (day[0], day[1], day[2]) >= FIRST_COMMIT,
-                    "{}: measured {} predates this repository ({}-{:02}-{:02})",
-                    e.name,
-                    m.on,
-                    FIRST_COMMIT.0,
-                    FIRST_COMMIT.1,
-                    FIRST_COMMIT.2
-                );
-            }
+            // Shared with `stack`'s curation test rather than spelled twice —
+            // see `assert_measured_states_its_case`.
+            assert_measured_states_its_case(&e.name, &e.measured);
         }
     }
 

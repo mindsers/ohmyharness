@@ -358,8 +358,30 @@ pub fn probe_programs(programs: &[&str]) -> String {
 /// rest of the name would be read as shell. Single quotes suspend every
 /// expansion, and the one character they cannot contain is closed, escaped and
 /// reopened — the standard `'\''` idiom.
-fn single_quote(word: &str) -> String {
+pub(crate) fn single_quote(word: &str) -> String {
     format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// Run a generated probe through a real `/bin/sh`, in `cwd`, and hand back its
+/// stdout.
+///
+/// The older probes are asserted by searching their source text for a
+/// substring, which cannot distinguish a script that works from one that merely
+/// mentions the right word. These are POSIX `sh` and need no container, so they
+/// can be *run* — and a probe is a program, so running it is the only assertion
+/// that means anything.
+///
+/// Shared with `stack`'s predicate tests rather than copied, so both halves of
+/// the wire format are exercised by the same runner.
+#[cfg(test)]
+pub(crate) fn run_probe_in(script: &str, cwd: &std::path::Path) -> String {
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(cwd)
+        .output()
+        .expect("a probe must be a script /bin/sh can run");
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 pub fn probe_script(checks: &[Check]) -> String {
@@ -835,25 +857,46 @@ mod tests {
     /// program in the same script.
     #[test]
     fn a_program_name_with_a_quote_cannot_corrupt_the_probe() {
-        let hostile = "x'; echo pwned; :'";
-        let out = run_probe(&probe_programs(&[hostile, "sh"]));
+        // Every shape of shell expansion, not one. Quote-breaking is the
+        // obvious payload and the least dangerous, because it is the only one
+        // double quotes happen to stop — an escaping that neutralises it while
+        // leaving `$(…)` live would have passed the version of this test that
+        // checked a single payload.
+        let hostile = [
+            "x'; echo pwned; :'",
+            "x$(echo pwned)",
+            "x`echo pwned`",
+            "x${IFS}pwned",
+            "x\"; echo pwned; \"",
+        ];
+        let mut asked: Vec<&str> = hostile.to_vec();
+        asked.push("sh");
+        let out = run_probe(&probe_programs(&asked));
+        let outcomes = parse(&out);
 
         // Line-wise, not `contains`: the marker is *inside the name*, so the
-        // report echoes it back as data on every run. Only execution can put
-        // it on a line of its own, and an assertion that cannot tell those
-        // apart fails against correct code — as this one first did.
+        // report echoes it back as data on every run. Only execution can put it
+        // on a line of its own, and an assertion that cannot tell those apart
+        // fails against correct code — as this one first did.
         assert!(
             !out.lines().any(|l| l.trim() == "pwned"),
             "the probe ran shell out of a program name: {out}"
         );
-        let outcomes = parse(&out);
+
+        // The real invariant, and the one that covers every expansion at once:
+        // a name comes back **exactly** as it went in. Command substitution,
+        // backticks and parameter expansion all change it, so this catches
+        // them without needing to know which of them a broken quoting allows.
+        for name in hostile {
+            assert!(
+                outcomes.iter().any(|o| o.name == name && !o.ok),
+                "{name:?} came back changed, or not at all — something expanded \
+                 it: {outcomes:?}"
+            );
+        }
         assert!(
             outcomes.iter().any(|o| o.name == "sh" && o.ok),
-            "one hostile name must not cost the answers for the rest: {outcomes:?}"
-        );
-        assert!(
-            outcomes.iter().any(|o| o.name == hostile && !o.ok),
-            "and it is reported, not silently dropped: {outcomes:?}"
+            "and one hostile name must not cost the answers for the rest: {outcomes:?}"
         );
     }
 

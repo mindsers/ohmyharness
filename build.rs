@@ -17,7 +17,7 @@ use std::path::Path;
 /// failure rather than an empty entry: shipping an omh with no adapters is the
 /// silent failure this whole change exists to remove, and it should not be
 /// possible to produce one.
-const SHIPPED: [&str; 3] = ["adapters", "base", "editors"];
+const SHIPPED: [&str; 4] = ["adapters", "base", "editors", "stacks"];
 
 /// `adapters` -> `Adapters`. ASCII is enough; these are directory names in
 /// this repository, not user input.
@@ -100,7 +100,7 @@ fn main() {
          pub enum Shipped {{\n{variants}}}\n\
          \n\
          /// Every directory omh ships, so nothing can iterate a stale subset.\n\
-         /// Only the tests walk all three; production names the one it wants.\n\
+         /// Only the tests walk them all; production names the one it wants.\n\
          #[cfg_attr(not(test), allow(dead_code))]\n\
          pub const ALL: [Shipped; {count}] = [{all}];\n\
          \n\

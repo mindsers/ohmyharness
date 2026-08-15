@@ -989,6 +989,138 @@ fn writing_a_setting_keeps_what_you_wrote_around_it() {
     );
 }
 
+/// Everything this repo ships as data reaches `~/.omh`, where the code reads it.
+///
+/// The failure this catches has already happened twice in this project, and
+/// `bundled.rs` opens by describing it: a guard is correct while the wiring that
+/// reaches it is missing, and the suite stays green. `bundled`'s own tests
+/// iterate what is *embedded*, so a directory absent from `build.rs`'s `SHIPPED`
+/// is neither embedded nor noticed — the guard is structurally blind to exactly
+/// the mistake of forgetting to add one.
+///
+/// Asserted against the repository's own directories rather than a list written
+/// here, so a fifth kind is covered the day somebody adds it.
+///
+/// Runs anywhere: `init` seeds these before it needs a container, so it does not
+/// matter that it fails later for want of one.
+#[test]
+fn init_installs_every_directory_this_repo_ships() {
+    let sb = sandbox();
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .arg("init")
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("the binary under test must run");
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for kind in ["adapters", "base", "editors", "stacks"] {
+        let src = repo_root.join(kind);
+        let shipped: Vec<String> = std::fs::read_dir(&src)
+            .unwrap_or_else(|e| panic!("this repo must ship {kind}: {e}"))
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".toml"))
+            .collect();
+        assert!(!shipped.is_empty(), "{kind} ships nothing");
+
+        for name in shipped {
+            let landed = sb.home.join(".omh").join(kind).join(&name);
+            assert!(
+                landed.exists(),
+                "{kind}/{name} is in the repo and not in ~/.omh — embedded but \
+                 never installed, or never embedded. stdout: {} stderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+/// Provisioning stays behind the runtime check, and records nothing without it.
+///
+/// This is an **ordering** guard, not the cannot-tell one — with no runtime
+/// `init` never reaches the provisioning block, so it would pass even if
+/// `fired_from` lost its empty-answer branch. That rule is guarded where it can
+/// actually be exercised, by `a_resolution_nobody_measured_is_never_recorded`.
+/// What this catches is provisioning being moved *above* `runtime::select`,
+/// which would write `[provision]` on a box that never asked a sandbox
+/// anything — and since `stack::reconcile` drops every `true` it is not told
+/// about, that write would erase the table rather than add to it.
+///
+/// Runs anywhere, because "no container runtime" is the condition under test.
+#[test]
+fn a_missing_container_runtime_records_no_resolution() {
+    let sb = sandbox();
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .arg("init")
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("the binary under test must run");
+
+    let settings = sb.settings();
+    assert!(
+        !settings.contains("[provision]"),
+        "an unmeasured resolution must not be written: {settings}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // And the repo is still configured — the container work stays last.
+    assert!(settings.contains("[use]"), "got: {settings}");
+}
+
+/// Setting a repo up must not be abandoned half-done because the machine has no
+/// container runtime.
+///
+/// The image build moved above the rest of `init` so a toolchain could be probed
+/// before hooks were seeded. It propagates, so on a box with neither docker nor
+/// sbx — somebody installing omh before a runtime, which is the first thing they
+/// would do — `init` now bails after writing hooks and **before**
+/// `config::write_selection` and before gitignoring `settings.local.toml`.
+///
+/// The second of those is the one that bites quietly: a `settings.local.toml`
+/// left tracked is how a machine-local override reaches the team's repo, which
+/// is the whole reason that line is written at all.
+///
+/// Runs anywhere, because "no container runtime" is the condition under test.
+#[test]
+fn a_missing_container_runtime_still_leaves_the_repo_configured() {
+    let sb = sandbox();
+    sb.git_init();
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+
+    // Nothing on PATH, so `runtime::select` can find no backend. Whether init
+    // reports failure is not what is asserted — what it left behind is.
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .arg("init")
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("the binary under test must run");
+
+    let gitignore = std::fs::read_to_string(sb.repo.join(".omh/.gitignore")).unwrap_or_default();
+    assert!(
+        gitignore.contains("settings.local.toml"),
+        "a tracked settings.local.toml is how a machine-local override gets \
+         committed to the team's repo. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sb.settings().contains("[use]"),
+        "and the selection is what switches this repo's own hooks on: {}",
+        sb.settings()
+    );
+}
+
 /// `omh init` writes the selection out with every entry named.
 ///
 /// Expanded rather than `"*"`, because an explicit list is editable and

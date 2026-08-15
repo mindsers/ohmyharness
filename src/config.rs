@@ -319,6 +319,8 @@ fn refuse_a_table(doc: &toml_edit::DocumentMut, key: &str) -> Result<()> {
 /// below cannot drift about what a table is called.
 pub const USE: &str = "use";
 pub const OMH: &str = "omh";
+/// The resolution `init` records: which provides applied here.
+pub const PROVISION: &str = "provision";
 
 /// Write one capability's `[use]` list, or several.
 ///
@@ -342,6 +344,49 @@ pub fn write_selection(
             table[&cap.to_string()] = toml_edit::value(array);
         }
     })
+}
+
+/// Record what this repo resolved to — which provides applied.
+///
+/// Through `write_table`, so `DocumentMut` preserves every comment in the file:
+/// `init` writes this file full of explanations, and a serialiser round trip
+/// deletes what the user wrote. The predecessor that hand-rolled a text splice
+/// instead shipped a duplicate table and a duplicate key, either of which makes
+/// TOML refuse the whole document.
+///
+/// Wholesale for the table, unlike `write_feature`'s single key: `reconcile`
+/// has already decided what the table should be, entry for entry, and a merge
+/// here would silently keep a provide that stopped applying.
+pub fn write_provision(
+    paths: &Paths,
+    layer: Layer,
+    entries: &BTreeMap<String, bool>,
+) -> Result<Written> {
+    write_table(paths, layer, PROVISION, |table| {
+        table.clear();
+        for (key, on) in entries {
+            table[key.as_str()] = toml_edit::value(*on);
+        }
+    })
+}
+
+/// What **one layer** says it resolved to.
+///
+/// Deliberately not `settings::resolve`, which merges all three. `reconcile`
+/// writes the committed file, so it must be fed the committed file — reading
+/// the merge would take a `false` somebody wrote in `settings.local.toml`,
+/// meaning *not on this laptop*, and export it to everybody who clones.
+pub fn read_provision(paths: &Paths, layer: Layer) -> Result<BTreeMap<String, bool>> {
+    let doc = read_doc(&layer.file(paths))?;
+    Ok(doc
+        .get(PROVISION)
+        .and_then(toml_edit::Item::as_table)
+        .map(|t| {
+            t.iter()
+                .filter_map(|(k, v)| v.as_bool().map(|b| (k.to_string(), b)))
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Switch one of omh's features on or off here.
@@ -792,6 +837,75 @@ mod tests {
         assert!(err.contains("mcp.json"), "and the file: {err}");
     }
 
+    /// `init` writes this file full of explanatory comments, and somebody
+    /// maintains it by hand afterwards. A serialiser round trip deletes every
+    /// one of them, which is deleting what the user wrote — the reason
+    /// `edit_layer` uses `DocumentMut` at all.
+    ///
+    /// Guarding it here rather than trusting that: an earlier version of the
+    /// toolchain recorder hand-rolled a text splice instead, and shipped two
+    /// bugs — a duplicate table and a duplicate key, each of which made the
+    /// whole document unparseable and took `carry_in`, `[omh]` and `[use]` with
+    /// it.
+    #[test]
+    fn recording_a_resolution_keeps_the_comments_around_it() {
+        let (_d, paths) = fixture();
+        settings(
+            &paths,
+            Layer::Shared,
+            "# what this repo decided\ncarry_in = [\".env\"]\n\n[omh]\ncodegraph = false\n",
+        );
+
+        write_provision(
+            &paths,
+            Layer::Shared,
+            &BTreeMap::from([("rust/toolchain".to_string(), true)]),
+        )
+        .unwrap();
+
+        let body = std::fs::read_to_string(Layer::Shared.file(&paths)).unwrap();
+        assert!(body.contains("# what this repo decided"), "got: {body}");
+        let parsed: toml::Table = toml::from_str(&body).expect("must still be TOML");
+        assert_eq!(parsed["carry_in"].as_array().unwrap().len(), 1, "{body}");
+        assert_eq!(parsed["omh"]["codegraph"].as_bool(), Some(false), "{body}");
+        assert_eq!(
+            parsed["provision"]["rust/toolchain"].as_bool(),
+            Some(true),
+            "{body}"
+        );
+    }
+
+    /// `reconcile` must be fed the shared layer's *own* table, never the
+    /// three-layer resolution — so the reader it is fed by has to answer for
+    /// one layer.
+    ///
+    /// Otherwise a `false` somebody wrote in `settings.local.toml`, meaning
+    /// *not on this laptop*, is read back and written into the committed file,
+    /// exporting one machine's opt-out to everybody who clones. The local layer
+    /// exists precisely so that decision stays local.
+    #[test]
+    fn reading_a_provision_layer_never_returns_another_layers_entries() {
+        let (_d, paths) = fixture();
+        settings(
+            &paths,
+            Layer::Shared,
+            "[provision]\n\"rust/toolchain\" = true\n",
+        );
+        settings(
+            &paths,
+            Layer::Local,
+            "[provision]\n\"rust/linker\" = false\n",
+        );
+
+        let shared = read_provision(&paths, Layer::Shared).unwrap();
+        assert_eq!(shared.get("rust/toolchain"), Some(&true));
+        assert_eq!(
+            shared.get("rust/linker"),
+            None,
+            "a laptop's opt-out must not be readable as the team's: {shared:?}"
+        );
+    }
+
     /// A file omh cannot read is never a file omh may overwrite.
     ///
     /// `set` and `mcp_add` are read-modify-write. Treating every read error as
@@ -808,6 +922,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn an_unreadable_file_is_never_overwritten_with_an_empty_one() {
+        // `cfg(unix)` and this doc were stranded above a test inserted between
+        // them and this function — the suite stayed green while the gate moved
+        // to somebody else's test. Restored here, where they belong.
         use std::os::unix::fs::PermissionsExt;
         let (_d, paths) = fixture();
 

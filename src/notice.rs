@@ -75,7 +75,11 @@ impl Record {
 /// for a hooks directory it cannot read, because reporting an empty set of
 /// hooks would be a lie; what actually stops the launch in that case is
 /// `render::merge_hooks`, which reads the same directory and refuses.
-pub fn hooks(paths: &Paths, stacks: &[Stack]) -> Result<(Vec<String>, Record)> {
+pub fn hooks(
+    paths: &Paths,
+    defs: &[crate::stack::Definition],
+    stacks: &[Stack],
+) -> Result<(Vec<String>, Record)> {
     let dir = paths.repo.join(".omh/hooks");
     let present = read_dir(&dir)?;
     let mut out = Vec::new();
@@ -105,7 +109,7 @@ pub fn hooks(paths: &Paths, stacks: &[Stack]) -> Result<(Vec<String>, Record)> {
         let Some((stack_name, _)) = name.rsplit_once('-') else {
             continue;
         };
-        let known = crate::detect::known(stack_name);
+        let known = crate::detect::known(defs, stack_name);
         if let Some(stack) = known {
             if !stacks.iter().any(|s| s.name == stack.name) {
                 out.push(format!(
@@ -307,16 +311,18 @@ mod tests {
 
     /// Report *and* record, which is what a real launch does.
     fn said(fx: &Fx) -> Vec<String> {
-        let stacks = crate::detect::stacks(&fx.paths.repo);
-        let (notices, record) = hooks(&fx.paths, &stacks).unwrap();
+        let defs = crate::detect::shipped();
+        let stacks = crate::detect::stacks(&defs, &fx.paths.repo);
+        let (notices, record) = hooks(&fx.paths, &defs, &stacks).unwrap();
         record.commit().unwrap();
         notices
     }
 
     /// Report only, which is what a dry run does.
     fn observed(fx: &Fx) -> Vec<String> {
-        let stacks = crate::detect::stacks(&fx.paths.repo);
-        hooks(&fx.paths, &stacks).unwrap().0
+        let defs = crate::detect::shipped();
+        let stacks = crate::detect::stacks(&defs, &fx.paths.repo);
+        hooks(&fx.paths, &defs, &stacks).unwrap().0
     }
 
     const HOOK: &str = r#"{"on":"turn-end","run":"cargo test"}"#;
@@ -605,7 +611,7 @@ mod tests {
         let dir = fx.paths.repo.join(".omh/hooks");
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let result = hooks(&fx.paths, &[]).map(|(notices, _)| notices);
+        let result = hooks(&fx.paths, &[], &[]).map(|(notices, _)| notices);
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let err = result.expect_err("unreadable is not empty").to_string();

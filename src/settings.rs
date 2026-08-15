@@ -49,6 +49,12 @@ struct File {
     /// guard below would refuse it as a table nobody reads.
     #[serde(default)]
     toolchain: BTreeMap<String, Toolchain>,
+    /// What this repo resolved to — `"<stack>/<provide>" = true` for each
+    /// provide that applied. Named here for the same reason `use` is: unnamed,
+    /// the guard below would refuse it as a table nobody reads, and `init`
+    /// would write a file omh could not then parse.
+    #[serde(default)]
+    provision: BTreeMap<String, bool>,
     #[serde(flatten)]
     rest: toml::Table,
 }
@@ -118,6 +124,7 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut state: BTreeMap<String, bool> = BTreeMap::new();
     let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut toolchain: BTreeMap<String, Toolchain> = BTreeMap::new();
+    let mut provision: BTreeMap<String, bool> = BTreeMap::new();
     let mut selection = crate::selection::Selection::owning(manifest.owns());
     for path in layers(paths) {
         let Some(raw) = read(&path)? else {
@@ -162,6 +169,10 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         // the table wholesale would make a personal note about `gofmt` silently
         // drop the team's answer about `cargo`.
         toolchain.extend(file.toolchain);
+        // Same rule, same reason: an opt-out on one laptop says nothing about
+        // the provides it did not mention, so replacing the table wholesale
+        // would discard the team's resolution for every other stack.
+        provision.extend(file.provision);
     }
     let off: BTreeSet<String> = state
         .into_iter()
@@ -172,6 +183,7 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     policy.mcp_env = mcp_env;
     policy.selection = selection;
     policy.toolchain = toolchain;
+    policy.provision = provision;
     Ok(policy)
 }
 
@@ -207,6 +219,15 @@ pub struct RepoPolicy {
     /// decision about `cargo` is a decision about `cargo`, and it settles both
     /// of rust's hooks and any hand-written command that needs it too.
     pub toolchain: BTreeMap<String, Toolchain>,
+    /// Which provides apply here, from `[provision]` — the resolution `init`
+    /// recorded so that launch re-evaluates no predicate.
+    ///
+    /// Keyed `"<stack>/<provide>"`. A `false` is a person's opt-out, for cost
+    /// or because they supply the tool themselves; omh writes only `true`. The
+    /// probe still runs either way, so nobody can use this to tell omh
+    /// something false — it changes what goes into the image, never what is
+    /// reported about it.
+    pub provision: BTreeMap<String, bool>,
 }
 
 impl RepoPolicy {
@@ -231,6 +252,7 @@ impl RepoPolicy {
             // entry, which is the one thing this type exists to prevent.
             selection: crate::selection::Selection::owning(manifest.owns()),
             toolchain: BTreeMap::new(),
+            provision: BTreeMap::new(),
         }
     }
 }
@@ -472,6 +494,119 @@ mod tests {
             !s.allows(crate::adapter::Capability::Skills, "ours"),
             "the gitignored layer has the last word, which is why omh use writes it too"
         );
+    }
+
+    // ── the provisioning resolution ─────────────────────────────────────────
+
+    /// What a repo resolved to: which stacks apply, which provides fired.
+    ///
+    /// Written by `init` after evaluating each provide's `when` in the sandbox,
+    /// and read on every launch so that evaluation happens once rather than
+    /// standing between somebody and their agent every session.
+    ///
+    /// **This reader lands before anything writes the table.** `resolve` refuses
+    /// any table nobody reads — so `init` writing `[provision]` first would
+    /// produce a file omh itself could not parse, and every later command would
+    /// fail on it.
+    #[test]
+    fn a_provision_resolution_is_read_from_the_repo() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[provision]\n\"rust/toolchain\" = true\n\"node/pnpm\" = false\n",
+        );
+        let policy = resolve(&paths, &m).unwrap();
+        assert_eq!(policy.provision.get("rust/toolchain"), Some(&true));
+        assert_eq!(policy.provision.get("node/pnpm"), Some(&false));
+    }
+
+    /// The ordering constraint, made executable.
+    ///
+    /// `resolve` refuses any table nobody reads, and that refusal is by design —
+    /// a `[mcpp]` holding somebody's token reaches nothing, silently, which is
+    /// the shape both this module and `config` exist to prevent. The cost is
+    /// that a table omh *writes* must be readable **first**: reversed, `init`
+    /// records `[provision]` and every later omh command dies parsing a file omh
+    /// produced.
+    ///
+    /// Nothing else states that dependency, and somebody deleting the field as
+    /// unused would find the suite green and the failure a release away.
+    #[test]
+    fn a_provision_table_is_not_a_table_nobody_reads() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "carry_in = []\n\n[provision]\n\"rust/toolchain\" = true\n",
+        );
+        assert!(
+            resolve(&paths, &m).is_ok(),
+            "omh must be able to read back the table it writes"
+        );
+    }
+
+    /// *"Not on this laptop"* is a machine's decision, not the team's — so the
+    /// gitignored layer has to be able to answer for itself, and win.
+    #[test]
+    fn a_later_layer_wins_a_provision_entry() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[provision]\n\"rust/linker\" = true\n",
+        );
+        write(
+            paths.repo.join(".omh/settings.local.toml"),
+            "[provision]\n\"rust/linker\" = false\n",
+        );
+        assert_eq!(
+            resolve(&paths, &m).unwrap().provision.get("rust/linker"),
+            Some(&false)
+        );
+    }
+
+    /// Key by key, like `[toolchain]` and `[mcp]` — and deliberately **not**
+    /// like `[use]`, which replaces wholesale. A laptop that opts out of one
+    /// provide has said nothing about the others, and taking its table as the
+    /// whole answer would silently discard the team's resolution for every
+    /// stack it did not mention.
+    #[test]
+    fn provision_entries_merge_key_by_key() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.root.join("settings.toml"),
+            "[provision]\n\"go/toolchain\" = true\n",
+        );
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[provision]\n\"rust/toolchain\" = true\n",
+        );
+        write(
+            paths.repo.join(".omh/settings.local.toml"),
+            "[provision]\n\"rust/linker\" = false\n",
+        );
+
+        let p = resolve(&paths, &m).unwrap().provision;
+        assert_eq!(
+            p.get("go/toolchain"),
+            Some(&true),
+            "personal survives: {p:?}"
+        );
+        assert_eq!(p.get("rust/toolchain"), Some(&true), "shared too: {p:?}");
+        assert_eq!(p.get("rust/linker"), Some(&false), "and local: {p:?}");
+    }
+
+    /// A value omh cannot read is refused rather than dropped. Dropped, a
+    /// typo'd opt-out silently becomes an opt-in, and the provide it was meant
+    /// to exclude is installed anyway — with nothing said.
+    #[test]
+    fn a_provision_value_omh_cannot_read_is_refused_by_name() {
+        let (_d, paths, m) = fixture();
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[provision]\n\"rust/linker\" = \"no\"\n",
+        );
+        let err = format!("{:#}", resolve(&paths, &m).unwrap_err());
+        assert!(err.contains("rust/linker"), "must name the key: {err}");
+        assert!(err.contains("settings.toml"), "and the file: {err}");
     }
 
     // ── toolchain decisions ─────────────────────────────────────────────────

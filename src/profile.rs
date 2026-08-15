@@ -55,6 +55,14 @@ impl Paths {
         self.root.join("editors")
     }
 
+    /// The stacks as shipped: what a project needs installed, and how the image
+    /// gets it. Managed files, refreshed on every `init` like the adapters — a
+    /// local edit that fixes one ecosystem leaves omh broken for everybody else
+    /// using it, so the fix belongs upstream.
+    pub fn stacks(&self) -> PathBuf {
+        self.root.join("stacks")
+    }
+
     /// The base set as shipped: what `init` seeds and what `omh why` explains.
     /// Versioned files, oldest kept, so an upgrade can eventually diff two.
     pub fn base(&self) -> PathBuf {

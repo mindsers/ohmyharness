@@ -1,0 +1,61 @@
+# Rust — what a repo with a Cargo.toml needs in order to be worked on.
+#
+# Every provide states what it buys (`because`) and, where somebody has taken
+# one, what it costs (`measured`). Costs are measured and benefits are argued;
+# they are different kinds of claim and this file keeps them apart, exactly as
+# the base set does.
+
+name   = "rust"
+marker = "Cargo.toml"
+
+# Three things here are not obvious, and each was got wrong first:
+#
+#   RUSTUP_HOME/CARGO_HOME under /usr/local — `install` runs as root, so the
+#   default `$HOME/.rustup` is `/root/.rustup`, and `/root` is mode 700. The
+#   agent could not read it even if it looked there.
+#
+#   The *toolchain's* binaries are linked, not rustup's shims. A shim resolves
+#   its toolchain through `$HOME/.rustup` at run time, so a root-installed one
+#   sends the agent looking in `/home/agent/.rustup`, which does not exist —
+#   `could not create home directory ... Permission denied`. The real binaries
+#   under `toolchains/*/bin` need no environment at all.
+#
+#   `-c rustfmt -c clippy` — the minimal profile ships neither, and rustup's
+#   install-on-demand only happens through the shims this deliberately avoids.
+[[provide]]
+name    = "toolchain"
+needs   = ["cargo", "rustc", "rustfmt", "cargo-clippy"]
+install = "export RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -c rustfmt -c clippy --no-modify-path && ln -sf /usr/local/rustup/toolchains/*/bin/* /usr/local/bin/ && chmod -R a+rX /usr/local/rustup /usr/local/cargo"
+because = "cargo is how a rust project is built, tested and formatted; without it neither the agent nor the human can check a change"
+
+  # Taken with a *default* profile, which is not what this recipe installs —
+  # said plainly rather than converted into an estimate, because a number
+  # nobody took reads exactly like one somebody did.
+  [[provide.measured]]
+  what  = "on disk, default profile (this recipe installs minimal plus rustfmt and clippy)"
+  value = "1.5 GB"
+  how   = "du -sh ~/.rustup after `rustup -y --profile default`, aarch64"
+  on    = "2026-08-14"
+
+  [[provide.measured]]
+  what  = "of that, the documentation --profile minimal omits"
+  value = "904 MB"
+  how   = "du -sh ~/.rustup/toolchains/*/share/doc, same install"
+  on    = "2026-08-14"
+
+# rustup delivers a working `cargo` and still cannot produce a binary without a
+# linker. The recipe above succeeded on an image with no `cc`, `ld` or `ar`, and
+# `cargo test` failed at the last step — which is why `needs` and `install` are
+# separate fields, and why this is a provide of its own rather than a line in
+# the one above.
+[[provide]]
+name    = "linker"
+needs   = ["cc", "ld", "ar"]
+install = "apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*"
+because = "rustc compiles without a linker and then cannot link, so every build fails at the last step"
+
+  [[provide.measured]]
+  what  = "on disk"
+  value = "124 MB"
+  how   = "sum of dpkg Installed-Size for gcc, gcc-12, libc6-dev, binutils and their deps, aarch64"
+  on    = "2026-08-14"

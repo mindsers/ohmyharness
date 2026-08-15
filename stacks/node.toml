@@ -1,0 +1,48 @@
+# Node — and the package manager question, which is a property of the project
+# rather than of the developer.
+#
+# One marker covers projects using npm, pnpm, yarn and bun, and they are
+# mutually exclusive: a repo using npm must not get pnpm installed on the
+# strength of being a node project. So each manager is its own provide with its
+# own `when`, and the repo's own committed files decide.
+#
+# `when` is a shell predicate — exit 0 applies, 1 does not, anything higher
+# means it could not answer and is reported rather than guessed at. It runs
+# **in the sandbox** with the repo mounted read-only, never on the host: a
+# stack definition executing shell on somebody's laptop is the one thing omh
+# exists to avoid.
+
+name   = "node"
+marker = "package.json"
+
+# Nothing to install — stated anyway. The base image is node:22-bookworm-slim,
+# and writing that down turns an unwritten assumption into one the probe checks,
+# so a change to the base image is caught here rather than at somebody's turn one.
+[[provide]]
+name    = "runtime"
+needs   = ["node", "npm"]
+because = "the base image already ships these; declaring them is how a change to it gets noticed"
+
+# The lockfile first and `packageManager` second, in that order deliberately:
+# the lockfile records what was actually used, the field records what was
+# declared, and where they disagree the lockfile is the better witness.
+[[provide]]
+name    = "pnpm"
+needs   = ["pnpm"]
+when    = "test -f pnpm-lock.yaml || jq -e '(.packageManager // \"\") | startswith(\"pnpm\")' package.json >/dev/null"
+install = "corepack enable pnpm"
+because = "a repo whose lockfile is pnpm's cannot be installed or tested with anything else"
+
+[[provide]]
+name    = "yarn"
+needs   = ["yarn"]
+when    = "test -f yarn.lock || jq -e '(.packageManager // \"\") | startswith(\"yarn\")' package.json >/dev/null"
+install = "corepack enable yarn"
+because = "a repo whose lockfile is yarn's cannot be installed or tested with anything else"
+
+[[provide]]
+name    = "bun"
+needs   = ["bun"]
+when    = "test -f bun.lock || test -f bun.lockb || jq -e '(.packageManager // \"\") | startswith(\"bun\")' package.json >/dev/null"
+install = "npm install -g bun"
+because = "a repo whose lockfile is bun's cannot be installed or tested with anything else"
