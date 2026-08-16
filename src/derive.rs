@@ -278,9 +278,18 @@ fn rule_heads(body: &str) -> BTreeSet<String> {
         // where a second target name would be, which a just recipe's parameter
         // default (`build target="debug":`) never does: `heads.contains('=')`
         // cannot tell those two apart and refused every parameterised recipe.
-        let mut words = heads.split_whitespace();
-        let assignment = words.next().is_some_and(|w| w.ends_with('='))
-            || words.next().is_some_and(|w| w.starts_with('='));
+        // An `=` **anywhere before the colon** in a head that is not a just
+        // parameter default. Looking at the first two words alone missed
+        // `export PYTHONPATH = src:tests`, where make's own keyword shifts the
+        // `=` along one — and then read `export` and `PYTHONPATH` as targets.
+        //
+        // Told apart from a just recipe by *what precedes the `=`*: a
+        // parameter default attaches to a name (`target="debug"`), while an
+        // assignment has whitespace or a keyword in front of its `=`. So the
+        // rule is a bare `=` word, or a word ending in `=`, in any position.
+        let assignment = heads
+            .split_whitespace()
+            .any(|w| w.starts_with('=') || w.ends_with('='));
         if after.starts_with([':', '=']) || assignment || heads.trim().is_empty() {
             continue;
         }
@@ -433,20 +442,34 @@ pub fn hooks(
     let scripts = scripts(repo);
 
     for (on, moment, names) in MOMENTS {
+        // Provenance is decided **here**, by the branch that decides the
+        // command — never re-derived afterwards from what happens to be in the
+        // repo. A `Makefile` with no `test` target falls through to
+        // `scripts.test`, and a `from` recomputed from "is there a runner?"
+        // would then explain the hook by pointing at a target nobody wrote.
         let found = runner
             .as_ref()
             .and_then(|(which, targets)| {
-                names
-                    .iter()
-                    .find(|n| targets.contains(**n))
-                    .map(|n| (which.program(), which.run(n), None))
+                names.iter().find(|n| targets.contains(**n)).map(|n| {
+                    (
+                        which.program(),
+                        which.run(n),
+                        None,
+                        format!("a `{n}` target in this repo's {}file", which.program()),
+                    )
+                })
             })
             .or_else(|| {
                 let m = manager?;
                 let n = names.iter().find(|n| scripts.contains(**n))?;
-                Some((m.program(), m.run(n), Some("node")))
+                Some((
+                    m.program(),
+                    m.run(n),
+                    Some("node"),
+                    format!("the `{n}` script in package.json, run with {}", m.program()),
+                ))
             });
-        let Some((source, command, stack)) = found else {
+        let Some((source, command, stack, from)) = found else {
             continue;
         };
         out.push(Derived {
@@ -464,25 +487,10 @@ pub fn hooks(
                 when: None,
                 action: crate::hook::Action::Run(command),
             },
-            from: source_of(&runner, manager, moment),
+            from,
         });
     }
     out
-}
-
-fn source_of(
-    runner: &Option<(Runner, BTreeSet<String>)>,
-    manager: Option<Manager>,
-    moment: &str,
-) -> String {
-    match (runner, manager) {
-        (Some((which, _)), _) => format!("a `{moment}` target in this repo's {:?}", which),
-        (None, Some(m)) => format!(
-            "the `{moment}` script in package.json, run with {}",
-            m.program()
-        ),
-        (None, None) => "this repo".to_string(),
-    }
 }
 
 #[cfg(test)]
@@ -727,6 +735,66 @@ mod tests {
         );
     }
 
+    /// **The `tasks:` block ends where the indentation does.** A key under a
+    /// *later* top-level block is not a task.
+    ///
+    /// `vars:`, `env:` and `silent:` routinely follow `tasks:` in a real
+    /// Taskfile, and a nested key under one of them sits at exactly the depth a
+    /// task name does. Read as tasks, they produce a hook running
+    /// `task <not-a-task>` — which fails on every turn, from a file omh wrote,
+    /// naming something that was never a task. That is the wrong-answer
+    /// direction this module opens by forbidding, and it is why the scan stops
+    /// rather than filtering.
+    #[test]
+    fn a_key_under_a_later_block_is_not_a_task() {
+        let (_d, r) = repo(&[(
+            "Taskfile.yml",
+            "version: '3'\n\
+             \n\
+             tasks:\n\
+             \x20 test:\n\
+             \x20   cmds:\n\
+             \x20     - go test ./...\n\
+             \n\
+             vars:\n\
+             \x20 BUILD_DATE:\n\
+             \x20   sh: date -u\n\
+             \x20 GREETING: hello\n",
+        )]);
+        assert_eq!(
+            runner(&r).expect("a Taskfile is a runner").1,
+            ["test".to_string()].into_iter().collect(),
+            "`BUILD_DATE` is a variable, and `task BUILD_DATE` is not a command"
+        );
+    }
+
+    /// A key **with a value on the same line** yields no task.
+    ///
+    /// Stated as what the code does rather than as a claim about Taskfile:
+    /// `hello: echo "hi"` may well be valid shorthand for a one-command task,
+    /// and omh does not read it. That is the conservative direction — a hook
+    /// omh did not derive is one somebody writes, while a hook naming something
+    /// that is not a task fails on every turn — but it is a narrowing rather
+    /// than a correctness rule, and this pins it so it cannot change without
+    /// somebody deciding to change it.
+    #[test]
+    fn a_key_carrying_a_value_is_not_read_as_a_task() {
+        let (_d, r) = repo(&[(
+            "Taskfile.yml",
+            "version: '3'\n\
+             tasks:\n\
+             \x20 test:\n\
+             \x20   cmds:\n\
+             \x20     - go test ./...\n\
+             \x20 hello: echo \"hi\"\n",
+        )]);
+        assert_eq!(
+            runner(&r).expect("a Taskfile is a runner").1,
+            ["test".to_string()].into_iter().collect(),
+            "only the block-shaped task is read"
+        );
+    }
+
     /// **A YAML feature the scanner does not understand means no answer**, not
     /// a partial one.
     ///
@@ -777,6 +845,31 @@ mod tests {
             runner(&r).expect("a Makefile is a runner").1,
             ["real"].map(String::from).into_iter().collect(),
             "a colon in a variable's value does not make it a rule"
+        );
+    }
+
+    /// …including when a keyword shifts the `=` along.
+    ///
+    /// `export PYTHONPATH = src:tests` puts the `=` in the *third* word, so a
+    /// check that looks only at the first two reads `export` and `PYTHONPATH`
+    /// as targets. `make export` is not a thing, and this is the wrong-answer
+    /// direction the module opens by forbidding — worse, it flips a Makefile
+    /// whose only colon-bearing lines are exported paths from *no runner* to
+    /// *a runner with two targets*, which then decides what `derive::hooks`
+    /// picks.
+    #[test]
+    fn a_keyword_before_an_assignment_does_not_make_it_a_rule() {
+        let (_d, r) = repo(&[(
+            "Makefile",
+            "export PYTHONPATH = src:tests\n\
+             override CFLAGS := -O2\n\
+             real:\n\
+             \techo\n",
+        )]);
+        assert_eq!(
+            runner(&r).expect("a Makefile is a runner").1,
+            ["real"].map(String::from).into_iter().collect(),
+            "`export` and `override` shift the `=`, and neither is a target"
         );
     }
 
@@ -993,6 +1086,43 @@ mod tests {
         );
     }
 
+    /// **The evidence named is the evidence used.** A hook the *manager* branch
+    /// produced must not be credited to a `Makefile` that happens to exist.
+    ///
+    /// A repo with a `Makefile` holding only `build:` and `deploy:` falls
+    /// through to `scripts.test`, and `omh why` would then explain the hook by
+    /// pointing at a `test` target nobody wrote — sending somebody to edit a
+    /// file that has nothing to do with it. Provenance has to be decided by the
+    /// branch that decided the command, not re-derived afterwards from what is
+    /// merely present.
+    ///
+    /// The existing test only asserted `from` was non-empty, which is what let
+    /// this through.
+    #[test]
+    fn the_evidence_a_hook_names_is_the_evidence_it_came_from() {
+        let (_d, r) = repo(&[
+            ("Makefile", "build:\n\techo\ndeploy:\n\techo\n"),
+            ("package.json", r#"{"scripts":{"test":"vitest run"}}"#),
+            ("pnpm-lock.yaml", ""),
+        ]);
+        let got = hooks(&r, &BTreeMap::new(), &BTreeSet::new());
+        let test = got
+            .iter()
+            .find(|h| h.name == "pnpm-test")
+            .unwrap_or_else(|| panic!("the manager branch produced it: {got:?}"));
+
+        assert!(
+            test.from.contains("package.json"),
+            "a hook from `scripts.test` must say so: {}",
+            test.from
+        );
+        assert!(
+            !test.from.to_lowercase().contains("make"),
+            "and must not credit a Makefile whose targets it never used: {}",
+            test.from
+        );
+    }
+
     /// **A runner outranks a script.** Somebody who wrote a `Makefile` wrapping
     /// their own `npm test` maintains the wrapper, and that is the entry point
     /// they expect to be used.
@@ -1042,5 +1172,187 @@ mod tests {
     fn a_runner_with_no_readable_targets_is_no_runner() {
         let (_d, r) = repo(&[("Makefile", "CARGO := cargo\n# nothing here\n")]);
         assert_eq!(runner(&r), None);
+    }
+
+    // ── candidate guards (mutation testing) ─────────────────────────────────
+
+    /// **Each Taskfile refusal has to stand on its own.** The fixture that
+    /// covers them together triggers two checks at once — an anchor *and* a
+    /// merge key in the same document — so either check could be deleted and
+    /// the other would carry the test. A partial task list is the failure this
+    /// module names as the worst one it can produce, so each way of reaching it
+    /// is pinned separately.
+    #[test]
+    fn each_taskfile_refusal_answers_nothing_on_its_own() {
+        for (why, body) in [
+            (
+                "an alias with no merge key still assembles a task elsewhere",
+                "version: '3'\nx-base: &base\n  - echo\ntasks:\n  test:\n    cmds: *base\n",
+            ),
+            (
+                "a merge key with no alias word is still a merge",
+                "version: '3'\ntasks:\n  test:\n    <<: {silent: true}\n    cmds:\n      - echo\n",
+            ),
+            (
+                "an anchor alone means the document is assembled",
+                "version: '3'\ntasks:\n  test: &t\n    cmds:\n      - echo\n",
+            ),
+        ] {
+            let (_d, r) = repo(&[("Taskfile.yml", body)]);
+            assert_eq!(runner(&r), None, "{why}");
+        }
+    }
+
+    /// A runner answers to more than one filename, and a spelling omh does not
+    /// look for is a repo that silently derives nothing. `Taskfile.yaml` and a
+    /// lowercase `makefile` are both ordinary.
+    #[test]
+    fn a_runner_answers_to_every_name_it_is_spelled_with() {
+        for (file, want) in [
+            ("Makefile", Runner::Make),
+            ("makefile", Runner::Make),
+            ("GNUmakefile", Runner::Make),
+            ("justfile", Runner::Just),
+            ("Justfile", Runner::Just),
+            (".justfile", Runner::Just),
+        ] {
+            let (_d, r) = repo(&[(file, "test:\n\techo\n")]);
+            assert_eq!(
+                runner(&r).map(|(w, _)| w),
+                Some(want),
+                "{file} is how this project spells its runner"
+            );
+        }
+        for file in ["Taskfile.yml", "Taskfile.yaml"] {
+            let (_d, r) = repo(&[(
+                file,
+                "version: '3'\ntasks:\n  test:\n    cmds:\n      - echo\n",
+            )]);
+            assert_eq!(
+                runner(&r).map(|(w, _)| w),
+                Some(Runner::Task),
+                "{file} is how this project spells its runner"
+            );
+        }
+    }
+
+    /// **An indented line is a recipe body, never a rule.** A recipe that
+    /// happens to contain a colon — an `scp` destination, a docker port map, a
+    /// `sed` expression — would otherwise contribute its first words as
+    /// targets, and `make scp` is not a thing anybody wrote.
+    #[test]
+    fn an_indented_line_is_a_recipe_body_never_a_rule() {
+        let (_d, r) = repo(&[(
+            "Makefile",
+            "deploy:\n\
+             \tscp build host:/srv/app\n\
+             test:\n\
+             \tdocker run -p 8080:80 img\n",
+        )]);
+        assert_eq!(
+            runner(&r).expect("a Makefile is a runner").1,
+            ["deploy", "test"].map(String::from).into_iter().collect(),
+            "a colon inside a recipe does not declare a target"
+        );
+    }
+
+    /// **A runner omh cannot read does not make the other one unambiguous.** A
+    /// repo with a `Makefile` and a `justfile` is cannot-tell; that must not
+    /// become a confident answer because one of the two could not be opened.
+    #[test]
+    #[cfg(unix)]
+    fn an_unreadable_runner_still_counts_as_a_runner() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, r) = repo(&[
+            ("Makefile", "test:\n\techo\n"),
+            ("justfile", "test:\n\techo\n"),
+        ]);
+        std::fs::set_permissions(r.join("Makefile"), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+        let got = runner(&r);
+        std::fs::set_permissions(r.join("Makefile"), std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        assert_eq!(
+            got, None,
+            "a file omh could not open is not a file omh knows is absent"
+        );
+    }
+
+    /// **More than one provisioned manager is not a tie broken here.** An image
+    /// carrying both pnpm and npm says nothing about which one this project
+    /// runs, and `Manager::ALL`'s order is not an answer — the repo's own
+    /// evidence is.
+    #[test]
+    fn more_than_one_provisioned_manager_defers_to_the_repo() {
+        let (_d, r) = repo(&[("package.json", "{}"), ("yarn.lock", "")]);
+        assert_eq!(
+            manager(&r, &provisioned(&["node/npm", "node/pnpm"])),
+            Some(Manager::Yarn),
+            "the image has both, so the lockfile is what decides"
+        );
+
+        // And where the repo cannot decide either, nothing does.
+        let (_d, r) = repo(&[
+            ("package.json", "{}"),
+            ("yarn.lock", ""),
+            ("pnpm-lock.yaml", ""),
+        ]);
+        assert_eq!(manager(&r, &provisioned(&["node/npm", "node/pnpm"])), None);
+    }
+
+    /// **`omh why` has to name the file that justified the hook**, not merely
+    /// say something. "omh guessed" is not an answer, and neither is crediting a
+    /// `package.json` for a command the `Makefile` supplied.
+    #[test]
+    fn the_provenance_names_the_file_the_command_came_from() {
+        // A repo with **both**, deliberately: with only one source in play the
+        // arms of `source_of` cannot be told apart, and the misattribution
+        // this guards against is exactly the one that needs both present.
+        let (_d, r) = repo(&[
+            ("Makefile", "test:\n\techo\n"),
+            ("package.json", "{\"scripts\":{\"test\":\"vitest run\"}}"),
+            ("pnpm-lock.yaml", ""),
+        ]);
+        let derived = hooks(&r, &BTreeMap::new(), &BTreeSet::new());
+        let from = &derived[0].from;
+        assert_eq!(derived[0].name, "make-test", "the runner supplied it");
+        assert!(
+            from.to_lowercase().contains("makefile") && !from.contains("package.json"),
+            "the Makefile supplied the command, so the Makefile is what \
+             `omh why` must name: {from}"
+        );
+
+        let (_d, r) = repo(&[
+            ("package.json", "{\"scripts\":{\"test\":\"vitest run\"}}"),
+            ("pnpm-lock.yaml", ""),
+        ]);
+        let derived = hooks(&r, &BTreeMap::new(), &BTreeSet::new());
+        let from = &derived[0].from;
+        assert!(
+            from.contains("package.json") && from.contains("pnpm"),
+            "a hook from a script must name the file and the manager: {from}"
+        );
+    }
+
+    /// **The list of moments is closed.** `build`, `start`, `check` and `dev`
+    /// are not moments omh has an opinion about — running one at the end of
+    /// every turn is a minute of wasted compute and a red mark whenever the
+    /// tree is mid-edit.
+    #[test]
+    fn no_script_outside_the_closed_list_becomes_a_hook() {
+        for script in ["build", "start", "dev", "check", "lint", "typecheck"] {
+            let (_d, r) = repo(&[
+                (
+                    "package.json",
+                    &format!("{{\"scripts\":{{\"{script}\":\"x\"}}}}"),
+                ),
+                ("pnpm-lock.yaml", ""),
+            ]);
+            assert_eq!(
+                hooks(&r, &BTreeMap::new(), &BTreeSet::new()),
+                Vec::new(),
+                "`{script}` is not a moment omh has an opinion about"
+            );
+        }
     }
 }

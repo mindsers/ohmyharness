@@ -694,8 +694,9 @@ before.
 
 ### Consequence for what is built
 
-The probe, `detect::program`, and `render::suppressed_by_toolchain` survive with
-a different input. `settings::Toolchain`, the `[toolchain]` table, the `init`
+The probe, `detect::program`, and the suppression itself survive with a
+different input — as `render::held_back` over `suppressed_by_probe`, reading
+measurements where the old suppression read a settings table. `settings::Toolchain`, the `[toolchain]` table, the `init`
 question and the answer-recording that writes it are **deleted** — roughly half
 of what shipped this cycle, removed because provisioning made the question it
 answered the wrong question.
@@ -810,16 +811,18 @@ That layering answers the convention-versus-fact question without a new concept:
 Neither path needs the stack to know a command, and a repo that disagrees with
 omh's convention simply shadows it — which is what the union rule is for.
 
-## 2.3 The arity is currently two, and hardcoded
+## 2.3 The arity was two, and hardcoded — resolved
 
-`detect::Stack` has exactly two command fields, and five places depend on it: the
-struct, `KNOWN`, `stack_hooks` returning `[StackHook; 2]`,
-`notice::stack_hook_names` returning `[String; 2]`, and the curation test
-asserting both are non-empty.
+`detect::Stack` had exactly two command fields and five places depended on
+them: the struct, `KNOWN`, `stack_hooks` returning `[StackHook; 2]`,
+`notice::stack_hook_names` returning `[String; 2]`, and a curation test
+asserting both were non-empty. That was this repo's shape imposed on everybody
+else's — a TypeScript project may want `tsc --noEmit` at turn end, a Python one
+`mypy`, a repo with codegen may want to regenerate after edits.
 
-That is this repo's shape imposed on everybody else's. A TypeScript project may
-want `tsc --noEmit` at turn end; a Python one `mypy`; a repo with codegen may
-want to regenerate after edits.
+**All five are gone.** Hooks are catalogue files that *name* a stack, so an
+ecosystem may have none, one, or six, and adding one is a `.json` file rather
+than a change to an array length.
 
 Note that **per-project hooks are already unlimited**: `.omh/hooks/*.json` is a
 directory anyone writes into, any moment, any command, and several hooks sharing

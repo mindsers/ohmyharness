@@ -278,13 +278,7 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
     // A name is half a `[provision]` key, and `key` joins the halves with `/`.
     // A stack `a/b` with provide `c` and a stack `a` with provide `b/c` mint one
     // key, so one person's `false` switches off somebody else's install.
-    anyhow::ensure!(!def.name.trim().is_empty(), "{at}: the stack has no name");
-    anyhow::ensure!(
-        !def.name.contains('/'),
-        "{at}: stack name `{}` contains `/`, which is what separates a stack \
-         from a provide in a `[provision]` key",
-        def.name
-    );
+    ecosystem_name(&def.name, &at.to_string())?;
 
     // `Path::join` **discards the base** when handed an absolute path, so an
     // absolute marker does not look inside the repo at all — it matches every
@@ -372,6 +366,41 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
 /// stacks is a set, and a polyglot repo is genuinely several of them at once.
 /// A missing directory is no stacks rather than an error, because a fresh
 /// install has not seeded one yet and that is not a reason to refuse to work.
+/// What an ecosystem may be called — the one rule, applied at **both** ends.
+///
+/// A `Definition::name` and a `Marker::stack` are the same name: the marker is
+/// the question, the definition is the answer, and `ask::how_is_it_installed`
+/// turns one into the other by writing `stacks/<stack>.toml`. The rule was
+/// enforced only where definitions are *read*, so a marker could name something
+/// no definition may be called — and omh would then write a file it declines to
+/// load, or write it into a subdirectory nothing reads.
+///
+/// Three things it must not be:
+///
+/// - **blank**, which names nothing
+/// - **`/`-bearing**, because a name is half a `[provision]` key and `key`
+///   joins the halves with `/`: a stack `a/b` with provide `c` and a stack `a`
+///   with provide `b/c` mint one key, so one person's `false` switches off
+///   somebody else's install
+/// - **a path component** — `.` or `..` or a separator — because the name is
+///   interpolated into a filename, and `..` climbs out of the directory the
+///   answer belongs in
+fn ecosystem_name(name: &str, at: &str) -> Result<()> {
+    anyhow::ensure!(!name.trim().is_empty(), "{at}: an ecosystem has no name");
+    anyhow::ensure!(
+        !name.contains('/') && !name.contains('\\'),
+        "{at}: ecosystem name `{name}` contains a separator, which is what \
+         divides a stack from a provide in a `[provision]` key — and what would \
+         put its file somewhere nothing reads"
+    );
+    anyhow::ensure!(
+        !name.starts_with('.'),
+        "{at}: ecosystem name `{name}` starts with `.`, so it is a path rather \
+         than a name"
+    );
+    Ok(())
+}
+
 /// A file omh recognises as naming an ecosystem it cannot yet set up.
 ///
 /// The one case where `init` has nothing to fall back on: the repo plainly *is*
@@ -419,11 +448,13 @@ pub fn markers(dir: &Path) -> Result<Vec<Marker>> {
         let parsed: Markers =
             toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
         for m in &parsed.markers {
-            anyhow::ensure!(
-                !m.file.trim().is_empty() && !m.stack.trim().is_empty(),
-                "{}: a marker needs both a `file` and a `stack`",
-                path.display()
-            );
+            let at = path.display().to_string();
+            anyhow::ensure!(!m.file.trim().is_empty(), "{at}: a marker needs a `file`");
+            // The same rule a `Definition::name` gets, because it is the same
+            // name: `ask::how_is_it_installed` writes the answer as
+            // `stacks/<stack>.toml`, so a marker that names something no
+            // definition may be called produces a file omh then cannot load.
+            ecosystem_name(&m.stack, &at)?;
             // The same rule a stack's own marker gets, for the same reason: an
             // absolute path matches every repo on the machine.
             let p = Path::new(&m.file);
@@ -591,7 +622,51 @@ because = "cargo is how a rust project is built and tested"
         }
     }
 
-    /// A marker earns its place by being recognisable and unanswerable. Both
+    /// **A marker's `stack` becomes a filename and a `[provision]` key**, so it
+    /// takes the same rule a stack's own name does.
+    ///
+    /// The rule was enforced at the read end and not the write end, and the two
+    /// ends are the same name. `ask::how_is_it_installed` interpolates this
+    /// straight into `stacks/<stack>.toml`, so `elixir/otp` writes
+    /// `<repo>/.omh/stacks/elixir/otp.toml` — which `load_dir` is not recursive
+    /// enough to find. The question is answered, the file exists, `init` says
+    /// `stack elixir/otp — from what you told it`, and nothing ever reads it.
+    /// Had it landed in the right directory, `validate` would have *refused* it
+    /// for the same `/`, so omh would have written a file omh then declines to
+    /// load.
+    ///
+    /// A leading `.` is the milder variant: `..` climbs out of `stacks/`
+    /// entirely, into `<repo>/.omh/`.
+    #[test]
+    fn a_marker_names_an_ecosystem_the_way_a_stack_does() {
+        for (stack, why) in [
+            (
+                "elixir/otp",
+                "a `/` separates a stack from a provide in a key",
+            ),
+            (
+                "../evil",
+                "and climbs out of the directory the answer belongs in",
+            ),
+            (".hidden", "a leading dot is not a name"),
+        ] {
+            let d = dir_with(&[(
+                "m.toml",
+                &format!("[[marker]]\nfile  = \"mix.exs\"\nstack = \"{stack}\"\n"),
+            )]);
+            assert!(
+                markers(d.path()).is_err(),
+                "`{stack}` must be refused — {why}"
+            );
+        }
+
+        // And a real one still loads, or the rule is only a wall.
+        let good = dir_with(&[(
+            "m.toml",
+            "[[marker]]\nfile = \"mix.exs\"\nstack = \"elixir\"\n",
+        )]);
+        assert_eq!(markers(good.path()).unwrap().len(), 1);
+    }
     /// halves are checked here because a blank one matches nothing and an
     /// absolute one matches every repo on the machine — the same rule a stack's
     /// own marker gets, for the same reason.
@@ -1369,5 +1444,66 @@ because = "cargo is how a rust project is built and tested"
         ]);
         let found = load_dir(d.path()).unwrap();
         assert_eq!(found.len(), 1, "got {found:?}");
+    }
+
+    // ── candidate guards (mutation testing) ─────────────────────────────────
+
+    /// A marker needs **both** halves and a **relative** file. An empty `stack`
+    /// names nothing to write; an absolute `file` exists in every repo on the
+    /// machine, so every project on it would be asked the same question.
+    ///
+    /// The same rule a stack's own marker gets, and it had the same reason and
+    /// none of the coverage.
+    #[test]
+    fn a_marker_needs_both_halves_and_a_file_inside_the_repo() {
+        for (why, body) in [
+            (
+                "no stack to name the file omh would write",
+                "[[marker]]\nfile = \"mix.exs\"\nstack = \"\"\n",
+            ),
+            (
+                "no file to look for",
+                "[[marker]]\nfile = \"\"\nstack = \"elixir\"\n",
+            ),
+            (
+                "an absolute path is in every repo on the machine",
+                "[[marker]]\nfile = \"/etc/passwd\"\nstack = \"elixir\"\n",
+            ),
+            (
+                "a path is not one filename inside the repo",
+                "[[marker]]\nfile = \"../mix.exs\"\nstack = \"elixir\"\n",
+            ),
+        ] {
+            let dir = dir_with(&[("m.toml", body)]);
+            assert!(markers(dir.path()).is_err(), "{why}: accepted {body:?}");
+        }
+    }
+
+    /// **The order the questions come in is stable.** One decline stops the
+    /// exchange, so the order decides which single question a polyglot repo is
+    /// ever asked — and `read_dir` order is neither stable nor meaningful.
+    #[test]
+    fn markers_are_returned_in_a_stable_order() {
+        let dir = dir_with(&[
+            (
+                "z.toml",
+                "[[marker]]\nfile = \"mix.exs\"\nstack = \"elixir\"\n",
+            ),
+            (
+                "a.toml",
+                "[[marker]]\nfile = \"Gemfile\"\nstack = \"ruby\"\n\n\
+                 [[marker]]\nfile = \"composer.json\"\nstack = \"php\"\n",
+            ),
+        ]);
+        let got: Vec<String> = markers(dir.path())
+            .unwrap()
+            .into_iter()
+            .map(|m| m.stack)
+            .collect();
+        assert_eq!(
+            got,
+            ["elixir", "php", "ruby"],
+            "sorted by stack, whatever order the files were read in"
+        );
     }
 }

@@ -2622,4 +2622,205 @@ try {{
         assert!(parse(Render::Dir, "").is_err());
         assert!(parse(Render::ClaudeSettings, "{}").is_err());
     }
+
+    // ── candidate guards (mutation testing) ─────────────────────────────────
+
+    /// **Two handlers running the same program at the same moment are two
+    /// hooks.** The name is derived, so it collides — and a collision that
+    /// overwrote would drop one of somebody's hooks on import, silently, with
+    /// nothing in the residue to say it had gone.
+    #[test]
+    fn two_hooks_that_would_share_a_name_are_both_imported() {
+        let (binding, tools) = foreign();
+        let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
+        let doc = "{\"hooks\":{\"AfterTurn\":[\
+            {\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"prettier a\"}]},\
+            {\"matcher\":\"\",\"hooks\":[{\"type\":\"command\",\"command\":\"prettier b\"}]}]}}";
+
+        let (imported, residue) = parse_hooks(doc, &vocab).unwrap();
+        assert_eq!(
+            imported.len(),
+            2,
+            "one was overwritten by the other: {imported:?} {residue:?}"
+        );
+        let commands: BTreeSet<&str> = imported.values().map(|h| h.does()).collect();
+        assert_eq!(commands.len(), 2, "and they are the two that were written");
+    }
+
+    /// **A hook name is a filename**, so a command run from a path must not put
+    /// a separator into it. `./bin/fmt` naming a hook `after-tool-./bin/fmt`
+    /// would be written into a directory nobody asked for, or not at all.
+    #[test]
+    fn a_hook_named_after_a_path_is_still_one_filename() {
+        let (binding, tools) = foreign();
+        let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
+        let doc = "{\"hooks\":{\"AfterTurn\":[{\"matcher\":\"\",\"hooks\":[\
+            {\"type\":\"command\",\"command\":\"./bin/fmt --check\"}]}]}}";
+
+        let (imported, _) = parse_hooks(doc, &vocab).unwrap();
+        let name = imported.keys().next().expect("must import").clone();
+        assert!(
+            !name.contains('/') && !name.contains('.'),
+            "a hook name is a filename, not a path: {name}"
+        );
+    }
+
+    /// **A blank command is not a command.** A handler whose `command` is
+    /// whitespace imports as a hook that runs a shell doing nothing, at the end
+    /// of every turn, in a file omh put there and attributed to omh.
+    #[test]
+    fn a_handler_with_a_blank_command_is_residue() {
+        let (binding, tools) = foreign();
+        let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
+        let doc = "{\"hooks\":{\"AfterTurn\":[{\"matcher\":\"\",\"hooks\":[\
+            {\"type\":\"command\",\"command\":\"   \"}]}]}}";
+
+        let (imported, residue) = parse_hooks(doc, &vocab).unwrap();
+        assert!(imported.is_empty(), "imported anyway: {imported:?}");
+        assert_eq!(residue.len(), 1, "and it is reported: {residue:?}");
+    }
+
+    /// A session-start hook is the ordinary shape — **no matcher at all** — and
+    /// it has to import. The guard against reading a session-start *matcher* as
+    /// a tool must not also refuse the case where there is none, and no test
+    /// imported a session-start hook at all.
+    #[test]
+    fn a_session_start_hook_with_no_matcher_is_imported() {
+        let (binding, tools) = foreign();
+        let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
+        let doc = "{\"hooks\":{\"Boot\":[{\"matcher\":\"\",\"hooks\":[\
+            {\"type\":\"command\",\"command\":\"echo hi\"}]}]}}";
+
+        let (imported, residue) = parse_hooks(doc, &vocab).unwrap();
+        assert_eq!(
+            imported.len(),
+            1,
+            "an unnarrowed session start: {residue:?}"
+        );
+        assert_eq!(
+            imported.values().next().unwrap().on,
+            hook::Event::SessionStart
+        );
+    }
+
+    /// **A spelling that is a prefix of another must not claim the shorter
+    /// reading.** The adapter omh ships happens to have no such pair, so the
+    /// longest-match rule is asserted against a vocabulary that does — which is
+    /// the only way to tell it apart from taking whichever came first.
+    #[test]
+    fn the_longest_spelling_wins_so_a_prefix_cannot_strand_the_rest() {
+        let (binding, _) = foreign();
+        let overlapping = BTreeMap::from([
+            (hook::Tool::Edit, "Edit".to_string()),
+            (hook::Tool::Read, "Edit|Write".to_string()),
+        ]);
+        let vocab = hook::Vocabulary::of(&binding, &overlapping).unwrap();
+        let doc = "{\"hooks\":{\"ToolFinished\":[{\"matcher\":\"Edit|Write\",\"hooks\":[\
+            {\"type\":\"command\",\"command\":\"x\"}]}]}}";
+
+        let (imported, residue) = parse_hooks(doc, &vocab).unwrap();
+        assert_eq!(imported.len(), 1, "got: {residue:?}");
+        assert_eq!(
+            imported.values().next().unwrap().tools,
+            vec![hook::Tool::Read],
+            "`Edit|Write` is one spelling, not `Edit` followed by something"
+        );
+    }
+
+    /// **A spelling matches a whole word, not a prefix.** `ModifyFetch` is one
+    /// word naming no tool; read as a prefix it becomes `Modify` then `Fetch`,
+    /// which is two tools nobody wrote and a narrowing omh invented.
+    #[test]
+    fn a_spelling_matches_a_whole_word_not_a_prefix() {
+        let (binding, tools) = foreign();
+        let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
+        let doc = "{\"hooks\":{\"ToolFinished\":[{\"matcher\":\"ModifyFetch\",\"hooks\":[\
+            {\"type\":\"command\",\"command\":\"x\"}]}]}}";
+
+        let (imported, residue) = parse_hooks(doc, &vocab).unwrap();
+        assert!(imported.is_empty(), "read as two tools: {imported:?}");
+        assert_eq!(residue.len(), 1, "and reported: {residue:?}");
+    }
+
+    // ── what an offered hook belongs to ─────────────────────────────────────
+
+    fn hook_dirs(layers: &[&[(&str, &str)]]) -> (tempfile::TempDir, Vec<PathBuf>) {
+        let d = tempfile::tempdir().unwrap();
+        let mut dirs = Vec::new();
+        for (i, files) in layers.iter().enumerate() {
+            let dir = d.path().join(format!("layer{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            for (name, body) in *files {
+                std::fs::write(dir.join(name), body).unwrap();
+            }
+            dirs.push(dir);
+        }
+        (d, dirs)
+    }
+
+    /// **Later directories win, matching `merge_hooks`.** A repo hook shadowing
+    /// a catalogue name decides what that name belongs to — otherwise the
+    /// launcher runs the repo's hook while the offered list describes the
+    /// catalogue's, and the two disagree about the same word.
+    #[test]
+    fn a_repo_hook_shadowing_a_catalogue_name_decides_its_ecosystem() {
+        let (_d, dirs) = hook_dirs(&[
+            &[(
+                "test.json",
+                "{\"on\":\"turn-end\",\"stack\":\"rust\",\"run\":\"cargo test\"}",
+            )],
+            &[(
+                "test.json",
+                "{\"on\":\"turn-end\",\"stack\":\"node\",\"run\":\"npm run test\"}",
+            )],
+        ]);
+        assert_eq!(
+            declared_stacks(&dirs).unwrap().get("test"),
+            Some(&Some("node".to_string())),
+            "the layer that decides what runs decides what it belongs to"
+        );
+    }
+
+    /// **A file that will not parse stays offered.** It contributes `None`,
+    /// which means *belongs everywhere* — dropping the name because its file
+    /// has a typo would hide the hook and the typo together, and `merge_hooks`
+    /// is where a bad hook file is an error, at the point it would run.
+    #[test]
+    fn a_hook_file_that_will_not_parse_is_still_offered() {
+        let (_d, dirs) = hook_dirs(&[&[
+            ("broken.json", "{ this is not json"),
+            ("mistyped.json", "{\"on\":\"whenever\",\"run\":\"x\"}"),
+        ]]);
+        let got = declared_stacks(&dirs).unwrap();
+        assert_eq!(
+            got.get("broken"),
+            Some(&None),
+            "a file omh cannot read belongs everywhere: {got:?}"
+        );
+        assert_eq!(got.get("mistyped"), Some(&None), "got: {got:?}");
+    }
+
+    /// **A `.yours` backup is not a hook.** `install_bundled` keeps somebody's
+    /// replaced edit beside the file that replaced it, and reading one as a
+    /// hook puts `rust-test.json` into the offered list as a name nothing
+    /// answers to. `stack::load_dir` refuses the same file for the same reason.
+    #[test]
+    fn a_replaced_files_backup_is_not_a_hook_name() {
+        let (_d, dirs) = hook_dirs(&[&[
+            (
+                "rust-test.json",
+                "{\"on\":\"turn-end\",\"stack\":\"rust\",\"run\":\"cargo test\"}",
+            ),
+            (
+                "rust-test.json.yours",
+                "{\"on\":\"turn-end\",\"run\":\"cargo t\"}",
+            ),
+        ]]);
+        let got = declared_stacks(&dirs).unwrap();
+        assert_eq!(
+            got.keys().collect::<Vec<_>>(),
+            vec!["rust-test"],
+            "only a file omh reads back is a name: {got:?}"
+        );
+    }
 }

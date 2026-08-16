@@ -1804,3 +1804,43 @@ fn a_copy_that_fails_part_way_leaves_nothing_behind() {
          exactly as a whole one is"
     );
 }
+
+/// **A hook `init` derives on a re-run reaches `[use]`, or it lands dead.**
+///
+/// `merge_hooks` drops any hook the selection does not name, and a repo that
+/// has been `init`ed once has a curated `[use]` that `init` will not resync. So
+/// a project that gains a `package.json` six months later gets `pnpm-test.json`
+/// written, sees it reported, and never runs it — the exact failure
+/// `imported_hooks_are_selected_or_they_land_dead` pins for `omh import`.
+///
+/// Runs without a container: everything up to the harness block executes, and
+/// the derived hook and the selection are both written before it.
+#[test]
+fn a_hook_init_derives_later_is_selected_too() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    // A repo already set up, with a list somebody has since curated.
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(fx.repo.join(".omh/settings.toml"), "[use]\nhooks = []\n").unwrap();
+    // …which has since become a node project.
+    std::fs::write(
+        fx.repo.join("package.json"),
+        r#"{"scripts":{"test":"vitest run"}}"#,
+    )
+    .unwrap();
+    std::fs::write(fx.repo.join("pnpm-lock.yaml"), "").unwrap();
+
+    let out = fx.omh(&["init"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        fx.repo.join(".omh/hooks/pnpm-test.json").exists(),
+        "the hook is derived: {said}"
+    );
+    assert!(
+        fx.settings().contains("pnpm-test"),
+        "and named in `[use]`, or no session will ever run it: {}",
+        fx.settings()
+    );
+}

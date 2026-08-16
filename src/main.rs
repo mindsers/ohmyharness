@@ -2068,11 +2068,29 @@ fn copy_entry(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
     if let Err(e) = copy_tree(from, to) {
         // Safe to remove: `import_entries` only calls this for a destination
         // that did not exist, so everything here is what this call just wrote.
-        let _ = if to.is_dir() {
+        let undone = if to.is_dir() {
             std::fs::remove_dir_all(to)
         } else {
             std::fs::remove_file(to)
         };
+        // **And the undo is not allowed to fail quietly.** It fails for the
+        // same reasons the copy did — a read-only destination, a
+        // permission-denied child — so the residue survives precisely in the
+        // cases that produced it. The caller then prints `skipped`, which means
+        // *nothing was written*, and the **next** run sees the partial entry,
+        // reports `kept — already in your catalogue`, and mounts it into every
+        // sandbox omh launches. A skill with its `SKILL.md` and none of its
+        // scripts, presented as one somebody chose to keep.
+        if let Err(u) = undone {
+            return Err(e).with_context(|| {
+                format!(
+                    "and {} could not be removed ({u}) — a partial copy is still \
+                     there, and the next import will report it as an entry you \
+                     already have. Delete it before re-running.",
+                    to.display()
+                )
+            });
+        }
         return Err(e);
     }
     Ok(())
@@ -2147,14 +2165,39 @@ fn importable(paths: &Paths, harnesses: &[String]) -> Vec<String> {
             continue;
         };
         let source = adapter::expand_host(template, &home, &paths.repo);
-        let Ok(raw) = std::fs::read_to_string(&source) else {
-            continue;
+        // **Absent and unreadable are not the same thing**, and this function's
+        // own justification used to conflate them: "there is nothing to tell
+        // somebody about a file that is not there" is true, and a
+        // `~/.claude/settings.json` full of hooks that is one comma short of
+        // parsing *is* there. Silent, it produces the same output as a clean
+        // machine — so somebody works in omh with none of their hooks, believes
+        // omh found nothing of theirs, and never runs the one command that
+        // would print the reason.
+        let raw = match std::fs::read_to_string(&source) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                out.push(format!(
+                    "import     {name}'s hooks are at {} and omh could not read \
+                     it ({e})",
+                    source.display()
+                ));
+                continue;
+            }
         };
         let Ok(vocab) = hook::Vocabulary::of(binding, &adapter.tools) else {
             continue;
         };
-        let Ok((found, residue)) = render::parse_hooks(&raw, &vocab) else {
-            continue;
+        let (found, residue) = match render::parse_hooks(&raw, &vocab) {
+            Ok(v) => v,
+            Err(e) => {
+                out.push(format!(
+                    "import     {name} has hooks in {} that omh could not read \
+                     ({e:#}) — omh import hooks {name} to see why",
+                    source.display()
+                ));
+                continue;
+            }
         };
         if found.is_empty() && residue.is_empty() {
             continue;
@@ -2192,7 +2235,18 @@ fn importable(paths: &Paths, harnesses: &[String]) -> Vec<String> {
                 // A rules import is one file rather than a directory, so it
                 // counts as one thing when it is there.
                 Err(_) if source.is_file() => 1,
-                Err(_) => 0,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+                // Same rule as the hooks half: a directory omh cannot read is
+                // not a directory with nothing in it, and reporting zero would
+                // be indistinguishable from a machine that has none.
+                Err(e) => {
+                    out.push(format!(
+                        "import     {name}'s {cap} are at {} and omh could not \
+                         read it ({e})",
+                        source.display()
+                    ));
+                    continue;
+                }
             };
             if held > 0 {
                 out.push(format!(
@@ -2357,6 +2411,30 @@ fn catalogue_lists(
 /// The asymmetry is deliberate: this drops what names an *undetected* stack,
 /// rather than keeping what names a detected one. Written the other way it
 /// would hide every hook that belongs everywhere, which is most of them.
+/// Which of **this repo's** ecosystems something already speaks for.
+///
+/// The intersection is the whole of it, and leaving it out made a milestone's
+/// worth of code unreachable. `declared_stacks` over the catalogue answers
+/// `{rust, go, python}` in every repo on earth, because that is what omh
+/// ships — so handed to `derive::hooks` as *covered* it meant
+/// `covered.is_empty()` was never true, and every `Makefile`, `justfile` and
+/// `Taskfile` derivation could not fire for anybody. Only node worked, because
+/// omh ships no node hook, which is why nothing looked broken.
+///
+/// The user-visible end was worse than a missing hook: `ask::what_tests_it`
+/// then said *"no stack it knows, no lockfile, no runner"* about a repo whose
+/// `Makefile` omh had just read and whose `test` target it had found.
+fn covered_here(
+    hook_dirs: &[std::path::PathBuf],
+    detected: &[&stack::Definition],
+) -> Result<BTreeSet<String>> {
+    Ok(render::declared_stacks(hook_dirs)?
+        .into_values()
+        .flatten()
+        .filter(|named| detected.iter().any(|d| &d.name == named))
+        .collect())
+}
+
 fn applicable_hooks(
     names: Vec<String>,
     declared: &BTreeMap<String, Option<String>>,
@@ -3238,10 +3316,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // quote in it — which is now a command omh read out of somebody's
     // `package.json` rather than one of four literals — would otherwise
     // produce a file nothing can parse.
-    let covered: BTreeSet<String> = render::declared_stacks(&[paths.hooks()])?
-        .into_values()
-        .flatten()
-        .collect();
+    let covered = covered_here(&[paths.hooks()], &stacks)?;
     let derived = derive::hooks(
         &paths.repo,
         &settings::resolve(&paths, &manifest)?.provision,
@@ -3269,7 +3344,20 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     let has_test = covered.iter().any(|s| stacks.iter().any(|d| &d.name == s))
         || derived.iter().any(|d| d.hook.on == hook::Event::TurnEnd)
         || repo_omh.join("hooks").join("test.json").exists();
-    let asked = questions(&repo_omh, &unclaimed, has_test)?;
+    let (asked, answered) = questions(&repo_omh, &unclaimed, has_test)?;
+
+    // **Reloaded, because an answer is a stack file.** `how_is_it_installed`
+    // writes `<repo>/.omh/stacks/<name>.toml`, and everything below — the
+    // report, the predicates, the recorded resolution, the image layer — reads
+    // `stack_defs`. Left stale, somebody typed how to install elixir, watched
+    // omh say `stack elixir — from what you told it`, and then watched the same
+    // run print `stack none detected` and build a sandbox with no elixir in it.
+    // Their answer took effect on the *next* `init`, and nothing said so.
+    //
+    // Unconditional rather than gated on `asked > 0`: it costs one directory
+    // read, and a gate is a second thing to keep true.
+    let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
+    let stacks = stack::detected(&stack_defs, &paths.repo);
     //
     // The selection, written out with every catalogue entry named — after the
     // catalogue is installed and the derived hooks are written, so both are in
@@ -3287,6 +3375,30 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     if !repo_has_selection(&paths)? {
         let lists = catalogue_lists(&paths)?;
         config::write_selection(&paths, config::Layer::Shared, &lists)?;
+    } else {
+        // A curated list is not resynced — and a hook **this run just wrote**
+        // still has to reach it, or it lands dead. `merge_hooks` drops any hook
+        // the selection does not name, so a repo `init`ed six months ago that
+        // has since gained a `package.json` gets `pnpm-test.json` written, sees
+        // it reported, and never runs it. `import_hooks` already guards exactly
+        // this; the same rule applies to what `init` writes.
+        //
+        // Added, never resynced: the point of a curated list is that omh does
+        // not put back what somebody pruned. These are names that did not exist
+        // when they pruned it.
+        let mine: Vec<String> = derived
+            .iter()
+            .map(|d| d.name.clone())
+            .chain(answered.iter().cloned())
+            .collect();
+        if !mine.is_empty() {
+            let (cap, mut names, _) = current_list(&paths, "hooks", &mine[0])?;
+            names.extend(mine);
+            names.sort();
+            names.dedup();
+            let lists = std::collections::BTreeMap::from([(cap, names)]);
+            write_lists(&paths, &lists)?;
+        }
     }
 
     // Appended, not overwritten: re-running init must not eat a line you added.
@@ -3618,12 +3730,12 @@ fn questions(
     repo_omh: &std::path::Path,
     unclaimed: &[&stack::Marker],
     has_test: bool,
-) -> Result<usize> {
+) -> Result<(usize, Vec<String>)> {
     if unclaimed.is_empty() && has_test {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     }
     if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        return Ok(0);
+        return Ok((0, Vec::new()));
     }
 
     let stdin = std::io::stdin();
@@ -3634,6 +3746,7 @@ fn questions(
         &mut std::io::stderr(),
     )?;
 
+    let mut hooks = Vec::new();
     for a in answers {
         let path = repo_omh.join(&a.path);
         if let Some(parent) = path.parent() {
@@ -3641,8 +3754,17 @@ fn questions(
         }
         write_if_absent(&path, &a.body)?;
         println!("  {}", a.said);
+        // Handed back so `init` can put it in `[use]`. A hook written into a
+        // repo whose selection is already curated is one `merge_hooks` drops,
+        // so an answered question would produce a file, a report line, and a
+        // session that never runs it.
+        if a.path.starts_with("hooks") {
+            if let Some(stem) = a.path.file_stem() {
+                hooks.push(stem.to_string_lossy().into_owned());
+            }
+        }
     }
-    Ok(asked)
+    Ok((asked, hooks))
 }
 
 /// The exchange itself, with the terminal handed in.
@@ -3663,11 +3785,13 @@ fn ask_all(
         asked += 1;
         match ask::how_is_it_installed(marker, input, out)? {
             Some(a) => answers.push(a),
-            // **Stop, rather than working through the rest.** A decline and a
-            // closed pipe arrive here identically, and the one that matters is
-            // the pipe: a polyglot repo with three unclaimed markers would
-            // otherwise print three questions into a void and count them. One
-            // "no" is answer enough to stop asking.
+            // **Stop the marker questions, rather than working through them.**
+            // A decline and a closed pipe arrive here identically, and the one
+            // that matters is the pipe: a polyglot repo with three unclaimed
+            // markers would otherwise print three questions into a void and
+            // count them. One "no" is answer enough to stop asking about the
+            // rest — and the test question below is still put, because it is
+            // the one most repos reach.
             None => break,
         }
     }
@@ -4888,8 +5012,8 @@ mod tests {
         .unwrap()
     }
 
-    /// **A decline stops the exchange**, rather than putting every remaining
-    /// question into the same void.
+    /// **A decline stops the remaining marker questions**, rather than putting
+    /// every one of them into the same void.
     ///
     /// A decline and a closed pipe are indistinguishable at this level, and the
     /// one that matters is the pipe: a polyglot repo with three unclaimed
@@ -4937,6 +5061,56 @@ mod tests {
         let (asked, answers) = exchange(&[], false, "mix test\n");
         assert_eq!(asked, 1);
         assert_eq!(answers[0].path, std::path::Path::new("hooks/test.json"));
+    }
+
+    /// **Covered means covered *here*.** A catalogue hook for an ecosystem this
+    /// repo is not speaks for nothing in it.
+    ///
+    /// Without the intersection this answers `{rust, go, python}` in every repo
+    /// — that is simply what omh ships — and `derive::hooks` reads a non-empty
+    /// `covered` as *some ecosystem hook already runs this project's tests*. So
+    /// runner derivation, the whole hand-rolled `Makefile`/`justfile`/`Taskfile`
+    /// scanner, could not fire for anybody, and a C project with a working
+    /// `make test` was then told by `omh init` that omh had found **no runner**.
+    ///
+    /// Every unit test of `derive::hooks` passes a hand-built `covered`, so none
+    /// of them could see this: the defect was in what the caller computed, and
+    /// nothing tested the caller. That is why this is a function.
+    #[test]
+    fn what_the_catalogue_covers_elsewhere_covers_nothing_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("rust-test.json"),
+            r#"{"on":"turn-end","stack":"rust","run":"cargo test"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            hooks.join("shellcheck.json"),
+            r#"{"on":"turn-end","run":"shellcheck ./x.sh"}"#,
+        )
+        .unwrap();
+        let dirs = [hooks];
+
+        let rust = stack::Definition {
+            name: "rust".into(),
+            marker: "Cargo.toml".into(),
+            provides: Vec::new(),
+        };
+
+        assert_eq!(
+            covered_here(&dirs, &[]).unwrap(),
+            BTreeSet::new(),
+            "a repo that is no ecosystem omh ships a hook for is covered by \
+             none of them — this is the C project with a Makefile, and the \
+             whole runner path depends on it"
+        );
+        assert_eq!(
+            covered_here(&dirs, &[&rust]).unwrap(),
+            ["rust".to_string()].into_iter().collect(),
+            "and a rust repo is covered, so its Makefile earns no second hook"
+        );
     }
 
     /// A hook belonging to an ecosystem this repo is not could never have been
@@ -5832,5 +6006,76 @@ because = "a fixture"
                 "{flag} reaches the harness"
             );
         }
+    }
+
+    // ── candidate guards (mutation testing) ─────────────────────────────────
+
+    /// **Only "not found" means absent.** A bundled file omh cannot open — a
+    /// permission it does not have, a name that is now a directory — is not a
+    /// file that is not there, and collapsing the two overwrites somebody's
+    /// edit with no backup and no message. The read fails, the write succeeds,
+    /// and the edit is gone.
+    ///
+    /// The non-UTF-8 half of this rule is guarded one test up. This is the
+    /// other half, and deleting it changed no test.
+    #[test]
+    #[cfg(unix)]
+    fn an_edit_omh_cannot_open_at_all_is_never_treated_as_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("adapters");
+        std::fs::create_dir_all(&dest).unwrap();
+        let target = dest.join("claude.toml");
+        std::fs::write(&target, "name = \"mine\"\n").unwrap();
+        // Write-only, deliberately. A mode omh can neither read nor write
+        // would be caught by the *write* failing, which proves nothing about
+        // the read — this is the shape the shipped bug actually had: the read
+        // failed, the write succeeded, and the edit was gone.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o200)).unwrap();
+
+        let outcome = install_bundled(&dest, bundled::Shipped::Adapters);
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let e = format!(
+            "{:#}",
+            outcome.expect_err("a file omh could not read must not be overwritten in silence")
+        );
+        assert!(e.contains("claude.toml"), "and it names the file: {e}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "name = \"mine\"\n",
+            "and the edit is still there"
+        );
+    }
+
+    /// **A hook belonging to an ecosystem this repo is not stays out of the
+    /// list; everything else stays in.** Both halves, because the filter has
+    /// two ways to be wrong and one of them offers a rust repo `go-test` while
+    /// the other drops every hook that belongs to nothing in particular —
+    /// which is most of them.
+    #[test]
+    fn a_hook_that_belongs_to_nothing_is_offered_everywhere() {
+        let declared = BTreeMap::from([
+            ("rust-test".to_string(), Some("rust".to_string())),
+            ("go-test".to_string(), Some("go".to_string())),
+            ("graph-refresh".to_string(), None),
+        ]);
+        let names = vec![
+            "rust-test".to_string(),
+            "go-test".to_string(),
+            "graph-refresh".to_string(),
+            "never-declared".to_string(),
+        ];
+        let rust: BTreeSet<String> = ["rust".to_string()].into_iter().collect();
+
+        assert_eq!(
+            applicable_hooks(names, &declared, &rust),
+            vec![
+                "rust-test".to_string(),
+                "graph-refresh".to_string(),
+                "never-declared".to_string()
+            ],
+            "an ecosystem hook is filtered by the ecosystem; nothing else is"
+        );
     }
 }

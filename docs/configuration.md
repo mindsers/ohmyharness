@@ -3,10 +3,6 @@
 Your setup is declared once and rendered into whatever shape each harness reads.
 This page covers where it lives, how it resolves, and how to change things.
 
-> Selection — `[use]`, `omh use` / `unuse` — is not built yet. Until it is, a
-> repo gets your whole catalogue. See [The profile](design/profile.md) for the
-> model and the reasoning.
-
 ## One catalogue, and it is personal
 
 ```
@@ -406,17 +402,17 @@ and omh will never copy it into the committed file.
 
 ## Hooks your sandbox cannot run
 
-`omh init` detects your stack from its manifest and writes a test and a format
-hook for it. Detection runs on your machine; the hook runs in the sandbox, and
-those are different computers. So omh provisions the toolchain into the image —
-that is what `[provision]` above records — and then **measures** what it got.
+omh works out which ecosystems this repo is from its manifests, and the hooks
+for them are catalogue entries this repo turns on through `[use]`. Detection
+runs on your machine; the hook runs in the sandbox, and those are different
+computers. So omh provisions the toolchain into the image — that is what
+`[provision]` above records — and then **measures** what it got.
 
-**The hook files are written either way.** `.omh/hooks/` is your repo's
-statement about itself — committed, and the same for everybody who clones it.
-Whether `cargo` is installed is a fact about one image, and it must not decide
-what is in the repo: otherwise whoever ran `init` first imposes their machine on
-the whole team, permanently, since init never rewrites a hook that already
-exists.
+**A hook is selected either way.** What omh ships and what your repo declares
+are both statements about the *project* — committed, and the same for everybody
+who clones it. Whether `cargo` is installed is a fact about one image, and it
+must not decide what the repo says about itself: otherwise whoever ran `init`
+first imposes their machine on the whole team.
 
 What a missing program decides is whether the hook **runs against this image**,
 and nobody is asked about it:

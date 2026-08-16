@@ -7,9 +7,8 @@
 //! - **how an ecosystem omh has never been taught is installed.** A repo with a
 //!   `mix.exs` plainly *is* something; omh ships no elixir stack and cannot
 //!   invent one. Only a person knows what puts `mix` on the PATH.
-//! - **what command tests a project nothing else could speak for.** No stack,
-//!   no lockfile, no runner, no declared script — and there is still, usually,
-//!   a command.
+//! - **what command tests a project nothing else could speak for.** Nothing omh
+//!   could read named one — and there is still, usually, a command.
 //!
 //! Both are tier 3 of `docs/design/adoption.md`'s table: nobody has encoded it,
 //! so ask once and record the answer where it belongs. The recording is what
@@ -23,11 +22,17 @@
 //! the key down — and an answer omh invented from a blank line would be a stack
 //! file in their repo, committed, describing an install command nobody chose.
 //!
-//! **A closed pipe stops the whole exchange**, rather than reading every
-//! remaining question as declined. A CI runner with no terminal gets no
-//! questions and no files, which is the same outcome; what must not happen is
-//! omh recording answers on behalf of somebody who was never shown them. That
-//! scar was earned once already by the question this module replaces.
+//! **A closed pipe stops the marker questions**, rather than putting every
+//! remaining one into the same void. A CI runner never reaches them at all —
+//! `questions` requires a terminal before asking anything — so what this covers
+//! is a pipe that closes mid-exchange. What must not happen is omh recording
+//! answers on behalf of somebody who was never shown them; that scar was earned
+//! once already by the question this module replaces.
+//!
+//! `prompt` cannot tell a decline from an EOF — both are `Ok(None)` — so the
+//! caller treats the stricter reading as the true one and stops. What it stops
+//! is the *marker* loop; the test question is asked after it either way, which
+//! is deliberate: it is the one most repos reach and the one worth answering.
 //!
 //! ## The terminal is handed in
 //!
@@ -130,11 +135,21 @@ pub fn how_is_it_installed(
 /// moment — **one** notion of covered, computed by the caller, rather than two
 /// that could disagree about whether a repo already has a test hook.
 pub fn what_tests_it(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<Option<Answer>> {
+    // **What it says is what it established.** The earlier wording named three
+    // specific negatives — "no stack it knows, no lockfile, no runner" — from a
+    // single boolean that is false for at least six different reasons, most of
+    // which contradict one of the clauses: a `Taskfile` omh refused to trust
+    // because of an `includes:`, a `Makefile` it could not read, a
+    // `package.json` that would not parse beside a lockfile that named pnpm
+    // perfectly well. Every one of those is a refusal stated as an absence,
+    // which is the other half of *cannot tell is never a licence to act*.
+    //
+    // So it says only what it knows: nothing omh could read told it how.
     writeln!(
         out,
-        "\n  omh found no way to test this project — no stack it knows, no \
-         lockfile, no runner.\n  With one, the agent can check its own work \
-         before handing it back."
+        "\n  omh has no test command for this project — nothing it could read \
+         told it one.\n  With one, the agent can check its own work before \
+         handing it back."
     )?;
     let Some(command) = prompt("  what command runs the tests? (Enter to skip)", input, out)?
     else {
