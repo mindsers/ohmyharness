@@ -16,6 +16,7 @@ mod container;
 mod detect;
 mod doctor;
 mod editor;
+mod facts;
 mod hook;
 mod idle;
 mod image;
@@ -41,6 +42,7 @@ use clap::{Parser, Subcommand};
 use profile::{Paths, Profile};
 use session::Session;
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Parser)]
@@ -605,6 +607,11 @@ fn session_up(
     adapter: &Adapter,
     session: &Session,
     opts: container::Options,
+    // The recipe behind `opts.image`. Handed in beside it rather than derived
+    // here, so the tag a session runs and the layer that gets built come from
+    // one `sandbox()` call and cannot describe different images — the split
+    // that let `init` build a layer no launch ever ran.
+    recipe: &[&str],
 ) -> Result<(Box<dyn runtime::Runtime>, String)> {
     let backend = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))?;
     let name = paths.container(&session.id);
@@ -670,7 +677,7 @@ fn session_up(
     }
 
     say_rules(&plan);
-    image::ensure(backend.program(), adapter)?;
+    image::ensure_stack(backend.program(), adapter, recipe)?;
     image::ensure_network(backend.program(), &plan.network)?;
 
     let key = ssh::ensure_key(&paths.keys())?;
@@ -725,6 +732,16 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
         .context("no adapters installed — run `omh init`")?;
     let adapter = Adapter::find(&paths.adapters(), &harness)?;
     let (own, repo) = resolved(&paths)?;
+    let mut sandbox = sandbox(&paths, &adapter, &repo)?;
+    if let Ok(backend) = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)) {
+        sandbox.top_up(
+            &paths,
+            backend.program(),
+            &profile.sources(adapter::Capability::Hooks)?,
+            &own,
+            &repo,
+        )?;
+    }
 
     std::fs::create_dir_all(paths.worktrees())?;
     let id = session::pick(&paths.worktrees(), id, false);
@@ -753,7 +770,10 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             base: Some(session::default_branch(&paths.repo)),
             omh: own,
             repo,
+            image: sandbox.tag.clone(),
+            resolves: sandbox.resolves.clone(),
         },
+        &sandbox.recipe(),
     )?;
 
     // The integration point is a managed SSH config include, not an IDE plugin —
@@ -987,7 +1007,17 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     // Resolved once and used for both the checks and the plan below, so the
     // probe cannot check a session different from the one it launches.
     let (own, repo) = resolved(&paths)?;
-    let mut checks = doctor::checks(&profile, &adapter, &own, &repo)?;
+    let mut sandbox = sandbox(&paths, &adapter, &repo)?;
+    if let Ok(backend) = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)) {
+        sandbox.top_up(
+            &paths,
+            backend.program(),
+            &profile.sources(adapter::Capability::Hooks)?,
+            &own,
+            &repo,
+        )?;
+    }
+    let mut checks = doctor::checks(&profile, &adapter, &own, &repo, &sandbox.resolves)?;
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
@@ -1027,6 +1057,8 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         base: Some(session::default_branch(&paths.repo)),
         omh: own,
         repo,
+        image: sandbox.tag.clone(),
+        resolves: sandbox.resolves.clone(),
     };
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
@@ -1044,18 +1076,18 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         return Ok(());
     }
 
-    image::ensure(backend.program(), &adapter)?;
+    image::ensure_stack(backend.program(), &adapter, &sandbox.recipe())?;
     image::ensure_network(backend.program(), &plan.network)?;
 
     match &account {
         Some(a) => println!(
             "omh doctor: {name} (in {}, account {})\n",
-            image::tag_for(&adapter),
+            sandbox.tag,
             a.file_name().unwrap_or_default().to_string_lossy()
         ),
         None => println!(
             "omh doctor: {name} (in {}, no account — credentials unchecked)\n",
-            image::tag_for(&adapter)
+            sandbox.tag
         ),
     }
     let out = Command::new(backend.program())
@@ -2355,6 +2387,24 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     // worktree has none of its own.
     let base = session::default_branch(&paths.repo);
     let (own, repo) = resolved(&paths)?;
+    let mut sandbox = sandbox(&paths, &adapter, &repo)?;
+    // Not on a dry run, which promises to leave no trace: topping up starts a
+    // container and writes `~/.omh/facts.json`. What is already cached is used,
+    // so the plan it prints is the plan a real launch would build from the same
+    // knowledge.
+    if !cli.dry_run {
+        if let Ok(backend) =
+            runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))
+        {
+            sandbox.top_up(
+                &paths,
+                backend.program(),
+                &profile.sources(adapter::Capability::Hooks)?,
+                &own,
+                &repo,
+            )?;
+        }
+    }
 
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
@@ -2373,6 +2423,8 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         base: Some(base.clone()),
         omh: own,
         repo,
+        image: sandbox.tag.clone(),
+        resolves: sandbox.resolves.clone(),
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
@@ -2440,6 +2492,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
             tty: false,
             ..opts.clone()
         },
+        &sandbox.recipe(),
     )?;
     // The container is up, so the launch happened and the call-out is spent.
     remember_hooks(hooks_seen);
@@ -2699,6 +2752,13 @@ fn init(cwd: &std::path::Path) -> Result<()> {
             println!("\n  image      {}", image::tag_for(&adapter));
         }
 
+        // Which image the question below is asked about. Defaults to the
+        // harness layer and is replaced by this repo's stack layer as soon as
+        // one is resolved — asking the wrong image is how omh would report a
+        // missing `cargo` about a sandbox that has one, or miss one that does
+        // not.
+        let mut session_tag = image::tag_for(&adapter);
+
         // Which provides apply here. Evaluated **in the sandbox**, with the repo
         // mounted read-only: a predicate is arbitrary shell out of a stack file,
         // and running it on the host during `init` is the one thing omh exists
@@ -2776,27 +2836,39 @@ fn init(cwd: &std::path::Path) -> Result<()> {
                     println!("  provision  {key}");
                 }
 
-                // The stack layer, built from the recipes that fired and that
-                // nobody opted out of, in file order. Nothing to install is the
-                // harness image itself rather than an empty layer on top of it.
+                // The stack layer, through the same function every launch
+                // reads — so what `init` reports built is what `omh run` runs,
+                // by construction rather than by two implementations agreeing.
                 //
-                // Resolved across all three layers rather than taken from
-                // `recorded`, which holds only the committed table: a `false`
-                // in `settings.local.toml` means *not on this laptop*, and this
-                // laptop is where the image is built.
-                let resolved = settings::resolve(&paths, &manifest)?.provision;
-                let installs = installs_for(&detected, &fired, &resolved);
-                let tag = image::ensure_stack(backend.program(), &adapter, &installs)?;
-                if tag != image::tag_for(&adapter) {
-                    // Said plainly, because it is not yet true that a session
-                    // runs this: `container::plan` still takes `tag_for`, and
-                    // wiring it is build-order item 2. Printing "this repo's
-                    // toolchain" without the caveat is how somebody reads the
-                    // report, believes the sandbox is provisioned, and meets
-                    // `cargo: not found` at turn one — the failure this whole
-                    // design opens by describing, now preceded by a line
-                    // claiming it was handled.
-                    println!("  image      {tag} (built; sessions do not use it yet)");
+                // Re-resolved from disk rather than reusing `recorded`, which
+                // is the committed table alone: `record_resolution` has just
+                // written it, and a `false` in `settings.local.toml` means *not
+                // on this laptop*, which is the laptop building the image.
+                let (own, repo) = resolved(&paths)?;
+                let sandbox = sandbox(&paths, &adapter, &repo)?;
+                session_tag = sandbox.tag.clone();
+                image::ensure_stack(backend.program(), &adapter, &sandbox.recipe())?;
+                if sandbox.tag != image::tag_for(&adapter) {
+                    println!("  image      {} (this repo's toolchain)", sandbox.tag);
+                }
+
+                // And what that image turned out to contain, measured once and
+                // remembered: every launch afterwards reads `~/.omh/facts.json`
+                // rather than starting a container to ask again.
+                //
+                // Two readings of one probe. A `needs` that did not resolve is
+                // a **provisioning failure** and is reported here — the recipe
+                // ran and the environment still does not work, which is exactly
+                // what shipping rustup with no `cc` looked like. The same
+                // measurements suppress a hook whose program is missing, which
+                // is a different question about the same fact.
+                let hook_dirs = Profile::resolve(&paths).sources(adapter::Capability::Hooks)?;
+                let mut sandbox = sandbox;
+                sandbox.top_up(&paths, backend.program(), &hook_dirs, &own, &repo)?;
+                for name in &sandbox.owed {
+                    if sandbox.resolves.get(name) == Some(&false) {
+                        println!("  provision  {name} did not resolve after installing");
+                    }
                 }
             }
         }
@@ -2816,7 +2888,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         // Probed once. The answers change what omh does with the result, never
         // what the sandbox contains, so asking the container twice would cost a
         // second run to be told the same thing.
-        let probe = probe_sandbox(backend.program(), &adapter, &stacks);
+        let probe = probe_sandbox(backend.program(), &session_tag, &stacks);
         let mut triage = triage_for(&stacks, &probe, &decided);
         // Ask, then act — so a hook somebody asks for is written on this run
         // rather than on the next one.
@@ -3317,9 +3389,9 @@ fn ask_about_gaps_with(
 /// a repo's resolution and leave the next launch provisioning nothing.
 ///
 /// A provide that could not answer is simply absent from the set, which is the
-/// safe direction — it is not installed, and once build-order item 2 verifies
-/// `needs` that
-/// will be reported. Installing on a coin-flip would be silent either way.
+/// safe direction — it is not installed, so it is not recorded, so its `needs`
+/// are not claimed and nothing reports a gap omh invented. Installing on a
+/// coin-flip would be silent either way.
 ///
 /// `asked` is how many provides there were to ask about, and it separates two
 /// things an empty report cannot: **nothing to ask** is an answer, **nothing
@@ -3375,31 +3447,238 @@ fn record_resolution(paths: &Paths, fired: &BTreeSet<String>) -> Result<BTreeMap
 ///
 /// File order is install order — `corepack enable pnpm` needs the node the
 /// provide above it asserted — so this walks the definitions rather than the
-/// fired set, which is sorted by name and would silently reorder them.
+/// resolution, which is a map sorted by name and would silently reorder them.
 ///
 /// A provide with no `install` contributes nothing: it asserts the base image
 /// already ships something, so it changes neither the recipe nor the tag.
 ///
-/// `resolved` is the `[provision]` table as all three settings layers resolve
-/// it, and a `false` there is a **person's** decision — the one thing that
-/// outranks a predicate. Only `false` is consulted: an entry omh has never seen
-/// is absent, not refused, so a new provide in a newer omh installs the first
-/// time rather than waiting to be enumerated.
+/// **`resolved` is the only input**, and that is the point. It is the
+/// `[provision]` table as all three settings layers resolve it: `init` writes
+/// what its predicates found, a person may write `false` to opt out, and every
+/// launch afterwards reads the same table. A launch that re-derived this from
+/// anything else — the predicates it cannot run, a set of provides that
+/// "fired" — would build a different image from the one `init` reported, and
+/// the disagreement would be invisible because both are plausible.
+///
+/// Only `true` provisions. Absent is not `false` and does not need to be: an
+/// entry nobody recorded is one no predicate has said applies here.
 fn installs_for<'a>(
     detected: &[&'a stack::Definition],
-    fired: &BTreeSet<String>,
     resolved: &BTreeMap<String, bool>,
 ) -> Vec<&'a str> {
     detected
         .iter()
         .flat_map(|d| d.provides.iter().map(move |p| (d, p)))
-        .map(|(d, p)| (stack::key(&d.name, &p.name), p))
-        .filter(|(key, _)| fired.contains(key) && resolved.get(key) != Some(&false))
+        .filter(|(d, p)| resolved.get(&stack::key(&d.name, &p.name)) == Some(&true))
         .filter_map(|(_, p)| p.install.as_deref())
         .collect()
 }
 
+/// What the stacks this repo provisions said must resolve once they had run.
+///
+/// Only provides the resolution recorded `true`. A provide nobody recorded was
+/// never installed, and a provide somebody opted out of was deliberately not
+/// installed — reporting either as a failure would be a gap omh invented. The
+/// consequence of an opt-out is not silenced by that: if a hook names the
+/// program, it is probed anyway through `render::hook_programs`, and a hook
+/// that cannot run is dropped by name.
+///
+/// This includes provides with **no `install`**, which is the point of letting
+/// them exist: `stacks/node.toml`'s `runtime` asserts the base image already
+/// ships `node` and `npm`, and the only way that assertion is worth writing is
+/// if something checks it.
+fn needs_of(
+    detected: &[&stack::Definition],
+    resolved: &BTreeMap<String, bool>,
+) -> BTreeSet<String> {
+    detected
+        .iter()
+        .flat_map(|d| d.provides.iter().map(move |p| (d, p)))
+        .filter(|(d, p)| resolved.get(&stack::key(&d.name, &p.name)) == Some(&true))
+        .flat_map(|(_, p)| p.needs.iter().cloned())
+        .collect()
+}
+
+/// Everything worth asking one image about: what the stacks promised, and what
+/// the hooks will actually run.
+///
+/// **The union, and it has to be.** The two lists answer different questions
+/// and neither contains the other. A stack's `needs` is what provisioning owes
+/// — the reading that catches rustup installing a `cargo` that cannot link.
+/// A hook's program is what will be handed to a shell — and a hand-written
+/// `shellcheck` hook is in no `needs` list, so a probe built from `needs` alone
+/// ships it into a sandbox that cannot run it. That is the original
+/// `cargo: not found` with a different program in it.
+fn probe_targets(
+    hook_dirs: &[PathBuf],
+    own: &base::Own,
+    repo: &settings::RepoPolicy,
+    owed: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut wanted = render::hook_programs(hook_dirs, own, repo)?;
+    wanted.extend(owed.iter().cloned());
+    Ok(wanted)
+}
+
+/// Ask the image about the programs nobody has asked it about yet, remember
+/// the answers, and hand back everything known about it.
+///
+/// The cache is the reason a launch is not a container run: `Facts::unseen`
+/// narrows the question to what has never been answered for this tag, and a
+/// repo whose hooks and stacks have not changed asks nothing at all.
+///
+/// Never fatal. A runtime that will not start, an image that is not there, a
+/// probe that says nothing — all of them leave the facts as they were, which
+/// reads as *nobody has looked* and suppresses nothing. The alternative is a
+/// diagnostic failure taking a launch down with it.
+fn measure(
+    program: &str,
+    paths: &Paths,
+    tag: &str,
+    wanted: &BTreeSet<String>,
+) -> Result<BTreeMap<String, bool>> {
+    let mut facts = facts::Facts::load(paths);
+    let unseen = facts.unseen(tag, wanted);
+    if !unseen.is_empty() {
+        let borrowed: Vec<&str> = unseen.iter().map(String::as_str).collect();
+        let outcomes = match Command::new(program)
+            .args(image::probe_args(tag, &doctor::probe_programs(&borrowed)))
+            .output()
+        {
+            Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
+            Err(_) => Vec::new(),
+        };
+        if !outcomes.is_empty() {
+            facts.learn(tag, &outcomes);
+            facts.save(paths)?;
+        }
+    }
+    Ok(facts.about(tag))
+}
+
+/// What this repo's sandbox is: the recipe its stacks provision, the image that
+/// recipe produces, and what that image has been measured to contain.
+///
+/// **One function, because these are one answer.** For the whole of the first
+/// milestone `init` built a stack layer and `container::plan` hardcoded
+/// `image::tag_for(adapter)`, so the layer was built by one command and run by
+/// none — and nothing was wrong with either half on its own. Two places
+/// deciding which image a session runs is the shape of that bug, so there is
+/// one place, and the measurements come back keyed on the tag it returned.
+///
+/// Fatal when the stacks will not load, which is the opposite of `say_hooks`'
+/// answer to the same directory and is right for the opposite reason. There, an
+/// unreadable directory costs a report. Here it decides *which sandbox you get*:
+/// falling back to the harness image would launch a session with no toolchain
+/// in it, silently, which is the failure this whole design starts from.
+struct Sandbox {
+    /// Owned, because the definitions they are read from do not outlive this.
+    installs: Vec<String>,
+    tag: String,
+    resolves: BTreeMap<String, bool>,
+    /// What the provides this repo installed said must resolve once they had.
+    /// Carried here rather than re-derived, so the caller that tops the
+    /// measurements up asks about the same list `init` reported on.
+    owed: BTreeSet<String>,
+}
+
+impl Sandbox {
+    fn recipe(&self) -> Vec<&str> {
+        self.installs.iter().map(String::as_str).collect()
+    }
+
+    /// Ask this image about anything nobody has asked it yet, and keep the
+    /// answers.
+    ///
+    /// Launch does this too, not only `init`. A hook added after the last
+    /// `init` names a program no measurement covers, and an unmeasured program
+    /// suppresses nothing — so without this the hook ships into a sandbox that
+    /// may not have it and fails at turn one with `not found`, which is the
+    /// failure this whole design starts from. The cache is what makes it
+    /// affordable: a repo whose hooks and stacks have not changed asks nothing
+    /// and starts no container.
+    ///
+    /// Never fatal, and the errors it can raise are already handled inside
+    /// `measure` — a runtime that will not start leaves the facts as they were,
+    /// which reads as *nobody has looked*.
+    fn top_up(
+        &mut self,
+        paths: &Paths,
+        program: &str,
+        hook_dirs: &[PathBuf],
+        own: &base::Own,
+        repo: &settings::RepoPolicy,
+    ) -> Result<()> {
+        let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
+        self.resolves = declared_over(
+            measure(program, paths, &self.tag, &wanted)?,
+            &repo.toolchain,
+        );
+        Ok(())
+    }
+}
+
+/// Measurement, with the `[toolchain]` answers still able to decide.
+///
+/// **Transitional**, and owed to build-order item 3, which deletes the table
+/// with an error naming it. Until then a `cargo = "skip"` somebody committed
+/// has to go on working: item 2 replaced the input `render::suppressed_by_probe`
+/// reads, and an answer that quietly stops taking effect between two releases
+/// is worse than one removed loudly.
+///
+/// Applied over the measurement rather than beside it, because they answer the
+/// same question and only one of them can win. A person's answer wins: `skip`
+/// is *this sandbox will not have it*, `assume` is *run the hook anyway*, and
+/// each is a statement about the image by somebody who may know its next
+/// moment better than a probe of its last one does.
+fn declared_over(
+    mut measured: BTreeMap<String, bool>,
+    decided: &BTreeMap<String, settings::Toolchain>,
+) -> BTreeMap<String, bool> {
+    for (program, answer) in decided {
+        measured.insert(
+            program.clone(),
+            match answer {
+                settings::Toolchain::Skip => false,
+                settings::Toolchain::Assume => true,
+            },
+        );
+    }
+    measured
+}
+
+fn sandbox(paths: &Paths, adapter: &Adapter, repo: &settings::RepoPolicy) -> Result<Sandbox> {
+    let defs = stack::load_dir(&paths.stacks())?;
+    let detected = stack::detected(&defs, &paths.repo);
+    let installs: Vec<String> = installs_for(&detected, &repo.provision)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let tag = image::stack_tag(
+        adapter,
+        &installs.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let resolves = declared_over(facts::Facts::load(paths).about(&tag), &repo.toolchain);
+    let owed = needs_of(&detected, &repo.provision);
+    Ok(Sandbox {
+        installs,
+        tag,
+        resolves,
+        owed,
+    })
+}
+
 /// Ask the sandbox which of the detected stacks' programs it actually has.
+///
+/// **Transitional**, and the second container run in `init`. It feeds the
+/// `[toolchain]` question only; suppression is decided by `measure`, which asks
+/// about the same image and a wider set of programs, and caches the answer.
+/// Build-order item 3 deletes the question and this with it.
+///
+/// Takes the tag rather than deriving it, which is not cosmetic: it derived
+/// `image::tag_for(adapter)` while sessions ran the stack layer, so it asked
+/// about an image nobody would launch — reporting `cargo` missing in a repo
+/// whose sandbox provisions it.
 ///
 /// Never fatal, and never fatal *silently*: every failure path returns no
 /// outcomes, which `triage_for` reads as cannot-tell and answers by writing
@@ -3410,11 +3689,7 @@ fn installs_for<'a>(
 /// Only stdout is read. A runtime writes its own noise to stderr, and
 /// `doctor::parse` already discards anything that is not the protocol, but
 /// there is no reason to hand it the chance.
-fn probe_sandbox(
-    program: &str,
-    adapter: &Adapter,
-    stacks: &[detect::Stack],
-) -> Vec<doctor::Outcome> {
+fn probe_sandbox(program: &str, tag: &str, stacks: &[detect::Stack]) -> Vec<doctor::Outcome> {
     let mut wanted: Vec<&str> = stacks
         .iter()
         .flat_map(|s| [s.test.as_str(), s.format.as_str()])
@@ -3428,10 +3703,7 @@ fn probe_sandbox(
         return Vec::new();
     }
     match Command::new(program)
-        .args(image::probe_args(
-            &image::tag_for(adapter),
-            &doctor::probe_programs(&wanted),
-        ))
+        .args(image::probe_args(tag, &doctor::probe_programs(&wanted)))
         .output()
     {
         Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
@@ -3615,6 +3887,17 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
             base: None,
             omh: own,
             repo,
+            // The harness image, not this repo's stack layer, for the reason
+            // `base` is `None`: a login is not work on the project. Building a
+            // toolchain to type a password would spend minutes on a container
+            // that is thrown away, and the credential paths a login writes are
+            // the same in both images.
+            image: image::tag_for(&adapter),
+            // So nothing has been measured about it here, and nothing is
+            // suppressed. That is the safe direction — a login session running
+            // one hook too many costs nothing, and this container exists for
+            // the length of an OAuth redirect.
+            resolves: BTreeMap::new(),
         },
     )?;
     plan.validate(&backend.caps())?;
@@ -4324,11 +4607,12 @@ mod tests {
         );
     }
 
-    /// Installs run in file order, and only for provides that fired and have
-    /// one. A provide that asserts something the base image already ships —
-    /// node's `runtime` — contributes no `RUN` and must not move the tag.
+    /// Installs run in file order, and only for provides the resolution
+    /// recorded. A provide that asserts something the base image already
+    /// ships — node's `runtime` — contributes no `RUN` and must not move the
+    /// tag.
     #[test]
-    fn installs_are_the_fired_recipes_in_file_order() {
+    fn installs_are_the_recorded_recipes_in_file_order() {
         let defs = stack::load_dir(std::path::Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/stacks"
@@ -4336,14 +4620,14 @@ mod tests {
         .unwrap();
         let node = defs.iter().find(|d| d.name == "node").expect("node ships");
 
-        // Everything fires, so only `install`-carrying provides may appear, in
-        // the order the file gives them.
-        let all: std::collections::BTreeSet<String> = node
+        // Everything applies, so only `install`-carrying provides may appear,
+        // in the order the file gives them.
+        let all: BTreeMap<String, bool> = node
             .provides
             .iter()
-            .map(|p| stack::key(&node.name, &p.name))
+            .map(|p| (stack::key(&node.name, &p.name), true))
             .collect();
-        let got = installs_for(&[node], &all, &BTreeMap::new());
+        let got = installs_for(&[node], &all);
 
         let expected: Vec<&str> = node
             .provides
@@ -4359,22 +4643,22 @@ mod tests {
 
     /// Only the recipes that fired, and the **file** decides their order.
     ///
-    /// The test above fires every provide, so it exercises the filter only in
+    /// The test above records every provide, so it exercises the filter only in
     /// the case where the filter does nothing, and it draws its fixture from
     /// `stacks/node.toml`, whose recipes happen to already be in alphabetical
-    /// order. Two wrong implementations pass it: one that ignores `fired`
-    /// entirely, and one that sorts.
+    /// order. Two wrong implementations pass it: one that ignores the
+    /// resolution entirely, and one that sorts.
     ///
-    /// Both are real failures. Ignoring `fired` installs *every* package
+    /// Both are real failures. Ignoring the resolution installs *every* package
     /// manager into a node repo — the outcome `stacks/node.toml` opens by
     /// forbidding, since a repo with a `pnpm-lock.yaml` must not also get yarn
     /// and bun. Sorting puts `corepack enable pnpm` ahead of the node provide
     /// it needs, and the image build fails on a stack file that is correct.
     ///
-    /// So the fixture is hostile on both axes at once: what fired is a strict
-    /// subset, and file order is not sorted order.
+    /// So the fixture is hostile on both axes at once: what was recorded is a
+    /// strict subset, and file order is not sorted order.
     #[test]
-    fn only_the_fired_recipes_run_and_the_file_decides_their_order() {
+    fn only_the_recorded_recipes_run_and_the_file_decides_their_order() {
         fn provide(name: &str, install: Option<&str>) -> stack::Provide {
             stack::Provide {
                 name: name.into(),
@@ -4395,18 +4679,18 @@ mod tests {
                 provide("mike", Some("install mike")),
             ],
         };
-        // `mike` did not fire; `asserted` fired and has no recipe.
-        let fired: std::collections::BTreeSet<String> =
+        // `mike` was never recorded; `asserted` applies and has no recipe.
+        let resolved: BTreeMap<String, bool> =
             ["fixture/zulu", "fixture/alpha", "fixture/asserted"]
                 .iter()
-                .map(|k| (*k).to_string())
+                .map(|k| ((*k).to_string(), true))
                 .collect();
 
         assert_eq!(
-            installs_for(&[&def], &fired, &BTreeMap::new()),
+            installs_for(&[&def], &resolved),
             vec!["install zulu", "install alpha"],
-            "a provide that did not fire must contribute no recipe, and sorted \
-             order is not file order"
+            "a provide the resolution does not name must contribute no recipe, \
+             and sorted order is not file order"
         );
     }
 
@@ -4416,14 +4700,15 @@ mod tests {
     /// `[provision] "rust/linker" = false` is how somebody says *do not install
     /// this* — because it costs 124 MB they do not want, or because their base
     /// image already has it. `reconcile` preserves that `false` faithfully and
-    /// `settings::resolve` reads it back, and until this filter existed both
+    /// `settings::resolve` reads it back, and there was a version where both
     /// were ceremony: the install set was built from what *fired*, so the
     /// recipe ran anyway. The file said one thing, the image was another, and
     /// `omh why` would cite the file.
     ///
-    /// Read from the **resolution**, not from the committed table alone: a
-    /// `false` in `settings.local.toml` means *not on this laptop*, and the
-    /// laptop is where the image is built.
+    /// Kept as its own case now that `installs_for` reads only `true`, because
+    /// what it guards is not the filter's spelling but the outcome: a `false`
+    /// and a key nobody recorded must reach the image identically, and a
+    /// future `unwrap_or(true)` would break exactly this and nothing else.
     #[test]
     fn a_provide_somebody_opted_out_of_is_not_installed() {
         fn provide(name: &str, install: &str) -> stack::Provide {
@@ -4444,20 +4729,231 @@ mod tests {
                 provide("linker", "apt-get install -y gcc"),
             ],
         };
-        let fired: BTreeSet<String> = ["rust/toolchain", "rust/linker"]
-            .iter()
-            .map(|k| (*k).to_string())
-            .collect();
         let resolved = BTreeMap::from([
             ("rust/toolchain".to_string(), true),
             ("rust/linker".to_string(), false),
         ]);
 
         assert_eq!(
-            installs_for(&[&def], &fired, &resolved),
+            installs_for(&[&def], &resolved),
             vec!["install rustup"],
             "the predicate said the linker applies; a person said not here, and \
              a person outranks a predicate"
+        );
+    }
+
+    /// An answer somebody already committed goes on working.
+    ///
+    /// Suppression now reads measurements, and `[toolchain]` is the table it
+    /// used to read. Deleting that table is build-order item 3 and comes with
+    /// an error naming it — but between the two, a `cargo = "skip"` sitting in
+    /// somebody's `settings.toml` must not quietly stop taking effect. An
+    /// answer that silently becomes a no-op is the worst of the three
+    /// possibilities: it is not honoured, and nothing says so.
+    ///
+    /// Both answers keep their meanings, which are not symmetrical. `skip`
+    /// says *this sandbox will not have it*, so it forces an absence over a
+    /// measurement that has not been taken. `assume` says *run the hook
+    /// anyway* — for a base image the user maintains, or a tool installed at
+    /// launch — so it has to survive a measurement that says the program is
+    /// missing, or the one answer that keeps a hook working would be the one
+    /// answer measurement overrules.
+    #[test]
+    fn a_committed_toolchain_answer_still_decides_until_it_is_deleted() {
+        use settings::Toolchain;
+        let measured = BTreeMap::from([
+            ("cargo".to_string(), true),
+            ("shellcheck".to_string(), false),
+        ]);
+        let decided = BTreeMap::from([
+            ("cargo".to_string(), Toolchain::Skip),
+            ("shellcheck".to_string(), Toolchain::Assume),
+        ]);
+
+        let got = declared_over(measured, &decided);
+        assert_eq!(
+            got.get("cargo"),
+            Some(&false),
+            "`skip` means this sandbox will not have it, whatever a probe saw"
+        );
+        assert_eq!(
+            got.get("shellcheck"),
+            Some(&true),
+            "`assume` means run the hook anyway, whatever a probe saw"
+        );
+        // And a program with no answer keeps its measurement, including the
+        // unmeasured case — absent stays absent, which suppresses nothing.
+        let kept = declared_over(
+            BTreeMap::from([("cc".to_string(), false)]),
+            &BTreeMap::new(),
+        );
+        assert_eq!(kept, BTreeMap::from([("cc".to_string(), false)]));
+    }
+
+    /// **A repo that provisions runs a different image from one that does
+    /// not**, and two repos provisioning different things do not share one
+    /// either.
+    ///
+    /// This is what the whole design comes down to, and it is the check the
+    /// plan reserved for a machine with docker: same stack, same marker,
+    /// different lockfiles, *different images*. The half that needs no
+    /// container is the arithmetic — which tag a repo resolves to — and that is
+    /// what is asserted here. Whether the image then contains a working pnpm
+    /// is `omh doctor`'s question and no green test can answer it.
+    ///
+    /// Read through `sandbox`, the same function every launch and `init` call,
+    /// because the bug this replaces was not a wrong tag: it was two places
+    /// computing one.
+    #[test]
+    fn a_repo_that_provisions_runs_a_different_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(paths.stacks()).unwrap();
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        std::fs::write(paths.repo.join("package.json"), "{}").unwrap();
+        std::fs::copy(
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/stacks/node.toml")),
+            paths.stacks().join("node.toml"),
+        )
+        .unwrap();
+        let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
+
+        let with = |keys: &[&str]| {
+            let mut repo = settings::RepoPolicy::default();
+            for k in keys {
+                repo.provision.insert((*k).to_string(), true);
+            }
+            sandbox(&paths, &adapter, &repo).unwrap().tag
+        };
+
+        let nothing = with(&[]);
+        let pnpm = with(&["node/pnpm"]);
+        let yarn = with(&["node/yarn"]);
+
+        assert_eq!(
+            nothing,
+            image::tag_for(&adapter),
+            "a repo that provisions nothing runs the harness image, not an \
+             empty layer on top of it"
+        );
+        assert_ne!(pnpm, nothing, "provisioning changes the image");
+        assert_ne!(
+            pnpm, yarn,
+            "same stack, same marker, different lockfile — and a shared image \
+             would hand the yarn repo pnpm and nothing else"
+        );
+        assert_eq!(
+            pnpm,
+            with(&["node/pnpm"]),
+            "and it is stable, or every launch rebuilds"
+        );
+    }
+
+    /// What the sandbox is asked about is the **union**, and neither half
+    /// contains the other.
+    ///
+    /// `needs` is what a *stack* promised: it catches rustup installing a
+    /// `cargo` that then cannot link, which is a provisioning failure and
+    /// belongs in `init`'s report. A hook's program is what will be handed to a
+    /// shell: a hand-written `shellcheck` hook is in no `needs` list anywhere,
+    /// and asking only about `needs` ships it into a sandbox that cannot run
+    /// it — `cargo: not found` with a different program in it.
+    ///
+    /// Both mutations are one line and neither is implausible, which is why
+    /// this asserts the whole set rather than two `contains`.
+    #[test]
+    fn the_sandbox_is_asked_about_both_what_stacks_promised_and_what_hooks_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("lint.json"),
+            r#"{"on":"turn-end","run":"shellcheck ./x.sh"}"#,
+        )
+        .unwrap();
+
+        let def = stack::Definition {
+            name: "rust".into(),
+            marker: "Cargo.toml".into(),
+            provides: vec![stack::Provide {
+                name: "toolchain".into(),
+                needs: vec!["cargo".into(), "rustc".into()],
+                when: None,
+                install: Some("install rustup".into()),
+                because: "a fixture".into(),
+                measured: Vec::new(),
+            }],
+        };
+        let mut repo = settings::RepoPolicy::default();
+        repo.provision.insert("rust/toolchain".to_string(), true);
+
+        // Through `needs_of`, because that is what `sandbox` puts in `owed` —
+        // asserting the union over a hand-written set would let the two halves
+        // agree here and disagree in the one place it matters.
+        let owed = needs_of(&[&def], &repo.provision);
+        let asked = probe_targets(&[hooks], &Default::default(), &repo, &owed).unwrap();
+
+        assert_eq!(
+            asked,
+            BTreeSet::from([
+                "cargo".to_string(),
+                "rustc".to_string(),
+                "shellcheck".to_string()
+            ]),
+            "asking about only one of the two lists leaves the other unmeasured"
+        );
+    }
+
+    /// A provide nobody recorded, and a provide somebody opted out of, owe
+    /// nothing — so neither can be reported as a provisioning failure.
+    ///
+    /// `init` prints "did not resolve after installing" for these, and that
+    /// sentence has to be true. A provide that was never installed did not
+    /// fail to install; saying so is a gap omh invented, and it would print on
+    /// every `init` for anybody who opted out of the 124 MB linker on purpose.
+    ///
+    /// The consequence of the opt-out is not silenced by this. If a hook names
+    /// the program, `probe_targets` asks about it through the hooks half, and a
+    /// hook that cannot run is dropped by name.
+    #[test]
+    fn only_what_was_provisioned_owes_a_program() {
+        fn provide(name: &str, need: &str, install: Option<&str>) -> stack::Provide {
+            stack::Provide {
+                name: name.into(),
+                needs: vec![need.into()],
+                when: None,
+                install: install.map(str::to_string),
+                because: "a fixture".into(),
+                measured: Vec::new(),
+            }
+        }
+        let def = stack::Definition {
+            name: "node".into(),
+            marker: "package.json".into(),
+            provides: vec![
+                // No `install`: an assertion that the base image already ships
+                // this, which is worth writing down only if something checks it.
+                provide("runtime", "node", None),
+                provide("pnpm", "pnpm", Some("corepack enable pnpm")),
+                provide("yarn", "yarn", Some("corepack enable yarn")),
+                provide("bun", "bun", Some("npm install -g bun")),
+            ],
+        };
+        let resolved = BTreeMap::from([
+            ("node/runtime".to_string(), true),
+            ("node/pnpm".to_string(), true),
+            ("node/yarn".to_string(), false),
+            // `node/bun` was never recorded at all.
+        ]);
+
+        assert_eq!(
+            needs_of(&[&def], &resolved),
+            BTreeSet::from(["node".to_string(), "pnpm".to_string()]),
+            "an assertion with no recipe is still owed; an opt-out and an \
+             absence are not"
         );
     }
 

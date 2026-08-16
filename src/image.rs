@@ -178,22 +178,22 @@ pub fn stack_dockerfile(adapter: &Adapter, installs: &[&str]) -> String {
     df
 }
 
-/// The image a session *will* run, given what this repo's stacks provide.
+/// The image a session runs, given what this repo's stacks provide.
 ///
-/// **Not yet what one does run.** `container::plan` still takes
-/// `tag_for(adapter)`, so today this tag is built by `init` and used by nothing
-/// — threading it through is build-order item 2. Written as intent rather than
-/// as fact, because a doc comment claiming a guarantee the code does not keep
-/// is worse than none: the next reader trusts it.
+/// Reached through `main::sandbox`, which is the single place that decides —
+/// `container::plan` takes the answer as `Options.image` and re-derives
+/// nothing. It was not always so: for one milestone `plan` hardcoded
+/// `tag_for(adapter)`, so this tag was built by `init` and run by nobody, and
+/// no test noticed. `a_session_runs_the_image_the_caller_resolved` is the guard
+/// that closed it.
 ///
-/// Keyed on the **recipe**, which is the fired installs in order — so a pnpm
+/// Keyed on the **recipe**, which is the recorded installs in order — so a pnpm
 /// repo and a yarn repo do not share an image, and a reordered stack file is a
 /// different image too. That is slightly stronger than keying on the set of
-/// provides that fired, and strictly more correct: it is what the image
-/// contains.
+/// provides recorded, and strictly more correct: it is what the image contains.
 ///
 /// Nothing to install is the harness image itself rather than an empty layer
-/// on top of it. A provide that fired but installs nothing — the `runtime`
+/// on top of it. A provide that applies but installs nothing — the `runtime`
 /// assertion in `stacks/node.toml` — correctly does not move the tag, because
 /// it changes nothing about the image.
 pub fn stack_tag(adapter: &Adapter, installs: &[&str]) -> String {
@@ -215,10 +215,10 @@ pub fn stack_tag(adapter: &Adapter, installs: &[&str]) -> String {
 /// deciding which image to run is how a session ends up in one image while
 /// `init` reported another.
 ///
-/// That is presently the state of things, and this comment is not a guarantee
-/// against it: `init` is the only caller, and `container::plan` independently
-/// takes `tag_for(adapter)`. Returning the tag is what makes the fix a
-/// one-line change at the launch sites when item 2 lands.
+/// Every caller now gets it from one `main::sandbox` call and hands the same
+/// value to `container::plan`, so the layer that is built and the image that
+/// runs are the same string by construction.
+///
 /// No test calls this: it builds an image, and there is no container runtime in
 /// the dev sandbox. Its construction — `stack_tag` and `stack_dockerfile` — is
 /// tested thoroughly; that the build *works* is `omh doctor`'s to prove, which

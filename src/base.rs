@@ -2003,6 +2003,7 @@ command = "c"
             &own,
             &Default::default(),
             &adapter.tools,
+            &Default::default(),
         )
         .unwrap();
 

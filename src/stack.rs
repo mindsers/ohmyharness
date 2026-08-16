@@ -157,9 +157,9 @@ pub enum Verdict {
     DoesNot,
     /// Anything above 1 — the predicate could not answer, with its code when
     /// that could be read. Reported and **not fired**: a provide omh skipped
-    /// because it could not tell will surface as its `needs` not resolving, which
-    /// is loud, whereas installing on a coin-flip is silent. (That verification
-    /// is build-order item 2; nothing checks `needs` yet.)
+    /// because it could not tell surfaces as its `needs` not resolving, which is
+    /// loud — `init` reports it and every hook that names the program is held
+    /// back by name — whereas installing on a coin-flip is silent.
     CouldNotAnswer(Option<i32>),
 }
 
@@ -328,8 +328,8 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
             "{at}: provide `{}` states no case — `omh why` has nothing to read",
             p.name
         );
-        // Every entry here is what build-order item 2 will hand to `command -v`.
-        // A blank one, or one carrying arguments, resolves nowhere — so it reports a gap for a
+        // Every entry here is handed to `command -v` by the sandbox probe. A
+        // blank one, or one carrying arguments, resolves nowhere — so it reports a gap for a
         // toolchain the user has, and keeps reporting it. `detect::program`
         // returns `None` rather than guess for exactly this reason; a stack
         // file is the other door into the same mistake.
@@ -921,8 +921,8 @@ because = "cargo is how a rust project is built and tested"
         assert!(format!("{e:#}").contains("toolchain"), "must name it");
     }
 
-    /// A `needs` entry is a program name — what build-order item 2's probe will
-    /// look for with `command -v`.
+    /// A `needs` entry is a program name — what the sandbox probe looks for
+    /// with `command -v`.
     /// A blank one, or one carrying arguments, resolves nowhere — so it reports
     /// a permanent gap for a toolchain the user has, which is the expensive
     /// failure direction and the one `detect::program` returns `None` to avoid.

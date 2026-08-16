@@ -228,11 +228,15 @@ pub struct RepoPolicy {
     /// so a `false` can only have been typed.
     ///
     /// What it changes is what goes into the image — `installs_for` drops the
-    /// recipe. What it must never change is what gets *reported*: once
-    /// build-order item 2 verifies `needs`, that verification runs regardless,
-    /// so opting out of `rust/linker` still says `cc` is missing. Nobody can
-    /// use this to tell omh something false about the sandbox; only to decide
-    /// what omh puts in it.
+    /// recipe, and `needs_of` stops claiming the provide owes anything, so
+    /// nothing is reported as having failed to install when it was never
+    /// installed.
+    ///
+    /// What it cannot do is make omh say something false about the sandbox. If
+    /// a hook names the program, the probe asks about it through
+    /// `render::hook_programs` regardless of this table, and a hook that cannot
+    /// run is held back by name. This decides what omh *puts in* the image,
+    /// never what omh *reports about* it.
     pub provision: BTreeMap<String, bool>,
 }
 

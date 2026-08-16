@@ -8,7 +8,7 @@ use crate::adapter::{Binding, Capability, Render};
 use crate::hook::{self, Outcome};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// A rendered capability, and what did not fit in it.
@@ -47,6 +47,10 @@ pub fn document(
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,
     tools: &BTreeMap<hook::Tool, String>,
+    // `resolves`: what the image this session will run has been measured to
+    // contain, from `facts::Facts::about`. A program absent from it is one
+    // nobody probed, which suppresses nothing — see `suppressed_by_probe`.
+    resolves: &BTreeMap<String, bool>,
 ) -> Result<Document> {
     match binding.render {
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
@@ -92,7 +96,7 @@ pub fn document(
         // launch.
         Render::ClaudeSettings => {
             let mut hooks = merge_hooks(sources, own, repo)?;
-            let mut dropped = suppressed_by_toolchain(&mut hooks, &repo.toolchain);
+            let mut dropped = suppressed_by_probe(&mut hooks, resolves);
             let (rendered, unspellable) = translate(&hooks, binding, tools)?;
             dropped.extend(unspellable);
             Ok(Document {
@@ -102,7 +106,7 @@ pub fn document(
         }
         Render::OpencodePlugin => {
             let mut hooks = merge_hooks(sources, own, repo)?;
-            let mut dropped = suppressed_by_toolchain(&mut hooks, &repo.toolchain);
+            let mut dropped = suppressed_by_probe(&mut hooks, resolves);
             let mut doc = opencode_plugin(&hooks, binding, tools)?;
             dropped.extend(std::mem::take(&mut doc.dropped));
             doc.dropped = dropped;
@@ -265,14 +269,20 @@ pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
 
 // ── Hooks ───────────────────────────────────────────────────────────────────
 
-/// Remove the hooks this machine has been told it cannot run, and name them.
+/// Remove the hooks the image has been **measured** unable to run, and name
+/// them.
 ///
-/// The division of labour behind `[toolchain]`. `.omh/hooks/` is the repo's
-/// statement about itself — committed, shared, the same for everybody who
-/// clones. Whether `cargo` is installed is a fact about one computer. So a
-/// missing toolchain never edits the repo; it stops a hook firing *here*, from
-/// a setting that layers like every other, and `settings.local.toml` is how one
-/// machine disagrees without telling the team anything.
+/// `.omh/hooks/` is the repo's statement about itself — committed, shared, the
+/// same for everybody who clones. Whether `cargo` resolves is a fact about one
+/// image. So a missing toolchain never edits the repo; it stops a hook firing
+/// against this image, and a repo whose sandbox gains the program gets the hook
+/// back with nothing to un-configure.
+///
+/// **Measured, never declared.** This used to read `[toolchain]`, a table
+/// `init` filled from a question — which asked somebody to configure around a
+/// sandbox that was broken, and recorded the answer in a committed file where
+/// it outlived the breakage. Provisioning removed the question; what is left is
+/// the measurement, and a measurement needs no consent to be right.
 ///
 /// Reported as [`hook::Dropped`], the same channel a hook a harness cannot
 /// spell already uses, so an absence is never silent — the failure this whole
@@ -282,23 +292,24 @@ pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
 /// Keyed on the command, never on the stack that produced it: a hook somebody
 /// wrote by hand obeys the same answer, which is what makes this a rule about
 /// programs rather than a rule about the four stacks omh happens to detect.
-fn suppressed_by_toolchain(
+fn suppressed_by_probe(
     hooks: &mut BTreeMap<String, hook::Hook>,
-    decided: &BTreeMap<String, crate::settings::Toolchain>,
+    resolves: &BTreeMap<String, bool>,
 ) -> Vec<hook::Dropped> {
     let mut dropped = Vec::new();
     hooks.retain(|name, hook| {
+        // Two cannot-tells, and neither is a licence to switch a hook off:
         // `detect::program` answers `None` for a command it could not read, and
-        // that is *cannot tell* — never a licence to switch a hook off.
+        // a program absent from the map is one nobody has probed.
         let blocked = hook.runs().into_iter().find_map(|cmd| {
             let p = crate::detect::program(cmd)?;
-            (decided.get(p) == Some(&crate::settings::Toolchain::Skip)).then(|| p.to_string())
+            (resolves.get(p) == Some(&false)).then(|| p.to_string())
         });
         match blocked {
             Some(program) => {
                 dropped.push(hook::Dropped {
                     name: name.clone(),
-                    wanted: format!("`{program}` here — [toolchain] in this repo's settings"),
+                    wanted: format!("`{program}` — not installed in this repo's sandbox"),
                 });
                 false
             }
@@ -414,6 +425,36 @@ fn merge_hooks(
         out.insert(own_hook.name.to_string(), own_hook.hook.clone());
     }
     Ok(out)
+}
+
+/// Every program the hooks this repo would actually ship name, as one set.
+///
+/// The union suppression has to be built from. A stack's `needs` says what a
+/// *stack* declared; this says what a *hook* will hand to a shell, and the two
+/// are not the same list — a hand-written `shellcheck` hook is in no `needs`.
+/// Asking about only one of them ships a hook into a sandbox that cannot run
+/// it, which is the failure this design opens by describing.
+///
+/// Built on `merge_hooks` so it is the same set the renderer ships: the
+/// selection, the reserved names and the repo's shadowing are all applied
+/// already. A second notion of *which hooks count* is how a probe starts
+/// answering about a hook nobody runs.
+///
+/// A command `detect::program` cannot read contributes nothing. That is
+/// *cannot tell*, and this is the direction where cannot-tell is cheap: a
+/// missing question costs one confusing hook error, an invented one reports a
+/// gap in a repo whose toolchain is fine.
+pub fn hook_programs(
+    dirs: &[PathBuf],
+    own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
+) -> Result<BTreeSet<String>> {
+    Ok(merge_hooks(dirs, own, repo)?
+        .values()
+        .flat_map(hook::Hook::runs)
+        .filter_map(crate::detect::program)
+        .map(str::to_string)
+        .collect())
 }
 
 const BEFORE_TOOL: &str = "tool.execute.before";
@@ -784,7 +825,7 @@ fn toml_str(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeSet;
+
     use std::io::Write;
 
     // ── toolchain suppression ───────────────────────────────────────────────
@@ -801,18 +842,19 @@ mod tests {
             .collect()
     }
 
-    /// A repo states what its hooks are; a machine states what it can run. The
-    /// hook file is committed and travels, so a toolchain missing *here* must
-    /// never remove it from the repo — it stops the hook firing on this machine,
-    /// and is reported by name so the absence is never silent.
+    /// A repo states what its hooks are; a **measurement** states what the
+    /// sandbox can run. The hook file is committed and travels, so a toolchain
+    /// missing in this image must never remove it from the repo — it stops the
+    /// hook firing against this image, and is reported by name so the absence
+    /// is never silent.
     #[test]
-    fn a_hook_needing_a_program_this_machine_lacks_is_dropped_by_name() {
+    fn a_hook_needing_a_program_the_image_lacks_is_dropped_by_name() {
         let mut hooks = hooks_named(&[
             ("rust-test", r#"{"on":"turn-end","run":"cargo test"}"#),
             ("greet", r#"{"on":"turn-end","run":"echo hi"}"#),
         ]);
-        let decided = BTreeMap::from([("cargo".to_string(), crate::settings::Toolchain::Skip)]);
-        let dropped = suppressed_by_toolchain(&mut hooks, &decided);
+        let measured = BTreeMap::from([("cargo".to_string(), false)]);
+        let dropped = suppressed_by_probe(&mut hooks, &measured);
 
         assert_eq!(dropped.len(), 1, "one hook is held back: {dropped:?}");
         assert_eq!(dropped[0].name, "rust-test");
@@ -832,25 +874,30 @@ mod tests {
         );
     }
 
-    /// `assume` answers *the sandbox will have this by launch*, so it must not
-    /// suppress anything — only `skip` does. Collapsing the two would make the
-    /// one answer that keeps a hook working behave like the one that turns it
-    /// off.
+    /// Only a **measured absence** suppresses. A program measured present, and
+    /// a program nobody measured at all, both leave the hook alone.
+    ///
+    /// The second half carries the weight: `facts::Facts::resolves` answers
+    /// `None` for a program nobody probed, and that must reach here as *not in
+    /// the map* rather than as `false`. A first run, a hook added since the
+    /// last probe, a cache somebody deleted — all of them look identical to an
+    /// empty sandbox if silence is read as absence, and omh would ship a
+    /// session with every hook switched off and no reason given.
     #[test]
-    fn only_skip_suppresses_and_an_unmentioned_program_never_does() {
-        let assumed = BTreeMap::from([("cargo".to_string(), crate::settings::Toolchain::Assume)]);
+    fn only_a_measured_absence_suppresses_and_an_unmeasured_program_never_does() {
+        let present = BTreeMap::from([("cargo".to_string(), true)]);
         let mut hooks = hooks_named(&[("rust-test", r#"{"on":"turn-end","run":"cargo test"}"#)]);
         assert!(
-            suppressed_by_toolchain(&mut hooks, &assumed).is_empty(),
-            "assume is not skip"
+            suppressed_by_probe(&mut hooks, &present).is_empty(),
+            "the probe found it — that is the answer that keeps a hook working"
         );
         assert!(hooks.contains_key("rust-test"));
 
-        // And a program nobody has said anything about is simply run.
+        // And a program nobody has measured is simply run.
         let mut hooks = hooks_named(&[("rust-test", r#"{"on":"turn-end","run":"cargo test"}"#)]);
         assert!(
-            suppressed_by_toolchain(&mut hooks, &BTreeMap::new()).is_empty(),
-            "silence is not a decision to suppress"
+            suppressed_by_probe(&mut hooks, &BTreeMap::new()).is_empty(),
+            "silence is cannot-tell, and cannot-tell is never a licence to act"
         );
         assert!(hooks.contains_key("rust-test"));
     }
@@ -876,8 +923,8 @@ mod tests {
                 r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
             ),
         ]);
-        let decided = BTreeMap::from([("cargo".to_string(), crate::settings::Toolchain::Skip)]);
-        let dropped = suppressed_by_toolchain(&mut hooks, &decided);
+        let measured = BTreeMap::from([("cargo".to_string(), false)]);
+        let dropped = suppressed_by_probe(&mut hooks, &measured);
 
         let names: BTreeSet<&str> = dropped.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(
@@ -1009,6 +1056,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &adapter.tools,
+            &Default::default(),
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
@@ -1046,6 +1094,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &adapter.tools,
+            &Default::default(),
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
@@ -1088,6 +1137,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &adapter.tools,
+            &Default::default(),
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
@@ -1103,6 +1153,70 @@ mod tests {
     /// left the whole suite green, including one that turns the refusal into
     /// `console.error` and one that renames the tool so `git-unavailable` can
     /// never match. The copy had already drifted, too: it omitted `edit`.
+    /// Suppression is a rule about **this repo**, so it has to hold on every
+    /// render path — asserted through `document`, which is what the launcher
+    /// calls, rather than through `suppressed_by_probe`, which is what the
+    /// three tests above call.
+    ///
+    /// The distinction is not academic. The unit tests would all pass with the
+    /// call deleted from one arm of `document`'s match, and the result would be
+    /// a hook that ships on opencode and not on claude — so which automation a
+    /// repo gets would depend on which harness you happened to launch. That is
+    /// not a weaker version of the rule; it is a different rule per harness,
+    /// which is the thing this module exists to prevent.
+    #[test]
+    fn a_measured_absence_holds_on_every_render_path() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/rust-test.json",
+            r#"{"on":"turn-end","run":"cargo test"}"#,
+        );
+        file(
+            dir.path(),
+            "h/greet.json",
+            r#"{"on":"turn-end","run":"echo hi"}"#,
+        );
+        let measured = BTreeMap::from([("cargo".to_string(), false)]);
+
+        let claude = claude_hooks();
+        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 2] = [
+            (hooks_binding(&claude), &claude.tools),
+            (opencode_hooks(), &opencode().tools),
+        ];
+        for (binding, tools) in paths {
+            let out = document(
+                Capability::Hooks,
+                binding,
+                &[dir.path().join("h")],
+                &Default::default(),
+                &Default::default(),
+                tools,
+                &measured,
+            )
+            .unwrap();
+
+            assert!(
+                !out.body.contains("cargo test"),
+                "{:?}: a hook the sandbox cannot run reached the harness:\n{}",
+                binding.render,
+                out.body
+            );
+            assert!(
+                out.dropped.iter().any(|d| d.name == "rust-test"),
+                "{:?}: and it must be named, never silently absent: {:?}",
+                binding.render,
+                out.dropped
+            );
+            assert!(
+                out.body.contains("echo hi"),
+                "{:?}: nothing else is disturbed:\n{}",
+                binding.render,
+                out.body
+            );
+        }
+    }
+
     fn opencode() -> &'static Adapter {
         static CELL: std::sync::OnceLock<Adapter> = std::sync::OnceLock::new();
         CELL.get_or_init(|| Adapter::find(Path::new(ADAPTERS), "opencode").unwrap())
@@ -1126,6 +1240,7 @@ mod tests {
             &Default::default(),
             &Default::default(),
             &opencode().tools,
+            &Default::default(),
         )
         .unwrap()
     }
@@ -1656,6 +1771,7 @@ try {{
             &Default::default(),
             &repo,
             &adapter.tools,
+            &Default::default(),
         )
         .unwrap();
 
@@ -1687,6 +1803,7 @@ try {{
             &Default::default(),
             &repo,
             &adapter.tools,
+            &Default::default(),
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("linear"), "got: {err:#}");
@@ -1746,6 +1863,70 @@ try {{
         );
     }
 
+    /// Every program the hooks that would *ship* name, asked about as one set.
+    ///
+    /// The gap this closes is easy to miss and cost the whole first design: a
+    /// stack's `needs` lists what a **stack** declared, and suppression has to
+    /// cover every program a **hook** names. A hand-written `shellcheck` hook
+    /// appears in no `needs` list, so a probe built from `needs` alone never
+    /// asks about it, `shellcheck` is missing, and the hook ships anyway — the
+    /// `cargo: not found` failure in a different spelling.
+    ///
+    /// Read through `merge_hooks`, so it is the same set the renderer will
+    /// ship: a hook `[use]` did not select, or one whose file is not there, is
+    /// not a program worth a question. Two ways of deciding which hooks count
+    /// is how the probe starts answering about a hook nobody runs.
+    #[test]
+    fn every_program_a_shipped_hook_would_run_is_asked_about() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("h");
+        file(
+            &hooks,
+            "lint.json",
+            r#"{"on":"turn-end","run":"shellcheck ./x.sh"}"#,
+        );
+        // A refusal shells out to nothing, so it can never need a program.
+        file(
+            &hooks,
+            "no.json",
+            r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+        );
+        // And a command omh cannot read is *cannot tell* — `detect::program`
+        // answers `None` rather than guessing `$(which`, and a question about
+        // a program nobody named would report a gap omh invented.
+        file(
+            &hooks,
+            "clever.json",
+            r#"{"on":"turn-end","run":"$(which cargo) test"}"#,
+        );
+
+        let own = crate::base::Own {
+            hooks: vec![crate::base::Hook {
+                name: "graph-refresh",
+                hook: hook::Hook::parse(r#"{"on":"turn-end","run":"omh-graph index"}"#, "own")
+                    .unwrap(),
+            }],
+            ..Default::default()
+        };
+
+        let asked = hook_programs(std::slice::from_ref(&hooks), &own, &Default::default()).unwrap();
+
+        assert!(
+            asked.contains("shellcheck"),
+            "a hand-written hook's program is in no stack's `needs`: {asked:?}"
+        );
+        assert!(
+            asked.contains("omh-graph"),
+            "omh's own hooks run programs too: {asked:?}"
+        );
+        assert_eq!(
+            asked,
+            BTreeSet::from(["shellcheck".to_string(), "omh-graph".to_string()]),
+            "a refusal runs nothing, and a command omh cannot read is not a gap \
+             it may invent: {asked:?}"
+        );
+    }
+
     /// A directory omh cannot read is not a directory with no hooks in it.
     ///
     /// The `config::read_layer` lesson, in the function generation rewrote —
@@ -1787,6 +1968,7 @@ try {{
             &Default::default(),
             &Default::default(),
             &adapter.tools,
+            &Default::default(),
         )
         .unwrap_err();
         assert!(err.to_string().contains("staged by the launcher"));

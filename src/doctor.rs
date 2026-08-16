@@ -146,6 +146,7 @@ pub fn checks(
     adapter: &Adapter,
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,
+    resolves: &std::collections::BTreeMap<String, bool>,
 ) -> Result<Vec<Check>> {
     let mut out = Vec::new();
     for capability in Capability::ALL {
@@ -190,7 +191,8 @@ pub fn checks(
             // A program gets a stronger check than a config file, not a weaker
             // one: that it parses, and that the hooks omh did not drop are in it.
             Render::OpencodePlugin => Expect::Parses(
-                hook_names(&sources, own, repo, binding, &adapter.tools).unwrap_or_default(),
+                hook_names(&sources, own, repo, binding, &adapter.tools, resolves)
+                    .unwrap_or_default(),
             ),
         };
 
@@ -286,8 +288,17 @@ fn hook_names(
     repo: &crate::settings::RepoPolicy,
     binding: &crate::adapter::Binding,
     tools: &std::collections::BTreeMap<crate::hook::Tool, String>,
+    resolves: &std::collections::BTreeMap<String, bool>,
 ) -> Result<Vec<String>> {
-    let doc = crate::render::document(Capability::Hooks, binding, sources, own, repo, tools)?;
+    let doc = crate::render::document(
+        Capability::Hooks,
+        binding,
+        sources,
+        own,
+        repo,
+        tools,
+        resolves,
+    )?;
     let dropped: Vec<&str> = doc.dropped.iter().map(|d| d.name.as_str()).collect();
     let mut names: Vec<String> = own
         .hooks
@@ -600,12 +611,17 @@ mod tests {
     #[test]
     fn a_capability_the_profile_does_not_source_is_still_checked() {
         let fx = fixture();
-        let names: Vec<String> =
-            checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1)
-                .unwrap()
-                .into_iter()
-                .map(|c| c.name)
-                .collect();
+        let names: Vec<String> = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
         assert!(
             names.iter().any(|n| n == "hooks"),
             "omh's own hooks are mounted with no hooks layer to source them: {names:?}"
@@ -625,11 +641,17 @@ mod tests {
         let fx = fixture();
         let (own, off) = decided_with(["codegraph".to_string()].into());
 
-        let mcp = checks(&fx.profile, &adapter("claude"), &own, &off)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.name == "mcp")
-            .expect("claude stages mcp");
+        let mcp = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &own,
+            &off,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "mcp")
+        .expect("claude stages mcp");
         assert_eq!(
             mcp.expect,
             Expect::Mentions(vec![]),
@@ -661,11 +683,17 @@ mod tests {
             )
             .unwrap();
 
-        let skills = checks(&fx.profile, &adapter("claude"), &own, &repo)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.name == "skills")
-            .expect("claude stages skills");
+        let skills = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &own,
+            &repo,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "skills")
+        .expect("claude stages skills");
         assert_eq!(
             skills.expect,
             Expect::Entries(vec![]),
@@ -676,11 +704,17 @@ mod tests {
     #[test]
     fn every_declared_capability_is_checked() {
         let fx = fixture();
-        let got: Vec<_> = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1)
-            .unwrap()
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
+        let got: Vec<_> = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
         assert_eq!(
             got,
             vec!["rules", "skills", "mcp", "mcp-loaded", "subagents", "hooks"],
@@ -718,11 +752,17 @@ mod tests {
         .unwrap();
         let terse = Adapter::find(dir.path(), "terse").unwrap();
 
-        let caps: Vec<String> = checks(&fx.profile, &terse, &decided().0, &decided().1)
-            .unwrap()
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
+        let caps: Vec<String> = checks(
+            &fx.profile,
+            &terse,
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
         assert!(
             !caps.iter().any(|c| c == "rules"),
             "a capability this harness cannot express is not checked: {caps:?}"
@@ -739,6 +779,7 @@ mod tests {
             &adapter("opencode"),
             &decided().0,
             &decided().1,
+            &Default::default(),
         )
         .unwrap()
         .into_iter()
@@ -752,7 +793,15 @@ mod tests {
     #[test]
     fn checks_target_guest_paths_only() {
         let fx = fixture();
-        for check in checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap() {
+        for check in checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap()
+        {
             let p = check.guest.to_string_lossy().to_string();
             assert!(
                 p.starts_with("/work") || p.starts_with(GUEST_HOME),
@@ -764,7 +813,14 @@ mod tests {
     #[test]
     fn content_checks_name_what_must_be_present() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap();
+        let cs = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap();
 
         let skills = cs.iter().find(|c| c.name == "skills").unwrap();
         assert_eq!(skills.expect, Expect::Entries(vec!["graphify".into()]));
@@ -796,7 +852,14 @@ mod tests {
     #[test]
     fn the_probe_reports_one_line_per_check() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap();
+        let cs = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap();
         let script = probe_script(&cs);
         for c in &cs {
             assert!(
@@ -1145,7 +1208,14 @@ mod tests {
     #[test]
     fn the_check_asks_where_the_document_is() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap();
+        let cs = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap();
         let loaded = cs
             .iter()
             .find(|c| matches!(c.expect, Expect::Loaded { .. }))

@@ -11,6 +11,7 @@ use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::profile::{Paths, Profile};
 use crate::session::Session;
 use anyhow::{Context, Result};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
@@ -200,6 +201,24 @@ pub struct Options {
     /// the same reason, which is what made one field tempting, but they answer
     /// opposite questions and `omh why` exists to keep those apart.
     pub repo: crate::settings::RepoPolicy,
+    /// The image this session runs — the harness layer, or the stack layer
+    /// built on top of it when this repo provisions anything.
+    ///
+    /// Resolved by the caller for the reason `omh`, `base` and `memory_bin`
+    /// are, and for one more that is specific to it: deciding here would mean
+    /// reading `[provision]` and the stack files from inside `plan`, so the
+    /// choice of image would be reachable from no test — and *which image a
+    /// session runs* is the single fact this whole design turns on. It was a
+    /// hardcoded `image::tag_for(adapter)` for the whole of the first
+    /// milestone, which built a stack layer nothing ever ran.
+    pub image: String,
+    /// What that image has been measured to contain, `{program: resolves}`.
+    ///
+    /// Read from `facts::Facts::about`, keyed on `image` above — so the two
+    /// fields are answers about the same thing and a mismatch is impossible to
+    /// spell here. A program absent from the map is one nobody probed, which
+    /// suppresses nothing.
+    pub resolves: BTreeMap<String, bool>,
 }
 
 pub fn plan(
@@ -245,6 +264,7 @@ pub fn plan(
         rules_doc: &rules_doc,
         own: &opts.omh,
         repo: &opts.repo,
+        resolves: &opts.resolves,
         stage: &stage,
         worktree: &session.worktree,
         staging,
@@ -367,7 +387,7 @@ pub fn plan(
     }
 
     Ok(Plan {
-        image: crate::image::tag_for(adapter),
+        image: opts.image.clone(),
         mounts,
         env: vec![
             ("OMH_SESSION".into(), session.id.clone()),
@@ -413,6 +433,11 @@ struct Stager<'a> {
     rules_doc: &'a str,
     own: &'a crate::base::Own,
     repo: &'a crate::settings::RepoPolicy,
+    /// What the session's image has been measured to contain. Beside `repo`
+    /// rather than inside it: one is what this checkout decided, the other is
+    /// what a container turned out to hold, and `omh why` exists to keep those
+    /// apart.
+    resolves: &'a BTreeMap<String, bool>,
     stage: &'a Path,
     worktree: &'a Path,
     staging: Staging,
@@ -430,6 +455,7 @@ impl Stager<'_> {
             rules_doc,
             own,
             repo,
+            resolves,
             stage,
             worktree,
             staging,
@@ -542,8 +568,15 @@ impl Stager<'_> {
                 let file = stage.join(format!("{cap}.rendered"));
                 // Rendered even when skipped, so a dry run still surfaces a
                 // malformed mcp.json instead of deferring it to launch.
-                let rendered =
-                    crate::render::document(cap, binding, sources, own, repo, &adapter.tools)?;
+                let rendered = crate::render::document(
+                    cap,
+                    binding,
+                    sources,
+                    own,
+                    repo,
+                    &adapter.tools,
+                    resolves,
+                )?;
                 dropped_hooks.extend(rendered.dropped);
                 if staging == Staging::Apply {
                     std::fs::create_dir_all(stage)?;
@@ -918,9 +951,60 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
+                image: crate::image::tag_for(adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap()
+    }
+
+    /// **A session runs the image the caller resolved**, and nothing else.
+    ///
+    /// The one fact this whole design turns on, and it was unguarded for a
+    /// milestone: `plan` hardcoded `image::tag_for(adapter)`, so `init` built a
+    /// stack layer that no session ever ran. A mutation sweep found it — every
+    /// test passed with the layer replaced by the harness image, and with the
+    /// harness image replaced by the base — because nothing asserted which
+    /// image comes out.
+    ///
+    /// Pinned against a tag no adapter could produce, so the assertion cannot
+    /// be satisfied by a derivation that happens to agree here: only passing
+    /// `opts.image` through gives this answer.
+    #[test]
+    fn a_session_runs_the_image_the_caller_resolved() {
+        let fx = fixture();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let (own, repo) = decided();
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Skip,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+                image: "omh/this-repos-toolchain:deadbeef".into(),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            p.image, "omh/this-repos-toolchain:deadbeef",
+            "the stack layer is built by `init` and must be the layer a session runs"
+        );
+        assert_ne!(
+            p.image,
+            crate::image::tag_for(&adapter),
+            "a plan that re-derives the harness tag ignores what it was handed"
+        );
     }
 
     fn plan_for(fx: &Fx, harness: &str) -> Plan {
@@ -950,6 +1034,8 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap()
@@ -990,6 +1076,8 @@ mod tests {
                 base: None,
                 omh: Default::default(),
                 repo,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -1145,6 +1233,8 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap()
@@ -1790,6 +1880,8 @@ mod tests {
                 base: None,
                 omh: decided_with(["memory".to_string()].into()).0,
                 repo: decided_with(["memory".to_string()].into()).1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -1844,6 +1936,8 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -1924,6 +2018,8 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .expect_err("a reserved name must not launch");
@@ -1998,6 +2094,8 @@ mod tests {
                 base: None,
                 omh: decided_with(["codegraph".to_string()].into()).0,
                 repo: decided_with(["codegraph".to_string()].into()).1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .expect_err("a manifest name is omh's whether the feature is on or off");
@@ -2024,6 +2122,8 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -2217,6 +2317,8 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -2356,6 +2458,8 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
+                image: crate::image::tag_for(&bad),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap_err();
@@ -2405,6 +2509,8 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -2438,6 +2544,8 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -2482,6 +2590,8 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -2500,6 +2610,8 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap();
@@ -2529,6 +2641,8 @@ mod tests {
             base: None,
             omh: decided().0,
             repo: decided().1,
+            image: crate::image::tag_for(&adapter),
+            resolves: BTreeMap::new(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
 
@@ -2549,6 +2663,8 @@ mod tests {
             base: None,
             omh: decided().0,
             repo: decided().1,
+            image: crate::image::tag_for(&adapter),
+            resolves: BTreeMap::new(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
         assert_eq!(p.argv, ["claude"]);
@@ -2574,6 +2690,8 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap()
@@ -2597,6 +2715,8 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
             },
         )
         .unwrap()

@@ -270,14 +270,55 @@ needs — it is not a boundary, and omh does not claim it as one. What is
 guaranteed is the read-only part: the agent can read a selected skill and cannot
 write one.
 
+## `[provision]` — what your sandbox is built with
+
+`omh init` works out which ecosystems this repo is — a `Cargo.toml`, a
+`package.json` — and then asks the **sandbox**, with your repo mounted
+read-only, which parts of them apply here. A repo with a `pnpm-lock.yaml` gets
+pnpm; the yarn and bun provides do not apply and are not installed.
+
+What it decided is written into your committed settings:
+
+```toml
+# <repo>/.omh/settings.toml
+[provision]
+"rust/toolchain" = true
+"rust/linker" = true
+```
+
+That table is the input to everything afterwards. Your sessions run an image
+built from exactly these, so a teammate who clones the repo gets the same
+sandbox without being asked anything, and `omh run` never re-evaluates a
+condition.
+
+**omh only ever writes `true`.** A `false` can only have been typed, so it is
+treated as a decision and left alone:
+
+```toml
+[provision]
+"rust/linker" = false   # this base image already has cc; do not spend 124 MB on it
+```
+
+An opt-out changes what goes **into** the image. It does not change what omh
+says **about** it: if one of your hooks needs the program, omh still asks the
+sandbox whether it is there, and still holds the hook back by name if it is not.
+
+Keyed `"<stack>/<provide>"`. `omh why` names what each one buys and what it
+costs. Re-running `omh init` is the honest fix for drift — swap a `yarn.lock`
+for a `pnpm-lock.yaml` and the yarn entry goes, because the table describes what
+is true now.
+
+These layer like every other setting, so a provide you want left out on **your**
+machine belongs in `settings.local.toml`, where it says nothing to anyone else —
+and omh will never copy it into the committed file.
+
 ## `[toolchain]` — what you told init about a missing tool
 
-> **Superseded.** This describes what ships today. The design that replaces it —
-> provisioning the stack's toolchain, and deriving suppression from the probe
-> instead of recording an answer — is in
-> [Adoption §1.8](design/adoption.md). `[toolchain]` is expected to be removed
-> rather than extended, so prefer fixing the environment over writing a line
-> here.
+> **Superseded, and no longer the source of truth.** Suppression is now decided
+> by measuring the image your sessions actually run, cached per image in
+> `~/.omh/facts.json`. A line here still overrides that measurement, so nothing
+> you have written has stopped working — but the table is expected to be removed
+> rather than extended. Prefer fixing the environment with `[provision]` above.
 
 `omh init` detects your stack from its manifest and writes a test and a format
 hook for it. Detection runs on your machine; the hook runs in the sandbox, and
@@ -303,6 +344,11 @@ gofmt = "assume"   # run them; the sandbox will have gofmt by launch
 
 A suppressed hook is reported at launch by name, in the same list as a hook your
 harness cannot spell — it is never silently absent.
+
+**You usually do not need this any more.** omh measures the image itself, so a
+hook whose program is missing is already held back and named without anyone
+writing a line. What is left for the table is disagreeing with the measurement:
+`skip` forces the absence, `assume` forces the presence.
 
 `assume` is for a sandbox that gains the tool after init looked — a base image
 you maintain, something installed at launch. It beats the probe, because you
