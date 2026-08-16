@@ -44,11 +44,6 @@ struct File {
     /// and this is the reader.
     #[serde(default, rename = "use")]
     uses: BTreeMap<String, Vec<String>>,
-    /// What this repo was asked about a program its sandbox does not have, and
-    /// what it answered. Named here for the same reason `use` is: unnamed, the
-    /// guard below would refuse it as a table nobody reads.
-    #[serde(default)]
-    toolchain: BTreeMap<String, Toolchain>,
     /// What this repo resolved to — `"<stack>/<provide>" = true` for each
     /// provide that applied. Named here for the same reason `use` is: unnamed,
     /// the guard below would refuse it as a table nobody reads, and `init`
@@ -57,34 +52,6 @@ struct File {
     provision: BTreeMap<String, bool>,
     #[serde(flatten)]
     rest: toml::Table,
-}
-
-/// What a repo decided about a program the probe could not find in its sandbox.
-///
-/// Two answers, and neither of them names a stack: omh does not know what rust
-/// is, and the moment this enum grows an `InstallRust` it becomes a list of
-/// every toolchain in the world that somebody has to keep current. Both of
-/// these are things omh can act on for a program it has never heard of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Toolchain {
-    /// Do not run hooks whose command needs this program here, and stop asking.
-    ///
-    /// The honest answer when this sandbox will not have the tool: a hook that
-    /// cannot run is not a safety net, it is a red mark at the end of every
-    /// turn that everyone learns to scroll past.
-    ///
-    /// It suppresses a hook; it never deletes one. The file is the repo's
-    /// statement about itself and is committed, so the answer belongs in
-    /// `settings.local.toml` when only this machine lacks the tool.
-    Skip,
-    /// Run the hook anyway.
-    ///
-    /// For a sandbox that gains the tool after `init` has looked — a base image
-    /// the user maintains, something installed at launch. The probe is evidence
-    /// about one moment, and the person who owns the image knows more about the
-    /// next one than omh does.
-    Assume,
 }
 
 /// What a repo may say about a catalogue server. Environment and nothing else:
@@ -123,7 +90,6 @@ fn layers(paths: &Paths) -> [PathBuf; 3] {
 pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut state: BTreeMap<String, bool> = BTreeMap::new();
     let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
-    let mut toolchain: BTreeMap<String, Toolchain> = BTreeMap::new();
     let mut provision: BTreeMap<String, bool> = BTreeMap::new();
     let mut selection = crate::selection::Selection::owning(manifest.owns());
     for path in layers(paths) {
@@ -143,6 +109,28 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         };
         for (key, value) in &file.rest {
             if is_table_like(value) {
+                // `[toolchain]` is named specifically, because it was omh's own
+                // table and somebody was *told* to write it. It falls into
+                // `rest` now that the field is gone, so it is already refused —
+                // but by a message that says only "read by nobody", which is
+                // true and useless to the person who typed `cargo = "skip"`
+                // because a release of omh asked them to.
+                //
+                // An error rather than a warning: the table decided whether a
+                // hook ran, and a version that reads it and does nothing leaves
+                // somebody believing their answer is in force while the hook
+                // fires every turn.
+                anyhow::ensure!(
+                    key != "toolchain",
+                    "{}: `[toolchain]` was removed. omh now provisions your \
+                     stack's toolchain and measures the image it built, so a \
+                     hook whose program is missing is held back by name without \
+                     anything on file — and starts running again by itself once \
+                     the sandbox has it. Delete the table. If what you want is a \
+                     provide left out, say so with \
+                     `[provision] \"<stack>/<name>\" = false`.",
+                    path.display()
+                );
                 anyhow::bail!(
                     "{}: `[{key}]` is read by nobody. This file holds settings at the \
                      top level, `[omh]` for omh's own features, and `[mcp.<name>.env]` \
@@ -164,14 +152,10 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
         // so: an env override adds a variable, a selection *is* the list, and
         // merging one would make removal unexpressible.
         selection.apply(&file.uses, &path)?;
-        // Program by program, like `mcp_env` and unlike `[use]`: a machine that
-        // lacks one toolchain has said nothing about the others, and replacing
-        // the table wholesale would make a personal note about `gofmt` silently
-        // drop the team's answer about `cargo`.
-        toolchain.extend(file.toolchain);
-        // Same rule, same reason: an opt-out on one laptop says nothing about
-        // the provides it did not mention, so replacing the table wholesale
-        // would discard the team's resolution for every other stack.
+        // Key by key, like `mcp_env` and unlike `[use]`: an opt-out on one
+        // laptop says nothing about the provides it did not mention, so
+        // replacing the table wholesale would discard the team's resolution for
+        // every other stack.
         provision.extend(file.provision);
     }
     let off: BTreeSet<String> = state
@@ -182,7 +166,6 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut policy = RepoPolicy::switching_off(manifest, off);
     policy.mcp_env = mcp_env;
     policy.selection = selection;
-    policy.toolchain = toolchain;
     policy.provision = provision;
     Ok(policy)
 }
@@ -214,11 +197,6 @@ pub struct RepoPolicy {
     pub mcp_env: BTreeMap<String, BTreeMap<String, String>>,
     /// What this repo uses from the catalogue, from `[use]`.
     pub selection: crate::selection::Selection,
-    /// Answers already given about programs the sandbox lacks, from
-    /// `[toolchain]`. Keyed by program rather than by stack or by hook: a
-    /// decision about `cargo` is a decision about `cargo`, and it settles both
-    /// of rust's hooks and any hand-written command that needs it too.
-    pub toolchain: BTreeMap<String, Toolchain>,
     /// Which provides apply here, from `[provision]` — the resolution `init`
     /// recorded so that launch re-evaluates no predicate.
     ///
@@ -261,7 +239,6 @@ impl RepoPolicy {
             // here would let a fixture treat `codegraph` as an ordinary catalogue
             // entry, which is the one thing this type exists to prevent.
             selection: crate::selection::Selection::owning(manifest.owns()),
-            toolchain: BTreeMap::new(),
             provision: BTreeMap::new(),
         }
     }
@@ -619,59 +596,41 @@ mod tests {
         assert!(err.contains("settings.toml"), "and the file: {err}");
     }
 
-    // ── toolchain decisions ─────────────────────────────────────────────────
+    // ── the table that was removed ──────────────────────────────────────────
 
-    /// What `init` was told about a program the sandbox does not have, so it
-    /// stops asking. This is the whole point of persisting the answer: a
-    /// question re-asked every `init` is a wizard, which is the thing omh sells
-    /// itself as not having.
+    /// `[toolchain]` is **gone**, and a repo that still has one is told so by
+    /// name rather than having it quietly ignored.
+    ///
+    /// This is the one breakage this change accepts, so it is a stated
+    /// behaviour with a test rather than a side effect of a field being
+    /// deleted from a struct. The alternative — falling through to `rest` and
+    /// producing whatever the generic guard happens to say — is how an accepted
+    /// breakage becomes an accident nobody chose.
+    ///
+    /// It has to be an **error**, not a warning. The table's whole purpose was
+    /// deciding whether a hook runs; a version that reads it and does nothing
+    /// leaves somebody believing their `cargo = "skip"` is in force while the
+    /// hook fires every turn.
+    ///
+    /// And the message has to name the way forward. Somebody wrote `skip`
+    /// because their sandbox lacked a tool; the answer now is that omh
+    /// provisions it, and if they want it left out that is a `[provision]`
+    /// entry. An error that only says *stop* sends them to the source.
     #[test]
-    fn a_toolchain_decision_is_read_from_the_repo() {
-        let (_d, paths, m) = fixture();
-        write(
-            paths.repo.join(".omh/settings.toml"),
-            "[toolchain]\ncargo = \"skip\"\ngofmt = \"assume\"\n",
-        );
-        let policy = resolve(&paths, &m).unwrap();
-        assert_eq!(policy.toolchain.get("cargo"), Some(&Toolchain::Skip));
-        assert_eq!(policy.toolchain.get("gofmt"), Some(&Toolchain::Assume));
-    }
-
-    /// A decision omh cannot read must not be silently discarded. Dropped, the
-    /// question comes back on the next `init` and the answer the user already
-    /// gave is nowhere — and they have no way to tell a typo from omh ignoring
-    /// them. The same rule `[omhh]` gets, for the same reason.
-    #[test]
-    fn a_toolchain_decision_omh_cannot_read_is_refused_by_name() {
-        let (_d, paths, m) = fixture();
-        write(
-            paths.repo.join(".omh/settings.toml"),
-            "[toolchain]\ncargo = \"maybe\"\n",
-        );
-        let err = format!("{:#}", resolve(&paths, &m).unwrap_err());
-        assert!(
-            err.contains("maybe"),
-            "must name what it could not read: {err}"
-        );
-        assert!(err.contains("settings.toml"), "and the file: {err}");
-    }
-
-    /// One machine lacking a toolchain is not the team's decision to inherit,
-    /// so a gitignored layer has to be able to answer for itself — and win.
-    #[test]
-    fn a_later_layer_wins_a_toolchain_decision_too() {
+    fn a_repo_that_still_has_a_toolchain_table_is_told_so() {
         let (_d, paths, m) = fixture();
         write(
             paths.repo.join(".omh/settings.toml"),
             "[toolchain]\ncargo = \"skip\"\n",
         );
-        write(
-            paths.repo.join(".omh/settings.local.toml"),
-            "[toolchain]\ncargo = \"assume\"\n",
-        );
-        assert_eq!(
-            resolve(&paths, &m).unwrap().toolchain.get("cargo"),
-            Some(&Toolchain::Assume)
+        let err = format!("{:#}", resolve(&paths, &m).unwrap_err());
+
+        assert!(err.contains("toolchain"), "must name the table: {err}");
+        assert!(err.contains("settings.toml"), "and the file: {err}");
+        assert!(
+            err.contains("provision"),
+            "and what replaced it, or the only way forward is reading omh's \
+             source: {err}"
         );
     }
 

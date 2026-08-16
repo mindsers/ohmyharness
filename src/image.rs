@@ -287,6 +287,16 @@ pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
     vec![
         "run".into(),
         "--rm".into(),
+        // Never fetch. `docker run` defaults to `--pull=missing`, and omh's
+        // tags carry no registry prefix, so a tag whose image is not here
+        // resolves against Docker Hub — for a name every user of a given omh
+        // version shares and anybody can precompute from this repository. A
+        // squatted `omh/*` would be pulled and run, and its `ENTRYPOINT` runs
+        // ahead of the `sh -c` below, so overriding the command saves nothing.
+        //
+        // This is the one path that runs an image `ensure*` has not just built,
+        // which is what makes the default reachable at all.
+        "--pull=never".into(),
         tag.into(),
         "sh".into(),
         "-c".into(),
@@ -925,9 +935,14 @@ mod tests {
             .iter()
             .position(|a| a == "omh/x:latest")
             .expect("the tag must be among the arguments");
+        // Two entries, each earning its place: `--rm` leaves no container
+        // behind, `--pull=never` refuses to fetch a tag that is not here. Both
+        // are asserted for on their own below and in
+        // `the_probe_never_fetches_the_image_it_asks_about`; the point of the
+        // list is that nothing *else* may appear.
         for a in &args[1..tag_at] {
-            assert_eq!(
-                a, "--rm",
+            assert!(
+                a == "--rm" || a == "--pull=never",
                 "an unexpected argument reached the probe — it must see nothing \
                  but the image, or it answers about the wrong machine: {args:?}"
             );
@@ -944,6 +959,33 @@ mod tests {
             args.last().map(String::as_str),
             Some("#!/bin/sh\ntrue\n"),
             "the script is what runs, whole and unedited: {args:?}"
+        );
+    }
+
+    /// The probe must never **fetch** the image it is asking about.
+    ///
+    /// `docker run <tag>` defaults to `--pull=missing`, so a tag with no local
+    /// image is resolved against the default registry. omh's tags are
+    /// `omh/<harness>:<hash>` — no registry prefix, so Docker Hub — and the
+    /// hash is a pure function of the recipe, which means it is identical for
+    /// every user on a given omh version and precomputable by anybody who has
+    /// read this repository. A squatted `omh/*` namespace would therefore be
+    /// pulled and run, and an `ENTRYPOINT` in a pulled image runs ahead of the
+    /// `sh -c` argv this builds, so overriding the command does not save it.
+    ///
+    /// The window is real rather than theoretical: this probe is the one path
+    /// that runs an image without `image::ensure*` having built it first.
+    ///
+    /// Asserted here as well as gated at the call site, on purpose. The gate is
+    /// a caller's responsibility and the next caller may forget; this is a
+    /// property of the command itself and travels with it.
+    #[test]
+    fn the_probe_never_fetches_the_image_it_asks_about() {
+        let args = probe_args("omh/x:latest", "#!/bin/sh\ntrue\n");
+        let tag_at = args.iter().position(|a| a == "omh/x:latest").unwrap();
+        assert!(
+            args[1..tag_at].iter().any(|a| a == "--pull=never"),
+            "a missing image must be an error, never a registry fetch: {args:?}"
         );
     }
 

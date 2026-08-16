@@ -958,6 +958,63 @@ mod tests {
         .unwrap()
     }
 
+    /// **A measurement handed to `plan` reaches the hooks it renders.**
+    ///
+    /// `render`'s own tests prove `document` suppresses, and `container`'s
+    /// fixtures all pass an empty map — so the wire between `Options.resolves`
+    /// and the renderer is asserted nowhere. Replacing it with an empty map
+    /// inside `plan` leaves the whole suite green, and the result is a session
+    /// that ships every hook the image cannot run: the `cargo: not found`
+    /// failure this milestone exists to remove, with the measurement taken,
+    /// cached and then thrown away one call short of the renderer.
+    #[test]
+    fn a_measurement_reaches_the_hooks_a_plan_renders() {
+        let fx = fixture();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+
+        let with = |resolves: BTreeMap<String, bool>| {
+            plan(
+                &fx.paths,
+                &fx.profile,
+                &adapter,
+                &fx.session,
+                &[],
+                Options {
+                    staging: Staging::Apply,
+                    persist: crate::persist::Mode::None,
+                    tty: true,
+                    account_dir: None,
+                    memory_bin: None,
+                    base: None,
+                    omh: decided().0,
+                    repo: decided().1,
+                    image: crate::image::tag_for(&adapter),
+                    resolves,
+                },
+            )
+            .unwrap()
+        };
+
+        let measured_absent = with(BTreeMap::from([("fmt".to_string(), false)]));
+        assert!(
+            measured_absent
+                .dropped_hooks
+                .iter()
+                .any(|d| d.name == "fmt"),
+            "a hook whose program the image lacks must not reach the harness: {:?}",
+            measured_absent.dropped_hooks
+        );
+
+        for known in [BTreeMap::from([("fmt".to_string(), true)]), BTreeMap::new()] {
+            let p = with(known);
+            assert!(
+                !p.dropped_hooks.iter().any(|d| d.name == "fmt"),
+                "measured present, and never measured, both leave a hook alone: {:?}",
+                p.dropped_hooks
+            );
+        }
+    }
+
     /// **A session runs the image the caller resolved**, and nothing else.
     ///
     /// The one fact this whole design turns on, and it was unguarded for a

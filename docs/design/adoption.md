@@ -1,12 +1,18 @@
 # Meeting a repo that already exists
 
-**Status: partly built, and one built part is superseded.** The sandbox probe and
-render-time suppression are built and tested and survive. The `[toolchain]`
-setting shipped alongside them and this page now argues for deleting it — see
-§1.8, which supersedes what is in `docs/configuration.md` today. Everything else
-here is **designed and not built**: stack definitions as data, the stack image
-layer, deriving what a project needs, the two questions of last resort, and importing
-any capability other than MCP.
+**Status: §1 is built. §2 onward is designed and not built.**
+
+Built and shipping: stack definitions as data (`stacks/*.toml`), the stack image
+layer and the tag that keys it, `[provision]` as the recorded resolution, the
+predicates that produce it, one sandbox probe read two ways — verifying a stack's
+`needs` and deciding which hooks the image can run — and the per-image
+measurement cache in `~/.omh/facts.json`. `[toolchain]` is **deleted**, as §1.8
+argues it should be; a repo that still has the table gets an error naming it and
+pointing at `[provision]`.
+
+Still designed and not built: decoupling hooks from stacks (`hooks/*.json` as a
+fourth data kind), deriving what a project needs from lockfiles and runners, the
+two questions of last resort, and importing any capability other than MCP.
 
 Two things happen when `omh init` meets a repo that is not empty. It has to
 build an environment the project can actually be worked in, and it has to not

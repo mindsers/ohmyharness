@@ -312,59 +312,52 @@ These layer like every other setting, so a provide you want left out on **your**
 machine belongs in `settings.local.toml`, where it says nothing to anyone else —
 and omh will never copy it into the committed file.
 
-## `[toolchain]` — what you told init about a missing tool
-
-> **Superseded, and no longer the source of truth.** Suppression is now decided
-> by measuring the image your sessions actually run, cached per image in
-> `~/.omh/facts.json`. A line here still overrides that measurement, so nothing
-> you have written has stopped working — but the table is expected to be removed
-> rather than extended. Prefer fixing the environment with `[provision]` above.
+## Hooks your sandbox cannot run
 
 `omh init` detects your stack from its manifest and writes a test and a format
 hook for it. Detection runs on your machine; the hook runs in the sandbox, and
-those are different computers. So after building the image, init asks it which
-of those commands can actually run there.
+those are different computers. So omh provisions the toolchain into the image —
+that is what `[provision]` above records — and then **measures** what it got.
 
 **The hook files are written either way.** `.omh/hooks/` is your repo's
 statement about itself — committed, and the same for everybody who clones it.
-Whether `cargo` is installed is a fact about one computer, and it must not
-decide what is in the repo: otherwise whoever ran `init` first imposes their
-machine on the whole team, permanently, since init never rewrites a hook that
-already exists.
+Whether `cargo` is installed is a fact about one image, and it must not decide
+what is in the repo: otherwise whoever ran `init` first imposes their machine on
+the whole team, permanently, since init never rewrites a hook that already
+exists.
 
-What a missing program decides is whether the hook **runs here**, and that is a
-setting:
+What a missing program decides is whether the hook **runs against this image**,
+and nobody is asked about it:
 
-```toml
-# <repo>/.omh/settings.toml
-[toolchain]
-cargo = "skip"     # do not run hooks whose command needs cargo
-gofmt = "assume"   # run them; the sandbox will have gofmt by launch
+```
+  held back  `rust-test` needs `cargo` — not installed in this repo's sandbox
+             the hook file is written and travels; it runs as soon as the
+             sandbox has it
 ```
 
-A suppressed hook is reported at launch by name, in the same list as a hook your
-harness cannot spell — it is never silently absent.
+That line appears at `omh init`, and again at every launch — in `omh run`'s status
+line and named individually by `omh code` — in the same list as a
+hook your harness cannot spell — a held-back hook is never silently absent. It
+is re-decided from the measurement each time, so a sandbox that gains the tool
+gets its hook back with nothing to un-configure.
 
-**You usually do not need this any more.** omh measures the image itself, so a
-hook whose program is missing is already held back and named without anyone
-writing a line. What is left for the table is disagreeing with the measurement:
-`skip` forces the absence, `assume` forces the presence.
+Measurements are cached per **image**, in `~/.omh/facts.json`, keyed by the tag
+your sessions run. A repo whose hooks and stacks have not changed asks the
+container nothing; add a hook naming a new program and that one program is
+asked about, once.
 
-`assume` is for a sandbox that gains the tool after init looked — a base image
-you maintain, something installed at launch. It beats the probe, because you
-know more about the next image than a measurement of the last one does.
+A program nobody has measured is **unknown**, never assumed missing — so a first
+run, a deleted cache or an unreadable one holds nothing back, and every hook
+ships. The failure has to fall that way round: the other direction would switch
+off every hook on the machine in a session that otherwise looks completely
+normal.
 
-Keyed by **program**, not by stack or by hook: a decision about `cargo` settles
-both of rust's hooks and any hand-written command needing it too. Delete a line
-to be asked again. These layer like every other setting, so a toolchain missing
-on *your* machine belongs in `settings.local.toml`, where it says nothing to
-anyone else.
-
-Two things init will not do. It will not ask when there is nothing missing —
-which is most repos, most of the time — and it will not ask when there is no
-terminal, so a CI runner gets a full set of hook files and no prompt. Nor does
-it install anything: it names the gap and what would have run, and the decision
-is yours.
+> **`[toolchain]` was removed.** It recorded an answer to *"this sandbox lacks
+> `cargo`, shall I switch the hook off?"* — a question that asked you to
+> configure around a broken environment, and whose answer outlived the breakage.
+> omh provisions the tool instead. A repo that still has the table gets an error
+> naming it; delete it, and use `[provision] "<stack>/<name>" = false` if what
+> you want is a provide left out.
 
 ## Settings, and their three layers
 

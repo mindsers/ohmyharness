@@ -22,7 +22,8 @@
 //! An **unknown** program is [`None`], never `Some(false)`. Suppression acts on
 //! `Some(false)` alone, so a cache that is missing, empty, corrupt or truncated
 //! suppresses nothing and every hook ships — the same direction
-//! `detect::program` and `triage_for` already fall in. The other way round, one
+//! `detect::program` and `main::fired_from` already fall in. The other way
+//! round, one
 //! unreadable file would silently switch off every hook in every repo, and the
 //! user would see a working session with no automation in it and no reason
 //! given.
@@ -115,6 +116,15 @@ impl Facts {
     }
 
     /// Write it back, creating `~/.omh` if this is a first run.
+    ///
+    /// Read-modify-write on one file shared by every repo, and **not locked**.
+    /// Two launches in different checkouts can each load, learn about a
+    /// different tag, and save; the later write wins and the earlier one's
+    /// measurements are lost. That is survivable by construction rather than by
+    /// luck: a lost measurement reads as *nobody has looked*, which suppresses
+    /// nothing and is re-probed the next time that tag is asked about. A lock
+    /// would buy correctness for a cache whose whole design premise is that
+    /// losing it costs one container run.
     pub fn save(&self, paths: &Paths) -> Result<()> {
         let path = paths.facts();
         if let Some(parent) = path.parent() {

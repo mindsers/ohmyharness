@@ -292,6 +292,22 @@ pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
 /// Keyed on the command, never on the stack that produced it: a hook somebody
 /// wrote by hand obeys the same answer, which is what makes this a rule about
 /// programs rather than a rule about the four stacks omh happens to detect.
+/// Which of this repo's hooks the image cannot run, without rendering anything.
+///
+/// `init` reports these and a launch drops them, and both go through here so
+/// they cannot disagree — a setup report that named a different set from the
+/// one the session ships would be worse than no report, because it is the one
+/// people read to find out what they got.
+pub fn held_back(
+    dirs: &[PathBuf],
+    own: &crate::base::Own,
+    repo: &crate::settings::RepoPolicy,
+    resolves: &BTreeMap<String, bool>,
+) -> Result<Vec<hook::Dropped>> {
+    let mut hooks = merge_hooks(dirs, own, repo)?;
+    Ok(suppressed_by_probe(&mut hooks, resolves))
+}
+
 fn suppressed_by_probe(
     hooks: &mut BTreeMap<String, hook::Hook>,
     resolves: &BTreeMap<String, bool>,
@@ -828,7 +844,7 @@ mod tests {
 
     use std::io::Write;
 
-    // ── toolchain suppression ───────────────────────────────────────────────
+    // ── suppression by measurement ──────────────────────────────────────────
 
     fn hooks_named(pairs: &[(&str, &str)]) -> BTreeMap<String, hook::Hook> {
         pairs
@@ -1153,6 +1169,73 @@ mod tests {
     /// left the whole suite green, including one that turns the refusal into
     /// `console.error` and one that renames the tool so `git-unavailable` can
     /// never match. The copy had already drifted, too: it omitted `edit`.
+    /// What `init` reports held back is exactly what a launch holds back.
+    ///
+    /// `init` has no document to render, so it asks `held_back` directly while
+    /// the launcher goes through `document`. Two paths, one answer — and the
+    /// report is the thing people read to find out what they got, so a report
+    /// naming a different set from the session's is worse than no report at
+    /// all: it would send somebody away believing a hook was running.
+    ///
+    /// Asserted as agreement between the two rather than against a fixed list,
+    /// because the failure is *divergence*, and a list would go on passing
+    /// while both drifted together.
+    #[test]
+    fn what_init_reports_held_back_is_what_a_launch_holds_back() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/rust-test.json",
+            r#"{"on":"turn-end","run":"cargo test"}"#,
+        );
+        file(
+            dir.path(),
+            "h/lint.json",
+            r#"{"on":"turn-end","run":"shellcheck ./x.sh"}"#,
+        );
+        file(
+            dir.path(),
+            "h/greet.json",
+            r#"{"on":"turn-end","run":"echo hi"}"#,
+        );
+        let dirs = [dir.path().join("h")];
+        let measured = BTreeMap::from([
+            ("cargo".to_string(), false),
+            ("shellcheck".to_string(), false),
+            ("echo".to_string(), true),
+        ]);
+
+        let reported: BTreeSet<String> =
+            held_back(&dirs, &Default::default(), &Default::default(), &measured)
+                .unwrap()
+                .into_iter()
+                .map(|d| d.name)
+                .collect();
+
+        let adapter = claude_hooks();
+        let shipped: BTreeSet<String> = document(
+            Capability::Hooks,
+            hooks_binding(&adapter),
+            &dirs,
+            &Default::default(),
+            &Default::default(),
+            &adapter.tools,
+            &measured,
+        )
+        .unwrap()
+        .dropped
+        .into_iter()
+        .map(|d| d.name)
+        .collect();
+
+        assert_eq!(reported, shipped, "the report and the session disagree");
+        assert_eq!(
+            reported,
+            BTreeSet::from(["rust-test".to_string(), "lint".to_string()]),
+            "and both must be the measured absences, not everything or nothing"
+        );
+    }
+
     /// Suppression is a rule about **this repo**, so it has to hold on every
     /// render path — asserted through `document`, which is what the launcher
     /// calls, rather than through `suppressed_by_probe`, which is what the

@@ -737,6 +737,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
         sandbox.top_up(
             &paths,
             backend.program(),
+            &adapter,
             &profile.sources(adapter::Capability::Hooks)?,
             &own,
             &repo,
@@ -756,6 +757,25 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
+
+    // Said here, because `attach` is the one launch path that never said it.
+    // `run` carries the drop list in its status line, built from the plan it
+    // makes itself; `session_up` builds its own plan and discards it, so
+    // `omh code` staged a hooks document with hooks removed and reported
+    // nothing — and this is the path where it matters most, for the reason
+    // `say_selection` gives: it is how you rejoin a session whose setup you
+    // have since changed.
+    //
+    // Through `render::held_back`, so the wording and the set are `init`'s.
+    for d in render::held_back(
+        &profile.sources(adapter::Capability::Hooks)?,
+        &own,
+        &repo,
+        &sandbox.resolves,
+    )? {
+        eprintln!("omh: `{}` needs {} — held back", d.name, d.wanted);
+    }
+
     session_up(
         &paths,
         &profile,
@@ -1012,6 +1032,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         sandbox.top_up(
             &paths,
             backend.program(),
+            &adapter,
             &profile.sources(adapter::Capability::Hooks)?,
             &own,
             &repo,
@@ -2399,6 +2420,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
             sandbox.top_up(
                 &paths,
                 backend.program(),
+                &adapter,
                 &profile.sources(adapter::Capability::Hooks)?,
                 &own,
                 &repo,
@@ -2589,7 +2611,6 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 fn init(cwd: &std::path::Path) -> Result<()> {
     // Fail fast. Everything below is wasted work outside a repo.
     let paths = Paths::discover(cwd)?;
@@ -2732,9 +2753,9 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // left the repo with hooks, no `[use]` list, and `settings.local.toml`
     // still tracked. Setting a repo up must not be abandoned half-done because
     // the machine cannot build an image yet.
-    let mut gaps: Vec<Gap> = Vec::new();
-    let mut declined: Vec<Gap> = Vec::new();
-    let mut asked = 0usize;
+    // Which of this repo's hooks the sandbox turned out to be unable to run.
+    // Measured, not asked about — see the block below.
+    let mut held_back: Vec<hook::Dropped> = Vec::new();
     if let Some(h) = &harness {
         let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
@@ -2751,13 +2772,6 @@ fn init(cwd: &std::path::Path) -> Result<()> {
             image::ensure(backend.program(), &adapter)?;
             println!("\n  image      {}", image::tag_for(&adapter));
         }
-
-        // Which image the question below is asked about. Defaults to the
-        // harness layer and is replaced by this repo's stack layer as soon as
-        // one is resolved — asking the wrong image is how omh would report a
-        // missing `cargo` about a sandbox that has one, or miss one that does
-        // not.
-        let mut session_tag = image::tag_for(&adapter);
 
         // Which provides apply here. Evaluated **in the sandbox**, with the repo
         // mounted read-only: a predicate is arbitrary shell out of a stack file,
@@ -2846,7 +2860,6 @@ fn init(cwd: &std::path::Path) -> Result<()> {
                 // on this laptop*, which is the laptop building the image.
                 let (own, repo) = resolved(&paths)?;
                 let sandbox = sandbox(&paths, &adapter, &repo)?;
-                session_tag = sandbox.tag.clone();
                 image::ensure_stack(backend.program(), &adapter, &sandbox.recipe())?;
                 if sandbox.tag != image::tag_for(&adapter) {
                     println!("  image      {} (this repo's toolchain)", sandbox.tag);
@@ -2857,52 +2870,36 @@ fn init(cwd: &std::path::Path) -> Result<()> {
                 // rather than starting a container to ask again.
                 //
                 // Two readings of one probe. A `needs` that did not resolve is
-                // a **provisioning failure** and is reported here — the recipe
-                // ran and the environment still does not work, which is exactly
-                // what shipping rustup with no `cc` looked like. The same
-                // measurements suppress a hook whose program is missing, which
+                // a **provisioning failure** — the recipe ran and the
+                // environment still does not work, which is exactly what
+                // shipping rustup with no `cc` looked like. The same
+                // measurements hold back a hook whose program is missing, which
                 // is a different question about the same fact.
                 let hook_dirs = Profile::resolve(&paths).sources(adapter::Capability::Hooks)?;
                 let mut sandbox = sandbox;
-                sandbox.top_up(&paths, backend.program(), &hook_dirs, &own, &repo)?;
+                sandbox.top_up(&paths, backend.program(), &adapter, &hook_dirs, &own, &repo)?;
                 for name in &sandbox.owed {
                     if sandbox.resolves.get(name) == Some(&false) {
                         println!("  provision  {name} did not resolve after installing");
                     }
                 }
-            }
-        }
 
-        // Answers already on file, so a question is asked once and not once per
-        // `init`. Read through `settings::resolve` rather than the repo's file
-        // alone: a toolchain missing on *this* machine is a `settings.local`
-        // decision, and the team's answer must not be the only one that counts.
-        //
-        // Propagated, never defaulted. Every error this raises — an unreadable
-        // layer, a table nobody reads, a value omh cannot parse — would
-        // otherwise become an empty map, and an empty map is indistinguishable
-        // from "nobody has answered anything". omh would then re-ask questions
-        // already on file and write the answers back into a file it had just
-        // failed to read.
-        let mut decided = settings::resolve(&paths, &manifest)?.toolchain;
-        // Probed once. The answers change what omh does with the result, never
-        // what the sandbox contains, so asking the container twice would cost a
-        // second run to be told the same thing.
-        let probe = probe_sandbox(backend.program(), &session_tag, &stacks);
-        let mut triage = triage_for(&stacks, &probe, &decided);
-        // Ask, then act — so a hook somebody asks for is written on this run
-        // rather than on the next one.
-        if !triage.gaps.is_empty() {
-            let answers = ask_about_gaps(&triage.gaps)?;
-            if !answers.is_empty() {
-                asked = answers.len();
-                record_toolchain_answers(&repo_omh, &answers)?;
-                decided.extend(answers);
-                triage = triage_for(&stacks, &probe, &decided);
+                // And the other reading, through the launcher's own function so
+                // `init` cannot report one thing and a launch do another.
+                //
+                // No question here any more, and that is the point of the whole
+                // design. What stood here asked, for every program the sandbox
+                // lacked, whether to switch its hook off — and recorded the
+                // answer in a committed file. It was asking somebody to
+                // configure around a broken environment, and the answer
+                // outlived the breakage: a repo whose sandbox later gained
+                // `cargo` still had `cargo = "skip"` on file, so the hook
+                // stayed off for everybody who cloned it, with nothing to
+                // re-ask. Now nothing is on file, because nothing had to be
+                // decided.
+                held_back = render::held_back(&hook_dirs, &own, &repo, &sandbox.resolves)?;
             }
         }
-        gaps = triage.gaps;
-        declined = triage.declined;
     }
     // No harness is no image, and no image is no sandbox to ask about. The
     // hooks are already written either way.
@@ -2910,16 +2907,16 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // Report every decision, so `omh why` has something to explain. Printed as
     // each one is made rather than collected for the end, which is why the
     // image and graph lines below appear inside the summary.
-    // The headline is a claim about this run, so it has to be able to stop
-    // being true. omh derives what it can and asks only what a probe could not
-    // settle; printing "asked nothing" after putting a question on screen would
-    // make the promise the tagline is selling into a thing the user just
-    // watched it break.
-    match asked {
-        0 => println!("omh init — decided, asked nothing\n"),
-        1 => println!("omh init — decided all but one question\n"),
-        n => println!("omh init — decided the rest; asked {n} questions\n"),
-    }
+    // The headline is a claim about this run, and right now it cannot stop
+    // being true: `init` has no questions left to ask. It had one — what to do
+    // about a program the sandbox lacked — and provisioning made it the wrong
+    // question, because the answer was always *install it*.
+    //
+    // Build-order item 6 adds two questions of last resort, for a marker no
+    // stack claims and a moment no hook covers, and restores the counted
+    // arms this replaced. Until then a count would be a variable that is
+    // always zero, dressed as one that might not be.
+    println!("omh init — decided, asked nothing\n");
     println!("  harnesses  {} ({})", adapters.len(), adapters.join(", "));
     println!("  editors    {} ({})", editors.len(), editors.join(", "));
     match &harness {
@@ -2947,32 +2944,25 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         }
     }
     // Named, with the evidence, because the alternative is the failure this
-    // replaces: a hook that runs on turn one and reports `cargo: not found`,
-    // which says nothing about who decided to run cargo or where it looked.
+    // whole design replaces: a hook that runs on turn one and reports
+    // `cargo: not found`, saying nothing about who decided to run cargo or
+    // where it looked.
     //
-    // "will fail", not "will not run". A gap survives to here only when nothing
-    // was recorded — no terminal to ask at, or the answer stopped at EOF — and
-    // with nothing recorded `render::suppressed_by_toolchain` has no reason to
-    // drop the hook, so it runs and fails. Reporting it as disabled would send
-    // somebody away believing this was handled, and the next turn would produce
-    // the exact error the report claimed to have prevented.
-    for g in &gaps {
+    // "will not run", and it is safe to say so now. This list comes from
+    // `render::held_back`, which is the function the launcher itself uses — so
+    // a hook named here is a hook the session will not ship, rather than one
+    // omh hoped somebody would go and disable.
+    //
+    // The hook file stays where it is either way. `.omh/hooks/` is the repo's
+    // statement about itself and it is committed; whether a program exists is
+    // a fact about one image, and it decides what runs here, never what the
+    // repo contains.
+    for d in &held_back {
         println!(
-            "  gap        {} needs `{}`, absent from this sandbox → `{}` will fail\n             \
-             nothing on file: re-run `omh init` on a terminal, or add \
-             {} = \"skip\" under [toolchain]",
-            g.stack, g.program, g.command, g.program
-        );
-    }
-    // Reported, not merely obeyed. A hook missing because somebody said so and
-    // a hook missing because omh never thought of it look identical in
-    // `.omh/hooks/`, and the second one is a bug — so the answer on file is
-    // printed every run, with the one line that undoes it.
-    for g in &declined {
-        println!(
-            "  skipped    {} needs `{}` — you chose skip, so `{}` stays off here\n             \
-             the hook file is written; drop `{}` from [toolchain] to switch it on",
-            g.stack, g.program, g.command, g.program
+            "  held back  `{}` needs {}\n             \
+             the hook file is written and travels; it runs as soon as the \
+             sandbox has it",
+            d.name, d.wanted
         );
     }
 
@@ -3146,240 +3136,6 @@ struct StackHook {
     command: String,
 }
 
-/// A hook `init` did not write, and the evidence for why.
-///
-/// This is what a question is built from, so it carries the whole story: the
-/// stack that asked for the hook, the command that would not have run, and the
-/// program that was missing. A gap that only said "rust is broken" would leave
-/// the human to guess what omh actually looked for.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Gap {
-    stack: String,
-    command: String,
-    program: String,
-}
-
-/// What `init` found missing, split by whether anybody has answered for it yet.
-///
-/// No list of hooks to write, deliberately. `init` writes them all: the file is
-/// the repo's statement about itself and it is committed, so a toolchain absent
-/// from one machine must not decide whether it exists.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct Triage {
-    /// Gaps nobody has answered yet — the only ones `init` may ask about.
-    gaps: Vec<Gap>,
-    /// Gaps already answered `skip`. Kept rather than dropped: a hook that is
-    /// absent because somebody decided it should be, and a hook that is absent
-    /// because omh never thought of it, look identical on disk. Only this
-    /// distinguishes them, and `omh why` has to be able to.
-    declined: Vec<Gap>,
-}
-
-/// The key a TOML line assigns to, if it assigns to one.
-///
-/// Deliberately not a parse. This is used to find a line to *replace* inside a
-/// table whose comments and spacing have to survive, and a round trip through a
-/// TOML value cannot preserve either. Quotes are trimmed so a bare `cargo` and a
-/// quoted `"cargo"` are recognised as the same key, which is what TOML would
-/// say too.
-fn toml_key(line: &str) -> Option<&str> {
-    let line = line.trim();
-    if line.starts_with('#') {
-        return None;
-    }
-    let key = line.split('=').next()?.trim().trim_matches('"');
-    (!key.is_empty()).then_some(key)
-}
-
-/// How a toolchain answer is spelled in `settings.toml`. One source, so the
-/// value written and the value `settings::Toolchain` reads back cannot drift.
-fn toolchain_word(t: settings::Toolchain) -> &'static str {
-    match t {
-        settings::Toolchain::Skip => "skip",
-        settings::Toolchain::Assume => "assume",
-    }
-}
-
-/// Put answers into a `settings.toml` without disturbing what it already says.
-///
-/// Textual, not a serialiser round-trip. `toml::to_string` would reformat the
-/// document and drop every comment in it — including the ones `init` wrote to
-/// explain `carry_in`, which exist precisely so somebody reading the file later
-/// knows what it is for.
-///
-/// The trap is the second answer. Appending another `[toolchain]` header makes
-/// a duplicate table, and TOML refuses the *whole document* — so the next
-/// `init` cannot read a file omh wrote itself, and every setting in it is lost
-/// at once. New keys therefore go inside the existing table when there is one.
-fn with_toolchain_answers(
-    existing: &str,
-    answers: &BTreeMap<String, settings::Toolchain>,
-) -> String {
-    let lines: Vec<String> = answers
-        .iter()
-        .map(|(program, t)| format!("{program} = \"{}\"", toolchain_word(*t)))
-        .collect();
-
-    if let Some(at) = existing
-        .lines()
-        .position(|l| l.trim_start().starts_with("[toolchain]"))
-    {
-        let mut out: Vec<String> = existing.lines().map(String::from).collect();
-        // The table ends at the next header, or at the end of the file. Writing
-        // past it would put a `[toolchain]` key inside `[mcp]`.
-        let end = out
-            .iter()
-            .skip(at + 1)
-            .position(|l| l.trim_start().starts_with('['))
-            .map_or(out.len(), |i| at + 1 + i);
-
-        let mut appended = Vec::new();
-        for (program, t) in answers {
-            let line = format!("{program} = \"{}\"", toolchain_word(*t));
-            // A key already in the table is *replaced*. Appending a second
-            // `cargo =` is a duplicate key, which TOML refuses exactly as hard
-            // as the duplicate header guarded above — same outcome, and the
-            // header check cannot see it.
-            match out[at + 1..end]
-                .iter()
-                .position(|l| toml_key(l) == Some(program))
-            {
-                Some(i) => out[at + 1 + i] = line,
-                None => appended.push(line),
-            }
-        }
-        out.splice(end..end, appended);
-        return out.join("\n") + "\n";
-    }
-
-    let mut out = existing.to_string();
-    if !out.is_empty() && !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(
-        "\n# Programs omh could not find in this repo's sandbox, and what you\n\
-         # said about each. The hook files are written either way — this decides\n\
-         # whether they run here. Delete a line to be asked again by `omh init`.\n\
-         #   skip    do not run hooks whose command needs it\n\
-         #   assume  run them; the sandbox will have it by launch\n\
-         # Put a machine-only answer in settings.local.toml instead.\n\
-         [toolchain]\n",
-    );
-    for line in &lines {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
-}
-
-/// Write the answers into this repo's `settings.toml`.
-fn record_toolchain_answers(
-    repo_omh: &std::path::Path,
-    answers: &BTreeMap<String, settings::Toolchain>,
-) -> Result<()> {
-    let path = repo_omh.join("settings.toml");
-    // Bytes that will not decode are *not* an absent file. Collapsing the two
-    // and then writing the result back is how `carry_in`, `[omh]`, `[use]` and
-    // `[mcp]` all disappear at once over one stray byte — the read fails, the
-    // write succeeds, and somebody's settings are gone. `settings::read` and
-    // `install_bundled` both already carry this scar; only `NotFound` means
-    // absent.
-    let existing = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(e).with_context(|| {
-                format!(
-                    "reading {} to record your answer — it is left untouched",
-                    path.display()
-                )
-            })
-        }
-    };
-    std::fs::write(&path, with_toolchain_answers(&existing, answers))
-        .with_context(|| format!("recording your answer in {}", path.display()))
-}
-
-/// Put one question per missing program, and only when something is actually
-/// missing.
-///
-/// The rule that keeps this from being a wizard: a repo whose sandbox has
-/// everything is asked nothing at all, which is every repo until it is not.
-/// Each question carries its own evidence — what needs the program, and what
-/// would have run — because the failure this replaces was `cargo: not found`,
-/// which names neither who wanted cargo nor where omh looked for it.
-///
-/// Silence is `skip`, so pressing Enter through it writes no hook that cannot
-/// run. Not asking at all — no terminal, a CI runner — is the same answer, but
-/// it is *not recorded*: nobody chose it, and writing it down would answer a
-/// question on behalf of somebody who was never shown it.
-fn ask_about_gaps(gaps: &[Gap]) -> Result<BTreeMap<String, settings::Toolchain>> {
-    use std::io::IsTerminal;
-
-    if !std::io::stdin().is_terminal() {
-        return Ok(BTreeMap::new());
-    }
-    let stdin = std::io::stdin();
-    ask_about_gaps_with(gaps, &mut stdin.lock(), &mut std::io::stdout())
-}
-
-/// The questioning itself, with the terminal handed in.
-///
-/// Split from [`ask_about_gaps`] so it can be tested at all. Reading
-/// `std::io::stdin()` directly would leave the dedup, the default, and the EOF
-/// case — every rule that decides what gets written into somebody's committed
-/// settings file — asserted by nothing.
-fn ask_about_gaps_with(
-    gaps: &[Gap],
-    input: &mut dyn std::io::BufRead,
-    out: &mut dyn std::io::Write,
-) -> Result<BTreeMap<String, settings::Toolchain>> {
-    // By program, not by hook: `cargo` is one question even though it holds up
-    // two of rust's hooks, and the answer settles both.
-    let mut by_program: BTreeMap<&str, Vec<&Gap>> = BTreeMap::new();
-    for g in gaps {
-        by_program.entry(g.program.as_str()).or_default().push(g);
-    }
-
-    let mut answers = BTreeMap::new();
-    for (program, blocked) in by_program {
-        let wanted_by: BTreeSet<&str> = blocked.iter().map(|g| g.stack.as_str()).collect();
-        writeln!(
-            out,
-            "\n  ! `{program}` is not installed in this repo's sandbox.\n    \
-             {} detected it, and these will not run: {}",
-            wanted_by.into_iter().collect::<Vec<_>>().join(", "),
-            blocked
-                .iter()
-                .map(|g| format!("`{}`", g.command))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )?;
-        writeln!(
-            out,
-            "\n      [s] skip    write no hook needing {program}\n      \
-             [a] assume  write them anyway — the sandbox will have {program} by launch\n"
-        )?;
-        write!(out, "    {program} [S/a] ")?;
-        out.flush()?;
-
-        let mut line = String::new();
-        // EOF mid-question: the terminal went away. Stop asking rather than
-        // spinning through the rest reading empty strings and recording an
-        // answer for each — answers nobody gave, written into a committed file
-        // and never asked again because they are now on record.
-        if input.read_line(&mut line)? == 0 {
-            break;
-        }
-        let answer = match line.trim().to_ascii_lowercase().as_str() {
-            "a" | "assume" => settings::Toolchain::Assume,
-            _ => settings::Toolchain::Skip,
-        };
-        answers.insert(program.to_string(), answer);
-    }
-    Ok(answers)
-}
-
 /// Which provides applied, from what the predicates answered.
 ///
 /// `None` when nothing was answered — the container never ran, the runtime
@@ -3407,8 +3163,9 @@ fn fired_from(asked: usize, answered: &[doctor::Outcome]) -> Option<BTreeSet<Str
     // One line per provide, so fewer lines than provides is a report that did
     // not finish — not a report saying "no". Accepting the prefix would make
     // `reconcile` drop every `true` it was not told about and rewrite a
-    // committed file without them. `triage_for` was fixed for this same shape
-    // earlier, where it only cost a spurious question; here it deletes.
+    // committed file without them. The now-deleted `[toolchain]` question had
+    // this same shape and had to be fixed for it, where it only cost a spurious
+    // question; here it deletes.
     if answered.len() != asked {
         return None;
     }
@@ -3531,6 +3288,41 @@ fn probe_targets(
 /// probe that says nothing — all of them leave the facts as they were, which
 /// reads as *nobody has looked* and suppresses nothing. The alternative is a
 /// diagnostic failure taking a launch down with it.
+/// What a probe run amounts to: what it measured, or **why nobody could be
+/// asked**.
+///
+/// Split out of `measure` because the reason is the whole value of the guard,
+/// and a reason that only exists as an `eprintln!` inside a function that shells
+/// out is a reason no test can see disappear.
+///
+/// A container that ran and **failed** is not an answer. Checking only the
+/// `Err` arm — a runtime that would not start — was the shape `init`'s
+/// predicate call already had to be fixed for: `docker run` failing because the
+/// image is gone, the daemon is refusing, or the disk is full exits non-zero
+/// with empty stdout, which parses to no outcomes and reads as *nothing was
+/// measured*. Unmeasured suppresses nothing, so the direction is safe; the
+/// silence is not. Without a reason the user gets a session with every hook
+/// shipped into a sandbox nobody could ask about, and nothing said.
+///
+/// Stderr is trimmed to three lines. A runtime failing to pull or mount can
+/// produce a page of it, and a diagnostic that buries the line above it in its
+/// own output is one people learn to scroll past.
+fn measured_or_reason(
+    ok: bool,
+    stdout: &str,
+    stderr: &str,
+) -> Result<Vec<doctor::Outcome>, String> {
+    if !ok {
+        let mut reason = String::from("could not ask the sandbox what it has");
+        for line in stderr.lines().filter(|l| !l.trim().is_empty()).take(3) {
+            reason.push_str("\n     ");
+            reason.push_str(line);
+        }
+        return Err(reason);
+    }
+    Ok(doctor::parse(stdout))
+}
+
 fn measure(
     program: &str,
     paths: &Paths,
@@ -3541,16 +3333,35 @@ fn measure(
     let unseen = facts.unseen(tag, wanted);
     if !unseen.is_empty() {
         let borrowed: Vec<&str> = unseen.iter().map(String::as_str).collect();
-        let outcomes = match Command::new(program)
+        let ran = Command::new(program)
             .args(image::probe_args(tag, &doctor::probe_programs(&borrowed)))
-            .output()
-        {
-            Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
-            Err(_) => Vec::new(),
+            .output();
+        let outcomes = match ran {
+            Ok(out) => measured_or_reason(
+                out.status.success(),
+                &String::from_utf8_lossy(&out.stdout),
+                &String::from_utf8_lossy(&out.stderr),
+            ),
+            Err(e) => Err(format!("could not ask the sandbox what it has ({e})")),
         };
+        let outcomes = outcomes.unwrap_or_else(|reason| {
+            eprintln!("omh: {reason}");
+            Vec::new()
+        });
         if !outcomes.is_empty() {
             facts.learn(tag, &outcomes);
-            facts.save(paths)?;
+            // Reported and swallowed, never fatal. This is a cache beside the
+            // catalogue; a read-only home, a full disk or a `facts.json`
+            // somebody replaced with a directory would otherwise abort every
+            // `omh run`, `omh code` and `omh doctor` on the machine — a launch
+            // killed by a file whose entire design premise is that losing it
+            // degrades to "nobody has looked". `Facts::load` already treats the
+            // read side this way and says why.
+            if let Err(e) = facts.save(paths) {
+                eprintln!(
+                    "omh: measurements not cached ({e:#}) — the sandbox is asked again next time"
+                );
+            }
         }
     }
     Ok(facts.about(tag))
@@ -3559,18 +3370,10 @@ fn measure(
 /// What this repo's sandbox is: the recipe its stacks provision, the image that
 /// recipe produces, and what that image has been measured to contain.
 ///
-/// **One function, because these are one answer.** For the whole of the first
-/// milestone `init` built a stack layer and `container::plan` hardcoded
-/// `image::tag_for(adapter)`, so the layer was built by one command and run by
-/// none — and nothing was wrong with either half on its own. Two places
-/// deciding which image a session runs is the shape of that bug, so there is
-/// one place, and the measurements come back keyed on the tag it returned.
-///
-/// Fatal when the stacks will not load, which is the opposite of `say_hooks`'
-/// answer to the same directory and is right for the opposite reason. There, an
-/// unreadable directory costs a report. Here it decides *which sandbox you get*:
-/// falling back to the harness image would launch a session with no toolchain
-/// in it, silently, which is the failure this whole design starts from.
+/// The four fields are **one answer**, and holding them together is what makes
+/// a mismatch hard to write: `tag` is derived from `installs`, `resolves` is
+/// keyed on `tag`, and `owed` is what `installs` promised. Nothing outside
+/// [`sandbox`] constructs one.
 struct Sandbox {
     /// Owned, because the definitions they are read from do not outlive this.
     installs: Vec<String>,
@@ -3598,55 +3401,65 @@ impl Sandbox {
     /// affordable: a repo whose hooks and stacks have not changed asks nothing
     /// and starts no container.
     ///
-    /// Never fatal, and the errors it can raise are already handled inside
-    /// `measure` — a runtime that will not start leaves the facts as they were,
-    /// which reads as *nobody has looked*.
+    /// **Builds the image first**, and that ordering is the method's reason for
+    /// existing rather than a detail inside it.
+    ///
+    /// `init` had it right and all three launch paths had it backwards: they
+    /// measured, then built inside `session_up`. So the first launch after a
+    /// recipe changed — a `[provision]` opt-out, a fresh clone of a repo whose
+    /// resolution is committed, anything after `docker image prune` — probed a
+    /// tag with no image behind it, learned nothing, and shipped every hook
+    /// unsuppressed into a sandbox that did not have their programs. It healed
+    /// on the *second* launch, which is precisely the broken-first-turn this
+    /// design exists to remove.
+    ///
+    /// Fixing it in three call sites would have left the fourth caller to get
+    /// it right. Here it cannot be got wrong: asking an image a question and
+    /// making sure there is an image to ask are one operation.
+    ///
+    /// Failures inside `measure` are reported and swallowed — a runtime that
+    /// will not start leaves the facts as they were, which reads as *nobody has
+    /// looked* and suppresses nothing. The build is **not** swallowed: an image
+    /// that will not build is the session, not a diagnostic about it.
     fn top_up(
         &mut self,
         paths: &Paths,
         program: &str,
+        adapter: &Adapter,
         hook_dirs: &[PathBuf],
         own: &base::Own,
         repo: &settings::RepoPolicy,
     ) -> Result<()> {
+        let recipe: Vec<String> = self.installs.clone();
+        image::ensure_stack(
+            program,
+            adapter,
+            &recipe.iter().map(String::as_str).collect::<Vec<_>>(),
+        )?;
         let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
-        self.resolves = declared_over(
-            measure(program, paths, &self.tag, &wanted)?,
-            &repo.toolchain,
-        );
+        self.resolves = measure(program, paths, &self.tag, &wanted)?;
         Ok(())
     }
 }
 
-/// Measurement, with the `[toolchain]` answers still able to decide.
+/// Work out which image this repo runs, and what is already known about it.
 ///
-/// **Transitional**, and owed to build-order item 3, which deletes the table
-/// with an error naming it. Until then a `cargo = "skip"` somebody committed
-/// has to go on working: item 2 replaced the input `render::suppressed_by_probe`
-/// reads, and an answer that quietly stops taking effect between two releases
-/// is worse than one removed loudly.
+/// **One function, because these are one answer.** For the whole of the first
+/// milestone `init` built a stack layer and `container::plan` hardcoded
+/// `image::tag_for(adapter)`, so the layer was built by one command and run by
+/// none — and nothing was wrong with either half on its own. Two places
+/// deciding which image a session runs is the shape of that bug, so there is
+/// one place, and the measurements come back keyed on the tag it returned.
 ///
-/// Applied over the measurement rather than beside it, because they answer the
-/// same question and only one of them can win. A person's answer wins: `skip`
-/// is *this sandbox will not have it*, `assume` is *run the hook anyway*, and
-/// each is a statement about the image by somebody who may know its next
-/// moment better than a probe of its last one does.
-fn declared_over(
-    mut measured: BTreeMap<String, bool>,
-    decided: &BTreeMap<String, settings::Toolchain>,
-) -> BTreeMap<String, bool> {
-    for (program, answer) in decided {
-        measured.insert(
-            program.clone(),
-            match answer {
-                settings::Toolchain::Skip => false,
-                settings::Toolchain::Assume => true,
-            },
-        );
-    }
-    measured
-}
-
+/// Fatal when the stacks will not load, which is the opposite of `say_hooks`'
+/// answer to the same directory and is right for the opposite reason. There, an
+/// unreadable directory costs a report. Here it decides *which sandbox you get*:
+/// falling back to the harness image would launch a session with no toolchain
+/// in it, silently, which is the failure this whole design starts from.
+///
+/// Reads the cache but never the container. Asking the image anything is
+/// [`Sandbox::top_up`], which builds it first — so this stays cheap enough to
+/// call on every launch path before anything has been decided.
 fn sandbox(paths: &Paths, adapter: &Adapter, repo: &settings::RepoPolicy) -> Result<Sandbox> {
     let defs = stack::load_dir(&paths.stacks())?;
     let detected = stack::detected(&defs, &paths.repo);
@@ -3658,7 +3471,7 @@ fn sandbox(paths: &Paths, adapter: &Adapter, repo: &settings::RepoPolicy) -> Res
         adapter,
         &installs.iter().map(String::as_str).collect::<Vec<_>>(),
     );
-    let resolves = declared_over(facts::Facts::load(paths).about(&tag), &repo.toolchain);
+    let resolves = facts::Facts::load(paths).about(&tag);
     let owed = needs_of(&detected, &repo.provision);
     Ok(Sandbox {
         installs,
@@ -3666,139 +3479,6 @@ fn sandbox(paths: &Paths, adapter: &Adapter, repo: &settings::RepoPolicy) -> Res
         resolves,
         owed,
     })
-}
-
-/// Ask the sandbox which of the detected stacks' programs it actually has.
-///
-/// **Transitional**, and the second container run in `init`. It feeds the
-/// `[toolchain]` question only; suppression is decided by `measure`, which asks
-/// about the same image and a wider set of programs, and caches the answer.
-/// Build-order item 3 deletes the question and this with it.
-///
-/// Takes the tag rather than deriving it, which is not cosmetic: it derived
-/// `image::tag_for(adapter)` while sessions ran the stack layer, so it asked
-/// about an image nobody would launch — reporting `cargo` missing in a repo
-/// whose sandbox provisions it.
-///
-/// Never fatal, and never fatal *silently*: every failure path returns no
-/// outcomes, which `triage_for` reads as cannot-tell and answers by writing
-/// every hook. `init` sets a repo up, and failing that over a diagnostic —
-/// or, worse, withholding a repo's hooks because a runtime hiccuped — would be
-/// the tail wagging the dog.
-///
-/// Only stdout is read. A runtime writes its own noise to stderr, and
-/// `doctor::parse` already discards anything that is not the protocol, but
-/// there is no reason to hand it the chance.
-fn probe_sandbox(program: &str, tag: &str, stacks: &[detect::Stack]) -> Vec<doctor::Outcome> {
-    let mut wanted: Vec<&str> = stacks
-        .iter()
-        .flat_map(|s| [s.test.as_str(), s.format.as_str()])
-        .filter_map(detect::program)
-        .collect();
-    // One question per program, not per command: rust asks about `cargo` once
-    // even though both of its hooks need it.
-    wanted.sort_unstable();
-    wanted.dedup();
-    if wanted.is_empty() {
-        return Vec::new();
-    }
-    match Command::new(program)
-        .args(image::probe_args(tag, &doctor::probe_programs(&wanted)))
-        .output()
-    {
-        Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// What `init` should raise, given whatever the sandbox probe managed to say.
-///
-/// The fallback is the whole point of the function. An empty report means the
-/// probe never ran — the container failed, the image was missing, the runtime
-/// hiccuped — and that is indistinguishable from a sandbox with nothing
-/// installed if you only look at the outcomes. Treating it as the latter would
-/// produce a page of questions about toolchains the user has.
-///
-/// Silence is therefore *cannot tell*, and `init` asks nothing. The same
-/// asymmetry `detect::program` documents — a missed gap costs one confusing
-/// hook error, an invented one costs trust in every answer omh gives.
-fn triage_for(
-    stacks: &[detect::Stack],
-    probe: &[doctor::Outcome],
-    decided: &BTreeMap<String, settings::Toolchain>,
-) -> Triage {
-    // An `assume` outranks the probe: it is an answer about the sandbox a
-    // session will run in, and the probe only ever saw the one `init` built.
-    let assumed = |p: &str| decided.get(p) == Some(&settings::Toolchain::Assume);
-
-    // Keyed on what the probe said was **missing**, never on what it said was
-    // present — and the difference is the whole rule, applied per program
-    // rather than per report.
-    //
-    // The protocol prints one line per program, so a program with no line was
-    // not answered. Building the set the other way round — "available means it
-    // appeared with ok" — makes an unanswered program indistinguishable from a
-    // failed one, and `probe.is_empty()` only catches that when *every* line is
-    // missing. A report truncated after the first line is non-empty, sails past
-    // the guard, and turns every program after the truncation into a definite
-    // gap: `init` then asks about a toolchain the user has, Enter records
-    // `skip` in the committed settings, and the hooks are off for everyone who
-    // clones the repo — with the answer on file, so nobody is asked again.
-    let mut triage = if probe.is_empty() {
-        Triage::default()
-    } else {
-        let missing: std::collections::BTreeSet<&str> = probe
-            .iter()
-            .filter(|o| !o.ok)
-            .map(|o| o.name.as_str())
-            .collect();
-        Triage {
-            gaps: missing_programs(stacks, &|p| !missing.contains(p) || assumed(p)),
-            declined: Vec::new(),
-        }
-    };
-
-    // A question with an answer on file is not a question. Moved rather than
-    // discarded, so `init` can still say what it did without asking again.
-    let (declined, unanswered) = triage
-        .gaps
-        .into_iter()
-        .partition(|g| decided.get(&g.program) == Some(&settings::Toolchain::Skip));
-    triage.gaps = unanswered;
-    triage.declined = declined;
-    triage
-}
-
-/// Which of a repo's stack commands name a program the sandbox does not have.
-///
-/// Pure, with the sandbox injected as a predicate — the same shape as
-/// `detect::preferred_harness` and for the same reason it gives: *"the harness
-/// itself runs in the sandbox"*. Whether `cargo` exists is a fact about a
-/// machine, and the machine that matters is not the one running `init`. Folding
-/// the lookup in here would make the answer untestable and would tempt a caller
-/// into answering from the host, which is the confusion this exists to end.
-///
-/// Judged per *command*, never per stack: `go test ./...` needs `go` and
-/// `gofmt -w .` needs `gofmt`, so one stack can be half-served.
-fn missing_programs(stacks: &[detect::Stack], available: &dyn Fn(&str) -> bool) -> Vec<Gap> {
-    let mut gaps = Vec::new();
-    for stack in stacks {
-        for hook in stack_hooks(stack) {
-            // `None` is *cannot tell*. Only a program omh positively read and
-            // positively failed to find is a gap; everything else is silence,
-            // and silence raises nothing.
-            if let Some(p) = detect::program(&hook.command) {
-                if !available(p) {
-                    gaps.push(Gap {
-                        stack: stack.name.clone(),
-                        command: hook.command.clone(),
-                        program: p.to_string(),
-                    });
-                }
-            }
-        }
-    }
-    gaps
 }
 
 /// The hooks a detected stack gets: run the tests at turn end, format on edit.
@@ -3814,7 +3494,9 @@ fn missing_programs(stacks: &[detect::Stack], available: &dyn Fn(&str) -> bool) 
 /// file exists at all would let whoever ran `init` first impose their laptop on
 /// everybody who clones afterwards — permanently, because `write_if_absent`
 /// never revisits. What a missing toolchain governs is whether the hook *runs*
-/// here, which is `[toolchain]` in settings and is applied at render.
+/// against this image, which `render::held_back` decides from a measurement and
+/// re-decides every launch — so a sandbox that gains the tool gets the hook back
+/// with nothing to un-configure.
 ///
 /// Extracted from `init` so the commands can be asserted without a container.
 /// The guard that used to cover them read the generated `AGENTS.md`, which no
@@ -4238,286 +3920,6 @@ mod tests {
         );
     }
 
-    /// A missing toolchain reports a gap and nothing more. It must not reach
-    /// back into what `init` writes: `.omh/hooks/` is committed and travels, so
-    /// deciding a file's existence from one machine's image lets whoever ran
-    /// `init` first impose their laptop on everyone who clones after —
-    /// permanently, because `write_if_absent` never revisits.
-    ///
-    /// Asserted over every shipped stack rather than this repo's own stack: a
-    /// rust-shaped implementation would pass a rust-only guard.
-    #[test]
-    fn what_the_sandbox_lacks_is_reported_and_never_subtracted_from_the_repo() {
-        let all = detect::all_shipped();
-        let unconditional: Vec<_> = all.iter().flat_map(stack_hooks).collect();
-
-        // A sandbox holding none of the toolchains. Every command is a gap, and
-        // the hooks the repo gets are exactly the ones it would have got with
-        // no probe at all.
-        let bare = missing_programs(&all, &|_| false);
-        assert_eq!(
-            bare.len(),
-            all.len() * 2,
-            "every unrunnable command must be reported, not silently dropped"
-        );
-        assert_eq!(
-            all.iter().flat_map(stack_hooks).collect::<Vec<_>>(),
-            unconditional,
-            "and what init writes is not a function of the probe at all"
-        );
-
-        // A sandbox holding everything: nothing to raise.
-        assert!(
-            missing_programs(&all, &|_| true).is_empty(),
-            "nothing is missing here"
-        );
-    }
-
-    /// `go test ./...` needs `go`; `gofmt -w .` needs `gofmt`. One stack, two
-    /// programs — so availability is a fact about a *command*, never about a
-    /// stack. A per-stack check reports both or neither, and both answers are
-    /// wrong when only one of the two tools is installed.
-    #[test]
-    fn one_stack_can_need_two_programs_and_each_is_judged_alone() {
-        let go = [detect::known(&detect::shipped(), "go").expect("go is a known stack")];
-        let gaps = missing_programs(&go, &|p| p == "go");
-
-        assert_eq!(gaps.len(), 1, "only gofmt is missing: {gaps:?}");
-        assert_eq!(gaps[0].program, "gofmt", "and it names which: {gaps:?}");
-        assert_eq!(gaps[0].command, "gofmt -w .");
-    }
-
-    /// When `detect::program` cannot read a command it says `None`, and `None`
-    /// is *cannot tell* rather than *needs nothing*. Raising a gap on that
-    /// basis would question somebody about a toolchain they have, over a
-    /// command omh never managed to read.
-    #[test]
-    fn a_command_omh_cannot_read_raises_no_gap() {
-        let odd = detect::Stack {
-            name: "odd".into(),
-            marker: "odd.toml".into(),
-            // Assignments alone name no executable, so `program` returns None.
-            test: "FOO=1".into(),
-            format: "FOO=1".into(),
-        };
-        // A sandbox with nothing at all: the only thing that could raise a gap
-        // here is the check itself.
-        assert!(
-            missing_programs(&[odd], &|_| false).is_empty(),
-            "omh must not invent a gap out of a command it could not read"
-        );
-    }
-
-    /// A probe that reported nothing means the container never ran it — the
-    /// failure `doctor::no_output_is_never_a_pass` already guards for the main
-    /// probe. Read as *no program is installed*, it would interrogate somebody
-    /// about four toolchains they have, because a runtime hiccup looks
-    /// identical to an empty sandbox.
-    #[test]
-    fn a_probe_that_did_not_run_asks_nothing() {
-        let all = detect::all_shipped();
-        let t = triage_for(&all, &[], &BTreeMap::new());
-
-        assert!(
-            t.gaps.is_empty(),
-            "silence raises no question: {:?}",
-            t.gaps
-        );
-        assert!(t.declined.is_empty(), "and settles none: {:?}", t.declined);
-    }
-
-    /// The wiring, through the real parser rather than a hand-built `Outcome`:
-    /// `triage_for` could have been reading the wrong field of the protocol
-    /// forever and a fabricated input would never have shown it.
-    #[test]
-    fn the_triage_acts_on_what_the_probe_reported() {
-        let go = [detect::known(&detect::shipped(), "go").expect("go is a known stack")];
-        let probe = doctor::parse("ok\tgo\tresolves\nfail\tgofmt\tnot installed in the sandbox\n");
-        let t = triage_for(&go, &probe, &BTreeMap::new());
-
-        assert_eq!(t.gaps.len(), 1, "only gofmt is missing: {:?}", t.gaps);
-        assert_eq!(t.gaps[0].program, "gofmt");
-    }
-
-    /// The probe prints one line per program, so a program with **no** line is
-    /// unknown — not absent. Reading silence as absence is the failure this
-    /// module's asymmetry exists to prevent, and `probe.is_empty()` only catches
-    /// the all-or-nothing form of it: a report truncated after the first line is
-    /// non-empty, so it sails past that guard and every unmentioned program
-    /// becomes a definite gap.
-    ///
-    /// What that costs is not one confusing message. `init` asks about a
-    /// toolchain the user has, Enter records `skip` into the **committed**
-    /// `settings.toml`, and the hooks are switched off for everyone who clones
-    /// the repo — with the answer on file, so nobody is ever asked again.
-    #[test]
-    fn a_program_the_probe_never_mentioned_raises_no_gap() {
-        let go = [detect::known(&detect::shipped(), "go").expect("go is a known stack")];
-        // The container died after flushing one line. `gofmt` was asked about
-        // and never answered.
-        let probe = doctor::parse("ok\tgo\tresolves\n");
-        let t = triage_for(&go, &probe, &BTreeMap::new());
-
-        assert!(
-            t.gaps.is_empty(),
-            "a line that never arrived is silence, not a missing gofmt: {:?}",
-            t.gaps
-        );
-    }
-
-    /// `assume` exists for the sandbox that gains a tool after `init` looked —
-    /// a base image the user maintains, something installed at launch. The
-    /// probe is evidence about one moment, and the person who owns the image
-    /// knows more about the next one than omh does. So a recorded `assume`
-    /// beats the probe, rather than being overruled by it every run.
-    #[test]
-    fn an_assumed_program_is_not_raised_however_the_probe_answered() {
-        let go = [detect::known(&detect::shipped(), "go").expect("go is a known stack")];
-        let probe = doctor::parse("fail\tgo\tnot installed\nfail\tgofmt\tnot installed\n");
-        let decided = BTreeMap::from([("gofmt".to_string(), settings::Toolchain::Assume)]);
-
-        let t = triage_for(&go, &probe, &decided);
-        assert_eq!(t.gaps.len(), 1, "only the undecided one: {:?}", t.gaps);
-        assert_eq!(t.gaps[0].program, "go");
-        assert!(
-            t.declined.is_empty(),
-            "assume is not a decline: {:?}",
-            t.declined
-        );
-    }
-
-    /// The point of writing the answer down. A question re-asked on every
-    /// `init` is a wizard, which is the thing omh sells itself as not being —
-    /// so a recorded `skip` moves out of the list `init` would ask about,
-    /// without being forgotten.
-    #[test]
-    fn a_recorded_skip_is_not_asked_again_but_is_still_accounted_for() {
-        let go = [detect::known(&detect::shipped(), "go").expect("go is a known stack")];
-        let probe = doctor::parse("ok\tgo\tresolves\nfail\tgofmt\tnot installed\n");
-        let decided = BTreeMap::from([("gofmt".to_string(), settings::Toolchain::Skip)]);
-
-        let t = triage_for(&go, &probe, &decided);
-        assert!(
-            t.gaps.is_empty(),
-            "an answered question is not asked again: {:?}",
-            t.gaps
-        );
-        assert_eq!(
-            t.declined.len(),
-            1,
-            "but it is still accounted for, not forgotten"
-        );
-        assert_eq!(t.declined[0].program, "gofmt");
-    }
-
-    /// The answer has to land in a file that still parses, and still says
-    /// everything it said before. Rewriting the document through a TOML
-    /// serialiser would round-trip away every comment in it — including the
-    /// ones `init` itself wrote to explain `carry_in`.
-    #[test]
-    fn an_answer_is_added_without_disturbing_what_the_file_already_said() {
-        let before =
-            "# what this repo decided\ncarry_in = [\".env\"]\n\n[omh]\ncodegraph = false\n";
-        let after = with_toolchain_answers(
-            before,
-            &BTreeMap::from([("cargo".to_string(), settings::Toolchain::Skip)]),
-        );
-
-        assert!(
-            after.contains("# what this repo decided"),
-            "the comments survive: {after}"
-        );
-        let parsed: toml::Table = toml::from_str(&after).expect("must still be TOML");
-        assert_eq!(
-            parsed["carry_in"].as_array().unwrap().len(),
-            1,
-            "and so does the setting: {after}"
-        );
-        assert_eq!(parsed["toolchain"]["cargo"].as_str(), Some("skip"));
-    }
-
-    /// The other duplicate, and the one the header guard does not catch. Adding
-    /// a key already in the table produces `cargo = "skip"` beside
-    /// `cargo = "assume"`, which TOML refuses exactly as hard as a duplicate
-    /// header — so the file omh wrote becomes one omh cannot read, and every
-    /// setting in it goes with it.
-    ///
-    /// Reachable whenever `decided` comes back without an answer that is
-    /// nonetheless on file: a `[toolchain]` value omh cannot parse makes
-    /// `settings::resolve` fail, and the question is asked again.
-    #[test]
-    fn answering_a_second_time_replaces_the_line_rather_than_repeating_the_key() {
-        let out = with_toolchain_answers(
-            "# keep me\n[toolchain]\ncargo = \"assume\"\ngofmt = \"skip\"\n",
-            &BTreeMap::from([("cargo".to_string(), settings::Toolchain::Skip)]),
-        );
-
-        let parsed: toml::Table = toml::from_str(&out).expect("must still be TOML");
-        assert_eq!(
-            parsed["toolchain"]["cargo"].as_str(),
-            Some("skip"),
-            "the new answer wins: {out}"
-        );
-        assert_eq!(
-            parsed["toolchain"]["gofmt"].as_str(),
-            Some("skip"),
-            "and the untouched one survives: {out}"
-        );
-        assert!(out.contains("# keep me"), "comments survive: {out}");
-    }
-
-    /// A file omh cannot read is not a file omh may replace.
-    ///
-    /// `read_to_string(..).unwrap_or_default()` collapses *absent* and *cannot
-    /// be read* into the same empty string, and the next line writes it back —
-    /// so one non-UTF-8 byte in `settings.toml` costs the user their `carry_in`,
-    /// their `[omh]` switches, their `[use]` list and their `[mcp]` environment,
-    /// silently. This repo has already paid for that lesson twice: `settings::
-    /// read` and `install_bundled`, whose comment reads *"the read failed, the
-    /// write succeeded, and somebody's edit was gone"*.
-    #[test]
-    fn a_settings_file_that_cannot_be_read_is_never_overwritten() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.toml");
-        // Valid TOML but for one byte no UTF-8 decoder will accept.
-        let original: Vec<u8> = b"carry_in = [\"\xff.env\"]\n".to_vec();
-        std::fs::write(&path, &original).unwrap();
-
-        let answers = BTreeMap::from([("cargo".to_string(), settings::Toolchain::Skip)]);
-        let result = record_toolchain_answers(dir.path(), &answers);
-
-        assert!(
-            result.is_err(),
-            "an unreadable settings file must be reported, not assumed empty"
-        );
-        assert_eq!(
-            std::fs::read(&path).unwrap(),
-            original,
-            "and left exactly as it was"
-        );
-    }
-
-    /// The trap. A second `[toolchain]` header is a duplicate table, which is
-    /// not merely untidy — TOML refuses the whole document, so the next `init`
-    /// fails to read a file omh wrote itself, and every setting in it is lost
-    /// at once.
-    #[test]
-    fn a_second_answer_joins_the_table_rather_than_opening_another() {
-        let once = with_toolchain_answers(
-            "[toolchain]\ncargo = \"skip\"\n",
-            &BTreeMap::from([("gofmt".to_string(), settings::Toolchain::Assume)]),
-        );
-
-        assert_eq!(
-            once.matches("[toolchain]").count(),
-            1,
-            "one table, not two: {once}"
-        );
-        let parsed: toml::Table = toml::from_str(&once).expect("must still be TOML");
-        assert_eq!(parsed["toolchain"]["cargo"].as_str(), Some("skip"));
-        assert_eq!(parsed["toolchain"]["gofmt"].as_str(), Some("assume"));
-    }
-
     // ── the provisioning resolution ─────────────────────────────────────────
 
     fn outcome(name: &str, ok: bool, detail: &str) -> doctor::Outcome {
@@ -4534,7 +3936,7 @@ mod tests {
     /// resolution and, on the next launch, the repo would provision nothing.
     ///
     /// Silence is cannot-tell, and cannot-tell writes nothing at all — the same
-    /// asymmetry `detect::program` and `triage_for` are built on, at the one
+    /// asymmetry `detect::program` and `facts::Facts` are built on, at the one
     /// point where acting on it would delete somebody's file contents.
     #[test]
     fn a_resolution_nobody_measured_is_never_recorded() {
@@ -4557,9 +3959,9 @@ mod tests {
     /// with no `gcc`, and `cargo test` fails at link — the exact failure this
     /// design opens by describing.
     ///
-    /// This is the same defect `triage_for` was fixed for earlier, in the
-    /// sibling function, where it only cost a spurious question. Here it edits
-    /// a file under version control.
+    /// The now-deleted `[toolchain]` question had to be fixed for this same
+    /// defect, where it only cost a spurious question. Here it edits a file
+    /// under version control, which is why the guard outlived the question.
     #[test]
     fn a_partial_report_is_not_a_resolution() {
         let truncated = [outcome("rust/toolchain", true, "applies")];
@@ -4741,55 +4143,6 @@ mod tests {
              a person outranks a predicate"
         );
     }
-
-    /// An answer somebody already committed goes on working.
-    ///
-    /// Suppression now reads measurements, and `[toolchain]` is the table it
-    /// used to read. Deleting that table is build-order item 3 and comes with
-    /// an error naming it — but between the two, a `cargo = "skip"` sitting in
-    /// somebody's `settings.toml` must not quietly stop taking effect. An
-    /// answer that silently becomes a no-op is the worst of the three
-    /// possibilities: it is not honoured, and nothing says so.
-    ///
-    /// Both answers keep their meanings, which are not symmetrical. `skip`
-    /// says *this sandbox will not have it*, so it forces an absence over a
-    /// measurement that has not been taken. `assume` says *run the hook
-    /// anyway* — for a base image the user maintains, or a tool installed at
-    /// launch — so it has to survive a measurement that says the program is
-    /// missing, or the one answer that keeps a hook working would be the one
-    /// answer measurement overrules.
-    #[test]
-    fn a_committed_toolchain_answer_still_decides_until_it_is_deleted() {
-        use settings::Toolchain;
-        let measured = BTreeMap::from([
-            ("cargo".to_string(), true),
-            ("shellcheck".to_string(), false),
-        ]);
-        let decided = BTreeMap::from([
-            ("cargo".to_string(), Toolchain::Skip),
-            ("shellcheck".to_string(), Toolchain::Assume),
-        ]);
-
-        let got = declared_over(measured, &decided);
-        assert_eq!(
-            got.get("cargo"),
-            Some(&false),
-            "`skip` means this sandbox will not have it, whatever a probe saw"
-        );
-        assert_eq!(
-            got.get("shellcheck"),
-            Some(&true),
-            "`assume` means run the hook anyway, whatever a probe saw"
-        );
-        // And a program with no answer keeps its measurement, including the
-        // unmeasured case — absent stays absent, which suppresses nothing.
-        let kept = declared_over(
-            BTreeMap::from([("cc".to_string(), false)]),
-            &BTreeMap::new(),
-        );
-        assert_eq!(kept, BTreeMap::from([("cc".to_string(), false)]));
-    }
-
     /// **A repo that provisions runs a different image from one that does
     /// not**, and two repos provisioning different things do not share one
     /// either.
@@ -4849,6 +4202,65 @@ mod tests {
             pnpm,
             with(&["node/pnpm"]),
             "and it is stable, or every launch rebuilds"
+        );
+    }
+
+    /// A probe that **ran and failed** is not a measurement of nothing, and the
+    /// difference is a sentence on the user's terminal.
+    ///
+    /// `docker run` against a missing image, a refusing daemon or a full disk
+    /// exits non-zero with empty stdout. Parsed anyway that is an empty outcome
+    /// list — indistinguishable from a sandbox that answered and had nothing,
+    /// except that one of the two is a broken machine. Both leave every hook
+    /// unsuppressed, which is the safe direction; only one of them deserves
+    /// silence, and it is not this one.
+    ///
+    /// This is the same defect `init`'s predicate call was fixed for, in a
+    /// function written afterwards — which is why the guard is a value here
+    /// rather than a `println!` no test can watch vanish.
+    #[test]
+    fn a_probe_that_ran_and_failed_is_a_reason_not_a_measurement() {
+        let failed = measured_or_reason(false, "", "Error: No such image: omh/x:abc\n");
+        let Err(reason) = failed else {
+            panic!("a failed container was read as a sandbox with nothing in it");
+        };
+        assert!(
+            reason.contains("could not ask the sandbox"),
+            "the reason has to say nobody was asked: {reason}"
+        );
+        assert!(
+            reason.contains("No such image"),
+            "and carry what the runtime said, or it names no cause: {reason}"
+        );
+
+        // A probe that succeeded is taken at its word, protocol and all.
+        assert_eq!(
+            measured_or_reason(true, "ok\tcargo\tresolves\n", "")
+                .expect("a successful probe is an answer")
+                .len(),
+            1
+        );
+        // Including when it honestly measured nothing — an empty *successful*
+        // report is a report, and must not be dressed as a failure.
+        assert_eq!(measured_or_reason(true, "", ""), Ok(Vec::new()));
+    }
+
+    /// Stderr is carried, but not all of it.
+    ///
+    /// A runtime failing to pull or mount can produce a page of output, and a
+    /// diagnostic that buries the line above it under its own noise is one
+    /// people learn to scroll past — the same reason `init`'s predicate report
+    /// takes three lines.
+    #[test]
+    fn the_reason_carries_a_few_lines_of_evidence_not_a_page() {
+        let noisy: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        let Err(reason) = measured_or_reason(false, "", &noisy) else {
+            panic!("must be a reason");
+        };
+        assert_eq!(
+            reason.lines().count(),
+            4,
+            "one reason and three lines of evidence: {reason}"
         );
     }
 
@@ -5037,84 +4449,371 @@ mod tests {
         );
     }
 
-    // ── the question ────────────────────────────────────────────────────────
+    // ── proposed guards ─────────────────────────────────────────────────────
 
-    fn gap(stack: &'static str, command: &'static str, program: &'static str) -> Gap {
-        Gap {
-            stack: stack.into(),
-            command: command.into(),
-            program: program.into(),
+    /// A stand-in for the container runtime: a script that records every call
+    /// and answers the probe protocol.
+    ///
+    /// `measure` and `top_up` take the runtime's program name as an argument,
+    /// so the whole measurement path is reachable without a container. What
+    /// this cannot prove is what a *real* image contains — that is `omh
+    /// doctor`'s, and no green test crosses that line. What it does prove is
+    /// omh's own arithmetic: which questions get asked, of which image, and
+    /// what is done with the answers.
+    fn fake_runtime(dir: &std::path::Path, present: &[&str], absent: &[&str]) -> String {
+        let log = dir.join("calls.log");
+        let mut body = String::from("#!/bin/sh\n");
+        body.push_str(&format!(
+            "printf 'CALL %s\\n' \"$*\" | tr -d '\\n' >> {}; printf '\\n' >> {}\n",
+            log.display(),
+            log.display()
+        ));
+        for p in present {
+            body.push_str(&format!("printf 'ok\\t{p}\\tresolves\\n'\n"));
+        }
+        for p in absent {
+            body.push_str(&format!("printf 'fail\\t{p}\\tnot installed\\n'\n"));
+        }
+        let bin = dir.join("fake-runtime");
+        std::fs::write(&bin, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin.to_string_lossy().to_string()
+    }
+
+    /// Every call the fake was given, and the probes among them — a probe is
+    /// the one that runs the image rather than inspecting or building it.
+    fn calls(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("calls.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn probes(dir: &std::path::Path) -> Vec<String> {
+        calls(dir)
+            .into_iter()
+            .filter(|c| c.contains("--pull=never"))
+            .collect()
+    }
+
+    fn a_sandbox(tag: &str, owed: &[&str]) -> Sandbox {
+        Sandbox {
+            installs: Vec::new(),
+            tag: tag.to_string(),
+            resolves: BTreeMap::new(),
+            owed: owed.iter().map(|s| (*s).to_string()).collect(),
         }
     }
 
-    fn ask(gaps: &[Gap], typed: &str) -> (BTreeMap<String, settings::Toolchain>, String) {
-        let mut out = Vec::new();
-        let answers = ask_about_gaps_with(
-            gaps,
-            &mut std::io::BufReader::new(typed.as_bytes()),
-            &mut out,
-        )
-        .unwrap();
-        (answers, String::from_utf8(out).unwrap())
+    fn measurement_fixture(dir: &std::path::Path) -> (Paths, Adapter) {
+        let paths = Paths {
+            root: dir.join("home"),
+            repo: dir.join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
+        (paths, adapter)
     }
 
-    /// A decision is about a program, so `cargo` is one question even though it
-    /// holds up both of rust's hooks. Asking twice would be asking the same
-    /// thing twice and would let somebody answer it two different ways.
+    /// **A second launch asks the image nothing**, and that is the only reason
+    /// a launch is not a container run.
+    ///
+    /// Everything the cache is for lives in one function nothing reached:
+    /// skipping `unseen`, dropping the `save`, or throwing the answer away
+    /// instead of storing it all left the suite green. The first two spend a
+    /// container run on every launch of every repo forever; the third ships
+    /// every hook into a sandbox that may not have its program, which is the
+    /// `cargo: not found` failure this milestone exists to remove.
+    #[cfg(unix)]
     #[test]
-    fn one_question_per_program_however_many_hooks_it_blocks() {
-        let gaps = [
-            gap("rust", "cargo test", "cargo"),
-            gap("rust", "cargo fmt", "cargo"),
-        ];
-        let (answers, shown) = ask(&gaps, "a\n");
+    fn a_second_launch_asks_the_image_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, adapter) = measurement_fixture(dir.path());
+        let runtime = fake_runtime(dir.path(), &["cargo"], &["cc"]);
+        let own = base::Own::default();
+        let repo = settings::RepoPolicy::default();
 
-        assert_eq!(answers.len(), 1, "one program, one answer: {answers:?}");
-        assert_eq!(shown.matches("[S/a]").count(), 1, "asked once: {shown}");
-        // Both blocked commands still have to appear, or the question is
-        // cheaper to ask than it is to answer.
-        assert!(shown.contains("cargo test"), "{shown}");
-        assert!(shown.contains("cargo fmt"), "{shown}");
-    }
+        let mut first = a_sandbox("omh/claude:abc123", &["cargo", "cc"]);
+        first
+            .top_up(&paths, &runtime, &adapter, &[], &own, &repo)
+            .unwrap();
 
-    /// Enter has to be the safe answer. Somebody holding it down through a
-    /// first-run prompt must not end up with a hook that fails on every turn —
-    /// silence degrades to nothing, never to wrong.
-    #[test]
-    fn enter_is_skip_so_holding_it_down_writes_no_broken_hook() {
-        let (answers, _) = ask(&[gap("rust", "cargo test", "cargo")], "\n");
-        assert_eq!(answers.get("cargo"), Some(&settings::Toolchain::Skip));
-
-        // And a typo is not read as consent to the other branch either.
-        let (typo, _) = ask(&[gap("rust", "cargo test", "cargo")], "yes please\n");
-        assert_eq!(typo.get("cargo"), Some(&settings::Toolchain::Skip));
-
-        let (yes, _) = ask(&[gap("rust", "cargo test", "cargo")], "a\n");
-        assert_eq!(yes.get("cargo"), Some(&settings::Toolchain::Assume));
-    }
-
-    /// EOF means the terminal went away. Reading on would hand back an empty
-    /// line per remaining question and record `skip` for every one of them —
-    /// answers nobody gave, written into a committed file, and never asked
-    /// again because they are now on record.
-    #[test]
-    fn a_terminal_that_goes_away_records_no_answer_it_was_not_given() {
-        let gaps = [
-            gap("rust", "cargo test", "cargo"),
-            gap("go", "gofmt -w .", "gofmt"),
-        ];
-        let (answers, _) = ask(&gaps, "");
+        assert_eq!(probes(dir.path()).len(), 1, "the first launch must ask");
+        assert_eq!(
+            first.resolves.get("cargo"),
+            Some(&true),
+            "and keep what it was told: {:?}",
+            first.resolves
+        );
+        assert_eq!(first.resolves.get("cc"), Some(&false));
         assert!(
-            answers.is_empty(),
-            "nothing was answered, so nothing is recorded: {answers:?}"
+            paths.facts().exists(),
+            "and write it down, or the next launch asks again"
         );
 
-        // One answer given, then the pipe closes: keep the one, invent nothing.
-        let (partial, _) = ask(&gaps, "a\n");
-        assert_eq!(partial.len(), 1, "only what was typed: {partial:?}");
-        assert_eq!(partial.get("cargo"), Some(&settings::Toolchain::Assume));
+        let mut second = a_sandbox("omh/claude:abc123", &["cargo", "cc"]);
+        second
+            .top_up(&paths, &runtime, &adapter, &[], &own, &repo)
+            .unwrap();
+        assert_eq!(
+            probes(dir.path()).len(),
+            1,
+            "a repo whose hooks and stacks have not changed must start no container"
+        );
+        assert_eq!(
+            second.resolves.get("cc"),
+            Some(&false),
+            "and still know what was measured before: {:?}",
+            second.resolves
+        );
     }
 
+    /// The probe runs in **this** image and asks about what this repo owes —
+    /// and the answers are filed under the same tag.
+    ///
+    /// Probing or filing under any other tag caches an answer about image A
+    /// against image B. Both directions are silent: a hook suppressed in a
+    /// sandbox that has its program, or shipped into one that does not.
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_asks_this_image_about_what_it_owes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, adapter) = measurement_fixture(dir.path());
+        let runtime = fake_runtime(dir.path(), &["cargo"], &[]);
+
+        let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
+        sb.top_up(
+            &paths,
+            &runtime,
+            &adapter,
+            &[],
+            &base::Own::default(),
+            &settings::RepoPolicy::default(),
+        )
+        .unwrap();
+
+        let probe = probes(dir.path()).join("\n");
+        assert!(
+            probe.contains("omh/claude:abc123"),
+            "the probe must run in the image this session will run: {probe}"
+        );
+        assert!(
+            probe.contains("cargo"),
+            "and ask about what the stacks promised: {probe}"
+        );
+
+        let raw = std::fs::read_to_string(paths.facts()).unwrap();
+        assert!(
+            raw.contains("omh/claude:abc123"),
+            "and file the answer under that image's tag: {raw}"
+        );
+    }
+
+    /// **There is an image before there is a question about it.**
+    ///
+    /// All three launch paths measured first and built inside `session_up`, so
+    /// the first launch after a recipe changed probed a tag with no image
+    /// behind it, learned nothing, and shipped every hook unsuppressed. It
+    /// healed on the second launch, which is exactly the broken first turn this
+    /// design removes. `top_up` now builds first, and nothing else says so.
+    #[cfg(unix)]
+    #[test]
+    fn an_image_is_made_sure_of_before_it_is_asked_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, adapter) = measurement_fixture(dir.path());
+        let runtime = fake_runtime(dir.path(), &["cargo"], &[]);
+
+        let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
+        sb.top_up(
+            &paths,
+            &runtime,
+            &adapter,
+            &[],
+            &base::Own::default(),
+            &settings::RepoPolicy::default(),
+        )
+        .unwrap();
+
+        let all = calls(dir.path());
+        let built = all
+            .iter()
+            .position(|c| !c.contains("--pull=never"))
+            .expect("the image has to be made sure of at all");
+        let asked = all
+            .iter()
+            .position(|c| c.contains("--pull=never"))
+            .expect("and then asked");
+        assert!(
+            built < asked,
+            "a probe against an image nobody built learns nothing: {all:?}"
+        );
+    }
+
+    /// A runtime that cannot answer is **cannot-tell**, never a sandbox with
+    /// nothing in it.
+    ///
+    /// Suppression acts on a measured `false`. A probe that could not run must
+    /// leave the facts as they were, or one broken docker turns every hook in
+    /// every repo off in a session that otherwise looks normal.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_that_cannot_run_suppresses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, adapter) = measurement_fixture(dir.path());
+        // Exits non-zero for everything, so the image "exists" is false and the
+        // probe fails — the shape of a daemon that is refusing.
+        let bin = dir.path().join("failing-runtime");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
+        let _ = sb.top_up(
+            &paths,
+            &bin.to_string_lossy(),
+            &adapter,
+            &[],
+            &base::Own::default(),
+            &settings::RepoPolicy::default(),
+        );
+
+        assert_eq!(
+            sb.resolves.get("cargo"),
+            None,
+            "silence is cannot-tell, and cannot-tell is never a measured \
+             absence: {:?}",
+            sb.resolves
+        );
+    }
+
+    /// A stack whose recipes are neither sorted nor all-applying — hostile on
+    /// both axes, so a recipe that sorts and an `owed` built from the
+    /// definitions rather than the resolution both come out wrong here.
+    fn provisioned_fixture(paths: &Paths) {
+        std::fs::create_dir_all(paths.stacks()).unwrap();
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        std::fs::write(paths.repo.join("fixture.toml"), "").unwrap();
+        std::fs::write(
+            paths.stacks().join("fixture.toml"),
+            r#"
+name   = "fixture"
+marker = "fixture.toml"
+
+[[provide]]
+name    = "zulu"
+needs   = ["zulu"]
+install = "install zulu"
+because = "a fixture"
+
+[[provide]]
+name    = "alpha"
+needs   = ["alpha"]
+install = "install alpha"
+because = "a fixture"
+
+[[provide]]
+name    = "declined"
+needs   = ["declined"]
+install = "install declined"
+because = "a fixture"
+"#,
+        )
+        .unwrap();
+    }
+
+    fn fixture_policy() -> settings::RepoPolicy {
+        let mut repo = settings::RepoPolicy::default();
+        repo.provision.insert("fixture/zulu".to_string(), true);
+        repo.provision.insert("fixture/alpha".to_string(), true);
+        repo.provision.insert("fixture/declined".to_string(), false);
+        repo
+    }
+
+    /// **The recipe a launch builds must produce the tag that launch runs.**
+    ///
+    /// `session_up` takes the two as separate arguments — `opts.image` and
+    /// `recipe` — so nothing stops them describing different images, which is
+    /// the milestone-one bug in a new place. Asserted as agreement rather than
+    /// against a literal, because the failure is divergence.
+    #[test]
+    fn the_layer_a_sandbox_names_is_the_layer_its_recipe_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        provisioned_fixture(&paths);
+        let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
+        let sb = sandbox(&paths, &adapter, &fixture_policy()).unwrap();
+
+        assert_eq!(
+            sb.recipe(),
+            vec!["install zulu", "install alpha"],
+            "file order is install order, and an opt-out contributes no recipe"
+        );
+        assert_ne!(
+            sb.tag,
+            image::tag_for(&adapter),
+            "this fixture must provision something or it proves nothing"
+        );
+        assert_eq!(
+            image::stack_tag(&adapter, &sb.recipe()),
+            sb.tag,
+            "the recipe handed to `ensure_stack` must build the tag `plan` runs, \
+             or a session runs an image nothing built"
+        );
+    }
+
+    /// What `sandbox` hands on is the **resolution's** list and the **tag's**
+    /// measurements, and neither is re-derived from anything else.
+    #[test]
+    fn a_sandbox_carries_what_it_owes_and_what_is_already_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        provisioned_fixture(&paths);
+        let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
+        let repo = fixture_policy();
+
+        let first = sandbox(&paths, &adapter, &repo).unwrap();
+        assert_eq!(
+            first.owed,
+            BTreeSet::from(["zulu".to_string(), "alpha".to_string()]),
+            "a provide somebody opted out of was never installed and owes \
+             nothing: {:?}",
+            first.owed
+        );
+        assert!(
+            first.resolves.is_empty(),
+            "and nothing has been measured about this image yet"
+        );
+
+        let mut facts = facts::Facts::default();
+        facts.learn(
+            &first.tag,
+            &[doctor::Outcome {
+                name: "alpha".into(),
+                ok: false,
+                detail: "not installed in the sandbox".into(),
+            }],
+        );
+        facts.save(&paths).unwrap();
+
+        let second = sandbox(&paths, &adapter, &repo).unwrap();
+        assert_eq!(
+            second.resolves.get("alpha"),
+            Some(&false),
+            "a sandbox must arrive knowing what was measured about its own \
+             tag: {:?}",
+            second.resolves
+        );
+    }
+
+    // ── the question ────────────────────────────────────────────────────────
     /// A detected stack earns hooks, not prose. The guard that used to cover
     /// this read the generated `AGENTS.md` — a sentence saying `cargo test`
     /// runs nothing, and once that file stopped being written the commands

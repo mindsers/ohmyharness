@@ -193,8 +193,9 @@ pub fn verdict(o: &crate::doctor::Outcome) -> Verdict {
 /// `Outcome` leaves for a three-valued answer — see [`Verdict`]. Each predicate
 /// is its own `if`, so one that dies takes only its own line: a `set -e` or a
 /// chain would let the first broken predicate silence every provide after it,
-/// and a truncated report read as a complete one is the failure `triage_for`
-/// was already fixed for once.
+/// and a truncated report read as a complete one is a defect this codebase has
+/// already paid for twice — see `main::fired_from`, which refuses a report
+/// shorter than the question it asked.
 pub fn predicate_script(candidates: &[(String, Option<&str>)]) -> String {
     let mut out = String::from("#!/bin/sh\n");
     for (key, when) in candidates {
@@ -663,8 +664,9 @@ because = "cargo is how a rust project is built and tested"
     /// Found by writing the test above with `exit 2` and getting **no output at
     /// all**: a bare `if exit 2; then` terminates the script, so every provide
     /// after it goes unanswered. That is a truncated report read as a complete
-    /// one — the exact failure `triage_for` was already fixed for — arriving
-    /// through a stack file rather than through a dying container.
+    /// one — the failure `main::fired_from` refuses at the other end of this
+    /// same wire — arriving through a stack file rather than through a dying
+    /// container.
     #[test]
     fn a_predicate_that_ends_the_shell_does_not_silence_the_rest() {
         let d = tempfile::tempdir().unwrap();
