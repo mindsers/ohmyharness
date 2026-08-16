@@ -1,0 +1,6 @@
+{
+  "on": "after-tool",
+  "stack": "python",
+  "tools": ["edit"],
+  "run": "ruff format ."
+}

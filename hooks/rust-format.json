@@ -1,0 +1,6 @@
+{
+  "on": "after-tool",
+  "stack": "rust",
+  "tools": ["edit"],
+  "run": "cargo fmt"
+}

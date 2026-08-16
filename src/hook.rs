@@ -163,6 +163,7 @@ pub enum Action {
 #[serde(into = "Raw")]
 pub struct Hook {
     pub on: Event,
+    pub stack: Option<String>,
     /// Empty means every tool this moment has — which is the only sensible
     /// reading for `turn-end`, where there is no tool to narrow to.
     pub tools: Vec<Tool>,
@@ -188,6 +189,13 @@ pub struct Hook {
 #[serde(deny_unknown_fields)]
 struct Raw {
     on: Event,
+    /// Which ecosystem this hook belongs to, if any — a **reference** to a
+    /// stack definition, never a copy of one. The marker that decides whether
+    /// a repo is a rust project stays in `stacks/rust.toml`, so the two cannot
+    /// disagree; a `marker` key here, or a `hooks = [...]` list there, would be
+    /// the same fact in two places.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stack: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tools: Vec<Tool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,6 +219,7 @@ impl From<Hook> for Raw {
         };
         Self {
             on: h.on,
+            stack: h.stack,
             tools: h.tools,
             when: h.when,
             capture,
@@ -326,6 +335,7 @@ impl Hook {
         }
         Ok(Self {
             on: raw.on,
+            stack: raw.stack,
             tools: raw.tools,
             when: raw.when,
             action,
@@ -338,6 +348,22 @@ impl Hook {
         match &self.action {
             Action::Run(cmd) => cmd,
             Action::Inject { text, .. } | Action::Refuse { text } => text,
+        }
+    }
+
+    /// Every shell command this hook would execute.
+    ///
+    /// Not [`Self::does`], which answers "what is this hook *for*" and returns
+    /// injected prose for the variants that inject. This answers "what will be
+    /// handed to a shell", which is a different question and the only one worth
+    /// asking about a missing program: a `refuse` runs nothing and can never be
+    /// blocked by a toolchain, while an `inject`'s `capture` shells out exactly
+    /// as a `run` does and is just as unable to.
+    pub fn runs(&self) -> Vec<&str> {
+        match &self.action {
+            Action::Run(cmd) => vec![cmd.as_str()],
+            Action::Inject { capture, .. } => capture.as_deref().into_iter().collect(),
+            Action::Refuse { .. } => Vec::new(),
         }
     }
 
@@ -569,6 +595,70 @@ pub fn wire<'a>(
     })
 }
 
+/// The same vocabulary, read the other way: this harness's words back into
+/// omh's.
+///
+/// Directly beneath [`wire`] on purpose — they are one mechanism pointed in two
+/// directions, and a translation that only went one way is how a format ends up
+/// exportable and un-importable. `render::parse` already sets the precedent for
+/// MCP: *every format that renders must also parse, and the pair must round
+/// trip*.
+///
+/// **Ambiguity is refused, never resolved by map order.** An adapter mapping
+/// two omh moments onto one harness word — say both `turn-end` and
+/// `session-start` to `Stop` — can be rendered from (each hook goes to `Stop`)
+/// and cannot be read back: a `Stop` entry is either, and a `BTreeMap` would
+/// silently answer whichever sorted first. That would import somebody's hooks
+/// with half of them at the wrong moment, which looks exactly like working.
+#[derive(Debug)]
+pub struct Vocabulary {
+    events: BTreeMap<String, Event>,
+    tools: BTreeMap<String, Tool>,
+}
+
+impl Vocabulary {
+    /// Invert one harness's tables, refusing any word that means two things.
+    pub fn of(binding: &Binding, tools: &BTreeMap<Tool, String>) -> Result<Self> {
+        let mut events = BTreeMap::new();
+        for (ours, theirs) in &binding.events {
+            if let Some(clash) = events.insert(theirs.clone(), *ours) {
+                anyhow::bail!(
+                    "this harness spells both `{clash}` and `{ours}` as `{theirs}`, \
+                     so a `{theirs}` hook cannot be read back as either"
+                );
+            }
+        }
+        let mut inverted = BTreeMap::new();
+        for (ours, theirs) in tools {
+            if let Some(clash) = inverted.insert(theirs.clone(), *ours) {
+                anyhow::bail!(
+                    "this harness spells both `{clash}` and `{ours}` as `{theirs}`, \
+                     so a `{theirs}` matcher cannot be read back as either"
+                );
+            }
+        }
+        Ok(Self {
+            events,
+            tools: inverted,
+        })
+    }
+
+    /// Which omh moment this harness's word names, if any.
+    pub fn event(&self, theirs: &str) -> Option<Event> {
+        self.events.get(theirs).copied()
+    }
+
+    /// Every tool spelling this harness declares, with what it means.
+    ///
+    /// Exposed because a spelling may itself be an alternation — Claude writes
+    /// `edit` as `Edit|Write|MultiEdit` — so reading a matcher back means
+    /// matching whole spellings against it, not splitting it on `|` and looking
+    /// each piece up.
+    pub fn spellings(&self) -> impl Iterator<Item = (&str, Tool)> {
+        self.tools.iter().map(|(word, tool)| (word.as_str(), *tool))
+    }
+}
+
 /// Translate one hook into the shape this harness parses.
 pub fn render(
     name: &str,
@@ -709,6 +799,144 @@ mod tests {
             Outcome::Rendered(r) => panic!("unexpectedly rendered: {r:?}"),
             Outcome::Dropped(d) => d,
         }
+    }
+
+    // ── reading a harness's words back ──────────────────────────────────────
+
+    /// Every word `wire` can emit, `Vocabulary` can read back — which is what
+    /// makes the pair a translation rather than an export.
+    ///
+    /// Asserted over the **shipped** adapters and over omh's whole vocabulary,
+    /// not a fixture: an adapter that gained a moment and forgot to be
+    /// invertible would otherwise be found by somebody trying to import.
+    #[test]
+    fn every_word_a_harness_renders_can_be_read_back() {
+        for name in ["claude", "opencode"] {
+            let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), name).unwrap();
+            let Some(binding) = adapter.supports(Capability::Hooks) else {
+                continue;
+            };
+            let vocab =
+                Vocabulary::of(binding, &adapter.tools).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+
+            for (ours, theirs) in &binding.events {
+                assert_eq!(
+                    vocab.event(theirs),
+                    Some(*ours),
+                    "{name}: renders `{ours}` as `{theirs}` and cannot read it back"
+                );
+            }
+            let spellings: BTreeMap<&str, Tool> = vocab.spellings().collect();
+            for (ours, theirs) in &adapter.tools {
+                assert_eq!(
+                    spellings.get(theirs.as_str()),
+                    Some(ours),
+                    "{name}: renders `{ours}` as `{theirs}` and cannot read it back"
+                );
+            }
+        }
+    }
+
+    /// **A word that means two things is refused**, rather than resolved by
+    /// whichever sorted first.
+    ///
+    /// An adapter mapping two omh moments onto one harness word renders fine —
+    /// every hook goes to the same place — and cannot be read back at all. A
+    /// `BTreeMap` would answer with whichever key sorted first, so half of
+    /// somebody's imported hooks would land at the wrong moment, and the import
+    /// would report success. Refusing costs an error message; guessing costs
+    /// trust in every hook omh imported.
+    #[test]
+    fn a_harness_word_that_means_two_things_is_refused() {
+        let ambiguous = binding(
+            "path = \"x\"\nrender = \"claude-settings\"\n\n\
+             [events]\nturn-end = \"Stop\"\nsession-start = \"Stop\"\n",
+        );
+        let err = format!(
+            "{:#}",
+            Vocabulary::of(&ambiguous, &BTreeMap::new())
+                .expect_err("`Stop` cannot be read back as either moment")
+        );
+        assert!(err.contains("Stop"), "must name the word: {err}");
+        assert!(
+            err.contains("turn-end") && err.contains("session-start"),
+            "and both things it means: {err}"
+        );
+
+        // The same for tools, which travel in the matcher rather than the key.
+        let tools = BTreeMap::from([
+            (Tool::Edit, "Write".to_string()),
+            (Tool::Read, "Write".into()),
+        ]);
+        let err = format!(
+            "{:#}",
+            Vocabulary::of(
+                &binding("path = \"x\"\nrender = \"claude-settings\"\n"),
+                &tools
+            )
+            .expect_err("`Write` cannot be read back as either tool")
+        );
+        assert!(err.contains("Write"), "got: {err}");
+    }
+
+    // ── naming a stack ──────────────────────────────────────────────────────
+
+    /// A hook may say which ecosystem it belongs to, and that is all it may say
+    /// about it.
+    ///
+    /// A **reference**, not a copy. The marker that decides whether a repo is a
+    /// rust project lives in `stacks/rust.toml` and nowhere else, so a hook
+    /// naming `rust` cannot disagree with it — where a `marker` key here, or a
+    /// `hooks = [...]` list in the stack file, would be the same fact in two
+    /// places, free to drift. That coupling is the thing this step exists to
+    /// break, so it must not be reintroduced in the other direction.
+    ///
+    /// Optional, and the absence is the common case: a hook that works
+    /// anywhere — `graph-refresh`, somebody's `shellcheck` — belongs to no
+    /// ecosystem and must not be filtered by one.
+    #[test]
+    fn a_hook_may_name_the_stack_it_belongs_to() {
+        let h = Hook::parse(
+            r#"{"on":"turn-end","stack":"rust","run":"cargo test"}"#,
+            "rust-test.json",
+        )
+        .expect("a hook may name its stack");
+        assert_eq!(h.stack.as_deref(), Some("rust"));
+
+        let anywhere = Hook::parse(r#"{"on":"turn-end","run":"echo hi"}"#, "greet.json").unwrap();
+        assert_eq!(
+            anywhere.stack, None,
+            "a hook that works anywhere belongs to no ecosystem"
+        );
+    }
+
+    /// It survives the round trip, because `init` writes hook files and
+    /// `omh import` will.
+    ///
+    /// `Hook` serialises through `Raw`, so a field the writer drops is a field
+    /// that silently un-names a hook's stack the first time omh rewrites it —
+    /// and the drift report would then stop recognising a hook it wrote itself.
+    #[test]
+    fn the_stack_a_hook_names_survives_being_written_back() {
+        let h = Hook::parse(
+            r#"{"on":"turn-end","stack":"go","run":"go test ./..."}"#,
+            "go-test.json",
+        )
+        .unwrap();
+        let written = serde_json::to_string(&h).unwrap();
+        assert!(
+            written.contains("\"stack\":\"go\""),
+            "the stack has to reach the file: {written}"
+        );
+        assert_eq!(Hook::parse(&written, "again").unwrap(), h);
+
+        // And a hook that names none writes no key, rather than a null that
+        // every reader would then have to know means the same thing.
+        let anywhere = Hook::parse(r#"{"on":"turn-end","run":"echo hi"}"#, "greet.json").unwrap();
+        assert!(
+            !serde_json::to_string(&anywhere).unwrap().contains("stack"),
+            "an absent stack is an absent key"
+        );
     }
 
     // ── the format ──────────────────────────────────────────────────────────

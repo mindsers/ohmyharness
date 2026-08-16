@@ -27,10 +27,18 @@ search = "Grep|Glob"
 path   = "/work/CLAUDE.md"
 also   = ["/work/AGENTS.md"]  # CLAUDE.md wins where both exist; same bytes either way
 render = "concat"
+# The **personal** memory file, never the repo's. `rules::compose` already puts
+# this project's own CLAUDE.md into every session, so importing that one would
+# deliver the same prose twice — once as yours, once as the project's.
+import = "$HOME/.claude/CLAUDE.md"
 
 [capabilities.skills]
 path   = "$HOME/.claude/skills"
 render = "dir"
+# Textually the same as `path` and not derived from it: `path` is where the
+# *container* reads, `import` where the host keeps yours. The two expand
+# differently, and deriving one from the other is wrong for MCP.
+import = "$HOME/.claude/skills"
 
 # Project-scoped, because that is the only file of this shape Claude Code reads.
 # `$HOME/.mcp.json` was the binding here until `verify` below was able to ask:
@@ -52,14 +60,17 @@ ready  = "Connected"
 [capabilities.commands]
 path   = "$HOME/.claude/commands"
 render = "dir"
+import = "$HOME/.claude/commands"
 
 [capabilities.subagents]
 path   = "$HOME/.claude/agents"
 render = "dir"
+import = "$HOME/.claude/agents"
 
 [capabilities.hooks]
 path   = "$HOME/.claude/settings.json"
 render = "claude-settings"
+import = "$HOME/.claude/settings.json"   # host-side, where `omh import hooks` reads
 
 # How this harness spells each word of omh's hook vocabulary. A hook is authored
 # once, in omh's words; everything below is where that stops being portable.

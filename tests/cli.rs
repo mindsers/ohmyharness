@@ -989,6 +989,138 @@ fn writing_a_setting_keeps_what_you_wrote_around_it() {
     );
 }
 
+/// Everything this repo ships as data reaches `~/.omh`, where the code reads it.
+///
+/// The failure this catches has already happened twice in this project, and
+/// `bundled.rs` opens by describing it: a guard is correct while the wiring that
+/// reaches it is missing, and the suite stays green. `bundled`'s own tests
+/// iterate what is *embedded*, so a directory absent from `build.rs`'s `SHIPPED`
+/// is neither embedded nor noticed — the guard is structurally blind to exactly
+/// the mistake of forgetting to add one.
+///
+/// Asserted against the repository's own directories rather than a list written
+/// here, so a fifth kind is covered the day somebody adds it.
+///
+/// Runs anywhere: `init` seeds these before it needs a container, so it does not
+/// matter that it fails later for want of one.
+#[test]
+fn init_installs_every_directory_this_repo_ships() {
+    let sb = sandbox();
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .arg("init")
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("the binary under test must run");
+
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for kind in ["adapters", "base", "editors", "stacks"] {
+        let src = repo_root.join(kind);
+        let shipped: Vec<String> = std::fs::read_dir(&src)
+            .unwrap_or_else(|e| panic!("this repo must ship {kind}: {e}"))
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".toml"))
+            .collect();
+        assert!(!shipped.is_empty(), "{kind} ships nothing");
+
+        for name in shipped {
+            let landed = sb.home.join(".omh").join(kind).join(&name);
+            assert!(
+                landed.exists(),
+                "{kind}/{name} is in the repo and not in ~/.omh — embedded but \
+                 never installed, or never embedded. stdout: {} stderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+}
+
+/// Provisioning stays behind the runtime check, and records nothing without it.
+///
+/// This is an **ordering** guard, not the cannot-tell one — with no runtime
+/// `init` never reaches the provisioning block, so it would pass even if
+/// `fired_from` lost its empty-answer branch. That rule is guarded where it can
+/// actually be exercised, by `a_resolution_nobody_measured_is_never_recorded`.
+/// What this catches is provisioning being moved *above* `runtime::select`,
+/// which would write `[provision]` on a box that never asked a sandbox
+/// anything — and since `stack::reconcile` drops every `true` it is not told
+/// about, that write would erase the table rather than add to it.
+///
+/// Runs anywhere, because "no container runtime" is the condition under test.
+#[test]
+fn a_missing_container_runtime_records_no_resolution() {
+    let sb = sandbox();
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .arg("init")
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("the binary under test must run");
+
+    let settings = sb.settings();
+    assert!(
+        !settings.contains("[provision]"),
+        "an unmeasured resolution must not be written: {settings}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // And the repo is still configured — the container work stays last.
+    assert!(settings.contains("[use]"), "got: {settings}");
+}
+
+/// Setting a repo up must not be abandoned half-done because the machine has no
+/// container runtime.
+///
+/// The image build moved above the rest of `init` so a toolchain could be probed
+/// before hooks were seeded. It propagates, so on a box with neither docker nor
+/// sbx — somebody installing omh before a runtime, which is the first thing they
+/// would do — `init` now bails after writing hooks and **before**
+/// `config::write_selection` and before gitignoring `settings.local.toml`.
+///
+/// The second of those is the one that bites quietly: a `settings.local.toml`
+/// left tracked is how a machine-local override reaches the team's repo, which
+/// is the whole reason that line is written at all.
+///
+/// Runs anywhere, because "no container runtime" is the condition under test.
+#[test]
+fn a_missing_container_runtime_still_leaves_the_repo_configured() {
+    let sb = sandbox();
+    sb.git_init();
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+
+    // Nothing on PATH, so `runtime::select` can find no backend. Whether init
+    // reports failure is not what is asserted — what it left behind is.
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .arg("init")
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("the binary under test must run");
+
+    let gitignore = std::fs::read_to_string(sb.repo.join(".omh/.gitignore")).unwrap_or_default();
+    assert!(
+        gitignore.contains("settings.local.toml"),
+        "a tracked settings.local.toml is how a machine-local override gets \
+         committed to the team's repo. stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sb.settings().contains("[use]"),
+        "and the selection is what switches this repo's own hooks on: {}",
+        sb.settings()
+    );
+}
+
 /// `omh init` writes the selection out with every entry named.
 ///
 /// Expanded rather than `"*"`, because an explicit list is editable and
@@ -997,6 +1129,21 @@ fn writing_a_setting_keeps_what_you_wrote_around_it() {
 /// earlier and a list that omitted them would switch off what init just
 /// created; omh's own are not, because `[omh]` governs those and `[use]`
 /// refuses to name one.
+///
+/// Both halves are asserted, because they are different claims. The first is
+/// about what `init` wrote into `<repo>/.omh/hooks/` — the derived hooks, the
+/// ones only this project could want — and it is checked against the directory
+/// rather than against a spelling, so a hook added there later inherits it.
+///
+/// The second is about the conventional ones, which since hooks were separated
+/// from stacks live in the **catalogue**: `cargo test` is what a rust project
+/// runs, not what *this* rust project runs, so one body per ecosystem is the
+/// honest scope. They reach a launch by being named in `[use]`, so that is
+/// where this asserts they are — unconditionally, because `[toolchain]` governs
+/// whether a hook *runs* here and never whether it is selected, which is why
+/// this holds on an image with no rust in it. Both directions of the ecosystem
+/// filter are checked: the loop above would pass just as happily on a selection
+/// that named every ecosystem omh ships as on one that named none.
 ///
 /// `#[ignore]`d because `init` builds an image, so it needs a container runtime.
 /// CI's linux job runs `--include-ignored`, which is where this bites.
@@ -1012,9 +1159,37 @@ fn init_writes_the_selection_expanded() {
     let written = sb.settings();
     assert!(written.contains("[use]"), "got: {written}");
     assert!(written.contains("review-diff"), "your catalogue: {written}");
+
+    // Everything init wrote is named in the list init then wrote. A hook on
+    // disk and absent from `[use]` is a hook switched off by the same run that
+    // created it.
+    let hooks: Vec<String> = std::fs::read_dir(sb.repo.join(".omh/hooks"))
+        .expect("init creates the hooks directory")
+        .flatten()
+        .map(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .trim_end_matches(".json")
+                .to_string()
+        })
+        .collect();
+    for h in &hooks {
+        assert!(
+            written.contains(h.as_str()),
+            "init wrote {h} and then left it out of the selection: {written}"
+        );
+    }
+    // And not vacuously. The detected stack's hooks are written whatever this
+    // machine's image holds — the file is the repo's, and `[toolchain]` decides
+    // whether it *runs*, never whether it exists. An empty directory would
+    // satisfy the loop above while meaning init had stopped writing hooks.
     assert!(
-        written.contains("rust-test") && written.contains("rust-format"),
-        "and the hooks init just wrote for the detected stack: {written}"
+        written.contains("\"rust-test\"") && written.contains("\"rust-format\""),
+        "the detected stack's hooks are unconditional: {written}"
+    );
+    assert!(
+        !written.contains("go-test") && !written.contains("python-test"),
+        "and an ecosystem this repo is not must not be selected into it: {written}"
     );
     assert!(
         !written.contains("codegraph") || !written.contains("mcp = [\"codegraph"),
@@ -1208,5 +1383,464 @@ fn s_ls_names_what_removed_sessions_left_behind() {
     assert!(
         !printed.contains("doctor"),
         "scratch staging is not a removed session: {printed}"
+    );
+}
+
+// ── omh import hooks ────────────────────────────────────────────────────────
+//
+// The one part of this feature whose end-to-end path runs here: importing
+// needs no container and no git, so these drive the real binary against a real
+// file rather than asserting on a function's return value.
+
+impl Sandbox {
+    /// The shipped adapters, where `Paths::adapters()` looks. `init` would put
+    /// them there and needs a container to finish.
+    fn seed_adapters(&self) {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters");
+        let dst = self.home.join(".omh/adapters");
+        std::fs::create_dir_all(&dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap().flatten() {
+            std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+        }
+    }
+
+    /// A harness config to import from, in Claude Code's own shape.
+    fn harness_hooks(&self, body: &str) -> PathBuf {
+        let p = self.home.join("their-settings.json");
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn repo_hook(&self, name: &str) -> Option<String> {
+        std::fs::read_to_string(self.repo.join(".omh/hooks").join(format!("{name}.json"))).ok()
+    }
+}
+
+/// What somebody already configured arrives as omh hooks, in **this repo**.
+///
+/// The destination is the whole point of the first assertion: a catalogue hook
+/// runs in every repo you ever open, so importing one project's formatter there
+/// would put it in front of every other project you touch.
+#[test]
+fn importing_hooks_writes_them_into_this_repo() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.harness_hooks(
+        r#"{"hooks":{
+            "Stop":[{"matcher":"","hooks":[{"type":"command","command":"cargo test"}]}],
+            "PostToolUse":[{"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":"cargo fmt"}]}]}}"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--from",
+        theirs.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let test = fx
+        .repo_hook("turn-end-cargo")
+        .expect("the turn-end hook must be in this repo");
+    assert!(test.contains("cargo test"), "got: {test}");
+    assert!(
+        test.contains("\"on\": \"turn-end\""),
+        "in omh's words, not Claude's: {test}"
+    );
+
+    let fmt = fx
+        .repo_hook("after-tool-cargo")
+        .expect("the after-tool hook must be in this repo");
+    assert!(
+        fmt.contains("cargo fmt") && fmt.contains("edit"),
+        "got: {fmt}"
+    );
+
+    // And nowhere else. The catalogue is yours, across every project.
+    assert!(
+        !fx.home.join(".omh/hooks/turn-end-cargo.json").exists(),
+        "a repo's hook must not be installed into the catalogue"
+    );
+}
+
+/// **Copy, never move.** Adopting omh is not a migration somebody cannot back
+/// out of: the harness they were using keeps working exactly as it did.
+///
+/// Asserted on the source's **bytes**, not its existence — a file truncated,
+/// rewritten or reformatted in place is still there.
+#[test]
+fn importing_leaves_the_harness_config_untouched() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let body = r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"cargo test"}]}]}}"#;
+    let theirs = fx.harness_hooks(body);
+
+    fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--from",
+        theirs.to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        std::fs::read_to_string(&theirs).unwrap(),
+        body,
+        "the harness's own config must be byte-for-byte what it was"
+    );
+}
+
+/// **An imported hook that is not selected is a hook no session ships.**
+///
+/// `[use]` is what the launcher reads. A file written without being named there
+/// is one `omh import` counted and reported and no launch will ever run — the
+/// report says `+2` and the session ships none of them, which is the most
+/// likely silent failure this feature has.
+#[test]
+fn imported_hooks_are_selected_or_they_land_dead() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    // A repo that has curated its selection: `init` writes one, and after that
+    // a hook not in it is off.
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(fx.repo.join(".omh/settings.toml"), "[use]\nhooks = []\n").unwrap();
+    let theirs = fx.harness_hooks(
+        r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"cargo test"}]}]}}"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--from",
+        theirs.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        fx.settings().contains("turn-end-cargo"),
+        "an imported hook must reach `[use]`, or it never runs: {}",
+        fx.settings()
+    );
+}
+
+/// **A hook answering to a name omh ships is refused**, and the reason is
+/// worse than shadowing: `render::merge_hooks` treats it as an error naming
+/// both files, so the whole session fails rather than that one hook.
+///
+/// Asserted through the real consumer — `omh why`, which builds the same
+/// profile a launch does — rather than by checking the file is absent. What
+/// matters is that omh still works afterwards.
+#[test]
+fn importing_refuses_a_name_omh_ships() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.harness_hooks(
+        r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"graph-refresh --now"}]}]}}"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--from",
+        theirs.to_str().unwrap(),
+    ]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "importing is not fatal: {said}");
+
+    // `graph-refresh` is omh's. Whatever omh did with it, a launch must still
+    // be able to compose this repo.
+    let why = fx.omh(&["why", "codegraph"]);
+    assert!(
+        why.status.success(),
+        "importing left this repo unable to launch: {}",
+        String::from_utf8_lossy(&why.stderr)
+    );
+}
+
+/// A handler omh cannot express whole is **left where it is**, and named. It is
+/// still in the harness's own file and still running there, which is honest —
+/// but somebody who was not told would think omh had taken everything.
+#[test]
+fn what_omh_cannot_import_is_reported_rather_than_dropped() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.harness_hooks(
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+            {"type":"command","command":"guard","if":"tool.name == 'Bash'"}]}]}}"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--from",
+        theirs.to_str().unwrap(),
+    ]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("left"), "the residue is reported: {said}");
+    assert!(
+        fx.repo_hook("before-tool-guard").is_none(),
+        "and a hook whose permission gate omh cannot express is not written \
+         without it"
+    );
+}
+
+// ── omh import <capability> ─────────────────────────────────────────────────
+
+impl Sandbox {
+    /// A harness's own catalogue, on the host, where `import` reads.
+    fn theirs(&self, at: &str, body: &str) -> PathBuf {
+        let p = self.home.join(at);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn mine(&self, at: &str) -> Option<String> {
+        std::fs::read_to_string(self.home.join(".omh").join(at)).ok()
+    }
+}
+
+/// **Skills, commands and subagents go to the catalogue, not the repo.**
+///
+/// The opposite of hooks, and the reason is the one the docs give: a skill is a
+/// way *you* work and travels with you across projects, while a hook binds to
+/// one repo's commands. A skill imported into a repo would be a skill you only
+/// had in one place.
+#[test]
+fn importing_a_skill_puts_it_in_your_catalogue() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(
+        ".claude/skills/review-diff/SKILL.md",
+        "---\nname: review-diff\ndescription: read a diff\n---\n\nbody\n",
+    );
+    fx.theirs(".claude/skills/review-diff/notes/extra.md", "more\n");
+
+    let out = fx.omh(&["import", "skills", "claude"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        fx.mine("skills/review-diff/SKILL.md")
+            .is_some_and(|s| s.contains("read a diff")),
+        "the skill must be in your catalogue"
+    );
+    assert!(
+        fx.mine("skills/review-diff/notes/extra.md").is_some(),
+        "a skill is a directory and arrives whole, not just its SKILL.md"
+    );
+    assert!(
+        !fx.repo.join(".omh/skills").exists(),
+        "a skill is yours across every project, not this repo's"
+    );
+}
+
+/// **Rules are imported from your own file, never this project's.**
+///
+/// `rules::compose` already puts the repo's `CLAUDE.md` into every session, so
+/// importing that one would hand the agent the same prose twice — and would go
+/// on doing it in every other repo, because the catalogue travels.
+#[test]
+fn importing_rules_takes_yours_and_not_this_projects() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(".claude/CLAUDE.md", "always write the test first\n");
+    std::fs::write(fx.repo.join("CLAUDE.md"), "this project uses tabs\n").unwrap();
+
+    let out = fx.omh(&["import", "rules", "claude"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let imported = fx.mine("rules/claude.md").expect("your own rules");
+    assert!(
+        imported.contains("always write the test first"),
+        "got: {imported}"
+    );
+    assert!(
+        !imported.contains("tabs"),
+        "the project's own rules are composed already — importing them delivers \
+         the same prose twice: {imported}"
+    );
+}
+
+/// **A symlink is refused**, rather than followed or copied as a link.
+///
+/// The catalogue is mounted into every sandbox omh launches, so a link reaching
+/// outside a skill would become a file the agent can read — in every project,
+/// from a copy nobody had reason to inspect. Following it is an exfiltration
+/// path; copying the link verbatim points somewhere else once the entry moves.
+#[cfg(unix)]
+#[test]
+fn importing_refuses_a_skill_that_reaches_outside_itself() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let secret = fx.theirs("secrets/id_rsa", "PRIVATE KEY\n");
+    fx.theirs(".claude/skills/sneaky/SKILL.md", "---\nname: sneaky\n---\n");
+    std::os::unix::fs::symlink(&secret, fx.home.join(".claude/skills/sneaky/borrowed.pem"))
+        .unwrap();
+
+    let out = fx.omh(&["import", "skills", "claude"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "one bad entry is not fatal: {said}");
+    assert!(said.contains("skipped"), "and it is reported: {said}");
+    assert!(
+        fx.mine("skills/sneaky/borrowed.pem").is_none()
+            && fx.mine("skills/sneaky/SKILL.md").is_none(),
+        "an entry omh cannot copy whole is not copied in part"
+    );
+}
+
+/// A name that is not a name never becomes a catalogue entry. `..` and a
+/// separator are refused by the same rule `[use]` applies, so a path cannot be
+/// smuggled in where an entry belongs.
+#[cfg(unix)]
+#[test]
+fn importing_refuses_an_entry_whose_name_is_a_path() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(".claude/commands/.hidden.md", "not an entry\n");
+    fx.theirs(".claude/commands/real.md", "an entry\n");
+
+    let out = fx.omh(&["import", "commands", "claude"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        fx.mine("commands/real.md").is_some(),
+        "the good one arrives"
+    );
+    assert!(
+        fx.mine("commands/.hidden.md").is_none(),
+        "a dotfile is not a catalogue entry"
+    );
+}
+
+/// Import never clobbers. An entry you have since edited is left exactly as it
+/// is, and re-running is a no-op — the rule `omh config mcp import` already
+/// follows.
+#[test]
+fn importing_twice_changes_nothing_the_second_time() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(".claude/commands/review.md", "theirs\n");
+
+    fx.omh(&["import", "commands", "claude"]);
+    std::fs::write(fx.home.join(".omh/commands/review.md"), "mine, edited\n").unwrap();
+    let out = fx.omh(&["import", "commands", "claude"]);
+
+    assert!(out.status.success());
+    assert_eq!(
+        fx.mine("commands/review.md").as_deref(),
+        Some("mine, edited\n"),
+        "an import must not replace what you have since written"
+    );
+}
+
+/// **A copy that fails part-way leaves nothing behind.**
+///
+/// The symlink check runs before anything is written, so it never reaches this
+/// path — which is exactly why the cleanup needed its own test: deleting it
+/// changed nothing, and the failure it guards against is the one nobody
+/// arranges. A skill half-copied into the catalogue is mounted into every
+/// sandbox exactly as a whole one is, and reads as an entry somebody chose.
+///
+/// Triggered with an unreadable file, so the failure is real rather than
+/// injected. Skipped as root, where the permission would not bite and the test
+/// would pass for the wrong reason.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_fails_part_way_leaves_nothing_behind() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads an unreadable file, so this proves nothing");
+        return;
+    }
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(".claude/skills/big/SKILL.md", "---\nname: big\n---\n");
+    let locked = fx.theirs(".claude/skills/big/zz-locked.md", "secret\n");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let out = fx.omh(&["import", "skills", "claude"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "one bad entry is not fatal: {said}");
+    assert!(said.contains("skipped"), "and is reported: {said}");
+    assert!(
+        !fx.home.join(".omh/skills/big").exists(),
+        "a half-copied entry must not survive: it is mounted into every sandbox \
+         exactly as a whole one is"
+    );
+}
+
+/// **A hook `init` derives on a re-run reaches `[use]`, or it lands dead.**
+///
+/// `merge_hooks` drops any hook the selection does not name, and a repo that
+/// has been `init`ed once has a curated `[use]` that `init` will not resync. So
+/// a project that gains a `package.json` six months later gets `pnpm-test.json`
+/// written, sees it reported, and never runs it — the exact failure
+/// `imported_hooks_are_selected_or_they_land_dead` pins for `omh import`.
+///
+/// Runs without a container: everything up to the harness block executes, and
+/// the derived hook and the selection are both written before it.
+#[test]
+fn a_hook_init_derives_later_is_selected_too() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    // A repo already set up, with a list somebody has since curated.
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(fx.repo.join(".omh/settings.toml"), "[use]\nhooks = []\n").unwrap();
+    // …which has since become a node project.
+    std::fs::write(
+        fx.repo.join("package.json"),
+        r#"{"scripts":{"test":"vitest run"}}"#,
+    )
+    .unwrap();
+    std::fs::write(fx.repo.join("pnpm-lock.yaml"), "").unwrap();
+
+    let out = fx.omh(&["init"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+
+    assert!(
+        fx.repo.join(".omh/hooks/pnpm-test.json").exists(),
+        "the hook is derived: {said}"
+    );
+    assert!(
+        fx.settings().contains("pnpm-test"),
+        "and named in `[use]`, or no session will ever run it: {}",
+        fx.settings()
     );
 }

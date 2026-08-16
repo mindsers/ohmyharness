@@ -1,0 +1,5 @@
+{
+  "on": "turn-end",
+  "stack": "rust",
+  "run": "cargo test"
+}

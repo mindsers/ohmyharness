@@ -146,6 +146,7 @@ pub fn checks(
     adapter: &Adapter,
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,
+    resolves: &std::collections::BTreeMap<String, bool>,
 ) -> Result<Vec<Check>> {
     let mut out = Vec::new();
     for capability in Capability::ALL {
@@ -190,7 +191,8 @@ pub fn checks(
             // A program gets a stronger check than a config file, not a weaker
             // one: that it parses, and that the hooks omh did not drop are in it.
             Render::OpencodePlugin => Expect::Parses(
-                hook_names(&sources, own, repo, binding, &adapter.tools).unwrap_or_default(),
+                hook_names(&sources, own, repo, binding, &adapter.tools, resolves)
+                    .unwrap_or_default(),
             ),
         };
 
@@ -286,8 +288,17 @@ fn hook_names(
     repo: &crate::settings::RepoPolicy,
     binding: &crate::adapter::Binding,
     tools: &std::collections::BTreeMap<crate::hook::Tool, String>,
+    resolves: &std::collections::BTreeMap<String, bool>,
 ) -> Result<Vec<String>> {
-    let doc = crate::render::document(Capability::Hooks, binding, sources, own, repo, tools)?;
+    let doc = crate::render::document(
+        Capability::Hooks,
+        binding,
+        sources,
+        own,
+        repo,
+        tools,
+        resolves,
+    )?;
     let dropped: Vec<&str> = doc.dropped.iter().map(|d| d.name.as_str()).collect();
     let mut names: Vec<String> = own
         .hooks
@@ -318,6 +329,72 @@ fn server_names(sources: &[PathBuf], repo: &crate::settings::RepoPolicy) -> Vec<
 
 /// Shell run inside the sandbox. Emits one `ok|fail<TAB>name<TAB>detail` line
 /// per check.
+/// A probe that reports, for each program, whether it resolves where the script
+/// runs.
+///
+/// A second builder rather than a fifth `Expect`: a `Check` is path-shaped —
+/// `guest` is documented as a path inside the sandbox — and a toolchain has no
+/// path, only a name. Widening `Check` to carry either would touch every check
+/// that already works, to express a subject the existing ones never have.
+///
+/// What is shared is the thing that matters: the wire protocol. These lines go
+/// through the same [`parse`] as every other probe, so there is one format and
+/// one reader, and `doctor` can concatenate this script with its own.
+///
+/// `command -v` rather than `which`: it is POSIX, it is a shell builtin so it
+/// needs nothing installed to answer, and it resolves builtins and functions
+/// as well as files on PATH. `which` is not in POSIX and is absent from some
+/// minimal images — a probe that needs a package installed to report a missing
+/// package is a probe that reports on itself.
+///
+/// **This must run where the hook will run.** Whether `cargo` resolves is a
+/// fact about one machine, and the machine that matters is the sandbox — not
+/// the host, and not a login shell whose profile has added to PATH.
+pub fn probe_programs(programs: &[&str]) -> String {
+    let mut out = String::from("#!/bin/sh\n");
+    for p in programs {
+        let q = single_quote(p);
+        out.push_str(&format!(
+            "if command -v {q} >/dev/null 2>&1; then printf 'ok\\t%s\\tresolves\\n' {q}; \
+             else printf 'fail\\t%s\\tnot installed in the sandbox\\n' {q}; fi\n"
+        ));
+    }
+    out
+}
+
+/// Wrap a word so the shell reads it as one literal, whatever is in it.
+///
+/// Program names reach here from commands a person wrote, so they are not
+/// omh's to trust: a stray quote would otherwise end the literal early and the
+/// rest of the name would be read as shell. Single quotes suspend every
+/// expansion, and the one character they cannot contain is closed, escaped and
+/// reopened — the standard `'\''` idiom.
+pub(crate) fn single_quote(word: &str) -> String {
+    format!("'{}'", word.replace('\'', r"'\''"))
+}
+
+/// Run a generated probe through a real `/bin/sh`, in `cwd`, and hand back its
+/// stdout.
+///
+/// The older probes are asserted by searching their source text for a
+/// substring, which cannot distinguish a script that works from one that merely
+/// mentions the right word. These are POSIX `sh` and need no container, so they
+/// can be *run* — and a probe is a program, so running it is the only assertion
+/// that means anything.
+///
+/// Shared with `stack`'s predicate tests rather than copied, so both halves of
+/// the wire format are exercised by the same runner.
+#[cfg(test)]
+pub(crate) fn run_probe_in(script: &str, cwd: &std::path::Path) -> String {
+    let out = std::process::Command::new("/bin/sh")
+        .arg("-c")
+        .arg(script)
+        .current_dir(cwd)
+        .output()
+        .expect("a probe must be a script /bin/sh can run");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 pub fn probe_script(checks: &[Check]) -> String {
     let mut out = String::from("#!/bin/sh\n");
     for check in checks {
@@ -534,12 +611,17 @@ mod tests {
     #[test]
     fn a_capability_the_profile_does_not_source_is_still_checked() {
         let fx = fixture();
-        let names: Vec<String> =
-            checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1)
-                .unwrap()
-                .into_iter()
-                .map(|c| c.name)
-                .collect();
+        let names: Vec<String> = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
         assert!(
             names.iter().any(|n| n == "hooks"),
             "omh's own hooks are mounted with no hooks layer to source them: {names:?}"
@@ -559,11 +641,17 @@ mod tests {
         let fx = fixture();
         let (own, off) = decided_with(["codegraph".to_string()].into());
 
-        let mcp = checks(&fx.profile, &adapter("claude"), &own, &off)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.name == "mcp")
-            .expect("claude stages mcp");
+        let mcp = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &own,
+            &off,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "mcp")
+        .expect("claude stages mcp");
         assert_eq!(
             mcp.expect,
             Expect::Mentions(vec![]),
@@ -595,11 +683,17 @@ mod tests {
             )
             .unwrap();
 
-        let skills = checks(&fx.profile, &adapter("claude"), &own, &repo)
-            .unwrap()
-            .into_iter()
-            .find(|c| c.name == "skills")
-            .expect("claude stages skills");
+        let skills = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &own,
+            &repo,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .find(|c| c.name == "skills")
+        .expect("claude stages skills");
         assert_eq!(
             skills.expect,
             Expect::Entries(vec![]),
@@ -610,11 +704,17 @@ mod tests {
     #[test]
     fn every_declared_capability_is_checked() {
         let fx = fixture();
-        let got: Vec<_> = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1)
-            .unwrap()
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
+        let got: Vec<_> = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
         assert_eq!(
             got,
             vec!["rules", "skills", "mcp", "mcp-loaded", "subagents", "hooks"],
@@ -652,11 +752,17 @@ mod tests {
         .unwrap();
         let terse = Adapter::find(dir.path(), "terse").unwrap();
 
-        let caps: Vec<String> = checks(&fx.profile, &terse, &decided().0, &decided().1)
-            .unwrap()
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
+        let caps: Vec<String> = checks(
+            &fx.profile,
+            &terse,
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
         assert!(
             !caps.iter().any(|c| c == "rules"),
             "a capability this harness cannot express is not checked: {caps:?}"
@@ -673,6 +779,7 @@ mod tests {
             &adapter("opencode"),
             &decided().0,
             &decided().1,
+            &Default::default(),
         )
         .unwrap()
         .into_iter()
@@ -686,7 +793,15 @@ mod tests {
     #[test]
     fn checks_target_guest_paths_only() {
         let fx = fixture();
-        for check in checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap() {
+        for check in checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap()
+        {
             let p = check.guest.to_string_lossy().to_string();
             assert!(
                 p.starts_with("/work") || p.starts_with(GUEST_HOME),
@@ -698,7 +813,14 @@ mod tests {
     #[test]
     fn content_checks_name_what_must_be_present() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap();
+        let cs = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap();
 
         let skills = cs.iter().find(|c| c.name == "skills").unwrap();
         assert_eq!(skills.expect, Expect::Entries(vec!["graphify".into()]));
@@ -730,7 +852,14 @@ mod tests {
     #[test]
     fn the_probe_reports_one_line_per_check() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap();
+        let cs = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap();
         let script = probe_script(&cs);
         for c in &cs {
             assert!(
@@ -739,6 +868,99 @@ mod tests {
                 c.guest
             );
         }
+    }
+
+    // ── the toolchain probe ─────────────────────────────────────────────────
+
+    /// Run a generated probe through a real `/bin/sh` and hand back its stdout.
+    ///
+    /// The existing probes are asserted by searching their source text for a
+    /// substring, which cannot distinguish a script that works from one that
+    /// merely mentions the right word. This one is POSIX `sh` and needs no
+    /// container, so it can be *run* — and a probe is a program, so running it
+    /// is the only assertion that means anything.
+    fn run_probe(script: &str) -> String {
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("a probe must be a script /bin/sh can run");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    /// End to end: build the probe, run it, parse it back through the shared
+    /// protocol. `sh` is present in every environment omh could possibly run
+    /// in, and a name of that shape is present in none — so the two directions
+    /// are both asserted without depending on what this machine happens to have
+    /// installed.
+    #[test]
+    fn the_probe_answers_for_every_program_it_was_given() {
+        let outcomes = parse(&run_probe(&probe_programs(&[
+            "sh",
+            "omh-no-such-program-b7f3",
+        ])));
+
+        let by = |name: &str| {
+            outcomes
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap_or_else(|| panic!("the probe said nothing about {name}: {outcomes:?}"))
+        };
+        assert!(by("sh").ok, "sh resolves everywhere: {outcomes:?}");
+        assert!(
+            !by("omh-no-such-program-b7f3").ok,
+            "and this resolves nowhere: {outcomes:?}"
+        );
+    }
+
+    /// Program names are read out of commands a person wrote, so they are not
+    /// omh's to trust. Interpolated bare, a name carrying a quote ends the
+    /// shell literal early and everything after it is read as shell — which
+    /// would both run it and destroy the probe's answers for every *other*
+    /// program in the same script.
+    #[test]
+    fn a_program_name_with_a_quote_cannot_corrupt_the_probe() {
+        // Every shape of shell expansion, not one. Quote-breaking is the
+        // obvious payload and the least dangerous, because it is the only one
+        // double quotes happen to stop — an escaping that neutralises it while
+        // leaving `$(…)` live would have passed the version of this test that
+        // checked a single payload.
+        let hostile = [
+            "x'; echo pwned; :'",
+            "x$(echo pwned)",
+            "x`echo pwned`",
+            "x${IFS}pwned",
+            "x\"; echo pwned; \"",
+        ];
+        let mut asked: Vec<&str> = hostile.to_vec();
+        asked.push("sh");
+        let out = run_probe(&probe_programs(&asked));
+        let outcomes = parse(&out);
+
+        // Line-wise, not `contains`: the marker is *inside the name*, so the
+        // report echoes it back as data on every run. Only execution can put it
+        // on a line of its own, and an assertion that cannot tell those apart
+        // fails against correct code — as this one first did.
+        assert!(
+            !out.lines().any(|l| l.trim() == "pwned"),
+            "the probe ran shell out of a program name: {out}"
+        );
+
+        // The real invariant, and the one that covers every expansion at once:
+        // a name comes back **exactly** as it went in. Command substitution,
+        // backticks and parameter expansion all change it, so this catches
+        // them without needing to know which of them a broken quoting allows.
+        for name in hostile {
+            assert!(
+                outcomes.iter().any(|o| o.name == name && !o.ok),
+                "{name:?} came back changed, or not at all — something expanded \
+                 it: {outcomes:?}"
+            );
+        }
+        assert!(
+            outcomes.iter().any(|o| o.name == "sh" && o.ok),
+            "and one hostile name must not cost the answers for the rest: {outcomes:?}"
+        );
     }
 
     #[test]
@@ -986,7 +1208,14 @@ mod tests {
     #[test]
     fn the_check_asks_where_the_document_is() {
         let fx = fixture();
-        let cs = checks(&fx.profile, &adapter("claude"), &decided().0, &decided().1).unwrap();
+        let cs = checks(
+            &fx.profile,
+            &adapter("claude"),
+            &decided().0,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap();
         let loaded = cs
             .iter()
             .find(|c| matches!(c.expect, Expect::Loaded { .. }))

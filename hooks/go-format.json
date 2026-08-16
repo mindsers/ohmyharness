@@ -1,0 +1,6 @@
+{
+  "on": "after-tool",
+  "stack": "go",
+  "tools": ["edit"],
+  "run": "gofmt -w ."
+}

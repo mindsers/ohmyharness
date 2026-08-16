@@ -10,10 +10,14 @@ login   = "run `/login` inside opencode, then exit"
 [capabilities.rules]
 path   = "/work/AGENTS.md"
 render = "concat"
+# The **personal** file, never the repo's: `rules::compose` already composes
+# this project's own AGENTS.md, so importing that one delivers it twice.
+import = "$HOME/.config/opencode/AGENTS.md"
 
 [capabilities.skills]
 path   = "$HOME/.config/opencode/skills"
 render = "dir"
+import = "$HOME/.config/opencode/skills"
 
 [capabilities.mcp]
 path   = "$HOME/.config/opencode/opencode.json"
@@ -28,6 +32,7 @@ import = "$HOME/.config/opencode/opencode.json"
 [capabilities.commands]
 path   = "$HOME/.config/opencode/commands"
 render = "dir"
+import = "$HOME/.config/opencode/commands"
 
 # Agent markdown files, `mode: subagent` in the frontmatter. Plural, per
 # https://opencode.ai/docs/agents/ read 2026-08-12.
@@ -40,6 +45,7 @@ render = "dir"
 [capabilities.subagents]
 path   = "$HOME/.config/opencode/agents"
 render = "dir"
+import = "$HOME/.config/opencode/agents"
 
 # How this harness names the things an agent does. Verified by running one:
 # `tool.execute.before` receives `input.tool`, and a read arrived as `read` with

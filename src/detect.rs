@@ -8,47 +8,6 @@
 
 use std::path::Path;
 
-/// A detected stack and the commands that go with it. The commands are what
-/// make detection useful: they become the base hooks and the AGENTS.md body.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stack {
-    pub name: &'static str,
-    pub marker: &'static str,
-    pub test: &'static str,
-    pub format: &'static str,
-}
-
-/// Every stack omh can detect. Public so `init`'s guard can seed a hook for
-/// each of them rather than only for whatever stack this repo happens to be —
-/// the test iterated `stacks(CARGO_MANIFEST_DIR)`, which is rust and nothing
-/// else, so three quarters of what `init` writes went unexercised.
-pub const KNOWN: [Stack; 4] = [
-    Stack {
-        name: "rust",
-        marker: "Cargo.toml",
-        test: "cargo test",
-        format: "cargo fmt",
-    },
-    Stack {
-        name: "node",
-        marker: "package.json",
-        test: "npm test",
-        format: "npm run format",
-    },
-    Stack {
-        name: "python",
-        marker: "pyproject.toml",
-        test: "pytest",
-        format: "ruff format .",
-    },
-    Stack {
-        name: "go",
-        marker: "go.mod",
-        test: "go test ./...",
-        format: "gofmt -w .",
-    },
-];
-
 /// A derived fact, with the source that produced it. The source is not
 /// decoration — `omh why` has to be able to explain every default.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,17 +16,68 @@ pub struct Seed {
     pub fact: String,
 }
 
-/// A stack by name, for reading a hook filename back into the marker it
-/// implies. The launcher needs this to notice a hook whose stack has gone.
-pub fn known(name: &str) -> Option<Stack> {
-    KNOWN.into_iter().find(|s| s.name == name)
+/// Which executable a command needs in order to run at all.
+///
+/// This is the generic kernel of toolchain detection, and it is deliberately
+/// ignorant of every stack omh ships: omh is not a rust tool that also knows
+/// npm. Give it a command string — one of ours or one somebody wrote by hand —
+/// and it names the program that has to be on PATH.
+///
+/// `None` means *cannot tell*, never *nothing is needed*. The two failure
+/// directions are not symmetric: missing a gap costs one confusing hook error,
+/// which is the status quo, while inventing one makes omh drop a working hook
+/// or interrogate somebody about a toolchain they already have. Everything
+/// ambiguous therefore resolves to `None`, and no caller may act on it.
+pub fn program(command: &str) -> Option<&str> {
+    let word = command.split_whitespace().find(|w| !is_assignment(w))?;
+    is_program_name(word).then_some(word)
 }
 
-pub fn stacks(repo: &Path) -> Vec<Stack> {
-    KNOWN
-        .into_iter()
-        .filter(|s| repo.join(s.marker).exists())
-        .collect()
+/// Is this word a program name, or is it shell?
+///
+/// An **allowlist**. A list of metacharacters to reject says nothing about the
+/// syntax it failed to think of, and the cost of missing one is not cosmetic:
+/// `$(which cargo) test` yields a candidate of `$(which`, which resolves
+/// nowhere, so omh reports a missing program in a repo whose cargo is fine,
+/// asks about it, and records an answer that switches a working hook off for
+/// everyone who clones. That is the expensive failure direction this module
+/// opens by naming.
+///
+/// The set is what a program name is actually made of — a bare name, a version
+/// suffix (`python3.11`), a path (`./scripts/test.sh`), a `+` or `-` in the
+/// name (`g++`, `cargo-nextest`). Anything else is *cannot tell*.
+fn is_program_name(word: &str) -> bool {
+    !word.is_empty()
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '+'))
+}
+
+/// `FOO=1 cargo test` runs cargo. A leading assignment is an ordinary shape for
+/// a test command and names no executable, so reporting `FOO=1` missing would
+/// be a gap omh invented. Recognising one word too many is safe — it costs a
+/// `None` — so this stays permissive on purpose.
+fn is_assignment(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((name, _)) => {
+            !name.is_empty()
+                && !name.starts_with(|c: char| c.is_ascii_digit())
+                && name.chars().all(|c| c.is_alphanumeric() || c == '_')
+        }
+        None => false,
+    }
+}
+
+/// Every stack omh ships, loaded from the repository's own `stacks/`.
+///
+/// The replacement for the `KNOWN` constant the tests used to iterate, and it
+/// reads exactly what production reads — so a guard cannot pass against a
+/// hardcoded list while the shipped data says something else. Two registries
+/// free to disagree is the failure this whole step removes.
+#[cfg(test)]
+pub(crate) fn shipped() -> Vec<crate::stack::Definition> {
+    crate::stack::load_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/stacks")))
+        .expect("the shipped stacks must load")
 }
 
 /// Which harness to default to. Host evidence is only a *hint*: the harness
@@ -84,7 +94,7 @@ pub fn preferred_harness(
 }
 
 /// Facts derived for memory. No questions asked.
-pub fn seeds(repo: &Path) -> Vec<Seed> {
+pub fn seeds(defs: &[crate::stack::Definition], repo: &Path) -> Vec<Seed> {
     let mut out = Vec::new();
 
     // First non-heading, non-empty line of the README is the project in one line.
@@ -109,13 +119,15 @@ pub fn seeds(repo: &Path) -> Vec<Seed> {
         }
     }
 
-    for s in stacks(repo) {
+    for def in crate::stack::detected(defs, repo) {
+        // The ecosystem and its evidence, without the commands the fact used to
+        // carry. Those live in hook files now, which are themselves the record
+        // — a seed repeating one would be a copy in the note store, ageing
+        // independently of the file it was copied from, which is the failure
+        // the note store exists to avoid rather than to cause.
         out.push(Seed {
-            source: s.marker.into(),
-            fact: format!(
-                "stack: {} (test `{}`, format `{}`)",
-                s.name, s.test, s.format
-            ),
+            source: def.marker.clone(),
+            fact: format!("stack: {}", def.name),
         });
     }
 
@@ -151,12 +163,93 @@ mod tests {
         (dir, root)
     }
 
+    // ── the program a command needs ──────────────────────────────────────────
+
+    /// The generic kernel. omh is not a rust tool that also knows npm: it takes
+    /// a command string it was given and reports which executable has to exist
+    /// for that string to run. Every shipped stack goes through here, and so
+    /// does a command somebody wrote by hand.
+    #[test]
+    fn the_program_a_command_needs_is_the_word_that_runs() {
+        for (command, want) in [
+            ("cargo test", "cargo"),
+            ("npm run format", "npm"),
+            ("pytest", "pytest"),
+            ("ruff format .", "ruff"),
+            ("go test ./...", "go"),
+            ("gofmt -w .", "gofmt"),
+        ] {
+            assert_eq!(program(command), Some(want), "for {command:?}");
+        }
+    }
+
+    /// The asymmetry that governs this whole feature. Failing to spot a
+    /// missing program costs one confusing hook error — the status quo. Naming
+    /// a program missing when it is not is worse: omh drops a hook that works,
+    /// or interrogates somebody about a toolchain they already have. So when a
+    /// command is not something we can read with confidence the answer is
+    /// `None` — *cannot tell* — and no caller is entitled to act on it.
+    #[test]
+    fn a_command_we_cannot_read_names_no_program_rather_than_a_wrong_one() {
+        assert_eq!(program(""), None, "an empty command runs nothing");
+        assert_eq!(program("   "), None, "and neither does whitespace");
+        // A leading environment assignment is an ordinary shape for a test
+        // command, and it names no executable. Reporting `RUST_LOG=debug`
+        // missing would be a gap omh invented.
+        assert_eq!(program("RUST_LOG=debug cargo test"), Some("cargo"));
+        assert_eq!(program("FOO=1 BAR=2 pytest"), Some("pytest"));
+        assert_eq!(program("FOO=1"), None, "assignments alone run nothing");
+    }
+
+    /// A word carrying shell syntax is not a program name, and guessing one out
+    /// of it fabricates a gap. `$(which cargo) test` otherwise reports a missing
+    /// program called `$(which` — in a repo whose cargo is fine — and the
+    /// recorded answer switches a working hook off for everyone who clones it.
+    ///
+    /// An allowlist, not a list of metacharacters to reject. A denylist says
+    /// nothing about whatever syntax it failed to think of, which is the lesson
+    /// `image::probe_args`' guard had to learn twice.
+    #[test]
+    fn a_word_carrying_shell_syntax_names_no_program() {
+        for command in [
+            "$(which cargo) test",
+            "${CARGO:-cargo} test",
+            "`which cargo` test",
+            // Not a valid shell variable name, so `is_assignment` correctly
+            // declines to skip it — which leaves it as the candidate, and it is
+            // not a program either.
+            "2FOO=1 cargo test",
+            "cargo|tee test",
+            "cargo&&true",
+        ] {
+            assert_eq!(program(command), None, "for {command:?}");
+        }
+    }
+
+    /// And the ordinary shapes still resolve. An allowlist that refused real
+    /// program names would be worse than the guess it replaced — it would
+    /// invent a *silence* instead of a gap, and silence is what stops a real
+    /// missing toolchain being reported at all.
+    #[test]
+    fn an_ordinary_program_name_still_resolves() {
+        for (command, want) in [
+            ("./scripts/test.sh", "./scripts/test.sh"),
+            ("python3.11 -m pytest", "python3.11"),
+            ("g++ -o x x.cc", "g++"),
+            ("/usr/local/bin/cargo test", "/usr/local/bin/cargo"),
+            ("cargo-nextest run", "cargo-nextest"),
+        ] {
+            assert_eq!(program(command), Some(want), "for {command:?}");
+        }
+    }
+
     // ── stacks ──────────────────────────────────────────────────────────────
 
     #[test]
     fn a_manifest_identifies_the_stack() {
         let (_d, r) = repo(&[("Cargo.toml", "[package]")]);
-        let found = stacks(&r);
+        let defs = shipped();
+        let found = crate::stack::detected(&defs, &r);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "rust");
     }
@@ -164,8 +257,21 @@ mod tests {
     #[test]
     fn a_polyglot_repo_reports_every_stack() {
         let (_d, r) = repo(&[("Cargo.toml", ""), ("package.json", "{}")]);
-        let names: Vec<_> = stacks(&r).into_iter().map(|s| s.name).collect();
-        assert_eq!(names, ["rust", "node"]);
+        let defs = shipped();
+        let names: std::collections::BTreeSet<_> = crate::stack::detected(&defs, &r)
+            .into_iter()
+            .map(|s| s.name.clone())
+            .collect();
+
+        // A set, not a sequence. Order *within* a stack is load-bearing —
+        // `corepack enable pnpm` needs node first — but order *across* stacks
+        // is whatever `load_dir` sorted by, and nothing may come to depend on
+        // it. Asserting the old declaration order would have pinned an
+        // accident.
+        assert_eq!(
+            names,
+            ["rust", "node"].map(String::from).into_iter().collect()
+        );
     }
 
     /// Guessing a stack would generate wrong hooks that fail on every agent
@@ -173,17 +279,8 @@ mod tests {
     #[test]
     fn no_marker_means_no_stack_rather_than_a_guess() {
         let (_d, r) = repo(&[("README.md", "hello")]);
-        assert!(stacks(&r).is_empty());
-    }
-
-    /// Detection is only worth doing because it yields commands — these become
-    /// the base test-on-stop and format-on-edit hooks.
-    #[test]
-    fn every_known_stack_supplies_commands() {
-        for s in KNOWN {
-            assert!(!s.test.is_empty(), "{} has no test command", s.name);
-            assert!(!s.format.is_empty(), "{} has no format command", s.name);
-        }
+        let defs = shipped();
+        assert!(crate::stack::detected(&defs, &r).is_empty());
     }
 
     // ── harness preference ──────────────────────────────────────────────────
@@ -219,7 +316,7 @@ mod tests {
             ("README.md", "# omh\n\noh-my-zsh for agentic coding.\n"),
             ("Cargo.toml", "[package]\nname = \"omh\""),
         ]);
-        let s = seeds(&r);
+        let s = seeds(&shipped(), &r);
         assert!(
             s.iter().any(|x| x.fact.contains("oh-my-zsh")),
             "README should seed the project description: {s:?}"
@@ -237,7 +334,7 @@ mod tests {
     #[test]
     fn a_blockquote_tagline_is_read_as_prose() {
         let (_d, r) = repo(&[("README.md", "# omh\n\n> Launch any coding harness.\n")]);
-        let s = seeds(&r);
+        let s = seeds(&shipped(), &r);
         let fact = &s
             .iter()
             .find(|x| x.source == "README.md")
@@ -257,7 +354,7 @@ mod tests {
             "README.md",
             "# p\n\n[![CI](https://img.shields.io/x)](https://ci)\n\nA real description.\n",
         )]);
-        let s = seeds(&r);
+        let s = seeds(&shipped(), &r);
         let fact = &s
             .iter()
             .find(|x| x.source == "README.md")
@@ -269,7 +366,7 @@ mod tests {
     #[test]
     fn every_seed_cites_its_source() {
         let (_d, r) = repo(&[("README.md", "# p\n\nA thing.\n"), ("go.mod", "module x")]);
-        for seed in seeds(&r) {
+        for seed in seeds(&shipped(), &r) {
             assert!(!seed.source.is_empty(), "unsourced seed: {seed:?}");
         }
     }
@@ -277,13 +374,13 @@ mod tests {
     #[test]
     fn an_empty_repo_seeds_nothing_rather_than_inventing() {
         let (_d, r) = repo(&[]);
-        assert!(seeds(&r).is_empty());
+        assert!(seeds(&shipped(), &r).is_empty());
     }
 
     #[test]
     fn existing_rules_are_seeded_so_conventions_survive() {
         let (_d, r) = repo(&[("AGENTS.md", "# Rules\n\nTDD always.\n")]);
-        let s = seeds(&r);
+        let s = seeds(&shipped(), &r);
         assert!(
             s.iter().any(|x| x.source.contains("AGENTS.md")),
             "got: {s:?}"

@@ -7,15 +7,18 @@
 //! the profile is *mounted* rather than copied, so there is no drift to fight.
 
 mod adapter;
+mod ask;
 mod auth;
 mod base;
 mod bundled;
 mod carry;
 mod config;
 mod container;
+mod derive;
 mod detect;
 mod doctor;
 mod editor;
+mod facts;
 mod hook;
 mod idle;
 mod image;
@@ -31,6 +34,7 @@ mod selection;
 mod session;
 mod settings;
 mod ssh;
+mod stack;
 mod why;
 
 use adapter::Adapter;
@@ -39,6 +43,8 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use profile::{Paths, Profile};
 use session::Session;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Parser)]
@@ -119,9 +125,9 @@ fn passthrough(argv: &[String], globals: &[String]) -> Result<Vec<String>> {
 
 /// Built-ins and their aliases always beat a harness name — otherwise an
 /// adapter called `s` or `config` would silently shadow a command.
-pub const RESERVED: [&str; 18] = [
+pub const RESERVED: [&str; 19] = [
     "init", "doctor", "d", "auth", "ls", "attach", "a", "sessions", "s", "config", "c", "graph",
-    "why", "memory", "help", "use", "unuse", "repo",
+    "why", "memory", "help", "use", "unuse", "repo", "import",
 ];
 
 #[derive(Subcommand)]
@@ -192,6 +198,16 @@ enum Cmd {
     Memory {
         #[command(subcommand)]
         cmd: Option<MemoryCmd>,
+    },
+    /// Bring a setup you already have into omh.
+    Import {
+        capability: String,
+        harness: String,
+        /// Read this instead of where the adapter says the harness keeps it —
+        /// for a config somewhere else, and for seeing what omh would do
+        /// without pointing it at your own.
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
     },
     /// Anything else is a harness: `omh claude`, `omh opencode`.
     #[command(external_subcommand)]
@@ -480,6 +496,12 @@ fn main() -> Result<()> {
         } => use_cmd(&cwd, capability.as_deref(), name.as_deref(), *all),
         Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name),
 
+        Cmd::Import {
+            capability,
+            harness,
+            from,
+        } => import_cmd(&cwd, capability, harness, from.as_deref()),
+
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
             Some(MemoryCmd::Lint) => memory_lint(&cwd),
@@ -603,6 +625,11 @@ fn session_up(
     adapter: &Adapter,
     session: &Session,
     opts: container::Options,
+    // The recipe behind `opts.image`. Handed in beside it rather than derived
+    // here, so the tag a session runs and the layer that gets built come from
+    // one `sandbox()` call and cannot describe different images — the split
+    // that let `init` build a layer no launch ever ran.
+    recipe: &[&str],
 ) -> Result<(Box<dyn runtime::Runtime>, String)> {
     let backend = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))?;
     let name = paths.container(&session.id);
@@ -636,7 +663,7 @@ fn session_up(
     // The account must reach *this* plan: this is the container that actually
     // runs. Building it without credentials is how every session started
     // logged out while `--dry-run` advertised the mounts.
-    say_selection(profile, &opts.repo);
+    say_selection(paths, profile, &opts.repo);
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate(&backend.caps())?;
 
@@ -668,7 +695,7 @@ fn session_up(
     }
 
     say_rules(&plan);
-    image::ensure(backend.program(), adapter)?;
+    image::ensure_stack(backend.program(), adapter, recipe)?;
     image::ensure_network(backend.program(), &plan.network)?;
 
     let key = ssh::ensure_key(&paths.keys())?;
@@ -723,6 +750,17 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
         .context("no adapters installed — run `omh init`")?;
     let adapter = Adapter::find(&paths.adapters(), &harness)?;
     let (own, repo) = resolved(&paths)?;
+    let mut sandbox = sandbox(&paths, &adapter, &repo)?;
+    if let Ok(backend) = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)) {
+        sandbox.top_up(
+            &paths,
+            backend.program(),
+            &adapter,
+            &profile.sources(adapter::Capability::Hooks)?,
+            &own,
+            &repo,
+        )?;
+    }
 
     std::fs::create_dir_all(paths.worktrees())?;
     let id = session::pick(&paths.worktrees(), id, false);
@@ -737,6 +775,25 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
+
+    // Said here, because `attach` is the one launch path that never said it.
+    // `run` carries the drop list in its status line, built from the plan it
+    // makes itself; `session_up` builds its own plan and discards it, so
+    // `omh code` staged a hooks document with hooks removed and reported
+    // nothing — and this is the path where it matters most, for the reason
+    // `say_selection` gives: it is how you rejoin a session whose setup you
+    // have since changed.
+    //
+    // Through `render::held_back`, so the wording and the set are `init`'s.
+    for d in render::held_back(
+        &profile.sources(adapter::Capability::Hooks)?,
+        &own,
+        &repo,
+        &sandbox.resolves,
+    )? {
+        eprintln!("omh: `{}` needs {} — held back", d.name, d.wanted);
+    }
+
     session_up(
         &paths,
         &profile,
@@ -751,7 +808,10 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             base: Some(session::default_branch(&paths.repo)),
             omh: own,
             repo,
+            image: sandbox.tag.clone(),
+            resolves: sandbox.resolves.clone(),
         },
+        &sandbox.recipe(),
     )?;
 
     // The integration point is a managed SSH config include, not an IDE plugin —
@@ -985,7 +1045,18 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     // Resolved once and used for both the checks and the plan below, so the
     // probe cannot check a session different from the one it launches.
     let (own, repo) = resolved(&paths)?;
-    let mut checks = doctor::checks(&profile, &adapter, &own, &repo)?;
+    let mut sandbox = sandbox(&paths, &adapter, &repo)?;
+    if let Ok(backend) = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)) {
+        sandbox.top_up(
+            &paths,
+            backend.program(),
+            &adapter,
+            &profile.sources(adapter::Capability::Hooks)?,
+            &own,
+            &repo,
+        )?;
+    }
+    let mut checks = doctor::checks(&profile, &adapter, &own, &repo, &sandbox.resolves)?;
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
@@ -1025,11 +1096,13 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         base: Some(session::default_branch(&paths.repo)),
         omh: own,
         repo,
+        image: sandbox.tag.clone(),
+        resolves: sandbox.resolves.clone(),
     };
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
-    say_selection(&profile, &opts.repo);
+    say_selection(&paths, &profile, &opts.repo);
     let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
     say_rules(&plan);
     plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
@@ -1042,18 +1115,18 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         return Ok(());
     }
 
-    image::ensure(backend.program(), &adapter)?;
+    image::ensure_stack(backend.program(), &adapter, &sandbox.recipe())?;
     image::ensure_network(backend.program(), &plan.network)?;
 
     match &account {
         Some(a) => println!(
             "omh doctor: {name} (in {}, account {})\n",
-            image::tag_for(&adapter),
+            sandbox.tag,
             a.file_name().unwrap_or_default().to_string_lossy()
         ),
         None => println!(
             "omh doctor: {name} (in {}, no account — credentials unchecked)\n",
-            image::tag_for(&adapter)
+            sandbox.tag
         ),
     }
     let out = Command::new(backend.program())
@@ -1312,7 +1385,10 @@ fn seed_store(paths: &Paths) -> Result<String> {
         }
     }
 
-    let seeds = detect::seeds(&paths.repo);
+    let seeds = detect::seeds(
+        &stack::load_all(&paths.stacks(), &paths.repo_stacks())?,
+        &paths.repo,
+    );
     if let Some(note) =
         memory::ingest::overview(&paths.repo_name(), &seeds, &stubs, &templates, &today)?
     {
@@ -1829,6 +1905,455 @@ fn write_lists(
 /// The name is validated here rather than at the write, which is the same rule
 /// `[use]` follows: a name is checked where it is minted, so `omh use` cannot
 /// put something in the file that reading the file would refuse.
+/// Bring one capability across from a harness you already use.
+///
+/// **Hooks go to the repo; everything else goes to the catalogue.** That
+/// asymmetry is the design rather than an accident: a hook binds to one
+/// project's commands, and a skill, a rule or a command is a way *you* work and
+/// travels with you. Importing a skill into a repo would be a skill you only
+/// had in one place; importing a hook into the catalogue would put one
+/// project's formatter in front of every other project you open.
+fn import_cmd(
+    cwd: &std::path::Path,
+    capability: &str,
+    harness: &str,
+    from: Option<&std::path::Path>,
+) -> Result<()> {
+    let cap = adapter::Capability::from_key(capability).with_context(|| {
+        format!(
+            "`{capability}` is not a capability — expected {}",
+            capability_list()
+        )
+    })?;
+    let paths = Paths::discover(cwd)?;
+    let adapter = Adapter::find(&paths.adapters(), harness)?;
+    let binding = adapter
+        .supports(cap)
+        .with_context(|| format!("{harness} has no {cap} for omh to read"))?;
+
+    let source = match from {
+        Some(f) => f.to_path_buf(),
+        None => {
+            let template = binding.import.as_deref().with_context(|| {
+                format!(
+                    "{harness} keeps its {cap} somewhere omh cannot read — \
+                     `omh import {capability} {harness} --from <path>` if you know where"
+                )
+            })?;
+            let home = dirs::home_dir().context("no home directory")?;
+            adapter::expand_host(template, &home, &paths.repo)
+        }
+    };
+    if !source.exists() {
+        println!("{harness} has no {cap} here ({})", source.display());
+        return Ok(());
+    }
+
+    match cap {
+        // Hooks are translated rather than copied — they are the one capability
+        // whose format is omh's own — and they land in the repo.
+        adapter::Capability::Hooks => import_hooks(&paths, &adapter, binding, &source),
+        adapter::Capability::Mcp => anyhow::bail!(
+            "MCP servers are `omh config mcp import {harness}` — a server is a \
+             record in one file, not an entry with its own"
+        ),
+        _ => import_entries(&paths, harness, cap, binding.render, &source),
+    }
+}
+
+/// Copy into the catalogue what a harness already holds, entry by entry.
+///
+/// **Into `~/.omh/`, not the repo** — the opposite of hooks, and for the reason
+/// `docs/configuration.md` gives: a skill is a way *you* work and travels with
+/// you across projects, while a hook binds to one repo's commands. Importing a
+/// skill into a repo would be a skill you only had in one place.
+///
+/// Rules are one file becoming one entry named after the harness it came from;
+/// everything else is a directory whose children each become an entry. Which
+/// shape a capability has is read off the adapter's `render`, not hardcoded —
+/// the same field the launcher stages by.
+///
+/// Never clobbers. An entry already in your catalogue is left exactly as it is
+/// and reported, so re-running is a no-op and an import cannot quietly replace
+/// something you have since edited.
+fn import_entries(
+    paths: &Paths,
+    harness: &str,
+    cap: adapter::Capability,
+    render: adapter::Render,
+    source: &std::path::Path,
+) -> Result<()> {
+    let dest = paths.root.join(cap.source());
+    let mut taken = 0usize;
+
+    let entries: Vec<(String, std::path::PathBuf)> = match render {
+        // One file, one entry. Named after the harness rather than after the
+        // file: `CLAUDE.md` in your catalogue says nothing about whose rules
+        // they were, and `omh why rules/claude` is the question somebody asks.
+        adapter::Render::Concat => vec![(format!("{harness}.md"), source.to_path_buf())],
+        _ => {
+            let mut found = Vec::new();
+            let listing = std::fs::read_dir(source)
+                .with_context(|| format!("reading {}", source.display()))?;
+            for entry in listing {
+                let path = entry
+                    .with_context(|| format!("reading {}", source.display()))?
+                    .path();
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                found.push((name.into_owned(), path));
+            }
+            found.sort();
+            found
+        }
+    };
+
+    println!("importing {harness} {cap} from {}", source.display());
+    for (name, from) in entries {
+        // The stem, because a catalogue entry is a name and `review-diff.md` is
+        // a filename. `validate_entry_name` then refuses `..`, a separator, and
+        // every dotfile in one arm — so `../evil` cannot name an entry, and a
+        // path cannot be smuggled in as one.
+        let stem = std::path::Path::new(&name)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if let Err(e) = selection::validate_entry_name(&stem, cap, source) {
+            println!("  skipped  {name} — {e:#}");
+            continue;
+        }
+        let to = dest.join(if from.is_dir() {
+            stem.clone()
+        } else {
+            name.clone()
+        });
+        if to.exists() {
+            println!("  kept     {stem} — already in your catalogue");
+            continue;
+        }
+        match copy_entry(&from, &to) {
+            Ok(()) => {
+                println!("  imported {stem}");
+                taken += 1;
+            }
+            Err(e) => println!("  skipped  {stem} — {e:#}"),
+        }
+    }
+    if taken == 0 {
+        println!("  nothing new");
+    }
+    Ok(())
+}
+
+/// Copy one catalogue entry — a file, or a directory whole.
+///
+/// **Refuses any symlink**, at any depth, rather than following it or copying
+/// it as a link. Following one lets a skill directory reach outside itself, and
+/// the catalogue is mounted into every sandbox omh launches — so a link to
+/// `~/.ssh` in somebody's skill would become a file the agent can read, in
+/// every project, from a copy they had no reason to inspect. Copying the link
+/// verbatim is no better: it points somewhere that means something else once
+/// the entry has moved.
+///
+/// Refusing whole rather than skipping the link: an entry with a piece missing
+/// is not a smaller version of that entry, and this is the same rule
+/// `render::parse_hooks` applies to a handler it cannot say completely.
+fn copy_entry(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    // Looked at **before** anything is written, so the common refusal never
+    // starts a copy — and undone below if a write fails for any other reason,
+    // because "refused whole" has to mean nothing was left behind. A
+    // half-copied skill is mounted into every sandbox exactly as a whole one
+    // is, and reads as an entry somebody chose.
+    refuse_symlinks(from)?;
+    if let Err(e) = copy_tree(from, to) {
+        // Safe to remove: `import_entries` only calls this for a destination
+        // that did not exist, so everything here is what this call just wrote.
+        let undone = if to.is_dir() {
+            std::fs::remove_dir_all(to)
+        } else {
+            std::fs::remove_file(to)
+        };
+        // **And the undo is not allowed to fail quietly.** It fails for the
+        // same reasons the copy did — a read-only destination, a
+        // permission-denied child — so the residue survives precisely in the
+        // cases that produced it. The caller then prints `skipped`, which means
+        // *nothing was written*, and the **next** run sees the partial entry,
+        // reports `kept — already in your catalogue`, and mounts it into every
+        // sandbox omh launches. A skill with its `SKILL.md` and none of its
+        // scripts, presented as one somebody chose to keep.
+        if let Err(u) = undone {
+            return Err(e).with_context(|| {
+                format!(
+                    "and {} could not be removed ({u}) — a partial copy is still \
+                     there, and the next import will report it as an entry you \
+                     already have. Delete it before re-running.",
+                    to.display()
+                )
+            });
+        }
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Refuse a symlink at any depth, before a byte is written.
+fn refuse_symlinks(from: &std::path::Path) -> Result<()> {
+    let meta =
+        std::fs::symlink_metadata(from).with_context(|| format!("reading {}", from.display()))?;
+    anyhow::ensure!(
+        !meta.file_type().is_symlink(),
+        "{} is a symlink, and omh will not copy one into a catalogue that is \
+         mounted into every sandbox",
+        from.display()
+    );
+    if meta.is_dir() {
+        let listing =
+            std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))?;
+        for entry in listing {
+            refuse_symlinks(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        let listing =
+            std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))?;
+        for entry in listing {
+            let child = entry?.path();
+            let name = child
+                .file_name()
+                .context("a path from read_dir has a name")?;
+            copy_tree(&child, &to.join(name))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(from, to).with_context(|| format!("copying {}", from.display()))?;
+    Ok(())
+}
+
+/// Harnesses on this machine whose hooks omh could bring across.
+///
+/// **A report, never an action.** Importing writes executable content into
+/// somebody's repo, and doing that because `init` found a file would be omh
+/// deciding on their behalf what runs at the end of their turns. So `init`
+/// names what is there and what would take it; `omh import hooks` is a
+/// separate act somebody chooses.
+///
+/// Never fatal and never noisy: a harness with no config, a config that will
+/// not parse, an adapter that declares no import path — all of them are simply
+/// not mentioned. There is nothing to tell somebody about a file that is not
+/// there.
+fn importable(paths: &Paths, harnesses: &[String]) -> Vec<String> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for name in harnesses {
+        let Ok(adapter) = Adapter::find(&paths.adapters(), name) else {
+            continue;
+        };
+        let Some(binding) = adapter.supports(adapter::Capability::Hooks) else {
+            continue;
+        };
+        let Some(template) = binding.import.as_deref() else {
+            continue;
+        };
+        let source = adapter::expand_host(template, &home, &paths.repo);
+        // **Absent and unreadable are not the same thing**, and this function's
+        // own justification used to conflate them: "there is nothing to tell
+        // somebody about a file that is not there" is true, and a
+        // `~/.claude/settings.json` full of hooks that is one comma short of
+        // parsing *is* there. Silent, it produces the same output as a clean
+        // machine — so somebody works in omh with none of their hooks, believes
+        // omh found nothing of theirs, and never runs the one command that
+        // would print the reason.
+        let raw = match std::fs::read_to_string(&source) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                out.push(format!(
+                    "import     {name}'s hooks are at {} and omh could not read \
+                     it ({e})",
+                    source.display()
+                ));
+                continue;
+            }
+        };
+        let Ok(vocab) = hook::Vocabulary::of(binding, &adapter.tools) else {
+            continue;
+        };
+        let (found, residue) = match render::parse_hooks(&raw, &vocab) {
+            Ok(v) => v,
+            Err(e) => {
+                out.push(format!(
+                    "import     {name} has hooks in {} that omh could not read \
+                     ({e:#}) — omh import hooks {name} to see why",
+                    source.display()
+                ));
+                continue;
+            }
+        };
+        if found.is_empty() && residue.is_empty() {
+            continue;
+        }
+        out.push(format!(
+            "import     {name} has {} hook{} omh can read{} — omh import hooks {name}",
+            found.len(),
+            if found.len() == 1 { "" } else { "s" },
+            if residue.is_empty() {
+                String::new()
+            } else {
+                format!(" and {} it cannot", residue.len())
+            }
+        ));
+    }
+
+    // And the capabilities that are copied rather than translated. Counted by
+    // what is actually there — an empty `~/.claude/commands` says nothing worth
+    // a line, and a line per harness per capability would bury the report in
+    // things nobody has.
+    for name in harnesses {
+        let Ok(adapter) = Adapter::find(&paths.adapters(), name) else {
+            continue;
+        };
+        for cap in adapter::Capability::ALL {
+            if matches!(cap, adapter::Capability::Hooks | adapter::Capability::Mcp) {
+                continue;
+            }
+            let Some(template) = adapter.supports(cap).and_then(|b| b.import.as_deref()) else {
+                continue;
+            };
+            let source = adapter::expand_host(template, &home, &paths.repo);
+            let held = match std::fs::read_dir(&source) {
+                Ok(listing) => listing.count(),
+                // A rules import is one file rather than a directory, so it
+                // counts as one thing when it is there.
+                Err(_) if source.is_file() => 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+                // Same rule as the hooks half: a directory omh cannot read is
+                // not a directory with nothing in it, and reporting zero would
+                // be indistinguishable from a machine that has none.
+                Err(e) => {
+                    out.push(format!(
+                        "import     {name}'s {cap} are at {} and omh could not \
+                         read it ({e})",
+                        source.display()
+                    ));
+                    continue;
+                }
+            };
+            if held > 0 {
+                out.push(format!(
+                    "import     {name} has {held} {cap} — omh import {cap} {name}"
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// Bring hooks somebody already configured in a harness into this repo.
+///
+/// **Into `<repo>/.omh/hooks/`, never the catalogue.** A catalogue hook runs in
+/// every repo you ever open, so importing one project's `prettier --write`
+/// there would put it in front of every other project you touch — worse than
+/// not importing at all, and invisible until it ran somewhere it should not
+/// have.
+///
+/// **Copy, never move.** The harness keeps working exactly as it did; adopting
+/// omh is not a migration you cannot back out of. The source file is not
+/// touched at all.
+///
+/// Two failure modes this is written against, and both are silent:
+///
+/// - **A hook that lands and never runs.** `[use]` is what the launcher reads,
+///   so a file written without being selected is a hook `omh import` counted
+///   and no session will ever ship. The report would say `+6` and the launch
+///   would ship none.
+/// - **A hook that stops every launch.** A file answering to a name omh's base
+///   manifest owns makes `merge_hooks` bail, which fails the whole session
+///   rather than that one hook. Refused here, by name.
+fn import_hooks(
+    paths: &Paths,
+    adapter: &Adapter,
+    binding: &adapter::Binding,
+    source: &std::path::Path,
+) -> Result<()> {
+    let harness = &adapter.name;
+    let raw =
+        std::fs::read_to_string(source).with_context(|| format!("reading {}", source.display()))?;
+
+    let vocab = hook::Vocabulary::of(binding, &adapter.tools)
+        .with_context(|| format!("reading {harness}'s vocabulary backwards"))?;
+    let (found, residue) = render::parse_hooks(&raw, &vocab)?;
+
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    // Every hook name the manifest owns, whether or not its feature is on
+    // here — a repo with `codegraph` disabled must still not be handed a file
+    // called `graph-refresh`, because enabling it later would then fail every
+    // launch rather than that one hook.
+    let reserved: std::collections::BTreeSet<String> = manifest
+        .owns()
+        .get(&adapter::Capability::Hooks)
+        .map(|owned| owned.keys().cloned().collect())
+        .unwrap_or_default();
+    let dir = paths.repo.join(".omh/hooks");
+
+    println!("importing {harness} hooks from {}", source.display());
+    let mut written = Vec::new();
+    for (name, hook) in &found {
+        // A name omh's manifest owns is not a hook that would be shadowed —
+        // it is a file `merge_hooks` refuses, which takes the whole session
+        // down rather than just this hook. Refused here, where the person can
+        // still see why.
+        if reserved.contains(name) {
+            println!("  skipped  {name} — omh ships a hook by that name");
+            continue;
+        }
+        let path = dir.join(format!("{name}.json"));
+        if path.exists() {
+            println!("  kept     {name} — already here, left as it is");
+            continue;
+        }
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(hook)?))?;
+        println!("  imported {name} — {}", hook.does());
+        written.push(name.clone());
+    }
+
+    // Selected, or they land dead. This is the failure the whole feature is
+    // most likely to have: files on disk, a report saying six, and a launch
+    // that ships none of them because `[use]` never named them.
+    if !written.is_empty() && repo_has_selection(paths)? {
+        let (cap, mut names, _) = current_list(paths, "hooks", &written[0])?;
+        names.extend(written.iter().cloned());
+        names.sort();
+        names.dedup();
+        let lists = std::collections::BTreeMap::from([(cap, names)]);
+        for w in write_lists(paths, &lists)? {
+            println!("  selected in {}", w.path.display());
+        }
+    }
+
+    // Named, never silently left behind. A hook omh could not bring across is
+    // still in the harness's own file and still running there, which is the
+    // honest outcome — but somebody who was not told would think omh had taken
+    // everything.
+    for d in &residue {
+        println!("  left     {} — {}", d.name, d.wanted);
+    }
+    if found.is_empty() && residue.is_empty() {
+        println!("  nothing to import");
+    }
+    Ok(())
+}
+
 fn current_list(
     paths: &Paths,
     key: &str,
@@ -1875,16 +2400,79 @@ fn catalogue_lists(
     Ok(out)
 }
 
+/// Which of these hooks this repo could ever take.
+///
+/// A hook naming an ecosystem this repo is not is dropped; a hook naming none
+/// is kept, and so is a name nothing declared. **Applicability, not
+/// selection** — `[use]` records what you chose from what you could have
+/// chosen, and offering a rust repo `go-test` makes the unselected report
+/// unreadable rather than more complete.
+///
+/// The asymmetry is deliberate: this drops what names an *undetected* stack,
+/// rather than keeping what names a detected one. Written the other way it
+/// would hide every hook that belongs everywhere, which is most of them.
+/// Which of **this repo's** ecosystems something already speaks for.
+///
+/// The intersection is the whole of it, and leaving it out made a milestone's
+/// worth of code unreachable. `declared_stacks` over the catalogue answers
+/// `{rust, go, python}` in every repo on earth, because that is what omh
+/// ships — so handed to `derive::hooks` as *covered* it meant
+/// `covered.is_empty()` was never true, and every `Makefile`, `justfile` and
+/// `Taskfile` derivation could not fire for anybody. Only node worked, because
+/// omh ships no node hook, which is why nothing looked broken.
+///
+/// The user-visible end was worse than a missing hook: `ask::what_tests_it`
+/// then said *"no stack it knows, no lockfile, no runner"* about a repo whose
+/// `Makefile` omh had just read and whose `test` target it had found.
+fn covered_here(
+    hook_dirs: &[std::path::PathBuf],
+    detected: &[&stack::Definition],
+) -> Result<BTreeSet<String>> {
+    Ok(render::declared_stacks(hook_dirs)?
+        .into_values()
+        .flatten()
+        .filter(|named| detected.iter().any(|d| &d.name == named))
+        .collect())
+}
+
+fn applicable_hooks(
+    names: Vec<String>,
+    declared: &BTreeMap<String, Option<String>>,
+    detected: &BTreeSet<String>,
+) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|n| match declared.get(n) {
+            Some(Some(stack)) => detected.contains(stack),
+            _ => true,
+        })
+        .collect()
+}
+
 /// The names a `[use]` list may hold for `cap`: what the catalogue and this
 /// repo declare, minus omh's own, which `[omh]` governs and `[use]` refuses.
 fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String>> {
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let owned = manifest.owns();
-    Ok(Profile::resolve(paths)
+    let profile = Profile::resolve(paths);
+    let names: Vec<String> = profile
         .entries(cap)?
         .into_iter()
         .filter(|n| !owned.get(&cap).is_some_and(|o| o.contains_key(n)))
-        .collect())
+        .collect();
+    if cap != adapter::Capability::Hooks {
+        return Ok(names);
+    }
+    // Hooks alone can belong to an ecosystem, and omh now ships one set per
+    // ecosystem. Offering a rust repo `go-test` would put every stack omh
+    // knows into the list `init` writes and the launcher reports.
+    let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
+    let detected: BTreeSet<String> = stack::detected(&defs, &paths.repo)
+        .into_iter()
+        .map(|d| d.name.clone())
+        .collect();
+    let declared = render::declared_stacks(&profile.sources(cap)?)?;
+    Ok(applicable_hooks(names, &declared, &detected))
 }
 
 /// Your defaults and your catalogue.
@@ -2015,7 +2603,7 @@ fn show_repo(cwd: &std::path::Path) -> Result<()> {
         println!("  {:<11} {summary}{note}", cap.to_string());
     }
 
-    for line in notice::selection(&profile, &policy.selection)? {
+    for line in notice::selection(&profile, &policy.selection, &catalogue_lists(&paths)?)? {
         println!("\n{line}");
     }
     Ok(())
@@ -2211,7 +2799,44 @@ fn say_rules(plan: &container::Plan) {
 /// can work in; and an unreadable hooks directory stops the launch anyway, in
 /// `render::merge_hooks`, which is where it should.
 fn say_hooks(paths: &Paths) -> Option<notice::Record> {
-    match notice::hooks(paths, &detect::stacks(&paths.repo)) {
+    // An unreadable stacks directory is the same class of non-fatal as the rest
+    // of this function: it costs the drift report, not the session. Reported
+    // and withdrawn, never defaulted to empty — `notice::hooks` reads "no
+    // definitions" as "no stack answers to that name", so an empty list does
+    // not weaken the report, it inverts it and prints the inversion in omh's
+    // own voice.
+    let defs = match stack::load_all(&paths.stacks(), &paths.repo_stacks()) {
+        Ok(defs) => defs,
+        Err(e) => {
+            eprintln!(
+                "omh: could not read your stacks, so this repo's hooks went unchecked — {e:#}"
+            );
+            return None;
+        }
+    };
+    // The same withdrawal for the same reason: which ecosystems are covered and
+    // what each hook file claims both come from reading the hook directories,
+    // and a report built on half of that is a wrong report rather than a
+    // shorter one.
+    // Same withdrawal for the same reason: what each hook file claims comes
+    // from reading the hook directories, and a drift report built on half of
+    // that is a wrong report rather than a shorter one.
+    let dirs = match Profile::resolve(paths).sources(adapter::Capability::Hooks) {
+        Ok(dirs) => dirs,
+        Err(e) => {
+            eprintln!("omh: could not read your hooks — {e:#}");
+            return None;
+        }
+    };
+    let declared = match render::declared_stacks(&dirs) {
+        Ok(declared) => declared,
+        Err(e) => {
+            eprintln!("omh: could not read your hooks, so drift went unchecked — {e:#}");
+            return None;
+        }
+    };
+    let detected = stack::detected(&defs, &paths.repo);
+    match notice::hooks(paths, &detected, &declared) {
         Ok((notices, record)) => {
             for notice in notices {
                 eprintln!("omh: {notice}");
@@ -2238,8 +2863,18 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
 /// including a dry run, never fatal. A selection omh cannot compute is not a
 /// reason to refuse a session — and it cannot be one, because the report exists
 /// to cover a silence rather than to guard anything.
-fn say_selection(profile: &Profile, repo: &settings::RepoPolicy) {
-    match notice::selection(profile, &repo.selection) {
+fn say_selection(paths: &Paths, profile: &Profile, repo: &settings::RepoPolicy) {
+    // Resolved here rather than inside `notice`: which ecosystems this repo is
+    // takes the stack definitions and the checkout, and a report module that
+    // read those would be deciding what it is meant to describe.
+    let applicable = match catalogue_lists(paths) {
+        Ok(lists) => lists,
+        Err(e) => {
+            eprintln!("omh: could not check what this repo uses — {e:#}");
+            return;
+        }
+    };
+    match notice::selection(profile, &repo.selection, &applicable) {
         Ok(notices) => {
             for notice in notices {
                 eprintln!("omh: {notice}");
@@ -2338,6 +2973,25 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     // worktree has none of its own.
     let base = session::default_branch(&paths.repo);
     let (own, repo) = resolved(&paths)?;
+    let mut sandbox = sandbox(&paths, &adapter, &repo)?;
+    // Not on a dry run, which promises to leave no trace: topping up starts a
+    // container and writes `~/.omh/facts.json`. What is already cached is used,
+    // so the plan it prints is the plan a real launch would build from the same
+    // knowledge.
+    if !cli.dry_run {
+        if let Ok(backend) =
+            runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))
+        {
+            sandbox.top_up(
+                &paths,
+                backend.program(),
+                &adapter,
+                &profile.sources(adapter::Capability::Hooks)?,
+                &own,
+                &repo,
+            )?;
+        }
+    }
 
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
@@ -2356,6 +3010,8 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
         base: Some(base.clone()),
         omh: own,
         repo,
+        image: sandbox.tag.clone(),
+        resolves: sandbox.resolves.clone(),
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
@@ -2386,7 +3042,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     plan.validate(&backend.caps())?;
 
     say_rules(&plan);
-    say_selection(&profile, &opts.repo);
+    say_selection(&paths, &profile, &opts.repo);
     let hooks_seen = say_hooks(&paths);
 
     let status_line = match plan.degradation() {
@@ -2423,6 +3079,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
             tty: false,
             ..opts.clone()
         },
+        &sandbox.recipe(),
     )?;
     // The container is up, so the launch happened and the call-out is spent.
     remember_hooks(hooks_seen);
@@ -2479,27 +3136,40 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
         .filter_map(|e| e.command.clone().map(|c| (e.name.clone(), c)))
         .collect();
 
-    // Hooks init generates from stack detection are omh's writing but not omh's
-    // opinion. Reported as neither the base set nor yours, because claiming
-    // either would be false in a way this command exists to prevent.
+    // Hooks that belong to a detected ecosystem are omh's opinion about that
+    // ecosystem, not about this repo. Reported as neither the base set nor
+    // yours, because claiming either would be false in a way this command
+    // exists to prevent.
     //
-    // The command and layer travel with the name, so the claim is checkable:
-    // init writes these only into the shared layer, and only with the command
-    // detection produced. A name match alone proved nothing — anyone can write
-    // a file called `rust-test.json`.
+    // The command travels with the name, so the claim is checkable: this reads
+    // the hook that would actually ship rather than matching on a name anyone
+    // could give a file. What changed with the catalogue is where the body
+    // comes from — the file, not a `match` in Rust — and that a repo shadowing
+    // the name is reported with *its* command, which is the honest answer.
     let mut derived = std::collections::BTreeMap::new();
-    for s in detect::stacks(&paths.repo) {
-        let from = format!("{}, detected from {}", s.name, s.marker);
-        for (suffix, command) in [("test", s.test), ("format", s.format)] {
-            derived.insert(
-                format!("{}-{suffix}", s.name),
-                why::Derived {
-                    from: from.clone(),
-                    command: command.to_string(),
-                    layer: config::Layer::Shared,
-                },
-            );
-        }
+    let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
+    let detected = stack::detected(&stack_defs, &paths.repo);
+    let (own, repo_policy) = resolved(&paths)?;
+    let merged = render::merge_hooks(
+        &Profile::resolve(&paths).sources(adapter::Capability::Hooks)?,
+        &own,
+        &repo_policy,
+    )?;
+    for (name, hook) in &merged {
+        let Some(stack) = hook.stack.as_deref() else {
+            continue;
+        };
+        let Some(def) = detected.iter().find(|d| d.name == stack) else {
+            continue;
+        };
+        derived.insert(
+            name.clone(),
+            why::Derived {
+                from: format!("{}, detected from {}", def.name, def.marker),
+                command: hook.does().to_string(),
+                layer: config::Layer::Shared,
+            },
+        );
     }
 
     let source = manifest.source();
@@ -2518,7 +3188,6 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 fn init(cwd: &std::path::Path) -> Result<()> {
     // Fail fast. Everything below is wasted work outside a repo.
     let paths = Paths::discover(cwd)?;
@@ -2533,6 +3202,22 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // it still lands as a file in `~/.omh/base`, which is where the
     // reviewability actually lives. `omh why` reads the file init seeds from.
     install_bundled(&paths.base(), bundled::Shipped::Base)?;
+    // The stacks, for the same reason and by the same route: what a project
+    // needs installed is omh's opinion, and an opinion imposed on somebody
+    // should be one they can read. Managed, so a shipped fix always lands.
+    install_bundled(&paths.stacks(), bundled::Shipped::Stacks)?;
+    // And the conventional hooks, which used to be a `match` in Rust written
+    // into every repo as two files. As catalogue data they are one body per
+    // ecosystem instead of one per checkout, so a fix reaches everybody; a repo
+    // needing its own spelling shadows the name, which is the rule hooks
+    // already had. Each names the stack it belongs to and nothing else about
+    // it — the marker stays in `stacks/`, so the two cannot drift.
+    install_bundled(&paths.hooks(), bundled::Shipped::Hooks)?;
+    // And the markers: ecosystems omh can recognise and cannot yet set up.
+    // Data rather than a `match` for the same reason the stacks are — a marker
+    // is removed by the same release that ships its stack, and the curation
+    // test refuses the pair being true at once.
+    install_bundled(&paths.markers(), bundled::Shipped::Markers)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     std::fs::create_dir_all(paths.worktrees())?;
 
@@ -2545,8 +3230,18 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         }
     }
 
-    // Detect rather than ask.
-    let stacks = detect::stacks(&paths.repo);
+    // Detect rather than ask — from the stacks just installed above, so this,
+    // the provisioning below and the hook catalogue all read one set of
+    // definitions rather than registries free to drift.
+    //
+    // One list now, where there used to be two: detection filtered through a
+    // view that dropped any stack omh had no hook opinion about, so a
+    // contributed ecosystem was provisioned and invisible in the report. A hook
+    // names its stack instead, so a stack with no hooks is simply a stack with
+    // no hooks — visible, provisioned, and waiting for somebody to contribute
+    // one.
+    let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
+    let stacks = stack::detected(&stack_defs, &paths.repo);
     let names: Vec<String> = adapters.to_vec();
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h));
 
@@ -2595,22 +3290,78 @@ fn init(cwd: &std::path::Path) -> Result<()> {
          # [omh]\n\
          # codegraph = false\n",
     )?;
-    // omh's own hooks are not seeded. They are generated from the manifest at
-    // launch, which is the only arrangement in which omh can ship a fix to
-    // them: `write_if_absent` never revisits, so a repo initialised before
-    // `git-unavailable` was rewritten would have run the broken pattern
-    // forever.
+    // No hooks are seeded into the repo. omh's own are generated from the
+    // manifest at launch, which is the only arrangement in which omh can ship a
+    // fix to them: `write_if_absent` never revisits, so a repo initialised
+    // before `git-unavailable` was rewritten would have run the broken pattern
+    // forever. The conventional ones are catalogue files for the same reason —
+    // `cargo test` is what a rust project runs, not what *this* rust project
+    // runs, so one body per ecosystem is the honest scope and a fix reaches
+    // everybody who already ran `init`.
     //
-    // The stack's two are files, because a toolset does not change weekly and
-    // when it does the thing you want is a file you can open, in the repo where
-    // the change belongs, reviewed with the commit that made it.
-    for stack in &stacks {
-        for (name, body) in stack_hooks(stack) {
-            write_if_absent(&repo_omh.join("hooks").join(name), &body)?;
+    // What a repo still declares is a hook only it could want, in
+    // `<repo>/.omh/hooks/`, which shadows a catalogue name by the rule
+    // `merge_hooks` already applies. That is the whole of what changed: the
+    // *scope* of the conventional hooks, not whether a repo may have its own.
+    //
+    // Some of those omh can work out. A node project's test command depends on
+    // which package manager it uses and whether it declared a `test` script at
+    // all, so the catalogue cannot hold it and `derive` reads it off the files
+    // the project already commits — for ecosystems the catalogue does not
+    // already cover, so a rust repo's `Makefile` does not earn a second hook
+    // that runs the suite again.
+    //
+    // `write_if_absent`, so a hook somebody has since edited is never
+    // rewritten, and **serialised** rather than formatted: a command with a
+    // quote in it — which is now a command omh read out of somebody's
+    // `package.json` rather than one of four literals — would otherwise
+    // produce a file nothing can parse.
+    let covered = covered_here(&[paths.hooks()], &stacks)?;
+    let derived = derive::hooks(
+        &paths.repo,
+        &settings::resolve(&paths, &manifest)?.provision,
+        &covered,
+    );
+    if !derived.is_empty() {
+        std::fs::create_dir_all(repo_omh.join("hooks"))?;
+        for d in &derived {
+            write_if_absent(
+                &repo_omh.join("hooks").join(format!("{}.json", d.name)),
+                &format!("{}\n", serde_json::to_string_pretty(&d.hook)?),
+            )?;
         }
     }
+
+    // And only now, the two questions — after every derivation has had its go,
+    // which is what makes them *last* resort rather than a wizard's opening.
+    //
+    // Two conditions, both narrow. A marker omh recognises and no stack claims
+    // is the one case where the repo plainly is something and omh cannot say
+    // what its sandbox needs. A project with no test hook from any source is
+    // the one case where the agent cannot check its own work.
+    let markers = stack::markers(&paths.markers())?;
+    let unclaimed = stack::unclaimed(&markers, &stack_defs, &paths.repo);
+    let has_test = covered.iter().any(|s| stacks.iter().any(|d| &d.name == s))
+        || derived.iter().any(|d| d.hook.on == hook::Event::TurnEnd)
+        || repo_omh.join("hooks").join("test.json").exists();
+    let (asked, answered) = questions(&repo_omh, &unclaimed, has_test)?;
+
+    // **Reloaded, because an answer is a stack file.** `how_is_it_installed`
+    // writes `<repo>/.omh/stacks/<name>.toml`, and everything below — the
+    // report, the predicates, the recorded resolution, the image layer — reads
+    // `stack_defs`. Left stale, somebody typed how to install elixir, watched
+    // omh say `stack elixir — from what you told it`, and then watched the same
+    // run print `stack none detected` and build a sandbox with no elixir in it.
+    // Their answer took effect on the *next* `init`, and nothing said so.
+    //
+    // Unconditional rather than gated on `asked > 0`: it costs one directory
+    // read, and a gate is a second thing to keep true.
+    let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
+    let stacks = stack::detected(&stack_defs, &paths.repo);
+    //
     // The selection, written out with every catalogue entry named — after the
-    // stack hooks, so this repo's own two are in the list it writes.
+    // catalogue is installed and the derived hooks are written, so both are in
+    // the list it writes.
     //
     // Expanded rather than `"*"`, because an explicit list is editable and
     // reviewable in a way a wildcard is not: you curate by deleting lines. That
@@ -2624,6 +3375,30 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     if !repo_has_selection(&paths)? {
         let lists = catalogue_lists(&paths)?;
         config::write_selection(&paths, config::Layer::Shared, &lists)?;
+    } else {
+        // A curated list is not resynced — and a hook **this run just wrote**
+        // still has to reach it, or it lands dead. `merge_hooks` drops any hook
+        // the selection does not name, so a repo `init`ed six months ago that
+        // has since gained a `package.json` gets `pnpm-test.json` written, sees
+        // it reported, and never runs it. `import_hooks` already guards exactly
+        // this; the same rule applies to what `init` writes.
+        //
+        // Added, never resynced: the point of a curated list is that omh does
+        // not put back what somebody pruned. These are names that did not exist
+        // when they pruned it.
+        let mine: Vec<String> = derived
+            .iter()
+            .map(|d| d.name.clone())
+            .chain(answered.iter().cloned())
+            .collect();
+        if !mine.is_empty() {
+            let (cap, mut names, _) = current_list(&paths, "hooks", &mine[0])?;
+            names.extend(mine);
+            names.sort();
+            names.dedup();
+            let lists = std::collections::BTreeMap::from([(cap, names)]);
+            write_lists(&paths, &lists)?;
+        }
     }
 
     // Appended, not overwritten: re-running init must not eat a line you added.
@@ -2631,10 +3406,184 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // Left tracked, a machine-local override gets committed to the team's repo.
     ensure_line(&gitignore, settings::LOCAL)?;
 
+    // Only now the image, and the question about what it turned out to hold.
+    //
+    // Everything above configures the repo and cannot fail for want of a
+    // container; everything here needs one and propagates when there is none.
+    // Ordered this way round deliberately: an earlier arrangement built the
+    // image first, so `omh init` on a box with no runtime — somebody who
+    // installed omh before docker, which is the order most people do it in —
+    // left the repo with hooks, no `[use]` list, and `settings.local.toml`
+    // still tracked. Setting a repo up must not be abandoned half-done because
+    // the machine cannot build an image yet.
+    // Which of this repo's hooks the sandbox turned out to be unable to run.
+    // Measured, not asked about — see the block below.
+    let mut held_back: Vec<hook::Dropped> = Vec::new();
+    if let Some(h) = &harness {
+        let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
+        let adapter = Adapter::find(&paths.adapters(), h)?;
+        // Without it the headline command cannot run, so init is not finished
+        // until this exists — and until it exists there is no sandbox to ask
+        // about a toolchain.
+        if image::exists(backend.program(), &image::tag_for(&adapter)) {
+            println!("  image      {} (already built)", image::tag_for(&adapter));
+        } else {
+            println!(
+                "\n  building {} — first run only\n",
+                image::tag_for(&adapter)
+            );
+            image::ensure(backend.program(), &adapter)?;
+            println!("\n  image      {}", image::tag_for(&adapter));
+        }
+
+        // Which provides apply here. Evaluated **in the sandbox**, with the repo
+        // mounted read-only: a predicate is arbitrary shell out of a stack file,
+        // and running it on the host during `init` is the one thing omh exists
+        // to avoid.
+        let detected = stack::detected(&stack_defs, &paths.repo);
+        let candidates: Vec<(String, Option<&str>)> = detected
+            .iter()
+            .flat_map(|d| {
+                d.provides
+                    .iter()
+                    .map(move |p| (stack::key(&d.name, &p.name), p.when.as_deref()))
+            })
+            .collect();
+
+        {
+            // No `if !candidates.is_empty()` guard. A repo with nothing to ask
+            // has still been answered — the answer is "nothing applies" — and
+            // skipping would leave a resolution recorded when this repo *was* a
+            // rust project asserting `rust/toolchain = true` for ever.
+            let answered = if candidates.is_empty() {
+                Vec::new()
+            } else {
+                match Command::new(backend.program())
+                    .args(stack::predicate_args(
+                        &image::tag_for(&adapter),
+                        &paths.repo,
+                        &stack::predicate_script(&candidates),
+                    ))
+                    .output()
+                {
+                    // A container that ran and failed is not an answer. Only
+                    // `Err` was handled before, so `docker run` failing — image
+                    // gone, mount refused, no space — produced empty stdout,
+                    // read as "nothing applies", and `init` went on to print
+                    // its summary with nothing said. The `Err` arm's own
+                    // comment forbids exactly that.
+                    Ok(out) if !out.status.success() => {
+                        println!(
+                            "  provision  the sandbox could not be asked ({}) — nothing recorded",
+                            out.status
+                        );
+                        for line in String::from_utf8_lossy(&out.stderr).lines().take(3) {
+                            println!("             {line}");
+                        }
+                        Vec::new()
+                    }
+                    Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
+                    Err(e) => {
+                        // Non-fatal, and never fatal *silently*: `init` sets a
+                        // repo up, and failing that over a diagnostic would be
+                        // the tail wagging the dog — but saying nothing would
+                        // let somebody believe the sandbox had been checked.
+                        println!("  provision  could not ask the sandbox ({e}) — nothing recorded");
+                        Vec::new()
+                    }
+                }
+            };
+
+            for a in answered.iter().filter(|a| !a.ok) {
+                if let stack::Verdict::CouldNotAnswer(code) = stack::verdict(a) {
+                    println!(
+                        "  provision  {}'s condition could not answer{} — not applied",
+                        a.name,
+                        code.map(|c| format!(" (exit {c})")).unwrap_or_default()
+                    );
+                }
+            }
+
+            // Recorded only when something was actually measured. `reconcile`
+            // drops every `true` it is not told about, so writing an empty
+            // answer would erase the repo's resolution rather than leave it be.
+            if let Some(fired) = fired_from(candidates.len(), &answered) {
+                let recorded = record_resolution(&paths, &fired)?;
+                for key in recorded.iter().filter(|(_, on)| **on).map(|(k, _)| k) {
+                    println!("  provision  {key}");
+                }
+
+                // The stack layer, through the same function every launch
+                // reads — so what `init` reports built is what `omh run` runs,
+                // by construction rather than by two implementations agreeing.
+                //
+                // Re-resolved from disk rather than reusing `recorded`, which
+                // is the committed table alone: `record_resolution` has just
+                // written it, and a `false` in `settings.local.toml` means *not
+                // on this laptop*, which is the laptop building the image.
+                let (own, repo) = resolved(&paths)?;
+                let sandbox = sandbox(&paths, &adapter, &repo)?;
+                image::ensure_stack(backend.program(), &adapter, &sandbox.recipe())?;
+                if sandbox.tag != image::tag_for(&adapter) {
+                    println!("  image      {} (this repo's toolchain)", sandbox.tag);
+                }
+
+                // And what that image turned out to contain, measured once and
+                // remembered: every launch afterwards reads `~/.omh/facts.json`
+                // rather than starting a container to ask again.
+                //
+                // Two readings of one probe. A `needs` that did not resolve is
+                // a **provisioning failure** — the recipe ran and the
+                // environment still does not work, which is exactly what
+                // shipping rustup with no `cc` looked like. The same
+                // measurements hold back a hook whose program is missing, which
+                // is a different question about the same fact.
+                let hook_dirs = Profile::resolve(&paths).sources(adapter::Capability::Hooks)?;
+                let mut sandbox = sandbox;
+                sandbox.top_up(&paths, backend.program(), &adapter, &hook_dirs, &own, &repo)?;
+                for name in &sandbox.owed {
+                    if sandbox.resolves.get(name) == Some(&false) {
+                        println!("  provision  {name} did not resolve after installing");
+                    }
+                }
+
+                // And the other reading, through the launcher's own function so
+                // `init` cannot report one thing and a launch do another.
+                //
+                // No question here any more, and that is the point of the whole
+                // design. What stood here asked, for every program the sandbox
+                // lacked, whether to switch its hook off — and recorded the
+                // answer in a committed file. It was asking somebody to
+                // configure around a broken environment, and the answer
+                // outlived the breakage: a repo whose sandbox later gained
+                // `cargo` still had `cargo = "skip"` on file, so the hook
+                // stayed off for everybody who cloned it, with nothing to
+                // re-ask. Now nothing is on file, because nothing had to be
+                // decided.
+                held_back = render::held_back(&hook_dirs, &own, &repo, &sandbox.resolves)?;
+            }
+        }
+    }
+    // No harness is no image, and no image is no sandbox to ask about. The
+    // hooks are already written either way.
+
     // Report every decision, so `omh why` has something to explain. Printed as
     // each one is made rather than collected for the end, which is why the
     // image and graph lines below appear inside the summary.
-    println!("omh init — decided, asked nothing\n");
+    // The headline is a claim about this run, so it has to be able to stop
+    // being true. omh derives what it can and asks only what nothing could
+    // derive; printing "asked nothing" after putting a question on screen would
+    // make the promise the tagline is selling into a thing the user just
+    // watched it break.
+    //
+    // Counted from what was actually *put*, not from what was answered — a
+    // question declined was still a question asked, and claiming otherwise
+    // would let omh interrogate somebody and then deny it.
+    match asked {
+        0 => println!("omh init — decided, asked nothing\n"),
+        1 => println!("omh init — decided all but one question\n"),
+        n => println!("omh init — decided the rest; asked {n} questions\n"),
+    }
     println!("  harnesses  {} ({})", adapters.len(), adapters.join(", "));
     println!("  editors    {} ({})", editors.len(), editors.join(", "));
     match &harness {
@@ -2655,11 +3604,43 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         );
     } else {
         for s in &stacks {
-            println!(
-                "  stack      {} (from {}) → test `{}`, format `{}`",
-                s.name, s.marker, s.test, s.format
-            );
+            // The marker and nothing else. What a stack 's hooks run is the
+            // hooks' business now, and the selection line below names those —
+            // repeating a command here would be a second copy free to disagree
+            // with the file that actually holds it.
+            println!("  stack      {} (from {})", s.name, s.marker);
         }
+    }
+    // Named, with the evidence, because the alternative is the failure this
+    // whole design replaces: a hook that runs on turn one and reports
+    // `cargo: not found`, saying nothing about who decided to run cargo or
+    // where it looked.
+    //
+    // "will not run", and it is safe to say so now. This list comes from
+    // `render::held_back`, which is the function the launcher itself uses — so
+    // a hook named here is a hook the session will not ship, rather than one
+    // omh hoped somebody would go and disable.
+    //
+    // The hook file stays where it is either way. `.omh/hooks/` is the repo's
+    // statement about itself and it is committed; whether a program exists is
+    // a fact about one image, and it decides what runs here, never what the
+    // repo contains.
+    for d in &held_back {
+        println!(
+            "  held back  `{}` needs {}\n             \
+             the hook file is written and travels; it runs as soon as the \
+             sandbox has it",
+            d.name, d.wanted
+        );
+    }
+
+    // Hooks somebody already has, somewhere omh can see them. **Noticed, never
+    // acted on**: importing writes executable content into the repo, and doing
+    // that because `init` happened to find a file is not a decision omh gets to
+    // make on somebody's behalf. It says what is there and what would bring it
+    // across.
+    for line in importable(&paths, &adapters) {
+        println!("  {line}");
     }
 
     // What the repo already documents becomes notes that *point* at it.
@@ -2676,31 +3657,14 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // Derive, then confirm: a hypothesis worth correcting is not a questionnaire.
     if stacks.len() > 1 {
         println!(
-            "\n  ! {} stacks detected; hooks were written for all of them.\n    \
-             drop the ones you do not want: .omh/hooks/",
+            "\n  ! {} stacks detected; hooks were written for every command the \
+             sandbox can run.\n    drop the ones you do not want: .omh/hooks/",
             stacks.len()
         );
     }
 
     println!("\n  catalogue  {}", paths.root.display());
     println!("  this repo  {}  (committed)", repo_omh.display());
-    // The image. Without it the headline command cannot run, so init is not
-    // finished until this exists.
-    if let Some(h) = &harness {
-        let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
-        let adapter = Adapter::find(&paths.adapters(), h)?;
-        if image::exists(backend.program(), &image::tag_for(&adapter)) {
-            println!("  image      {} (already built)", image::tag_for(&adapter));
-        } else {
-            println!(
-                "\n  building {} — first run only\n",
-                image::tag_for(&adapter)
-            );
-            image::ensure(backend.program(), &adapter)?;
-            println!("\n  image      {}", image::tag_for(&adapter));
-        }
-    }
-
     // The index lives in a container volume, so it has to be built inside the
     // sandbox — one built on the host would land where no session can read it.
     if let Some(h) = &harness {
@@ -2750,6 +3714,99 @@ fn install_bundled_adapters(paths: &Paths) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Put the two questions of last resort, and write down what comes back.
+///
+/// **A terminal is a precondition, not a fallback.** With stdin closed — a CI
+/// runner, a script — nothing is asked and nothing is written, which is the
+/// same outcome as declining and is reached without printing a prompt nobody
+/// can answer. `ask::prompt` reads EOF as a stop for the same reason.
+///
+/// Returns how many questions were actually put, so `init`'s headline can stop
+/// claiming it asked nothing the moment it did.
+///
+/// `write_if_absent`, so an answer somebody has since edited is never
+/// overwritten by a later `init` re-asking and getting a different reply.
+fn questions(
+    repo_omh: &std::path::Path,
+    unclaimed: &[&stack::Marker],
+    has_test: bool,
+) -> Result<(usize, Vec<String>)> {
+    if unclaimed.is_empty() && has_test {
+        return Ok((0, Vec::new()));
+    }
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Ok((0, Vec::new()));
+    }
+
+    let stdin = std::io::stdin();
+    let (asked, answers) = ask_all(
+        unclaimed,
+        has_test,
+        &mut stdin.lock(),
+        &mut std::io::stderr(),
+    )?;
+
+    let mut hooks = Vec::new();
+    for a in answers {
+        let path = repo_omh.join(&a.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        write_if_absent(&path, &a.body)?;
+        println!("  {}", a.said);
+        // Handed back so `init` can put it in `[use]`. A hook written into a
+        // repo whose selection is already curated is one `merge_hooks` drops,
+        // so an answered question would produce a file, a report line, and a
+        // session that never runs it.
+        if a.path.starts_with("hooks") {
+            if let Some(stem) = a.path.file_stem() {
+                hooks.push(stem.to_string_lossy().into_owned());
+            }
+        }
+    }
+    Ok((asked, hooks))
+}
+
+/// The exchange itself, with the terminal handed in.
+///
+/// Split from [`questions`] so its rules can be asserted at all — how many
+/// questions were put, what a decline does to the ones after it, and that a
+/// declined question is still a question asked.
+fn ask_all(
+    unclaimed: &[&stack::Marker],
+    has_test: bool,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn std::io::Write,
+) -> Result<(usize, Vec<ask::Answer>)> {
+    let mut asked = 0usize;
+    let mut answers = Vec::new();
+
+    for marker in unclaimed {
+        asked += 1;
+        match ask::how_is_it_installed(marker, input, out)? {
+            Some(a) => answers.push(a),
+            // **Stop the marker questions, rather than working through them.**
+            // A decline and a closed pipe arrive here identically, and the one
+            // that matters is the pipe: a polyglot repo with three unclaimed
+            // markers would otherwise print three questions into a void and
+            // count them. One "no" is answer enough to stop asking about the
+            // rest — and the test question below is still put, because it is
+            // the one most repos reach.
+            None => break,
+        }
+    }
+    // Asked last, because it is the question most repos reach and the one most
+    // worth answering — putting it after an exchange somebody has already
+    // declined would waste it.
+    if !has_test {
+        asked += 1;
+        if let Some(a) = ask::what_tests_it(input, out)? {
+            answers.push(a);
+        }
+    }
+    Ok((asked, answers))
+}
+
 /// Copy definitions that ship with omh into `~/.omh`.
 ///
 /// Bundled files are **managed**: they are refreshed on every `init`, because a
@@ -2780,7 +3837,14 @@ fn install_bundled(dest: &std::path::Path, kind: bundled::Shipped) -> Result<Vec
         if !existing.is_empty() && existing != contents.as_bytes() {
             // Managed files are refreshed so shipped fixes land, but
             // silently discarding an edit is not acceptable.
-            let backup = target.with_extension("toml.yours");
+            //
+            // **Appended, never `with_extension`.** That replaces the
+            // extension, so it produced the right name only while everything
+            // omh shipped was TOML: an edited `rust-test.json` was saved as
+            // `rust-test.toml.yours` while the line below said
+            // `rust-test.json.yours`, and somebody looking where omh told them
+            // to look would conclude their edit had been thrown away.
+            let backup = target.with_file_name(format!("{name}.yours"));
             std::fs::write(&backup, &existing)
                 .with_context(|| format!("saving your {name} as {}", backup.display()))?;
             // stderr: this is a warning about data, and stdout is the report.
@@ -2835,35 +3899,349 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
-/// The hooks a detected stack gets: run the tests at turn end, format on edit.
+/// Which provides applied, from what the predicates answered.
 ///
-/// Files rather than prose. A sentence in the rules describing `cargo test` is
-/// a sentence; a hook is the thing that runs it — and once written it is the
-/// repo's, editable and committed, so a teammate cloning gets the project's
-/// test command with the project.
+/// `None` when nothing was answered — the container never ran, the runtime
+/// hiccuped, the image was missing. That case is not "nothing applies", and the
+/// difference is destructive rather than academic: `stack::reconcile` drops
+/// every `true` it is not told about, so recording an empty answer would erase
+/// a repo's resolution and leave the next launch provisioning nothing.
 ///
-/// Extracted from `init` so the commands can be asserted without a container.
-/// The guard that used to cover them read the generated `AGENTS.md`, which no
-/// longer exists.
-fn stack_hooks(stack: &detect::Stack) -> [(String, String); 2] {
-    // Names from `notice::stack_hook_names`, never spelled again here: the
-    // launcher compares what detection expects against what the directory
-    // holds, and two spellings of `rust-test` would make it report a hook
-    // missing that `init` had just written.
-    let [test, format] = notice::stack_hook_names(stack);
-    [
-        (
-            format!("{test}.json"),
-            format!("{{ \"on\": \"turn-end\", \"run\": \"{}\" }}\n", stack.test),
-        ),
-        (
-            format!("{format}.json"),
-            format!(
-                "{{ \"on\": \"after-tool\", \"tools\": [\"edit\"], \"run\": \"{}\" }}\n",
-                stack.format
+/// A provide that could not answer is simply absent from the set, which is the
+/// safe direction — it is not installed, so it is not recorded, so its `needs`
+/// are not claimed and nothing reports a gap omh invented. Installing on a
+/// coin-flip would be silent either way.
+///
+/// `asked` is how many provides there were to ask about, and it separates two
+/// things an empty report cannot: **nothing to ask** is an answer, **nothing
+/// answered** is silence. A repo that stops being a stack has no candidates and
+/// runs no container, and that has to clear the resolution rather than preserve
+/// it — otherwise `[provision]` keeps asserting `rust/toolchain = true` after
+/// the `Cargo.toml` is gone, and the stack layer keeps installing a toolchain
+/// nothing uses.
+fn fired_from(asked: usize, answered: &[doctor::Outcome]) -> Option<BTreeSet<String>> {
+    if asked == 0 {
+        return Some(BTreeSet::new());
+    }
+    // One line per provide, so fewer lines than provides is a report that did
+    // not finish — not a report saying "no". Accepting the prefix would make
+    // `reconcile` drop every `true` it was not told about and rewrite a
+    // committed file without them. The now-deleted `[toolchain]` question had
+    // this same shape and had to be fixed for it, where it only cost a spurious
+    // question; here it deletes.
+    if answered.len() != asked {
+        return None;
+    }
+    Some(
+        answered
+            .iter()
+            .filter(|o| stack::verdict(o) == stack::Verdict::Applies)
+            .map(|o| o.name.clone())
+            .collect(),
+    )
+}
+
+/// Write what fired into the repo's **shared**, committed settings, and hand
+/// back what the file now says.
+///
+/// A function rather than four lines inline, because the layer it names on both
+/// sides is the whole of its correctness and inline it is reachable only
+/// through a container. Both halves are load-bearing in opposite directions:
+///
+/// - **Read `Shared`.** `reconcile` writes what it is given, so reading the
+///   merge would take a `false` from `settings.local.toml` — one laptop's *not
+///   here* — and commit it for everybody who clones.
+/// - **Write `Shared`.** The resolution is the repo's, and a teammate cloning
+///   it is the reason it lives in a committed file at all. Written to `Local`
+///   it would be re-derived, and re-asked, on every machine.
+fn record_resolution(paths: &Paths, fired: &BTreeSet<String>) -> Result<BTreeMap<String, bool>> {
+    let recorded = stack::reconcile(
+        &config::read_provision(paths, config::Layer::Shared)?,
+        fired,
+    );
+    config::write_provision(paths, config::Layer::Shared, &recorded)?;
+    Ok(recorded)
+}
+
+/// The recipes to run, in the order the stack files gave them.
+///
+/// File order is install order — `corepack enable pnpm` needs the node the
+/// provide above it asserted — so this walks the definitions rather than the
+/// resolution, which is a map sorted by name and would silently reorder them.
+///
+/// A provide with no `install` contributes nothing: it asserts the base image
+/// already ships something, so it changes neither the recipe nor the tag.
+///
+/// **`resolved` is the only input**, and that is the point. It is the
+/// `[provision]` table as all three settings layers resolve it: `init` writes
+/// what its predicates found, a person may write `false` to opt out, and every
+/// launch afterwards reads the same table. A launch that re-derived this from
+/// anything else — the predicates it cannot run, a set of provides that
+/// "fired" — would build a different image from the one `init` reported, and
+/// the disagreement would be invisible because both are plausible.
+///
+/// Only `true` provisions. Absent is not `false` and does not need to be: an
+/// entry nobody recorded is one no predicate has said applies here.
+fn installs_for<'a>(
+    detected: &[&'a stack::Definition],
+    resolved: &BTreeMap<String, bool>,
+) -> Vec<&'a str> {
+    detected
+        .iter()
+        .flat_map(|d| d.provides.iter().map(move |p| (d, p)))
+        .filter(|(d, p)| resolved.get(&stack::key(&d.name, &p.name)) == Some(&true))
+        .filter_map(|(_, p)| p.install.as_deref())
+        .collect()
+}
+
+/// What the stacks this repo provisions said must resolve once they had run.
+///
+/// Only provides the resolution recorded `true`. A provide nobody recorded was
+/// never installed, and a provide somebody opted out of was deliberately not
+/// installed — reporting either as a failure would be a gap omh invented. The
+/// consequence of an opt-out is not silenced by that: if a hook names the
+/// program, it is probed anyway through `render::hook_programs`, and a hook
+/// that cannot run is dropped by name.
+///
+/// This includes provides with **no `install`**, which is the point of letting
+/// them exist: `stacks/node.toml`'s `runtime` asserts the base image already
+/// ships `node` and `npm`, and the only way that assertion is worth writing is
+/// if something checks it.
+fn needs_of(
+    detected: &[&stack::Definition],
+    resolved: &BTreeMap<String, bool>,
+) -> BTreeSet<String> {
+    detected
+        .iter()
+        .flat_map(|d| d.provides.iter().map(move |p| (d, p)))
+        .filter(|(d, p)| resolved.get(&stack::key(&d.name, &p.name)) == Some(&true))
+        .flat_map(|(_, p)| p.needs.iter().cloned())
+        .collect()
+}
+
+/// Everything worth asking one image about: what the stacks promised, and what
+/// the hooks will actually run.
+///
+/// **The union, and it has to be.** The two lists answer different questions
+/// and neither contains the other. A stack's `needs` is what provisioning owes
+/// — the reading that catches rustup installing a `cargo` that cannot link.
+/// A hook's program is what will be handed to a shell — and a hand-written
+/// `shellcheck` hook is in no `needs` list, so a probe built from `needs` alone
+/// ships it into a sandbox that cannot run it. That is the original
+/// `cargo: not found` with a different program in it.
+fn probe_targets(
+    hook_dirs: &[PathBuf],
+    own: &base::Own,
+    repo: &settings::RepoPolicy,
+    owed: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let mut wanted = render::hook_programs(hook_dirs, own, repo)?;
+    wanted.extend(owed.iter().cloned());
+    Ok(wanted)
+}
+
+/// Ask the image about the programs nobody has asked it about yet, remember
+/// the answers, and hand back everything known about it.
+///
+/// The cache is the reason a launch is not a container run: `Facts::unseen`
+/// narrows the question to what has never been answered for this tag, and a
+/// repo whose hooks and stacks have not changed asks nothing at all.
+///
+/// Never fatal. A runtime that will not start, an image that is not there, a
+/// probe that says nothing — all of them leave the facts as they were, which
+/// reads as *nobody has looked* and suppresses nothing. The alternative is a
+/// diagnostic failure taking a launch down with it.
+/// What a probe run amounts to: what it measured, or **why nobody could be
+/// asked**.
+///
+/// Split out of `measure` because the reason is the whole value of the guard,
+/// and a reason that only exists as an `eprintln!` inside a function that shells
+/// out is a reason no test can see disappear.
+///
+/// A container that ran and **failed** is not an answer. Checking only the
+/// `Err` arm — a runtime that would not start — was the shape `init`'s
+/// predicate call already had to be fixed for: `docker run` failing because the
+/// image is gone, the daemon is refusing, or the disk is full exits non-zero
+/// with empty stdout, which parses to no outcomes and reads as *nothing was
+/// measured*. Unmeasured suppresses nothing, so the direction is safe; the
+/// silence is not. Without a reason the user gets a session with every hook
+/// shipped into a sandbox nobody could ask about, and nothing said.
+///
+/// Stderr is trimmed to three lines. A runtime failing to pull or mount can
+/// produce a page of it, and a diagnostic that buries the line above it in its
+/// own output is one people learn to scroll past.
+fn measured_or_reason(
+    ok: bool,
+    stdout: &str,
+    stderr: &str,
+) -> Result<Vec<doctor::Outcome>, String> {
+    if !ok {
+        let mut reason = String::from("could not ask the sandbox what it has");
+        for line in stderr.lines().filter(|l| !l.trim().is_empty()).take(3) {
+            reason.push_str("\n     ");
+            reason.push_str(line);
+        }
+        return Err(reason);
+    }
+    Ok(doctor::parse(stdout))
+}
+
+fn measure(
+    program: &str,
+    paths: &Paths,
+    tag: &str,
+    wanted: &BTreeSet<String>,
+) -> Result<BTreeMap<String, bool>> {
+    let mut facts = facts::Facts::load(paths);
+    let unseen = facts.unseen(tag, wanted);
+    if !unseen.is_empty() {
+        let borrowed: Vec<&str> = unseen.iter().map(String::as_str).collect();
+        let ran = Command::new(program)
+            .args(image::probe_args(tag, &doctor::probe_programs(&borrowed)))
+            .output();
+        let outcomes = match ran {
+            Ok(out) => measured_or_reason(
+                out.status.success(),
+                &String::from_utf8_lossy(&out.stdout),
+                &String::from_utf8_lossy(&out.stderr),
             ),
-        ),
-    ]
+            Err(e) => Err(format!("could not ask the sandbox what it has ({e})")),
+        };
+        let outcomes = outcomes.unwrap_or_else(|reason| {
+            eprintln!("omh: {reason}");
+            Vec::new()
+        });
+        if !outcomes.is_empty() {
+            facts.learn(tag, &outcomes);
+            // Reported and swallowed, never fatal. This is a cache beside the
+            // catalogue; a read-only home, a full disk or a `facts.json`
+            // somebody replaced with a directory would otherwise abort every
+            // `omh run`, `omh code` and `omh doctor` on the machine — a launch
+            // killed by a file whose entire design premise is that losing it
+            // degrades to "nobody has looked". `Facts::load` already treats the
+            // read side this way and says why.
+            if let Err(e) = facts.save(paths) {
+                eprintln!(
+                    "omh: measurements not cached ({e:#}) — the sandbox is asked again next time"
+                );
+            }
+        }
+    }
+    Ok(facts.about(tag))
+}
+
+/// What this repo's sandbox is: the recipe its stacks provision, the image that
+/// recipe produces, and what that image has been measured to contain.
+///
+/// The four fields are **one answer**, and holding them together is what makes
+/// a mismatch hard to write: `tag` is derived from `installs`, `resolves` is
+/// keyed on `tag`, and `owed` is what `installs` promised. Nothing outside
+/// [`sandbox`] constructs one.
+struct Sandbox {
+    /// Owned, because the definitions they are read from do not outlive this.
+    installs: Vec<String>,
+    tag: String,
+    resolves: BTreeMap<String, bool>,
+    /// What the provides this repo installed said must resolve once they had.
+    /// Carried here rather than re-derived, so the caller that tops the
+    /// measurements up asks about the same list `init` reported on.
+    owed: BTreeSet<String>,
+}
+
+impl Sandbox {
+    fn recipe(&self) -> Vec<&str> {
+        self.installs.iter().map(String::as_str).collect()
+    }
+
+    /// Ask this image about anything nobody has asked it yet, and keep the
+    /// answers.
+    ///
+    /// Launch does this too, not only `init`. A hook added after the last
+    /// `init` names a program no measurement covers, and an unmeasured program
+    /// suppresses nothing — so without this the hook ships into a sandbox that
+    /// may not have it and fails at turn one with `not found`, which is the
+    /// failure this whole design starts from. The cache is what makes it
+    /// affordable: a repo whose hooks and stacks have not changed asks nothing
+    /// and starts no container.
+    ///
+    /// **Builds the image first**, and that ordering is the method's reason for
+    /// existing rather than a detail inside it.
+    ///
+    /// `init` had it right and all three launch paths had it backwards: they
+    /// measured, then built inside `session_up`. So the first launch after a
+    /// recipe changed — a `[provision]` opt-out, a fresh clone of a repo whose
+    /// resolution is committed, anything after `docker image prune` — probed a
+    /// tag with no image behind it, learned nothing, and shipped every hook
+    /// unsuppressed into a sandbox that did not have their programs. It healed
+    /// on the *second* launch, which is precisely the broken-first-turn this
+    /// design exists to remove.
+    ///
+    /// Fixing it in three call sites would have left the fourth caller to get
+    /// it right. Here it cannot be got wrong: asking an image a question and
+    /// making sure there is an image to ask are one operation.
+    ///
+    /// Failures inside `measure` are reported and swallowed — a runtime that
+    /// will not start leaves the facts as they were, which reads as *nobody has
+    /// looked* and suppresses nothing. The build is **not** swallowed: an image
+    /// that will not build is the session, not a diagnostic about it.
+    fn top_up(
+        &mut self,
+        paths: &Paths,
+        program: &str,
+        adapter: &Adapter,
+        hook_dirs: &[PathBuf],
+        own: &base::Own,
+        repo: &settings::RepoPolicy,
+    ) -> Result<()> {
+        let recipe: Vec<String> = self.installs.clone();
+        image::ensure_stack(
+            program,
+            adapter,
+            &recipe.iter().map(String::as_str).collect::<Vec<_>>(),
+        )?;
+        let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
+        self.resolves = measure(program, paths, &self.tag, &wanted)?;
+        Ok(())
+    }
+}
+
+/// Work out which image this repo runs, and what is already known about it.
+///
+/// **One function, because these are one answer.** For the whole of the first
+/// milestone `init` built a stack layer and `container::plan` hardcoded
+/// `image::tag_for(adapter)`, so the layer was built by one command and run by
+/// none — and nothing was wrong with either half on its own. Two places
+/// deciding which image a session runs is the shape of that bug, so there is
+/// one place, and the measurements come back keyed on the tag it returned.
+///
+/// Fatal when the stacks will not load, which is the opposite of `say_hooks`'
+/// answer to the same directory and is right for the opposite reason. There, an
+/// unreadable directory costs a report. Here it decides *which sandbox you get*:
+/// falling back to the harness image would launch a session with no toolchain
+/// in it, silently, which is the failure this whole design starts from.
+///
+/// Reads the cache but never the container. Asking the image anything is
+/// [`Sandbox::top_up`], which builds it first — so this stays cheap enough to
+/// call on every launch path before anything has been decided.
+fn sandbox(paths: &Paths, adapter: &Adapter, repo: &settings::RepoPolicy) -> Result<Sandbox> {
+    let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
+    let detected = stack::detected(&defs, &paths.repo);
+    let installs: Vec<String> = installs_for(&detected, &repo.provision)
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    let tag = image::stack_tag(
+        adapter,
+        &installs.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    let resolves = facts::Facts::load(paths).about(&tag);
+    let owed = needs_of(&detected, &repo.provision);
+    Ok(Sandbox {
+        installs,
+        tag,
+        resolves,
+        owed,
+    })
 }
 
 /// Run the harness's own login inside a sandbox, with this account's credential
@@ -2911,6 +4289,17 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
             base: None,
             omh: own,
             repo,
+            // The harness image, not this repo's stack layer, for the reason
+            // `base` is `None`: a login is not work on the project. Building a
+            // toolchain to type a password would spend minutes on a container
+            // that is thrown away, and the credential paths a login writes are
+            // the same in both images.
+            image: image::tag_for(&adapter),
+            // So nothing has been measured about it here, and nothing is
+            // suppressed. That is the safe direction — a login session running
+            // one hook too many costs nothing, and this container exists for
+            // the length of an OAuth redirect.
+            resolves: BTreeMap::new(),
         },
     )?;
     plan.validate(&backend.caps())?;
@@ -3251,59 +4640,1080 @@ mod tests {
         );
     }
 
-    /// A detected stack earns hooks, not prose. The guard that used to cover
-    /// this read the generated `AGENTS.md` — a sentence saying `cargo test`
-    /// runs nothing, and once that file stopped being written the commands
-    /// were asserted nowhere.
-    #[test]
-    fn a_detected_stack_gets_a_hook_that_runs_its_commands() {
-        // Every stack omh knows, not `stacks(CARGO_MANIFEST_DIR)` — which is
-        // rust and nothing else, so `init` in a node, python or go repo could
-        // write files the renderer rejects and the suite would not notice.
-        for stack in detect::KNOWN {
-            let hooks = stack_hooks(&stack);
-            let by = |suffix: &str| {
-                hooks
-                    .iter()
-                    .find(|(name, _)| name.ends_with(suffix))
-                    .map(|(_, body)| body.clone())
-                    .unwrap_or_else(|| panic!("{} has no {suffix}", stack.name))
-            };
+    // ── the provisioning resolution ─────────────────────────────────────────
 
-            // omh's words, not a harness's. A seeded file spelling `Stop`
-            // would work on exactly one harness, and the file `init` writes is
-            // the example every hand-written one is copied from.
-            let test = by("-test.json");
-            assert!(test.contains(stack.test), "must run the tests: {test}");
-            assert!(test.contains("\"turn-end\""), "at turn end: {test}");
-
-            let format = by("-format.json");
-            assert!(
-                format.contains(stack.format),
-                "must format the code: {format}"
-            );
-            assert!(
-                format.contains("\"edit\""),
-                "when a file is written: {format}"
-            );
-
-            // Through `hook::Hook::parse`, not `serde_json::Value`. Valid
-            // JSON is not a valid hook: a seeded file saying `"on": "Stop"` or
-            // `"tools": ["Edit"]` parses as a document and is refused by the
-            // renderer at launch, breaking every session in that repo. And
-            // `stack_hooks` interpolates a command into a JSON string literal
-            // with no escaping, so a future command containing a quote would
-            // produce a file nothing could read.
-            for (name, body) in hooks {
-                crate::hook::Hook::parse(&body, &name).unwrap_or_else(|e| {
-                    panic!(
-                        "{} seeds a file omh cannot read: {e:#} in {body}",
-                        stack.name
-                    )
-                });
-            }
+    fn outcome(name: &str, ok: bool, detail: &str) -> doctor::Outcome {
+        doctor::Outcome {
+            name: name.into(),
+            ok,
+            detail: detail.into(),
         }
     }
+
+    /// A probe that reported nothing means the container never ran it, and
+    /// recording that as "nothing applies" is **destructive**: `reconcile` drops
+    /// every `true` it is not told about, so an empty answer would erase the
+    /// resolution and, on the next launch, the repo would provision nothing.
+    ///
+    /// Silence is cannot-tell, and cannot-tell writes nothing at all — the same
+    /// asymmetry `detect::program` and `facts::Facts` are built on, at the one
+    /// point where acting on it would delete somebody's file contents.
+    #[test]
+    fn a_resolution_nobody_measured_is_never_recorded() {
+        assert_eq!(
+            fired_from(3, &[]),
+            None,
+            "three provides asked, none answered — the container never ran"
+        );
+    }
+
+    /// A partial report is not an answer either, and here that distinction
+    /// deletes from a committed file.
+    ///
+    /// The protocol prints one line per provide, so fewer lines than provides
+    /// means the container died part-way — OOM, a torn pipe, a runtime that
+    /// truncates. Accepting the prefix as the whole answer makes
+    /// `stack::reconcile` drop every `true` it was not told about, and
+    /// `config::write_provision` then rewrites `.omh/settings.toml` without
+    /// them. A rust repo loses `rust/linker = true`, the next layer is built
+    /// with no `gcc`, and `cargo test` fails at link — the exact failure this
+    /// design opens by describing.
+    ///
+    /// The now-deleted `[toolchain]` question had to be fixed for this same
+    /// defect, where it only cost a spurious question. Here it edits a file
+    /// under version control, which is why the guard outlived the question.
+    #[test]
+    fn a_partial_report_is_not_a_resolution() {
+        let truncated = [outcome("rust/toolchain", true, "applies")];
+        assert_eq!(
+            fired_from(2, &truncated),
+            None,
+            "two provides asked, one answered — the container died mid-script"
+        );
+    }
+
+    /// Nothing to ask is an **answer**, not silence, and the difference decides
+    /// whether a stale resolution is ever cleared.
+    ///
+    /// A repo that stops being a stack — `Cargo.toml` deleted, the crate moved
+    /// into a subdirectory — has no candidates, so no container runs. Treating
+    /// that like an unanswered probe leaves `[provision]` asserting
+    /// `rust/toolchain = true` for ever: the stack layer keeps installing a
+    /// toolchain nothing uses, and the committed file describes a repo that no
+    /// longer exists.
+    #[test]
+    fn nothing_to_ask_is_an_answer_and_clears_a_stale_resolution() {
+        assert_eq!(
+            fired_from(0, &[]),
+            Some(std::collections::BTreeSet::new()),
+            "no candidates is a measured 'nothing applies', not a failure to measure"
+        );
+    }
+
+    /// And a probe that *did* answer is taken at its word — only the provides
+    /// that applied. A provide that could not answer is simply absent, which is
+    /// the safe direction: it does not get installed, its `needs` then fails to
+    /// resolve, and that is reported. Installing on a coin-flip would be silent.
+    #[test]
+    fn only_the_provides_that_applied_are_recorded() {
+        let answered = [
+            outcome("rust/toolchain", true, "applies"),
+            outcome("node/pnpm", false, "1 does not apply"),
+            outcome("node/bun", false, "2 could not answer"),
+        ];
+        assert_eq!(
+            fired_from(3, &answered),
+            Some(std::collections::BTreeSet::from([
+                "rust/toolchain".to_string()
+            ]))
+        );
+    }
+
+    /// Installs run in file order, and only for provides the resolution
+    /// recorded. A provide that asserts something the base image already
+    /// ships — node's `runtime` — contributes no `RUN` and must not move the
+    /// tag.
+    #[test]
+    fn installs_are_the_recorded_recipes_in_file_order() {
+        let defs = stack::load_dir(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/stacks"
+        )))
+        .unwrap();
+        let node = defs.iter().find(|d| d.name == "node").expect("node ships");
+
+        // Everything applies, so only `install`-carrying provides may appear,
+        // in the order the file gives them.
+        let all: BTreeMap<String, bool> = node
+            .provides
+            .iter()
+            .map(|p| (stack::key(&node.name, &p.name), true))
+            .collect();
+        let got = installs_for(&[node], &all);
+
+        let expected: Vec<&str> = node
+            .provides
+            .iter()
+            .filter_map(|p| p.install.as_deref())
+            .collect();
+        assert_eq!(got, expected, "order or filtering changed");
+        assert!(
+            !got.is_empty() && got.len() < node.provides.len(),
+            "node must have both kinds of provide for this to prove anything: {got:?}"
+        );
+    }
+
+    /// Only the recipes that fired, and the **file** decides their order.
+    ///
+    /// The test above records every provide, so it exercises the filter only in
+    /// the case where the filter does nothing, and it draws its fixture from
+    /// `stacks/node.toml`, whose recipes happen to already be in alphabetical
+    /// order. Two wrong implementations pass it: one that ignores the
+    /// resolution entirely, and one that sorts.
+    ///
+    /// Both are real failures. Ignoring the resolution installs *every* package
+    /// manager into a node repo — the outcome `stacks/node.toml` opens by
+    /// forbidding, since a repo with a `pnpm-lock.yaml` must not also get yarn
+    /// and bun. Sorting puts `corepack enable pnpm` ahead of the node provide
+    /// it needs, and the image build fails on a stack file that is correct.
+    ///
+    /// So the fixture is hostile on both axes at once: what was recorded is a
+    /// strict subset, and file order is not sorted order.
+    #[test]
+    fn only_the_recorded_recipes_run_and_the_file_decides_their_order() {
+        fn provide(name: &str, install: Option<&str>) -> stack::Provide {
+            stack::Provide {
+                name: name.into(),
+                needs: vec![name.into()],
+                when: None,
+                install: install.map(str::to_string),
+                because: "a fixture".into(),
+                measured: Vec::new(),
+            }
+        }
+        let def = stack::Definition {
+            name: "fixture".into(),
+            marker: "fixture.toml".into(),
+            provides: vec![
+                provide("zulu", Some("install zulu")),
+                provide("alpha", Some("install alpha")),
+                provide("asserted", None),
+                provide("mike", Some("install mike")),
+            ],
+        };
+        // `mike` was never recorded; `asserted` applies and has no recipe.
+        let resolved: BTreeMap<String, bool> =
+            ["fixture/zulu", "fixture/alpha", "fixture/asserted"]
+                .iter()
+                .map(|k| ((*k).to_string(), true))
+                .collect();
+
+        assert_eq!(
+            installs_for(&[&def], &resolved),
+            vec!["install zulu", "install alpha"],
+            "a provide the resolution does not name must contribute no recipe, \
+             and sorted order is not file order"
+        );
+    }
+
+    /// An opt-out keeps the recipe out of the image, which is the only thing an
+    /// opt-out could mean.
+    ///
+    /// `[provision] "rust/linker" = false` is how somebody says *do not install
+    /// this* — because it costs 124 MB they do not want, or because their base
+    /// image already has it. `reconcile` preserves that `false` faithfully and
+    /// `settings::resolve` reads it back, and there was a version where both
+    /// were ceremony: the install set was built from what *fired*, so the
+    /// recipe ran anyway. The file said one thing, the image was another, and
+    /// `omh why` would cite the file.
+    ///
+    /// Kept as its own case now that `installs_for` reads only `true`, because
+    /// what it guards is not the filter's spelling but the outcome: a `false`
+    /// and a key nobody recorded must reach the image identically, and a
+    /// future `unwrap_or(true)` would break exactly this and nothing else.
+    #[test]
+    fn a_provide_somebody_opted_out_of_is_not_installed() {
+        fn provide(name: &str, install: &str) -> stack::Provide {
+            stack::Provide {
+                name: name.into(),
+                needs: vec![name.into()],
+                when: None,
+                install: Some(install.into()),
+                because: "a fixture".into(),
+                measured: Vec::new(),
+            }
+        }
+        let def = stack::Definition {
+            name: "rust".into(),
+            marker: "Cargo.toml".into(),
+            provides: vec![
+                provide("toolchain", "install rustup"),
+                provide("linker", "apt-get install -y gcc"),
+            ],
+        };
+        let resolved = BTreeMap::from([
+            ("rust/toolchain".to_string(), true),
+            ("rust/linker".to_string(), false),
+        ]);
+
+        assert_eq!(
+            installs_for(&[&def], &resolved),
+            vec!["install rustup"],
+            "the predicate said the linker applies; a person said not here, and \
+             a person outranks a predicate"
+        );
+    }
+    /// **A repo that provisions runs a different image from one that does
+    /// not**, and two repos provisioning different things do not share one
+    /// either.
+    ///
+    /// This is what the whole design comes down to, and it is the check the
+    /// plan reserved for a machine with docker: same stack, same marker,
+    /// different lockfiles, *different images*. The half that needs no
+    /// container is the arithmetic — which tag a repo resolves to — and that is
+    /// what is asserted here. Whether the image then contains a working pnpm
+    /// is `omh doctor`'s question and no green test can answer it.
+    ///
+    /// Read through `sandbox`, the same function every launch and `init` call,
+    /// because the bug this replaces was not a wrong tag: it was two places
+    /// computing one.
+    #[test]
+    fn a_repo_that_provisions_runs_a_different_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(paths.stacks()).unwrap();
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        std::fs::write(paths.repo.join("package.json"), "{}").unwrap();
+        std::fs::copy(
+            std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/stacks/node.toml")),
+            paths.stacks().join("node.toml"),
+        )
+        .unwrap();
+        let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
+
+        let with = |keys: &[&str]| {
+            let mut repo = settings::RepoPolicy::default();
+            for k in keys {
+                repo.provision.insert((*k).to_string(), true);
+            }
+            sandbox(&paths, &adapter, &repo).unwrap().tag
+        };
+
+        let nothing = with(&[]);
+        let pnpm = with(&["node/pnpm"]);
+        let yarn = with(&["node/yarn"]);
+
+        assert_eq!(
+            nothing,
+            image::tag_for(&adapter),
+            "a repo that provisions nothing runs the harness image, not an \
+             empty layer on top of it"
+        );
+        assert_ne!(pnpm, nothing, "provisioning changes the image");
+        assert_ne!(
+            pnpm, yarn,
+            "same stack, same marker, different lockfile — and a shared image \
+             would hand the yarn repo pnpm and nothing else"
+        );
+        assert_eq!(
+            pnpm,
+            with(&["node/pnpm"]),
+            "and it is stable, or every launch rebuilds"
+        );
+    }
+
+    /// A probe that **ran and failed** is not a measurement of nothing, and the
+    /// difference is a sentence on the user's terminal.
+    ///
+    /// `docker run` against a missing image, a refusing daemon or a full disk
+    /// exits non-zero with empty stdout. Parsed anyway that is an empty outcome
+    /// list — indistinguishable from a sandbox that answered and had nothing,
+    /// except that one of the two is a broken machine. Both leave every hook
+    /// unsuppressed, which is the safe direction; only one of them deserves
+    /// silence, and it is not this one.
+    ///
+    /// This is the same defect `init`'s predicate call was fixed for, in a
+    /// function written afterwards — which is why the guard is a value here
+    /// rather than a `println!` no test can watch vanish.
+    #[test]
+    fn a_probe_that_ran_and_failed_is_a_reason_not_a_measurement() {
+        let failed = measured_or_reason(false, "", "Error: No such image: omh/x:abc\n");
+        let Err(reason) = failed else {
+            panic!("a failed container was read as a sandbox with nothing in it");
+        };
+        assert!(
+            reason.contains("could not ask the sandbox"),
+            "the reason has to say nobody was asked: {reason}"
+        );
+        assert!(
+            reason.contains("No such image"),
+            "and carry what the runtime said, or it names no cause: {reason}"
+        );
+
+        // A probe that succeeded is taken at its word, protocol and all.
+        assert_eq!(
+            measured_or_reason(true, "ok\tcargo\tresolves\n", "")
+                .expect("a successful probe is an answer")
+                .len(),
+            1
+        );
+        // Including when it honestly measured nothing — an empty *successful*
+        // report is a report, and must not be dressed as a failure.
+        assert_eq!(measured_or_reason(true, "", ""), Ok(Vec::new()));
+    }
+
+    /// Stderr is carried, but not all of it.
+    ///
+    /// A runtime failing to pull or mount can produce a page of output, and a
+    /// diagnostic that buries the line above it under its own noise is one
+    /// people learn to scroll past — the same reason `init`'s predicate report
+    /// takes three lines.
+    #[test]
+    fn the_reason_carries_a_few_lines_of_evidence_not_a_page() {
+        let noisy: String = (0..40).map(|i| format!("line {i}\n")).collect();
+        let Err(reason) = measured_or_reason(false, "", &noisy) else {
+            panic!("must be a reason");
+        };
+        assert_eq!(
+            reason.lines().count(),
+            4,
+            "one reason and three lines of evidence: {reason}"
+        );
+    }
+
+    // ── the questions of last resort ────────────────────────────────────────
+
+    fn unclaimed(stacks: &[&str]) -> Vec<stack::Marker> {
+        stacks
+            .iter()
+            .map(|s| stack::Marker {
+                file: format!("{s}.manifest"),
+                stack: (*s).to_string(),
+            })
+            .collect()
+    }
+
+    fn exchange(
+        markers: &[stack::Marker],
+        has_test: bool,
+        typed: &str,
+    ) -> (usize, Vec<ask::Answer>) {
+        let refs: Vec<&stack::Marker> = markers.iter().collect();
+        let mut out = Vec::new();
+        ask_all(
+            &refs,
+            has_test,
+            &mut std::io::BufReader::new(typed.as_bytes()),
+            &mut out,
+        )
+        .unwrap()
+    }
+
+    /// **A decline stops the remaining marker questions**, rather than putting
+    /// every one of them into the same void.
+    ///
+    /// A decline and a closed pipe are indistinguishable at this level, and the
+    /// one that matters is the pipe: a polyglot repo with three unclaimed
+    /// markers would otherwise print three questions nobody can see. One "no"
+    /// is answer enough to stop asking — the scar the deleted `[toolchain]`
+    /// question earned, carried over rather than re-learned.
+    #[test]
+    fn declining_one_question_stops_the_rest() {
+        let three = unclaimed(&["elixir", "ruby", "php"]);
+        let (asked, answers) = exchange(&three, true, "\n");
+        assert_eq!(asked, 1, "one question put, and no more after the decline");
+        assert!(answers.is_empty());
+
+        // A closed pipe reaches the same place without a prompt being answered
+        // at all.
+        assert_eq!(exchange(&three, true, ""), (1, Vec::new()));
+    }
+
+    /// **A question declined is a question asked.** The headline counts what
+    /// was put on screen, not what came back — claiming "asked nothing" after
+    /// interrogating somebody is the promise the tagline sells, broken while
+    /// they watch.
+    #[test]
+    fn the_count_is_what_was_put_not_what_was_answered() {
+        let one = unclaimed(&["elixir"]);
+        let (asked, answers) = exchange(&one, true, "\n");
+        assert_eq!((asked, answers.len()), (1, 0));
+
+        let (asked, answers) = exchange(&one, true, "apt-get install -y elixir\nmix\n");
+        assert_eq!((asked, answers.len()), (1, 1));
+        assert_eq!(answers[0].path, std::path::Path::new("stacks/elixir.toml"));
+    }
+
+    /// Neither question is put where nothing is unknown — which is most repos,
+    /// most of the time, and is what keeps this from being a wizard.
+    #[test]
+    fn a_repo_with_nothing_unknown_is_asked_nothing() {
+        assert_eq!(exchange(&[], true, "mix test\n"), (0, Vec::new()));
+    }
+
+    /// The test question stands alone: a repo omh understands entirely, that
+    /// still has no way to check its own work.
+    #[test]
+    fn a_project_with_no_way_to_test_itself_is_asked_about_that_alone() {
+        let (asked, answers) = exchange(&[], false, "mix test\n");
+        assert_eq!(asked, 1);
+        assert_eq!(answers[0].path, std::path::Path::new("hooks/test.json"));
+    }
+
+    /// **Covered means covered *here*.** A catalogue hook for an ecosystem this
+    /// repo is not speaks for nothing in it.
+    ///
+    /// Without the intersection this answers `{rust, go, python}` in every repo
+    /// — that is simply what omh ships — and `derive::hooks` reads a non-empty
+    /// `covered` as *some ecosystem hook already runs this project's tests*. So
+    /// runner derivation, the whole hand-rolled `Makefile`/`justfile`/`Taskfile`
+    /// scanner, could not fire for anybody, and a C project with a working
+    /// `make test` was then told by `omh init` that omh had found **no runner**.
+    ///
+    /// Every unit test of `derive::hooks` passes a hand-built `covered`, so none
+    /// of them could see this: the defect was in what the caller computed, and
+    /// nothing tested the caller. That is why this is a function.
+    #[test]
+    fn what_the_catalogue_covers_elsewhere_covers_nothing_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("rust-test.json"),
+            r#"{"on":"turn-end","stack":"rust","run":"cargo test"}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            hooks.join("shellcheck.json"),
+            r#"{"on":"turn-end","run":"shellcheck ./x.sh"}"#,
+        )
+        .unwrap();
+        let dirs = [hooks];
+
+        let rust = stack::Definition {
+            name: "rust".into(),
+            marker: "Cargo.toml".into(),
+            provides: Vec::new(),
+        };
+
+        assert_eq!(
+            covered_here(&dirs, &[]).unwrap(),
+            BTreeSet::new(),
+            "a repo that is no ecosystem omh ships a hook for is covered by \
+             none of them — this is the C project with a Makefile, and the \
+             whole runner path depends on it"
+        );
+        assert_eq!(
+            covered_here(&dirs, &[&rust]).unwrap(),
+            ["rust".to_string()].into_iter().collect(),
+            "and a rust repo is covered, so its Makefile earns no second hook"
+        );
+    }
+
+    /// A hook belonging to an ecosystem this repo is not could never have been
+    /// taken here, so it is not offered and not reported as unselected.
+    ///
+    /// This is **applicability, not selection**, and the distinction is the
+    /// whole of it. `[use]` is what you chose from what you could have chosen;
+    /// once omh ships a hook per ecosystem, a rust repo's catalogue holds
+    /// `go-test` and `python-format` too, and listing them as "available but
+    /// not selected" would turn a real report — *here is what you are not
+    /// using* — into a page of things nobody could ever use. The launcher's
+    /// unselected line exists to be read, and a report nobody reads is one that
+    /// stops catching the entry you did mean to take.
+    ///
+    /// A hook naming **no** stack belongs everywhere: `graph-refresh`, or
+    /// somebody's `shellcheck`. Those are never filtered, and the asymmetry
+    /// matters — filtering by "names a detected stack" rather than "does not
+    /// name an undetected one" would hide every general hook in the catalogue.
+    #[test]
+    fn a_hook_for_an_ecosystem_this_repo_is_not_is_not_offered() {
+        let declared = BTreeMap::from([
+            ("rust-test".to_string(), Some("rust".to_string())),
+            ("go-test".to_string(), Some("go".to_string())),
+            ("shellcheck".to_string(), None),
+        ]);
+        let names = vec![
+            "rust-test".to_string(),
+            "go-test".to_string(),
+            "shellcheck".to_string(),
+            // A name in the list that no file declares — the repo's own hook
+            // directory is read separately, and a name omh knows nothing about
+            // is not a name omh may drop.
+            "mine".to_string(),
+        ];
+        let detected: BTreeSet<String> = ["rust".to_string()].into_iter().collect();
+
+        assert_eq!(
+            applicable_hooks(names.clone(), &declared, &detected),
+            vec![
+                "rust-test".to_string(),
+                "shellcheck".to_string(),
+                "mine".to_string()
+            ],
+            "only the hook naming an ecosystem this repo is not comes out"
+        );
+
+        // A repo omh detects nothing for keeps everything that claims nothing.
+        assert_eq!(
+            applicable_hooks(names, &declared, &BTreeSet::new()),
+            vec!["shellcheck".to_string(), "mine".to_string()]
+        );
+    }
+
+    /// What the sandbox is asked about is the **union**, and neither half
+    /// contains the other.
+    ///
+    /// `needs` is what a *stack* promised: it catches rustup installing a
+    /// `cargo` that then cannot link, which is a provisioning failure and
+    /// belongs in `init`'s report. A hook's program is what will be handed to a
+    /// shell: a hand-written `shellcheck` hook is in no `needs` list anywhere,
+    /// and asking only about `needs` ships it into a sandbox that cannot run
+    /// it — `cargo: not found` with a different program in it.
+    ///
+    /// Both mutations are one line and neither is implausible, which is why
+    /// this asserts the whole set rather than two `contains`.
+    #[test]
+    fn the_sandbox_is_asked_about_both_what_stacks_promised_and_what_hooks_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let hooks = dir.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        std::fs::write(
+            hooks.join("lint.json"),
+            r#"{"on":"turn-end","run":"shellcheck ./x.sh"}"#,
+        )
+        .unwrap();
+
+        let def = stack::Definition {
+            name: "rust".into(),
+            marker: "Cargo.toml".into(),
+            provides: vec![stack::Provide {
+                name: "toolchain".into(),
+                needs: vec!["cargo".into(), "rustc".into()],
+                when: None,
+                install: Some("install rustup".into()),
+                because: "a fixture".into(),
+                measured: Vec::new(),
+            }],
+        };
+        let mut repo = settings::RepoPolicy::default();
+        repo.provision.insert("rust/toolchain".to_string(), true);
+
+        // Through `needs_of`, because that is what `sandbox` puts in `owed` —
+        // asserting the union over a hand-written set would let the two halves
+        // agree here and disagree in the one place it matters.
+        let owed = needs_of(&[&def], &repo.provision);
+        let asked = probe_targets(&[hooks], &Default::default(), &repo, &owed).unwrap();
+
+        assert_eq!(
+            asked,
+            BTreeSet::from([
+                "cargo".to_string(),
+                "rustc".to_string(),
+                "shellcheck".to_string()
+            ]),
+            "asking about only one of the two lists leaves the other unmeasured"
+        );
+    }
+
+    /// A provide nobody recorded, and a provide somebody opted out of, owe
+    /// nothing — so neither can be reported as a provisioning failure.
+    ///
+    /// `init` prints "did not resolve after installing" for these, and that
+    /// sentence has to be true. A provide that was never installed did not
+    /// fail to install; saying so is a gap omh invented, and it would print on
+    /// every `init` for anybody who opted out of the 124 MB linker on purpose.
+    ///
+    /// The consequence of the opt-out is not silenced by this. If a hook names
+    /// the program, `probe_targets` asks about it through the hooks half, and a
+    /// hook that cannot run is dropped by name.
+    #[test]
+    fn only_what_was_provisioned_owes_a_program() {
+        fn provide(name: &str, need: &str, install: Option<&str>) -> stack::Provide {
+            stack::Provide {
+                name: name.into(),
+                needs: vec![need.into()],
+                when: None,
+                install: install.map(str::to_string),
+                because: "a fixture".into(),
+                measured: Vec::new(),
+            }
+        }
+        let def = stack::Definition {
+            name: "node".into(),
+            marker: "package.json".into(),
+            provides: vec![
+                // No `install`: an assertion that the base image already ships
+                // this, which is worth writing down only if something checks it.
+                provide("runtime", "node", None),
+                provide("pnpm", "pnpm", Some("corepack enable pnpm")),
+                provide("yarn", "yarn", Some("corepack enable yarn")),
+                provide("bun", "bun", Some("npm install -g bun")),
+            ],
+        };
+        let resolved = BTreeMap::from([
+            ("node/runtime".to_string(), true),
+            ("node/pnpm".to_string(), true),
+            ("node/yarn".to_string(), false),
+            // `node/bun` was never recorded at all.
+        ]);
+
+        assert_eq!(
+            needs_of(&[&def], &resolved),
+            BTreeSet::from(["node".to_string(), "pnpm".to_string()]),
+            "an assertion with no recipe is still owed; an opt-out and an \
+             absence are not"
+        );
+    }
+
+    /// A stacks directory omh cannot read is **said**, and it withdraws the
+    /// drift report rather than filing a wrong one.
+    ///
+    /// `notice::hooks` decides which hooks name a stack this repo is not, so
+    /// with no definitions it concludes that every stack-named hook belongs to
+    /// nothing. Swallowing the error into an empty list therefore does not
+    /// degrade the report — it inverts it, and prints the inversion in omh's
+    /// own voice. The neighbouring branch already reports its error and returns
+    /// `None`; this one used `unwrap_or_default` and said nothing at all.
+    #[test]
+    fn a_stacks_directory_omh_cannot_read_is_reported_rather_than_read_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(paths.stacks()).unwrap();
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        std::fs::write(paths.stacks().join("rust.toml"), "this is not toml {{{").unwrap();
+
+        assert!(
+            say_hooks(&paths).is_none(),
+            "a report built on stacks that would not load is a wrong report"
+        );
+    }
+
+    /// The resolution is read from and written to the **committed** layer, and
+    /// nothing else guarded which layer that is.
+    ///
+    /// `config`'s own tests prove the reader answers for one layer, and prove
+    /// it for a good reason — but a correct reader called with the wrong
+    /// argument is the same bug with a passing guard in front of it. Both
+    /// mutations survived the suite: reading `Local` exports one laptop's
+    /// `false` into a file everybody clones, and writing `Local` means the
+    /// resolution never reaches a teammate, which is the entire case for the
+    /// table living in committed settings.
+    #[test]
+    fn the_resolution_is_read_and_written_in_the_committed_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let write = |layer: config::Layer, body: &str| {
+            let f = layer.file(&paths);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, body).unwrap();
+        };
+        write(
+            config::Layer::Shared,
+            "[provision]\n\"rust/toolchain\" = true\n",
+        );
+        let local_before = "[provision]\n\"node/pnpm\" = false\n";
+        write(config::Layer::Local, local_before);
+
+        let fired: BTreeSet<String> = ["rust/toolchain", "node/pnpm"]
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect();
+        record_resolution(&paths, &fired).unwrap();
+
+        let shared = std::fs::read_to_string(config::Layer::Shared.file(&paths)).unwrap();
+        let parsed: toml::Table = toml::from_str(&shared).expect("still TOML");
+        assert_eq!(
+            parsed["provision"]["rust/toolchain"].as_bool(),
+            Some(true),
+            "the resolution must land in the committed file: {shared}"
+        );
+        assert_eq!(
+            parsed["provision"]["node/pnpm"].as_bool(),
+            Some(true),
+            "a laptop's opt-out must not be read back as the team's: {shared}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(config::Layer::Local.file(&paths)).unwrap(),
+            local_before,
+            "the local layer is somebody's own file and init does not edit it"
+        );
+    }
+
+    // ── proposed guards ─────────────────────────────────────────────────────
+
+    /// A stand-in for the container runtime: a script that records every call
+    /// and answers the probe protocol.
+    ///
+    /// `measure` and `top_up` take the runtime's program name as an argument,
+    /// so the whole measurement path is reachable without a container. What
+    /// this cannot prove is what a *real* image contains — that is `omh
+    /// doctor`'s, and no green test crosses that line. What it does prove is
+    /// omh's own arithmetic: which questions get asked, of which image, and
+    /// what is done with the answers.
+    fn fake_runtime(dir: &std::path::Path, present: &[&str], absent: &[&str]) -> String {
+        let log = dir.join("calls.log");
+        let mut body = String::from("#!/bin/sh\n");
+        body.push_str(&format!(
+            "printf 'CALL %s\\n' \"$*\" | tr -d '\\n' >> {}; printf '\\n' >> {}\n",
+            log.display(),
+            log.display()
+        ));
+        for p in present {
+            body.push_str(&format!("printf 'ok\\t{p}\\tresolves\\n'\n"));
+        }
+        for p in absent {
+            body.push_str(&format!("printf 'fail\\t{p}\\tnot installed\\n'\n"));
+        }
+        let bin = dir.join("fake-runtime");
+        std::fs::write(&bin, body).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        bin.to_string_lossy().to_string()
+    }
+
+    /// Every call the fake was given, and the probes among them — a probe is
+    /// the one that runs the image rather than inspecting or building it.
+    fn calls(dir: &std::path::Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("calls.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn probes(dir: &std::path::Path) -> Vec<String> {
+        calls(dir)
+            .into_iter()
+            .filter(|c| c.contains("--pull=never"))
+            .collect()
+    }
+
+    fn a_sandbox(tag: &str, owed: &[&str]) -> Sandbox {
+        Sandbox {
+            installs: Vec::new(),
+            tag: tag.to_string(),
+            resolves: BTreeMap::new(),
+            owed: owed.iter().map(|s| (*s).to_string()).collect(),
+        }
+    }
+
+    fn measurement_fixture(dir: &std::path::Path) -> (Paths, Adapter) {
+        let paths = Paths {
+            root: dir.join("home"),
+            repo: dir.join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
+        (paths, adapter)
+    }
+
+    /// **A second launch asks the image nothing**, and that is the only reason
+    /// a launch is not a container run.
+    ///
+    /// Everything the cache is for lives in one function nothing reached:
+    /// skipping `unseen`, dropping the `save`, or throwing the answer away
+    /// instead of storing it all left the suite green. The first two spend a
+    /// container run on every launch of every repo forever; the third ships
+    /// every hook into a sandbox that may not have its program, which is the
+    /// `cargo: not found` failure this milestone exists to remove.
+    #[cfg(unix)]
+    #[test]
+    fn a_second_launch_asks_the_image_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, adapter) = measurement_fixture(dir.path());
+        let runtime = fake_runtime(dir.path(), &["cargo"], &["cc"]);
+        let own = base::Own::default();
+        let repo = settings::RepoPolicy::default();
+
+        let mut first = a_sandbox("omh/claude:abc123", &["cargo", "cc"]);
+        first
+            .top_up(&paths, &runtime, &adapter, &[], &own, &repo)
+            .unwrap();
+
+        assert_eq!(probes(dir.path()).len(), 1, "the first launch must ask");
+        assert_eq!(
+            first.resolves.get("cargo"),
+            Some(&true),
+            "and keep what it was told: {:?}",
+            first.resolves
+        );
+        assert_eq!(first.resolves.get("cc"), Some(&false));
+        assert!(
+            paths.facts().exists(),
+            "and write it down, or the next launch asks again"
+        );
+
+        let mut second = a_sandbox("omh/claude:abc123", &["cargo", "cc"]);
+        second
+            .top_up(&paths, &runtime, &adapter, &[], &own, &repo)
+            .unwrap();
+        assert_eq!(
+            probes(dir.path()).len(),
+            1,
+            "a repo whose hooks and stacks have not changed must start no container"
+        );
+        assert_eq!(
+            second.resolves.get("cc"),
+            Some(&false),
+            "and still know what was measured before: {:?}",
+            second.resolves
+        );
+    }
+
+    /// The probe runs in **this** image and asks about what this repo owes —
+    /// and the answers are filed under the same tag.
+    ///
+    /// Probing or filing under any other tag caches an answer about image A
+    /// against image B. Both directions are silent: a hook suppressed in a
+    /// sandbox that has its program, or shipped into one that does not.
+    #[cfg(unix)]
+    #[test]
+    fn the_probe_asks_this_image_about_what_it_owes() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, adapter) = measurement_fixture(dir.path());
+        let runtime = fake_runtime(dir.path(), &["cargo"], &[]);
+
+        let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
+        sb.top_up(
+            &paths,
+            &runtime,
+            &adapter,
+            &[],
+            &base::Own::default(),
+            &settings::RepoPolicy::default(),
+        )
+        .unwrap();
+
+        let probe = probes(dir.path()).join("\n");
+        assert!(
+            probe.contains("omh/claude:abc123"),
+            "the probe must run in the image this session will run: {probe}"
+        );
+        assert!(
+            probe.contains("cargo"),
+            "and ask about what the stacks promised: {probe}"
+        );
+
+        let raw = std::fs::read_to_string(paths.facts()).unwrap();
+        assert!(
+            raw.contains("omh/claude:abc123"),
+            "and file the answer under that image's tag: {raw}"
+        );
+    }
+
+    /// **There is an image before there is a question about it.**
+    ///
+    /// All three launch paths measured first and built inside `session_up`, so
+    /// the first launch after a recipe changed probed a tag with no image
+    /// behind it, learned nothing, and shipped every hook unsuppressed. It
+    /// healed on the second launch, which is exactly the broken first turn this
+    /// design removes. `top_up` now builds first, and nothing else says so.
+    #[cfg(unix)]
+    #[test]
+    fn an_image_is_made_sure_of_before_it_is_asked_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, adapter) = measurement_fixture(dir.path());
+        let runtime = fake_runtime(dir.path(), &["cargo"], &[]);
+
+        let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
+        sb.top_up(
+            &paths,
+            &runtime,
+            &adapter,
+            &[],
+            &base::Own::default(),
+            &settings::RepoPolicy::default(),
+        )
+        .unwrap();
+
+        let all = calls(dir.path());
+        let built = all
+            .iter()
+            .position(|c| !c.contains("--pull=never"))
+            .expect("the image has to be made sure of at all");
+        let asked = all
+            .iter()
+            .position(|c| c.contains("--pull=never"))
+            .expect("and then asked");
+        assert!(
+            built < asked,
+            "a probe against an image nobody built learns nothing: {all:?}"
+        );
+    }
+
+    /// A runtime that cannot answer is **cannot-tell**, never a sandbox with
+    /// nothing in it.
+    ///
+    /// Suppression acts on a measured `false`. A probe that could not run must
+    /// leave the facts as they were, or one broken docker turns every hook in
+    /// every repo off in a session that otherwise looks normal.
+    #[cfg(unix)]
+    #[test]
+    fn a_probe_that_cannot_run_suppresses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (paths, adapter) = measurement_fixture(dir.path());
+        // Exits non-zero for everything, so the image "exists" is false and the
+        // probe fails — the shape of a daemon that is refusing.
+        let bin = dir.path().join("failing-runtime");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
+        let _ = sb.top_up(
+            &paths,
+            &bin.to_string_lossy(),
+            &adapter,
+            &[],
+            &base::Own::default(),
+            &settings::RepoPolicy::default(),
+        );
+
+        assert_eq!(
+            sb.resolves.get("cargo"),
+            None,
+            "silence is cannot-tell, and cannot-tell is never a measured \
+             absence: {:?}",
+            sb.resolves
+        );
+    }
+
+    /// A stack whose recipes are neither sorted nor all-applying — hostile on
+    /// both axes, so a recipe that sorts and an `owed` built from the
+    /// definitions rather than the resolution both come out wrong here.
+    fn provisioned_fixture(paths: &Paths) {
+        std::fs::create_dir_all(paths.stacks()).unwrap();
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        std::fs::write(paths.repo.join("fixture.toml"), "").unwrap();
+        std::fs::write(
+            paths.stacks().join("fixture.toml"),
+            r#"
+name   = "fixture"
+marker = "fixture.toml"
+
+[[provide]]
+name    = "zulu"
+needs   = ["zulu"]
+install = "install zulu"
+because = "a fixture"
+
+[[provide]]
+name    = "alpha"
+needs   = ["alpha"]
+install = "install alpha"
+because = "a fixture"
+
+[[provide]]
+name    = "declined"
+needs   = ["declined"]
+install = "install declined"
+because = "a fixture"
+"#,
+        )
+        .unwrap();
+    }
+
+    fn fixture_policy() -> settings::RepoPolicy {
+        let mut repo = settings::RepoPolicy::default();
+        repo.provision.insert("fixture/zulu".to_string(), true);
+        repo.provision.insert("fixture/alpha".to_string(), true);
+        repo.provision.insert("fixture/declined".to_string(), false);
+        repo
+    }
+
+    /// **The recipe a launch builds must produce the tag that launch runs.**
+    ///
+    /// `session_up` takes the two as separate arguments — `opts.image` and
+    /// `recipe` — so nothing stops them describing different images, which is
+    /// the milestone-one bug in a new place. Asserted as agreement rather than
+    /// against a literal, because the failure is divergence.
+    #[test]
+    fn the_layer_a_sandbox_names_is_the_layer_its_recipe_builds() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        provisioned_fixture(&paths);
+        let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
+        let sb = sandbox(&paths, &adapter, &fixture_policy()).unwrap();
+
+        assert_eq!(
+            sb.recipe(),
+            vec!["install zulu", "install alpha"],
+            "file order is install order, and an opt-out contributes no recipe"
+        );
+        assert_ne!(
+            sb.tag,
+            image::tag_for(&adapter),
+            "this fixture must provision something or it proves nothing"
+        );
+        assert_eq!(
+            image::stack_tag(&adapter, &sb.recipe()),
+            sb.tag,
+            "the recipe handed to `ensure_stack` must build the tag `plan` runs, \
+             or a session runs an image nothing built"
+        );
+    }
+
+    /// What `sandbox` hands on is the **resolution's** list and the **tag's**
+    /// measurements, and neither is re-derived from anything else.
+    #[test]
+    fn a_sandbox_carries_what_it_owes_and_what_is_already_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        provisioned_fixture(&paths);
+        let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
+        let repo = fixture_policy();
+
+        let first = sandbox(&paths, &adapter, &repo).unwrap();
+        assert_eq!(
+            first.owed,
+            BTreeSet::from(["zulu".to_string(), "alpha".to_string()]),
+            "a provide somebody opted out of was never installed and owes \
+             nothing: {:?}",
+            first.owed
+        );
+        assert!(
+            first.resolves.is_empty(),
+            "and nothing has been measured about this image yet"
+        );
+
+        let mut facts = facts::Facts::default();
+        facts.learn(
+            &first.tag,
+            &[doctor::Outcome {
+                name: "alpha".into(),
+                ok: false,
+                detail: "not installed in the sandbox".into(),
+            }],
+        );
+        facts.save(&paths).unwrap();
+
+        let second = sandbox(&paths, &adapter, &repo).unwrap();
+        assert_eq!(
+            second.resolves.get("alpha"),
+            Some(&false),
+            "a sandbox must arrive knowing what was measured about its own \
+             tag: {:?}",
+            second.resolves
+        );
+    }
+
+    // ── the shipped hooks ───────────────────────────────────────────────────
 
     /// The safety property, restated where it now lives.
     ///
@@ -3437,6 +5847,43 @@ mod tests {
         );
     }
 
+    /// **And it is recoverable under a name that exists**, for every kind omh
+    /// ships rather than only the TOML ones.
+    ///
+    /// The backup was named by *replacing* the extension with a literal
+    /// `toml.yours`, which was right by accident while everything shipped was
+    /// TOML and wrong the moment `hooks/` shipped JSON: an edited
+    /// `rust-test.json` was saved as `rust-test.toml.yours` while the message
+    /// on screen said `rust-test.json.yours`. Somebody looking for their edit
+    /// where omh told them to look would not find it, and would reasonably
+    /// conclude it had been discarded.
+    ///
+    /// Iterated over every shipped kind, because a guard written against
+    /// adapters alone is a guard that passes on exactly the case that broke.
+    #[test]
+    fn a_replaced_file_is_kept_under_the_name_omh_names() {
+        for kind in bundled::ALL {
+            let d = tempfile::tempdir().unwrap();
+            let dest = d.path().join(kind.dir());
+            std::fs::create_dir_all(&dest).unwrap();
+            let first = kind.files()[0].name;
+            let mine = "this is what I wrote\n";
+            std::fs::write(dest.join(first), mine).unwrap();
+
+            install_bundled(&dest, kind).unwrap();
+
+            // The name omh prints, spelled the way omh prints it.
+            let backup = dest.join(format!("{first}.yours"));
+            assert_eq!(
+                std::fs::read_to_string(&backup).ok().as_deref(),
+                Some(mine),
+                "{}: an edit must be recoverable at {}",
+                kind.dir(),
+                backup.display()
+            );
+        }
+    }
+
     /// A file omh cannot read as text is still a file somebody wrote.
     ///
     /// `read_to_string` fails on a single non-UTF-8 byte — one accented
@@ -3559,5 +6006,76 @@ mod tests {
                 "{flag} reaches the harness"
             );
         }
+    }
+
+    // ── candidate guards (mutation testing) ─────────────────────────────────
+
+    /// **Only "not found" means absent.** A bundled file omh cannot open — a
+    /// permission it does not have, a name that is now a directory — is not a
+    /// file that is not there, and collapsing the two overwrites somebody's
+    /// edit with no backup and no message. The read fails, the write succeeds,
+    /// and the edit is gone.
+    ///
+    /// The non-UTF-8 half of this rule is guarded one test up. This is the
+    /// other half, and deleting it changed no test.
+    #[test]
+    #[cfg(unix)]
+    fn an_edit_omh_cannot_open_at_all_is_never_treated_as_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("adapters");
+        std::fs::create_dir_all(&dest).unwrap();
+        let target = dest.join("claude.toml");
+        std::fs::write(&target, "name = \"mine\"\n").unwrap();
+        // Write-only, deliberately. A mode omh can neither read nor write
+        // would be caught by the *write* failing, which proves nothing about
+        // the read — this is the shape the shipped bug actually had: the read
+        // failed, the write succeeded, and the edit was gone.
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o200)).unwrap();
+
+        let outcome = install_bundled(&dest, bundled::Shipped::Adapters);
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let e = format!(
+            "{:#}",
+            outcome.expect_err("a file omh could not read must not be overwritten in silence")
+        );
+        assert!(e.contains("claude.toml"), "and it names the file: {e}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "name = \"mine\"\n",
+            "and the edit is still there"
+        );
+    }
+
+    /// **A hook belonging to an ecosystem this repo is not stays out of the
+    /// list; everything else stays in.** Both halves, because the filter has
+    /// two ways to be wrong and one of them offers a rust repo `go-test` while
+    /// the other drops every hook that belongs to nothing in particular —
+    /// which is most of them.
+    #[test]
+    fn a_hook_that_belongs_to_nothing_is_offered_everywhere() {
+        let declared = BTreeMap::from([
+            ("rust-test".to_string(), Some("rust".to_string())),
+            ("go-test".to_string(), Some("go".to_string())),
+            ("graph-refresh".to_string(), None),
+        ]);
+        let names = vec![
+            "rust-test".to_string(),
+            "go-test".to_string(),
+            "graph-refresh".to_string(),
+            "never-declared".to_string(),
+        ];
+        let rust: BTreeSet<String> = ["rust".to_string()].into_iter().collect();
+
+        assert_eq!(
+            applicable_hooks(names, &declared, &rust),
+            vec![
+                "rust-test".to_string(),
+                "graph-refresh".to_string(),
+                "never-declared".to_string()
+            ],
+            "an ecosystem hook is filtered by the ecosystem; nothing else is"
+        );
     }
 }

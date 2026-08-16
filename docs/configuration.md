@@ -3,10 +3,6 @@
 Your setup is declared once and rendered into whatever shape each harness reads.
 This page covers where it lives, how it resolves, and how to change things.
 
-> Selection — `[use]`, `omh use` / `unuse` — is not built yet. Until it is, a
-> repo gets your whole catalogue. See [The profile](design/profile.md) for the
-> model and the reasoning.
-
 ## One catalogue, and it is personal
 
 ```
@@ -29,7 +25,8 @@ A repo holds configuration, and one kind of content:
   settings.toml        committed: settings, and which of omh's features are on
   settings.local.toml  gitignored: your overrides, and the secrets the other must not hold
   memory.toml          committed: how the note store keys and expires
-  hooks/               committed: hooks that only make sense in this repo
+  hooks/               committed: hooks bound to commands only this repo has
+  stacks/              committed: an ecosystem you taught omh, if you had to
 <repo>/AGENTS.md       the project's own rules — tracked, and actually read
 ```
 
@@ -39,20 +36,109 @@ names ones from your catalogue.
 ### Why hooks are the exception
 
 A skill is a way *you* work — it travels with you across repos, which is why it
-belongs to you. A hook binds to a repo's own commands, and the stack hooks are
-the proof: `cargo test` here, `pnpm test` next door, one name and two bodies. A
-capability that is project-specific by nature has to be declarable where the
-project is, or the catalogue fills with entries that are only ever right in one
-place.
+belongs to you. Some hooks are the same: `cargo test` is what a rust project
+runs, not what *this* rust project runs, so omh ships one per ecosystem and they
+live in your catalogue like everything else.
+
+But a hook is also the one capability that can bind to a command only this repo
+has — an integration suite behind a script, a linter with the project's own
+config. Those have to be declarable where the project is, or the catalogue fills
+with entries that are only ever right in one place.
 
 So the rule is not "no content in the repo". It is **content lives where its
-scope is**, and hooks are the one capability whose scope is the repo.
+scope is**, and hooks are the one capability that can have either scope.
+
+**A shipped hook names the ecosystem it belongs to**, and nothing else about it:
+
+```json
+{ "on": "turn-end", "stack": "rust", "run": "cargo test" }
+```
+
+That is a *reference*. The marker that decides whether a repo is a rust project
+stays in the stack definition, so the two can never disagree — and a hook naming
+an ecosystem you are not is simply not offered to you. `omh init` in a rust repo
+does not put `go-test` in your `[use]` list, and the launcher does not report it
+as something you are not using.
+
+A hook that names no stack belongs everywhere, which is most of them.
 
 **A project hook beats a catalogue hook of the same name**, which is how a repo
 overrides your personal `format` hook with the one it actually needs, without
 renaming anything. **Names from the base set are reserved** — a file answering
 to one is an error naming both, because a repo that could replace
 `graph-refresh` could make the graph lie while looking installed.
+
+### Hooks omh works out for you
+
+Some commands the catalogue cannot hold, because they are a property of the
+project rather than of its ecosystem. `npm test` is only a real command if the
+project declared a `test` script, and which manager runs it depends on the
+lockfile. So `omh init` reads what the project already commits and writes the
+hook into `<repo>/.omh/hooks/` — where you can edit it, and where it is
+committed and travels:
+
+| It reads | To decide |
+|---|---|
+| a lockfile, then `packageManager` | which package manager runs a script |
+| `scripts` in `package.json` | whether there is a `test` or `format` to run |
+| a `Makefile`, `justfile` or `Taskfile.yml` | whether the project has its own entry point |
+
+**It executes nothing.** Not `make -qp`, not a shell. Every answer comes from
+reading a file, because a derivation that ran something on your machine during
+`init` would be the thing omh exists to avoid.
+
+**It fills gaps and never competes.** A rust project already has `rust-test`
+from the catalogue, so its `Makefile` earns nothing — otherwise every turn
+would run the suite twice. A project that is both rust and node correctly gets
+both.
+
+**Anything ambiguous produces nothing.** Two lockfiles, a `Taskfile` using
+`includes:` or YAML anchors, a `package.json` that will not parse: omh writes no
+hook and you write one. A repo with no hook is a repo somebody adds one to; a
+repo with the *wrong* hook is one where every turn ends in a red mark nobody can
+explain, and the hook omh invented is the last place anyone looks.
+
+The command is always spelled from omh's own vocabulary — `pnpm run test`,
+`make fmt` — never from text in your files. And it is always `run`: `bun test`
+is bun's own test runner and ignores your `test` script completely.
+
+### The two things omh will ask
+
+Everything above is derived, and most repos are asked nothing at all. Two things
+are not derivable from any file, and `omh init` asks about them — once, on a
+terminal, recording the answer so it never asks again.
+
+**"How is this installed?"** — when the repo plainly *is* something omh has
+never been taught. A `mix.exs` names elixir; omh ships no elixir stack and
+cannot invent one. Answer it and omh writes `<repo>/.omh/stacks/elixir.toml`,
+which is read beside the ones omh ships:
+
+```toml
+name   = "elixir"
+marker = "mix.exs"
+
+[[provide]]
+name    = "toolchain"
+needs   = ["mix", "elixir"]
+install = "apt-get update && apt-get install -y elixir"
+because = "elixir is what this project is written in"
+```
+
+It asks for the install command *and* what should then be on PATH, because a
+recipe with no stated outcome is one nothing can check — omh would install
+something, report success, and have no way to notice it had not worked.
+
+**A repo's own stack adds; it never shadows.** A file answering to a name omh
+ships is an error naming both paths, not a silent override — a stack decides
+what goes into the image your agent runs in.
+
+**"What command tests this?"** — when no stack, lockfile, runner or declared
+script could say. Answer it and omh writes `<repo>/.omh/hooks/test.json`.
+
+**Pressing Enter declines and writes nothing**, which is what it should mean:
+it is what you press when you do not know. **A closed pipe stops the
+questions** — a CI runner is asked nothing and gets no files, rather than having
+its silence recorded as a set of answers.
 
 ### What that costs
 
@@ -103,8 +189,9 @@ why omh keeps one closed tool vocabulary and one `[tools]` map per adapter.
 ## Writing a hook
 
 A hook is the one kind of content a repo can declare, and the only thing omh
-carries that *executes*. It goes in `<repo>/.omh/hooks/<name>.json` if it needs
-to know which repo it is in, and in `~/.omh/hooks/` if it works anywhere.
+carries that *executes*. It goes in `<repo>/.omh/hooks/<name>.json` if it binds
+to a command only this project has, and in `~/.omh/hooks/` if it works anywhere
+— which is where omh's own conventional ones live.
 
 **You write what you want; the adapter says how this harness spells it.**
 
@@ -121,6 +208,7 @@ to know which repo it is in, and in `~/.omh/hooks/` if it works anywhere.
 | Field | Meaning |
 |---|---|
 | `on` | `session-start` · `turn-end` · `before-tool` · `after-tool` |
+| `stack` | which ecosystem it belongs to; absent means every one |
 | `tools` | `edit` · `read` · `shell` · `search`. Empty means every tool |
 | `when` | a shell predicate; non-zero keeps the hook silent |
 | `capture` | a command whose output binds to `$OMH_CAPTURE` |
@@ -269,6 +357,95 @@ looking for it. Selection is for keeping a project's context to what the project
 needs — it is not a boundary, and omh does not claim it as one. What is
 guaranteed is the read-only part: the agent can read a selected skill and cannot
 write one.
+
+## `[provision]` — what your sandbox is built with
+
+`omh init` works out which ecosystems this repo is — a `Cargo.toml`, a
+`package.json` — and then asks the **sandbox**, with your repo mounted
+read-only, which parts of them apply here. A repo with a `pnpm-lock.yaml` gets
+pnpm; the yarn and bun provides do not apply and are not installed.
+
+What it decided is written into your committed settings:
+
+```toml
+# <repo>/.omh/settings.toml
+[provision]
+"rust/toolchain" = true
+"rust/linker" = true
+```
+
+That table is the input to everything afterwards. Your sessions run an image
+built from exactly these, so a teammate who clones the repo gets the same
+sandbox without being asked anything, and `omh run` never re-evaluates a
+condition.
+
+**omh only ever writes `true`.** A `false` can only have been typed, so it is
+treated as a decision and left alone:
+
+```toml
+[provision]
+"rust/linker" = false   # this base image already has cc; do not spend 124 MB on it
+```
+
+An opt-out changes what goes **into** the image. It does not change what omh
+says **about** it: if one of your hooks needs the program, omh still asks the
+sandbox whether it is there, and still holds the hook back by name if it is not.
+
+Keyed `"<stack>/<provide>"`. `omh why` names what each one buys and what it
+costs. Re-running `omh init` is the honest fix for drift — swap a `yarn.lock`
+for a `pnpm-lock.yaml` and the yarn entry goes, because the table describes what
+is true now.
+
+These layer like every other setting, so a provide you want left out on **your**
+machine belongs in `settings.local.toml`, where it says nothing to anyone else —
+and omh will never copy it into the committed file.
+
+## Hooks your sandbox cannot run
+
+omh works out which ecosystems this repo is from its manifests, and the hooks
+for them are catalogue entries this repo turns on through `[use]`. Detection
+runs on your machine; the hook runs in the sandbox, and those are different
+computers. So omh provisions the toolchain into the image — that is what
+`[provision]` above records — and then **measures** what it got.
+
+**A hook is selected either way.** What omh ships and what your repo declares
+are both statements about the *project* — committed, and the same for everybody
+who clones it. Whether `cargo` is installed is a fact about one image, and it
+must not decide what the repo says about itself: otherwise whoever ran `init`
+first imposes their machine on the whole team.
+
+What a missing program decides is whether the hook **runs against this image**,
+and nobody is asked about it:
+
+```
+  held back  `rust-test` needs `cargo` — not installed in this repo's sandbox
+             the hook file is written and travels; it runs as soon as the
+             sandbox has it
+```
+
+That line appears at `omh init`, and again at every launch — in `omh run`'s status
+line and named individually by `omh code` — in the same list as a
+hook your harness cannot spell — a held-back hook is never silently absent. It
+is re-decided from the measurement each time, so a sandbox that gains the tool
+gets its hook back with nothing to un-configure.
+
+Measurements are cached per **image**, in `~/.omh/facts.json`, keyed by the tag
+your sessions run. A repo whose hooks and stacks have not changed asks the
+container nothing; add a hook naming a new program and that one program is
+asked about, once.
+
+A program nobody has measured is **unknown**, never assumed missing — so a first
+run, a deleted cache or an unreadable one holds nothing back, and every hook
+ships. The failure has to fall that way round: the other direction would switch
+off every hook on the machine in a session that otherwise looks completely
+normal.
+
+> **`[toolchain]` was removed.** It recorded an answer to *"this sandbox lacks
+> `cargo`, shall I switch the hook off?"* — a question that asked you to
+> configure around a broken environment, and whose answer outlived the breakage.
+> omh provisions the tool instead. A repo that still has the table gets an error
+> naming it; delete it, and use `[provision] "<stack>/<name>" = false` if what
+> you want is a provide left out.
 
 ## Settings, and their three layers
 
@@ -460,9 +637,76 @@ Import paths expand against the **host**, deliberately using a different
 expansion than everything else — the guest home would send import looking into a
 filesystem that does not exist yet.
 
-**Planned:** extending import beyond MCP to rules, skills, hooks and commands,
-plus a `plugin` capability that reads Claude marketplace plugins and re-renders
-them for other harnesses. See [roadmap](design/roadmap.md).
+### Importing hooks
+
+```console
+$ omh import hooks claude
+```
+
+The same inverse, for the capability most people already have configured. It
+reads the harness's own hook file and writes what it can say into
+**`<repo>/.omh/hooks/`** — this repo, never your catalogue, because a catalogue
+hook runs in every project you ever open and one project's formatter does not
+belong in front of the others.
+
+**It copies.** The harness keeps working exactly as it did; adopting omh is not
+a migration you cannot back out of.
+
+**Imported hooks are selected**, or they would sit on disk and never run — the
+launcher reads `[use]`, so a file written without being named there is a hook
+the report counted and no session ships.
+
+**Nothing is imported half-way.** A handler carrying anything omh cannot say —
+`args`, a `type` that is not a command, or an `if` permission gate — is left
+where it is and named. Importing the command without its `if` would turn a hook
+that fired on one narrow case into one that fires on every call, which is not a
+smaller version of what you wrote. The same goes for a matcher omh cannot read
+as tools: Claude's matchers are unanchored regexes, and `Edit|Write` is
+deliberately narrower than omh's `edit` — importing it as `edit` would widen
+your hook to fire where you had stopped it.
+
+`omh init` mentions what it can see and does nothing about it. Importing writes
+executable content into your repo, which is a decision you make rather than one
+`init` makes because it found a file.
+
+### Importing the rest
+
+```console
+$ omh import skills claude
+$ omh import rules claude
+$ omh import commands opencode
+$ omh import subagents claude
+```
+
+These are **copied into your catalogue**, not into the repo — the opposite of
+hooks, and for the reason the catalogue exists: a skill is a way you work and
+travels with you, while a hook binds to one project's commands.
+
+**Rules come from your own file**, `~/.claude/CLAUDE.md`, never the project's.
+omh already composes this repo's `CLAUDE.md` into every session; importing that
+one would hand the agent the same prose twice, and go on doing it in every other
+repo you opened.
+
+**A skill arrives whole** — it is a directory, and everything under it comes
+across.
+
+**A symlink is refused**, at any depth. Your catalogue is mounted into every
+sandbox omh launches, so a link reaching outside a skill would become a file the
+agent can read in every project, from a copy nobody had reason to inspect. The
+entry is skipped and named; nothing partial is left behind.
+
+**A name that is not a name is refused** — `..`, a separator, a dotfile — by the
+same rule `[use]` applies, so a path cannot be smuggled in where an entry
+belongs.
+
+**Nothing is ever clobbered.** An entry already in your catalogue is left
+exactly as it is, so re-running is a no-op and an import cannot replace
+something you have since edited.
+
+`omh init` names what it can see across all of these and acts on none of it.
+
+**Planned:** a `plugin` capability that reads Claude marketplace plugins and
+re-renders them for other harnesses. See [roadmap](design/roadmap.md).
 
 ## `carry_in`
 

@@ -159,6 +159,80 @@ pub fn harness_dockerfile(adapter: &Adapter) -> String {
     df
 }
 
+/// A third layer: what this repo's stacks put in the image.
+///
+/// The same shape as `harness_dockerfile`, one layer further out, with one
+/// `RUN` per provide that fired — in the order the stack file gave them,
+/// because `corepack enable pnpm` needs the node the provide above it asserted.
+/// An ordered list is how a stack file expresses that dependency without a
+/// graph, and a graph would be a second way to say what the order already says.
+///
+/// Root to install, `agent` to run, exactly as the harness layer: an image that
+/// ends privileged hands the agent the sandbox's own escape hatch.
+pub fn stack_dockerfile(adapter: &Adapter, installs: &[&str]) -> String {
+    let mut df = format!("FROM {}\nUSER root\n", tag_for(adapter));
+    for install in installs {
+        df.push_str(&format!("RUN {install}\n"));
+    }
+    df.push_str("USER agent\nWORKDIR /work\n");
+    df
+}
+
+/// The image a session runs, given what this repo's stacks provide.
+///
+/// Reached through `main::sandbox`, which is the single place that decides —
+/// `container::plan` takes the answer as `Options.image` and re-derives
+/// nothing. It was not always so: for one milestone `plan` hardcoded
+/// `tag_for(adapter)`, so this tag was built by `init` and run by nobody, and
+/// no test noticed. `a_session_runs_the_image_the_caller_resolved` is the guard
+/// that closed it.
+///
+/// Keyed on the **recipe**, which is the recorded installs in order — so a pnpm
+/// repo and a yarn repo do not share an image, and a reordered stack file is a
+/// different image too. That is slightly stronger than keying on the set of
+/// provides recorded, and strictly more correct: it is what the image contains.
+///
+/// Nothing to install is the harness image itself rather than an empty layer
+/// on top of it. A provide that applies but installs nothing — the `runtime`
+/// assertion in `stacks/node.toml` — correctly does not move the tag, because
+/// it changes nothing about the image.
+pub fn stack_tag(adapter: &Adapter, installs: &[&str]) -> String {
+    if installs.is_empty() {
+        return tag_for(adapter);
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    stack_dockerfile(adapter, installs).hash(&mut h);
+    tag_for(adapter).hash(&mut h);
+    base_dockerfile().hash(&mut h);
+    format!("omh/{}:{:x}", adapter.name, h.finish())
+}
+
+/// Build the base, the harness layer and this repo's stack layer if missing,
+/// and hand back the tag a session should run.
+///
+/// Returns the tag rather than letting the caller recompute it: two places
+/// deciding which image to run is how a session ends up in one image while
+/// `init` reported another.
+///
+/// Every caller now gets it from one `main::sandbox` call and hands the same
+/// value to `container::plan`, so the layer that is built and the image that
+/// runs are the same string by construction.
+///
+/// No test calls this: it builds an image, and there is no container runtime in
+/// the dev sandbox. Its construction — `stack_tag` and `stack_dockerfile` — is
+/// tested thoroughly; that the build *works* is `omh doctor`'s to prove, which
+/// is the coverage line `CLAUDE.md` draws and not one a green suite can cross.
+pub fn ensure_stack(program: &str, adapter: &Adapter, installs: &[&str]) -> Result<String> {
+    ensure(program, adapter)?;
+    let tag = stack_tag(adapter, installs);
+    if tag != tag_for(adapter) && !exists(program, &tag) {
+        eprintln!("omh: building {tag} — this repo's toolchain, first run only");
+        build(program, &tag, &stack_dockerfile(adapter, installs))?;
+    }
+    Ok(tag)
+}
+
 /// Parents of every mount target under the agent's home.
 ///
 /// The home itself is excluded — the base image already owns it — and
@@ -195,6 +269,38 @@ pub fn build_args(tag: &str, context: &Path) -> Vec<String> {
         "-f".into(),
         "-".into(),
         context.to_string_lossy().into_owned(),
+    ]
+}
+
+/// Arguments that run a short diagnostic script inside the image, and nothing
+/// else.
+///
+/// Deliberately mountless. `omh doctor` builds a full `container::plan` because
+/// it is checking mounted files; this probe asks only *what does this image
+/// have on PATH*, and every mount it does not take is a way it cannot end up
+/// answering about the host instead. That confusion — host evidence standing in
+/// for a fact about the sandbox — is what the probe exists to end, so it must
+/// not be reachable from inside the probe itself.
+///
+/// No `-w` either: the answer must not depend on where the script starts.
+pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
+    vec![
+        "run".into(),
+        "--rm".into(),
+        // Never fetch. `docker run` defaults to `--pull=missing`, and omh's
+        // tags carry no registry prefix, so a tag whose image is not here
+        // resolves against Docker Hub — for a name every user of a given omh
+        // version shares and anybody can precompute from this repository. A
+        // squatted `omh/*` would be pulled and run, and its `ENTRYPOINT` runs
+        // ahead of the `sh -c` below, so overriding the command saves nothing.
+        //
+        // This is the one path that runs an image `ensure*` has not just built,
+        // which is what makes the default reachable at all.
+        "--pull=never".into(),
+        tag.into(),
+        "sh".into(),
+        "-c".into(),
+        script.into(),
     ]
 }
 
@@ -389,6 +495,79 @@ mod tests {
         assert!(!df.contains("omh/base:latest"), "got: {df}");
     }
 
+    // ── the stack layer ─────────────────────────────────────────────────────
+
+    /// The same discipline the harness layer already keeps: pin the exact layer
+    /// below, never a mutable `:latest`. With a floating base, `ensure` sees the
+    /// tag present and skips the build, so a recipe change never reaches an
+    /// install that already built the old one.
+    #[test]
+    fn the_stack_layer_pins_the_exact_harness_layer() {
+        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"]);
+        assert!(df.contains(&tag_for(&claude())), "got: {df}");
+        assert!(!df.contains(":latest"), "got: {df}");
+    }
+
+    /// A pnpm repo and a yarn repo are the same stack and **not** the same
+    /// image. Without this the two share a tag, one silently gets the other's
+    /// package manager, and the cache makes it stick — worse than no cache at
+    /// all, because it is wrong and fast.
+    #[test]
+    fn a_different_set_of_fired_installs_is_a_different_tag() {
+        let a = claude();
+        let pnpm = stack_tag(&a, &["corepack enable pnpm"]);
+        let yarn = stack_tag(&a, &["corepack enable yarn"]);
+        let both = stack_tag(&a, &["corepack enable pnpm", "corepack enable yarn"]);
+
+        assert_ne!(pnpm, yarn, "different provides, different image");
+        assert_ne!(pnpm, both, "a superset is a different image too");
+        assert_eq!(
+            pnpm,
+            stack_tag(&a, &["corepack enable pnpm"]),
+            "and an unchanged resolution must not rebuild"
+        );
+        // Order is part of the recipe, not a presentation detail. `corepack
+        // enable pnpm` needs the node the provide above it asserted, so a
+        // reordered stack file describes a different image — and a tag that
+        // hashed the *set* would hand that repo the image built in the old
+        // order, which is a cache hit on a build that never happened.
+        assert_ne!(
+            both,
+            stack_tag(&a, &["corepack enable yarn", "corepack enable pnpm"]),
+            "a reordered recipe is a different image"
+        );
+    }
+
+    /// A repo whose stacks install nothing runs the harness image itself.
+    /// Building an empty layer to hold nothing would cost every such repo a
+    /// build, a tag and a pull for no content.
+    #[test]
+    fn nothing_to_install_is_the_harness_image_itself() {
+        assert_eq!(stack_tag(&claude(), &[]), tag_for(&claude()));
+    }
+
+    /// File order is install order, and it is load-bearing: `corepack enable
+    /// pnpm` needs the node the provide above it asserted. An ordered list is
+    /// how a stack file says that without a dependency graph — so the recipe
+    /// must not reorder it.
+    #[test]
+    fn installs_run_in_the_order_the_stack_file_gave() {
+        // Deliberately *not* in alphabetical order. Given `["a", "b"]` a
+        // sorting implementation is indistinguishable from a faithful one —
+        // which is what the first version of this test asserted, and it passed
+        // against a `sort()` inserted to break it.
+        let df = stack_dockerfile(
+            &claude(),
+            &["zzz corepack enable pnpm", "aaa apt-get install nodejs"],
+        );
+        let at = |needle: &str| df.find(needle).unwrap_or_else(|| panic!("missing: {df}"));
+        assert!(
+            at("zzz corepack") < at("aaa apt-get"),
+            "the recipe was reordered — file order is install order, and \
+             `corepack enable pnpm` needs the node above it:\n{df}"
+        );
+    }
+
     #[test]
     fn a_changed_recipe_is_a_different_tag() {
         let mut a = claude();
@@ -456,7 +635,13 @@ mod tests {
     /// that the value never moves. `DefaultHasher` would pass every test here
     /// and change under a toolchain upgrade, marking every image-pinned note in
     /// every repo stale on the same day.
+    ///
+    /// `#[ignore]`d because it shells out to git, which does not work inside an
+    /// omh sandbox: the worktree's `.git` is a pointer at an admin directory
+    /// omh does not mount, so git fails where finding no repository at all
+    /// would have succeeded. Runs on the host and in CI.
     #[test]
+    #[ignore]
     fn an_image_recipe_digest_is_stable_across_toolchains() {
         assert_eq!(
             recipe_digest("hello\n").unwrap(),
@@ -685,13 +870,123 @@ mod tests {
     /// root hands the agent the sandbox's own escape hatch.
     #[test]
     fn images_end_as_the_unprivileged_user() {
-        for df in [base_dockerfile(), harness_dockerfile(&claude())] {
+        // The stack layer installs as root like the harness layer does, so it
+        // is the newest way to end an image privileged — and an image that ends
+        // privileged hands the agent the sandbox's own escape hatch.
+        for df in [
+            base_dockerfile(),
+            harness_dockerfile(&claude()),
+            stack_dockerfile(&claude(), &["apt-get install -y gcc"]),
+        ] {
             let last_user = df
                 .lines()
                 .rfind(|l| l.trim_start().starts_with("USER "))
                 .unwrap_or("");
             assert_eq!(last_user.trim(), "USER agent", "ended privileged:\n{df}");
         }
+    }
+
+    /// …and the stack layer *begins* as root, which the test above cannot see.
+    ///
+    /// It reads only the last `USER`, so dropping `USER root` from
+    /// `stack_dockerfile` leaves it green — and the layer would then run
+    /// `apt-get install gcc` as `agent`. Every recipe that installs anything
+    /// system-wide fails, which is loud, but it fails at *image build* on data
+    /// that is correct, and the person reading the error has no reason to
+    /// suspect the Dockerfile omh generated.
+    ///
+    /// Asserted positionally rather than by presence: root must come before
+    /// the first `RUN`, because a `USER root` after the installs would satisfy
+    /// `contains` and change nothing.
+    #[test]
+    fn the_stack_layer_installs_as_root() {
+        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"]);
+        let line = |needle: &str| {
+            df.lines()
+                .position(|l| l.trim_start().starts_with(needle))
+                .unwrap_or_else(|| panic!("missing `{needle}`:\n{df}"))
+        };
+        assert!(
+            line("USER root") < line("RUN "),
+            "the recipe runs before the layer takes root:\n{df}"
+        );
+    }
+
+    /// The probe exists to answer a question about the *sandbox*, so it must be
+    /// unable to see anything else. One bind mount of a host directory and
+    /// `command -v cargo` starts answering about the developer's laptop — which
+    /// is the exact confusion this whole feature was built to end, reintroduced
+    /// one layer down where nothing would notice.
+    ///
+    /// Asserted as an invariant — *no mount of any spelling* — rather than
+    /// against a fixed argument list, so a future flag cannot slip a mount in
+    /// beside an assertion that still passes.
+    #[test]
+    fn the_toolchain_probe_can_see_nothing_but_the_image() {
+        let args = probe_args("omh/x:latest", "#!/bin/sh\ntrue\n");
+        // An **allowlist**, not a list of flags to forbid. Naming `-v`,
+        // `--mount` and friends looks like an invariant and is a denylist: it
+        // says nothing about `-w`, which `probe_args`' own doc also promises is
+        // absent, nor about `--network`, `--privileged`, `-e` or `--userns`,
+        // nor about whatever docker grows next. Everything between `run` and
+        // the tag must be something this test knows about, so a new flag
+        // arrives as a failure rather than as silence.
+        let tag_at = args
+            .iter()
+            .position(|a| a == "omh/x:latest")
+            .expect("the tag must be among the arguments");
+        // Two entries, each earning its place: `--rm` leaves no container
+        // behind, `--pull=never` refuses to fetch a tag that is not here. Both
+        // are asserted for on their own below and in
+        // `the_probe_never_fetches_the_image_it_asks_about`; the point of the
+        // list is that nothing *else* may appear.
+        for a in &args[1..tag_at] {
+            assert!(
+                a == "--rm" || a == "--pull=never",
+                "an unexpected argument reached the probe — it must see nothing \
+                 but the image, or it answers about the wrong machine: {args:?}"
+            );
+        }
+        assert!(
+            args[1..tag_at].contains(&"--rm".to_string()),
+            "a diagnostic must leave no container behind: {args:?}"
+        );
+        assert!(
+            args.contains(&"omh/x:latest".into()),
+            "and it runs in the image the session will use: {args:?}"
+        );
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("#!/bin/sh\ntrue\n"),
+            "the script is what runs, whole and unedited: {args:?}"
+        );
+    }
+
+    /// The probe must never **fetch** the image it is asking about.
+    ///
+    /// `docker run <tag>` defaults to `--pull=missing`, so a tag with no local
+    /// image is resolved against the default registry. omh's tags are
+    /// `omh/<harness>:<hash>` — no registry prefix, so Docker Hub — and the
+    /// hash is a pure function of the recipe, which means it is identical for
+    /// every user on a given omh version and precomputable by anybody who has
+    /// read this repository. A squatted `omh/*` namespace would therefore be
+    /// pulled and run, and an `ENTRYPOINT` in a pulled image runs ahead of the
+    /// `sh -c` argv this builds, so overriding the command does not save it.
+    ///
+    /// The window is real rather than theoretical: this probe is the one path
+    /// that runs an image without `image::ensure*` having built it first.
+    ///
+    /// Asserted here as well as gated at the call site, on purpose. The gate is
+    /// a caller's responsibility and the next caller may forget; this is a
+    /// property of the command itself and travels with it.
+    #[test]
+    fn the_probe_never_fetches_the_image_it_asks_about() {
+        let args = probe_args("omh/x:latest", "#!/bin/sh\ntrue\n");
+        let tag_at = args.iter().position(|a| a == "omh/x:latest").unwrap();
+        assert!(
+            args[1..tag_at].iter().any(|a| a == "--pull=never"),
+            "a missing image must be an error, never a registry fetch: {args:?}"
+        );
     }
 
     #[test]

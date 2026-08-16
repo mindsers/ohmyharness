@@ -1,0 +1,18 @@
+# Go.
+#
+# One provide, because the distribution's package delivers both binaries at
+# once — but `needs` names them both, because `go test ./...` needs `go` while
+# `gofmt -w .` needs `gofmt`, and a stack that verified only the first would
+# report success on an image where formatting silently fails.
+#
+# No `measured`: nobody has taken it. See stacks/python.toml for why that is
+# allowed and what is still enforced.
+
+name   = "go"
+marker = "go.mod"
+
+[[provide]]
+name    = "toolchain"
+needs   = ["go", "gofmt"]
+install = "apt-get update && apt-get install -y --no-install-recommends golang-go && rm -rf /var/lib/apt/lists/*"
+because = "go builds, tests and formats through its own toolchain; the base image ships none of it"

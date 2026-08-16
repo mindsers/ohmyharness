@@ -55,6 +55,45 @@ impl Paths {
         self.root.join("editors")
     }
 
+    /// The stacks as shipped: what a project needs installed, and how the image
+    /// gets it. Managed files, refreshed on every `init` like the adapters — a
+    /// local edit that fixes one ecosystem leaves omh broken for everybody else
+    /// using it, so the fix belongs upstream.
+    pub fn stacks(&self) -> PathBuf {
+        self.root.join("stacks")
+    }
+
+    /// Ecosystems **this repo** taught omh, for the one case a release never
+    /// will: a proprietary internal toolchain. Written by `init` from an answer
+    /// somebody typed, read beside the shipped ones, and unable to answer to a
+    /// name omh ships.
+    pub fn repo_stacks(&self) -> PathBuf {
+        self.repo.join(".omh").join("stacks")
+    }
+
+    /// Files omh recognises as naming an ecosystem it cannot yet set up. A
+    /// question, not an answer — see `stack::Marker`.
+    pub fn markers(&self) -> PathBuf {
+        self.root.join("markers")
+    }
+
+    /// The conventional hooks as shipped — `cargo test`, `gofmt -w .` — living
+    /// in the catalogue beside the ones you write, because that is where their
+    /// scope is: `cargo test` is what a rust project runs, not what *this* rust
+    /// project runs.
+    ///
+    /// Managed like the stacks and the adapters, so a fix omh ships reaches
+    /// somebody who ran `init` a year ago. A repo that needs its own spelling
+    /// writes `<repo>/.omh/hooks/<name>.json`, which shadows this by the rule
+    /// `merge_hooks` already applies.
+    ///
+    /// Deliberately the same directory `Capability::Hooks` sources, not a
+    /// parallel one: a second place hooks can live is a second precedence rule
+    /// to explain, and the shadowing already says what to do about a clash.
+    pub fn hooks(&self) -> PathBuf {
+        self.root.join(Capability::Hooks.source())
+    }
+
     /// The base set as shipped: what `init` seeds and what `omh why` explains.
     /// Versioned files, oldest kept, so an upgrade can eventually diff two.
     pub fn base(&self) -> PathBuf {

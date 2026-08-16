@@ -1,0 +1,25 @@
+# Python.
+#
+# No `measured` on either provide: nobody has taken those numbers, and this
+# file would rather say nothing than say something typed. The rule that a
+# measurement *present* must be one somebody could have taken is enforced by
+# `every_provide_states_its_case`; the rule that one must exist is not, so that
+# a stack can be contributed by somebody who works in the ecosystem and has no
+# way to run an image build.
+
+name   = "python"
+marker = "pyproject.toml"
+
+[[provide]]
+name    = "runtime"
+needs   = ["python3", "pip3"]
+install = "apt-get update && apt-get install -y --no-install-recommends python3 python3-pip python3-venv && rm -rf /var/lib/apt/lists/*"
+because = "the base image is a node image and ships no python at all, so nothing in the project can be run"
+
+# Separate from the runtime because they fail separately: a repo can have a
+# working python and no test runner, and the report should say which.
+[[provide]]
+name    = "tools"
+needs   = ["pytest", "ruff"]
+install = "pip3 install --break-system-packages --no-cache-dir pytest ruff"
+because = "pytest runs the tests and ruff formats; neither ships with python"
