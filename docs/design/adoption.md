@@ -1,6 +1,6 @@
 # Meeting a repo that already exists
 
-**Status: Part 1 is built. Part 3 — import — is built for hooks; the rest is designed and not built.**
+**Status: built.** Part 1 (the environment) and Part 3 (import) both ship.
 
 Built and shipping: stack definitions as data (`stacks/*.toml`), the stack image
 layer and the tag that keys it, `[provision]` as the recorded resolution, the
@@ -25,13 +25,15 @@ stack for is asked about once and the answer written as
 it. Silence declines, a closed pipe stops, and a repo-local stack may add an
 ecosystem but never answer to a name omh ships.
 
-Also built: `omh import hooks <harness>`. It reads a harness's own hook file back
-through the same vocabulary that renders to it, writes what it can say into
-`<repo>/.omh/hooks/` and into `[use]`, and leaves anything it cannot say whole
-where it is — named. `init` reports what it can see and acts on nothing.
+Also built: `omh import <capability> <harness>`. Hooks are read back through the
+same vocabulary that renders to them and land in `<repo>/.omh/hooks/` and in
+`[use]`; rules, skills, commands and subagents are copied into the catalogue,
+refusing a symlink at any depth, a name that is a path, and anything already
+yours. `init` reports what it can see and acts on nothing.
 
-**Part 1 is complete.** Still designed and not built: importing rules, skills,
-commands and subagents (Part 3's remainder).
+What is left is the `plugin` capability — Claude marketplace plugins,
+re-rendered for other harnesses — which is `docs/design/roadmap.md` rather than
+this page.
 
 Two things happen when `omh init` meets a repo that is not empty. It has to
 build an environment the project can actually be worked in, and it has to not

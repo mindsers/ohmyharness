@@ -792,6 +792,96 @@ install="x""#,
         }
     }
 
+    /// **Rules are imported from the personal file, never the repo's.**
+    ///
+    /// `rules::compose` already puts this project's own `CLAUDE.md`/`AGENTS.md`
+    /// into every session — that is what makes a repo's rules reach the agent
+    /// at all. Importing the same file into the catalogue would deliver it
+    /// twice: once as the project's, once as yours, in one prompt. And it would
+    /// keep doing so in every *other* repo you opened afterwards, since the
+    /// catalogue travels.
+    ///
+    /// Asserted as *not under the repo* rather than as a literal path, so an
+    /// adapter that changed where it looked would still have to look somewhere
+    /// personal.
+    #[test]
+    fn rules_are_imported_from_your_own_file_not_this_projects() {
+        let home = Path::new("/Users/me");
+        let repo = Path::new("/repo");
+        for name in ["claude", "opencode"] {
+            let a = Adapter::find(Path::new(REAL), name).unwrap();
+            let binding = a.supports(Capability::Rules).unwrap();
+            let template = binding
+                .import
+                .as_deref()
+                .unwrap_or_else(|| panic!("{name} must say where your own rules are"));
+            let from = expand_host(template, home, repo);
+            assert!(
+                !from.starts_with(repo),
+                "{name} imports rules from {}, which `rules::compose` already \
+                 composes — the agent would be handed the same prose twice",
+                from.display()
+            );
+            assert!(
+                from.starts_with(home),
+                "{name}: your own rules live in your home, not at {}",
+                from.display()
+            );
+        }
+    }
+
+    /// **`import` is never derived from `path`**, even where the two are
+    /// textually identical.
+    ///
+    /// They answer different questions — `path` is where the *container* reads,
+    /// `import` where the host keeps yours — and they expand through different
+    /// functions, which `guest_and_host_expansion_disagree_on_purpose` guards.
+    /// Deriving one from the other happens to work for skills and commands and
+    /// is wrong for MCP, where Claude's import source is `$REPO/.mcp.json` and
+    /// its mount is `$HOME/.mcp.json`; and wrong for rules, where the mount is
+    /// a guest path in `/work` that does not exist on the host at all.
+    ///
+    /// So the duplication in the adapter files is deliberate, and this is what
+    /// stops somebody removing it.
+    #[test]
+    fn where_a_harness_keeps_yours_is_not_where_omh_mounts_omhs() {
+        let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
+        for cap in [Capability::Rules, Capability::Mcp] {
+            let binding = claude.supports(cap).unwrap();
+            assert_ne!(
+                binding.import.as_deref(),
+                Some(binding.path.as_str()),
+                "{cap}: deriving `import` from `path` would be wrong here"
+            );
+        }
+    }
+
+    /// Every capability omh can copy says where to copy it from.
+    ///
+    /// Iterated over the capabilities and the adapters rather than spot-checked:
+    /// the one that is missing will be the one somebody added last, and its
+    /// absence reads as "this harness has none" rather than as an omission.
+    #[test]
+    fn every_importable_capability_says_where_yours_live() {
+        for name in ["claude", "opencode"] {
+            let a = Adapter::find(Path::new(REAL), name).unwrap();
+            for cap in [
+                Capability::Rules,
+                Capability::Skills,
+                Capability::Commands,
+                Capability::Subagents,
+            ] {
+                let binding = a
+                    .supports(cap)
+                    .unwrap_or_else(|| panic!("{name} declares no {cap}"));
+                assert!(
+                    binding.import.is_some(),
+                    "{name}/{cap} can be rendered to and not read from"
+                );
+            }
+        }
+    }
+
     /// A harness whose hooks are a **file it reads** says where they are; one
     /// whose hooks are a program omh *generates* does not, and must not.
     ///

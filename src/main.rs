@@ -199,10 +199,15 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<MemoryCmd>,
     },
-    /// Bring a setup you already have into this repo.
+    /// Bring a setup you already have into omh.
     Import {
-        #[command(subcommand)]
-        cmd: ImportCmd,
+        capability: String,
+        harness: String,
+        /// Read this instead of where the adapter says the harness keeps it —
+        /// for a config somewhere else, and for seeing what omh would do
+        /// without pointing it at your own.
+        #[arg(long)]
+        from: Option<std::path::PathBuf>,
     },
     /// Anything else is a harness: `omh claude`, `omh opencode`.
     #[command(external_subcommand)]
@@ -231,19 +236,6 @@ enum McpCmd {
         file: Option<std::path::PathBuf>,
         #[arg(long)]
         force: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum ImportCmd {
-    /// Hooks you already configured in a harness, into this repo.
-    Hooks {
-        harness: String,
-        /// Read this file instead of where the adapter says the harness keeps
-        /// them — for a config somewhere else, and for testing what omh does
-        /// with one without touching your own.
-        #[arg(long)]
-        file: Option<std::path::PathBuf>,
     },
 }
 
@@ -504,9 +496,11 @@ fn main() -> Result<()> {
         } => use_cmd(&cwd, capability.as_deref(), name.as_deref(), *all),
         Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name),
 
-        Cmd::Import { cmd } => match cmd {
-            ImportCmd::Hooks { harness, file } => import_hooks(&cwd, harness, file.as_deref()),
-        },
+        Cmd::Import {
+            capability,
+            harness,
+            from,
+        } => import_cmd(&cwd, capability, harness, from.as_deref()),
 
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
@@ -1911,6 +1905,220 @@ fn write_lists(
 /// The name is validated here rather than at the write, which is the same rule
 /// `[use]` follows: a name is checked where it is minted, so `omh use` cannot
 /// put something in the file that reading the file would refuse.
+/// Bring one capability across from a harness you already use.
+///
+/// **Hooks go to the repo; everything else goes to the catalogue.** That
+/// asymmetry is the design rather than an accident: a hook binds to one
+/// project's commands, and a skill, a rule or a command is a way *you* work and
+/// travels with you. Importing a skill into a repo would be a skill you only
+/// had in one place; importing a hook into the catalogue would put one
+/// project's formatter in front of every other project you open.
+fn import_cmd(
+    cwd: &std::path::Path,
+    capability: &str,
+    harness: &str,
+    from: Option<&std::path::Path>,
+) -> Result<()> {
+    let cap = adapter::Capability::from_key(capability).with_context(|| {
+        format!(
+            "`{capability}` is not a capability — expected {}",
+            capability_list()
+        )
+    })?;
+    let paths = Paths::discover(cwd)?;
+    let adapter = Adapter::find(&paths.adapters(), harness)?;
+    let binding = adapter
+        .supports(cap)
+        .with_context(|| format!("{harness} has no {cap} for omh to read"))?;
+
+    let source = match from {
+        Some(f) => f.to_path_buf(),
+        None => {
+            let template = binding.import.as_deref().with_context(|| {
+                format!(
+                    "{harness} keeps its {cap} somewhere omh cannot read — \
+                     `omh import {capability} {harness} --from <path>` if you know where"
+                )
+            })?;
+            let home = dirs::home_dir().context("no home directory")?;
+            adapter::expand_host(template, &home, &paths.repo)
+        }
+    };
+    if !source.exists() {
+        println!("{harness} has no {cap} here ({})", source.display());
+        return Ok(());
+    }
+
+    match cap {
+        // Hooks are translated rather than copied — they are the one capability
+        // whose format is omh's own — and they land in the repo.
+        adapter::Capability::Hooks => import_hooks(&paths, &adapter, binding, &source),
+        adapter::Capability::Mcp => anyhow::bail!(
+            "MCP servers are `omh config mcp import {harness}` — a server is a \
+             record in one file, not an entry with its own"
+        ),
+        _ => import_entries(&paths, harness, cap, binding.render, &source),
+    }
+}
+
+/// Copy into the catalogue what a harness already holds, entry by entry.
+///
+/// **Into `~/.omh/`, not the repo** — the opposite of hooks, and for the reason
+/// `docs/configuration.md` gives: a skill is a way *you* work and travels with
+/// you across projects, while a hook binds to one repo's commands. Importing a
+/// skill into a repo would be a skill you only had in one place.
+///
+/// Rules are one file becoming one entry named after the harness it came from;
+/// everything else is a directory whose children each become an entry. Which
+/// shape a capability has is read off the adapter's `render`, not hardcoded —
+/// the same field the launcher stages by.
+///
+/// Never clobbers. An entry already in your catalogue is left exactly as it is
+/// and reported, so re-running is a no-op and an import cannot quietly replace
+/// something you have since edited.
+fn import_entries(
+    paths: &Paths,
+    harness: &str,
+    cap: adapter::Capability,
+    render: adapter::Render,
+    source: &std::path::Path,
+) -> Result<()> {
+    let dest = paths.root.join(cap.source());
+    let mut taken = 0usize;
+
+    let entries: Vec<(String, std::path::PathBuf)> = match render {
+        // One file, one entry. Named after the harness rather than after the
+        // file: `CLAUDE.md` in your catalogue says nothing about whose rules
+        // they were, and `omh why rules/claude` is the question somebody asks.
+        adapter::Render::Concat => vec![(format!("{harness}.md"), source.to_path_buf())],
+        _ => {
+            let mut found = Vec::new();
+            let listing = std::fs::read_dir(source)
+                .with_context(|| format!("reading {}", source.display()))?;
+            for entry in listing {
+                let path = entry
+                    .with_context(|| format!("reading {}", source.display()))?
+                    .path();
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                found.push((name.into_owned(), path));
+            }
+            found.sort();
+            found
+        }
+    };
+
+    println!("importing {harness} {cap} from {}", source.display());
+    for (name, from) in entries {
+        // The stem, because a catalogue entry is a name and `review-diff.md` is
+        // a filename. `validate_entry_name` then refuses `..`, a separator, and
+        // every dotfile in one arm — so `../evil` cannot name an entry, and a
+        // path cannot be smuggled in as one.
+        let stem = std::path::Path::new(&name)
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if let Err(e) = selection::validate_entry_name(&stem, cap, source) {
+            println!("  skipped  {name} — {e:#}");
+            continue;
+        }
+        let to = dest.join(if from.is_dir() {
+            stem.clone()
+        } else {
+            name.clone()
+        });
+        if to.exists() {
+            println!("  kept     {stem} — already in your catalogue");
+            continue;
+        }
+        match copy_entry(&from, &to) {
+            Ok(()) => {
+                println!("  imported {stem}");
+                taken += 1;
+            }
+            Err(e) => println!("  skipped  {stem} — {e:#}"),
+        }
+    }
+    if taken == 0 {
+        println!("  nothing new");
+    }
+    Ok(())
+}
+
+/// Copy one catalogue entry — a file, or a directory whole.
+///
+/// **Refuses any symlink**, at any depth, rather than following it or copying
+/// it as a link. Following one lets a skill directory reach outside itself, and
+/// the catalogue is mounted into every sandbox omh launches — so a link to
+/// `~/.ssh` in somebody's skill would become a file the agent can read, in
+/// every project, from a copy they had no reason to inspect. Copying the link
+/// verbatim is no better: it points somewhere that means something else once
+/// the entry has moved.
+///
+/// Refusing whole rather than skipping the link: an entry with a piece missing
+/// is not a smaller version of that entry, and this is the same rule
+/// `render::parse_hooks` applies to a handler it cannot say completely.
+fn copy_entry(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    // Looked at **before** anything is written, so the common refusal never
+    // starts a copy — and undone below if a write fails for any other reason,
+    // because "refused whole" has to mean nothing was left behind. A
+    // half-copied skill is mounted into every sandbox exactly as a whole one
+    // is, and reads as an entry somebody chose.
+    refuse_symlinks(from)?;
+    if let Err(e) = copy_tree(from, to) {
+        // Safe to remove: `import_entries` only calls this for a destination
+        // that did not exist, so everything here is what this call just wrote.
+        let _ = if to.is_dir() {
+            std::fs::remove_dir_all(to)
+        } else {
+            std::fs::remove_file(to)
+        };
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// Refuse a symlink at any depth, before a byte is written.
+fn refuse_symlinks(from: &std::path::Path) -> Result<()> {
+    let meta =
+        std::fs::symlink_metadata(from).with_context(|| format!("reading {}", from.display()))?;
+    anyhow::ensure!(
+        !meta.file_type().is_symlink(),
+        "{} is a symlink, and omh will not copy one into a catalogue that is \
+         mounted into every sandbox",
+        from.display()
+    );
+    if meta.is_dir() {
+        let listing =
+            std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))?;
+        for entry in listing {
+            refuse_symlinks(&entry?.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    if from.is_dir() {
+        std::fs::create_dir_all(to)?;
+        let listing =
+            std::fs::read_dir(from).with_context(|| format!("reading {}", from.display()))?;
+        for entry in listing {
+            let child = entry?.path();
+            let name = child
+                .file_name()
+                .context("a path from read_dir has a name")?;
+            copy_tree(&child, &to.join(name))?;
+        }
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::copy(from, to).with_context(|| format!("copying {}", from.display()))?;
+    Ok(())
+}
+
 /// Harnesses on this machine whose hooks omh could bring across.
 ///
 /// **A report, never an action.** Importing writes executable content into
@@ -1962,6 +2170,37 @@ fn importable(paths: &Paths, harnesses: &[String]) -> Vec<String> {
             }
         ));
     }
+
+    // And the capabilities that are copied rather than translated. Counted by
+    // what is actually there — an empty `~/.claude/commands` says nothing worth
+    // a line, and a line per harness per capability would bury the report in
+    // things nobody has.
+    for name in harnesses {
+        let Ok(adapter) = Adapter::find(&paths.adapters(), name) else {
+            continue;
+        };
+        for cap in adapter::Capability::ALL {
+            if matches!(cap, adapter::Capability::Hooks | adapter::Capability::Mcp) {
+                continue;
+            }
+            let Some(template) = adapter.supports(cap).and_then(|b| b.import.as_deref()) else {
+                continue;
+            };
+            let source = adapter::expand_host(template, &home, &paths.repo);
+            let held = match std::fs::read_dir(&source) {
+                Ok(listing) => listing.count(),
+                // A rules import is one file rather than a directory, so it
+                // counts as one thing when it is there.
+                Err(_) if source.is_file() => 1,
+                Err(_) => 0,
+            };
+            if held > 0 {
+                out.push(format!(
+                    "import     {name} has {held} {cap} — omh import {cap} {name}"
+                ));
+            }
+        }
+    }
     out
 }
 
@@ -1987,31 +2226,14 @@ fn importable(paths: &Paths, harnesses: &[String]) -> Vec<String> {
 ///   manifest owns makes `merge_hooks` bail, which fails the whole session
 ///   rather than that one hook. Refused here, by name.
 fn import_hooks(
-    cwd: &std::path::Path,
-    harness: &str,
-    file: Option<&std::path::Path>,
+    paths: &Paths,
+    adapter: &Adapter,
+    binding: &adapter::Binding,
+    source: &std::path::Path,
 ) -> Result<()> {
-    let paths = Paths::discover(cwd)?;
-    let adapter = Adapter::find(&paths.adapters(), harness)?;
-    let binding = adapter
-        .supports(adapter::Capability::Hooks)
-        .with_context(|| format!("{harness} has no hooks for omh to read"))?;
-
-    let source = match file {
-        Some(f) => f.to_path_buf(),
-        None => {
-            let template = binding.import.as_deref().with_context(|| {
-                format!(
-                    "{harness} keeps its hooks somewhere omh cannot read them — \
-                     `omh import hooks {harness} --file <path>` if you know where"
-                )
-            })?;
-            let home = dirs::home_dir().context("no home directory")?;
-            adapter::expand_host(template, &home, &paths.repo)
-        }
-    };
-    let raw = std::fs::read_to_string(&source)
-        .with_context(|| format!("reading {}", source.display()))?;
+    let harness = &adapter.name;
+    let raw =
+        std::fs::read_to_string(source).with_context(|| format!("reading {}", source.display()))?;
 
     let vocab = hook::Vocabulary::of(binding, &adapter.tools)
         .with_context(|| format!("reading {harness}'s vocabulary backwards"))?;
@@ -2054,13 +2276,13 @@ fn import_hooks(
     // Selected, or they land dead. This is the failure the whole feature is
     // most likely to have: files on disk, a report saying six, and a launch
     // that ships none of them because `[use]` never named them.
-    if !written.is_empty() && repo_has_selection(&paths)? {
-        let (cap, mut names, _) = current_list(&paths, "hooks", &written[0])?;
+    if !written.is_empty() && repo_has_selection(paths)? {
+        let (cap, mut names, _) = current_list(paths, "hooks", &written[0])?;
         names.extend(written.iter().cloned());
         names.sort();
         names.dedup();
         let lists = std::collections::BTreeMap::from([(cap, names)]);
-        for w in write_lists(&paths, &lists)? {
+        for w in write_lists(paths, &lists)? {
             println!("  selected in {}", w.path.display());
         }
     }

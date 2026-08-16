@@ -1436,7 +1436,7 @@ fn importing_hooks_writes_them_into_this_repo() {
         "import",
         "hooks",
         "claude",
-        "--file",
+        "--from",
         theirs.to_str().unwrap(),
     ]);
     assert!(
@@ -1486,7 +1486,7 @@ fn importing_leaves_the_harness_config_untouched() {
         "import",
         "hooks",
         "claude",
-        "--file",
+        "--from",
         theirs.to_str().unwrap(),
     ]);
 
@@ -1520,7 +1520,7 @@ fn imported_hooks_are_selected_or_they_land_dead() {
         "import",
         "hooks",
         "claude",
-        "--file",
+        "--from",
         theirs.to_str().unwrap(),
     ]);
     assert!(
@@ -1556,7 +1556,7 @@ fn importing_refuses_a_name_omh_ships() {
         "import",
         "hooks",
         "claude",
-        "--file",
+        "--from",
         theirs.to_str().unwrap(),
     ]);
     let said = String::from_utf8_lossy(&out.stdout).to_string();
@@ -1589,7 +1589,7 @@ fn what_omh_cannot_import_is_reported_rather_than_dropped() {
         "import",
         "hooks",
         "claude",
-        "--file",
+        "--from",
         theirs.to_str().unwrap(),
     ]);
     let said = String::from_utf8_lossy(&out.stdout);
@@ -1599,5 +1599,208 @@ fn what_omh_cannot_import_is_reported_rather_than_dropped() {
         fx.repo_hook("before-tool-guard").is_none(),
         "and a hook whose permission gate omh cannot express is not written \
          without it"
+    );
+}
+
+// ── omh import <capability> ─────────────────────────────────────────────────
+
+impl Sandbox {
+    /// A harness's own catalogue, on the host, where `import` reads.
+    fn theirs(&self, at: &str, body: &str) -> PathBuf {
+        let p = self.home.join(at);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn mine(&self, at: &str) -> Option<String> {
+        std::fs::read_to_string(self.home.join(".omh").join(at)).ok()
+    }
+}
+
+/// **Skills, commands and subagents go to the catalogue, not the repo.**
+///
+/// The opposite of hooks, and the reason is the one the docs give: a skill is a
+/// way *you* work and travels with you across projects, while a hook binds to
+/// one repo's commands. A skill imported into a repo would be a skill you only
+/// had in one place.
+#[test]
+fn importing_a_skill_puts_it_in_your_catalogue() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(
+        ".claude/skills/review-diff/SKILL.md",
+        "---\nname: review-diff\ndescription: read a diff\n---\n\nbody\n",
+    );
+    fx.theirs(".claude/skills/review-diff/notes/extra.md", "more\n");
+
+    let out = fx.omh(&["import", "skills", "claude"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        fx.mine("skills/review-diff/SKILL.md")
+            .is_some_and(|s| s.contains("read a diff")),
+        "the skill must be in your catalogue"
+    );
+    assert!(
+        fx.mine("skills/review-diff/notes/extra.md").is_some(),
+        "a skill is a directory and arrives whole, not just its SKILL.md"
+    );
+    assert!(
+        !fx.repo.join(".omh/skills").exists(),
+        "a skill is yours across every project, not this repo's"
+    );
+}
+
+/// **Rules are imported from your own file, never this project's.**
+///
+/// `rules::compose` already puts the repo's `CLAUDE.md` into every session, so
+/// importing that one would hand the agent the same prose twice — and would go
+/// on doing it in every other repo, because the catalogue travels.
+#[test]
+fn importing_rules_takes_yours_and_not_this_projects() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(".claude/CLAUDE.md", "always write the test first\n");
+    std::fs::write(fx.repo.join("CLAUDE.md"), "this project uses tabs\n").unwrap();
+
+    let out = fx.omh(&["import", "rules", "claude"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let imported = fx.mine("rules/claude.md").expect("your own rules");
+    assert!(
+        imported.contains("always write the test first"),
+        "got: {imported}"
+    );
+    assert!(
+        !imported.contains("tabs"),
+        "the project's own rules are composed already — importing them delivers \
+         the same prose twice: {imported}"
+    );
+}
+
+/// **A symlink is refused**, rather than followed or copied as a link.
+///
+/// The catalogue is mounted into every sandbox omh launches, so a link reaching
+/// outside a skill would become a file the agent can read — in every project,
+/// from a copy nobody had reason to inspect. Following it is an exfiltration
+/// path; copying the link verbatim points somewhere else once the entry moves.
+#[cfg(unix)]
+#[test]
+fn importing_refuses_a_skill_that_reaches_outside_itself() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let secret = fx.theirs("secrets/id_rsa", "PRIVATE KEY\n");
+    fx.theirs(".claude/skills/sneaky/SKILL.md", "---\nname: sneaky\n---\n");
+    std::os::unix::fs::symlink(&secret, fx.home.join(".claude/skills/sneaky/borrowed.pem"))
+        .unwrap();
+
+    let out = fx.omh(&["import", "skills", "claude"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "one bad entry is not fatal: {said}");
+    assert!(said.contains("skipped"), "and it is reported: {said}");
+    assert!(
+        fx.mine("skills/sneaky/borrowed.pem").is_none()
+            && fx.mine("skills/sneaky/SKILL.md").is_none(),
+        "an entry omh cannot copy whole is not copied in part"
+    );
+}
+
+/// A name that is not a name never becomes a catalogue entry. `..` and a
+/// separator are refused by the same rule `[use]` applies, so a path cannot be
+/// smuggled in where an entry belongs.
+#[cfg(unix)]
+#[test]
+fn importing_refuses_an_entry_whose_name_is_a_path() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(".claude/commands/.hidden.md", "not an entry\n");
+    fx.theirs(".claude/commands/real.md", "an entry\n");
+
+    let out = fx.omh(&["import", "commands", "claude"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        fx.mine("commands/real.md").is_some(),
+        "the good one arrives"
+    );
+    assert!(
+        fx.mine("commands/.hidden.md").is_none(),
+        "a dotfile is not a catalogue entry"
+    );
+}
+
+/// Import never clobbers. An entry you have since edited is left exactly as it
+/// is, and re-running is a no-op — the rule `omh config mcp import` already
+/// follows.
+#[test]
+fn importing_twice_changes_nothing_the_second_time() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(".claude/commands/review.md", "theirs\n");
+
+    fx.omh(&["import", "commands", "claude"]);
+    std::fs::write(fx.home.join(".omh/commands/review.md"), "mine, edited\n").unwrap();
+    let out = fx.omh(&["import", "commands", "claude"]);
+
+    assert!(out.status.success());
+    assert_eq!(
+        fx.mine("commands/review.md").as_deref(),
+        Some("mine, edited\n"),
+        "an import must not replace what you have since written"
+    );
+}
+
+/// **A copy that fails part-way leaves nothing behind.**
+///
+/// The symlink check runs before anything is written, so it never reaches this
+/// path — which is exactly why the cleanup needed its own test: deleting it
+/// changed nothing, and the failure it guards against is the one nobody
+/// arranges. A skill half-copied into the catalogue is mounted into every
+/// sandbox exactly as a whole one is, and reads as an entry somebody chose.
+///
+/// Triggered with an unreadable file, so the failure is real rather than
+/// injected. Skipped as root, where the permission would not bite and the test
+/// would pass for the wrong reason.
+#[cfg(unix)]
+#[test]
+fn a_copy_that_fails_part_way_leaves_nothing_behind() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads an unreadable file, so this proves nothing");
+        return;
+    }
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.theirs(".claude/skills/big/SKILL.md", "---\nname: big\n---\n");
+    let locked = fx.theirs(".claude/skills/big/zz-locked.md", "secret\n");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let out = fx.omh(&["import", "skills", "claude"]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "one bad entry is not fatal: {said}");
+    assert!(said.contains("skipped"), "and is reported: {said}");
+    assert!(
+        !fx.home.join(".omh/skills/big").exists(),
+        "a half-copied entry must not survive: it is mounted into every sandbox \
+         exactly as a whole one is"
     );
 }

@@ -673,9 +673,44 @@ your hook to fire where you had stopped it.
 executable content into your repo, which is a decision you make rather than one
 `init` makes because it found a file.
 
-**Planned:** extending import to rules, skills and commands, plus a `plugin`
-capability that reads Claude marketplace plugins and re-renders them for other
-harnesses. See [roadmap](design/roadmap.md).
+### Importing the rest
+
+```console
+$ omh import skills claude
+$ omh import rules claude
+$ omh import commands opencode
+$ omh import subagents claude
+```
+
+These are **copied into your catalogue**, not into the repo — the opposite of
+hooks, and for the reason the catalogue exists: a skill is a way you work and
+travels with you, while a hook binds to one project's commands.
+
+**Rules come from your own file**, `~/.claude/CLAUDE.md`, never the project's.
+omh already composes this repo's `CLAUDE.md` into every session; importing that
+one would hand the agent the same prose twice, and go on doing it in every other
+repo you opened.
+
+**A skill arrives whole** — it is a directory, and everything under it comes
+across.
+
+**A symlink is refused**, at any depth. Your catalogue is mounted into every
+sandbox omh launches, so a link reaching outside a skill would become a file the
+agent can read in every project, from a copy nobody had reason to inspect. The
+entry is skipped and named; nothing partial is left behind.
+
+**A name that is not a name is refused** — `..`, a separator, a dotfile — by the
+same rule `[use]` applies, so a path cannot be smuggled in where an entry
+belongs.
+
+**Nothing is ever clobbered.** An entry already in your catalogue is left
+exactly as it is, so re-running is a no-op and an import cannot replace
+something you have since edited.
+
+`omh init` names what it can see across all of these and acts on none of it.
+
+**Planned:** a `plugin` capability that reads Claude marketplace plugins and
+re-renders them for other harnesses. See [roadmap](design/roadmap.md).
 
 ## `carry_in`
 
