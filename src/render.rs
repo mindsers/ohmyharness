@@ -1481,7 +1481,12 @@ mod tests {
         let codex = mcp(Render::CodexToml, &m).unwrap();
         assert!(codex.contains("[mcp_servers.a]"), "got: {codex}");
         assert!(codex.contains(r#"command = "a-cmd""#), "got: {codex}");
-        let reparsed: toml::Value = codex.parse().expect("codex output must be valid TOML");
+        // A `Table`, not a `Value`: what this renders is a TOML *document*, and
+        // since toml 1.0 parsing into `Value` reads a single value expression
+        // instead — which takes `[mcp_servers.a]` for an array and then refuses
+        // the rest of the file. Both spellings compiled; only one asks the
+        // question this test is for.
+        let reparsed: toml::Table = codex.parse().expect("codex output must be valid TOML");
         assert_eq!(
             reparsed["mcp_servers"]["a"]["args"][0].as_str(),
             Some("--x")
@@ -1500,7 +1505,7 @@ mod tests {
             },
         );
         let out = mcp(Render::CodexToml, &m).unwrap();
-        out.parse::<toml::Value>()
+        out.parse::<toml::Table>()
             .expect("must stay valid TOML when values contain quotes");
     }
 
