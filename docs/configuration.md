@@ -65,6 +65,40 @@ as something you are not using.
 
 A hook that names no stack belongs everywhere, which is most of them.
 
+### Hooks omh works out for you
+
+Some commands the catalogue cannot hold, because they are a property of the
+project rather than of its ecosystem. `npm test` is only a real command if the
+project declared a `test` script, and which manager runs it depends on the
+lockfile. So `omh init` reads what the project already commits and writes the
+hook into `<repo>/.omh/hooks/` — where you can edit it, and where it is
+committed and travels:
+
+| It reads | To decide |
+|---|---|
+| a lockfile, then `packageManager` | which package manager runs a script |
+| `scripts` in `package.json` | whether there is a `test` or `format` to run |
+| a `Makefile`, `justfile` or `Taskfile.yml` | whether the project has its own entry point |
+
+**It executes nothing.** Not `make -qp`, not a shell. Every answer comes from
+reading a file, because a derivation that ran something on your machine during
+`init` would be the thing omh exists to avoid.
+
+**It fills gaps and never competes.** A rust project already has `rust-test`
+from the catalogue, so its `Makefile` earns nothing — otherwise every turn
+would run the suite twice. A project that is both rust and node correctly gets
+both.
+
+**Anything ambiguous produces nothing.** Two lockfiles, a `Taskfile` using
+`includes:` or YAML anchors, a `package.json` that will not parse: omh writes no
+hook and you write one. A repo with no hook is a repo somebody adds one to; a
+repo with the *wrong* hook is one where every turn ends in a red mark nobody can
+explain, and the hook omh invented is the last place anyone looks.
+
+The command is always spelled from omh's own vocabulary — `pnpm run test`,
+`make fmt` — never from text in your files. And it is always `run`: `bun test`
+is bun's own test runner and ignores your `test` script completely.
+
 **A project hook beats a catalogue hook of the same name**, which is how a repo
 overrides your personal `format` hook with the one it actually needs, without
 renaming anything. **Names from the base set are reserved** — a file answering

@@ -13,6 +13,7 @@ mod bundled;
 mod carry;
 mod config;
 mod container;
+mod derive;
 mod detect;
 mod doctor;
 mod editor;
@@ -2805,8 +2806,40 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // `merge_hooks` already applies. That is the whole of what changed: the
     // *scope* of the conventional hooks, not whether a repo may have its own.
     //
+    // Some of those omh can work out. A node project's test command depends on
+    // which package manager it uses and whether it declared a `test` script at
+    // all, so the catalogue cannot hold it and `derive` reads it off the files
+    // the project already commits — for ecosystems the catalogue does not
+    // already cover, so a rust repo's `Makefile` does not earn a second hook
+    // that runs the suite again.
+    //
+    // `write_if_absent`, so a hook somebody has since edited is never
+    // rewritten, and **serialised** rather than formatted: a command with a
+    // quote in it — which is now a command omh read out of somebody's
+    // `package.json` rather than one of four literals — would otherwise
+    // produce a file nothing can parse.
+    let covered: BTreeSet<String> = render::declared_stacks(&[paths.hooks()])?
+        .into_values()
+        .flatten()
+        .collect();
+    let derived = derive::hooks(
+        &paths.repo,
+        &settings::resolve(&paths, &manifest)?.provision,
+        &covered,
+    );
+    if !derived.is_empty() {
+        std::fs::create_dir_all(repo_omh.join("hooks"))?;
+        for d in &derived {
+            write_if_absent(
+                &repo_omh.join("hooks").join(format!("{}.json", d.name)),
+                &format!("{}\n", serde_json::to_string_pretty(&d.hook)?),
+            )?;
+        }
+    }
+    //
     // The selection, written out with every catalogue entry named — after the
-    // catalogue is installed, so what ships is in the list it writes.
+    // catalogue is installed and the derived hooks are written, so both are in
+    // the list it writes.
     //
     // Expanded rather than `"*"`, because an explicit list is editable and
     // reviewable in a way a wildcard is not: you curate by deleting lines. That
