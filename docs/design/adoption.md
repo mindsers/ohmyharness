@@ -1,6 +1,6 @@
 # Meeting a repo that already exists
 
-**Status: §1 is built. §2 onward is designed and not built.**
+**Status: §1 and the hook decoupling are built. The rest is designed and not built.**
 
 Built and shipping: stack definitions as data (`stacks/*.toml`), the stack image
 layer and the tag that keys it, `[provision]` as the recorded resolution, the
@@ -10,9 +10,13 @@ measurement cache in `~/.omh/facts.json`. `[toolchain]` is **deleted**, as §1.8
 argues it should be; a repo that still has the table gets an error naming it and
 pointing at `[provision]`.
 
-Still designed and not built: decoupling hooks from stacks (`hooks/*.json` as a
-fourth data kind), deriving what a project needs from lockfiles and runners, the
-two questions of last resort, and importing any capability other than MCP.
+Also built: hooks decoupled from stacks. `hooks/*.json` is a fourth data kind,
+each naming the ecosystem it belongs to as a reference; a hook for an ecosystem
+a repo is not is never offered to it.
+
+Still designed and not built: deriving what a project needs from lockfiles and
+runners, the two questions of last resort, and importing any capability other
+than MCP.
 
 Two things happen when `omh init` meets a repo that is not empty. It has to
 build an environment the project can actually be worked in, and it has to not

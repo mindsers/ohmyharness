@@ -13,11 +13,25 @@
 
 use std::path::Path;
 
-/// The directories omh ships. A directory that is missing or empty is a build
-/// failure rather than an empty entry: shipping an omh with no adapters is the
-/// silent failure this whole change exists to remove, and it should not be
-/// possible to produce one.
-const SHIPPED: [&str; 4] = ["adapters", "base", "editors", "stacks"];
+/// The directories omh ships, each with the extension its files carry.
+///
+/// A directory that is missing or empty is a build failure rather than an empty
+/// entry: shipping an omh with no adapters is the silent failure this whole
+/// file exists to remove, and it should not be possible to produce one.
+///
+/// The extension travels with the directory because `hooks/` broke the
+/// assumption that everything omh ships is TOML. Left hardcoded, a `hooks/`
+/// full of `.json` would have matched nothing and tripped the empty-directory
+/// assert — loudly, which is the good case. What made it worth a pair rather
+/// than a filter is `install_bundled`, which named its backups by *replacing*
+/// the extension with a literal `toml.yours`.
+const SHIPPED: [(&str, &str); 5] = [
+    ("adapters", "toml"),
+    ("base", "toml"),
+    ("editors", "toml"),
+    ("stacks", "toml"),
+    ("hooks", "json"),
+];
 
 /// `adapters` -> `Adapters`. ASCII is enough; these are directory names in
 /// this repository, not user input.
@@ -36,9 +50,10 @@ fn main() {
     let mut variants = String::new();
     let mut all = String::new();
     let mut dir_arms = String::new();
+    let mut ext_arms = String::new();
     let mut file_arms = String::new();
 
-    for kind in SHIPPED {
+    for (kind, ext) in SHIPPED {
         let dir = Path::new(&manifest).join(kind);
         let name = variant(kind);
 
@@ -58,18 +73,19 @@ fn main() {
                 })
                 .path()
             })
-            .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+            .filter(|p| p.extension().is_some_and(|x| x == ext))
             .collect();
         files.sort();
 
         assert!(
             !files.is_empty(),
-            "{kind}/ holds no .toml — that would build an omh that installs nothing"
+            "{kind}/ holds no .{ext} — that would build an omh that installs nothing"
         );
 
         variants.push_str(&format!("    {name},\n"));
         all.push_str(&format!("Shipped::{name}, "));
         dir_arms.push_str(&format!("            Shipped::{name} => {kind:?},\n"));
+        ext_arms.push_str(&format!("            Shipped::{name} => {ext:?},\n"));
         file_arms.push_str(&format!("            Shipped::{name} => &[\n"));
 
         for file in files {
@@ -108,6 +124,18 @@ fn main() {
          \x20   /// The directory name, in this repo and under `~/.omh`.\n\
          \x20   pub fn dir(self) -> &'static str {{\n\
          \x20       match self {{\n{dir_arms}\x20       }}\n\
+         \x20   }}\n\
+         \n\
+         \x20   /// The extension its files carry. Not every kind is TOML:\n\
+         \x20   /// `hooks/` is JSON, and a caller that assumed otherwise named\n\
+         \x20   /// its backups after an extension the file did not have.\n\
+         \x20   ///\n\
+         \x20   /// Only the tests walk this — production names a directory and\n\
+         \x20   /// gets its files. It is here so a guard can check the table\n\
+         \x20   /// against itself rather than against a hardcoded `.toml`.\n\
+         \x20   #[cfg_attr(not(test), allow(dead_code))]\n\
+         \x20   pub fn ext(self) -> &'static str {{\n\
+         \x20       match self {{\n{ext_arms}\x20       }}\n\
          \x20   }}\n\
          \n\
          \x20   /// What omh installs for this directory. Never empty: build.rs\n\

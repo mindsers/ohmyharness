@@ -562,6 +562,7 @@ pub fn hooks() -> Vec<Hook> {
             // `codebase-memory-mcp` must not fail somebody's turn.
             hook: Canonical {
                 on: Event::TurnEnd,
+                stack: None,
                 tools: vec![],
                 when: None,
                 action: Action::Run(format!(
@@ -585,6 +586,7 @@ pub fn hooks() -> Vec<Hook> {
             // silent when the graph answered nothing.
             hook: Canonical {
                 on: Event::SessionStart,
+                stack: None,
                 tools: vec![],
                 when: Some(format!("[ -n \"${}\" ]", crate::hook::CAPTURE_VAR)),
                 action: Action::Inject {
@@ -626,6 +628,7 @@ pub fn hooks() -> Vec<Hook> {
             // one the `git-rules` section carries cannot drift.
             hook: Canonical {
                 on: Event::BeforeTool,
+                stack: None,
                 tools: vec![Tool::Shell],
                 when: Some(format!(
                     "case \"${}\" in \
@@ -656,6 +659,7 @@ pub fn hooks() -> Vec<Hook> {
             // so the rendered command pays for no `jq` — search is frequent.
             hook: Canonical {
                 on: Event::BeforeTool,
+                stack: None,
                 tools: vec![Tool::Search],
                 when: None,
                 action: Action::Inject {
@@ -681,6 +685,7 @@ pub fn hooks() -> Vec<Hook> {
             // comes first so the common case costs a `case` and not a `wc`.
             hook: Canonical {
                 on: Event::BeforeTool,
+                stack: None,
                 tools: vec![Tool::Read],
                 when: Some(format!(
                     "case \"${f}\" in {SOURCE}) ;; *) false ;; esac && \

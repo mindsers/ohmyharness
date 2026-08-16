@@ -29,7 +29,7 @@ A repo holds configuration, and one kind of content:
   settings.toml        committed: settings, and which of omh's features are on
   settings.local.toml  gitignored: your overrides, and the secrets the other must not hold
   memory.toml          committed: how the note store keys and expires
-  hooks/               committed: hooks that only make sense in this repo
+  hooks/               committed: hooks bound to commands only this repo has
 <repo>/AGENTS.md       the project's own rules — tracked, and actually read
 ```
 
@@ -39,14 +39,31 @@ names ones from your catalogue.
 ### Why hooks are the exception
 
 A skill is a way *you* work — it travels with you across repos, which is why it
-belongs to you. A hook binds to a repo's own commands, and the stack hooks are
-the proof: `cargo test` here, `pnpm test` next door, one name and two bodies. A
-capability that is project-specific by nature has to be declarable where the
-project is, or the catalogue fills with entries that are only ever right in one
-place.
+belongs to you. Some hooks are the same: `cargo test` is what a rust project
+runs, not what *this* rust project runs, so omh ships one per ecosystem and they
+live in your catalogue like everything else.
+
+But a hook is also the one capability that can bind to a command only this repo
+has — an integration suite behind a script, a linter with the project's own
+config. Those have to be declarable where the project is, or the catalogue fills
+with entries that are only ever right in one place.
 
 So the rule is not "no content in the repo". It is **content lives where its
-scope is**, and hooks are the one capability whose scope is the repo.
+scope is**, and hooks are the one capability that can have either scope.
+
+**A shipped hook names the ecosystem it belongs to**, and nothing else about it:
+
+```json
+{ "on": "turn-end", "stack": "rust", "run": "cargo test" }
+```
+
+That is a *reference*. The marker that decides whether a repo is a rust project
+stays in the stack definition, so the two can never disagree — and a hook naming
+an ecosystem you are not is simply not offered to you. `omh init` in a rust repo
+does not put `go-test` in your `[use]` list, and the launcher does not report it
+as something you are not using.
+
+A hook that names no stack belongs everywhere, which is most of them.
 
 **A project hook beats a catalogue hook of the same name**, which is how a repo
 overrides your personal `format` hook with the one it actually needs, without
@@ -103,8 +120,9 @@ why omh keeps one closed tool vocabulary and one `[tools]` map per adapter.
 ## Writing a hook
 
 A hook is the one kind of content a repo can declare, and the only thing omh
-carries that *executes*. It goes in `<repo>/.omh/hooks/<name>.json` if it needs
-to know which repo it is in, and in `~/.omh/hooks/` if it works anywhere.
+carries that *executes*. It goes in `<repo>/.omh/hooks/<name>.json` if it binds
+to a command only this project has, and in `~/.omh/hooks/` if it works anywhere
+— which is where omh's own conventional ones live.
 
 **You write what you want; the adapter says how this harness spells it.**
 
@@ -121,6 +139,7 @@ to know which repo it is in, and in `~/.omh/hooks/` if it works anywhere.
 | Field | Meaning |
 |---|---|
 | `on` | `session-start` · `turn-end` · `before-tool` · `after-tool` |
+| `stack` | which ecosystem it belongs to; absent means every one |
 | `tools` | `edit` · `read` · `shell` · `search`. Empty means every tool |
 | `when` | a shell predicate; non-zero keeps the hook silent |
 | `capture` | a command whose output binds to `$OMH_CAPTURE` |

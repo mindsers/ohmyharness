@@ -292,6 +292,51 @@ pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
 /// Keyed on the command, never on the stack that produced it: a hook somebody
 /// wrote by hand obeys the same answer, which is what makes this a rule about
 /// programs rather than a rule about the four stacks omh happens to detect.
+/// Which ecosystem each hook file in these directories names, if any.
+///
+/// Read **without** the selection filter, deliberately: this is what decides
+/// what a selection may contain, and applying the selection first would be
+/// circular — a hook could never be offered because it was never selected
+/// because it was never offered.
+///
+/// A file that will not parse contributes `None`, which means *belongs
+/// everywhere* and so stays offered. That is the safe direction: this feeds
+/// what `init` writes into `[use]` and what the launcher reports as unselected,
+/// and quietly dropping a name from both because its file has a typo would hide
+/// the hook and the typo together. `merge_hooks` is where a bad hook file is an
+/// error, at the point it would actually run.
+pub fn declared_stacks(dirs: &[PathBuf]) -> Result<BTreeMap<String, Option<String>>> {
+    let mut out = BTreeMap::new();
+    for dir in dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        };
+        for entry in entries {
+            let path = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
+            if !path.extension().is_some_and(|e| e == "json") {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let stack = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| hook::Hook::parse(&raw, &path.display().to_string()).ok())
+                .and_then(|h| h.stack);
+            // Later directories win, matching `merge_hooks`: a repo hook
+            // shadowing a catalogue name decides what that name belongs to.
+            out.insert(name, stack);
+        }
+    }
+    Ok(out)
+}
+
 /// Which of this repo's hooks the image cannot run, without rendering anything.
 ///
 /// `init` reports these and a launch drops them, and both go through here so
@@ -366,7 +411,7 @@ fn translate(
 /// They are generated from the manifest and belong to no directory, which is
 /// the point: a hook you can edit is a hook omh can never ship a fix to, and
 /// `git-unavailable` has already needed one.
-fn merge_hooks(
+pub fn merge_hooks(
     dirs: &[PathBuf],
     own: &crate::base::Own,
     repo: &crate::settings::RepoPolicy,

@@ -1130,12 +1130,20 @@ fn a_missing_container_runtime_still_leaves_the_repo_configured() {
 /// created; omh's own are not, because `[omh]` governs those and `[use]`
 /// refuses to name one.
 ///
-/// Both halves are asserted, because they are different claims. That the
-/// detected stack's hooks exist at all is unconditional — `[toolchain]` governs
-/// whether a hook *runs* here, never whether the repo has it, so this holds on
-/// an image with no rust in it. That the selection then names them is the
-/// invariant `contains("rust-test")` alone was standing in for, and it is
-/// checked against the directory rather than against two spellings.
+/// Both halves are asserted, because they are different claims. The first is
+/// about what `init` wrote into `<repo>/.omh/hooks/` — the derived hooks, the
+/// ones only this project could want — and it is checked against the directory
+/// rather than against a spelling, so a hook added there later inherits it.
+///
+/// The second is about the conventional ones, which since hooks were separated
+/// from stacks live in the **catalogue**: `cargo test` is what a rust project
+/// runs, not what *this* rust project runs, so one body per ecosystem is the
+/// honest scope. They reach a launch by being named in `[use]`, so that is
+/// where this asserts they are — unconditionally, because `[toolchain]` governs
+/// whether a hook *runs* here and never whether it is selected, which is why
+/// this holds on an image with no rust in it. Both directions of the ecosystem
+/// filter are checked: the loop above would pass just as happily on a selection
+/// that named every ecosystem omh ships as on one that named none.
 ///
 /// `#[ignore]`d because `init` builds an image, so it needs a container runtime.
 /// CI's linux job runs `--include-ignored`, which is where this bites.
@@ -1176,8 +1184,12 @@ fn init_writes_the_selection_expanded() {
     // whether it *runs*, never whether it exists. An empty directory would
     // satisfy the loop above while meaning init had stopped writing hooks.
     assert!(
-        hooks.iter().any(|h| h == "rust-test") && hooks.iter().any(|h| h == "rust-format"),
-        "the detected stack's hooks are unconditional: {hooks:?}"
+        written.contains("\"rust-test\"") && written.contains("\"rust-format\""),
+        "the detected stack's hooks are unconditional: {written}"
+    );
+    assert!(
+        !written.contains("go-test") && !written.contains("python-test"),
+        "and an ecosystem this repo is not must not be selected into it: {written}"
     );
     assert!(
         !written.contains("codegraph") || !written.contains("mcp = [\"codegraph"),

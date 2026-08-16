@@ -8,46 +8,6 @@
 
 use std::path::Path;
 
-/// A stack this repo turned out to be, with the commands omh's conventional
-/// hooks run for it.
-///
-/// A **view**, built at detection time from a `stack::Definition` — which is
-/// the thing that ships, and which carries no commands. The two command fields
-/// here are the join between what a project *is* and what omh's hook opinion
-/// does about it, and they are owed to build-order item 7: once conventional
-/// hooks ship as hook files, this type loses them and becomes a borrow of the
-/// definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Stack {
-    pub name: String,
-    pub marker: String,
-    pub test: String,
-    pub format: String,
-}
-
-/// What omh's conventional hooks run, per stack.
-///
-/// **Owed to build-order item 7**, and deliberately here rather than in the
-/// stack file. A stack says what a project needs *installed*; a command belongs
-/// to a hook, and hooks already have two homes with a defined precedence. A
-/// `test =` key in `stacks/rust.toml` would be a third copy of the same string,
-/// free to disagree with the other two — and contributors would then write one
-/// for every stack they add.
-///
-/// So this stays in code until conventional hooks ship as catalogue hook files,
-/// and `every_conventional_command_is_provisioned` ties it to the shipped data
-/// meanwhile: a command whose program no provide installs is a hook that fails
-/// on every turn.
-fn conventional(stack: &str) -> Option<(&'static str, &'static str)> {
-    match stack {
-        "rust" => Some(("cargo test", "cargo fmt")),
-        "node" => Some(("npm test", "npm run format")),
-        "python" => Some(("pytest", "ruff format .")),
-        "go" => Some(("go test ./...", "gofmt -w .")),
-        _ => None,
-    }
-}
-
 /// A derived fact, with the source that produced it. The source is not
 /// decoration — `omh why` has to be able to explain every default.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,24 +68,6 @@ fn is_assignment(word: &str) -> bool {
     }
 }
 
-/// A stack by name, for reading a hook filename back into the marker it
-/// implies. The launcher needs this to notice a hook whose stack has gone.
-pub fn known(stacks: &[crate::stack::Definition], name: &str) -> Option<Stack> {
-    stacks.iter().find(|s| s.name == name).and_then(view)
-}
-
-/// Which of these stacks this repo is, as views with their commands.
-///
-/// Takes the definitions rather than loading them, so this stays a pure
-/// function of *what omh ships* and *what is on disk here* — and so a caller
-/// that has already loaded them does not read the directory twice.
-pub fn stacks(defs: &[crate::stack::Definition], repo: &Path) -> Vec<Stack> {
-    crate::stack::detected(defs, repo)
-        .into_iter()
-        .filter_map(view)
-        .collect()
-}
-
 /// Every stack omh ships, loaded from the repository's own `stacks/`.
 ///
 /// The replacement for the `KNOWN` constant the tests used to iterate, and it
@@ -136,29 +78,6 @@ pub fn stacks(defs: &[crate::stack::Definition], repo: &Path) -> Vec<Stack> {
 pub(crate) fn shipped() -> Vec<crate::stack::Definition> {
     crate::stack::load_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/stacks")))
         .expect("the shipped stacks must load")
-}
-
-/// Those of them omh has a hook opinion about, as views.
-#[cfg(test)]
-pub(crate) fn all_shipped() -> Vec<Stack> {
-    shipped().iter().filter_map(view).collect()
-}
-
-/// A definition omh has a hook opinion about becomes a detected stack; one it
-/// does not is detected and simply gets no conventional hooks.
-///
-/// That is the honest outcome for a contributed stack today: omh can provision
-/// an ecosystem it was taught about in four lines of TOML, and has nothing to
-/// say about how that ecosystem tests itself until item 5 derives it or item 6
-/// asks. Silently inventing `elixir test` would be the wrong kind of helpful.
-fn view(def: &crate::stack::Definition) -> Option<Stack> {
-    let (test, format) = conventional(&def.name)?;
-    Some(Stack {
-        name: def.name.clone(),
-        marker: def.marker.clone(),
-        test: test.to_string(),
-        format: format.to_string(),
-    })
 }
 
 /// Which harness to default to. Host evidence is only a *hint*: the harness
@@ -200,13 +119,15 @@ pub fn seeds(defs: &[crate::stack::Definition], repo: &Path) -> Vec<Seed> {
         }
     }
 
-    for s in stacks(defs, repo) {
+    for def in crate::stack::detected(defs, repo) {
+        // The ecosystem and its evidence, without the commands the fact used to
+        // carry. Those live in hook files now, which are themselves the record
+        // — a seed repeating one would be a copy in the note store, ageing
+        // independently of the file it was copied from, which is the failure
+        // the note store exists to avoid rather than to cause.
         out.push(Seed {
-            source: s.marker.clone(),
-            fact: format!(
-                "stack: {} (test `{}`, format `{}`)",
-                s.name, s.test, s.format
-            ),
+            source: def.marker.clone(),
+            fact: format!("stack: {}", def.name),
         });
     }
 
@@ -327,7 +248,8 @@ mod tests {
     #[test]
     fn a_manifest_identifies_the_stack() {
         let (_d, r) = repo(&[("Cargo.toml", "[package]")]);
-        let found = stacks(&shipped(), &r);
+        let defs = shipped();
+        let found = crate::stack::detected(&defs, &r);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "rust");
     }
@@ -335,8 +257,11 @@ mod tests {
     #[test]
     fn a_polyglot_repo_reports_every_stack() {
         let (_d, r) = repo(&[("Cargo.toml", ""), ("package.json", "{}")]);
-        let names: std::collections::BTreeSet<_> =
-            stacks(&shipped(), &r).into_iter().map(|s| s.name).collect();
+        let defs = shipped();
+        let names: std::collections::BTreeSet<_> = crate::stack::detected(&defs, &r)
+            .into_iter()
+            .map(|s| s.name.clone())
+            .collect();
 
         // A set, not a sequence. Order *within* a stack is load-bearing —
         // `corepack enable pnpm` needs node first — but order *across* stacks
@@ -349,60 +274,13 @@ mod tests {
         );
     }
 
-    /// The join between omh's hook opinion and the data it ships.
-    ///
-    /// `conventional` lives in code and the provides live in TOML, so until
-    /// item 7 removes the split they are two registries free to disagree — and
-    /// a disagreement is silent and expensive: omh seeds a `gofmt -w .` hook
-    /// and probes for `gofmt`, while no provide installs it, so the image
-    /// builds, the probe fails, and somebody is asked a question no recipe can
-    /// answer.
-    ///
-    /// Iterated over every shipped stack, because the pair that drifts will not
-    /// be the one this repo happens to be.
-    #[test]
-    fn every_conventional_command_is_provisioned() {
-        for def in shipped() {
-            let Some((test, format)) = conventional(&def.name) else {
-                continue;
-            };
-            let provisioned: Vec<&str> = def
-                .provides
-                .iter()
-                .flat_map(|p| p.needs.iter().map(String::as_str))
-                .collect();
-
-            for command in [test, format] {
-                let Some(needed) = program(command) else {
-                    panic!("{}: `{command}` names no program", def.name);
-                };
-                assert!(
-                    provisioned.contains(&needed),
-                    "{}: the conventional hook runs `{command}`, and no provide \
-                     installs `{needed}` — the hook would fail on every turn. \
-                     provisioned: {provisioned:?}",
-                    def.name
-                );
-            }
-        }
-    }
-
     /// Guessing a stack would generate wrong hooks that fail on every agent
     /// turn. Detecting nothing is the correct outcome for an unknown repo.
     #[test]
     fn no_marker_means_no_stack_rather_than_a_guess() {
         let (_d, r) = repo(&[("README.md", "hello")]);
-        assert!(stacks(&shipped(), &r).is_empty());
-    }
-
-    /// Detection is only worth doing because it yields commands — these become
-    /// the base test-on-stop and format-on-edit hooks.
-    #[test]
-    fn every_known_stack_supplies_commands() {
-        for s in all_shipped() {
-            assert!(!s.test.is_empty(), "{} has no test command", s.name);
-            assert!(!s.format.is_empty(), "{} has no format command", s.name);
-        }
+        let defs = shipped();
+        assert!(crate::stack::detected(&defs, &r).is_empty());
     }
 
     // ── harness preference ──────────────────────────────────────────────────

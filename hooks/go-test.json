@@ -1,0 +1,5 @@
+{
+  "on": "turn-end",
+  "stack": "go",
+  "run": "go test ./..."
+}

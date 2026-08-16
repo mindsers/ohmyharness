@@ -57,7 +57,7 @@ mod tests {
             let mut on_disk: Vec<String> = std::fs::read_dir(root.join(kind.dir()))
                 .unwrap()
                 .map(|e| e.unwrap().path())
-                .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+                .filter(|p| p.extension().is_some_and(|x| x == kind.ext()))
                 .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
                 .collect();
             on_disk.sort();
@@ -102,14 +102,39 @@ mod tests {
         assert!(names.contains(&"opencode.toml"), "got: {names:?}");
     }
 
-    /// Every shipped file is a `.toml`, which `install_bundled` relies on when
-    /// it names a backup `<file>.toml.yours`.
+    /// Every shipped file carries the extension its directory declares.
+    ///
+    /// This used to assert `.toml` of everything, and said why: `install_bundled`
+    /// named a backup `<file>.toml.yours` by *replacing* the extension, so the
+    /// claim and the code held each other up. `hooks/` is JSON, so the claim is
+    /// now false and the naming had to stop assuming it — the extension travels
+    /// with the directory instead, and this checks the table against itself.
     #[test]
-    fn every_shipped_file_is_a_toml() {
+    fn every_shipped_file_carries_its_directorys_extension() {
         for kind in ALL {
             for file in kind.files() {
-                assert!(file.name.ends_with(".toml"), "{}/{}", kind.dir(), file.name);
+                assert!(
+                    file.name.ends_with(&format!(".{}", kind.ext())),
+                    "{}/{} is not a .{}",
+                    kind.dir(),
+                    file.name,
+                    kind.ext()
+                );
             }
         }
+    }
+
+    /// More than one extension actually ships, or the guard above is a
+    /// tautology and `install_bundled`'s backup naming is untested for the case
+    /// it was got wrong in.
+    #[test]
+    fn omh_ships_more_than_one_kind_of_file() {
+        let kinds: std::collections::BTreeSet<&str> = ALL.iter().map(|k| k.ext()).collect();
+        assert!(
+            kinds.len() > 1,
+            "every shipped directory is .{}, so nothing exercises a non-TOML \
+             name: {kinds:?}",
+            kinds.iter().next().unwrap_or(&"?")
+        );
     }
 }

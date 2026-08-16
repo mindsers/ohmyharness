@@ -163,6 +163,7 @@ pub enum Action {
 #[serde(into = "Raw")]
 pub struct Hook {
     pub on: Event,
+    pub stack: Option<String>,
     /// Empty means every tool this moment has — which is the only sensible
     /// reading for `turn-end`, where there is no tool to narrow to.
     pub tools: Vec<Tool>,
@@ -188,6 +189,13 @@ pub struct Hook {
 #[serde(deny_unknown_fields)]
 struct Raw {
     on: Event,
+    /// Which ecosystem this hook belongs to, if any — a **reference** to a
+    /// stack definition, never a copy of one. The marker that decides whether
+    /// a repo is a rust project stays in `stacks/rust.toml`, so the two cannot
+    /// disagree; a `marker` key here, or a `hooks = [...]` list there, would be
+    /// the same fact in two places.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    stack: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     tools: Vec<Tool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,6 +219,7 @@ impl From<Hook> for Raw {
         };
         Self {
             on: h.on,
+            stack: h.stack,
             tools: h.tools,
             when: h.when,
             capture,
@@ -326,6 +335,7 @@ impl Hook {
         }
         Ok(Self {
             on: raw.on,
+            stack: raw.stack,
             tools: raw.tools,
             when: raw.when,
             action,
@@ -725,6 +735,66 @@ mod tests {
             Outcome::Rendered(r) => panic!("unexpectedly rendered: {r:?}"),
             Outcome::Dropped(d) => d,
         }
+    }
+
+    // ── naming a stack ──────────────────────────────────────────────────────
+
+    /// A hook may say which ecosystem it belongs to, and that is all it may say
+    /// about it.
+    ///
+    /// A **reference**, not a copy. The marker that decides whether a repo is a
+    /// rust project lives in `stacks/rust.toml` and nowhere else, so a hook
+    /// naming `rust` cannot disagree with it — where a `marker` key here, or a
+    /// `hooks = [...]` list in the stack file, would be the same fact in two
+    /// places, free to drift. That coupling is the thing this step exists to
+    /// break, so it must not be reintroduced in the other direction.
+    ///
+    /// Optional, and the absence is the common case: a hook that works
+    /// anywhere — `graph-refresh`, somebody's `shellcheck` — belongs to no
+    /// ecosystem and must not be filtered by one.
+    #[test]
+    fn a_hook_may_name_the_stack_it_belongs_to() {
+        let h = Hook::parse(
+            r#"{"on":"turn-end","stack":"rust","run":"cargo test"}"#,
+            "rust-test.json",
+        )
+        .expect("a hook may name its stack");
+        assert_eq!(h.stack.as_deref(), Some("rust"));
+
+        let anywhere = Hook::parse(r#"{"on":"turn-end","run":"echo hi"}"#, "greet.json").unwrap();
+        assert_eq!(
+            anywhere.stack, None,
+            "a hook that works anywhere belongs to no ecosystem"
+        );
+    }
+
+    /// It survives the round trip, because `init` writes hook files and
+    /// `omh import` will.
+    ///
+    /// `Hook` serialises through `Raw`, so a field the writer drops is a field
+    /// that silently un-names a hook's stack the first time omh rewrites it —
+    /// and the drift report would then stop recognising a hook it wrote itself.
+    #[test]
+    fn the_stack_a_hook_names_survives_being_written_back() {
+        let h = Hook::parse(
+            r#"{"on":"turn-end","stack":"go","run":"go test ./..."}"#,
+            "go-test.json",
+        )
+        .unwrap();
+        let written = serde_json::to_string(&h).unwrap();
+        assert!(
+            written.contains("\"stack\":\"go\""),
+            "the stack has to reach the file: {written}"
+        );
+        assert_eq!(Hook::parse(&written, "again").unwrap(), h);
+
+        // And a hook that names none writes no key, rather than a null that
+        // every reader would then have to know means the same thing.
+        let anywhere = Hook::parse(r#"{"on":"turn-end","run":"echo hi"}"#, "greet.json").unwrap();
+        assert!(
+            !serde_json::to_string(&anywhere).unwrap().contains("stack"),
+            "an absent stack is an absent key"
+        );
     }
 
     // ── the format ──────────────────────────────────────────────────────────

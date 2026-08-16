@@ -63,6 +63,23 @@ impl Paths {
         self.root.join("stacks")
     }
 
+    /// The conventional hooks as shipped — `cargo test`, `gofmt -w .` — living
+    /// in the catalogue beside the ones you write, because that is where their
+    /// scope is: `cargo test` is what a rust project runs, not what *this* rust
+    /// project runs.
+    ///
+    /// Managed like the stacks and the adapters, so a fix omh ships reaches
+    /// somebody who ran `init` a year ago. A repo that needs its own spelling
+    /// writes `<repo>/.omh/hooks/<name>.json`, which shadows this by the rule
+    /// `merge_hooks` already applies.
+    ///
+    /// Deliberately the same directory `Capability::Hooks` sources, not a
+    /// parallel one: a second place hooks can live is a second precedence rule
+    /// to explain, and the shadowing already says what to do about a clash.
+    pub fn hooks(&self) -> PathBuf {
+        self.root.join(Capability::Hooks.source())
+    }
+
     /// The base set as shipped: what `init` seeds and what `omh why` explains.
     /// Versioned files, oldest kept, so an upgrade can eventually diff two.
     pub fn base(&self) -> PathBuf {

@@ -645,7 +645,7 @@ fn session_up(
     // The account must reach *this* plan: this is the container that actually
     // runs. Building it without credentials is how every session started
     // logged out while `--dry-run` advertised the mounts.
-    say_selection(profile, &opts.repo);
+    say_selection(paths, profile, &opts.repo);
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate(&backend.caps())?;
 
@@ -1084,7 +1084,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
-    say_selection(&profile, &opts.repo);
+    say_selection(&paths, &profile, &opts.repo);
     let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
     say_rules(&plan);
     plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
@@ -1930,16 +1930,55 @@ fn catalogue_lists(
     Ok(out)
 }
 
+/// Which of these hooks this repo could ever take.
+///
+/// A hook naming an ecosystem this repo is not is dropped; a hook naming none
+/// is kept, and so is a name nothing declared. **Applicability, not
+/// selection** — `[use]` records what you chose from what you could have
+/// chosen, and offering a rust repo `go-test` makes the unselected report
+/// unreadable rather than more complete.
+///
+/// The asymmetry is deliberate: this drops what names an *undetected* stack,
+/// rather than keeping what names a detected one. Written the other way it
+/// would hide every hook that belongs everywhere, which is most of them.
+fn applicable_hooks(
+    names: Vec<String>,
+    declared: &BTreeMap<String, Option<String>>,
+    detected: &BTreeSet<String>,
+) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|n| match declared.get(n) {
+            Some(Some(stack)) => detected.contains(stack),
+            _ => true,
+        })
+        .collect()
+}
+
 /// The names a `[use]` list may hold for `cap`: what the catalogue and this
 /// repo declare, minus omh's own, which `[omh]` governs and `[use]` refuses.
 fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String>> {
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let owned = manifest.owns();
-    Ok(Profile::resolve(paths)
+    let profile = Profile::resolve(paths);
+    let names: Vec<String> = profile
         .entries(cap)?
         .into_iter()
         .filter(|n| !owned.get(&cap).is_some_and(|o| o.contains_key(n)))
-        .collect())
+        .collect();
+    if cap != adapter::Capability::Hooks {
+        return Ok(names);
+    }
+    // Hooks alone can belong to an ecosystem, and omh now ships one set per
+    // ecosystem. Offering a rust repo `go-test` would put every stack omh
+    // knows into the list `init` writes and the launcher reports.
+    let defs = stack::load_dir(&paths.stacks())?;
+    let detected: BTreeSet<String> = stack::detected(&defs, &paths.repo)
+        .into_iter()
+        .map(|d| d.name.clone())
+        .collect();
+    let declared = render::declared_stacks(&profile.sources(cap)?)?;
+    Ok(applicable_hooks(names, &declared, &detected))
 }
 
 /// Your defaults and your catalogue.
@@ -2070,7 +2109,7 @@ fn show_repo(cwd: &std::path::Path) -> Result<()> {
         println!("  {:<11} {summary}{note}", cap.to_string());
     }
 
-    for line in notice::selection(&profile, &policy.selection)? {
+    for line in notice::selection(&profile, &policy.selection, &catalogue_lists(&paths)?)? {
         println!("\n{line}");
     }
     Ok(())
@@ -2281,7 +2320,29 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
             return None;
         }
     };
-    match notice::hooks(paths, &defs, &detect::stacks(&defs, &paths.repo)) {
+    // The same withdrawal for the same reason: which ecosystems are covered and
+    // what each hook file claims both come from reading the hook directories,
+    // and a report built on half of that is a wrong report rather than a
+    // shorter one.
+    // Same withdrawal for the same reason: what each hook file claims comes
+    // from reading the hook directories, and a drift report built on half of
+    // that is a wrong report rather than a shorter one.
+    let dirs = match Profile::resolve(paths).sources(adapter::Capability::Hooks) {
+        Ok(dirs) => dirs,
+        Err(e) => {
+            eprintln!("omh: could not read your hooks — {e:#}");
+            return None;
+        }
+    };
+    let declared = match render::declared_stacks(&dirs) {
+        Ok(declared) => declared,
+        Err(e) => {
+            eprintln!("omh: could not read your hooks, so drift went unchecked — {e:#}");
+            return None;
+        }
+    };
+    let detected = stack::detected(&defs, &paths.repo);
+    match notice::hooks(paths, &detected, &declared) {
         Ok((notices, record)) => {
             for notice in notices {
                 eprintln!("omh: {notice}");
@@ -2308,8 +2369,18 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
 /// including a dry run, never fatal. A selection omh cannot compute is not a
 /// reason to refuse a session — and it cannot be one, because the report exists
 /// to cover a silence rather than to guard anything.
-fn say_selection(profile: &Profile, repo: &settings::RepoPolicy) {
-    match notice::selection(profile, &repo.selection) {
+fn say_selection(paths: &Paths, profile: &Profile, repo: &settings::RepoPolicy) {
+    // Resolved here rather than inside `notice`: which ecosystems this repo is
+    // takes the stack definitions and the checkout, and a report module that
+    // read those would be deciding what it is meant to describe.
+    let applicable = match catalogue_lists(paths) {
+        Ok(lists) => lists,
+        Err(e) => {
+            eprintln!("omh: could not check what this repo uses — {e:#}");
+            return;
+        }
+    };
+    match notice::selection(profile, &repo.selection, &applicable) {
         Ok(notices) => {
             for notice in notices {
                 eprintln!("omh: {notice}");
@@ -2477,7 +2548,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     plan.validate(&backend.caps())?;
 
     say_rules(&plan);
-    say_selection(&profile, &opts.repo);
+    say_selection(&paths, &profile, &opts.repo);
     let hooks_seen = say_hooks(&paths);
 
     let status_line = match plan.degradation() {
@@ -2571,28 +2642,40 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
         .filter_map(|e| e.command.clone().map(|c| (e.name.clone(), c)))
         .collect();
 
-    // Hooks init generates from stack detection are omh's writing but not omh's
-    // opinion. Reported as neither the base set nor yours, because claiming
-    // either would be false in a way this command exists to prevent.
+    // Hooks that belong to a detected ecosystem are omh's opinion about that
+    // ecosystem, not about this repo. Reported as neither the base set nor
+    // yours, because claiming either would be false in a way this command
+    // exists to prevent.
     //
-    // The command and layer travel with the name, so the claim is checkable:
-    // init writes these only into the shared layer, and only with the command
-    // detection produced. A name match alone proved nothing — anyone can write
-    // a file called `rust-test.json`.
+    // The command travels with the name, so the claim is checkable: this reads
+    // the hook that would actually ship rather than matching on a name anyone
+    // could give a file. What changed with the catalogue is where the body
+    // comes from — the file, not a `match` in Rust — and that a repo shadowing
+    // the name is reported with *its* command, which is the honest answer.
     let mut derived = std::collections::BTreeMap::new();
     let stack_defs = stack::load_dir(&paths.stacks())?;
-    for s in detect::stacks(&stack_defs, &paths.repo) {
-        let from = format!("{}, detected from {}", s.name, s.marker);
-        for (suffix, command) in [("test", s.test.clone()), ("format", s.format.clone())] {
-            derived.insert(
-                format!("{}-{suffix}", s.name),
-                why::Derived {
-                    from: from.clone(),
-                    command: command.to_string(),
-                    layer: config::Layer::Shared,
-                },
-            );
-        }
+    let detected = stack::detected(&stack_defs, &paths.repo);
+    let (own, repo_policy) = resolved(&paths)?;
+    let merged = render::merge_hooks(
+        &Profile::resolve(&paths).sources(adapter::Capability::Hooks)?,
+        &own,
+        &repo_policy,
+    )?;
+    for (name, hook) in &merged {
+        let Some(stack) = hook.stack.as_deref() else {
+            continue;
+        };
+        let Some(def) = detected.iter().find(|d| d.name == stack) else {
+            continue;
+        };
+        derived.insert(
+            name.clone(),
+            why::Derived {
+                from: format!("{}, detected from {}", def.name, def.marker),
+                command: hook.does().to_string(),
+                layer: config::Layer::Shared,
+            },
+        );
     }
 
     let source = manifest.source();
@@ -2629,6 +2712,13 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // needs installed is omh's opinion, and an opinion imposed on somebody
     // should be one they can read. Managed, so a shipped fix always lands.
     install_bundled(&paths.stacks(), bundled::Shipped::Stacks)?;
+    // And the conventional hooks, which used to be a `match` in Rust written
+    // into every repo as two files. As catalogue data they are one body per
+    // ecosystem instead of one per checkout, so a fix reaches everybody; a repo
+    // needing its own spelling shadows the name, which is the rule hooks
+    // already had. Each names the stack it belongs to and nothing else about
+    // it — the marker stays in `stacks/`, so the two cannot drift.
+    install_bundled(&paths.hooks(), bundled::Shipped::Hooks)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     std::fs::create_dir_all(paths.worktrees())?;
 
@@ -2641,18 +2731,18 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         }
     }
 
-    // Detect rather than ask — from the stacks just installed above, so both
-    // this and the provisioning below read one set of definitions rather than
-    // two registries free to drift.
+    // Detect rather than ask — from the stacks just installed above, so this,
+    // the provisioning below and the hook catalogue all read one set of
+    // definitions rather than registries free to drift.
     //
-    // They are not the same *list*, though: `detect::stacks` filters through
-    // `view`, which drops a stack `detect::conventional` has no commands for,
-    // while provisioning takes `stack::detected` whole. So a contributed stack
-    // is provisioned and offers no hooks — which is the intended direction (an
-    // environment without automation beats automation without an environment),
-    // and stops being a gap when build-order item 7 ships hooks as data.
+    // One list now, where there used to be two: detection filtered through a
+    // view that dropped any stack omh had no hook opinion about, so a
+    // contributed ecosystem was provisioned and invisible in the report. A hook
+    // names its stack instead, so a stack with no hooks is simply a stack with
+    // no hooks — visible, provisioned, and waiting for somebody to contribute
+    // one.
     let stack_defs = stack::load_dir(&paths.stacks())?;
-    let stacks = detect::stacks(&stack_defs, &paths.repo);
+    let stacks = stack::detected(&stack_defs, &paths.repo);
     let names: Vec<String> = adapters.to_vec();
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h));
 
@@ -2701,28 +2791,22 @@ fn init(cwd: &std::path::Path) -> Result<()> {
          # [omh]\n\
          # codegraph = false\n",
     )?;
-    // omh's own hooks are not seeded. They are generated from the manifest at
-    // launch, which is the only arrangement in which omh can ship a fix to
-    // them: `write_if_absent` never revisits, so a repo initialised before
-    // `git-unavailable` was rewritten would have run the broken pattern
-    // forever.
+    // No hooks are seeded into the repo. omh's own are generated from the
+    // manifest at launch, which is the only arrangement in which omh can ship a
+    // fix to them: `write_if_absent` never revisits, so a repo initialised
+    // before `git-unavailable` was rewritten would have run the broken pattern
+    // forever. The conventional ones are catalogue files for the same reason —
+    // `cargo test` is what a rust project runs, not what *this* rust project
+    // runs, so one body per ecosystem is the honest scope and a fix reaches
+    // everybody who already ran `init`.
     //
-    // The stack's two are files, because a toolset does not change weekly and
-    // when it does the thing you want is a file you can open, in the repo where
-    // the change belongs, reviewed with the commit that made it.
+    // What a repo still declares is a hook only it could want, in
+    // `<repo>/.omh/hooks/`, which shadows a catalogue name by the rule
+    // `merge_hooks` already applies. That is the whole of what changed: the
+    // *scope* of the conventional hooks, not whether a repo may have its own.
     //
-    // Every detected stack gets its two, unconditionally. What the sandbox can
-    // run decides whether they *fire* — a setting, applied at render — never
-    // whether the file exists. `init` sets a preference; it does not decide a
-    // repo's contents on the strength of one machine's image.
-    for stack in &stacks {
-        for hook in stack_hooks(stack) {
-            write_if_absent(&repo_omh.join("hooks").join(hook.name), &hook.body)?;
-        }
-    }
-
     // The selection, written out with every catalogue entry named — after the
-    // stack hooks, so this repo's own two are in the list it writes.
+    // catalogue is installed, so what ships is in the list it writes.
     //
     // Expanded rather than `"*"`, because an explicit list is editable and
     // reviewable in a way a wildcard is not: you curate by deleting lines. That
@@ -2937,10 +3021,11 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         );
     } else {
         for s in &stacks {
-            println!(
-                "  stack      {} (from {}) → test `{}`, format `{}`",
-                s.name, s.marker, s.test, s.format
-            );
+            // The marker and nothing else. What a stack 's hooks run is the
+            // hooks' business now, and the selection line below names those —
+            // repeating a command here would be a second copy free to disagree
+            // with the file that actually holds it.
+            println!("  stack      {} (from {})", s.name, s.marker);
         }
     }
     // Named, with the evidence, because the alternative is the failure this
@@ -3067,7 +3152,14 @@ fn install_bundled(dest: &std::path::Path, kind: bundled::Shipped) -> Result<Vec
         if !existing.is_empty() && existing != contents.as_bytes() {
             // Managed files are refreshed so shipped fixes land, but
             // silently discarding an edit is not acceptable.
-            let backup = target.with_extension("toml.yours");
+            //
+            // **Appended, never `with_extension`.** That replaces the
+            // extension, so it produced the right name only while everything
+            // omh shipped was TOML: an edited `rust-test.json` was saved as
+            // `rust-test.toml.yours` while the line below said
+            // `rust-test.json.yours`, and somebody looking where omh told them
+            // to look would conclude their edit had been thrown away.
+            let backup = target.with_file_name(format!("{name}.yours"));
             std::fs::write(&backup, &existing)
                 .with_context(|| format!("saving your {name} as {}", backup.display()))?;
             // stderr: this is a warning about data, and stdout is the report.
@@ -3120,20 +3212,6 @@ fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
         std::fs::write(path, contents)?;
     }
     Ok(())
-}
-
-/// One hook a detected stack earns: the file, its body, and the command inside
-/// it.
-///
-/// The command travels with the file rather than being recovered from it. The
-/// alternative — pairing `stack_hooks`' output back up with `stack.test` and
-/// `stack.format` by array position — makes a reordering of that array silently
-/// check the format hook against the test command, and nothing would fail.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct StackHook {
-    name: String,
-    body: String,
-    command: String,
 }
 
 /// Which provides applied, from what the predicates answered.
@@ -3479,49 +3557,6 @@ fn sandbox(paths: &Paths, adapter: &Adapter, repo: &settings::RepoPolicy) -> Res
         resolves,
         owed,
     })
-}
-
-/// The hooks a detected stack gets: run the tests at turn end, format on edit.
-///
-/// Files rather than prose. A sentence in the rules describing `cargo test` is
-/// a sentence; a hook is the thing that runs it — and once written it is the
-/// repo's, editable and committed, so a teammate cloning gets the project's
-/// test command with the project.
-///
-/// Written for every detected stack, whatever the sandbox on *this* machine
-/// happens to hold. The file is committed and travels; whether `cargo` is
-/// installed is a fact about one computer, and letting it decide whether the
-/// file exists at all would let whoever ran `init` first impose their laptop on
-/// everybody who clones afterwards — permanently, because `write_if_absent`
-/// never revisits. What a missing toolchain governs is whether the hook *runs*
-/// against this image, which `render::held_back` decides from a measurement and
-/// re-decides every launch — so a sandbox that gains the tool gets the hook back
-/// with nothing to un-configure.
-///
-/// Extracted from `init` so the commands can be asserted without a container.
-/// The guard that used to cover them read the generated `AGENTS.md`, which no
-/// longer exists.
-fn stack_hooks(stack: &detect::Stack) -> [StackHook; 2] {
-    // Names from `notice::stack_hook_names`, never spelled again here: the
-    // launcher compares what detection expects against what the directory
-    // holds, and two spellings of `rust-test` would make it report a hook
-    // missing that `init` had just written.
-    let [test, format] = notice::stack_hook_names(stack);
-    [
-        StackHook {
-            name: format!("{test}.json"),
-            body: format!("{{ \"on\": \"turn-end\", \"run\": \"{}\" }}\n", stack.test),
-            command: stack.test.clone(),
-        },
-        StackHook {
-            name: format!("{format}.json"),
-            body: format!(
-                "{{ \"on\": \"after-tool\", \"tools\": [\"edit\"], \"run\": \"{}\" }}\n",
-                stack.format
-            ),
-            command: stack.format.clone(),
-        },
-    ]
 }
 
 /// Run the harness's own login inside a sandbox, with this account's credential
@@ -4264,6 +4299,57 @@ mod tests {
         );
     }
 
+    /// A hook belonging to an ecosystem this repo is not could never have been
+    /// taken here, so it is not offered and not reported as unselected.
+    ///
+    /// This is **applicability, not selection**, and the distinction is the
+    /// whole of it. `[use]` is what you chose from what you could have chosen;
+    /// once omh ships a hook per ecosystem, a rust repo's catalogue holds
+    /// `go-test` and `python-format` too, and listing them as "available but
+    /// not selected" would turn a real report — *here is what you are not
+    /// using* — into a page of things nobody could ever use. The launcher's
+    /// unselected line exists to be read, and a report nobody reads is one that
+    /// stops catching the entry you did mean to take.
+    ///
+    /// A hook naming **no** stack belongs everywhere: `graph-refresh`, or
+    /// somebody's `shellcheck`. Those are never filtered, and the asymmetry
+    /// matters — filtering by "names a detected stack" rather than "does not
+    /// name an undetected one" would hide every general hook in the catalogue.
+    #[test]
+    fn a_hook_for_an_ecosystem_this_repo_is_not_is_not_offered() {
+        let declared = BTreeMap::from([
+            ("rust-test".to_string(), Some("rust".to_string())),
+            ("go-test".to_string(), Some("go".to_string())),
+            ("shellcheck".to_string(), None),
+        ]);
+        let names = vec![
+            "rust-test".to_string(),
+            "go-test".to_string(),
+            "shellcheck".to_string(),
+            // A name in the list that no file declares — the repo's own hook
+            // directory is read separately, and a name omh knows nothing about
+            // is not a name omh may drop.
+            "mine".to_string(),
+        ];
+        let detected: BTreeSet<String> = ["rust".to_string()].into_iter().collect();
+
+        assert_eq!(
+            applicable_hooks(names.clone(), &declared, &detected),
+            vec![
+                "rust-test".to_string(),
+                "shellcheck".to_string(),
+                "mine".to_string()
+            ],
+            "only the hook naming an ecosystem this repo is not comes out"
+        );
+
+        // A repo omh detects nothing for keeps everything that claims nothing.
+        assert_eq!(
+            applicable_hooks(names, &declared, &BTreeSet::new()),
+            vec!["shellcheck".to_string(), "mine".to_string()]
+        );
+    }
+
     /// What the sandbox is asked about is the **union**, and neither half
     /// contains the other.
     ///
@@ -4813,60 +4899,7 @@ because = "a fixture"
         );
     }
 
-    // ── the question ────────────────────────────────────────────────────────
-    /// A detected stack earns hooks, not prose. The guard that used to cover
-    /// this read the generated `AGENTS.md` — a sentence saying `cargo test`
-    /// runs nothing, and once that file stopped being written the commands
-    /// were asserted nowhere.
-    #[test]
-    fn a_detected_stack_gets_a_hook_that_runs_its_commands() {
-        // Every stack omh knows, not `stacks(CARGO_MANIFEST_DIR)` — which is
-        // rust and nothing else, so `init` in a node, python or go repo could
-        // write files the renderer rejects and the suite would not notice.
-        for stack in detect::all_shipped() {
-            let hooks = stack_hooks(&stack);
-            let by = |suffix: &str| {
-                hooks
-                    .iter()
-                    .find(|h| h.name.ends_with(suffix))
-                    .map(|h| h.body.clone())
-                    .unwrap_or_else(|| panic!("{} has no {suffix}", stack.name))
-            };
-
-            // omh's words, not a harness's. A seeded file spelling `Stop`
-            // would work on exactly one harness, and the file `init` writes is
-            // the example every hand-written one is copied from.
-            let test = by("-test.json");
-            assert!(test.contains(&stack.test), "must run the tests: {test}");
-            assert!(test.contains("\"turn-end\""), "at turn end: {test}");
-
-            let format = by("-format.json");
-            assert!(
-                format.contains(&stack.format),
-                "must format the code: {format}"
-            );
-            assert!(
-                format.contains("\"edit\""),
-                "when a file is written: {format}"
-            );
-
-            // Through `hook::Hook::parse`, not `serde_json::Value`. Valid
-            // JSON is not a valid hook: a seeded file saying `"on": "Stop"` or
-            // `"tools": ["Edit"]` parses as a document and is refused by the
-            // renderer at launch, breaking every session in that repo. And
-            // `stack_hooks` interpolates a command into a JSON string literal
-            // with no escaping, so a future command containing a quote would
-            // produce a file nothing could read.
-            for h in hooks {
-                crate::hook::Hook::parse(&h.body, &h.name).unwrap_or_else(|e| {
-                    panic!(
-                        "{} seeds a file omh cannot read: {e:#} in {}",
-                        stack.name, h.body
-                    )
-                });
-            }
-        }
-    }
+    // ── the shipped hooks ───────────────────────────────────────────────────
 
     /// The safety property, restated where it now lives.
     ///
@@ -4998,6 +5031,43 @@ because = "a fixture"
             mine,
             "the replaced file must be recoverable byte for byte"
         );
+    }
+
+    /// **And it is recoverable under a name that exists**, for every kind omh
+    /// ships rather than only the TOML ones.
+    ///
+    /// The backup was named by *replacing* the extension with a literal
+    /// `toml.yours`, which was right by accident while everything shipped was
+    /// TOML and wrong the moment `hooks/` shipped JSON: an edited
+    /// `rust-test.json` was saved as `rust-test.toml.yours` while the message
+    /// on screen said `rust-test.json.yours`. Somebody looking for their edit
+    /// where omh told them to look would not find it, and would reasonably
+    /// conclude it had been discarded.
+    ///
+    /// Iterated over every shipped kind, because a guard written against
+    /// adapters alone is a guard that passes on exactly the case that broke.
+    #[test]
+    fn a_replaced_file_is_kept_under_the_name_omh_names() {
+        for kind in bundled::ALL {
+            let d = tempfile::tempdir().unwrap();
+            let dest = d.path().join(kind.dir());
+            std::fs::create_dir_all(&dest).unwrap();
+            let first = kind.files()[0].name;
+            let mine = "this is what I wrote\n";
+            std::fs::write(dest.join(first), mine).unwrap();
+
+            install_bundled(&dest, kind).unwrap();
+
+            // The name omh prints, spelled the way omh prints it.
+            let backup = dest.join(format!("{first}.yours"));
+            assert_eq!(
+                std::fs::read_to_string(&backup).ok().as_deref(),
+                Some(mine),
+                "{}: an edit must be recoverable at {}",
+                kind.dir(),
+                backup.display()
+            );
+        }
     }
 
     /// A file omh cannot read as text is still a file somebody wrote.

@@ -18,12 +18,16 @@
 //! barrier to *contributing* — a few lines of TOML rather than Rust — not a
 //! lower barrier to diverging.
 //!
-//! Commands are the one thing still split. `detect::conventional` holds what
-//! omh's conventional hooks run, in code, because a command belongs to a hook
-//! and a `test =` key here would be a third copy of a string that already has
-//! two homes. Until build-order item 7 ships those as catalogue hook files, the
-//! two are tied together by `every_conventional_command_is_provisioned`, which
-//! refuses a hook whose program no provide installs.
+//! Commands live in hooks, and a hook says which ecosystem it belongs to. The
+//! reference points that way round on purpose: a `hooks = [...]` key here would
+//! make a stack file decide what automation an ecosystem gets, and the two
+//! would then have to be edited together forever. As it is, contributing a
+//! stack and contributing a hook for it are separate acts, and a stack with no
+//! hooks is a perfectly good stack.
+//!
+//! The pair is held together by `every_shipped_hook_names_a_program_its_stack_provisions`,
+//! which refuses a hook whose program no provide installs — the one thing
+//! neither file can check about the other.
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -421,6 +425,70 @@ because = "cargo is how a rust project is built and tested"
     fn shipped() -> Vec<Definition> {
         load_dir(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/stacks")))
             .expect("the shipped stacks must load")
+    }
+
+    /// **Every shipped hook names a program its stack provisions.**
+    ///
+    /// The join between omh's hook opinion and the environment it builds, and
+    /// the point is that neither side knows about the other: a hook file names
+    /// a stack and a command, a stack file names what it installs, and nothing
+    /// but this walks both. A disagreement is silent and expensive — omh ships
+    /// a `gofmt -w .` hook while no provide installs `gofmt`, so the image
+    /// builds, the measurement says `gofmt` is missing, and the hook a rust-shaped
+    /// repo never wanted is held back for a reason nobody can fix from the repo.
+    ///
+    /// It also fixes the direction of the old guard. That one read
+    /// `detect::conventional`, a `match` in Rust, so a contributor adding a
+    /// stack had to edit code to give it hooks. Now both halves are data and
+    /// this checks the data.
+    ///
+    /// **Node ships no hook on purpose**, which is why this iterates hooks
+    /// rather than stacks: `npm test` is only a real command if a `test` script
+    /// exists, and asserting one per stack would force a hook that fails on
+    /// every turn in every node repo without one. Node's commands come from its
+    /// own `scripts`, as repo hooks, and that is build-order item 5.
+    #[test]
+    fn every_shipped_hook_names_a_program_its_stack_provisions() {
+        let defs = shipped();
+        let mut checked = 0;
+        for file in crate::bundled::Shipped::Hooks.files() {
+            let hook = crate::hook::Hook::parse(file.contents, file.name)
+                .unwrap_or_else(|e| panic!("{}: {e:#}", file.name));
+
+            let Some(stack) = hook.stack.as_deref() else {
+                // A hook that belongs to no ecosystem is claiming nothing about
+                // one, so there is nothing here to check against.
+                continue;
+            };
+            let def = defs
+                .iter()
+                .find(|d| d.name == stack)
+                .unwrap_or_else(|| panic!("{}: names stack `{stack}`, which omh does not ship — it could never apply anywhere", file.name));
+            let provisioned: Vec<&str> = def
+                .provides
+                .iter()
+                .flat_map(|p| p.needs.iter().map(String::as_str))
+                .collect();
+
+            for command in hook.runs() {
+                let Some(needed) = crate::detect::program(command) else {
+                    panic!("{}: `{command}` names no program", file.name);
+                };
+                assert!(
+                    provisioned.contains(&needed),
+                    "{}: runs `{command}`, and no provide of `{stack}` installs \
+                     `{needed}` — the hook would be held back in every repo that \
+                     takes it. provisioned: {provisioned:?}",
+                    file.name
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 4,
+            "only {checked} commands were checked — a hook catalogue this small \
+             proves nothing about the join"
+        );
     }
 
     /// Every provide states its case, and any cost it claims is one somebody
