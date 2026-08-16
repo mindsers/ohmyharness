@@ -16,8 +16,9 @@ name   = "node"
 marker = "package.json"
 
 # Nothing to install — stated anyway. The base image is node:22-bookworm-slim,
-# and writing that down turns an unwritten assumption into one the probe checks,
-# so a change to the base image is caught here rather than at somebody's turn one.
+# and writing that down turns an unwritten assumption into one a probe can check
+# once build-order item 2 verifies `needs`. Until then it is a claim in the file
+# rather than a check, but it is the claim that check will read.
 [[provide]]
 name    = "runtime"
 needs   = ["node", "npm"]

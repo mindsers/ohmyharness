@@ -94,8 +94,17 @@ pub fn detected<'a>(stacks: &'a [Definition], repo: &Path) -> Vec<&'a Definition
         .collect()
 }
 
-/// How a provide is named everywhere it is named: `[provision]` keys, the tag
-/// the image is cached under, the report. One speller, so those cannot drift.
+/// How a provide is named everywhere it is named: `[provision]` keys, the
+/// probe's outcome names, the report. One speller, so those cannot drift.
+///
+/// Not the image tag — `image::stack_tag` hashes the recipe, which is what the
+/// image actually contains, and two repos whose fired provides differ in name
+/// but not in recipe should share a layer.
+///
+/// This spelling is part of a **committed file**, so it is pinned literally by
+/// a test rather than only round-tripped: the opt-out somebody hand-writes is
+/// a string in their `settings.toml`, and a speller that changed would leave
+/// it matching nothing, in silence.
 pub fn key(stack: &str, provide: &str) -> String {
     format!("{stack}/{provide}")
 }
@@ -148,8 +157,9 @@ pub enum Verdict {
     DoesNot,
     /// Anything above 1 — the predicate could not answer, with its code when
     /// that could be read. Reported and **not fired**: a provide omh skipped
-    /// because it could not tell surfaces later as its `needs` not resolving,
-    /// which is loud, whereas installing on a coin-flip is silent.
+    /// because it could not tell will surface as its `needs` not resolving, which
+    /// is loud, whereas installing on a coin-flip is silent. (That verification
+    /// is build-order item 2; nothing checks `needs` yet.)
     CouldNotAnswer(Option<i32>),
 }
 
@@ -198,8 +208,17 @@ pub fn predicate_script(candidates: &[(String, Option<&str>)]) -> String {
             // a complete one is the failure this design has already been fixed
             // for once. In a subshell the `exit` ends only that predicate and
             // the `if` sees its code.
+            // `>/dev/null 2>&1` on the predicate itself, not just the subshell
+            // for `exit`. Predicate output and omh's protocol share one stream,
+            // and `doctor::parse` takes a well-formed line from anywhere in it —
+            // so a predicate written without a redirect (`grep packageManager
+            // package.json`) prints **repo-controlled text** into the channel.
+            // `init` runs against repos you have just cloned, and a forged
+            // `applies` line reaches a committed table and an image recipe that
+            // runs as root. Every shipped predicate redirects; this stops that
+            // being a matter of discipline.
             Some(pred) => out.push_str(&format!(
-                "if ( {pred} ); then printf 'ok\\t%s\\tapplies\\n' {k}; \
+                "if ( {pred} ) >/dev/null 2>&1; then printf 'ok\\t%s\\tapplies\\n' {k}; \
                  else c=$?; if [ \"$c\" -eq 1 ]; then \
                  printf 'fail\\t%s\\t1 does not apply\\n' {k}; else \
                  printf 'fail\\t%s\\t%s could not answer\\n' {k} \"$c\"; fi; fi\n"
@@ -250,9 +269,67 @@ pub fn predicate_args(tag: &str, repo: &Path, script: &str) -> Vec<String> {
 /// stacks — it is a rule about these four files.
 fn validate(def: &Definition, path: &Path) -> Result<()> {
     let at = path.display();
+
+    // A name is half a `[provision]` key, and `key` joins the halves with `/`.
+    // A stack `a/b` with provide `c` and a stack `a` with provide `b/c` mint one
+    // key, so one person's `false` switches off somebody else's install.
+    anyhow::ensure!(!def.name.trim().is_empty(), "{at}: the stack has no name");
+    anyhow::ensure!(
+        !def.name.contains('/'),
+        "{at}: stack name `{}` contains `/`, which is what separates a stack \
+         from a provide in a `[provision]` key",
+        def.name
+    );
+
+    // `Path::join` **discards the base** when handed an absolute path, so an
+    // absolute marker does not look inside the repo at all — it matches every
+    // repository on the machine, each of which then runs this stack's `install`
+    // as root. `..` climbs out of the checkout, and a blank marker joins to the
+    // repo root, which always exists.
+    //
+    // Shipped stack files are reviewed; build-order item 6 puts one inside a
+    // repo you have just cloned, so this closes before that opens.
+    let marker = Path::new(&def.marker);
+    anyhow::ensure!(
+        !def.marker.trim().is_empty(),
+        "{at}: the stack has no marker, and an empty one matches every repo"
+    );
+    anyhow::ensure!(
+        marker.components().count() == 1
+            && marker
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_))),
+        "{at}: marker `{}` must be one filename inside the repo — an absolute \
+         path matches every repo on this machine, and `..` leaves the checkout",
+        def.marker
+    );
+
+    let mut seen = std::collections::BTreeSet::new();
     for p in &def.provides {
-        // Every entry here is handed to `command -v`. A blank one, or one
-        // carrying arguments, resolves nowhere — so it reports a gap for a
+        anyhow::ensure!(
+            !p.name.trim().is_empty(),
+            "{at}: a provide has no name, so it cannot be keyed or reported"
+        );
+        anyhow::ensure!(
+            !p.name.contains('/'),
+            "{at}: provide name `{}` contains `/`",
+            p.name
+        );
+        // Two provides of one name are one `[provision]` key and two installs,
+        // and they destroy the attribution the `needs`/`install` pairing exists
+        // for: "the `linker` provide ran and `cc` still does not resolve".
+        anyhow::ensure!(
+            seen.insert(p.name.as_str()),
+            "{at}: two provides are called `{}`",
+            p.name
+        );
+        anyhow::ensure!(
+            !p.because.trim().is_empty(),
+            "{at}: provide `{}` states no case — `omh why` has nothing to read",
+            p.name
+        );
+        // Every entry here is what build-order item 2 will hand to `command -v`.
+        // A blank one, or one carrying arguments, resolves nowhere — so it reports a gap for a
         // toolchain the user has, and keeps reporting it. `detect::program`
         // returns `None` rather than guess for exactly this reason; a stack
         // file is the other door into the same mistake.
@@ -267,10 +344,15 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
                 "{at}: provide `{}` has a blank `needs` entry",
                 p.name
             );
+            // Through `detect::program` rather than a local re-spelling of the
+            // rule. That function is the codebase's answer to "is this word a
+            // program name", it uses an allowlist for reasons its own tests
+            // record, and a second implementation here accepted `$(which`,
+            // `cargo|tee` and a leading space — the exact shapes it refuses.
             anyhow::ensure!(
-                need.split_whitespace().nth(1).is_none(),
-                "{at}: provide `{}` needs `{need}`, which is a command rather \
-                 than a program name — `needs` is what must resolve on PATH",
+                crate::detect::program(need) == Some(need.as_str()),
+                "{at}: provide `{}` needs `{need}`, which is not a program name \
+                 — `needs` is what must resolve on PATH, not a command to run",
                 p.name
             );
         }
@@ -457,6 +539,23 @@ because = "cargo is how a rust project is built and tested"
 
     fn fired(keys: &[&str]) -> std::collections::BTreeSet<String> {
         keys.iter().map(|k| k.to_string()).collect()
+    }
+
+    /// The one spelling, asserted literally — because it is a **committed file
+    /// format**, not an internal detail.
+    ///
+    /// Every other test here computes both sides through `key`, so the suite
+    /// stays self-consistent under any spelling: `"{provide}/{stack}"` and
+    /// `"{stack}:{provide}"` both pass. But somebody who writes
+    /// `"rust/linker" = false` into `.omh/settings.toml` — the opt-out
+    /// `[provision]` exists for — has a literal in a file omh does not own.
+    /// Change the speller and that line stops matching anything and is
+    /// silently ignored: the provide is installed anyway, exit 0, no
+    /// diagnostic. `docs/configuration.md` and every repo already using it
+    /// spell it this way.
+    #[test]
+    fn a_provision_key_is_stack_slash_provide() {
+        assert_eq!(key("rust", "linker"), "rust/linker");
     }
 
     /// **Only a person writes `false`.** omh records what applied, so a `false`
@@ -693,6 +792,40 @@ because = "cargo is how a rust project is built and tested"
         assert_eq!(args.last().map(String::as_str), Some("#!/bin/sh\ntrue\n"));
     }
 
+    /// A predicate's own output must never reach the report channel.
+    ///
+    /// Predicate stdout and omh's protocol share one stream, and `doctor::parse`
+    /// accepts a well-formed line from anywhere in it. So a predicate written
+    /// without a redirect — `grep packageManager package.json`, no `-q` — prints
+    /// **repo-controlled text** into the protocol. `omh init` runs against
+    /// repositories you have just cloned and not read, and a fabricated
+    /// `applies` line is written into a committed `[provision]` table and into
+    /// an image recipe that runs as root.
+    ///
+    /// The shipped predicates all redirect, but that is discipline; this makes
+    /// it structural. `a_hostile_key_cannot_corrupt_the_run` covers a hostile
+    /// key from a stack file — this covers hostile content from the repo.
+    #[test]
+    fn a_predicate_that_prints_cannot_fabricate_a_verdict() {
+        let d = tempfile::tempdir().unwrap();
+        // A predicate that echoes repo content, and a repo whose content is a
+        // forged protocol line for a provide nobody asked about.
+        let forged = "ok\trust/toolchain\tapplies";
+        std::fs::write(d.path().join("package.json"), forged).unwrap();
+
+        let got = ask(&[("node/pnpm", Some("cat package.json"))], d.path());
+
+        assert_eq!(
+            got.len(),
+            1,
+            "the repo's content became a verdict of its own: {got:?}"
+        );
+        assert_eq!(
+            got[0].0, "node/pnpm",
+            "and it is the one omh asked: {got:?}"
+        );
+    }
+
     /// A key reaches the script from a stack file, so it is not omh's to trust.
     /// Same rule, same reason, and the same shape of assertion as
     /// `doctor::a_program_name_with_a_quote_cannot_corrupt_the_probe`: the key
@@ -722,7 +855,74 @@ because = "cargo is how a rust project is built and tested"
         );
     }
 
-    /// A `needs` entry is a program name the probe looks for with `command -v`.
+    /// A marker is one filename inside the repo, and nothing else.
+    ///
+    /// `Path::join` **discards the base when given an absolute path**, so
+    /// `marker = "/etc/hostname"` does not look inside the repo — it matches
+    /// every repository on the machine, and every one of them then runs that
+    /// stack's `install` as root in an image build. `..` escapes the checkout
+    /// the same way, and a blank marker joins to the repo root itself, which
+    /// always exists.
+    ///
+    /// Today these files ship with omh and are reviewed. Build-order item 6
+    /// puts one inside `<repo>/.omh/stacks`, in a repository you have just
+    /// cloned and not read — so this closes before the milestone that opens it,
+    /// not after.
+    #[test]
+    fn a_marker_that_is_not_one_filename_inside_the_repo_is_refused() {
+        for (marker, why) in [
+            ("/etc/hostname", "absolute — `join` throws the repo away"),
+            ("../../etc/hostname", "climbs out of the checkout"),
+            ("", "joins to the repo root, which always exists"),
+            ("a/b", "is a path rather than a marker"),
+        ] {
+            let body = MINIMAL.replace("Cargo.toml", marker);
+            let d = dir_with(&[("rust.toml", &body)]);
+            let Err(e) = load_dir(d.path()) else {
+                panic!("accepted a marker that {why}: {marker:?}");
+            };
+            let err = format!("{e:#}");
+            assert!(err.contains("rust.toml"), "must name the file: {err}");
+        }
+    }
+
+    /// A name is half a `[provision]` key, and `key` joins the two with `/`.
+    /// A stack `a/b` with provide `c` and a stack `a` with provide `b/c` mint
+    /// the same key — so one person's `false` silently switches off somebody
+    /// else's install, and `reconcile` cannot express one without the other.
+    #[test]
+    fn a_name_that_would_collide_in_a_provision_key_is_refused() {
+        for (field, value) in [
+            ("name   = \"rust\"", "name   = \"ru/st\""),
+            ("name   = \"rust\"", "name   = \"\""),
+        ] {
+            let body = MINIMAL.replacen(field, value, 1);
+            let d = dir_with(&[("rust.toml", &body)]);
+            assert!(
+                load_dir(d.path()).is_err(),
+                "accepted a stack name that cannot key a provide: {value}"
+            );
+        }
+    }
+
+    /// Two provides of one name are one `[provision]` key and two installs.
+    /// The whole case for pairing `needs` with `install` per provide is
+    /// attribution — *"the `linker` provide ran and `cc` still does not
+    /// resolve"* — and two `toolchain`s make that sentence ambiguous.
+    #[test]
+    fn two_provides_cannot_share_a_name() {
+        let body = format!(
+            "{MINIMAL}\n[[provide]]\nname    = \"toolchain\"\nneeds   = [\"rustc\"]\nbecause = \"again\"\n"
+        );
+        let d = dir_with(&[("rust.toml", &body)]);
+        let Err(e) = load_dir(d.path()) else {
+            panic!("accepted two provides called `toolchain`");
+        };
+        assert!(format!("{e:#}").contains("toolchain"), "must name it");
+    }
+
+    /// A `needs` entry is a program name — what build-order item 2's probe will
+    /// look for with `command -v`.
     /// A blank one, or one carrying arguments, resolves nowhere — so it reports
     /// a permanent gap for a toolchain the user has, which is the expensive
     /// failure direction and the one `detect::program` returns `None` to avoid.
@@ -731,14 +931,29 @@ because = "cargo is how a rust project is built and tested"
     /// curation test only ever reads this source tree. Once `~/.omh/stacks`
     /// exists and can be edited, `load_dir` is the only thing standing between
     /// a typo and a sandbox that reports a missing compiler for ever.
+    ///
+    /// The bad provide is always the **second** one, and where the list can
+    /// hold two, the bad entry is the second entry. A fixture with one provide
+    /// carrying one need cannot tell a validator that checks everything from
+    /// one that checks only the first of each — and `stacks/node.toml` ships
+    /// four provides, `stacks/rust.toml` a provide with four needs, so the
+    /// difference is the difference between a guard and a decoration.
     #[test]
     fn a_needs_entry_that_is_not_a_program_name_is_refused() {
         for (needs, why) in [
             (r#"[""]"#, "blank"),
             (r#"["cargo test"]"#, "carries arguments"),
             ("[]", "empty, so nothing can verify the provide"),
+            (r#"["cc", ""]"#, "blank, in second position"),
+            (
+                r#"["cc", "cargo test"]"#,
+                "carries arguments, in second position",
+            ),
         ] {
-            let body = MINIMAL.replace(r#"["cargo"]"#, needs);
+            let body = format!(
+                "{MINIMAL}\n[[provide]]\nname    = \"linker\"\nneeds   = {needs}\n\
+                 because = \"rustc emits objects and something has to link them\"\n"
+            );
             let d = dir_with(&[("rust.toml", &body)]);
             let Err(e) = load_dir(d.path()) else {
                 panic!("a {why} `needs` was accepted: {body}");
@@ -746,7 +961,7 @@ because = "cargo is how a rust project is built and tested"
             let err = format!("{e:#}");
             assert!(err.contains("rust.toml"), "must name the file: {err}");
             assert!(
-                err.contains("toolchain"),
+                err.contains("linker"),
                 "and the provide, so the fix is findable: {err}"
             );
         }
@@ -788,9 +1003,16 @@ because = "cargo is how a rust project is built and tested"
     /// sandbox is missing a compiler, which is the whole failure this module
     /// exists to end. `Adapter` and `Manifest` both deny unknown fields for the
     /// same reason.
+    ///
+    /// The stray key is **added** rather than substituted for `marker`.
+    /// Renaming one reads the same on the surface and tests something else
+    /// entirely: serde answers `missing field `marker`` first, which satisfies
+    /// every assertion below while `deny_unknown_fields` is never reached —
+    /// deleting the attribute left this green. Keeping the file otherwise
+    /// valid means only the unknown key can refuse it.
     #[test]
     fn a_key_omh_does_not_understand_is_refused_by_name() {
-        let d = dir_with(&[("rust.toml", &MINIMAL.replace("marker", "mark"))]);
+        let d = dir_with(&[("rust.toml", &format!("mark = \"Cargo.toml\"\n{MINIMAL}"))]);
         let err = format!("{:#}", load_dir(d.path()).unwrap_err());
 
         assert!(err.contains("mark"), "must name the key: {err}");

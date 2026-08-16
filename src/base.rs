@@ -1075,15 +1075,49 @@ mod tests {
             m
         };
 
+        // The middle column is the message the rule must give. Asserting only
+        // that *something* panicked reads as a guard and is not one: weakening
+        // `day.len() == 3` to `>= 2` still refuses `2026-08`, but by indexing
+        // `day[2]` out of bounds — a crash, not a rule, and one that would
+        // report a measurement as an omh bug. `catch_unwind` cannot tell an
+        // intended refusal from an unrelated panic; the message can.
         let cases = [
-            (a_measurement("2026-08-04"), "predates this repository"),
-            (a_measurement("2026-08"), "has only month precision"),
-            (a_measurement("not-a-date"), "is not a date at all"),
-            (a_measurement("2031-08-14"), "has not happened yet"),
-            (blanked("what"), "does not say what was measured"),
-            (blanked("value"), "does not say what the value was"),
-            (blanked("how"), "does not say how it was taken"),
-            (blanked("on"), "does not say when"),
+            (
+                a_measurement("2026-08-04"),
+                "predates this repository",
+                "predates this repository",
+            ),
+            (
+                a_measurement("2026-08"),
+                "needs YYYY-MM-DD",
+                "has only month precision",
+            ),
+            (
+                a_measurement("not-a-date"),
+                "is not a date",
+                "is not a date at all",
+            ),
+            (
+                a_measurement("2031-08-14"),
+                "has not happened yet",
+                "has not happened yet",
+            ),
+            (
+                blanked("what"),
+                "`what` is blank",
+                "does not say what was measured",
+            ),
+            (
+                blanked("value"),
+                "`value` is blank",
+                "does not say what the value was",
+            ),
+            (
+                blanked("how"),
+                "`how` is blank",
+                "does not say how it was taken",
+            ),
+            (blanked("on"), "`on` is blank", "does not say when"),
         ];
 
         // Silenced, or nine expected panics bury a real failure in the output.
@@ -1091,17 +1125,35 @@ mod tests {
         std::panic::set_hook(Box::new(|_| {}));
         let outcomes: Vec<_> = cases
             .into_iter()
-            .map(|(m, why)| {
-                let refused =
-                    std::panic::catch_unwind(|| assert_measured_states_its_case("x", &[m]))
-                        .is_err();
-                (refused, why)
+            .map(|(m, expected, why)| {
+                // Second, behind a good one. `stacks/rust.toml` ships a provide
+                // with two measurements, so a rule that checked only the first
+                // would let the second be fabricated — and every fixture here
+                // used to pass exactly one, which made that indistinguishable
+                // from a rule that checks them all.
+                let refused = std::panic::catch_unwind(|| {
+                    assert_measured_states_its_case("x", &[a_measurement("2026-08-14"), m])
+                })
+                .err()
+                .map(|e| {
+                    e.downcast_ref::<String>()
+                        .cloned()
+                        .or_else(|| e.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                        .unwrap_or_else(|| "<panic with no message>".to_string())
+                });
+                (refused, expected, why)
             })
             .collect();
         std::panic::set_hook(hook);
 
-        for (refused, why) in outcomes {
-            assert!(refused, "accepted a measurement that {why}");
+        for (refused, expected, why) in outcomes {
+            let Some(message) = refused else {
+                panic!("accepted a measurement that {why}");
+            };
+            assert!(
+                message.contains(expected),
+                "a measurement that {why} was refused for the wrong reason: {message}"
+            );
         }
     }
 

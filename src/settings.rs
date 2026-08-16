@@ -222,11 +222,17 @@ pub struct RepoPolicy {
     /// Which provides apply here, from `[provision]` — the resolution `init`
     /// recorded so that launch re-evaluates no predicate.
     ///
-    /// Keyed `"<stack>/<provide>"`. A `false` is a person's opt-out, for cost
-    /// or because they supply the tool themselves; omh writes only `true`. The
-    /// probe still runs either way, so nobody can use this to tell omh
-    /// something false — it changes what goes into the image, never what is
-    /// reported about it.
+    /// Keyed `"<stack>/<provide>"` by `stack::key`, which is pinned literally
+    /// because this table is hand-edited. A `false` is a person's opt-out, for
+    /// cost or because they supply the tool themselves; omh writes only `true`,
+    /// so a `false` can only have been typed.
+    ///
+    /// What it changes is what goes into the image — `installs_for` drops the
+    /// recipe. What it must never change is what gets *reported*: once
+    /// build-order item 2 verifies `needs`, that verification runs regardless,
+    /// so opting out of `rust/linker` still says `cc` is missing. Nobody can
+    /// use this to tell omh something false about the sandbox; only to decide
+    /// what omh puts in it.
     pub provision: BTreeMap<String, bool>,
 }
 

@@ -378,15 +378,31 @@ pub fn write_provision(
 /// meaning *not on this laptop*, and export it to everybody who clones.
 pub fn read_provision(paths: &Paths, layer: Layer) -> Result<BTreeMap<String, bool>> {
     let doc = read_doc(&layer.file(paths))?;
-    Ok(doc
-        .get(PROVISION)
-        .and_then(toml_edit::Item::as_table)
-        .map(|t| {
-            t.iter()
-                .filter_map(|(k, v)| v.as_bool().map(|b| (k.to_string(), b)))
-                .collect()
-        })
-        .unwrap_or_default())
+    // `as_table_like`, not `as_table`: an inline `provision = { "a/b" = true }`
+    // is valid TOML that `settings::resolve` reads happily, and a reader that
+    // could not see it would be the same bug one spelling over — the argument
+    // `declares_key` already makes a few lines below.
+    let Some(table) = doc.get(PROVISION).and_then(toml_edit::Item::as_table_like) else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut out = BTreeMap::new();
+    for (key, value) in table.iter() {
+        // Refused, never dropped. The next thing that happens to this table is
+        // `write_provision`, which clears it — so a value read as absent is a
+        // value deleted from a committed file, and `reconcile` then writes
+        // `true` over somebody's opt-out. `settings::resolve` refuses this by
+        // name; two readers of one table must not disagree about strictness.
+        let on = value.as_bool().with_context(|| {
+            format!(
+                "{}: `[provision] {key}` is not true or false — omh will not \
+                 rewrite a table it cannot read",
+                layer.file(paths).display()
+            )
+        })?;
+        out.insert(key.to_string(), on);
+    }
+    Ok(out)
 }
 
 /// Switch one of omh's features on or off here.
@@ -873,6 +889,78 @@ mod tests {
             Some(true),
             "{body}"
         );
+    }
+
+    /// The table is **replaced**, not merged into — which is what makes
+    /// `reconcile`'s drift rule reach the file.
+    ///
+    /// `reconcile` removes a `true` whose provide stopped applying, and
+    /// `a_provide_that_stopped_applying_loses_its_entry` proves it does. But
+    /// every other test here writes into a file with no `[provision]` table at
+    /// all, where merging and replacing are indistinguishable. A writer that
+    /// merged would leave `"node/yarn" = true` in the committed file for ever
+    /// after a `yarn.lock` became a `pnpm-lock.yaml`: the repo would keep
+    /// provisioning yarn, `omh why` would keep citing a case nothing supports,
+    /// and re-running `init` — the documented fix for exactly this drift —
+    /// would change nothing. The whole story fails at its last step.
+    #[test]
+    fn recording_a_resolution_drops_what_stopped_applying() {
+        let (_d, paths) = fixture();
+        settings(
+            &paths,
+            Layer::Shared,
+            "[provision]\n\"node/yarn\" = true\n\"node/runtime\" = true\n",
+        );
+
+        // What `reconcile` would return once the lockfile changed.
+        write_provision(
+            &paths,
+            Layer::Shared,
+            &BTreeMap::from([
+                ("node/pnpm".to_string(), true),
+                ("node/runtime".to_string(), true),
+            ]),
+        )
+        .unwrap();
+
+        let after = read_provision(&paths, Layer::Shared).unwrap();
+        assert_eq!(
+            after,
+            BTreeMap::from([
+                ("node/pnpm".to_string(), true),
+                ("node/runtime".to_string(), true)
+            ]),
+            "the file must say what is true now, not accumulate every provide \
+             that was ever true"
+        );
+    }
+
+    /// A value omh cannot read is refused, not dropped — because the next thing
+    /// that happens to this table is `write_provision`, which clears it.
+    ///
+    /// `settings::resolve` already refuses a non-bool here by name, but in
+    /// `init` that call happens *after* the write. So somebody typing
+    /// `"rust/linker" = "no"` — meaning *do not install this* — had their
+    /// opt-out silently discarded on read and then overwritten with `true` by
+    /// `reconcile`, in a committed file, exit 0. A re-run cannot undo it; only
+    /// git can.
+    ///
+    /// Two readers of one table must not disagree about strictness.
+    #[test]
+    fn a_provision_value_config_cannot_read_is_refused_rather_than_dropped() {
+        let (_d, paths) = fixture();
+        settings(
+            &paths,
+            Layer::Shared,
+            "[provision]\n\"rust/linker\" = \"no\"\n",
+        );
+
+        let Err(e) = read_provision(&paths, Layer::Shared) else {
+            panic!("a non-bool opt-out was read as absent, and the next write erases it");
+        };
+        let err = format!("{e:#}");
+        assert!(err.contains("rust/linker"), "must name the key: {err}");
+        assert!(err.contains("settings.toml"), "and the file: {err}");
     }
 
     /// `reconcile` must be fed the shared layer's *own* table, never the

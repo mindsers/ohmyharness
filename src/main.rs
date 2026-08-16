@@ -2214,8 +2214,20 @@ fn say_rules(plan: &container::Plan) {
 /// `render::merge_hooks`, which is where it should.
 fn say_hooks(paths: &Paths) -> Option<notice::Record> {
     // An unreadable stacks directory is the same class of non-fatal as the rest
-    // of this function: it costs the drift report, not the session.
-    let defs = stack::load_dir(&paths.stacks()).unwrap_or_default();
+    // of this function: it costs the drift report, not the session. Reported
+    // and withdrawn, never defaulted to empty — `notice::hooks` reads "no
+    // definitions" as "no stack answers to that name", so an empty list does
+    // not weaken the report, it inverts it and prints the inversion in omh's
+    // own voice.
+    let defs = match stack::load_dir(&paths.stacks()) {
+        Ok(defs) => defs,
+        Err(e) => {
+            eprintln!(
+                "omh: could not read your stacks, so this repo's hooks went unchecked — {e:#}"
+            );
+            return None;
+        }
+    };
     match notice::hooks(paths, &defs, &detect::stacks(&defs, &paths.repo)) {
         Ok((notices, record)) => {
             for notice in notices {
@@ -2555,8 +2567,16 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         }
     }
 
-    // Detect rather than ask — from the stacks just installed above, so what
-    // omh detects and what omh could provision are one list and cannot disagree.
+    // Detect rather than ask — from the stacks just installed above, so both
+    // this and the provisioning below read one set of definitions rather than
+    // two registries free to drift.
+    //
+    // They are not the same *list*, though: `detect::stacks` filters through
+    // `view`, which drops a stack `detect::conventional` has no commands for,
+    // while provisioning takes `stack::detected` whole. So a contributed stack
+    // is provisioned and offers no hooks — which is the intended direction (an
+    // environment without automation beats automation without an environment),
+    // and stops being a gap when build-order item 7 ships hooks as data.
     let stack_defs = stack::load_dir(&paths.stacks())?;
     let stacks = detect::stacks(&stack_defs, &paths.repo);
     let names: Vec<String> = adapters.to_vec();
@@ -2693,23 +2713,47 @@ fn init(cwd: &std::path::Path) -> Result<()> {
             })
             .collect();
 
-        if !candidates.is_empty() {
-            let answered = match Command::new(backend.program())
-                .args(stack::predicate_args(
-                    &image::tag_for(&adapter),
-                    &paths.repo,
-                    &stack::predicate_script(&candidates),
-                ))
-                .output()
-            {
-                Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
-                Err(e) => {
-                    // Non-fatal, and never fatal *silently*: `init` sets a repo
-                    // up, and failing that over a diagnostic would be the tail
-                    // wagging the dog — but saying nothing would let somebody
-                    // believe the sandbox had been checked.
-                    println!("  provision  could not ask the sandbox ({e}) — nothing recorded");
-                    Vec::new()
+        {
+            // No `if !candidates.is_empty()` guard. A repo with nothing to ask
+            // has still been answered — the answer is "nothing applies" — and
+            // skipping would leave a resolution recorded when this repo *was* a
+            // rust project asserting `rust/toolchain = true` for ever.
+            let answered = if candidates.is_empty() {
+                Vec::new()
+            } else {
+                match Command::new(backend.program())
+                    .args(stack::predicate_args(
+                        &image::tag_for(&adapter),
+                        &paths.repo,
+                        &stack::predicate_script(&candidates),
+                    ))
+                    .output()
+                {
+                    // A container that ran and failed is not an answer. Only
+                    // `Err` was handled before, so `docker run` failing — image
+                    // gone, mount refused, no space — produced empty stdout,
+                    // read as "nothing applies", and `init` went on to print
+                    // its summary with nothing said. The `Err` arm's own
+                    // comment forbids exactly that.
+                    Ok(out) if !out.status.success() => {
+                        println!(
+                            "  provision  the sandbox could not be asked ({}) — nothing recorded",
+                            out.status
+                        );
+                        for line in String::from_utf8_lossy(&out.stderr).lines().take(3) {
+                            println!("             {line}");
+                        }
+                        Vec::new()
+                    }
+                    Ok(out) => doctor::parse(&String::from_utf8_lossy(&out.stdout)),
+                    Err(e) => {
+                        // Non-fatal, and never fatal *silently*: `init` sets a
+                        // repo up, and failing that over a diagnostic would be
+                        // the tail wagging the dog — but saying nothing would
+                        // let somebody believe the sandbox had been checked.
+                        println!("  provision  could not ask the sandbox ({e}) — nothing recorded");
+                        Vec::new()
+                    }
                 }
             };
 
@@ -2726,23 +2770,33 @@ fn init(cwd: &std::path::Path) -> Result<()> {
             // Recorded only when something was actually measured. `reconcile`
             // drops every `true` it is not told about, so writing an empty
             // answer would erase the repo's resolution rather than leave it be.
-            if let Some(fired) = fired_from(&answered) {
-                let recorded = stack::reconcile(
-                    &config::read_provision(&paths, config::Layer::Shared)?,
-                    &fired,
-                );
-                config::write_provision(&paths, config::Layer::Shared, &recorded)?;
+            if let Some(fired) = fired_from(candidates.len(), &answered) {
+                let recorded = record_resolution(&paths, &fired)?;
                 for key in recorded.iter().filter(|(_, on)| **on).map(|(k, _)| k) {
                     println!("  provision  {key}");
                 }
 
-                // The stack layer, built from the recipes that fired, in file
-                // order. Nothing to install is the harness image itself rather
-                // than an empty layer on top of it.
-                let installs = installs_for(&detected, &fired);
+                // The stack layer, built from the recipes that fired and that
+                // nobody opted out of, in file order. Nothing to install is the
+                // harness image itself rather than an empty layer on top of it.
+                //
+                // Resolved across all three layers rather than taken from
+                // `recorded`, which holds only the committed table: a `false`
+                // in `settings.local.toml` means *not on this laptop*, and this
+                // laptop is where the image is built.
+                let resolved = settings::resolve(&paths, &manifest)?.provision;
+                let installs = installs_for(&detected, &fired, &resolved);
                 let tag = image::ensure_stack(backend.program(), &adapter, &installs)?;
                 if tag != image::tag_for(&adapter) {
-                    println!("  image      {tag} (this repo's toolchain)");
+                    // Said plainly, because it is not yet true that a session
+                    // runs this: `container::plan` still takes `tag_for`, and
+                    // wiring it is build-order item 2. Printing "this repo's
+                    // toolchain" without the caveat is how somebody reads the
+                    // report, believes the sandbox is provisioned, and meets
+                    // `cargo: not found` at turn one — the failure this whole
+                    // design opens by describing, now preceded by a line
+                    // claiming it was handled.
+                    println!("  image      {tag} (built; sessions do not use it yet)");
                 }
             }
         }
@@ -3263,10 +3317,27 @@ fn ask_about_gaps_with(
 /// a repo's resolution and leave the next launch provisioning nothing.
 ///
 /// A provide that could not answer is simply absent from the set, which is the
-/// safe direction — it is not installed, its `needs` then fails to resolve, and
-/// that is reported. Installing on a coin-flip would be silent.
-fn fired_from(answered: &[doctor::Outcome]) -> Option<BTreeSet<String>> {
-    if answered.is_empty() {
+/// safe direction — it is not installed, and once build-order item 2 verifies
+/// `needs` that
+/// will be reported. Installing on a coin-flip would be silent either way.
+///
+/// `asked` is how many provides there were to ask about, and it separates two
+/// things an empty report cannot: **nothing to ask** is an answer, **nothing
+/// answered** is silence. A repo that stops being a stack has no candidates and
+/// runs no container, and that has to clear the resolution rather than preserve
+/// it — otherwise `[provision]` keeps asserting `rust/toolchain = true` after
+/// the `Cargo.toml` is gone, and the stack layer keeps installing a toolchain
+/// nothing uses.
+fn fired_from(asked: usize, answered: &[doctor::Outcome]) -> Option<BTreeSet<String>> {
+    if asked == 0 {
+        return Some(BTreeSet::new());
+    }
+    // One line per provide, so fewer lines than provides is a report that did
+    // not finish — not a report saying "no". Accepting the prefix would make
+    // `reconcile` drop every `true` it was not told about and rewrite a
+    // committed file without them. `triage_for` was fixed for this same shape
+    // earlier, where it only cost a spurious question; here it deletes.
+    if answered.len() != asked {
         return None;
     }
     Some(
@@ -3278,6 +3349,28 @@ fn fired_from(answered: &[doctor::Outcome]) -> Option<BTreeSet<String>> {
     )
 }
 
+/// Write what fired into the repo's **shared**, committed settings, and hand
+/// back what the file now says.
+///
+/// A function rather than four lines inline, because the layer it names on both
+/// sides is the whole of its correctness and inline it is reachable only
+/// through a container. Both halves are load-bearing in opposite directions:
+///
+/// - **Read `Shared`.** `reconcile` writes what it is given, so reading the
+///   merge would take a `false` from `settings.local.toml` — one laptop's *not
+///   here* — and commit it for everybody who clones.
+/// - **Write `Shared`.** The resolution is the repo's, and a teammate cloning
+///   it is the reason it lives in a committed file at all. Written to `Local`
+///   it would be re-derived, and re-asked, on every machine.
+fn record_resolution(paths: &Paths, fired: &BTreeSet<String>) -> Result<BTreeMap<String, bool>> {
+    let recorded = stack::reconcile(
+        &config::read_provision(paths, config::Layer::Shared)?,
+        fired,
+    );
+    config::write_provision(paths, config::Layer::Shared, &recorded)?;
+    Ok(recorded)
+}
+
 /// The recipes to run, in the order the stack files gave them.
 ///
 /// File order is install order — `corepack enable pnpm` needs the node the
@@ -3286,11 +3379,22 @@ fn fired_from(answered: &[doctor::Outcome]) -> Option<BTreeSet<String>> {
 ///
 /// A provide with no `install` contributes nothing: it asserts the base image
 /// already ships something, so it changes neither the recipe nor the tag.
-fn installs_for<'a>(detected: &[&'a stack::Definition], fired: &BTreeSet<String>) -> Vec<&'a str> {
+///
+/// `resolved` is the `[provision]` table as all three settings layers resolve
+/// it, and a `false` there is a **person's** decision — the one thing that
+/// outranks a predicate. Only `false` is consulted: an entry omh has never seen
+/// is absent, not refused, so a new provide in a newer omh installs the first
+/// time rather than waiting to be enumerated.
+fn installs_for<'a>(
+    detected: &[&'a stack::Definition],
+    fired: &BTreeSet<String>,
+    resolved: &BTreeMap<String, bool>,
+) -> Vec<&'a str> {
     detected
         .iter()
         .flat_map(|d| d.provides.iter().map(move |p| (d, p)))
-        .filter(|(d, p)| fired.contains(&stack::key(&d.name, &p.name)))
+        .map(|(d, p)| (stack::key(&d.name, &p.name), p))
+        .filter(|(key, _)| fired.contains(key) && resolved.get(key) != Some(&false))
         .filter_map(|(_, p)| p.install.as_deref())
         .collect()
 }
@@ -4151,7 +4255,54 @@ mod tests {
     /// point where acting on it would delete somebody's file contents.
     #[test]
     fn a_resolution_nobody_measured_is_never_recorded() {
-        assert_eq!(fired_from(&[]), None, "an unanswered probe records nothing");
+        assert_eq!(
+            fired_from(3, &[]),
+            None,
+            "three provides asked, none answered — the container never ran"
+        );
+    }
+
+    /// A partial report is not an answer either, and here that distinction
+    /// deletes from a committed file.
+    ///
+    /// The protocol prints one line per provide, so fewer lines than provides
+    /// means the container died part-way — OOM, a torn pipe, a runtime that
+    /// truncates. Accepting the prefix as the whole answer makes
+    /// `stack::reconcile` drop every `true` it was not told about, and
+    /// `config::write_provision` then rewrites `.omh/settings.toml` without
+    /// them. A rust repo loses `rust/linker = true`, the next layer is built
+    /// with no `gcc`, and `cargo test` fails at link — the exact failure this
+    /// design opens by describing.
+    ///
+    /// This is the same defect `triage_for` was fixed for earlier, in the
+    /// sibling function, where it only cost a spurious question. Here it edits
+    /// a file under version control.
+    #[test]
+    fn a_partial_report_is_not_a_resolution() {
+        let truncated = [outcome("rust/toolchain", true, "applies")];
+        assert_eq!(
+            fired_from(2, &truncated),
+            None,
+            "two provides asked, one answered — the container died mid-script"
+        );
+    }
+
+    /// Nothing to ask is an **answer**, not silence, and the difference decides
+    /// whether a stale resolution is ever cleared.
+    ///
+    /// A repo that stops being a stack — `Cargo.toml` deleted, the crate moved
+    /// into a subdirectory — has no candidates, so no container runs. Treating
+    /// that like an unanswered probe leaves `[provision]` asserting
+    /// `rust/toolchain = true` for ever: the stack layer keeps installing a
+    /// toolchain nothing uses, and the committed file describes a repo that no
+    /// longer exists.
+    #[test]
+    fn nothing_to_ask_is_an_answer_and_clears_a_stale_resolution() {
+        assert_eq!(
+            fired_from(0, &[]),
+            Some(std::collections::BTreeSet::new()),
+            "no candidates is a measured 'nothing applies', not a failure to measure"
+        );
     }
 
     /// And a probe that *did* answer is taken at its word — only the provides
@@ -4166,7 +4317,7 @@ mod tests {
             outcome("node/bun", false, "2 could not answer"),
         ];
         assert_eq!(
-            fired_from(&answered),
+            fired_from(3, &answered),
             Some(std::collections::BTreeSet::from([
                 "rust/toolchain".to_string()
             ]))
@@ -4192,7 +4343,7 @@ mod tests {
             .iter()
             .map(|p| stack::key(&node.name, &p.name))
             .collect();
-        let got = installs_for(&[node], &all);
+        let got = installs_for(&[node], &all, &BTreeMap::new());
 
         let expected: Vec<&str> = node
             .provides
@@ -4203,6 +4354,190 @@ mod tests {
         assert!(
             !got.is_empty() && got.len() < node.provides.len(),
             "node must have both kinds of provide for this to prove anything: {got:?}"
+        );
+    }
+
+    /// Only the recipes that fired, and the **file** decides their order.
+    ///
+    /// The test above fires every provide, so it exercises the filter only in
+    /// the case where the filter does nothing, and it draws its fixture from
+    /// `stacks/node.toml`, whose recipes happen to already be in alphabetical
+    /// order. Two wrong implementations pass it: one that ignores `fired`
+    /// entirely, and one that sorts.
+    ///
+    /// Both are real failures. Ignoring `fired` installs *every* package
+    /// manager into a node repo — the outcome `stacks/node.toml` opens by
+    /// forbidding, since a repo with a `pnpm-lock.yaml` must not also get yarn
+    /// and bun. Sorting puts `corepack enable pnpm` ahead of the node provide
+    /// it needs, and the image build fails on a stack file that is correct.
+    ///
+    /// So the fixture is hostile on both axes at once: what fired is a strict
+    /// subset, and file order is not sorted order.
+    #[test]
+    fn only_the_fired_recipes_run_and_the_file_decides_their_order() {
+        fn provide(name: &str, install: Option<&str>) -> stack::Provide {
+            stack::Provide {
+                name: name.into(),
+                needs: vec![name.into()],
+                when: None,
+                install: install.map(str::to_string),
+                because: "a fixture".into(),
+                measured: Vec::new(),
+            }
+        }
+        let def = stack::Definition {
+            name: "fixture".into(),
+            marker: "fixture.toml".into(),
+            provides: vec![
+                provide("zulu", Some("install zulu")),
+                provide("alpha", Some("install alpha")),
+                provide("asserted", None),
+                provide("mike", Some("install mike")),
+            ],
+        };
+        // `mike` did not fire; `asserted` fired and has no recipe.
+        let fired: std::collections::BTreeSet<String> =
+            ["fixture/zulu", "fixture/alpha", "fixture/asserted"]
+                .iter()
+                .map(|k| (*k).to_string())
+                .collect();
+
+        assert_eq!(
+            installs_for(&[&def], &fired, &BTreeMap::new()),
+            vec!["install zulu", "install alpha"],
+            "a provide that did not fire must contribute no recipe, and sorted \
+             order is not file order"
+        );
+    }
+
+    /// An opt-out keeps the recipe out of the image, which is the only thing an
+    /// opt-out could mean.
+    ///
+    /// `[provision] "rust/linker" = false` is how somebody says *do not install
+    /// this* — because it costs 124 MB they do not want, or because their base
+    /// image already has it. `reconcile` preserves that `false` faithfully and
+    /// `settings::resolve` reads it back, and until this filter existed both
+    /// were ceremony: the install set was built from what *fired*, so the
+    /// recipe ran anyway. The file said one thing, the image was another, and
+    /// `omh why` would cite the file.
+    ///
+    /// Read from the **resolution**, not from the committed table alone: a
+    /// `false` in `settings.local.toml` means *not on this laptop*, and the
+    /// laptop is where the image is built.
+    #[test]
+    fn a_provide_somebody_opted_out_of_is_not_installed() {
+        fn provide(name: &str, install: &str) -> stack::Provide {
+            stack::Provide {
+                name: name.into(),
+                needs: vec![name.into()],
+                when: None,
+                install: Some(install.into()),
+                because: "a fixture".into(),
+                measured: Vec::new(),
+            }
+        }
+        let def = stack::Definition {
+            name: "rust".into(),
+            marker: "Cargo.toml".into(),
+            provides: vec![
+                provide("toolchain", "install rustup"),
+                provide("linker", "apt-get install -y gcc"),
+            ],
+        };
+        let fired: BTreeSet<String> = ["rust/toolchain", "rust/linker"]
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect();
+        let resolved = BTreeMap::from([
+            ("rust/toolchain".to_string(), true),
+            ("rust/linker".to_string(), false),
+        ]);
+
+        assert_eq!(
+            installs_for(&[&def], &fired, &resolved),
+            vec!["install rustup"],
+            "the predicate said the linker applies; a person said not here, and \
+             a person outranks a predicate"
+        );
+    }
+
+    /// A stacks directory omh cannot read is **said**, and it withdraws the
+    /// drift report rather than filing a wrong one.
+    ///
+    /// `notice::hooks` decides which hooks name a stack this repo is not, so
+    /// with no definitions it concludes that every stack-named hook belongs to
+    /// nothing. Swallowing the error into an empty list therefore does not
+    /// degrade the report — it inverts it, and prints the inversion in omh's
+    /// own voice. The neighbouring branch already reports its error and returns
+    /// `None`; this one used `unwrap_or_default` and said nothing at all.
+    #[test]
+    fn a_stacks_directory_omh_cannot_read_is_reported_rather_than_read_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(paths.stacks()).unwrap();
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        std::fs::write(paths.stacks().join("rust.toml"), "this is not toml {{{").unwrap();
+
+        assert!(
+            say_hooks(&paths).is_none(),
+            "a report built on stacks that would not load is a wrong report"
+        );
+    }
+
+    /// The resolution is read from and written to the **committed** layer, and
+    /// nothing else guarded which layer that is.
+    ///
+    /// `config`'s own tests prove the reader answers for one layer, and prove
+    /// it for a good reason — but a correct reader called with the wrong
+    /// argument is the same bug with a passing guard in front of it. Both
+    /// mutations survived the suite: reading `Local` exports one laptop's
+    /// `false` into a file everybody clones, and writing `Local` means the
+    /// resolution never reaches a teammate, which is the entire case for the
+    /// table living in committed settings.
+    #[test]
+    fn the_resolution_is_read_and_written_in_the_committed_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let write = |layer: config::Layer, body: &str| {
+            let f = layer.file(&paths);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, body).unwrap();
+        };
+        write(
+            config::Layer::Shared,
+            "[provision]\n\"rust/toolchain\" = true\n",
+        );
+        let local_before = "[provision]\n\"node/pnpm\" = false\n";
+        write(config::Layer::Local, local_before);
+
+        let fired: BTreeSet<String> = ["rust/toolchain", "node/pnpm"]
+            .iter()
+            .map(|k| (*k).to_string())
+            .collect();
+        record_resolution(&paths, &fired).unwrap();
+
+        let shared = std::fs::read_to_string(config::Layer::Shared.file(&paths)).unwrap();
+        let parsed: toml::Table = toml::from_str(&shared).expect("still TOML");
+        assert_eq!(
+            parsed["provision"]["rust/toolchain"].as_bool(),
+            Some(true),
+            "the resolution must land in the committed file: {shared}"
+        );
+        assert_eq!(
+            parsed["provision"]["node/pnpm"].as_bool(),
+            Some(true),
+            "a laptop's opt-out must not be read back as the team's: {shared}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(config::Layer::Local.file(&paths)).unwrap(),
+            local_before,
+            "the local layer is somebody's own file and init does not edit it"
         );
     }
 

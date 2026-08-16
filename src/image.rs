@@ -178,7 +178,13 @@ pub fn stack_dockerfile(adapter: &Adapter, installs: &[&str]) -> String {
     df
 }
 
-/// The image a session actually runs, given what this repo's stacks provide.
+/// The image a session *will* run, given what this repo's stacks provide.
+///
+/// **Not yet what one does run.** `container::plan` still takes
+/// `tag_for(adapter)`, so today this tag is built by `init` and used by nothing
+/// — threading it through is build-order item 2. Written as intent rather than
+/// as fact, because a doc comment claiming a guarantee the code does not keep
+/// is worse than none: the next reader trusts it.
 ///
 /// Keyed on the **recipe**, which is the fired installs in order — so a pnpm
 /// repo and a yarn repo do not share an image, and a reordered stack file is a
@@ -208,6 +214,11 @@ pub fn stack_tag(adapter: &Adapter, installs: &[&str]) -> String {
 /// Returns the tag rather than letting the caller recompute it: two places
 /// deciding which image to run is how a session ends up in one image while
 /// `init` reported another.
+///
+/// That is presently the state of things, and this comment is not a guarantee
+/// against it: `init` is the only caller, and `container::plan` independently
+/// takes `tag_for(adapter)`. Returning the tag is what makes the fix a
+/// one-line change at the launch sites when item 2 lands.
 /// No test calls this: it builds an image, and there is no container runtime in
 /// the dev sandbox. Its construction — `stack_tag` and `stack_dockerfile` — is
 /// tested thoroughly; that the build *works* is `omh doctor`'s to prove, which
@@ -504,6 +515,16 @@ mod tests {
             pnpm,
             stack_tag(&a, &["corepack enable pnpm"]),
             "and an unchanged resolution must not rebuild"
+        );
+        // Order is part of the recipe, not a presentation detail. `corepack
+        // enable pnpm` needs the node the provide above it asserted, so a
+        // reordered stack file describes a different image — and a tag that
+        // hashed the *set* would hand that repo the image built in the old
+        // order, which is a cache hit on a build that never happened.
+        assert_ne!(
+            both,
+            stack_tag(&a, &["corepack enable yarn", "corepack enable pnpm"]),
+            "a reordered recipe is a different image"
         );
     }
 
@@ -853,6 +874,32 @@ mod tests {
                 .unwrap_or("");
             assert_eq!(last_user.trim(), "USER agent", "ended privileged:\n{df}");
         }
+    }
+
+    /// …and the stack layer *begins* as root, which the test above cannot see.
+    ///
+    /// It reads only the last `USER`, so dropping `USER root` from
+    /// `stack_dockerfile` leaves it green — and the layer would then run
+    /// `apt-get install gcc` as `agent`. Every recipe that installs anything
+    /// system-wide fails, which is loud, but it fails at *image build* on data
+    /// that is correct, and the person reading the error has no reason to
+    /// suspect the Dockerfile omh generated.
+    ///
+    /// Asserted positionally rather than by presence: root must come before
+    /// the first `RUN`, because a `USER root` after the installs would satisfy
+    /// `contains` and change nothing.
+    #[test]
+    fn the_stack_layer_installs_as_root() {
+        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"]);
+        let line = |needle: &str| {
+            df.lines()
+                .position(|l| l.trim_start().starts_with(needle))
+                .unwrap_or_else(|| panic!("missing `{needle}`:\n{df}"))
+        };
+        assert!(
+            line("USER root") < line("RUN "),
+            "the recipe runs before the layer takes root:\n{df}"
+        );
     }
 
     /// The probe exists to answer a question about the *sandbox*, so it must be
