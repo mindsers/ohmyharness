@@ -292,8 +292,9 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
     // as root. `..` climbs out of the checkout, and a blank marker joins to the
     // repo root, which always exists.
     //
-    // Shipped stack files are reviewed; build-order item 6 puts one inside a
-    // repo you have just cloned, so this closes before that opens.
+    // Shipped stack files are reviewed. A repo-local one is not: it arrives in
+    // a checkout you have just cloned and not read, which is why this rule
+    // lives in the loader both of them go through.
     let marker = Path::new(&def.marker);
     anyhow::ensure!(
         !def.marker.trim().is_empty(),
@@ -371,6 +372,128 @@ fn validate(def: &Definition, path: &Path) -> Result<()> {
 /// stacks is a set, and a polyglot repo is genuinely several of them at once.
 /// A missing directory is no stacks rather than an error, because a fresh
 /// install has not seeded one yet and that is not a reason to refuse to work.
+/// A file omh recognises as naming an ecosystem it cannot yet set up.
+///
+/// The one case where `init` has nothing to fall back on: the repo plainly *is*
+/// something, no stack claims it, and no lockfile or runner says how to test
+/// it. So omh asks — which is tier 3 of `docs/design/adoption.md`'s table, and
+/// the only question left in `init`.
+///
+/// Deliberately **not** a stack file with no provides. The answer to the
+/// question is written as `<repo>/.omh/stacks/<name>.toml`, and a shipped stack
+/// of that name is one a repo may not answer to — so the question and its
+/// answer would collide. A marker is a question; a stack is an answer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Marker {
+    /// The filename whose presence names the ecosystem.
+    pub file: String,
+    /// What to call it — the name the repo's own stack file will take.
+    pub stack: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Markers {
+    #[serde(default, rename = "marker")]
+    markers: Vec<Marker>,
+}
+
+/// Every marker omh recognises without being able to provision it.
+pub fn markers(dir: &Path) -> Result<Vec<Marker>> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+    };
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("reading {}", dir.display()))?
+            .path();
+        if path.extension().is_none_or(|e| e != "toml") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let parsed: Markers =
+            toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+        for m in &parsed.markers {
+            anyhow::ensure!(
+                !m.file.trim().is_empty() && !m.stack.trim().is_empty(),
+                "{}: a marker needs both a `file` and a `stack`",
+                path.display()
+            );
+            // The same rule a stack's own marker gets, for the same reason: an
+            // absolute path matches every repo on the machine.
+            let p = Path::new(&m.file);
+            anyhow::ensure!(
+                p.components().count() == 1
+                    && p.components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))),
+                "{}: marker `{}` must be one filename inside the repo",
+                path.display(),
+                m.file
+            );
+        }
+        out.extend(parsed.markers);
+    }
+    out.sort_by(|a, b| a.stack.cmp(&b.stack));
+    Ok(out)
+}
+
+/// Which recognised-but-unprovisionable ecosystems this repo turns out to be.
+///
+/// A marker whose stack is now in play is not unclaimed — that is what makes
+/// contributing `stacks/elixir.toml` turn the elixir question off, in the same
+/// release, without anybody remembering to edit a second file. The curation
+/// test refuses the contradiction outright, so this filter is a belt to that
+/// braces: a repo-local stack answers the question too, and no test can iterate
+/// those.
+pub fn unclaimed<'a>(markers: &'a [Marker], stacks: &[Definition], repo: &Path) -> Vec<&'a Marker> {
+    markers
+        .iter()
+        .filter(|m| repo.join(&m.file).exists())
+        .filter(|m| !stacks.iter().any(|s| s.name == m.stack))
+        .collect()
+}
+
+/// Every stack in play: what omh ships, plus what this repo taught it.
+///
+/// A repo writes `<repo>/.omh/stacks/<name>.toml` to describe an ecosystem omh
+/// has never heard of — a proprietary internal toolchain that will never be
+/// upstreamed, and still has to be installable. That is the escape hatch
+/// `docs/design/adoption.md` §1.2 reserves, scoped to the project that needs it
+/// so shared opinion stays versioned.
+///
+/// **It adds; it never shadows.** A repo file answering to a name omh ships is
+/// an error naming both paths. `merge_hooks` applies the same rule to a hook
+/// answering to a manifest name, and here the reason is stronger: a stack
+/// decides what goes into the image somebody's agent runs in, so a repo that
+/// could redefine `rust` could point its `install` at anything and the only
+/// symptom would be a sandbox that built successfully.
+///
+/// In the loader, so `init`, launch, `doctor` and `why` all inherit it. A guard
+/// only `init` applied is a guard any repo bypasses by never being `init`ed.
+pub fn load_all(catalogue: &Path, repo: &Path) -> Result<Vec<Definition>> {
+    let mut out = load_dir(catalogue)?;
+    for def in load_dir(repo)? {
+        if out.iter().any(|d| d.name == def.name) {
+            anyhow::bail!(
+                "{}: `{}` is a stack omh ships, so this file answers to nothing — \
+                 it is not read, and it does not override omh's ({}). Rename it, \
+                 or open a pull request against the one omh ships if it is wrong.",
+                repo.join(format!("{}.toml", def.name)).display(),
+                def.name,
+                catalogue.join(format!("{}.toml", def.name)).display()
+            );
+        }
+        out.push(def);
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
 pub fn load_dir(dir: &Path) -> Result<Vec<Definition>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -427,6 +550,150 @@ because = "cargo is how a rust project is built and tested"
             .expect("the shipped stacks must load")
     }
 
+    // ── markers omh cannot answer for ───────────────────────────────────────
+
+    fn shipped_markers() -> Vec<Marker> {
+        markers(Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/markers")))
+            .expect("the shipped markers must load")
+    }
+
+    /// **A marker omh ships a stack for is a contradiction**, and shipping the
+    /// stack is what removing the marker means.
+    ///
+    /// The two files say opposite things: `markers/` means *omh recognises this
+    /// and cannot set it up*, `stacks/` means *omh sets this up*. Left in both,
+    /// `init` would ask how to install an ecosystem it had just provisioned —
+    /// a question with a right answer already on disk, which is the most
+    /// expensive kind to be asked.
+    ///
+    /// Enforced rather than documented, because the two files are edited by
+    /// different people at different times: whoever contributes
+    /// `stacks/elixir.toml` has no reason to know `markers/markers.toml`
+    /// exists, and this is how they find out in the same commit.
+    #[test]
+    fn no_marker_names_an_ecosystem_omh_already_ships() {
+        let stacks = shipped();
+        for m in shipped_markers() {
+            assert!(
+                !stacks.iter().any(|s| s.name == m.stack),
+                "`{}` is listed as unclaimed and omh ships a `{}` stack — \
+                 delete the marker, or `init` will ask how to install what it \
+                 just installed",
+                m.file,
+                m.stack
+            );
+            assert!(
+                !stacks.iter().any(|s| s.marker == m.file),
+                "`{}` is listed as unclaimed and a shipped stack already \
+                 detects it",
+                m.file
+            );
+        }
+    }
+
+    /// A marker earns its place by being recognisable and unanswerable. Both
+    /// halves are checked here because a blank one matches nothing and an
+    /// absolute one matches every repo on the machine — the same rule a stack's
+    /// own marker gets, for the same reason.
+    #[test]
+    fn every_shipped_marker_names_a_file_and_an_ecosystem() {
+        let all = shipped_markers();
+        assert!(all.len() >= 5, "a list this short proves nothing: {all:?}");
+        for m in &all {
+            assert!(!m.file.trim().is_empty() && !m.stack.trim().is_empty());
+            assert_eq!(
+                Path::new(&m.file).components().count(),
+                1,
+                "`{}` is not one filename inside the repo",
+                m.file
+            );
+        }
+        let names: std::collections::BTreeSet<&str> =
+            all.iter().map(|m| m.stack.as_str()).collect();
+        assert_eq!(names.len(), all.len(), "two markers claim one ecosystem");
+    }
+
+    /// Unclaimed means *here, and unanswered*. A marker for an ecosystem this
+    /// repo is not asks nothing, and neither does one a stack now claims —
+    /// including a stack the **repo itself** added, which is how answering the
+    /// question stops it being asked again.
+    #[test]
+    fn a_marker_a_stack_now_claims_is_no_longer_unclaimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        std::fs::write(repo.join("mix.exs"), "").unwrap();
+
+        let all = shipped_markers();
+        let asked: Vec<&str> = unclaimed(&all, &[], repo)
+            .iter()
+            .map(|m| m.stack.as_str())
+            .collect();
+        assert_eq!(asked, ["elixir"], "only the marker this repo actually has");
+
+        let answered: Vec<Definition> = toml::from_str::<Definition>(
+            "name = \"elixir\"\nmarker = \"mix.exs\"\n\n[[provide]]\n\
+             name    = \"toolchain\"\nneeds   = [\"mix\"]\n\
+             install = \"apt-get install -y elixir\"\nbecause = \"it builds\"\n",
+        )
+        .map(|d| vec![d])
+        .unwrap();
+        assert!(
+            unclaimed(&all, &answered, repo).is_empty(),
+            "a stack answering the question turns it off, whoever wrote it"
+        );
+    }
+
+    // ── a repo's own stacks ─────────────────────────────────────────────────
+
+    /// A repo may teach omh an ecosystem omh has never heard of, and that is
+    /// the whole point of letting it write a stack file at all: a proprietary
+    /// internal toolchain will never be upstreamed, and it still has to be
+    /// installable.
+    #[test]
+    fn a_repo_may_add_an_ecosystem_omh_does_not_ship() {
+        let catalogue = dir_with(&[("rust.toml", MINIMAL)]);
+        let repo = dir_with(&[(
+            "acme.toml",
+            "name = \"acme\"\nmarker = \"acme.yaml\"\n\n\
+             [[provide]]\nname    = \"toolchain\"\nneeds   = [\"acmec\"]\n\
+             install = \"install-acme\"\nbecause = \"the internal compiler\"\n",
+        )]);
+
+        let all = load_all(catalogue.path(), repo.path()).unwrap();
+        let names: Vec<&str> = all.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["acme", "rust"], "both, sorted, from both places");
+    }
+
+    /// **It adds; it never shadows.** A repo file answering to a name omh ships
+    /// is an error naming **both paths**, not a silent override.
+    ///
+    /// The same rule `merge_hooks` applies to a hook answering to a manifest
+    /// name, for a stronger reason: a stack decides what goes into the image
+    /// somebody's agent runs in. A repo that could redefine `rust` could point
+    /// `rust/toolchain`'s `install` at anything, and the only sign would be a
+    /// sandbox that built successfully.
+    ///
+    /// Enforced in the loader rather than at `init`, so launch, `doctor` and
+    /// `why` inherit it — a guard only `init` applied would be a guard a repo
+    /// bypasses by never being `init`ed.
+    #[test]
+    fn a_repo_may_not_answer_to_a_name_omh_ships() {
+        let catalogue = dir_with(&[("rust.toml", MINIMAL)]);
+        let repo = dir_with(&[("rust.toml", &MINIMAL.replace("Cargo.toml", "evil.toml"))]);
+
+        let err = format!(
+            "{:#}",
+            load_all(catalogue.path(), repo.path())
+                .expect_err("a repo may not redefine an ecosystem omh ships")
+        );
+        assert!(err.contains("rust"), "must name it: {err}");
+        assert!(
+            err.contains(&catalogue.path().display().to_string())
+                && err.contains(&repo.path().display().to_string()),
+            "and both files, or the fix is a guess: {err}"
+        );
+    }
+
     /// **Every shipped hook names a program its stack provisions.**
     ///
     /// The join between omh's hook opinion and the environment it builds, and
@@ -446,7 +713,7 @@ because = "cargo is how a rust project is built and tested"
     /// rather than stacks: `npm test` is only a real command if a `test` script
     /// exists, and asserting one per stack would force a hook that fails on
     /// every turn in every node repo without one. Node's commands come from its
-    /// own `scripts`, as repo hooks, and that is build-order item 5.
+    /// own `scripts`, read by `derive` and written as repo hooks.
     #[test]
     fn every_shipped_hook_names_a_program_its_stack_provisions() {
         let defs = shipped();
@@ -934,10 +1201,10 @@ because = "cargo is how a rust project is built and tested"
     /// the same way, and a blank marker joins to the repo root itself, which
     /// always exists.
     ///
-    /// Today these files ship with omh and are reviewed. Build-order item 6
-    /// puts one inside `<repo>/.omh/stacks`, in a repository you have just
-    /// cloned and not read — so this closes before the milestone that opens it,
-    /// not after.
+    /// The shipped files are reviewed; a repo-local one is not. It arrives in a
+    /// checkout you have just cloned and never opened, and `load_all` reads it
+    /// through this same validator — which is why the rule closed before the
+    /// door it guards was opened, rather than after.
     #[test]
     fn a_marker_that_is_not_one_filename_inside_the_repo_is_refused() {
         for (marker, why) in [

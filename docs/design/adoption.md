@@ -1,6 +1,6 @@
 # Meeting a repo that already exists
 
-**Status: §1, the hook decoupling and command derivation are built. The rest is designed and not built.**
+**Status: Part 1 is built. Part 3 — import — is built for hooks; the rest is designed and not built.**
 
 Built and shipping: stack definitions as data (`stacks/*.toml`), the stack image
 layer and the tag that keys it, `[provision]` as the recorded resolution, the
@@ -19,8 +19,19 @@ reads a lockfile, a `packageManager`, a `package.json`'s scripts or a
 runner's targets and writes the hooks the catalogue cannot hold — for
 ecosystems the catalogue does not already cover, executing nothing.
 
-Still designed and not built: the two questions of last resort, and importing
-any capability other than MCP.
+Also built: the two questions of last resort. A marker omh recognises and has no
+stack for is asked about once and the answer written as
+`<repo>/.omh/stacks/<name>.toml`; a project nothing can test is asked what tests
+it. Silence declines, a closed pipe stops, and a repo-local stack may add an
+ecosystem but never answer to a name omh ships.
+
+Also built: `omh import hooks <harness>`. It reads a harness's own hook file back
+through the same vocabulary that renders to it, writes what it can say into
+`<repo>/.omh/hooks/` and into `[use]`, and leaves anything it cannot say whole
+where it is — named. `init` reports what it can see and acts on nothing.
+
+**Part 1 is complete.** Still designed and not built: importing rules, skills,
+commands and subagents (Part 3's remainder).
 
 Two things happen when `omh init` meets a repo that is not empty. It has to
 build an environment the project can actually be worked in, and it has to not

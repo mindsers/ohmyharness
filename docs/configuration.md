@@ -30,6 +30,7 @@ A repo holds configuration, and one kind of content:
   settings.local.toml  gitignored: your overrides, and the secrets the other must not hold
   memory.toml          committed: how the note store keys and expires
   hooks/               committed: hooks bound to commands only this repo has
+  stacks/              committed: an ecosystem you taught omh, if you had to
 <repo>/AGENTS.md       the project's own rules — tracked, and actually read
 ```
 
@@ -65,6 +66,12 @@ as something you are not using.
 
 A hook that names no stack belongs everywhere, which is most of them.
 
+**A project hook beats a catalogue hook of the same name**, which is how a repo
+overrides your personal `format` hook with the one it actually needs, without
+renaming anything. **Names from the base set are reserved** — a file answering
+to one is an error naming both, because a repo that could replace
+`graph-refresh` could make the graph lie while looking installed.
+
 ### Hooks omh works out for you
 
 Some commands the catalogue cannot hold, because they are a property of the
@@ -99,11 +106,43 @@ The command is always spelled from omh's own vocabulary — `pnpm run test`,
 `make fmt` — never from text in your files. And it is always `run`: `bun test`
 is bun's own test runner and ignores your `test` script completely.
 
-**A project hook beats a catalogue hook of the same name**, which is how a repo
-overrides your personal `format` hook with the one it actually needs, without
-renaming anything. **Names from the base set are reserved** — a file answering
-to one is an error naming both, because a repo that could replace
-`graph-refresh` could make the graph lie while looking installed.
+### The two things omh will ask
+
+Everything above is derived, and most repos are asked nothing at all. Two things
+are not derivable from any file, and `omh init` asks about them — once, on a
+terminal, recording the answer so it never asks again.
+
+**"How is this installed?"** — when the repo plainly *is* something omh has
+never been taught. A `mix.exs` names elixir; omh ships no elixir stack and
+cannot invent one. Answer it and omh writes `<repo>/.omh/stacks/elixir.toml`,
+which is read beside the ones omh ships:
+
+```toml
+name   = "elixir"
+marker = "mix.exs"
+
+[[provide]]
+name    = "toolchain"
+needs   = ["mix", "elixir"]
+install = "apt-get update && apt-get install -y elixir"
+because = "elixir is what this project is written in"
+```
+
+It asks for the install command *and* what should then be on PATH, because a
+recipe with no stated outcome is one nothing can check — omh would install
+something, report success, and have no way to notice it had not worked.
+
+**A repo's own stack adds; it never shadows.** A file answering to a name omh
+ships is an error naming both paths, not a silent override — a stack decides
+what goes into the image your agent runs in.
+
+**"What command tests this?"** — when no stack, lockfile, runner or declared
+script could say. Answer it and omh writes `<repo>/.omh/hooks/test.json`.
+
+**Pressing Enter declines and writes nothing**, which is what it should mean:
+it is what you press when you do not know. **A closed pipe stops the
+questions** — a CI runner is asked nothing and gets no files, rather than having
+its silence recorded as a set of answers.
 
 ### What that costs
 
@@ -602,9 +641,41 @@ Import paths expand against the **host**, deliberately using a different
 expansion than everything else — the guest home would send import looking into a
 filesystem that does not exist yet.
 
-**Planned:** extending import beyond MCP to rules, skills, hooks and commands,
-plus a `plugin` capability that reads Claude marketplace plugins and re-renders
-them for other harnesses. See [roadmap](design/roadmap.md).
+### Importing hooks
+
+```console
+$ omh import hooks claude
+```
+
+The same inverse, for the capability most people already have configured. It
+reads the harness's own hook file and writes what it can say into
+**`<repo>/.omh/hooks/`** — this repo, never your catalogue, because a catalogue
+hook runs in every project you ever open and one project's formatter does not
+belong in front of the others.
+
+**It copies.** The harness keeps working exactly as it did; adopting omh is not
+a migration you cannot back out of.
+
+**Imported hooks are selected**, or they would sit on disk and never run — the
+launcher reads `[use]`, so a file written without being named there is a hook
+the report counted and no session ships.
+
+**Nothing is imported half-way.** A handler carrying anything omh cannot say —
+`args`, a `type` that is not a command, or an `if` permission gate — is left
+where it is and named. Importing the command without its `if` would turn a hook
+that fired on one narrow case into one that fires on every call, which is not a
+smaller version of what you wrote. The same goes for a matcher omh cannot read
+as tools: Claude's matchers are unanchored regexes, and `Edit|Write` is
+deliberately narrower than omh's `edit` — importing it as `edit` would widen
+your hook to fire where you had stopped it.
+
+`omh init` mentions what it can see and does nothing about it. Importing writes
+executable content into your repo, which is a decision you make rather than one
+`init` makes because it found a file.
+
+**Planned:** extending import to rules, skills and commands, plus a `plugin`
+capability that reads Claude marketplace plugins and re-renders them for other
+harnesses. See [roadmap](design/roadmap.md).
 
 ## `carry_in`
 

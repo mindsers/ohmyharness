@@ -7,6 +7,7 @@
 //! the profile is *mounted* rather than copied, so there is no drift to fight.
 
 mod adapter;
+mod ask;
 mod auth;
 mod base;
 mod bundled;
@@ -124,9 +125,9 @@ fn passthrough(argv: &[String], globals: &[String]) -> Result<Vec<String>> {
 
 /// Built-ins and their aliases always beat a harness name — otherwise an
 /// adapter called `s` or `config` would silently shadow a command.
-pub const RESERVED: [&str; 18] = [
+pub const RESERVED: [&str; 19] = [
     "init", "doctor", "d", "auth", "ls", "attach", "a", "sessions", "s", "config", "c", "graph",
-    "why", "memory", "help", "use", "unuse", "repo",
+    "why", "memory", "help", "use", "unuse", "repo", "import",
 ];
 
 #[derive(Subcommand)]
@@ -198,6 +199,11 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<MemoryCmd>,
     },
+    /// Bring a setup you already have into this repo.
+    Import {
+        #[command(subcommand)]
+        cmd: ImportCmd,
+    },
     /// Anything else is a harness: `omh claude`, `omh opencode`.
     #[command(external_subcommand)]
     Run(Vec<String>),
@@ -225,6 +231,19 @@ enum McpCmd {
         file: Option<std::path::PathBuf>,
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ImportCmd {
+    /// Hooks you already configured in a harness, into this repo.
+    Hooks {
+        harness: String,
+        /// Read this file instead of where the adapter says the harness keeps
+        /// them — for a config somewhere else, and for testing what omh does
+        /// with one without touching your own.
+        #[arg(long)]
+        file: Option<std::path::PathBuf>,
     },
 }
 
@@ -484,6 +503,10 @@ fn main() -> Result<()> {
             all,
         } => use_cmd(&cwd, capability.as_deref(), name.as_deref(), *all),
         Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name),
+
+        Cmd::Import { cmd } => match cmd {
+            ImportCmd::Hooks { harness, file } => import_hooks(&cwd, harness, file.as_deref()),
+        },
 
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd),
@@ -1368,7 +1391,10 @@ fn seed_store(paths: &Paths) -> Result<String> {
         }
     }
 
-    let seeds = detect::seeds(&stack::load_dir(&paths.stacks())?, &paths.repo);
+    let seeds = detect::seeds(
+        &stack::load_all(&paths.stacks(), &paths.repo_stacks())?,
+        &paths.repo,
+    );
     if let Some(note) =
         memory::ingest::overview(&paths.repo_name(), &seeds, &stubs, &templates, &today)?
     {
@@ -1885,6 +1911,173 @@ fn write_lists(
 /// The name is validated here rather than at the write, which is the same rule
 /// `[use]` follows: a name is checked where it is minted, so `omh use` cannot
 /// put something in the file that reading the file would refuse.
+/// Harnesses on this machine whose hooks omh could bring across.
+///
+/// **A report, never an action.** Importing writes executable content into
+/// somebody's repo, and doing that because `init` found a file would be omh
+/// deciding on their behalf what runs at the end of their turns. So `init`
+/// names what is there and what would take it; `omh import hooks` is a
+/// separate act somebody chooses.
+///
+/// Never fatal and never noisy: a harness with no config, a config that will
+/// not parse, an adapter that declares no import path — all of them are simply
+/// not mentioned. There is nothing to tell somebody about a file that is not
+/// there.
+fn importable(paths: &Paths, harnesses: &[String]) -> Vec<String> {
+    let Some(home) = dirs::home_dir() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for name in harnesses {
+        let Ok(adapter) = Adapter::find(&paths.adapters(), name) else {
+            continue;
+        };
+        let Some(binding) = adapter.supports(adapter::Capability::Hooks) else {
+            continue;
+        };
+        let Some(template) = binding.import.as_deref() else {
+            continue;
+        };
+        let source = adapter::expand_host(template, &home, &paths.repo);
+        let Ok(raw) = std::fs::read_to_string(&source) else {
+            continue;
+        };
+        let Ok(vocab) = hook::Vocabulary::of(binding, &adapter.tools) else {
+            continue;
+        };
+        let Ok((found, residue)) = render::parse_hooks(&raw, &vocab) else {
+            continue;
+        };
+        if found.is_empty() && residue.is_empty() {
+            continue;
+        }
+        out.push(format!(
+            "import     {name} has {} hook{} omh can read{} — omh import hooks {name}",
+            found.len(),
+            if found.len() == 1 { "" } else { "s" },
+            if residue.is_empty() {
+                String::new()
+            } else {
+                format!(" and {} it cannot", residue.len())
+            }
+        ));
+    }
+    out
+}
+
+/// Bring hooks somebody already configured in a harness into this repo.
+///
+/// **Into `<repo>/.omh/hooks/`, never the catalogue.** A catalogue hook runs in
+/// every repo you ever open, so importing one project's `prettier --write`
+/// there would put it in front of every other project you touch — worse than
+/// not importing at all, and invisible until it ran somewhere it should not
+/// have.
+///
+/// **Copy, never move.** The harness keeps working exactly as it did; adopting
+/// omh is not a migration you cannot back out of. The source file is not
+/// touched at all.
+///
+/// Two failure modes this is written against, and both are silent:
+///
+/// - **A hook that lands and never runs.** `[use]` is what the launcher reads,
+///   so a file written without being selected is a hook `omh import` counted
+///   and no session will ever ship. The report would say `+6` and the launch
+///   would ship none.
+/// - **A hook that stops every launch.** A file answering to a name omh's base
+///   manifest owns makes `merge_hooks` bail, which fails the whole session
+///   rather than that one hook. Refused here, by name.
+fn import_hooks(
+    cwd: &std::path::Path,
+    harness: &str,
+    file: Option<&std::path::Path>,
+) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let adapter = Adapter::find(&paths.adapters(), harness)?;
+    let binding = adapter
+        .supports(adapter::Capability::Hooks)
+        .with_context(|| format!("{harness} has no hooks for omh to read"))?;
+
+    let source = match file {
+        Some(f) => f.to_path_buf(),
+        None => {
+            let template = binding.import.as_deref().with_context(|| {
+                format!(
+                    "{harness} keeps its hooks somewhere omh cannot read them — \
+                     `omh import hooks {harness} --file <path>` if you know where"
+                )
+            })?;
+            let home = dirs::home_dir().context("no home directory")?;
+            adapter::expand_host(template, &home, &paths.repo)
+        }
+    };
+    let raw = std::fs::read_to_string(&source)
+        .with_context(|| format!("reading {}", source.display()))?;
+
+    let vocab = hook::Vocabulary::of(binding, &adapter.tools)
+        .with_context(|| format!("reading {harness}'s vocabulary backwards"))?;
+    let (found, residue) = render::parse_hooks(&raw, &vocab)?;
+
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    // Every hook name the manifest owns, whether or not its feature is on
+    // here — a repo with `codegraph` disabled must still not be handed a file
+    // called `graph-refresh`, because enabling it later would then fail every
+    // launch rather than that one hook.
+    let reserved: std::collections::BTreeSet<String> = manifest
+        .owns()
+        .get(&adapter::Capability::Hooks)
+        .map(|owned| owned.keys().cloned().collect())
+        .unwrap_or_default();
+    let dir = paths.repo.join(".omh/hooks");
+
+    println!("importing {harness} hooks from {}", source.display());
+    let mut written = Vec::new();
+    for (name, hook) in &found {
+        // A name omh's manifest owns is not a hook that would be shadowed —
+        // it is a file `merge_hooks` refuses, which takes the whole session
+        // down rather than just this hook. Refused here, where the person can
+        // still see why.
+        if reserved.contains(name) {
+            println!("  skipped  {name} — omh ships a hook by that name");
+            continue;
+        }
+        let path = dir.join(format!("{name}.json"));
+        if path.exists() {
+            println!("  kept     {name} — already here, left as it is");
+            continue;
+        }
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(hook)?))?;
+        println!("  imported {name} — {}", hook.does());
+        written.push(name.clone());
+    }
+
+    // Selected, or they land dead. This is the failure the whole feature is
+    // most likely to have: files on disk, a report saying six, and a launch
+    // that ships none of them because `[use]` never named them.
+    if !written.is_empty() && repo_has_selection(&paths)? {
+        let (cap, mut names, _) = current_list(&paths, "hooks", &written[0])?;
+        names.extend(written.iter().cloned());
+        names.sort();
+        names.dedup();
+        let lists = std::collections::BTreeMap::from([(cap, names)]);
+        for w in write_lists(&paths, &lists)? {
+            println!("  selected in {}", w.path.display());
+        }
+    }
+
+    // Named, never silently left behind. A hook omh could not bring across is
+    // still in the harness's own file and still running there, which is the
+    // honest outcome — but somebody who was not told would think omh had taken
+    // everything.
+    for d in &residue {
+        println!("  left     {} — {}", d.name, d.wanted);
+    }
+    if found.is_empty() && residue.is_empty() {
+        println!("  nothing to import");
+    }
+    Ok(())
+}
+
 fn current_list(
     paths: &Paths,
     key: &str,
@@ -1973,7 +2166,7 @@ fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String
     // Hooks alone can belong to an ecosystem, and omh now ships one set per
     // ecosystem. Offering a rust repo `go-test` would put every stack omh
     // knows into the list `init` writes and the launcher reports.
-    let defs = stack::load_dir(&paths.stacks())?;
+    let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let detected: BTreeSet<String> = stack::detected(&defs, &paths.repo)
         .into_iter()
         .map(|d| d.name.clone())
@@ -2312,7 +2505,7 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
     // definitions" as "no stack answers to that name", so an empty list does
     // not weaken the report, it inverts it and prints the inversion in omh's
     // own voice.
-    let defs = match stack::load_dir(&paths.stacks()) {
+    let defs = match stack::load_all(&paths.stacks(), &paths.repo_stacks()) {
         Ok(defs) => defs,
         Err(e) => {
             eprintln!(
@@ -2654,7 +2847,7 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
     // comes from — the file, not a `match` in Rust — and that a repo shadowing
     // the name is reported with *its* command, which is the honest answer.
     let mut derived = std::collections::BTreeMap::new();
-    let stack_defs = stack::load_dir(&paths.stacks())?;
+    let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let detected = stack::detected(&stack_defs, &paths.repo);
     let (own, repo_policy) = resolved(&paths)?;
     let merged = render::merge_hooks(
@@ -2720,6 +2913,11 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // already had. Each names the stack it belongs to and nothing else about
     // it — the marker stays in `stacks/`, so the two cannot drift.
     install_bundled(&paths.hooks(), bundled::Shipped::Hooks)?;
+    // And the markers: ecosystems omh can recognise and cannot yet set up.
+    // Data rather than a `match` for the same reason the stacks are — a marker
+    // is removed by the same release that ships its stack, and the curation
+    // test refuses the pair being true at once.
+    install_bundled(&paths.markers(), bundled::Shipped::Markers)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     std::fs::create_dir_all(paths.worktrees())?;
 
@@ -2742,7 +2940,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // names its stack instead, so a stack with no hooks is simply a stack with
     // no hooks — visible, provisioned, and waiting for somebody to contribute
     // one.
-    let stack_defs = stack::load_dir(&paths.stacks())?;
+    let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let stacks = stack::detected(&stack_defs, &paths.repo);
     let names: Vec<String> = adapters.to_vec();
     let harness = detect::preferred_harness(&names, &|h| runtime::installed(h));
@@ -2836,6 +3034,20 @@ fn init(cwd: &std::path::Path) -> Result<()> {
             )?;
         }
     }
+
+    // And only now, the two questions — after every derivation has had its go,
+    // which is what makes them *last* resort rather than a wizard's opening.
+    //
+    // Two conditions, both narrow. A marker omh recognises and no stack claims
+    // is the one case where the repo plainly is something and omh cannot say
+    // what its sandbox needs. A project with no test hook from any source is
+    // the one case where the agent cannot check its own work.
+    let markers = stack::markers(&paths.markers())?;
+    let unclaimed = stack::unclaimed(&markers, &stack_defs, &paths.repo);
+    let has_test = covered.iter().any(|s| stacks.iter().any(|d| &d.name == s))
+        || derived.iter().any(|d| d.hook.on == hook::Event::TurnEnd)
+        || repo_omh.join("hooks").join("test.json").exists();
+    let asked = questions(&repo_omh, &unclaimed, has_test)?;
     //
     // The selection, written out with every catalogue entry named — after the
     // catalogue is installed and the derived hooks are written, so both are in
@@ -3024,16 +3236,20 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // Report every decision, so `omh why` has something to explain. Printed as
     // each one is made rather than collected for the end, which is why the
     // image and graph lines below appear inside the summary.
-    // The headline is a claim about this run, and right now it cannot stop
-    // being true: `init` has no questions left to ask. It had one — what to do
-    // about a program the sandbox lacked — and provisioning made it the wrong
-    // question, because the answer was always *install it*.
+    // The headline is a claim about this run, so it has to be able to stop
+    // being true. omh derives what it can and asks only what nothing could
+    // derive; printing "asked nothing" after putting a question on screen would
+    // make the promise the tagline is selling into a thing the user just
+    // watched it break.
     //
-    // Build-order item 6 adds two questions of last resort, for a marker no
-    // stack claims and a moment no hook covers, and restores the counted
-    // arms this replaced. Until then a count would be a variable that is
-    // always zero, dressed as one that might not be.
-    println!("omh init — decided, asked nothing\n");
+    // Counted from what was actually *put*, not from what was answered — a
+    // question declined was still a question asked, and claiming otherwise
+    // would let omh interrogate somebody and then deny it.
+    match asked {
+        0 => println!("omh init — decided, asked nothing\n"),
+        1 => println!("omh init — decided all but one question\n"),
+        n => println!("omh init — decided the rest; asked {n} questions\n"),
+    }
     println!("  harnesses  {} ({})", adapters.len(), adapters.join(", "));
     println!("  editors    {} ({})", editors.len(), editors.join(", "));
     match &harness {
@@ -3082,6 +3298,15 @@ fn init(cwd: &std::path::Path) -> Result<()> {
              sandbox has it",
             d.name, d.wanted
         );
+    }
+
+    // Hooks somebody already has, somewhere omh can see them. **Noticed, never
+    // acted on**: importing writes executable content into the repo, and doing
+    // that because `init` happened to find a file is not a decision omh gets to
+    // make on somebody's behalf. It says what is there and what would bring it
+    // across.
+    for line in importable(&paths, &adapters) {
+        println!("  {line}");
     }
 
     // What the repo already documents becomes notes that *point* at it.
@@ -3153,6 +3378,87 @@ fn install_bundled_adapters(paths: &Paths) -> Result<Vec<String>> {
         .into_iter()
         .map(|a| a.name)
         .collect())
+}
+
+/// Put the two questions of last resort, and write down what comes back.
+///
+/// **A terminal is a precondition, not a fallback.** With stdin closed — a CI
+/// runner, a script — nothing is asked and nothing is written, which is the
+/// same outcome as declining and is reached without printing a prompt nobody
+/// can answer. `ask::prompt` reads EOF as a stop for the same reason.
+///
+/// Returns how many questions were actually put, so `init`'s headline can stop
+/// claiming it asked nothing the moment it did.
+///
+/// `write_if_absent`, so an answer somebody has since edited is never
+/// overwritten by a later `init` re-asking and getting a different reply.
+fn questions(
+    repo_omh: &std::path::Path,
+    unclaimed: &[&stack::Marker],
+    has_test: bool,
+) -> Result<usize> {
+    if unclaimed.is_empty() && has_test {
+        return Ok(0);
+    }
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Ok(0);
+    }
+
+    let stdin = std::io::stdin();
+    let (asked, answers) = ask_all(
+        unclaimed,
+        has_test,
+        &mut stdin.lock(),
+        &mut std::io::stderr(),
+    )?;
+
+    for a in answers {
+        let path = repo_omh.join(&a.path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        write_if_absent(&path, &a.body)?;
+        println!("  {}", a.said);
+    }
+    Ok(asked)
+}
+
+/// The exchange itself, with the terminal handed in.
+///
+/// Split from [`questions`] so its rules can be asserted at all — how many
+/// questions were put, what a decline does to the ones after it, and that a
+/// declined question is still a question asked.
+fn ask_all(
+    unclaimed: &[&stack::Marker],
+    has_test: bool,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn std::io::Write,
+) -> Result<(usize, Vec<ask::Answer>)> {
+    let mut asked = 0usize;
+    let mut answers = Vec::new();
+
+    for marker in unclaimed {
+        asked += 1;
+        match ask::how_is_it_installed(marker, input, out)? {
+            Some(a) => answers.push(a),
+            // **Stop, rather than working through the rest.** A decline and a
+            // closed pipe arrive here identically, and the one that matters is
+            // the pipe: a polyglot repo with three unclaimed markers would
+            // otherwise print three questions into a void and count them. One
+            // "no" is answer enough to stop asking.
+            None => break,
+        }
+    }
+    // Asked last, because it is the question most repos reach and the one most
+    // worth answering — putting it after an exchange somebody has already
+    // declined would waste it.
+    if !has_test {
+        asked += 1;
+        if let Some(a) = ask::what_tests_it(input, out)? {
+            answers.push(a);
+        }
+    }
+    Ok((asked, answers))
 }
 
 /// Copy definitions that ship with omh into `~/.omh`.
@@ -3572,7 +3878,7 @@ impl Sandbox {
 /// [`Sandbox::top_up`], which builds it first — so this stays cheap enough to
 /// call on every launch path before anything has been decided.
 fn sandbox(paths: &Paths, adapter: &Adapter, repo: &settings::RepoPolicy) -> Result<Sandbox> {
-    let defs = stack::load_dir(&paths.stacks())?;
+    let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let detected = stack::detected(&defs, &paths.repo);
     let installs: Vec<String> = installs_for(&detected, &repo.provision)
         .into_iter()
@@ -4330,6 +4636,85 @@ mod tests {
             4,
             "one reason and three lines of evidence: {reason}"
         );
+    }
+
+    // ── the questions of last resort ────────────────────────────────────────
+
+    fn unclaimed(stacks: &[&str]) -> Vec<stack::Marker> {
+        stacks
+            .iter()
+            .map(|s| stack::Marker {
+                file: format!("{s}.manifest"),
+                stack: (*s).to_string(),
+            })
+            .collect()
+    }
+
+    fn exchange(
+        markers: &[stack::Marker],
+        has_test: bool,
+        typed: &str,
+    ) -> (usize, Vec<ask::Answer>) {
+        let refs: Vec<&stack::Marker> = markers.iter().collect();
+        let mut out = Vec::new();
+        ask_all(
+            &refs,
+            has_test,
+            &mut std::io::BufReader::new(typed.as_bytes()),
+            &mut out,
+        )
+        .unwrap()
+    }
+
+    /// **A decline stops the exchange**, rather than putting every remaining
+    /// question into the same void.
+    ///
+    /// A decline and a closed pipe are indistinguishable at this level, and the
+    /// one that matters is the pipe: a polyglot repo with three unclaimed
+    /// markers would otherwise print three questions nobody can see. One "no"
+    /// is answer enough to stop asking — the scar the deleted `[toolchain]`
+    /// question earned, carried over rather than re-learned.
+    #[test]
+    fn declining_one_question_stops_the_rest() {
+        let three = unclaimed(&["elixir", "ruby", "php"]);
+        let (asked, answers) = exchange(&three, true, "\n");
+        assert_eq!(asked, 1, "one question put, and no more after the decline");
+        assert!(answers.is_empty());
+
+        // A closed pipe reaches the same place without a prompt being answered
+        // at all.
+        assert_eq!(exchange(&three, true, ""), (1, Vec::new()));
+    }
+
+    /// **A question declined is a question asked.** The headline counts what
+    /// was put on screen, not what came back — claiming "asked nothing" after
+    /// interrogating somebody is the promise the tagline sells, broken while
+    /// they watch.
+    #[test]
+    fn the_count_is_what_was_put_not_what_was_answered() {
+        let one = unclaimed(&["elixir"]);
+        let (asked, answers) = exchange(&one, true, "\n");
+        assert_eq!((asked, answers.len()), (1, 0));
+
+        let (asked, answers) = exchange(&one, true, "apt-get install -y elixir\nmix\n");
+        assert_eq!((asked, answers.len()), (1, 1));
+        assert_eq!(answers[0].path, std::path::Path::new("stacks/elixir.toml"));
+    }
+
+    /// Neither question is put where nothing is unknown — which is most repos,
+    /// most of the time, and is what keeps this from being a wizard.
+    #[test]
+    fn a_repo_with_nothing_unknown_is_asked_nothing() {
+        assert_eq!(exchange(&[], true, "mix test\n"), (0, Vec::new()));
+    }
+
+    /// The test question stands alone: a repo omh understands entirely, that
+    /// still has no way to check its own work.
+    #[test]
+    fn a_project_with_no_way_to_test_itself_is_asked_about_that_alone() {
+        let (asked, answers) = exchange(&[], false, "mix test\n");
+        assert_eq!(asked, 1);
+        assert_eq!(answers[0].path, std::path::Path::new("hooks/test.json"));
     }
 
     /// A hook belonging to an ecosystem this repo is not could never have been

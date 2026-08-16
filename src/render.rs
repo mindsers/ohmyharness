@@ -867,6 +867,182 @@ fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>) -> Result<String> {
     }))
 }
 
+/// Read a harness's own hook configuration back into omh's words.
+///
+/// The inverse of [`claude_settings`], and the rule `parse` already follows for
+/// MCP: *every format that renders must also parse, and the pair must round
+/// trip*. Without it omh can export somebody's setup and never meet them where
+/// they already are, which is the whole of what `omh import` is for.
+///
+/// **Nothing is imported half-way.** Anything omh cannot say whole comes back
+/// as [`hook::Dropped`] — named, and left in the file it came from — rather
+/// than as a hook with the part omh understood. The case that decides the
+/// shape is `if`: a handler's permission gate. A `command` imported without
+/// its `if` is a hook that fired on one narrow case now firing on every call,
+/// which is not a smaller version of what somebody wrote.
+///
+/// That is why the handler check is an **allowlist**. `args`, an unknown
+/// `type`, a key omh has never heard of — each changes what runs, and a list of
+/// keys to reject says nothing about the one the next release adds.
+pub fn parse_hooks(
+    raw: &str,
+    vocab: &hook::Vocabulary,
+) -> Result<(BTreeMap<String, hook::Hook>, Vec<hook::Dropped>)> {
+    #[derive(Deserialize)]
+    struct Document {
+        #[serde(default)]
+        hooks: BTreeMap<String, Vec<Entry>>,
+    }
+    #[derive(Deserialize)]
+    struct Entry {
+        #[serde(default)]
+        matcher: String,
+        #[serde(default)]
+        hooks: Vec<serde_json::Value>,
+    }
+
+    let doc: Document = serde_json::from_str(raw).context("parsing this harness's hooks")?;
+    let mut out: BTreeMap<String, hook::Hook> = BTreeMap::new();
+    let mut residue = Vec::new();
+    let mut note = |what: &str, wanted: String| {
+        residue.push(hook::Dropped {
+            name: what.to_string(),
+            wanted,
+        })
+    };
+
+    for (theirs, entries) in &doc.hooks {
+        for (i, entry) in entries.iter().enumerate() {
+            let at = format!("{theirs}[{i}]");
+            let Some(on) = vocab.event(theirs) else {
+                note(&at, format!("`{theirs}` is a moment omh has no word for"));
+                continue;
+            };
+            // Claude's matcher is an unanchored regex, and at `SessionStart` it
+            // is not a tool at all — `startup|resume|clear` is a different axis
+            // entirely. Only a `|`-separated list of words this harness
+            // declared as tools reads as a narrowing; everything else is a
+            // narrowing omh would be inventing.
+            let tools = match read_matcher(&entry.matcher, on, vocab) {
+                Ok(tools) => tools,
+                Err(why) => {
+                    note(&at, why);
+                    continue;
+                }
+            };
+            for handler in &entry.hooks {
+                match read_handler(handler) {
+                    Ok(command) => {
+                        let name = name_for(&out, on, &command);
+                        out.insert(
+                            name,
+                            hook::Hook {
+                                on,
+                                stack: None,
+                                tools: tools.clone(),
+                                when: None,
+                                action: hook::Action::Run(command),
+                            },
+                        );
+                    }
+                    Err(why) => note(&at, why),
+                }
+            }
+        }
+    }
+    Ok((out, residue))
+}
+
+/// A matcher as a list of tools, or why it is not one.
+fn read_matcher(
+    matcher: &str,
+    on: hook::Event,
+    vocab: &hook::Vocabulary,
+) -> std::result::Result<Vec<hook::Tool>, String> {
+    if matcher.trim().is_empty() {
+        // Not a narrowing: every tool this moment has, which is what omh's own
+        // empty `tools` means.
+        return Ok(Vec::new());
+    }
+    if on == hook::Event::SessionStart {
+        return Err(format!(
+            "`{matcher}` narrows a session start, which is not a tool — omh has \
+             no word for that axis"
+        ));
+    }
+    // **Not `split('|')`.** A harness's word for one omh tool may itself be an
+    // alternation — Claude spells `edit` as `Edit|Write|MultiEdit` — so a
+    // matcher is a `|`-join of spellings, each of which may contain `|`.
+    // Splitting first turns one tool into three words that name none.
+    //
+    // Longest match first, so a spelling that is a prefix of another cannot
+    // claim the shorter reading and strand the rest.
+    let mut rest = matcher.trim();
+    let mut tools = Vec::new();
+    while !rest.is_empty() {
+        let matched = vocab
+            .spellings()
+            .filter(|(word, _)| {
+                rest.strip_prefix(*word)
+                    .is_some_and(|after| after.is_empty() || after.starts_with('|'))
+            })
+            .max_by_key(|(word, _)| word.len());
+        let Some((word, tool)) = matched else {
+            return Err(format!(
+                "`{matcher}` is not a list of tools omh knows — it does not \
+                 continue with one at `{rest}`"
+            ));
+        };
+        tools.push(tool);
+        rest = rest[word.len()..].trim_start_matches('|');
+    }
+    Ok(tools)
+}
+
+/// A handler as the command it runs, or why omh cannot say it whole.
+fn read_handler(handler: &serde_json::Value) -> std::result::Result<String, String> {
+    let Some(object) = handler.as_object() else {
+        return Err("a handler that is not an object".to_string());
+    };
+    for key in object.keys() {
+        if key != "type" && key != "command" {
+            return Err(format!(
+                "a handler with `{key}`, which omh cannot express — importing \
+                 the command without it would change what the hook does"
+            ));
+        }
+    }
+    match object.get("type").and_then(serde_json::Value::as_str) {
+        Some("command") => {}
+        Some(other) => return Err(format!("a `{other}` handler, which is not a command")),
+        None => return Err("a handler with no `type`".to_string()),
+    }
+    match object.get("command").and_then(serde_json::Value::as_str) {
+        Some(c) if !c.trim().is_empty() => Ok(c.to_string()),
+        _ => Err("a command handler with no command".to_string()),
+    }
+}
+
+/// A name for a hook whose original format had none.
+///
+/// From the moment and the program it runs, because those are what somebody
+/// scanning `.omh/hooks/` needs to recognise it by — `after-tool-prettier`
+/// rather than a number. `detect::program` answers `None` for a command it
+/// cannot read, and a numbered fallback is better than a name built from shell.
+fn name_for(taken: &BTreeMap<String, hook::Hook>, on: hook::Event, command: &str) -> String {
+    let base = match crate::detect::program(command) {
+        Some(p) => format!("{on}-{}", p.trim_start_matches("./").replace('/', "-")),
+        None => format!("{on}-imported"),
+    };
+    if !taken.contains_key(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|n| !taken.contains_key(n))
+        .expect("an unbounded range contains a free name")
+}
+
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
@@ -888,6 +1064,251 @@ mod tests {
     use super::*;
 
     use std::io::Write;
+
+    // ── reading a harness's hooks back ──────────────────────────────────────
+
+    /// An adapter that spells every moment differently from Claude Code, so a
+    /// parser with `"Stop"` written into it cannot pass.
+    ///
+    /// The whole point of the round trip is that the vocabulary travels through
+    /// data. A fixture using Claude's own words would be satisfied by a reader
+    /// that had them hardcoded, which is the bug this pair exists to prevent.
+    fn foreign() -> (Binding, BTreeMap<hook::Tool, String>) {
+        let binding: Binding = toml::from_str(
+            "path = \"x\"\nrender = \"claude-settings\"\n\n\
+             [events]\nturn-end = \"AfterTurn\"\nafter-tool = \"ToolFinished\"\n\
+             session-start = \"Boot\"\n",
+        )
+        .unwrap();
+        let tools = BTreeMap::from([
+            (hook::Tool::Edit, "Modify".to_string()),
+            (hook::Tool::Read, "Fetch".to_string()),
+        ]);
+        (binding, tools)
+    }
+
+    /// **Every format that renders must also parse, and the pair must round
+    /// trip.** The rule `render::parse` already follows for MCP, applied to the
+    /// capability that actually needs importing.
+    ///
+    /// Through the harness document, not through a fixture of one: what is
+    /// asserted is that a hook rendered into somebody else's file comes back as
+    /// the same hook, which is the only thing that makes `omh import` a
+    /// translation rather than a guess.
+    #[test]
+    fn hooks_survive_a_round_trip_through_the_harness_document() {
+        let (binding, tools) = foreign();
+        let mine = hooks_named(&[
+            ("tests", r#"{"on":"turn-end","run":"cargo test"}"#),
+            (
+                "fmt",
+                r#"{"on":"after-tool","tools":["edit"],"run":"cargo fmt"}"#,
+            ),
+        ]);
+
+        let (rendered, dropped) = translate(&mine, &binding, &tools).unwrap();
+        assert!(dropped.is_empty(), "the fixture must render: {dropped:?}");
+        let document = claude_settings(&rendered).unwrap();
+
+        let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
+        let (back, residue) = parse_hooks(&document, &vocab).unwrap();
+        assert!(residue.is_empty(), "nothing should be residue: {residue:?}");
+
+        let recovered: BTreeSet<(hook::Event, Vec<hook::Tool>, String)> = back
+            .values()
+            .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
+            .collect();
+        assert_eq!(
+            recovered,
+            mine.values()
+                .map(|h| (h.on, h.tools.clone(), h.does().to_string()))
+                .collect(),
+            "a hook rendered into a harness's file must come back as itself"
+        );
+    }
+
+    /// **Nothing is imported half-way.** A handler carrying anything omh cannot
+    /// express is residue, reported by name — never a `command` brought across
+    /// with the rest of its entry quietly dropped.
+    ///
+    /// `if` is the one that matters and is why this is an allowlist rather than
+    /// a list of keys to ignore: it is a permission gate, so importing the
+    /// command without it turns a hook that fires on one narrow case into one
+    /// that fires on every call. The others are the same shape of loss —
+    /// `args` changes what runs, a `type` omh does not know is not a command at
+    /// all — and a key omh has never heard of is the case a denylist cannot
+    /// cover.
+    #[test]
+    fn a_handler_omh_cannot_express_whole_is_not_imported_in_part() {
+        let (binding, tools) = foreign();
+        let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
+
+        for (why, handler) in [
+            (
+                "a permission gate omh would drop",
+                r#"{"type":"command","command":"fmt","if":"tool.name == 'Bash'"}"#,
+            ),
+            (
+                "arguments that change what runs",
+                r#"{"type":"command","command":"fmt","args":["--check"]}"#,
+            ),
+            (
+                "a type that is not a command",
+                r#"{"type":"builtin","command":"fmt"}"#,
+            ),
+            (
+                "a key omh has never heard of",
+                r#"{"type":"command","command":"fmt","onFailure":"block"}"#,
+            ),
+        ] {
+            let doc =
+                format!(r#"{{"hooks":{{"AfterTurn":[{{"matcher":"","hooks":[{handler}]}}]}}}}"#);
+            let (imported, residue) = parse_hooks(&doc, &vocab).unwrap();
+            assert!(imported.is_empty(), "{why}: imported anyway: {imported:?}");
+            assert_eq!(residue.len(), 1, "{why}: not reported: {residue:?}");
+        }
+    }
+
+    /// A matcher omh cannot read as tools is residue, and the two ways that
+    /// happens are different mistakes.
+    ///
+    /// Claude's matcher grammar is **wider than `|`-alternation**: it is an
+    /// unanchored regex, so `Edit.*` matches tools omh has no name for and
+    /// importing it as `edit` would narrow somebody's hook without saying so.
+    /// And at `SessionStart` a matcher is not a tool at all — it is
+    /// `startup|resume|clear`, a completely different axis — so reading one as
+    /// a tool name would be a category error that happens to typecheck.
+    #[test]
+    fn a_matcher_that_is_not_a_list_of_tools_is_residue() {
+        let (binding, tools) = foreign();
+        let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
+
+        for (why, event, matcher) in [
+            (
+                "a regex is wider than the tools it mentions",
+                "ToolFinished",
+                "Modify.*",
+            ),
+            ("a tool this harness never declared", "ToolFinished", "Bash"),
+        ] {
+            let doc = format!(
+                r#"{{"hooks":{{"{event}":[{{"matcher":"{matcher}","hooks":[{{"type":"command","command":"x"}}]}}]}}}}"#
+            );
+            let (imported, residue) = parse_hooks(&doc, &vocab).unwrap();
+            assert!(imported.is_empty(), "{why}: {imported:?}");
+            assert_eq!(residue.len(), 1, "{why}: not reported: {residue:?}");
+        }
+
+        // An empty matcher is not a narrowing — it is every tool this moment
+        // has, which is what omh's own empty `tools` means.
+        let doc = r#"{"hooks":{"AfterTurn":[{"matcher":"","hooks":[{"type":"command","command":"x"}]}]}}"#;
+        let (imported, residue) = parse_hooks(doc, &vocab).unwrap();
+        assert_eq!(imported.len(), 1, "got: {residue:?}");
+        assert!(imported.values().next().unwrap().tools.is_empty());
+    }
+
+    /// A harness's word for one omh tool may **itself be an alternation** —
+    /// Claude spells `edit` as `Edit|Write|MultiEdit` — so a matcher is read by
+    /// matching whole spellings against it, never by splitting on `|`.
+    ///
+    /// Both halves are failures. Splitting first turns one tool into three
+    /// words that name none, so every hook narrowed to a tool becomes residue
+    /// and nothing imports. And a *partial* alternation is not that tool:
+    /// somebody matching `Edit|Write` deliberately excluded `MultiEdit`, and
+    /// importing it as `edit` would widen their hook to fire where they had
+    /// stopped it — the mirror of narrowing, and just as silent.
+    ///
+    /// Found end to end rather than here: the fixture below spells tools as
+    /// single words, so the round trip passed against a parser that could not
+    /// read the adapter omh actually ships.
+    #[test]
+    fn a_tool_spelled_as_an_alternation_is_one_tool() {
+        let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let binding = adapter.supports(Capability::Hooks).unwrap();
+        let vocab = hook::Vocabulary::of(binding, &adapter.tools).unwrap();
+
+        let doc = |matcher: &str| {
+            format!(
+                r#"{{"hooks":{{"PostToolUse":[{{"matcher":"{matcher}","hooks":[{{"type":"command","command":"fmt"}}]}}]}}}}"#
+            )
+        };
+
+        let (imported, residue) = parse_hooks(&doc("Edit|Write|MultiEdit"), &vocab).unwrap();
+        assert_eq!(
+            imported.len(),
+            1,
+            "one tool, however it is spelled: {residue:?}"
+        );
+        assert_eq!(
+            imported.values().next().unwrap().tools,
+            vec![hook::Tool::Edit]
+        );
+
+        // Two of them, joined — still whole spellings, not six words.
+        let (imported, residue) = parse_hooks(&doc("Edit|Write|MultiEdit|Read"), &vocab).unwrap();
+        assert_eq!(imported.len(), 1, "got: {residue:?}");
+        assert_eq!(
+            imported.values().next().unwrap().tools,
+            vec![hook::Tool::Edit, hook::Tool::Read]
+        );
+
+        // And a partial alternation is **not** that tool.
+        let (imported, residue) = parse_hooks(&doc("Edit|Write"), &vocab).unwrap();
+        assert!(
+            imported.is_empty(),
+            "importing this as `edit` would widen a hook that deliberately \
+             excluded MultiEdit: {imported:?}"
+        );
+        assert_eq!(residue.len(), 1, "and it is reported: {residue:?}");
+    }
+
+    /// At session start a matcher is **not a tool** — Claude's are
+    /// `startup|resume|clear`, a different axis entirely — and the guard for
+    /// that only bites where the word also happens to name a tool.
+    ///
+    /// So the fixture makes it: a harness that spells `edit` as `startup`.
+    /// Contrived, and it is exactly the collision the guard exists for. Without
+    /// it, a hook that fired when a session resumed would be imported as a hook
+    /// that fires on every edit — a category error that typechecks, produces a
+    /// valid hook, and is wrong in a way nothing downstream can notice.
+    ///
+    /// Written after deleting the guard changed no test: the first version of
+    /// this used a word no tool was spelled as, so the tool lookup failed
+    /// anyway and the guard was decoration.
+    #[test]
+    fn a_session_start_matcher_is_never_read_as_a_tool() {
+        let (binding, _) = foreign();
+        let colliding = BTreeMap::from([(hook::Tool::Edit, "startup".to_string())]);
+        let vocab = hook::Vocabulary::of(&binding, &colliding).unwrap();
+
+        let doc = r#"{"hooks":{"Boot":[{"matcher":"startup","hooks":[{"type":"command","command":"x"}]}]}}"#;
+        let (imported, residue) = parse_hooks(doc, &vocab).unwrap();
+        assert!(
+            imported.is_empty(),
+            "a session-start matcher became a tool narrowing: {imported:?}"
+        );
+        assert_eq!(residue.len(), 1, "and is reported: {residue:?}");
+    }
+
+    /// A moment this harness has and omh does not is residue rather than an
+    /// error: the rest of somebody's hooks still come across, and the one that
+    /// did not is named.
+    #[test]
+    fn a_moment_omh_has_no_word_for_is_reported_not_fatal() {
+        let (binding, tools) = foreign();
+        let vocab = hook::Vocabulary::of(&binding, &tools).unwrap();
+        let doc = r#"{"hooks":{
+            "AfterTurn":[{"matcher":"","hooks":[{"type":"command","command":"keep me"}]}],
+            "PreCompact":[{"matcher":"","hooks":[{"type":"command","command":"drop me"}]}]}}"#;
+
+        let (imported, residue) = parse_hooks(doc, &vocab).unwrap();
+        assert_eq!(imported.len(), 1, "the rest still come across");
+        assert_eq!(residue.len(), 1);
+        assert!(
+            residue[0].wanted.contains("PreCompact"),
+            "and the residue names what it was: {residue:?}"
+        );
+    }
 
     // ── suppression by measurement ──────────────────────────────────────────
 

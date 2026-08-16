@@ -595,6 +595,70 @@ pub fn wire<'a>(
     })
 }
 
+/// The same vocabulary, read the other way: this harness's words back into
+/// omh's.
+///
+/// Directly beneath [`wire`] on purpose — they are one mechanism pointed in two
+/// directions, and a translation that only went one way is how a format ends up
+/// exportable and un-importable. `render::parse` already sets the precedent for
+/// MCP: *every format that renders must also parse, and the pair must round
+/// trip*.
+///
+/// **Ambiguity is refused, never resolved by map order.** An adapter mapping
+/// two omh moments onto one harness word — say both `turn-end` and
+/// `session-start` to `Stop` — can be rendered from (each hook goes to `Stop`)
+/// and cannot be read back: a `Stop` entry is either, and a `BTreeMap` would
+/// silently answer whichever sorted first. That would import somebody's hooks
+/// with half of them at the wrong moment, which looks exactly like working.
+#[derive(Debug)]
+pub struct Vocabulary {
+    events: BTreeMap<String, Event>,
+    tools: BTreeMap<String, Tool>,
+}
+
+impl Vocabulary {
+    /// Invert one harness's tables, refusing any word that means two things.
+    pub fn of(binding: &Binding, tools: &BTreeMap<Tool, String>) -> Result<Self> {
+        let mut events = BTreeMap::new();
+        for (ours, theirs) in &binding.events {
+            if let Some(clash) = events.insert(theirs.clone(), *ours) {
+                anyhow::bail!(
+                    "this harness spells both `{clash}` and `{ours}` as `{theirs}`, \
+                     so a `{theirs}` hook cannot be read back as either"
+                );
+            }
+        }
+        let mut inverted = BTreeMap::new();
+        for (ours, theirs) in tools {
+            if let Some(clash) = inverted.insert(theirs.clone(), *ours) {
+                anyhow::bail!(
+                    "this harness spells both `{clash}` and `{ours}` as `{theirs}`, \
+                     so a `{theirs}` matcher cannot be read back as either"
+                );
+            }
+        }
+        Ok(Self {
+            events,
+            tools: inverted,
+        })
+    }
+
+    /// Which omh moment this harness's word names, if any.
+    pub fn event(&self, theirs: &str) -> Option<Event> {
+        self.events.get(theirs).copied()
+    }
+
+    /// Every tool spelling this harness declares, with what it means.
+    ///
+    /// Exposed because a spelling may itself be an alternation — Claude writes
+    /// `edit` as `Edit|Write|MultiEdit` — so reading a matcher back means
+    /// matching whole spellings against it, not splitting it on `|` and looking
+    /// each piece up.
+    pub fn spellings(&self) -> impl Iterator<Item = (&str, Tool)> {
+        self.tools.iter().map(|(word, tool)| (word.as_str(), *tool))
+    }
+}
+
 /// Translate one hook into the shape this harness parses.
 pub fn render(
     name: &str,
@@ -735,6 +799,84 @@ mod tests {
             Outcome::Rendered(r) => panic!("unexpectedly rendered: {r:?}"),
             Outcome::Dropped(d) => d,
         }
+    }
+
+    // ── reading a harness's words back ──────────────────────────────────────
+
+    /// Every word `wire` can emit, `Vocabulary` can read back — which is what
+    /// makes the pair a translation rather than an export.
+    ///
+    /// Asserted over the **shipped** adapters and over omh's whole vocabulary,
+    /// not a fixture: an adapter that gained a moment and forgot to be
+    /// invertible would otherwise be found by somebody trying to import.
+    #[test]
+    fn every_word_a_harness_renders_can_be_read_back() {
+        for name in ["claude", "opencode"] {
+            let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), name).unwrap();
+            let Some(binding) = adapter.supports(Capability::Hooks) else {
+                continue;
+            };
+            let vocab =
+                Vocabulary::of(binding, &adapter.tools).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+
+            for (ours, theirs) in &binding.events {
+                assert_eq!(
+                    vocab.event(theirs),
+                    Some(*ours),
+                    "{name}: renders `{ours}` as `{theirs}` and cannot read it back"
+                );
+            }
+            let spellings: BTreeMap<&str, Tool> = vocab.spellings().collect();
+            for (ours, theirs) in &adapter.tools {
+                assert_eq!(
+                    spellings.get(theirs.as_str()),
+                    Some(ours),
+                    "{name}: renders `{ours}` as `{theirs}` and cannot read it back"
+                );
+            }
+        }
+    }
+
+    /// **A word that means two things is refused**, rather than resolved by
+    /// whichever sorted first.
+    ///
+    /// An adapter mapping two omh moments onto one harness word renders fine —
+    /// every hook goes to the same place — and cannot be read back at all. A
+    /// `BTreeMap` would answer with whichever key sorted first, so half of
+    /// somebody's imported hooks would land at the wrong moment, and the import
+    /// would report success. Refusing costs an error message; guessing costs
+    /// trust in every hook omh imported.
+    #[test]
+    fn a_harness_word_that_means_two_things_is_refused() {
+        let ambiguous = binding(
+            "path = \"x\"\nrender = \"claude-settings\"\n\n\
+             [events]\nturn-end = \"Stop\"\nsession-start = \"Stop\"\n",
+        );
+        let err = format!(
+            "{:#}",
+            Vocabulary::of(&ambiguous, &BTreeMap::new())
+                .expect_err("`Stop` cannot be read back as either moment")
+        );
+        assert!(err.contains("Stop"), "must name the word: {err}");
+        assert!(
+            err.contains("turn-end") && err.contains("session-start"),
+            "and both things it means: {err}"
+        );
+
+        // The same for tools, which travel in the matcher rather than the key.
+        let tools = BTreeMap::from([
+            (Tool::Edit, "Write".to_string()),
+            (Tool::Read, "Write".into()),
+        ]);
+        let err = format!(
+            "{:#}",
+            Vocabulary::of(
+                &binding("path = \"x\"\nrender = \"claude-settings\"\n"),
+                &tools
+            )
+            .expect_err("`Write` cannot be read back as either tool")
+        );
+        assert!(err.contains("Write"), "got: {err}");
     }
 
     // ── naming a stack ──────────────────────────────────────────────────────

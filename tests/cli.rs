@@ -1385,3 +1385,219 @@ fn s_ls_names_what_removed_sessions_left_behind() {
         "scratch staging is not a removed session: {printed}"
     );
 }
+
+// ── omh import hooks ────────────────────────────────────────────────────────
+//
+// The one part of this feature whose end-to-end path runs here: importing
+// needs no container and no git, so these drive the real binary against a real
+// file rather than asserting on a function's return value.
+
+impl Sandbox {
+    /// The shipped adapters, where `Paths::adapters()` looks. `init` would put
+    /// them there and needs a container to finish.
+    fn seed_adapters(&self) {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters");
+        let dst = self.home.join(".omh/adapters");
+        std::fs::create_dir_all(&dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap().flatten() {
+            std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+        }
+    }
+
+    /// A harness config to import from, in Claude Code's own shape.
+    fn harness_hooks(&self, body: &str) -> PathBuf {
+        let p = self.home.join("their-settings.json");
+        std::fs::write(&p, body).unwrap();
+        p
+    }
+
+    fn repo_hook(&self, name: &str) -> Option<String> {
+        std::fs::read_to_string(self.repo.join(".omh/hooks").join(format!("{name}.json"))).ok()
+    }
+}
+
+/// What somebody already configured arrives as omh hooks, in **this repo**.
+///
+/// The destination is the whole point of the first assertion: a catalogue hook
+/// runs in every repo you ever open, so importing one project's formatter there
+/// would put it in front of every other project you touch.
+#[test]
+fn importing_hooks_writes_them_into_this_repo() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.harness_hooks(
+        r#"{"hooks":{
+            "Stop":[{"matcher":"","hooks":[{"type":"command","command":"cargo test"}]}],
+            "PostToolUse":[{"matcher":"Edit|Write|MultiEdit","hooks":[{"type":"command","command":"cargo fmt"}]}]}}"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--file",
+        theirs.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let test = fx
+        .repo_hook("turn-end-cargo")
+        .expect("the turn-end hook must be in this repo");
+    assert!(test.contains("cargo test"), "got: {test}");
+    assert!(
+        test.contains("\"on\": \"turn-end\""),
+        "in omh's words, not Claude's: {test}"
+    );
+
+    let fmt = fx
+        .repo_hook("after-tool-cargo")
+        .expect("the after-tool hook must be in this repo");
+    assert!(
+        fmt.contains("cargo fmt") && fmt.contains("edit"),
+        "got: {fmt}"
+    );
+
+    // And nowhere else. The catalogue is yours, across every project.
+    assert!(
+        !fx.home.join(".omh/hooks/turn-end-cargo.json").exists(),
+        "a repo's hook must not be installed into the catalogue"
+    );
+}
+
+/// **Copy, never move.** Adopting omh is not a migration somebody cannot back
+/// out of: the harness they were using keeps working exactly as it did.
+///
+/// Asserted on the source's **bytes**, not its existence — a file truncated,
+/// rewritten or reformatted in place is still there.
+#[test]
+fn importing_leaves_the_harness_config_untouched() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let body = r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"cargo test"}]}]}}"#;
+    let theirs = fx.harness_hooks(body);
+
+    fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--file",
+        theirs.to_str().unwrap(),
+    ]);
+
+    assert_eq!(
+        std::fs::read_to_string(&theirs).unwrap(),
+        body,
+        "the harness's own config must be byte-for-byte what it was"
+    );
+}
+
+/// **An imported hook that is not selected is a hook no session ships.**
+///
+/// `[use]` is what the launcher reads. A file written without being named there
+/// is one `omh import` counted and reported and no launch will ever run — the
+/// report says `+2` and the session ships none of them, which is the most
+/// likely silent failure this feature has.
+#[test]
+fn imported_hooks_are_selected_or_they_land_dead() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    // A repo that has curated its selection: `init` writes one, and after that
+    // a hook not in it is off.
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(fx.repo.join(".omh/settings.toml"), "[use]\nhooks = []\n").unwrap();
+    let theirs = fx.harness_hooks(
+        r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"cargo test"}]}]}}"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--file",
+        theirs.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        fx.settings().contains("turn-end-cargo"),
+        "an imported hook must reach `[use]`, or it never runs: {}",
+        fx.settings()
+    );
+}
+
+/// **A hook answering to a name omh ships is refused**, and the reason is
+/// worse than shadowing: `render::merge_hooks` treats it as an error naming
+/// both files, so the whole session fails rather than that one hook.
+///
+/// Asserted through the real consumer — `omh why`, which builds the same
+/// profile a launch does — rather than by checking the file is absent. What
+/// matters is that omh still works afterwards.
+#[test]
+fn importing_refuses_a_name_omh_ships() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.harness_hooks(
+        r#"{"hooks":{"Stop":[{"matcher":"","hooks":[{"type":"command","command":"graph-refresh --now"}]}]}}"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--file",
+        theirs.to_str().unwrap(),
+    ]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "importing is not fatal: {said}");
+
+    // `graph-refresh` is omh's. Whatever omh did with it, a launch must still
+    // be able to compose this repo.
+    let why = fx.omh(&["why", "codegraph"]);
+    assert!(
+        why.status.success(),
+        "importing left this repo unable to launch: {}",
+        String::from_utf8_lossy(&why.stderr)
+    );
+}
+
+/// A handler omh cannot express whole is **left where it is**, and named. It is
+/// still in the harness's own file and still running there, which is honest —
+/// but somebody who was not told would think omh had taken everything.
+#[test]
+fn what_omh_cannot_import_is_reported_rather_than_dropped() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    let theirs = fx.harness_hooks(
+        r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[
+            {"type":"command","command":"guard","if":"tool.name == 'Bash'"}]}]}}"#,
+    );
+
+    let out = fx.omh(&[
+        "import",
+        "hooks",
+        "claude",
+        "--file",
+        theirs.to_str().unwrap(),
+    ]);
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(said.contains("left"), "the residue is reported: {said}");
+    assert!(
+        fx.repo_hook("before-tool-guard").is_none(),
+        "and a hook whose permission gate omh cannot express is not written \
+         without it"
+    );
+}

@@ -25,12 +25,13 @@ use std::path::Path;
 /// assert — loudly, which is the good case. What made it worth a pair rather
 /// than a filter is `install_bundled`, which named its backups by *replacing*
 /// the extension with a literal `toml.yours`.
-const SHIPPED: [(&str, &str); 5] = [
+const SHIPPED: [(&str, &str); 6] = [
     ("adapters", "toml"),
     ("base", "toml"),
     ("editors", "toml"),
     ("stacks", "toml"),
     ("hooks", "json"),
+    ("markers", "toml"),
 ];
 
 /// `adapters` -> `Adapters`. ASCII is enough; these are directory names in

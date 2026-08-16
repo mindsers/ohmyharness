@@ -791,4 +791,34 @@ install="x""#,
             );
         }
     }
+
+    /// A harness whose hooks are a **file it reads** says where they are; one
+    /// whose hooks are a program omh *generates* does not, and must not.
+    ///
+    /// opencode's hooks are a TypeScript plugin omh writes — there is nothing
+    /// of the user's in it to import, and an `import` key pointing at it would
+    /// have `omh import hooks opencode` read omh's own output back and offer to
+    /// import it. The absence is the correct answer, so it is asserted rather
+    /// than left as an omission somebody later "fixes".
+    #[test]
+    fn a_harness_says_where_its_hooks_are_only_when_they_are_its_own() {
+        let claude = Adapter::find(Path::new(REAL), "claude").unwrap();
+        assert!(
+            claude.supports(Capability::Hooks).unwrap().import.is_some(),
+            "claude keeps hooks in a file it reads, so omh can import them"
+        );
+
+        let opencode = Adapter::find(Path::new(REAL), "opencode").unwrap();
+        let hooks = opencode.supports(Capability::Hooks).unwrap();
+        assert_eq!(
+            hooks.render,
+            Render::OpencodePlugin,
+            "this test's reasoning rests on opencode's hooks being generated"
+        );
+        assert!(
+            hooks.import.is_none(),
+            "omh generates this file — importing it would read omh's own output \
+             back and offer it to you as yours"
+        );
+    }
 }

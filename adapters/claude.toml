@@ -60,6 +60,7 @@ render = "dir"
 [capabilities.hooks]
 path   = "$HOME/.claude/settings.json"
 render = "claude-settings"
+import = "$HOME/.claude/settings.json"   # host-side, where `omh import hooks` reads
 
 # How this harness spells each word of omh's hook vocabulary. A hook is authored
 # once, in omh's words; everything below is where that stops being portable.

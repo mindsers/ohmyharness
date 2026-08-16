@@ -63,6 +63,20 @@ impl Paths {
         self.root.join("stacks")
     }
 
+    /// Ecosystems **this repo** taught omh, for the one case a release never
+    /// will: a proprietary internal toolchain. Written by `init` from an answer
+    /// somebody typed, read beside the shipped ones, and unable to answer to a
+    /// name omh ships.
+    pub fn repo_stacks(&self) -> PathBuf {
+        self.repo.join(".omh").join("stacks")
+    }
+
+    /// Files omh recognises as naming an ecosystem it cannot yet set up. A
+    /// question, not an answer — see `stack::Marker`.
+    pub fn markers(&self) -> PathBuf {
+        self.root.join("markers")
+    }
+
     /// The conventional hooks as shipped — `cargo test`, `gofmt -w .` — living
     /// in the catalogue beside the ones you write, because that is where their
     /// scope is: `cargo test` is what a rust project runs, not what *this* rust

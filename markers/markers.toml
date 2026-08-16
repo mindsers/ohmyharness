@@ -1,0 +1,52 @@
+# Ecosystems omh can recognise and cannot yet set up.
+#
+# A marker here is a file omh knows names a real ecosystem, for which no stack
+# ships. Meeting one is the single case where `omh init` has nothing derivable
+# to fall back on: the repo plainly *is* something, and omh cannot say what its
+# sandbox needs. So it asks — once, recording the answer in the repo — which is
+# tier 3 of docs/design/adoption.md's table.
+#
+# This is deliberately **not** a stack file with no provides. Those two would
+# collide: the answer to the question is written as
+# `<repo>/.omh/stacks/<name>.toml`, and a shipped stack of the same name would
+# then be a name the repo may not answer to. A marker is a question; a stack is
+# an answer, and they are different files for that reason.
+#
+# Removing an entry is what shipping its stack means. The curation test refuses
+# a marker whose ecosystem omh already ships, so the two cannot both be true.
+
+[[marker]]
+file  = "mix.exs"
+stack = "elixir"
+
+[[marker]]
+file  = "Gemfile"
+stack = "ruby"
+
+[[marker]]
+file  = "composer.json"
+stack = "php"
+
+[[marker]]
+file  = "pom.xml"
+stack = "java"
+
+[[marker]]
+file  = "build.gradle"
+stack = "gradle"
+
+[[marker]]
+file  = "pubspec.yaml"
+stack = "dart"
+
+[[marker]]
+file  = "Package.swift"
+stack = "swift"
+
+[[marker]]
+file  = "Project.toml"
+stack = "julia"
+
+[[marker]]
+file  = "dune-project"
+stack = "ocaml"
