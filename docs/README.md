@@ -3,7 +3,7 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.3.1` (milestone v0). One harness (`claude`) has been driven for real work;
+**Status: early.** `0.4.0` (milestone v0). One harness (`claude`) has been driven for real work;
 `opencode` passes `omh doctor` but has not. Docker is the only verified runtime.
 Several things described in the design pages are **designed and not built** —
 each says so at the top. See the [roadmap](design/roadmap.md).
