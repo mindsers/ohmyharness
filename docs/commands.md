@@ -29,6 +29,30 @@ shadow a real command. A `RESERVED` list prevents it, and rather than trusting
 anyone to keep that list current, a test introspects the CLI definition and
 fails if any command or alias is missing from it.
 
+### What every command prints
+
+Two audiences, one answer. Every command builds a value and renders it either
+for a person or for a program, so the two cannot disagree about what happened.
+
+| | |
+|---|---|
+| `--json` | The answer as JSON, with stable field names. |
+| `--color auto\|always\|never` | Defaults to `auto`: styled on a terminal, plain in a pipe. |
+
+**stdout is the answer; stderr is everything else.** What a command was asked
+for goes to stdout, so `omh s ls > sessions.txt` captures exactly that.
+Warnings, progress and next-step hints go to stderr, so they still reach you
+when stdout is redirected — and stay out of the file.
+
+`--json` never emits colour, whatever `--color` says, because a script setting
+`--color always` in a wrapper should not break `jq`. It also suppresses hints,
+which are prose for a person.
+
+Both flags are omh's own, so `omh claude --json` is **refused** rather than
+handed to the harness — see [omh's flags come before the harness
+name](#omhs-flags-come-before-the-harness-name). Use `omh claude -- --json` to
+pass it on regardless.
+
 ---
 
 ## `omh init`
