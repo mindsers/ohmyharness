@@ -1576,7 +1576,6 @@ impl Report for Attached {
 
 // ── omh memory ──────────────────────────────────────────────────────────────
 
-/// Every note in the store.
 #[derive(Debug, Clone)]
 pub struct Notes {
     pub notes: Vec<crate::memory::Note>,

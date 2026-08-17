@@ -2000,9 +2000,6 @@ fn use_cmd(
             names.len()
         )
     });
-    // **One report, however many layers were written.** A `say` per file emits
-    // a JSON document per file, and two documents concatenated are a parse
-    // error — see `every_json_answer_is_one_document_and_not_several`.
     let paths = written_paths(&written);
     let mut action = report::Action::new("capability-used", format!("using {cap}/{name}")).data(
         serde_json::json!({
@@ -2023,11 +2020,16 @@ fn use_cmd(
     Ok(())
 }
 
-/// Where a write landed, as the report wants it.
+/// Every file a write landed in, collapsed into one list for one report.
 ///
-/// One place, because every writer that loops over the repo layers has to
-/// collapse them the same way — and the moment one of them does it inline, it
-/// is one `ctx.say` per layer again.
+/// **This is what stops a command saying itself twice.** A repo can declare a
+/// capability in both its shared and its gitignored layer, so these writers
+/// loop; a `ctx.say` inside that loop emits a JSON document per layer, and two
+/// documents concatenated are a parse error in whatever reads them. Calling
+/// this is the shape that cannot make the mistake — the plural is in the value
+/// rather than in the number of times the command speaks.
+///
+/// Guarded by `every_json_answer_is_one_document_and_not_several`.
 fn written_paths(written: &[config::Written]) -> Vec<String> {
     written
         .iter()
@@ -2065,7 +2067,6 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Re
         )
     });
     let remaining = names.len();
-    // One report across every layer written — see `use_cmd`.
     let written = write_lists(&paths, &std::collections::BTreeMap::from([(cap, names)]))?;
     let paths = written_paths(&written);
     let mut action =
@@ -3053,7 +3054,6 @@ fn feature_switch(cwd: &std::path::Path, feature: &str, on: bool, ctx: &out::Ctx
     // about the project, the same argument `omh use` writes there on.
     // ...and the gitignored one too when it already declares this feature, or
     // the switch reports a change the layer beneath it overrules.
-    // One report across every layer written — see `use_cmd`.
     let mut written = Vec::new();
     for layer in config::declaring(&paths, config::OMH, feature)? {
         written.push(config::write_feature(&paths, layer, feature, on)?);

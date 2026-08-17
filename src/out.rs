@@ -136,52 +136,56 @@ pub fn display_width(s: &str) -> usize {
     let mut width = 0;
     let mut chars = s.chars();
     while let Some(c) = chars.next() {
-        if c != '\x1b' {
-            // A combining mark is drawn on top of its predecessor, so it costs
-            // nothing. `é` written as `e` + U+0301 is one column, not two.
-            if !is_combining(c) {
-                width += 1;
-            }
-            continue;
-        }
-        // CSI (`ESC [ … final`) ends at a byte in `@`..=`~`; OSC (`ESC ] …`)
-        // ends at BEL or the ST that follows an ESC. Anything else is a
-        // two-byte sequence whose second byte is already consumed by taking it.
-        match chars.next() {
-            Some('[') => {
-                for c in chars.by_ref() {
-                    if ('\x40'..='\x7e').contains(&c) {
-                        break;
-                    }
-                }
-            }
-            Some(']') => {
-                let mut prev = '\0';
-                for c in chars.by_ref() {
-                    if c == '\x07' || (c == '\\' && prev == '\x1b') {
-                        break;
-                    }
-                    prev = c;
-                }
-            }
-            _ => {}
+        match c {
+            ESC => skip_escape_sequence(&mut chars),
+            c if is_combining(c) => {}
+            _ => width += 1,
         }
     }
     width
 }
 
-/// Whether `c` is drawn on top of the character before it rather than beside it.
+const ESC: char = '\x1b';
+const BEL: char = '\x07';
+
+/// Consume the rest of an escape sequence whose `ESC` has already been taken.
+///
+/// The terminal's grammar, which no amount of naming can make evident from the
+/// byte values: **CSI** (`ESC [ … final`) runs until a byte in `@`..=`~`;
+/// **OSC** (`ESC ] … terminator`) runs until BEL, or until the `\` that
+/// follows an ESC. Anything else is a two-byte sequence, and taking the second
+/// byte to look at it is what consumes it.
+fn skip_escape_sequence(chars: &mut std::str::Chars) {
+    match chars.next() {
+        Some('[') => {
+            chars.find(|c| ('\x40'..='\x7e').contains(c));
+        }
+        Some(']') => {
+            let mut prev = '\0';
+            for c in chars.by_ref() {
+                if c == BEL || (c == '\\' && prev == ESC) {
+                    break;
+                }
+                prev = c;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `c` is drawn on top of the character before it rather than beside
+/// it, and so costs no column of its own.
 ///
 /// The three combining blocks a Latin-script locale can actually produce: a
-/// decomposed `é` from macOS's filesystem normalisation is the realistic way
-/// one of these reaches a table cell.
+/// decomposed `é` — `e` followed by U+0301, which is one column and two chars
+/// — is what macOS's filesystem normalisation puts in a path, and a path is
+/// what reaches a table cell.
 fn is_combining(c: char) -> bool {
     matches!(c, '\u{0300}'..='\u{036f}' | '\u{1ab0}'..='\u{1aff}' | '\u{20d0}'..='\u{20ff}')
 }
 
 // ── Tables ──────────────────────────────────────────────────────────────────
 
-/// One column's worth of one row.
 pub struct Cell {
     text: String,
     style: Option<Style>,
@@ -218,14 +222,20 @@ pub struct Table {
     gap: usize,
 }
 
+/// How far a table sits from the left margin — the shape omh's output already
+/// had, now in one place rather than at every call site.
+const INDENT: usize = 2;
+
+/// The gap between columns. Two spaces is the narrowest gutter that still reads
+/// as a gutter rather than a typo when a cell ends in a digit.
+const GUTTER: usize = 2;
+
 impl Table {
-    /// Two spaces of gutter and two of indent — the shape omh's output already
-    /// had, now in one place instead of at every call site.
     pub fn new() -> Self {
         Self {
             rows: Vec::new(),
-            indent: 2,
-            gap: 2,
+            indent: INDENT,
+            gap: GUTTER,
         }
     }
 
@@ -353,7 +363,6 @@ pub trait Report {
     fn json(&self) -> serde_json::Value;
 }
 
-/// Which of the two a run wants.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum Format {
     #[default]
