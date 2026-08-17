@@ -1854,3 +1854,65 @@ fn a_hook_init_derives_later_is_selected_too() {
         fx.settings()
     );
 }
+
+/// **`--json` emits exactly one document, from every command that emits any.**
+///
+/// The bug this exists to stop is invisible to a unit test by construction.
+/// Every `Report::json` in `src/report.rs` is exercised by calling `.json()` on
+/// a hand-built value, which can only ever produce one object — but a *command*
+/// chooses how many times to call `Ctx::say`, and four of them called it inside
+/// a loop over the repo layers. Two layers, two objects, concatenated: valid
+/// JSON twice over and a parse error once, in the format whose entire purpose
+/// is to be parsed.
+///
+/// This is the file's stated reason for existing, in the module docs above — a
+/// guard that is correct while the wiring reaching it is wrong.
+///
+/// Counted by closing braces in column zero, which is exact for
+/// `serde_json::to_string_pretty`: a top-level object closes there and nothing
+/// nested does. Cruder than a parser and it needs no dependency the test target
+/// does not already have.
+#[test]
+fn every_json_answer_is_one_document_and_not_several() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&["skills/alpha/SKILL.md", "skills/beta/SKILL.md"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+
+    // Both repo layers declare the same capability, which is what makes the
+    // writers loop. A repo with one layer passes whatever the command does.
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        "[use]\nskills = [\"alpha\"]\n\n[omh]\ncodegraph = true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "[use]\nskills = [\"alpha\"]\n\n[omh]\ncodegraph = true\n",
+    )
+    .unwrap();
+
+    for args in [
+        vec!["--json", "ls"],
+        vec!["--json", "repo"],
+        vec!["--json", "config"],
+        vec!["--json", "use", "skills", "beta"],
+        vec!["--json", "unuse", "skills", "beta"],
+        vec!["--json", "repo", "disable", "codegraph"],
+        vec!["--json", "s", "ls"],
+        vec!["--json", "memory", "ls"],
+    ] {
+        let out = sb.omh(&args);
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        if stdout.trim().is_empty() {
+            continue; // a command with nothing to say is not this test's business
+        }
+        let documents = stdout.lines().filter(|l| *l == "}").count();
+        assert_eq!(
+            documents,
+            1,
+            "`omh {}` emitted {documents} JSON documents, and a parser reads one:\n{stdout}",
+            args.join(" ")
+        );
+    }
+}

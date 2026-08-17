@@ -1112,29 +1112,34 @@ fn down(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()> {
         Some(i) => vec![i.to_string()],
         None => session::list(&paths.worktrees()),
     };
+    // Collected, then said once: with no id this is asked about every session,
+    // and one `say` per session is one JSON document per session.
+    let mut sessions = Vec::new();
+    let mut stuck = 0usize;
     for i in &ids {
         let name = paths.container(i);
         if !image::container_running(backend.program(), &name) {
-            ctx.say(
-                &report::Action::new("session-not-running", format!("{i} was not running"))
-                    .data(serde_json::json!({ "session": i, "stopped": false })),
-            );
+            sessions.push((i.clone(), false));
             continue;
         }
         match image::container_remove(backend.program(), &name) {
-            Ok(()) => ctx.say(
-                &report::Action::new(
-                    "session-stopped",
-                    format!("stopped {i}; worktree and branch survive"),
-                )
-                .data(serde_json::json!({ "session": i, "stopped": true })),
-            ),
-            // Reported and carried on rather than returned: `omh s down` with
-            // no id is asking about every session, and one container that will
-            // not go must not hide the ones that did.
-            Err(e) => ctx.warn(&format!("{i} is still running: {e}")),
+            Ok(()) => sessions.push((i.clone(), true)),
+            // Reported and carried on rather than returned: one container that
+            // will not go must not hide the ones that did. It still decides
+            // the exit code below — a caller whose JSON says nothing stopped
+            // needs the status to agree.
+            Err(e) => {
+                stuck += 1;
+                ctx.warn(&format!("{i} is still running: {e}"));
+            }
         }
     }
+    ctx.say(&report::Down { sessions });
+    anyhow::ensure!(
+        stuck == 0,
+        "{stuck} session{} would not stop",
+        if stuck == 1 { "" } else { "s" }
+    );
     Ok(())
 }
 
@@ -1314,7 +1319,7 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     .map(|b| image::container_running(b.program(), &paths.container(&id)))
                     .unwrap_or(false),
                 label: sess.label().to_string(),
-                work: work_state(&sess, &paths.repo, &base),
+                work: Some(work_state(&sess, &paths.repo, &base)),
                 behind: sess.behind(&paths.repo, &base),
                 id,
             }
@@ -1581,8 +1586,7 @@ fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let judged = memory::expiry::judge(&paths, &memory::load(&paths)?)?;
 
-    /// Which heading a verdict belongs under, or `None` for the one that is
-    /// counted rather than listed.
+    /// Which group a verdict belongs to.
     ///
     /// A `match` on the verdict alone, so the compiler owns the mapping. The
     /// grouping used to match on `(&verdict, <integer tag>)`, where a `_` arm
@@ -1590,12 +1594,17 @@ fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     /// no group and tallied nowhere, so the note simply vanished from the
     /// command. `evaluate` refusing to collapse the third answer buys nothing
     /// if the printer drops the fourth.
-    fn heading(verdict: &Verdict) -> Option<&'static str> {
+    ///
+    /// Returns `report::Age`, not the heading text. Handing the renderer a
+    /// string put the same failure back one layer out: it filtered on literals
+    /// that had to be spelled identically in two files, with nothing checking
+    /// they were.
+    fn age(verdict: &Verdict) -> report::Age {
         match verdict {
-            Verdict::Stale { .. } => Some("stale"),
-            Verdict::Unknown { .. } => Some("omh cannot tell"),
-            Verdict::NoTrigger => Some("no expiry — carries only its date"),
-            Verdict::Fresh => None,
+            Verdict::Stale { .. } => report::Age::Stale,
+            Verdict::Unknown { .. } => report::Age::Unknown,
+            Verdict::NoTrigger => report::Age::NoTrigger,
+            Verdict::Fresh => report::Age::Fresh,
         }
     }
 
@@ -1606,7 +1615,7 @@ fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 key: j.key.clone(),
                 layer: j.layer.to_string(),
                 recorded: j.recorded.clone(),
-                group: heading(&j.verdict),
+                age: age(&j.verdict),
                 because: match &j.verdict {
                     Verdict::Stale { because } | Verdict::Unknown { because } => {
                         Some(because.clone())
@@ -1617,8 +1626,8 @@ fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             .collect(),
     };
 
-    let stale = report.count(Some("stale"));
-    let unknown = report.count(Some("omh cannot tell"));
+    let stale = report.count(report::Age::Stale);
+    let unknown = report.count(report::Age::Unknown);
     ctx.say(&report);
 
     // The report is the product, so it prints in full before this decides the
@@ -1991,24 +2000,39 @@ fn use_cmd(
             names.len()
         )
     });
-    for w in written {
-        let mut action = report::Action::new(
-            "capability-used",
-            format!("using {cap}/{name} — wrote → {}", w.path.display()),
-        )
-        .data(serde_json::json!({
+    // **One report, however many layers were written.** A `say` per file emits
+    // a JSON document per file, and two documents concatenated are a parse
+    // error — see `every_json_answer_is_one_document_and_not_several`.
+    let paths = written_paths(&written);
+    let mut action = report::Action::new("capability-used", format!("using {cap}/{name}")).data(
+        serde_json::json!({
             "capability": cap.to_string(),
             "name": name,
             "changed": true,
             "froze_selection": was_open,
-            "path": w.path.display().to_string(),
-        }));
-        if let Some(line) = &froze {
-            action = action.note(line);
-        }
-        ctx.say(&action);
+            "paths": paths,
+        }),
+    );
+    if let Some(line) = &froze {
+        action = action.note(line);
     }
+    for path in &paths {
+        action = action.note(format!("wrote → {path}"));
+    }
+    ctx.say(&action);
     Ok(())
+}
+
+/// Where a write landed, as the report wants it.
+///
+/// One place, because every writer that loops over the repo layers has to
+/// collapse them the same way — and the moment one of them does it inline, it
+/// is one `ctx.say` per layer again.
+fn written_paths(written: &[config::Written]) -> Vec<String> {
+    written
+        .iter()
+        .map(|w| w.path.display().to_string())
+        .collect()
 }
 
 /// Stop using a catalogue entry here.
@@ -2041,26 +2065,26 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Re
         )
     });
     let remaining = names.len();
-    for w in write_lists(&paths, &std::collections::BTreeMap::from([(cap, names)]))? {
-        let mut action = report::Action::new(
-            "capability-unused",
-            format!(
-                "no longer using {cap}/{name} — wrote → {}",
-                w.path.display()
-            ),
-        )
-        .data(serde_json::json!({
-            "capability": cap.to_string(),
-            "name": name,
-            "froze_selection": was_open,
-            "remaining": remaining,
-            "path": w.path.display().to_string(),
-        }));
-        if let Some(line) = &froze {
-            action = action.note(line);
-        }
-        ctx.say(&action);
+    // One report across every layer written — see `use_cmd`.
+    let written = write_lists(&paths, &std::collections::BTreeMap::from([(cap, names)]))?;
+    let paths = written_paths(&written);
+    let mut action =
+        report::Action::new("capability-unused", format!("no longer using {cap}/{name}")).data(
+            serde_json::json!({
+                "capability": cap.to_string(),
+                "name": name,
+                "froze_selection": was_open,
+                "remaining": remaining,
+                "paths": paths,
+            }),
+        );
+    if let Some(line) = &froze {
+        action = action.note(line);
     }
+    for path in &paths {
+        action = action.note(format!("wrote → {path}"));
+    }
+    ctx.say(&action);
     Ok(())
 }
 
@@ -2083,6 +2107,14 @@ fn write_lists(
     }
     // Two capabilities can share a layer, and reporting the same file twice
     // reads as two writes.
+    //
+    // **Sorted first.** `dedup_by` only drops *adjacent* duplicates, and this
+    // vec is built capability-outer/layer-inner, so a repo whose shared and
+    // local files both declare `[use]` produces `[shared, local, shared,
+    // local, …]` — where no two duplicates are ever adjacent and the dedup
+    // removes nothing. `omh use --all` reported five writes to two files, and
+    // `--json` said so in a five-element array.
+    out.sort_by(|a, b| a.path.cmp(&b.path));
     out.dedup_by(|a, b| a.path == b.path);
     Ok(out)
 }
@@ -2252,13 +2284,20 @@ fn import_entries(
         });
     }
 
+    // Where the entries landed. `None` here said "nothing was written" to both
+    // audiences on a run that had just copied files into the catalogue —
+    // `mcp import` sets this and these did not, which is what made it an
+    // omission rather than a convention.
+    let took = considered
+        .iter()
+        .any(|c| c.verdict == report::Verdict::Took);
     ctx.say(&report::Imported {
         what: format!("{harness} {cap}"),
         source: source.display().to_string(),
         considered,
         noun: cap.to_string(),
         dry_run: false,
-        wrote: None,
+        wrote: took.then(|| dest.display().to_string()),
         selected_in: Vec::new(),
     });
     Ok(())
@@ -2592,7 +2631,9 @@ fn import_hooks(
         considered,
         noun: "hooks".into(),
         dry_run: false,
-        wrote: None,
+        // The hooks directory, for the same reason as `import_entries`: a run
+        // that wrote files has to say where they went.
+        wrote: (!written.is_empty()).then(|| dir.display().to_string()),
         selected_in,
     });
     Ok(())
@@ -3012,26 +3053,28 @@ fn feature_switch(cwd: &std::path::Path, feature: &str, on: bool, ctx: &out::Ctx
     // about the project, the same argument `omh use` writes there on.
     // ...and the gitignored one too when it already declares this feature, or
     // the switch reports a change the layer beneath it overrules.
+    // One report across every layer written — see `use_cmd`.
+    let mut written = Vec::new();
     for layer in config::declaring(&paths, config::OMH, feature)? {
-        let w = config::write_feature(&paths, layer, feature, on)?;
-        let mut action = report::Action::new(
-            if on { "feature-on" } else { "feature-off" },
-            format!(
-                "{feature} is {} here — wrote → {}",
-                if on { "on" } else { "off" },
-                w.path.display()
-            ),
-        )
-        .data(serde_json::json!({
-            "feature": feature,
-            "on": on,
-            "path": w.path.display().to_string(),
-        }));
-        if !on {
-            action = action.note("nothing was uninstalled; the next repo gets it back");
-        }
-        ctx.say(&action);
+        written.push(config::write_feature(&paths, layer, feature, on)?);
     }
+    let paths = written_paths(&written);
+    let mut action = report::Action::new(
+        if on { "feature-on" } else { "feature-off" },
+        format!("{feature} is {} here", if on { "on" } else { "off" }),
+    )
+    .data(serde_json::json!({
+        "feature": feature,
+        "on": on,
+        "paths": paths,
+    }));
+    if !on {
+        action = action.note("nothing was uninstalled; the next repo gets it back");
+    }
+    for path in &paths {
+        action = action.note(format!("wrote → {path}"));
+    }
+    ctx.say(&action);
     Ok(())
 }
 
@@ -3354,7 +3397,11 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli, ctx: &out::Ctx) -> Res
     let status = Command::new(backend.program())
         .args(backend.exec_args(&name, &plan.argv, true))
         .status()?;
-    ctx.hint(&format!("\nreview with  omh diff {}", session.id));
+    // `omh s diff`, not `omh diff`. There is no top-level `diff` — the name is
+    // not in `RESERVED`, so it falls through to the harness arm and comes back
+    // as ``unknown harness `diff` ``. This line has been wrong since it was
+    // written, which is what a suggestion nobody runs looks like.
+    ctx.hint(&format!("\nreview with  omh s diff {}", session.id));
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -4657,8 +4704,9 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     // `omh ls` is the wide view and does not ask git what state
                     // the work is in; `omh s ls` is the command for that, and
                     // asking here would cost a subprocess per session for a
-                    // column this listing does not print.
-                    work: report::Work::Clean,
+                    // column this listing does not print. `None` says *not
+                    // asked* — `Work::Clean` would be a claim, and a false one.
+                    work: None,
                     running: false,
                     behind: sess.behind(&paths.repo, &base),
                     id,
@@ -4676,11 +4724,11 @@ fn diff(cwd: &std::path::Path, id: Option<&str>, base: Option<&str>, ctx: &out::
     let base = base
         .map(str::to_string)
         .unwrap_or_else(|| session::default_branch(&paths.repo));
-    let patch = session.diff(&paths.repo, &base)?;
+    let summary = session.diff(&paths.repo, &base)?;
     ctx.say(&report::Diff {
         label: session.label().to_string(),
         base,
-        patch,
+        summary,
     });
     Ok(())
 }

@@ -108,6 +108,50 @@ impl Report for Action {
     }
 }
 
+// ── omh s down ──────────────────────────────────────────────────────────────
+
+/// What `omh s down` did to each session it was asked about.
+///
+/// A list rather than one `Action` per session, because with no id the command
+/// is asked about *every* session — and saying each one separately emits a
+/// JSON document per session, which is a parse error for the caller and
+/// nothing at all for the exit code.
+#[derive(Debug, Clone)]
+pub struct Down {
+    /// `(id, was it running and is it now stopped)`.
+    pub sessions: Vec<(String, bool)>,
+}
+
+impl Report for Down {
+    fn human(&self, p: &out::Palette) -> String {
+        if self.sessions.is_empty() {
+            return format!("{}\n", p.paint(out::DIM, "no sessions"));
+        }
+        let mut t = Table::new();
+        for (id, stopped) in &self.sessions {
+            t = t.row(vec![
+                Cell::styled(id, out::NAME),
+                if *stopped {
+                    Cell::plain("stopped; worktree and branch survive")
+                } else {
+                    Cell::styled("was not running", out::DIM)
+                },
+            ]);
+        }
+        t.render(p)
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "action": "sessions-down",
+            "sessions": self.sessions.iter().map(|(id, stopped)| json!({
+                "session": id,
+                "stopped": stopped,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
 // ── omh s ls ────────────────────────────────────────────────────────────────
 
 /// Where a session is in the cycle, as one answer.
@@ -168,7 +212,16 @@ pub struct Session {
     pub id: String,
     pub label: String,
     pub running: bool,
-    pub work: Work,
+    /// **`None` means nobody asked**, which is not `Some(Work::Clean)`.
+    ///
+    /// `omh ls` is the wide view and does not spend a git subprocess per
+    /// session on a column it never prints. It filled this with `Work::Clean`
+    /// once — harmless only because `Inventory` happened not to read the
+    /// field, and one line away from reporting every session in `omh ls` as
+    /// having nothing in it. `Work::Unknown` exists to keep *cannot tell*
+    /// apart from *nothing to do*; `Option` keeps *did not ask* apart from
+    /// both, and makes the mistake unspellable rather than merely absent.
+    pub work: Option<Work>,
     /// Commits the base branch has that this session does not.
     pub behind: usize,
 }
@@ -198,7 +251,10 @@ impl Report for Sessions {
                 } else {
                     Cell::styled("stopped", out::DIM)
                 },
-                Cell::styled(s.work.human(), s.work.style()),
+                match &s.work {
+                    Some(work) => Cell::styled(work.human(), work.style()),
+                    None => Cell::plain(""),
+                },
                 match s.behind {
                     0 => Cell::plain(""),
                     n => Cell::styled(format!("({n} behind {})", self.base), out::DIM),
@@ -233,7 +289,9 @@ impl Report for Sessions {
                 "id": s.id,
                 "label": s.label,
                 "running": s.running,
-                "work": s.work.json(),
+                // `null` where nobody asked. A caller can tell that apart from
+                // every answer, which is the whole reason for the `Option`.
+                "work": s.work.as_ref().map(Work::json),
                 "behind": s.behind,
             })).collect::<Vec<_>>(),
             "leftovers": self.leftovers,
@@ -335,6 +393,11 @@ impl Report for Inventory {
 
     fn json(&self) -> serde_json::Value {
         json!({
+            // Where a harness would be added. The human form only mentions it
+            // in the empty-list message, which is exactly when it matters —
+            // and omitting it here left a script diagnosing *why is nothing
+            // installed* with no way to learn where to write the file.
+            "adapters_dir": self.adapters_dir,
             "harnesses": self.harnesses.iter().map(|h| json!({
                 "name": h.name,
                 "accounts": h.accounts,
@@ -428,8 +491,15 @@ impl Report for Doctor {
             "harness": self.harness,
             "image": self.tag,
             "account": self.account,
-            "passed": self.outcomes.len() - self.failed(),
-            "failed": self.failed(),
+            // `ok` is the verdict; the other two are tallies. Named apart on
+            // purpose: `"passed": 3` beside a `passed()` that returns a bool
+            // invites `jq -e '.passed'`, which is truthy on a run where two of
+            // five checks failed — inverting the one thing this command exists
+            // to tell you, in the format where the exit code is most likely to
+            // have been thrown away.
+            "ok": self.passed(),
+            "passed_count": self.outcomes.len() - self.failed(),
+            "failed_count": self.failed(),
             "checks": self.outcomes.iter().map(|o| json!({
                 "name": o.name,
                 "ok": o.ok,
@@ -1154,11 +1224,54 @@ pub struct Judged {
     pub key: String,
     pub layer: String,
     pub recorded: String,
-    /// The heading it sits under — `None` for the fresh ones, which are
-    /// counted rather than listed.
-    pub group: Option<&'static str>,
+    pub age: Age,
     /// Why it is stale, or why omh could not tell.
     pub because: Option<String>,
+}
+
+/// How a note stands against the world it describes.
+///
+/// An enum rather than the heading string, and that is the point. This grouping
+/// was a `match` on `memory::expiry::Verdict` precisely so the compiler owned
+/// the mapping — its own comment records a verdict that once fell through a
+/// `_` arm, was counted in no group, and vanished from the command. Splitting
+/// the renderer into this module briefly reintroduced that: the producer
+/// returned `"omh cannot tell"` and the renderer filtered on the same literal,
+/// coupled by nothing but the spelling. Reword one side and the affected notes
+/// match no group, are excluded from the fresh count, and disappear from the
+/// human report while still appearing in the JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Age {
+    Stale,
+    /// omh could not tell — never folded into `Fresh`.
+    Unknown,
+    /// Carries only its date; nothing said what would outdate it.
+    NoTrigger,
+    Fresh,
+}
+
+impl Age {
+    /// The heading this sits under, or `None` for the one that is counted
+    /// rather than listed.
+    fn heading(&self) -> Option<&'static str> {
+        match self {
+            Self::Stale => Some("stale"),
+            Self::Unknown => Some("omh cannot tell"),
+            Self::NoTrigger => Some("no expiry — carries only its date"),
+            Self::Fresh => None,
+        }
+    }
+
+    /// The stable key a script reads. Headings are prose and may be reworded;
+    /// these may not.
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Stale => "stale",
+            Self::Unknown => "unknown",
+            Self::NoTrigger => "no-trigger",
+            Self::Fresh => "fresh",
+        }
+    }
 }
 
 /// The launch that would have happened.
@@ -1246,23 +1359,27 @@ impl Report for Why {
     }
 }
 
-/// A session's work against its base.
+/// A session's work against its base, as `git diff --stat` summarises it.
 ///
-/// The patch reaches stdout **unchanged and unstyled**. It is meant to be
-/// piped into `git apply`, `delta` or a pager, and a colour omh added would
-/// either be wrong for the reader's tool or corrupt the patch outright. What
-/// omh contributes is the sentence for the empty case — silence reads as
-/// breakage, so say which comparison came up empty.
+/// **A summary, not a patch.** `Session::diff` runs `--stat`, so this is the
+/// file-and-line-count table and there is nothing here for `git apply` to
+/// consume. The field is named for what it holds: calling it `patch` invited
+/// `omh s diff --json | jq -r .patch | git apply`, which fails on every
+/// session that has changed anything.
+///
+/// It reaches stdout **unchanged and unstyled** either way — omh adds only the
+/// sentence for the empty case, because silence reads as breakage and the
+/// useful thing to say is which comparison came up empty.
 #[derive(Debug, Clone)]
 pub struct Diff {
     pub label: String,
     pub base: String,
-    pub patch: String,
+    pub summary: String,
 }
 
 impl Report for Diff {
     fn human(&self, p: &out::Palette) -> String {
-        if self.patch.trim().is_empty() {
+        if self.summary.trim().is_empty() {
             return format!(
                 "{}\n",
                 p.paint(
@@ -1271,15 +1388,15 @@ impl Report for Diff {
                 )
             );
         }
-        self.patch.clone()
+        self.summary.clone()
     }
 
     fn json(&self) -> serde_json::Value {
         json!({
             "session": self.label,
             "base": self.base,
-            "changed": !self.patch.trim().is_empty(),
-            "patch": self.patch,
+            "changed": !self.summary.trim().is_empty(),
+            "summary": self.summary,
         })
     }
 }
@@ -1317,19 +1434,16 @@ pub struct Stale {
 }
 
 impl Stale {
-    /// The headings, in the order they are read: what is wrong first.
-    const GROUPS: [&'static str; 3] = [
-        "stale",
-        "omh cannot tell",
-        "no expiry — carries only its date",
-    ];
+    /// The groups, in the order they are read: what is wrong first. `Fresh` is
+    /// absent because it is counted rather than listed.
+    const GROUPS: [Age; 3] = [Age::Stale, Age::Unknown, Age::NoTrigger];
 
-    pub fn count(&self, group: Option<&str>) -> usize {
-        self.judged.iter().filter(|j| j.group == group).count()
+    pub fn count(&self, age: Age) -> usize {
+        self.judged.iter().filter(|j| j.age == age).count()
     }
 
     fn fresh(&self) -> usize {
-        self.count(None)
+        self.count(Age::Fresh)
     }
 }
 
@@ -1337,12 +1451,8 @@ impl Report for Stale {
     fn human(&self, p: &out::Palette) -> String {
         let mut s = String::new();
         let mut printed = false;
-        for group in Self::GROUPS {
-            let members: Vec<&Judged> = self
-                .judged
-                .iter()
-                .filter(|j| j.group == Some(group))
-                .collect();
+        for age in Self::GROUPS {
+            let members: Vec<&Judged> = self.judged.iter().filter(|j| j.age == age).collect();
             if members.is_empty() {
                 continue;
             }
@@ -1350,7 +1460,10 @@ impl Report for Stale {
                 s.push('\n');
             }
             printed = true;
-            s.push_str(&out::heading(p, &format!("{group}:")));
+            s.push_str(&out::heading(
+                p,
+                &format!("{}:", age.heading().expect("GROUPS excludes Fresh")),
+            ));
 
             let mut t = Table::new();
             for j in members {
@@ -1388,19 +1501,12 @@ impl Report for Stale {
                 "key": j.key,
                 "layer": j.layer,
                 "recorded": j.recorded,
-                // `null` is fresh — the group headings are prose and may be
-                // reworded, so a script keys off these instead.
-                "verdict": match j.group {
-                    None => "fresh",
-                    Some("stale") => "stale",
-                    Some("omh cannot tell") => "unknown",
-                    Some(_) => "no-trigger",
-                },
+                "verdict": j.age.key(),
                 "because": j.because,
             })).collect::<Vec<_>>(),
             "fresh": self.fresh(),
-            "stale": self.count(Some("stale")),
-            "unknown": self.count(Some("omh cannot tell")),
+            "stale": self.count(Age::Stale),
+            "unknown": self.count(Age::Unknown),
         })
     }
 }
@@ -1596,7 +1702,7 @@ mod tests {
             id: id.into(),
             label: "claude".into(),
             running: false,
-            work,
+            work: Some(work),
             behind: 0,
         }
     }
@@ -1821,13 +1927,19 @@ mod tests {
         );
     }
 
-    /// The tally and the list cannot disagree.
+    /// The tally and the list cannot disagree, and **the verdict is a bool**.
     ///
-    /// `passed` and `failed` are derived, not stored, so a script can trust
-    /// them against `checks` — the alternative is two numbers maintained by
-    /// hand that drift the first time a check is added on one path only.
+    /// The counts are derived, not stored, so a script can trust them against
+    /// `checks` — the alternative is two numbers maintained by hand that drift
+    /// the first time a check is added on one path only.
+    ///
+    /// The `ok` half is the guard that matters. A field called `passed`
+    /// holding `1` reads as *this passed* to `jq -e '.passed'` and to
+    /// `if data["passed"]:`, and it is truthy on a run where two of five
+    /// checks failed — the exact inversion of what `omh doctor` is for, in the
+    /// format where the exit code has most likely been discarded.
     #[test]
-    fn the_tally_is_the_list_counted() {
+    fn the_tally_is_the_list_counted_and_the_verdict_is_not_a_tally() {
         let report = Doctor {
             harness: "claude".into(),
             tag: "t".into(),
@@ -1835,15 +1947,46 @@ mod tests {
             outcomes: vec![check("a", true), check("b", false), check("c", false)],
         };
         let machine = report.json();
-        assert_eq!(machine["failed"], 2);
-        assert_eq!(machine["passed"], 1);
+        assert_eq!(machine["failed_count"], 2);
+        assert_eq!(machine["passed_count"], 1);
         assert_eq!(
-            machine["passed"].as_u64().unwrap() + machine["failed"].as_u64().unwrap(),
+            machine["passed_count"].as_u64().unwrap() + machine["failed_count"].as_u64().unwrap(),
             machine["checks"].as_array().unwrap().len() as u64
+        );
+        assert_eq!(
+            machine["ok"],
+            json!(false),
+            "the verdict is a bool, and a run with failures in it is false"
+        );
+        assert!(
+            machine["ok"].is_boolean(),
+            "never a count — a truthy number here says `passed` about a failed run"
         );
         assert_eq!(
             machine["account"], "work",
             "and whose credentials were checked is on the record, not in a header"
+        );
+    }
+
+    /// An empty probe is not a pass, in the machine format either.
+    ///
+    /// `doctor::passed` refuses to call an empty run a success, and `ok` goes
+    /// through it. Deriving the verdict as `failed_count == 0` here instead
+    /// would report `true` for a probe that produced nothing at all — the
+    /// state a broken sandbox leaves behind.
+    #[test]
+    fn a_probe_that_produced_nothing_is_not_reported_as_a_pass() {
+        let empty = Doctor {
+            harness: "claude".into(),
+            tag: "t".into(),
+            account: None,
+            outcomes: vec![],
+        };
+        assert_eq!(empty.failed(), 0, "nothing failed, because nothing ran");
+        assert_eq!(
+            empty.json()["ok"],
+            json!(false),
+            "and that is still not a pass"
         );
     }
 
