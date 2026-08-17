@@ -13,6 +13,11 @@ categories = ["development-tools", "command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
+# Styling is the vocabulary only — `Style` renders escapes and nothing else, so
+# it makes no decision about whether to. That decision is `out::Palette`'s, and
+# keeping it there is what lets a test resolve colour without a terminal.
+# Already in the tree as clap's own dependency, so this is an edge, not code.
+anstyle = "1"
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 serde = { version = "1", features = ["derive"] }

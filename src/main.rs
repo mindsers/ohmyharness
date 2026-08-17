@@ -25,9 +25,11 @@ mod image;
 mod mcp;
 mod memory;
 mod notice;
+mod out;
 mod persist;
 mod profile;
 mod render;
+mod report;
 mod rules;
 mod runtime;
 mod selection;
@@ -70,8 +72,51 @@ struct Cli {
     #[arg(long, short = 'a', global = true)]
     account: Option<String>,
 
+    // Global, which means `omh claude --json` is **refused** rather than
+    // forwarded — see `passthrough`. That is the right way round: every omh
+    // global is stolen from the harness's argv, and a flag that silently
+    // changed which of the two it addressed would be the `--dry-run` bug again.
+    // `omh claude -- --json` still reaches the harness.
+    //
+    // Deliberately *not* a doc comment: clap prints those, and the reader of
+    // `--help` is not the reader of this paragraph.
+    /// Report as JSON, for a script rather than a person.
+    #[arg(long, global = true)]
+    json: bool,
+
+    /// When to colour the output.
+    #[arg(long, global = true, value_name = "WHEN", default_value = "auto")]
+    color: out::Color,
+
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+impl Cli {
+    /// How this run reports, decided once.
+    ///
+    /// Resolved here and passed down rather than consulted where it is used: a
+    /// command that asked `is_terminal` twice could paint half its output, and
+    /// the half that changed would be whichever half ran after the first write
+    /// to a full pipe buffer.
+    ///
+    /// **`--json` implies no colour** even under `--color always`. The flag
+    /// says a program is reading, and `out::emit` already refuses to paint
+    /// JSON; making the palette agree means anything a command prints *around*
+    /// the report — a warning on stderr, say — does not paint either, which is
+    /// what a log scraper on the far end needs.
+    fn output(&self) -> (out::Format, out::Palette) {
+        if self.json {
+            return (out::Format::Json, out::Palette::plain());
+        }
+        let no_color = std::env::var("NO_COLOR").ok();
+        let palette = out::Palette::resolve(
+            self.color,
+            no_color.as_deref(),
+            std::io::IsTerminal::is_terminal(&std::io::stdout()),
+        );
+        (out::Format::Human, palette)
+    }
 }
 
 /// omh's own long flags, taken from the parser rather than written out.
@@ -417,7 +462,15 @@ enum MemoryCmd {
     },
 }
 
-fn main() -> Result<()> {
+/// Parse, dispatch, and say what went wrong in omh's own voice.
+///
+/// Split from [`dispatch`] so a failure has somewhere to be *rendered*. With
+/// `main() -> Result<()>` the message was anyhow's `{:?}`, which is a debug
+/// format: it leads with `Error:` — a word that names neither the program nor
+/// the problem — and it is the one piece of output no user can opt out of
+/// seeing. Now it goes through `out::problem`, which knows about the palette
+/// and prints the whole cause chain.
+fn main() -> std::process::ExitCode {
     // A closed pipe (`omh ls | head`) is not a crash. Without this, Rust's
     // default panics on the failed write and prints a backtrace.
     #[cfg(unix)]
@@ -426,25 +479,39 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    let (format, palette) = cli.output();
+    let ctx = out::Ctx { format, palette };
+
+    match dispatch(&cli, &ctx) {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            eprint!("{}", out::problem(&ctx.palette, &e));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     let cwd = std::env::current_dir()?;
 
     match &cli.cmd {
-        Cmd::Init => init(&cwd),
-        Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account),
-        Cmd::Ls => ls(&cwd),
-        Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run),
-        Cmd::Why { thing } => why_cmd(&cwd, thing),
-        Cmd::Graph { session, stop } => graph(&cwd, session.as_deref(), *stop),
-        Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref()),
+        Cmd::Init => init(&cwd, ctx),
+        Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account, ctx),
+        Cmd::Ls => ls(&cwd, ctx),
+        Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx),
+        Cmd::Why { thing } => why_cmd(&cwd, thing, ctx),
+        Cmd::Graph { session, stop } => graph(&cwd, session.as_deref(), *stop, ctx),
+        Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx),
 
         Cmd::Sessions { cmd } => match cmd {
-            SessionsCmd::Ls => sessions_ls(&cwd),
-            SessionsCmd::Rm { session } => rm(&cwd, session),
-            SessionsCmd::Down { session } => down(&cwd, session.as_deref()),
+            SessionsCmd::Ls => sessions_ls(&cwd, ctx),
+            SessionsCmd::Rm { session } => rm(&cwd, session, ctx),
+            SessionsCmd::Down { session } => down(&cwd, session.as_deref(), ctx),
             SessionsCmd::Diff { session, base } => diff(
                 &cwd,
                 session.as_deref().or(cli.session.as_deref()),
                 base.as_deref(),
+                ctx,
             ),
             SessionsCmd::Commit {
                 message,
@@ -454,20 +521,28 @@ fn main() -> Result<()> {
                 cli.session.as_deref(),
                 message.as_deref(),
                 *skip_carried,
+                ctx,
             ),
             SessionsCmd::Push { name, pr } => {
-                push(&cwd, cli.session.as_deref(), name.as_deref(), *pr)
+                push(&cwd, cli.session.as_deref(), name.as_deref(), *pr, ctx)
             }
         },
 
         Cmd::Config { cmd } => match cmd {
-            None => show_config(&cwd),
-            Some(ConfigCmd::Set { key, value, layer }) => {
-                set(&cwd, key, value, layer_or(*layer, config::Layer::Personal))
-            }
-            Some(ConfigCmd::Unset { key, layer }) => {
-                unset(&cwd, key, layer_or(*layer, config::Layer::Personal))
-            }
+            None => show_config(&cwd, ctx),
+            Some(ConfigCmd::Set { key, value, layer }) => set(
+                &cwd,
+                key,
+                value,
+                layer_or(*layer, config::Layer::Personal, ctx),
+                ctx,
+            ),
+            Some(ConfigCmd::Unset { key, layer }) => unset(
+                &cwd,
+                key,
+                layer_or(*layer, config::Layer::Personal, ctx),
+                ctx,
+            ),
             Some(ConfigCmd::Edit {
                 capability,
                 name,
@@ -476,43 +551,47 @@ fn main() -> Result<()> {
                 &cwd,
                 capability.as_deref(),
                 name.as_deref(),
-                layer_or(*layer, config::Layer::Personal),
+                layer_or(*layer, config::Layer::Personal, ctx),
             ),
-            Some(ConfigCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run),
+            Some(ConfigCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run, ctx),
         },
 
         Cmd::Repo { cmd } => match cmd {
-            None => show_repo(&cwd),
-            Some(RepoCmd::Enable { feature }) => feature_switch(&cwd, feature, true),
-            Some(RepoCmd::Disable { feature }) => feature_switch(&cwd, feature, false),
-            Some(RepoCmd::Set { key, value, shared }) => set(&cwd, key, value, repo_layer(*shared)),
-            Some(RepoCmd::Unset { key, shared }) => unset(&cwd, key, repo_layer(*shared)),
+            None => show_repo(&cwd, ctx),
+            Some(RepoCmd::Enable { feature }) => feature_switch(&cwd, feature, true, ctx),
+            Some(RepoCmd::Disable { feature }) => feature_switch(&cwd, feature, false, ctx),
+            Some(RepoCmd::Set { key, value, shared }) => {
+                set(&cwd, key, value, repo_layer(*shared), ctx)
+            }
+            Some(RepoCmd::Unset { key, shared }) => unset(&cwd, key, repo_layer(*shared), ctx),
         },
 
         Cmd::Use {
             capability,
             name,
             all,
-        } => use_cmd(&cwd, capability.as_deref(), name.as_deref(), *all),
-        Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name),
+        } => use_cmd(&cwd, capability.as_deref(), name.as_deref(), *all, ctx),
+        Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name, ctx),
 
         Cmd::Import {
             capability,
             harness,
             from,
-        } => import_cmd(&cwd, capability, harness, from.as_deref()),
+        } => import_cmd(&cwd, capability, harness, from.as_deref(), ctx),
 
         Cmd::Memory { cmd } => match cmd {
-            None => memory_ls(&cwd),
-            Some(MemoryCmd::Lint) => memory_lint(&cwd),
-            Some(MemoryCmd::Stale) => memory_stale(&cwd),
-            Some(MemoryCmd::Promote { keys }) => memory_promote(&cwd, keys),
+            None => memory_ls(&cwd, ctx),
+            Some(MemoryCmd::Lint) => memory_lint(&cwd, ctx),
+            Some(MemoryCmd::Stale) => memory_stale(&cwd, ctx),
+            Some(MemoryCmd::Promote { keys }) => memory_promote(&cwd, keys, ctx),
             Some(MemoryCmd::Serve {
                 team,
                 local,
                 session,
             }) => memory_serve(team.clone(), local.clone(), session.clone()),
-            Some(MemoryCmd::Rm { key, layer, at }) => memory_rm(&cwd, key, *layer, at.as_deref()),
+            Some(MemoryCmd::Rm { key, layer, at }) => {
+                memory_rm(&cwd, key, *layer, at.as_deref(), ctx)
+            }
             Some(MemoryCmd::Remember {
                 expected,
                 observed,
@@ -536,13 +615,14 @@ fn main() -> Result<()> {
                 },
                 *if_exists,
                 cli.session.as_deref(),
+                ctx,
             ),
         },
 
         // Before `run` looks anything up: which flags are whose is a question
         // about the command line, and answering it after resolving an adapter
         // would report an unknown harness for a mistyped flag.
-        Cmd::Run(argv) => run(&cwd, &passthrough(argv, &omh_globals())?, &cli),
+        Cmd::Run(argv) => run(&cwd, &passthrough(argv, &omh_globals())?, cli, ctx),
     }
 }
 
@@ -630,6 +710,7 @@ fn session_up(
     // one `sandbox()` call and cannot describe different images — the split
     // that let `init` build a layer no launch ever ran.
     recipe: &[&str],
+    ctx: &out::Ctx,
 ) -> Result<(Box<dyn runtime::Runtime>, String)> {
     let backend = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))?;
     let name = paths.container(&session.id);
@@ -655,7 +736,7 @@ fn session_up(
     ) {
         Ok(bin) => opts.memory_bin = Some(bin),
         Err(e) => {
-            eprintln!("omh: memory server unavailable — {e:#}");
+            ctx.warn(&format!("memory server unavailable — {e:#}"));
             opts.memory_bin = None;
         }
     }
@@ -663,7 +744,7 @@ fn session_up(
     // The account must reach *this* plan: this is the container that actually
     // runs. Building it without credentials is how every session started
     // logged out while `--dry-run` advertised the mounts.
-    say_selection(paths, profile, &opts.repo);
+    say_selection(paths, profile, &opts.repo, ctx);
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
     plan.validate(&backend.caps())?;
 
@@ -684,17 +765,17 @@ fn session_up(
                 id = session.id,
             ),
             container::Reuse::Restart(why) => {
-                eprintln!(
-                    "omh: restarting the sandbox for {} — {}",
+                ctx.progress(&format!(
+                    "restarting the sandbox for {} — {}",
                     session.label(),
                     why.join(", ")
-                );
+                ));
                 let _ = image::container_remove(backend.program(), &name);
             }
         }
     }
 
-    say_rules(&plan);
+    say_rules(&plan, ctx);
     image::ensure_stack(backend.program(), adapter, recipe)?;
     image::ensure_network(backend.program(), &plan.network)?;
 
@@ -739,7 +820,12 @@ fn session_up(
     Ok((backend, name))
 }
 
-fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Result<()> {
+fn attach(
+    cwd: &std::path::Path,
+    id: Option<&str>,
+    chosen: Option<&str>,
+    ctx: &out::Ctx,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let profile = Profile::resolve(&paths);
     let names: Vec<String> = Adapter::load_dir(&paths.adapters())?
@@ -759,6 +845,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             &profile.sources(adapter::Capability::Hooks)?,
             &own,
             &repo,
+            ctx,
         )?;
     }
 
@@ -766,7 +853,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
     let id = session::pick(&paths.worktrees(), id, false);
     let session = Session::new(&paths.worktrees(), id);
     session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
-    carry_in(&paths, &session)?;
+    carry_in(&paths, &session, ctx)?;
     let _ = idle::touch(&paths.runs(), &session.id);
 
     let configured = policy_value(&paths, "account");
@@ -791,7 +878,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
         &repo,
         &sandbox.resolves,
     )? {
-        eprintln!("omh: `{}` needs {} — held back", d.name, d.wanted);
+        ctx.warn(&format!("`{}` needs {} — held back", d.name, d.wanted));
     }
 
     session_up(
@@ -812,6 +899,7 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
             resolves: sandbox.resolves.clone(),
         },
         &sandbox.recipe(),
+        ctx,
     )?;
 
     // The integration point is a managed SSH config include, not an IDE plugin —
@@ -847,39 +935,50 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
         .as_deref()
         .and_then(|n| editor::Editor::find(&paths.editors(), n));
 
-    match ed {
+    let editors: Vec<(String, String)> = editor::Editor::load_dir(&paths.editors())?
+        .into_iter()
+        .map(|e| (e.name.clone(), e.command(&alias).join(" ")))
+        .collect();
+
+    // Which editor, if any, actually got a window open. Everything else about
+    // the report is the same either way — the URL and the `ssh` line are how
+    // you rejoin this session tomorrow, whether or not something opened today.
+    let opened_in = match ed {
         // An editor that is not installed is not an error — the URL is still a
         // good answer, and launching nothing silently would not be.
         Some(ed) if runtime::installed(&ed.bin) => {
             let cmd = ed.command(&alias);
-            println!("omh: opening {} in {}", ssh::url(&alias), ed.name);
             let ok = Command::new(&cmd[0])
                 .args(&cmd[1..])
                 .status()
                 .map(|s| s.success());
-            if !matches!(ok, Ok(true)) {
-                // Remote launches fail for ordinary reasons — missing extension,
-                // handshake refused. Printing nothing leaves the user waiting
-                // for a window that will never open.
-                eprintln!("omh: {} did not open the session", ed.name);
-                println!("\n  {}", ssh::url(&alias));
-                println!("  ssh {alias}");
+            if matches!(ok, Ok(true)) {
+                Some(ed.name.clone())
+            } else {
+                // Remote launches fail for ordinary reasons — missing
+                // extension, handshake refused. Saying nothing leaves the user
+                // waiting for a window that will never open.
+                ctx.warn(&format!("{} did not open the session", ed.name));
+                None
             }
         }
         other => {
             if let Some(ed) = other {
-                println!("omh: `{}` is not installed on this machine\n", ed.bin);
+                ctx.warn(&format!("`{}` is not installed on this machine", ed.bin));
             } else if let Some(w) = &wanted {
-                println!("omh: no editor named `{w}` — see `omh ls`\n");
+                ctx.warn(&format!("no editor named `{w}` — see `omh ls`"));
             }
-            println!("session {} is up\n", session.id);
-            println!("  {}", ssh::url(&alias));
-            println!("  ssh {alias}\n");
-            for e in editor::Editor::load_dir(&paths.editors())? {
-                println!("  {:<8} {}", e.name, e.command(&alias).join(" "));
-            }
+            None
         }
-    }
+    };
+
+    ctx.say(&report::Attached {
+        session: session.id.clone(),
+        url: ssh::url(&alias),
+        alias,
+        opened_in,
+        editors,
+    });
     Ok(())
 }
 
@@ -893,18 +992,24 @@ fn attach(cwd: &std::path::Path, id: Option<&str>, chosen: Option<&str>) -> Resu
 /// server showed every other session's graph anyway. Matching the server's
 /// scope to its data's scope removes the duplication, survives sessions coming
 /// and going, and lets the container mount only the index.
-fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool) -> Result<()> {
+fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     let container = base::ui_container(&paths.repo_name());
 
     if stop {
         if !image::container_running(backend.program(), &container) {
-            println!("the graph is not running");
+            ctx.say(
+                &report::Action::new("graph-not-running", "the graph is not running")
+                    .data(serde_json::json!({ "running": false })),
+            );
             return Ok(());
         }
         image::container_remove(backend.program(), &container)?;
-        println!("omh: graph stopped; sessions keep running");
+        ctx.say(
+            &report::Action::new("graph-stopped", "graph stopped; sessions keep running")
+                .data(serde_json::json!({ "running": false })),
+        );
         return Ok(());
     }
 
@@ -940,9 +1045,12 @@ fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool) -> Result<()> {
     }
 
     let url = format!("http://127.0.0.1:{port}");
-    println!("omh: graph at {url}");
-    println!("  every session's graph for this repo, in one place");
-    println!("  stop with: omh graph --stop");
+    ctx.say(
+        &report::Action::new("graph-started", format!("graph at {url}"))
+            .next("omh graph --stop")
+            .data(serde_json::json!({ "url": url, "port": port, "running": true })),
+    );
+    ctx.hint("every session's graph for this repo, in one place");
     let _ = Command::new(if cfg!(target_os = "macos") {
         "open"
     } else {
@@ -961,14 +1069,16 @@ fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool) -> Result<()> {
 ///
 /// Best-effort by design: this runs on the way to starting a session, and a
 /// failure to reap must never stop you working.
-fn reap_idle(paths: &Paths, launching: &str) {
+fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
     let Some(raw) = policy_value(paths, "idle_timeout") else {
         return;
     };
     let Some(timeout) = idle::parse_duration(&raw) else {
         // Say so rather than ignoring silently — a setting that resolves with
         // provenance and then does nothing is exactly what this feature was.
-        eprintln!("omh: ignoring idle_timeout `{raw}` — expected a duration like 30m, 2h, 90s");
+        ctx.warn(&format!(
+            "ignoring idle_timeout `{raw}` — expected a duration like 30m, 2h, 90s"
+        ));
         return;
     };
     let Ok(backend) = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))
@@ -987,15 +1097,15 @@ fn reap_idle(paths: &Paths, launching: &str) {
 
     for id in idle::expired(&running, timeout, std::time::SystemTime::now(), launching) {
         match image::container_remove(backend.program(), &paths.container(&id)) {
-            Ok(()) => {
-                eprintln!("omh: stopped {id} — idle over {raw} (worktree and branch survive)")
-            }
-            Err(e) => eprintln!("omh: could not stop idle session {id}: {e}"),
+            Ok(()) => ctx.progress(&format!(
+                "stopped {id} — idle over {raw} (worktree and branch survive)"
+            )),
+            Err(e) => ctx.warn(&format!("could not stop idle session {id}: {e}")),
         }
     }
 }
 
-fn down(cwd: &std::path::Path, id: Option<&str>) -> Result<()> {
+fn down(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     let ids = match id {
@@ -1004,13 +1114,25 @@ fn down(cwd: &std::path::Path, id: Option<&str>) -> Result<()> {
     };
     for i in &ids {
         let name = paths.container(i);
-        if image::container_running(backend.program(), &name) {
-            match image::container_remove(backend.program(), &name) {
-                Ok(()) => println!("stopped {i}; worktree and branch survive"),
-                Err(e) => eprintln!("omh: {i} is still running: {e}"),
-            }
-        } else {
-            println!("{i} was not running");
+        if !image::container_running(backend.program(), &name) {
+            ctx.say(
+                &report::Action::new("session-not-running", format!("{i} was not running"))
+                    .data(serde_json::json!({ "session": i, "stopped": false })),
+            );
+            continue;
+        }
+        match image::container_remove(backend.program(), &name) {
+            Ok(()) => ctx.say(
+                &report::Action::new(
+                    "session-stopped",
+                    format!("stopped {i}; worktree and branch survive"),
+                )
+                .data(serde_json::json!({ "session": i, "stopped": true })),
+            ),
+            // Reported and carried on rather than returned: `omh s down` with
+            // no id is asking about every session, and one container that will
+            // not go must not hide the ones that did.
+            Err(e) => ctx.warn(&format!("{i} is still running: {e}")),
         }
     }
     Ok(())
@@ -1019,7 +1141,12 @@ fn down(cwd: &std::path::Path, id: Option<&str>) -> Result<()> {
 /// Launch the real image with the real mounts and ask the harness's own paths
 /// what they can see. Nothing in process can answer this: a green unit suite
 /// proves omh mounts a path, never that anything reads it.
-fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Result<()> {
+fn doctor_cmd(
+    cwd: &std::path::Path,
+    harness: Option<&str>,
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let profile = Profile::resolve(&paths);
     let name = match harness {
@@ -1054,6 +1181,7 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
             &profile.sources(adapter::Capability::Hooks)?,
             &own,
             &repo,
+            ctx,
         )?;
     }
     let mut checks = doctor::checks(&profile, &adapter, &own, &repo, &sandbox.resolves)?;
@@ -1077,7 +1205,13 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
         checks.extend(doctor::memory_checks(server));
     }
     if checks.is_empty() {
-        println!("nothing to check: the profile is empty");
+        ctx.say(
+            &report::Action::new(
+                "doctor-nothing-to-check",
+                "nothing to check: the profile is empty",
+            )
+            .data(serde_json::json!({ "harness": name, "checks": 0 })),
+        );
         return Ok(());
     }
 
@@ -1102,47 +1236,44 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
-    say_selection(&paths, &profile, &opts.repo);
+    say_selection(&paths, &profile, &opts.repo, ctx);
     let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
-    say_rules(&plan);
+    say_rules(&plan, ctx);
     plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
 
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     plan.validate(&backend.caps())?;
 
     if dry_run {
-        println!("{}", doctor::probe_script(&checks));
+        // The script itself, unwrapped: this output exists to be piped into a
+        // shell or read line by line, and a report around it would have to be
+        // stripped back off. `Probe` says so in one place instead of here.
+        ctx.say(&report::Probe {
+            script: doctor::probe_script(&checks),
+            checks: checks.iter().map(|c| c.name.clone()).collect(),
+        });
         return Ok(());
     }
 
     image::ensure_stack(backend.program(), &adapter, &sandbox.recipe())?;
     image::ensure_network(backend.program(), &plan.network)?;
 
-    match &account {
-        Some(a) => println!(
-            "omh doctor: {name} (in {}, account {})\n",
-            sandbox.tag,
-            a.file_name().unwrap_or_default().to_string_lossy()
-        ),
-        None => println!(
-            "omh doctor: {name} (in {}, no account — credentials unchecked)\n",
+    let account_name = account
+        .as_ref()
+        .map(|a| a.file_name().unwrap_or_default().to_string_lossy().into());
+    ctx.progress(&match &account_name {
+        Some(a) => format!("checking {name} in {} as {a}…", sandbox.tag),
+        None => format!(
+            "checking {name} in {} — no account, so credentials go unchecked…",
             sandbox.tag
         ),
-    }
+    });
+
     let out = Command::new(backend.program())
         .args(backend.args(&plan))
         .output()?;
     let outcomes = doctor::parse(&String::from_utf8_lossy(&out.stdout));
     let _ = session.remove(&paths.repo, ""); // diagnostic: leave no session behind
-
-    for o in &outcomes {
-        println!(
-            "  {} {:<10} {}",
-            if o.ok { "\u{2713}" } else { "\u{2717}" },
-            o.name,
-            o.detail
-        );
-    }
 
     if outcomes.is_empty() {
         anyhow::bail!(
@@ -1150,59 +1281,51 @@ fn doctor_cmd(cwd: &std::path::Path, harness: Option<&str>, dry_run: bool) -> Re
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    if !doctor::passed(&outcomes) {
+
+    let report = report::Doctor {
+        harness: name,
+        tag: sandbox.tag.clone(),
+        account: account_name,
+        outcomes,
+    };
+    ctx.say(&report);
+    if !report.passed() {
         anyhow::bail!(
             "{} of {} checks failed",
-            outcomes.iter().filter(|o| !o.ok).count(),
-            outcomes.len()
+            report.failed(),
+            report.outcomes.len()
         );
     }
-    println!(
-        "\n  all {} checks passed — {name}'s adapter paths are verified",
-        outcomes.len()
-    );
     Ok(())
 }
 
-fn sessions_ls(cwd: &std::path::Path) -> Result<()> {
+fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
     let base = session::default_branch(&paths.repo);
-    let sessions = session::list(&paths.worktrees());
-    if sessions.is_empty() {
-        println!("no sessions");
-    }
-    for id in sessions {
-        let sess = Session::new(&paths.worktrees(), id.clone());
-        let up = backend
-            .as_ref()
-            .map(|b| image::container_running(b.program(), &paths.container(&id)))
-            .unwrap_or(false);
-        let drift = match sess.behind(&paths.repo, &base) {
-            0 => String::new(),
-            n => format!("  ({n} behind {base})"),
-        };
-        println!(
-            "  {id:<8} {:<14} {:<9} {:<20}{drift}",
-            sess.label(),
-            if up { "up" } else { "stopped" },
-            work_state(&sess, &paths.repo, &base),
-        );
-    }
 
-    let left = leftovers(&paths, backend.as_deref());
-    if !left.is_empty() {
-        println!(
-            "\n{} removed but left something behind: {}",
-            if left.len() == 1 {
-                "1 session was"
-            } else {
-                "sessions were"
-            },
-            left.join(", ")
-        );
-        println!("  clear each with  omh s rm <id>");
-    }
+    let sessions = session::list(&paths.worktrees())
+        .into_iter()
+        .map(|id| {
+            let sess = Session::new(&paths.worktrees(), id.clone());
+            report::Session {
+                running: backend
+                    .as_ref()
+                    .map(|b| image::container_running(b.program(), &paths.container(&id)))
+                    .unwrap_or(false),
+                label: sess.label().to_string(),
+                work: work_state(&sess, &paths.repo, &base),
+                behind: sess.behind(&paths.repo, &base),
+                id,
+            }
+        })
+        .collect();
+
+    ctx.say(&report::Sessions {
+        sessions,
+        leftovers: leftovers(&paths, backend.as_deref()),
+        base,
+    });
     Ok(())
 }
 
@@ -1253,7 +1376,9 @@ fn leftovers(paths: &Paths, backend: Option<&dyn runtime::Runtime>) -> Vec<Strin
 /// Ordered most-actionable first, and deliberately one answer rather than a
 /// tally: `s ls` is read at a glance, and a session with uncommitted work needs
 /// committing whatever else is also true of it.
-fn work_state(session: &Session, repo: &std::path::Path, base: &str) -> String {
+fn work_state(session: &Session, repo: &std::path::Path, base: &str) -> report::Work {
+    use report::Work;
+
     // A git that cannot answer is never rendered as an answer. Every accessor
     // below runs through the worktree's `.git` pointer, which goes stale when a
     // checkout moves and is already handled as a real case by `Session::remove`
@@ -1261,29 +1386,29 @@ fn work_state(session: &Session, repo: &std::path::Path, base: &str) -> String {
     // holding a day of work the user is about to `s rm`.
     let (uncommitted, unpushed) = match (session.uncommitted(), session.unpushed()) {
         (Ok(uncommitted), Ok(unpushed)) => (uncommitted, unpushed),
-        _ => return "?".into(),
+        _ => return Work::Unknown,
     };
 
     if let n @ 1.. = uncommitted {
-        return format!("{n} uncommitted");
+        return Work::Uncommitted(n);
     }
     match unpushed {
-        Some(n @ 1..) => format!("{n} to push"),
+        Some(n @ 1..) => Work::ToPush(n),
         // Nothing origin does not already have. Report the name it went out
         // under, which is what you would look for in a list of PRs — `omh/s01`
         // is not a name anybody searches for.
         Some(_) => match session.published_as() {
-            Ok(Some(target)) => format!("→ {target}"),
-            Ok(None) => String::new(),
-            Err(_) => "?".into(),
+            Ok(Some(target)) => Work::Published(target),
+            Ok(None) => Work::Clean,
+            Err(_) => Work::Unknown,
         },
         // Never pushed, which is not the same as nothing to push: this is the
         // state the loop passes through every time, between `s commit` and the
         // first `s push`. Measured against the base branch instead, because a
         // blank here reads as a session nobody touched.
         None => match session.commits(repo, base) {
-            0 => String::new(),
-            n => format!("{n} to push"),
+            0 => Work::Clean,
+            n => Work::ToPush(n),
         },
     }
 }
@@ -1336,6 +1461,7 @@ fn memory_remember(
     mut input: memory::Remembered,
     if_exists: memory::IfExists,
     session: Option<&str>,
+    ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     if input.source.trim().is_empty() {
@@ -1347,18 +1473,27 @@ fn memory_remember(
             None => "cli".into(),
         };
     }
-    match memory::remember(&paths, &input, if_exists)? {
-        memory::Wrote::Created(path) => println!("recorded {}", path.display()),
+    ctx.say(&match memory::remember(&paths, &input, if_exists)? {
+        memory::Wrote::Created(path) => {
+            report::Action::new("note-recorded", format!("recorded {}", path.display()))
+                .data(serde_json::json!({ "path": path.display().to_string(), "replaced": false }))
+        }
         // Said out loud: a note that existed is gone, and only `--if-exists
         // override` gets here, so the caller asked for it and can check.
-        memory::Wrote::Replaced(path) => {
-            println!(
+        memory::Wrote::Replaced(path) => report::Action::new(
+            "note-replaced",
+            format!(
                 "replaced {} — the note that was there is gone",
                 path.display()
-            )
-        }
-        memory::Wrote::Skipped(key) => println!("`{key}` is already recorded; left alone"),
-    }
+            ),
+        )
+        .data(serde_json::json!({ "path": path.display().to_string(), "replaced": true })),
+        memory::Wrote::Skipped(key) => report::Action::new(
+            "note-already-there",
+            format!("`{key}` is already recorded; left alone"),
+        )
+        .data(serde_json::json!({ "key": key, "replaced": false })),
+    });
     Ok(())
 }
 
@@ -1410,9 +1545,12 @@ fn seed_store(paths: &Paths) -> Result<String> {
 
 /// Speak MCP until stdin closes.
 ///
-/// Nothing but protocol may reach stdout — this binary is full of `println!`,
-/// and one stray line breaks the very first handshake. Diagnostics go to
-/// stderr, which the harness shows as server logs.
+/// Nothing but protocol may reach stdout, and one stray line breaks the very
+/// first handshake. Every other command now writes through `out::Ctx`, which
+/// puts answers on stdout and diagnostics on stderr — so the rule this comment
+/// used to enforce by vigilance is enforced by the type. This function is the
+/// exception that still owns its own stdout, because what it writes there is
+/// not a report at all.
 fn memory_serve(
     team: std::path::PathBuf,
     local: std::path::PathBuf,
@@ -1438,7 +1576,7 @@ fn memory_serve(
 /// A join against facts omh already holds. Three groups, because they are
 /// three different claims: the world moved, omh cannot tell, and omh was never
 /// asked to tell.
-fn memory_stale(cwd: &std::path::Path) -> Result<()> {
+fn memory_stale(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     use memory::expiry::Verdict;
     let paths = Paths::discover(cwd)?;
     let judged = memory::expiry::judge(&paths, &memory::load(&paths)?)?;
@@ -1461,47 +1599,27 @@ fn memory_stale(cwd: &std::path::Path) -> Result<()> {
         }
     }
 
-    let mut printed = false;
-    for group in [
-        "stale",
-        "omh cannot tell",
-        "no expiry — carries only its date",
-    ] {
-        let members: Vec<&memory::expiry::Judged> = judged
+    let report = report::Stale {
+        judged: judged
             .iter()
-            .filter(|j| heading(&j.verdict) == Some(group))
-            .collect();
-        if members.is_empty() {
-            continue;
-        }
-        if printed {
-            println!();
-        }
-        printed = true;
-        println!("{group}:");
-        for j in members {
-            // Every line carries its date and its layer, exactly as `recall`
-            // does: a note reported without those cannot be judged.
-            print!("  {:<44} {:<5}  {}", j.key, j.layer.to_string(), j.recorded);
-            match &j.verdict {
-                Verdict::Stale { because } | Verdict::Unknown { because } => {
-                    println!("  — {because}")
-                }
-                Verdict::NoTrigger | Verdict::Fresh => println!(),
-            }
-        }
-    }
+            .map(|j| report::Judged {
+                key: j.key.clone(),
+                layer: j.layer.to_string(),
+                recorded: j.recorded.clone(),
+                group: heading(&j.verdict),
+                because: match &j.verdict {
+                    Verdict::Stale { because } | Verdict::Unknown { because } => {
+                        Some(because.clone())
+                    }
+                    Verdict::NoTrigger | Verdict::Fresh => None,
+                },
+            })
+            .collect(),
+    };
 
-    let count = |f: fn(&Verdict) -> bool| judged.iter().filter(|j| f(&j.verdict)).count();
-    let fresh = count(|v| matches!(v, Verdict::Fresh));
-    let stale = count(|v| matches!(v, Verdict::Stale { .. }));
-    let unknown = count(|v| matches!(v, Verdict::Unknown { .. }));
-
-    if !printed && fresh == 0 {
-        println!("no notes yet");
-    } else if fresh > 0 {
-        println!("\n{fresh} still current");
-    }
+    let stale = report.count(Some("stale"));
+    let unknown = report.count(Some("omh cannot tell"));
+    ctx.say(&report);
 
     // The report is the product, so it prints in full before this decides the
     // exit code — the same order `lint` uses.
@@ -1524,7 +1642,7 @@ fn memory_stale(cwd: &std::path::Path) -> Result<()> {
 
 /// local → team. §12's one human gate, because it is the one place a wrong
 /// note reaches somebody else.
-fn memory_promote(cwd: &std::path::Path, keys: &[String]) -> Result<()> {
+fn memory_promote(cwd: &std::path::Path, keys: &[String], ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let notes = memory::load(&paths)?;
     let repo = paths.repo.clone();
@@ -1540,54 +1658,45 @@ fn memory_promote(cwd: &std::path::Path, keys: &[String]) -> Result<()> {
             // planned, and the human who ran the gate would have to work out
             // which half landed.
             for b in &blocked {
-                eprintln!("omh: {}", b.say());
+                ctx.warn(&b.say());
             }
             anyhow::bail!("promoted nothing");
         }
     };
     memory::promote::apply(&steps)?;
-    print!("{}", memory::promote::report(&steps, &paths));
+    ctx.say(&report::Promoted {
+        text: memory::promote::report(&steps, &paths),
+        keys: steps.iter().map(|s| s.key.clone()).collect(),
+    });
     Ok(())
 }
 
 /// The store, by layer, with what points at each note.
-fn memory_ls(cwd: &std::path::Path) -> Result<()> {
+fn memory_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let notes = memory::load(&paths)?;
-    if notes.is_empty() {
-        println!("no notes yet — the store fills as work surprises the agent");
-        return Ok(());
-    }
-    print!("{}", memory::render_list(&notes));
+    ctx.say(&report::Notes {
+        notes: memory::load(&paths)?,
+    });
     Ok(())
 }
 
 /// The store-quality meter. Violations are grouped by rule rather than listed
 /// flat, because the count per rule is the signal and the individual lines are
 /// how you act on it.
-fn memory_lint(cwd: &std::path::Path) -> Result<()> {
+fn memory_lint(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let found = memory::lint(&paths)?;
-    if found.is_empty() {
-        println!("no violations");
-        return Ok(());
-    }
-    for v in &found {
-        let mark = match v.rule.severity() {
-            memory::Severity::Refused => "refused",
-            memory::Severity::Warning => "warning",
-        };
-        println!("{mark:<8} {:<6} {}", v.layer.to_string(), v.detail);
-    }
-    println!();
-    for (rule, count) in memory::tally(&found) {
-        println!("  {count:>3}  {rule:?}");
-    }
+    let tally = memory::tally(&found);
+    let report = report::Lint {
+        violations: found,
+        tally,
+    };
 
     // The report is the product, so it prints in full before this decides the
     // exit code. Warnings do not fail the command: `Orphan` fires on every
     // note nothing links to, and a gate that is always red gates nothing.
-    let refused = memory::refused(&found);
+    ctx.say(&report);
+    let refused = report.refused();
     if refused > 0 {
         anyhow::bail!(
             "{refused} violation{} the schema refuses",
@@ -1605,22 +1714,33 @@ fn memory_rm(
     key: &str,
     layer: Option<memory::Layer>,
     at: Option<&str>,
+    ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let removed = memory::remove(&paths, layer, key, at)?;
-    println!("removed {key} ({})", removed.layer);
+
+    let mut action =
+        report::Action::new("note-removed", format!("removed {key} ({})", removed.layer)).data(
+            serde_json::json!({
+                "key": key,
+                "layer": removed.layer.to_string(),
+                "committed": removed.layer.is_committed(),
+                "inbound": removed.inbound,
+            }),
+        );
+    // The file is gone here, but a teammate still has it until the deletion is
+    // committed. Saying so beats letting someone believe a shared note
+    // disappeared for everybody.
     if removed.layer.is_committed() {
-        // The file is gone here, but a teammate still has it until the
-        // deletion is committed. Saying so beats letting someone believe a
-        // shared note disappeared for everybody.
-        println!("  it was committed — teammates keep it until you commit the deletion");
+        action = action.note("it was committed — teammates keep it until you commit the deletion");
     }
     if !removed.inbound.is_empty() {
-        println!(
-            "  still linked from {} — those links now dangle, and `omh memory lint` lists them",
+        action = action.note(format!(
+            "still linked from {} — those links now dangle, and `omh memory lint` lists them",
             removed.inbound.join(", ")
-        );
+        ));
     }
+    ctx.say(&action);
     Ok(())
 }
 
@@ -1630,10 +1750,10 @@ fn parse_env(s: &str) -> std::result::Result<(String, String), String> {
         .ok_or_else(|| format!("expected KEY=VALUE, got `{s}`"))
 }
 
-fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
+fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     match cmd {
-        McpCmd::Ls => show_servers(cwd),
+        McpCmd::Ls => show_servers(cwd, ctx),
 
         McpCmd::Add {
             name,
@@ -1647,26 +1767,37 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
                 env: env.iter().cloned().collect(),
             };
             let w = config::mcp_add(&paths, name, server)?;
-            println!("wrote → {}", w.path.display());
+            let mut action =
+                report::Action::new("mcp-added", format!("wrote → {}", w.path.display())).data(
+                    serde_json::json!({ "server": name, "path": w.path.display().to_string() }),
+                );
             if !env.is_empty() {
                 // The catalogue is not committed, so nothing here reaches a
                 // teammate — but it does reach every repo you work in, which is
                 // the wrong scope for a token scoped to one of them.
-                println!(
-                    "note: this env applies in every repo. For one repo only, \
-                     put [mcp.{name}.env] in .omh/{}",
+                action = action.note(format!(
+                    "this env applies in every repo. For one repo only, put \
+                     [mcp.{name}.env] in .omh/{}",
                     settings::LOCAL
-                );
+                ));
             }
+            ctx.say(&action);
             Ok(())
         }
 
         McpCmd::Rm { name } => {
-            if config::mcp_remove(&paths, name)? {
-                println!("removed {name} from your catalogue");
-            } else {
-                println!("{name} is not in your catalogue");
-            }
+            let removed = config::mcp_remove(&paths, name)?;
+            ctx.say(
+                &report::Action::new(
+                    if removed { "mcp-removed" } else { "mcp-absent" },
+                    if removed {
+                        format!("removed {name} from your catalogue")
+                    } else {
+                        format!("{name} is not in your catalogue")
+                    },
+                )
+                .data(serde_json::json!({ "server": name, "removed": removed })),
+            );
             Ok(())
         }
 
@@ -1699,27 +1830,39 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool) -> Result<()> {
             })?;
             let incoming = render::parse(binding.render, &raw)?;
 
-            let report = config::mcp_import(&paths, incoming, *force, dry_run)?;
+            let outcome = config::mcp_import(&paths, incoming, *force, dry_run)?;
+            let wrote = (!dry_run && !outcome.added.is_empty())
+                .then(|| config::mcp_path(&paths).display().to_string());
 
-            println!("import from {harness} ({})", source.display());
-            for name in &report.added {
-                println!("  + {name}");
-            }
-            for name in &report.unchanged {
-                println!("  = {name} (already identical)");
-            }
-            for name in &report.conflicts {
-                println!("  ! {name} (differs — keeping yours; --force to overwrite)");
-            }
-            if report.added.is_empty() && report.conflicts.is_empty() && report.unchanged.is_empty()
-            {
-                println!("  (no servers found)");
-            }
-            if dry_run {
-                println!("\n--dry-run: nothing written");
-            } else if !report.added.is_empty() {
-                println!("\nwrote → {}", config::mcp_path(&paths).display());
-            }
+            let considered = outcome
+                .added
+                .iter()
+                .map(|name| report::Considered {
+                    name: name.clone(),
+                    verdict: report::Verdict::Took,
+                    detail: String::new(),
+                })
+                .chain(outcome.unchanged.iter().map(|name| report::Considered {
+                    name: name.clone(),
+                    verdict: report::Verdict::Kept,
+                    detail: "already identical".into(),
+                }))
+                .chain(outcome.conflicts.iter().map(|name| report::Considered {
+                    name: name.clone(),
+                    verdict: report::Verdict::Conflict,
+                    detail: "differs — keeping yours; --force to overwrite".into(),
+                }))
+                .collect();
+
+            ctx.say(&report::Imported {
+                what: harness.clone(),
+                source: source.display().to_string(),
+                considered,
+                noun: "servers".into(),
+                dry_run,
+                wrote,
+                selected_in: Vec::new(),
+            });
             Ok(())
         }
     }
@@ -1741,17 +1884,18 @@ fn repo_has_selection(paths: &Paths) -> Result<bool> {
 }
 
 /// The catalogue's MCP servers, with whose each one is.
-fn show_servers(cwd: &std::path::Path) -> Result<()> {
+fn show_servers(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let servers = config::servers(&paths)?;
-    println!("mcp:");
-    if servers.is_empty() {
-        println!("  (nothing set)");
-    }
-    for s in servers {
-        // Content says whose it is; a setting says which file decided it.
-        println!("  {:<16} {:<28} ← {}", s.key, s.value, s.layer.whose());
-    }
+    ctx.say(&report::Servers {
+        servers: config::servers(&paths)?
+            .into_iter()
+            .map(|s| report::Setting {
+                key: s.key,
+                value: s.value,
+                whose: Some(s.layer.whose().to_string()),
+            })
+            .collect(),
+    });
     Ok(())
 }
 
@@ -1770,6 +1914,7 @@ fn use_cmd(
     capability: Option<&str>,
     name: Option<&str>,
     all: bool,
+    ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     if all {
@@ -1777,12 +1922,16 @@ fn use_cmd(
             anyhow::bail!("`--all` resyncs every capability — it takes no arguments");
         }
         let lists = catalogue_lists(&paths)?;
-        for w in write_lists(&paths, &lists)? {
-            println!("resynced to your catalogue — wrote → {}", w.path.display());
-        }
-        for (cap, names) in &lists {
-            println!("  {:<11} {}", cap.to_string(), names.len());
-        }
+        ctx.say(&report::Resynced {
+            wrote: write_lists(&paths, &lists)?
+                .into_iter()
+                .map(|w| w.path.display().to_string())
+                .collect(),
+            counts: lists
+                .iter()
+                .map(|(cap, names)| (cap.to_string(), names.len()))
+                .collect(),
+        });
         return Ok(());
     }
 
@@ -1813,7 +1962,17 @@ fn use_cmd(
     // capability is still following the whole catalogue every name is used, and
     // saying so would leave `omh use` unable to start a selection at all.
     if already && !was_open {
-        println!("{cap}/{name} is already used here");
+        ctx.say(
+            &report::Action::new(
+                "capability-already-used",
+                format!("{cap}/{name} is already used here"),
+            )
+            .data(serde_json::json!({
+                "capability": cap.to_string(),
+                "name": name,
+                "changed": false,
+            })),
+        );
         return Ok(());
     }
     if !already {
@@ -1823,24 +1982,37 @@ fn use_cmd(
         &paths,
         &std::collections::BTreeMap::from([(cap, names.clone())]),
     )?;
-    if was_open {
-        // Said out loud, because this is the moment a capability turns from
-        // "follows the catalogue" into "this list" — everything is still
-        // selected, but from now on by name, and an entry added later will not
-        // be.
-        println!(
+    // Said out loud, because this is the moment a capability turns from
+    // "follows the catalogue" into "this list" — everything is still selected,
+    // but from now on by name, and an entry added later will not be.
+    let froze = was_open.then(|| {
+        format!(
             "{cap} was following your whole catalogue; wrote its {} entries as the list",
             names.len()
-        );
-    }
+        )
+    });
     for w in written {
-        println!("using {cap}/{name} — wrote → {}", w.path.display());
+        let mut action = report::Action::new(
+            "capability-used",
+            format!("using {cap}/{name} — wrote → {}", w.path.display()),
+        )
+        .data(serde_json::json!({
+            "capability": cap.to_string(),
+            "name": name,
+            "changed": true,
+            "froze_selection": was_open,
+            "path": w.path.display().to_string(),
+        }));
+        if let Some(line) = &froze {
+            action = action.note(line);
+        }
+        ctx.say(&action);
     }
     Ok(())
 }
 
 /// Stop using a catalogue entry here.
-fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str) -> Result<()> {
+fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let (cap, mut names, was_open) = current_list(&paths, key, name)?;
     if !names.iter().any(|n| n == name) {
@@ -1857,22 +2029,37 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str) -> Result<()> {
         );
     }
     names.retain(|n| n != name);
-    if was_open {
-        // The same disclosure `use_cmd` makes, and for the same reason: this is
-        // the moment the capability stops following the catalogue. Discarding
-        // the flag here was an oversight rather than a decision — `unuse`
-        // performs the identical conversion, so a repo with no list at all
-        // freezes into one on the command that was meant to remove one name.
-        println!(
+    // The same disclosure `use_cmd` makes, and for the same reason: this is the
+    // moment the capability stops following the catalogue. Discarding the flag
+    // here was an oversight rather than a decision — `unuse` performs the
+    // identical conversion, so a repo with no list at all freezes into one on
+    // the command that was meant to remove one name.
+    let froze = was_open.then(|| {
+        format!(
             "{cap} was following your whole catalogue; wrote its remaining {} entries as the list",
             names.len()
-        );
-    }
+        )
+    });
+    let remaining = names.len();
     for w in write_lists(&paths, &std::collections::BTreeMap::from([(cap, names)]))? {
-        println!(
-            "no longer using {cap}/{name} — wrote → {}",
-            w.path.display()
-        );
+        let mut action = report::Action::new(
+            "capability-unused",
+            format!(
+                "no longer using {cap}/{name} — wrote → {}",
+                w.path.display()
+            ),
+        )
+        .data(serde_json::json!({
+            "capability": cap.to_string(),
+            "name": name,
+            "froze_selection": was_open,
+            "remaining": remaining,
+            "path": w.path.display().to_string(),
+        }));
+        if let Some(line) = &froze {
+            action = action.note(line);
+        }
+        ctx.say(&action);
     }
     Ok(())
 }
@@ -1918,6 +2105,7 @@ fn import_cmd(
     capability: &str,
     harness: &str,
     from: Option<&std::path::Path>,
+    ctx: &out::Ctx,
 ) -> Result<()> {
     let cap = adapter::Capability::from_key(capability).with_context(|| {
         format!(
@@ -1945,19 +2133,30 @@ fn import_cmd(
         }
     };
     if !source.exists() {
-        println!("{harness} has no {cap} here ({})", source.display());
+        ctx.say(
+            &report::Action::new(
+                "import-nothing-there",
+                format!("{harness} has no {cap} here ({})", source.display()),
+            )
+            .data(serde_json::json!({
+                "harness": harness,
+                "capability": cap.to_string(),
+                "source": source.display().to_string(),
+                "exists": false,
+            })),
+        );
         return Ok(());
     }
 
     match cap {
         // Hooks are translated rather than copied — they are the one capability
         // whose format is omh's own — and they land in the repo.
-        adapter::Capability::Hooks => import_hooks(&paths, &adapter, binding, &source),
+        adapter::Capability::Hooks => import_hooks(&paths, &adapter, binding, &source, ctx),
         adapter::Capability::Mcp => anyhow::bail!(
             "MCP servers are `omh config mcp import {harness}` — a server is a \
              record in one file, not an entry with its own"
         ),
-        _ => import_entries(&paths, harness, cap, binding.render, &source),
+        _ => import_entries(&paths, harness, cap, binding.render, &source, ctx),
     }
 }
 
@@ -1982,9 +2181,9 @@ fn import_entries(
     cap: adapter::Capability,
     render: adapter::Render,
     source: &std::path::Path,
+    ctx: &out::Ctx,
 ) -> Result<()> {
     let dest = paths.root.join(cap.source());
-    let mut taken = 0usize;
 
     let entries: Vec<(String, std::path::PathBuf)> = match render {
         // One file, one entry. Named after the harness rather than after the
@@ -2007,7 +2206,7 @@ fn import_entries(
         }
     };
 
-    println!("importing {harness} {cap} from {}", source.display());
+    let mut considered = Vec::new();
     for (name, from) in entries {
         // The stem, because a catalogue entry is a name and `review-diff.md` is
         // a filename. `validate_entry_name` then refuses `..`, a separator, and
@@ -2019,7 +2218,11 @@ fn import_entries(
             .to_string_lossy()
             .into_owned();
         if let Err(e) = selection::validate_entry_name(&stem, cap, source) {
-            println!("  skipped  {name} — {e:#}");
+            considered.push(report::Considered {
+                name,
+                verdict: report::Verdict::Skipped,
+                detail: format!("{e:#}"),
+            });
             continue;
         }
         let to = dest.join(if from.is_dir() {
@@ -2028,20 +2231,36 @@ fn import_entries(
             name.clone()
         });
         if to.exists() {
-            println!("  kept     {stem} — already in your catalogue");
+            considered.push(report::Considered {
+                name: stem,
+                verdict: report::Verdict::Kept,
+                detail: "already in your catalogue".into(),
+            });
             continue;
         }
-        match copy_entry(&from, &to) {
-            Ok(()) => {
-                println!("  imported {stem}");
-                taken += 1;
-            }
-            Err(e) => println!("  skipped  {stem} — {e:#}"),
-        }
+        considered.push(match copy_entry(&from, &to) {
+            Ok(()) => report::Considered {
+                name: stem,
+                verdict: report::Verdict::Took,
+                detail: String::new(),
+            },
+            Err(e) => report::Considered {
+                name: stem,
+                verdict: report::Verdict::Skipped,
+                detail: format!("{e:#}"),
+            },
+        });
     }
-    if taken == 0 {
-        println!("  nothing new");
-    }
+
+    ctx.say(&report::Imported {
+        what: format!("{harness} {cap}"),
+        source: source.display().to_string(),
+        considered,
+        noun: cap.to_string(),
+        dry_run: false,
+        wrote: None,
+        selected_in: Vec::new(),
+    });
     Ok(())
 }
 
@@ -2284,6 +2503,7 @@ fn import_hooks(
     adapter: &Adapter,
     binding: &adapter::Binding,
     source: &std::path::Path,
+    ctx: &out::Ctx,
 ) -> Result<()> {
     let harness = &adapter.name;
     let raw =
@@ -2305,7 +2525,7 @@ fn import_hooks(
         .unwrap_or_default();
     let dir = paths.repo.join(".omh/hooks");
 
-    println!("importing {harness} hooks from {}", source.display());
+    let mut considered = Vec::new();
     let mut written = Vec::new();
     for (name, hook) in &found {
         // A name omh's manifest owns is not a hook that would be shadowed —
@@ -2313,23 +2533,36 @@ fn import_hooks(
         // down rather than just this hook. Refused here, where the person can
         // still see why.
         if reserved.contains(name) {
-            println!("  skipped  {name} — omh ships a hook by that name");
+            considered.push(report::Considered {
+                name: name.clone(),
+                verdict: report::Verdict::Skipped,
+                detail: "omh ships a hook by that name".into(),
+            });
             continue;
         }
         let path = dir.join(format!("{name}.json"));
         if path.exists() {
-            println!("  kept     {name} — already here, left as it is");
+            considered.push(report::Considered {
+                name: name.clone(),
+                verdict: report::Verdict::Kept,
+                detail: "already here, left as it is".into(),
+            });
             continue;
         }
         std::fs::create_dir_all(&dir)?;
         std::fs::write(&path, format!("{}\n", serde_json::to_string_pretty(hook)?))?;
-        println!("  imported {name} — {}", hook.does());
+        considered.push(report::Considered {
+            name: name.clone(),
+            verdict: report::Verdict::Took,
+            detail: hook.does().to_string(),
+        });
         written.push(name.clone());
     }
 
     // Selected, or they land dead. This is the failure the whole feature is
     // most likely to have: files on disk, a report saying six, and a launch
     // that ships none of them because `[use]` never named them.
+    let mut selected_in = Vec::new();
     if !written.is_empty() && repo_has_selection(paths)? {
         let (cap, mut names, _) = current_list(paths, "hooks", &written[0])?;
         names.extend(written.iter().cloned());
@@ -2337,7 +2570,7 @@ fn import_hooks(
         names.dedup();
         let lists = std::collections::BTreeMap::from([(cap, names)]);
         for w in write_lists(paths, &lists)? {
-            println!("  selected in {}", w.path.display());
+            selected_in.push(w.path.display().to_string());
         }
     }
 
@@ -2346,11 +2579,22 @@ fn import_hooks(
     // honest outcome — but somebody who was not told would think omh had taken
     // everything.
     for d in &residue {
-        println!("  left     {} — {}", d.name, d.wanted);
+        considered.push(report::Considered {
+            name: d.name.clone(),
+            verdict: report::Verdict::Left,
+            detail: d.wanted.clone(),
+        });
     }
-    if found.is_empty() && residue.is_empty() {
-        println!("  nothing to import");
-    }
+
+    ctx.say(&report::Imported {
+        what: format!("{harness} hooks"),
+        source: source.display().to_string(),
+        considered,
+        noun: "hooks".into(),
+        dry_run: false,
+        wrote: None,
+        selected_in,
+    });
     Ok(())
 }
 
@@ -2480,37 +2724,32 @@ fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String
 /// Deliberately not the resolved three-layer merge any more — that question is
 /// "what is effective *here*", and it moved to `omh repo` with the rest of the
 /// repo-scoped reporting. This command narrows to mean **you**.
-fn show_config(cwd: &std::path::Path) -> Result<()> {
+fn show_config(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let profile = Profile::resolve(&paths);
 
-    println!(
-        "your defaults  {}",
-        config::Layer::Personal.file(&paths).display()
-    );
-    let yours: Vec<config::Setting> = config::policy(&paths)?
-        .into_iter()
-        .filter(|s| s.layer == config::Layer::Personal)
-        .collect();
-    if yours.is_empty() {
-        println!("  (nothing set)");
-    }
-    for s in yours {
-        println!("  {:<16} {}", s.key, s.value);
+    let mut catalogue = Vec::new();
+    for cap in adapter::Capability::ALL {
+        catalogue.push(report::Catalogue {
+            capability: cap.to_string(),
+            entries: profile.entries(cap)?,
+        });
     }
 
-    println!("\nyour catalogue  {}", paths.root.display());
-    for cap in adapter::Capability::ALL {
-        let entries = profile.entries(cap)?;
-        // The count as well as the names: a catalogue is a thing that grows,
-        // and "12" is the number the unselected report will be talking about.
-        println!(
-            "  {:<11} {:>2}  {}",
-            cap.to_string(),
-            entries.len(),
-            entries.join(", ")
-        );
-    }
+    ctx.say(&report::Config {
+        defaults_file: config::Layer::Personal.file(&paths).display().to_string(),
+        settings: config::policy(&paths)?
+            .into_iter()
+            .filter(|s| s.layer == config::Layer::Personal)
+            .map(|s| report::Setting {
+                key: s.key,
+                value: s.value,
+                whose: None,
+            })
+            .collect(),
+        catalogue_dir: paths.root.display().to_string(),
+        catalogue,
+    });
     Ok(())
 }
 
@@ -2520,92 +2759,71 @@ fn show_config(cwd: &std::path::Path) -> Result<()> {
 /// curated list the useful question stops being "what is this set to" and
 /// becomes "why is this skill not here", and that needs the selection, the
 /// features and the settings in one place.
-fn show_repo(cwd: &std::path::Path) -> Result<()> {
+fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let profile = Profile::resolve(&paths);
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let policy = settings::resolve(&paths, &manifest)?;
 
-    println!("this repo  {}", paths.repo.join(".omh").display());
+    let settings = config::policy(&paths)?
+        .into_iter()
+        .map(|s| report::Effective {
+            key: s.key,
+            value: s.value,
+            layer: s.layer.to_string(),
+            shadows: s.shadows.iter().map(|l| l.to_string()).collect(),
+        })
+        .collect();
 
-    println!("\nsettings");
-    let settings = config::policy(&paths)?;
-    if settings.is_empty() {
-        println!("  (nothing set)");
-    }
-    for s in settings {
-        // Provenance is the point: a three-layer merge you cannot trace is
-        // worse than no layering at all.
-        let shadowed = if s.shadows.is_empty() {
-            String::new()
-        } else {
-            let names: Vec<_> = s.shadows.iter().map(|l| l.to_string()).collect();
-            format!(" (overrides {})", names.join(", "))
-        };
-        println!("  {:<16} {:<24} ← {}{shadowed}", s.key, s.value, s.layer);
-    }
-
-    println!("\nomh's features");
-    let mut features: Vec<&str> = manifest
+    let mut names: Vec<&str> = manifest
         .entries
         .iter()
         .map(|e| e.feature.as_str())
         .collect();
-    features.sort();
-    features.dedup();
-    for feature in features {
-        let state = if policy.off.contains(feature) {
-            "off here"
-        } else {
-            "on"
-        };
-        println!("  {feature:<16} {state}");
-    }
+    names.sort();
+    names.dedup();
+    let features = names
+        .into_iter()
+        .map(|feature| report::Feature {
+            name: feature.to_string(),
+            on: !policy.off.contains(feature),
+        })
+        .collect();
 
-    println!("\nusing");
+    let mut using = Vec::new();
     for cap in adapter::Capability::ALL {
         let entries = profile.entries(cap)?;
         let unselected = policy.selection.unselected(cap, &entries);
-        // "everything" rather than a list identical to the catalogue's, because
-        // the two are different states: one follows the catalogue as it grows
-        // and the other is a list that happens to be complete today.
+        // `None` rather than a list identical to the catalogue's, because the
+        // two are different states: one follows the catalogue as it grows and
+        // the other is a list that happens to be complete today.
         //
-        // Printed in the **declared** order, not `entries`' alphabetical one.
-        // For `rules` that order is the whole feature — this page's own docs say
+        // Kept in the **declared** order, not `entries`' alphabetical one. For
+        // `rules` that order is the whole feature — this page's own docs say
         // "the list is the order" — and building the line from the sorted
         // catalogue made `omh repo` the one place that contradicted it. Filtered
         // by what the catalogue actually holds, so a name nothing answers to is
         // reported as missing rather than listed as used.
-        let summary = match policy.selection.order(cap) {
-            None => "everything".to_string(),
-            Some(order) => {
-                let taken: Vec<&str> = order
+        using.push(report::Using {
+            capability: cap.to_string(),
+            selected: policy.selection.order(cap).map(|order| {
+                order
                     .iter()
                     .filter(|n| entries.iter().any(|e| e == *n))
-                    .map(String::as_str)
-                    .collect();
-                if taken.is_empty() {
-                    "nothing".to_string()
-                } else {
-                    taken.join(", ")
-                }
-            }
-        };
-        let note = if unselected.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "   ({} not selected: {})",
-                unselected.len(),
-                unselected.join(", ")
-            )
-        };
-        println!("  {:<11} {summary}{note}", cap.to_string());
+                    .cloned()
+                    .collect()
+            }),
+            unselected,
+        });
     }
 
-    for line in notice::selection(&profile, &policy.selection, &catalogue_lists(&paths)?)? {
-        println!("\n{line}");
-    }
+    ctx.say(&report::Repo {
+        dir: paths.repo.join(".omh").display().to_string(),
+        settings,
+        features,
+        using,
+        notices: notice::selection(&profile, &policy.selection, &catalogue_lists(&paths)?)?,
+    });
     Ok(())
 }
 
@@ -2615,7 +2833,7 @@ fn show_repo(cwd: &std::path::Path) -> Result<()> {
 /// retyping, so a hard error would cost more than it protects. What it must not
 /// do is keep working silently — a flag that outlives its documentation is how
 /// people learn a command by copying a form that is about to stop existing.
-fn layer_or(named: Option<config::Layer>, default: config::Layer) -> config::Layer {
+fn layer_or(named: Option<config::Layer>, default: config::Layer, ctx: &out::Ctx) -> config::Layer {
     let Some(layer) = named else {
         return default;
     };
@@ -2624,10 +2842,10 @@ fn layer_or(named: Option<config::Layer>, default: config::Layer) -> config::Lay
         config::Layer::Shared => "omh repo set --shared",
         config::Layer::Local => "omh repo set",
     };
-    eprintln!(
-        "omh: --layer {layer} is going away — that is `{replacement}` now. \
+    ctx.warn(&format!(
+        "--layer {layer} is going away — that is `{replacement}` now. \
          Two scopes, two commands: `omh config` is you, `omh repo` is this checkout."
-    );
+    ));
     layer
 }
 
@@ -2643,27 +2861,60 @@ fn repo_layer(shared: bool) -> config::Layer {
     }
 }
 
-fn set(cwd: &std::path::Path, key: &str, value: &str, layer: config::Layer) -> Result<()> {
+fn set(
+    cwd: &std::path::Path,
+    key: &str,
+    value: &str,
+    layer: config::Layer,
+    ctx: &out::Ctx,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let w = config::set(&paths, key, value, layer)?;
-    println!("wrote → {}", w.path.display());
+    ctx.say(
+        &report::Action::new("setting-written", format!("wrote → {}", w.path.display())).data(
+            serde_json::json!({
+                "key": key,
+                "value": value,
+                "layer": w.layer.to_string(),
+                "committed": w.committed,
+                "path": w.path.display().to_string(),
+            }),
+        ),
+    );
+    // The one mistake git makes unrecoverable. On stderr through `warn`, so it
+    // survives `omh config set … > log` — which is exactly the invocation a
+    // script that is about to commit a secret would use.
     if w.committed {
-        // The one mistake git makes unrecoverable.
-        println!(
-            "warning: the {} layer is COMMITTED — never put a secret here",
+        ctx.warn(&format!(
+            "the {} layer is COMMITTED — never put a secret here",
             w.layer
-        );
+        ));
     }
     Ok(())
 }
 
-fn unset(cwd: &std::path::Path, key: &str, layer: config::Layer) -> Result<()> {
+fn unset(cwd: &std::path::Path, key: &str, layer: config::Layer, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    if config::unset(&paths, key, layer)? {
-        println!("removed {key} from the {layer} layer");
-    } else {
-        println!("{key} was not set in the {layer} layer");
-    }
+    let removed = config::unset(&paths, key, layer)?;
+    ctx.say(
+        &report::Action::new(
+            if removed {
+                "setting-removed"
+            } else {
+                "setting-absent"
+            },
+            if removed {
+                format!("removed {key} from the {layer} layer")
+            } else {
+                format!("{key} was not set in the {layer} layer")
+            },
+        )
+        .data(serde_json::json!({
+            "key": key,
+            "layer": layer.to_string(),
+            "removed": removed,
+        })),
+    );
     Ok(())
 }
 
@@ -2732,7 +2983,7 @@ fn capability_list() -> String {
 /// the file's structure rather than flatten it: if `omh repo disable` took a
 /// skill name, the difference between *an entry you chose* and *a feature omh
 /// ships* would exist only in the docs.
-fn feature_switch(cwd: &std::path::Path, feature: &str, on: bool) -> Result<()> {
+fn feature_switch(cwd: &std::path::Path, feature: &str, on: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let features: std::collections::BTreeSet<&str> = manifest
@@ -2763,14 +3014,23 @@ fn feature_switch(cwd: &std::path::Path, feature: &str, on: bool) -> Result<()> 
     // the switch reports a change the layer beneath it overrules.
     for layer in config::declaring(&paths, config::OMH, feature)? {
         let w = config::write_feature(&paths, layer, feature, on)?;
-        println!(
-            "{feature} is {} here — wrote → {}",
-            if on { "on" } else { "off" },
-            w.path.display()
-        );
-    }
-    if !on {
-        println!("nothing was uninstalled; the next repo gets it back");
+        let mut action = report::Action::new(
+            if on { "feature-on" } else { "feature-off" },
+            format!(
+                "{feature} is {} here — wrote → {}",
+                if on { "on" } else { "off" },
+                w.path.display()
+            ),
+        )
+        .data(serde_json::json!({
+            "feature": feature,
+            "on": on,
+            "path": w.path.display().to_string(),
+        }));
+        if !on {
+            action = action.note("nothing was uninstalled; the next repo gets it back");
+        }
+        ctx.say(&action);
     }
     Ok(())
 }
@@ -2781,9 +3041,9 @@ fn feature_switch(cwd: &std::path::Path, feature: &str, on: bool) -> Result<()> 
 /// `doctor` compose the same document, and a fallback announced on one path in
 /// three is the same silence the notice exists to break. Only when there is
 /// something to say — a line printed every launch is a line nobody reads.
-fn say_rules(plan: &container::Plan) {
+fn say_rules(plan: &container::Plan, ctx: &out::Ctx) {
     for notice in plan.rules.notices() {
-        eprintln!("omh: {notice}");
+        ctx.warn(&notice.to_string());
     }
 }
 
@@ -2798,7 +3058,7 @@ fn say_rules(plan: &container::Plan) {
 /// Never fatal. A repo whose hook drift cannot be computed is still a repo you
 /// can work in; and an unreadable hooks directory stops the launch anyway, in
 /// `render::merge_hooks`, which is where it should.
-fn say_hooks(paths: &Paths) -> Option<notice::Record> {
+fn say_hooks(paths: &Paths, ctx: &out::Ctx) -> Option<notice::Record> {
     // An unreadable stacks directory is the same class of non-fatal as the rest
     // of this function: it costs the drift report, not the session. Reported
     // and withdrawn, never defaulted to empty — `notice::hooks` reads "no
@@ -2808,9 +3068,9 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
     let defs = match stack::load_all(&paths.stacks(), &paths.repo_stacks()) {
         Ok(defs) => defs,
         Err(e) => {
-            eprintln!(
-                "omh: could not read your stacks, so this repo's hooks went unchecked — {e:#}"
-            );
+            ctx.warn(&format!(
+                "could not read your stacks, so this repo's hooks went unchecked — {e:#}"
+            ));
             return None;
         }
     };
@@ -2824,14 +3084,16 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
     let dirs = match Profile::resolve(paths).sources(adapter::Capability::Hooks) {
         Ok(dirs) => dirs,
         Err(e) => {
-            eprintln!("omh: could not read your hooks — {e:#}");
+            ctx.warn(&format!("could not read your hooks — {e:#}"));
             return None;
         }
     };
     let declared = match render::declared_stacks(&dirs) {
         Ok(declared) => declared,
         Err(e) => {
-            eprintln!("omh: could not read your hooks, so drift went unchecked — {e:#}");
+            ctx.warn(&format!(
+                "could not read your hooks, so drift went unchecked — {e:#}"
+            ));
             return None;
         }
     };
@@ -2839,12 +3101,12 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
     match notice::hooks(paths, &detected, &declared) {
         Ok((notices, record)) => {
             for notice in notices {
-                eprintln!("omh: {notice}");
+                ctx.warn(&notice.to_string());
             }
             Some(record)
         }
         Err(e) => {
-            eprintln!("omh: could not check this repo's hooks — {e:#}");
+            ctx.warn(&format!("could not check this repo's hooks — {e:#}"));
             None
         }
     }
@@ -2863,24 +3125,24 @@ fn say_hooks(paths: &Paths) -> Option<notice::Record> {
 /// including a dry run, never fatal. A selection omh cannot compute is not a
 /// reason to refuse a session — and it cannot be one, because the report exists
 /// to cover a silence rather than to guard anything.
-fn say_selection(paths: &Paths, profile: &Profile, repo: &settings::RepoPolicy) {
+fn say_selection(paths: &Paths, profile: &Profile, repo: &settings::RepoPolicy, ctx: &out::Ctx) {
     // Resolved here rather than inside `notice`: which ecosystems this repo is
     // takes the stack definitions and the checkout, and a report module that
     // read those would be deciding what it is meant to describe.
     let applicable = match catalogue_lists(paths) {
         Ok(lists) => lists,
         Err(e) => {
-            eprintln!("omh: could not check what this repo uses — {e:#}");
+            ctx.warn(&format!("could not check what this repo uses — {e:#}"));
             return;
         }
     };
     match notice::selection(profile, &repo.selection, &applicable) {
         Ok(notices) => {
             for notice in notices {
-                eprintln!("omh: {notice}");
+                ctx.warn(&notice.to_string());
             }
         }
-        Err(e) => eprintln!("omh: could not check what this repo uses — {e:#}"),
+        Err(e) => ctx.warn(&format!("could not check what this repo uses — {e:#}")),
     }
 }
 
@@ -2892,13 +3154,13 @@ fn say_selection(paths: &Paths, profile: &Profile, repo: &settings::RepoPolicy) 
 /// build — spent the one notification about somebody else's executable content
 /// changing under you, and the retry was silent. A dry run never gets here at
 /// all, which is the other half of the same rule.
-fn remember_hooks(record: Option<notice::Record>) {
+fn remember_hooks(record: Option<notice::Record>, ctx: &out::Ctx) {
     if let Some(record) = record {
         if let Err(e) = record.commit() {
             // The check succeeded and its notices are already printed; only the
             // bookkeeping failed. Saying "could not check" would send the user
             // looking at their hooks instead of at `~/.omh/run`.
-            eprintln!("omh: this repo's hooks were not recorded — {e:#}");
+            ctx.warn(&format!("this repo's hooks were not recorded — {e:#}"));
         }
     }
 }
@@ -2906,7 +3168,7 @@ fn remember_hooks(record: Option<notice::Record>) {
 /// Copy the checkout's untracked essentials into a worktree, and say what
 /// happened — a `.env` you thought you were carrying and are not is exactly the
 /// failure that wastes an hour inside the sandbox.
-fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
+fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
     // The rules themselves are mounted, not written here — this covers the
     // empty placeholder each mount lands on, and any backend that cannot mount
     // a single file. It must run before `plan` places those placeholders.
@@ -2918,29 +3180,29 @@ fn carry_in(paths: &Paths, session: &Session) -> Result<()> {
     }
     for item in carry::apply(&paths.repo, &session.worktree, &patterns)? {
         match item.action {
-            carry::Action::Copied => eprintln!("omh: carried {}", item.path),
-            carry::Action::Refreshed => eprintln!("omh: refreshed {}", item.path),
+            // What was carried is progress, not a warning: it is the launcher
+            // saying what it did, and it happens on every normal launch.
+            carry::Action::Copied => ctx.progress(&format!("carried {}", item.path)),
+            carry::Action::Refreshed => ctx.progress(&format!("refreshed {}", item.path)),
             // The mistake, named where it is made rather than three commands
             // later at `s commit`. `carry_in` is for what a worktree does not
             // get; a tracked file is already on the branch.
-            carry::Action::AlreadyTracked => eprintln!(
-                "omh: warning: carry_in lists {} — git already tracks it, so the worktree\n\
-                 \x20 has it already. Not carried; drop it with `omh repo set carry_in`.",
+            carry::Action::AlreadyTracked => ctx.warn(&format!(
+                "carry_in lists {} — git already tracks it, so the worktree has it \
+                 already. Not carried; drop it with `omh repo set carry_in`.",
                 item.path
-            ),
-            carry::Action::Missing => {
-                eprintln!(
-                    "omh: warning: carry_in lists {} — not in this checkout",
-                    item.path
-                )
-            }
+            )),
+            carry::Action::Missing => ctx.warn(&format!(
+                "carry_in lists {} — not in this checkout",
+                item.path
+            )),
             carry::Action::Unchanged => {}
         }
     }
     Ok(())
 }
 
-fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
+fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let name = &argv[0];
 
@@ -2989,6 +3251,7 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
                 &profile.sources(adapter::Capability::Hooks)?,
                 &own,
                 &repo,
+                ctx,
             )?;
         }
     }
@@ -3022,10 +3285,10 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;
-        carry_in(&paths, &session)?;
+        carry_in(&paths, &session, ctx)?;
         // Reap before starting another container, and record that this one is
         // in use so it is not reaped by the next launch.
-        reap_idle(&paths, &session.id);
+        reap_idle(&paths, &session.id, ctx);
         let _ = idle::touch(&paths.runs(), &session.id);
     }
 
@@ -3041,23 +3304,26 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     plan.validate(&backend.caps())?;
 
-    say_rules(&plan);
-    say_selection(&paths, &profile, &opts.repo);
-    let hooks_seen = say_hooks(&paths);
+    say_rules(&plan, ctx);
+    say_selection(&paths, &profile, &opts.repo, ctx);
+    let hooks_seen = say_hooks(&paths, ctx);
 
+    // Without the `omh: ` prefix, which `Ctx` now owns: the launch line is a
+    // diagnostic and goes through the same voice as every other one, so it
+    // paints and prefixes the same way.
     let status_line = match plan.degradation() {
-        Some(d) => format!("omh: {} on {} — {d}", adapter.name, session.label()),
-        None => format!("omh: {} on {}", adapter.name, session.label()),
+        Some(d) => format!("{} on {} — {d}", adapter.name, session.label()),
+        None => format!("{} on {}", adapter.name, session.label()),
     };
 
     if cli.dry_run {
-        println!("{status_line}");
-        println!("worktree {}", session.worktree.display());
-        println!(
-            "\n{} {}",
-            backend.program(),
-            backend.args(&plan).join(" \\\n       ")
-        );
+        ctx.say(&report::DryRun {
+            status: status_line,
+            worktree: session.worktree.display().to_string(),
+            argv: std::iter::once(backend.program().to_string())
+                .chain(backend.args(&plan))
+                .collect(),
+        });
         return Ok(());
     }
 
@@ -3080,14 +3346,15 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli) -> Result<()> {
             ..opts.clone()
         },
         &sandbox.recipe(),
+        ctx,
     )?;
     // The container is up, so the launch happened and the call-out is spent.
-    remember_hooks(hooks_seen);
-    eprintln!("{status_line}");
+    remember_hooks(hooks_seen, ctx);
+    ctx.announce(&status_line);
     let status = Command::new(backend.program())
         .args(backend.exec_args(&name, &plan.argv, true))
         .status()?;
-    eprintln!("\nomh: review with  omh diff {}", session.id);
+    ctx.hint(&format!("\nreview with  omh diff {}", session.id));
     std::process::exit(status.code().unwrap_or(1));
 }
 
@@ -3117,7 +3384,7 @@ fn resolved(paths: &Paths) -> Result<(base::Own, settings::RepoPolicy)> {
 /// Needs no container and no session: it is a pure function of the manifest and
 /// the resolved profile, which is why it can answer even for something you have
 /// removed.
-fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
+fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
 
@@ -3181,43 +3448,47 @@ fn why_cmd(cwd: &std::path::Path, thing: &str) -> Result<()> {
         installed,
         derived,
     };
-    print!(
-        "{}",
-        why::render_with_source(&catalog, &catalog.why(thing), &version, &source)
-    );
+    ctx.say(&report::Why {
+        thing: thing.to_string(),
+        text: why::render_with_source(&catalog, &catalog.why(thing), &version, &source),
+    });
     Ok(())
 }
 
-fn init(cwd: &std::path::Path) -> Result<()> {
+fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // Fail fast. Everything below is wasted work outside a repo.
     let paths = Paths::discover(cwd)?;
 
+    // Filled in as the run goes and reported once at the end. See
+    // `report::Init` for why this is not printed as it happens.
+    let mut summary = report::Init::default();
+
     // A fresh install has no adapters, so `omh <harness>` would fail no matter
     // what else init did. Ship them before anything else.
-    let adapters = install_bundled_adapters(&paths)?;
-    let editors = install_bundled(&paths.editors(), bundled::Shipped::Editors)?;
+    let adapters = install_bundled_adapters(&paths, ctx)?;
+    let editors = install_bundled(&paths.editors(), bundled::Shipped::Editors, ctx)?;
     // The base set ships as data next to the adapters, for the same reason: the
     // opinion should be reviewable by the people it is imposed on. It travels
     // *inside* the binary now — otherwise a released omh installs nothing — but
     // it still lands as a file in `~/.omh/base`, which is where the
     // reviewability actually lives. `omh why` reads the file init seeds from.
-    install_bundled(&paths.base(), bundled::Shipped::Base)?;
+    install_bundled(&paths.base(), bundled::Shipped::Base, ctx)?;
     // The stacks, for the same reason and by the same route: what a project
     // needs installed is omh's opinion, and an opinion imposed on somebody
     // should be one they can read. Managed, so a shipped fix always lands.
-    install_bundled(&paths.stacks(), bundled::Shipped::Stacks)?;
+    install_bundled(&paths.stacks(), bundled::Shipped::Stacks, ctx)?;
     // And the conventional hooks, which used to be a `match` in Rust written
     // into every repo as two files. As catalogue data they are one body per
     // ecosystem instead of one per checkout, so a fix reaches everybody; a repo
     // needing its own spelling shadows the name, which is the rule hooks
     // already had. Each names the stack it belongs to and nothing else about
     // it — the marker stays in `stacks/`, so the two cannot drift.
-    install_bundled(&paths.hooks(), bundled::Shipped::Hooks)?;
+    install_bundled(&paths.hooks(), bundled::Shipped::Hooks, ctx)?;
     // And the markers: ecosystems omh can recognise and cannot yet set up.
     // Data rather than a `match` for the same reason the stacks are — a marker
     // is removed by the same release that ships its stack, and the curation
     // test refuses the pair being true at once.
-    install_bundled(&paths.markers(), bundled::Shipped::Markers)?;
+    install_bundled(&paths.markers(), bundled::Shipped::Markers, ctx)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     std::fs::create_dir_all(paths.worktrees())?;
 
@@ -3344,7 +3615,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     let has_test = covered.iter().any(|s| stacks.iter().any(|d| &d.name == s))
         || derived.iter().any(|d| d.hook.on == hook::Event::TurnEnd)
         || repo_omh.join("hooks").join("test.json").exists();
-    let (asked, answered) = questions(&repo_omh, &unclaimed, has_test)?;
+    let (asked, answered) = questions(&repo_omh, &unclaimed, has_test, ctx)?;
 
     // **Reloaded, because an answer is a stack file.** `how_is_it_installed`
     // writes `<repo>/.omh/stacks/<name>.toml`, and everything below — the
@@ -3426,14 +3697,16 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         // until this exists — and until it exists there is no sandbox to ask
         // about a toolchain.
         if image::exists(backend.program(), &image::tag_for(&adapter)) {
-            println!("  image      {} (already built)", image::tag_for(&adapter));
+            summary.image = Some(format!("{} (already built)", image::tag_for(&adapter)));
         } else {
-            println!(
-                "\n  building {} — first run only\n",
+            // Progress, not report: this is the minutes-long step, and
+            // somebody watching a blank terminal needs to know it is alive.
+            ctx.progress(&format!(
+                "building {} — first run only…",
                 image::tag_for(&adapter)
-            );
+            ));
             image::ensure(backend.program(), &adapter)?;
-            println!("\n  image      {}", image::tag_for(&adapter));
+            summary.image = Some(image::tag_for(&adapter));
         }
 
         // Which provides apply here. Evaluated **in the sandbox**, with the repo
@@ -3473,12 +3746,12 @@ fn init(cwd: &std::path::Path) -> Result<()> {
                     // its summary with nothing said. The `Err` arm's own
                     // comment forbids exactly that.
                     Ok(out) if !out.status.success() => {
-                        println!(
-                            "  provision  the sandbox could not be asked ({}) — nothing recorded",
+                        summary.provision_problems.push(format!(
+                            "the sandbox could not be asked ({}) — nothing recorded",
                             out.status
-                        );
+                        ));
                         for line in String::from_utf8_lossy(&out.stderr).lines().take(3) {
-                            println!("             {line}");
+                            summary.provision_problems.push(line.to_string());
                         }
                         Vec::new()
                     }
@@ -3488,7 +3761,9 @@ fn init(cwd: &std::path::Path) -> Result<()> {
                         // repo up, and failing that over a diagnostic would be
                         // the tail wagging the dog — but saying nothing would
                         // let somebody believe the sandbox had been checked.
-                        println!("  provision  could not ask the sandbox ({e}) — nothing recorded");
+                        summary.provision_problems.push(format!(
+                            "could not ask the sandbox ({e}) — nothing recorded"
+                        ));
                         Vec::new()
                     }
                 }
@@ -3496,11 +3771,11 @@ fn init(cwd: &std::path::Path) -> Result<()> {
 
             for a in answered.iter().filter(|a| !a.ok) {
                 if let stack::Verdict::CouldNotAnswer(code) = stack::verdict(a) {
-                    println!(
-                        "  provision  {}'s condition could not answer{} — not applied",
+                    summary.provision_problems.push(format!(
+                        "{}'s condition could not answer{} — not applied",
                         a.name,
                         code.map(|c| format!(" (exit {c})")).unwrap_or_default()
-                    );
+                    ));
                 }
             }
 
@@ -3510,7 +3785,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
             if let Some(fired) = fired_from(candidates.len(), &answered) {
                 let recorded = record_resolution(&paths, &fired)?;
                 for key in recorded.iter().filter(|(_, on)| **on).map(|(k, _)| k) {
-                    println!("  provision  {key}");
+                    summary.provisioned.push(key.clone());
                 }
 
                 // The stack layer, through the same function every launch
@@ -3525,7 +3800,7 @@ fn init(cwd: &std::path::Path) -> Result<()> {
                 let sandbox = sandbox(&paths, &adapter, &repo)?;
                 image::ensure_stack(backend.program(), &adapter, &sandbox.recipe())?;
                 if sandbox.tag != image::tag_for(&adapter) {
-                    println!("  image      {} (this repo's toolchain)", sandbox.tag);
+                    summary.stack_image = Some(sandbox.tag.clone());
                 }
 
                 // And what that image turned out to contain, measured once and
@@ -3540,10 +3815,20 @@ fn init(cwd: &std::path::Path) -> Result<()> {
                 // is a different question about the same fact.
                 let hook_dirs = Profile::resolve(&paths).sources(adapter::Capability::Hooks)?;
                 let mut sandbox = sandbox;
-                sandbox.top_up(&paths, backend.program(), &adapter, &hook_dirs, &own, &repo)?;
+                sandbox.top_up(
+                    &paths,
+                    backend.program(),
+                    &adapter,
+                    &hook_dirs,
+                    &own,
+                    &repo,
+                    ctx,
+                )?;
                 for name in &sandbox.owed {
                     if sandbox.resolves.get(name) == Some(&false) {
-                        println!("  provision  {name} did not resolve after installing");
+                        summary
+                            .provision_problems
+                            .push(format!("{name} did not resolve after installing"));
                     }
                 }
 
@@ -3579,38 +3864,15 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // Counted from what was actually *put*, not from what was answered — a
     // question declined was still a question asked, and claiming otherwise
     // would let omh interrogate somebody and then deny it.
-    match asked {
-        0 => println!("omh init — decided, asked nothing\n"),
-        1 => println!("omh init — decided all but one question\n"),
-        n => println!("omh init — decided the rest; asked {n} questions\n"),
-    }
-    println!("  harnesses  {} ({})", adapters.len(), adapters.join(", "));
-    println!("  editors    {} ({})", editors.len(), editors.join(", "));
-    match &harness {
-        Some(h) => println!(
-            "  harness    {h}{}",
-            if runtime::installed(h) {
-                "  (found on your host)"
-            } else {
-                "  (default; nothing detected on host)"
-            }
-        ),
-        None => println!("  harness    none — no adapters available"),
-    }
-    if stacks.is_empty() {
-        println!(
-            "  stack      none detected — write your test and format hooks into \
-             .omh/hooks/"
-        );
-    } else {
-        for s in &stacks {
-            // The marker and nothing else. What a stack 's hooks run is the
-            // hooks' business now, and the selection line below names those —
-            // repeating a command here would be a second copy free to disagree
-            // with the file that actually holds it.
-            println!("  stack      {} (from {})", s.name, s.marker);
-        }
-    }
+    summary.asked = asked;
+    summary.adapters = adapters.clone();
+    summary.editors = editors.clone();
+    summary.harness_on_host = harness.as_deref().is_some_and(runtime::installed);
+    summary.harness = harness.clone();
+    summary.stacks = stacks
+        .iter()
+        .map(|s| (s.name.clone(), s.marker.clone()))
+        .collect();
     // Named, with the evidence, because the alternative is the failure this
     // whole design replaces: a hook that runs on turn one and reports
     // `cargo: not found`, saying nothing about who decided to run cargo or
@@ -3625,46 +3887,31 @@ fn init(cwd: &std::path::Path) -> Result<()> {
     // statement about itself and it is committed; whether a program exists is
     // a fact about one image, and it decides what runs here, never what the
     // repo contains.
-    for d in &held_back {
-        println!(
-            "  held back  `{}` needs {}\n             \
-             the hook file is written and travels; it runs as soon as the \
-             sandbox has it",
-            d.name, d.wanted
-        );
-    }
+    summary.held_back = held_back
+        .iter()
+        .map(|d| (d.name.clone(), d.wanted.clone()))
+        .collect();
 
     // Hooks somebody already has, somewhere omh can see them. **Noticed, never
     // acted on**: importing writes executable content into the repo, and doing
     // that because `init` happened to find a file is not a decision omh gets to
     // make on somebody's behalf. It says what is there and what would bring it
     // across.
-    for line in importable(&paths, &adapters) {
-        println!("  {line}");
-    }
+    summary.importable = importable(&paths, &adapters);
 
     // What the repo already documents becomes notes that *point* at it.
     // Printing the seeds instead would derive them every run, show them once,
     // and keep them nowhere.
-    match seed_store(&paths) {
-        Ok(report) => println!("  memory     {report}"),
+    summary.memory = match seed_store(&paths) {
+        Ok(report) => report,
         // Never fatal. A repo that cannot be ingested is still a repo omh set
         // up, and failing `init` over the note store would be the tail
         // wagging the dog.
-        Err(e) => println!("  memory     not seeded: {e:#}"),
-    }
+        Err(e) => format!("not seeded: {e:#}"),
+    };
 
-    // Derive, then confirm: a hypothesis worth correcting is not a questionnaire.
-    if stacks.len() > 1 {
-        println!(
-            "\n  ! {} stacks detected; hooks were written for every command the \
-             sandbox can run.\n    drop the ones you do not want: .omh/hooks/",
-            stacks.len()
-        );
-    }
-
-    println!("\n  catalogue  {}", paths.root.display());
-    println!("  this repo  {}  (committed)", repo_omh.display());
+    summary.catalogue_dir = paths.root.display().to_string();
+    summary.repo_dir = repo_omh.display().to_string();
     // The index lives in a container volume, so it has to be built inside the
     // sandbox — one built on the host would land where no session can read it.
     if let Some(h) = &harness {
@@ -3684,30 +3931,29 @@ fn init(cwd: &std::path::Path) -> Result<()> {
         {
             // Backgrounded: init returns now and the first launch waits only if
             // this has not finished.
-            Ok(_) => println!(
-                "  graph      indexing in background → {}",
-                paths.cache_volume()
-            ),
-            Err(e) => println!("  graph      could not start indexing: {e}"),
+            Ok(_) => {
+                summary.graph = Some(format!("indexing in background → {}", paths.cache_volume()))
+            }
+            Err(e) => summary.graph = Some(format!("could not start indexing: {e}")),
         }
     }
 
-    println!("\n  base set  ({})", manifest.version);
-    for (name, why) in manifest.rationale() {
-        println!("    {name:<10} {why}");
-    }
-    // Named here because this is the moment somebody wonders what that is and
-    // why it was installed without being asked.
-    println!("\n  omh why <name>  what it costs, what was considered instead, how to remove it");
-    println!("\nnot yet done: recall, cost accounting.");
-    println!("next: omh {}", harness.as_deref().unwrap_or("config"));
+    summary.base_set = manifest.version.to_string();
+    summary.rationale = manifest
+        .rationale()
+        .into_iter()
+        .map(|(name, why)| (name.to_string(), why.to_string()))
+        .collect();
+    summary.next_command = harness.as_deref().unwrap_or("config").to_string();
+
+    ctx.say(&summary);
     Ok(())
 }
 
 /// Adapters ship with omh but live in `~/.omh`. Without this a fresh install
 /// cannot launch anything, which is the state the tool was in until now.
-fn install_bundled_adapters(paths: &Paths) -> Result<Vec<String>> {
-    install_bundled(&paths.adapters(), bundled::Shipped::Adapters)?;
+fn install_bundled_adapters(paths: &Paths, ctx: &out::Ctx) -> Result<Vec<String>> {
+    install_bundled(&paths.adapters(), bundled::Shipped::Adapters, ctx)?;
     Ok(Adapter::load_dir(&paths.adapters())?
         .into_iter()
         .map(|a| a.name)
@@ -3730,6 +3976,7 @@ fn questions(
     repo_omh: &std::path::Path,
     unclaimed: &[&stack::Marker],
     has_test: bool,
+    ctx: &out::Ctx,
 ) -> Result<(usize, Vec<String>)> {
     if unclaimed.is_empty() && has_test {
         return Ok((0, Vec::new()));
@@ -3753,7 +4000,10 @@ fn questions(
             std::fs::create_dir_all(parent)?;
         }
         write_if_absent(&path, &a.body)?;
-        println!("  {}", a.said);
+        // Confirmed as it happens rather than saved for the summary: the user
+        // is sitting at a prompt they just answered, and the answer to "what
+        // did that do" is owed now, not forty lines later.
+        ctx.progress(&a.said);
         // Handed back so `init` can put it in `[use]`. A hook written into a
         // repo whose selection is already curated is one `merge_hooks` drops,
         // so an answered question would produce a file, a report line, and a
@@ -3817,7 +4067,11 @@ fn ask_all(
 /// The contents come from [`bundled`], embedded at compile time. Reading them
 /// from the source tree instead is what made a released binary install nothing
 /// at all — and say nothing, because the `read_dir` error was discarded.
-fn install_bundled(dest: &std::path::Path, kind: bundled::Shipped) -> Result<Vec<String>> {
+fn install_bundled(
+    dest: &std::path::Path,
+    kind: bundled::Shipped,
+    ctx: &out::Ctx,
+) -> Result<Vec<String>> {
     std::fs::create_dir_all(dest)
         .with_context(|| format!("creating {} for the bundled {}", dest.display(), kind.dir()))?;
     for &bundled::File { name, contents } in kind.files() {
@@ -3848,10 +4102,10 @@ fn install_bundled(dest: &std::path::Path, kind: bundled::Shipped) -> Result<Vec
             std::fs::write(&backup, &existing)
                 .with_context(|| format!("saving your {name} as {}", backup.display()))?;
             // stderr: this is a warning about data, and stdout is the report.
-            eprintln!(
-                "  replaced   {} (yours saved as {name}.yours)",
+            ctx.warn(&format!(
+                "replaced {} — yours saved as {name}.yours",
                 target.display()
-            );
+            ));
         }
         std::fs::write(&target, contents)
             .with_context(|| format!("writing {}", target.display()))?;
@@ -4091,6 +4345,7 @@ fn measure(
     paths: &Paths,
     tag: &str,
     wanted: &BTreeSet<String>,
+    ctx: &out::Ctx,
 ) -> Result<BTreeMap<String, bool>> {
     let mut facts = facts::Facts::load(paths);
     let unseen = facts.unseen(tag, wanted);
@@ -4108,7 +4363,7 @@ fn measure(
             Err(e) => Err(format!("could not ask the sandbox what it has ({e})")),
         };
         let outcomes = outcomes.unwrap_or_else(|reason| {
-            eprintln!("omh: {reason}");
+            ctx.warn(&reason);
             Vec::new()
         });
         if !outcomes.is_empty() {
@@ -4121,9 +4376,9 @@ fn measure(
             // degrades to "nobody has looked". `Facts::load` already treats the
             // read side this way and says why.
             if let Err(e) = facts.save(paths) {
-                eprintln!(
-                    "omh: measurements not cached ({e:#}) — the sandbox is asked again next time"
-                );
+                ctx.warn(&format!(
+                    "measurements not cached ({e:#}) — the sandbox is asked again next time"
+                ));
             }
         }
     }
@@ -4184,6 +4439,13 @@ impl Sandbox {
     /// will not start leaves the facts as they were, which reads as *nobody has
     /// looked* and suppresses nothing. The build is **not** swallowed: an image
     /// that will not build is the session, not a diagnostic about it.
+    //
+    // Eight arguments, one over clippy's default. Every one is a distinct
+    // input this cannot derive — the paths, the runtime, the adapter, the hook
+    // directories, both halves of the resolved settings, and where to report.
+    // Bundling them into a struct only to unpack it here would move the list
+    // rather than shorten it.
+    #[allow(clippy::too_many_arguments)]
     fn top_up(
         &mut self,
         paths: &Paths,
@@ -4192,6 +4454,7 @@ impl Sandbox {
         hook_dirs: &[PathBuf],
         own: &base::Own,
         repo: &settings::RepoPolicy,
+        ctx: &out::Ctx,
     ) -> Result<()> {
         let recipe: Vec<String> = self.installs.clone();
         image::ensure_stack(
@@ -4200,7 +4463,7 @@ impl Sandbox {
             &recipe.iter().map(String::as_str).collect::<Vec<_>>(),
         )?;
         let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
-        self.resolves = measure(program, paths, &self.tag, &wanted)?;
+        self.resolves = measure(program, paths, &self.tag, &wanted, ctx)?;
         Ok(())
     }
 }
@@ -4247,7 +4510,7 @@ fn sandbox(paths: &Paths, adapter: &Adapter, repo: &settings::RepoPolicy) -> Res
 /// Run the harness's own login inside a sandbox, with this account's credential
 /// files bind-mounted writable. There is no separate capture step: the login
 /// writes straight through to the host.
-fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
+fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let profile = Profile::resolve(&paths);
     let adapter = Adapter::find(&paths.adapters(), harness)?;
@@ -4305,22 +4568,26 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
     plan.validate(&backend.caps())?;
     image::ensure_network(backend.program(), &plan.network)?;
 
-    println!(
-        "omh auth: logging {harness} in as `{account}`{}",
-        if already { " (re-authenticating)" } else { "" }
-    );
-    println!("  credentials → {}", account_dir.display());
-    if let Some(hint) = &adapter.login {
-        println!("  next        → {hint}");
-    }
-    println!();
+    // Progress, not the report: the login itself is what the user is here for,
+    // and this is the sentence that tells them which window is about to open
+    // and where the token will land. Under `--json` the same facts arrive as
+    // fields on the outcome below.
+    ctx.progress(&format!(
+        "logging {harness} in as `{account}`{} — credentials → {}{}",
+        if already { " (re-authenticating)" } else { "" },
+        account_dir.display(),
+        match &adapter.login {
+            Some(hint) => format!("\nnext → {hint}"),
+            None => String::new(),
+        }
+    ));
     let status = Command::new(backend.program())
         .args(backend.args(&plan))
         .status()?;
     if let Err(e) = session.remove(&paths.repo, "") {
         // A leftover `auth` worktree wins `session::current()` and silently
         // becomes the session the next launch runs in.
-        eprintln!("omh: warning: could not remove the auth worktree: {e}");
+        ctx.warn(&format!("could not remove the auth worktree: {e}"));
     }
 
     // Host paths, not guest ones: the guest path names a container that has
@@ -4338,76 +4605,83 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str) -> Result<()> {
             .collect();
     auth::login_outcome(status.success(), &unfilled)
         .map_err(|e| e.context(format!("run `omh auth {harness} {account}` again")))?;
-    println!("\nomh: `{account}` captured for {harness}");
     let all = auth::accounts(&paths, &adapter);
+    let mut action = report::Action::new(
+        "account-captured",
+        format!("`{account}` captured for {harness}"),
+    )
+    .data(serde_json::json!({
+        "harness": harness,
+        "account": account,
+        "reauthenticated": already,
+        "credentials": account_dir.display().to_string(),
+        "accounts": all,
+    }));
+    // Only once there is a choice to make. With one account the line is a
+    // sentence about a decision nobody has.
     if all.len() > 1 {
-        println!("  accounts: {}", all.join(", "));
-        println!("  choose per project with `omh repo set account <name>`");
+        action = action
+            .note(format!("accounts: {}", all.join(", ")))
+            .next("omh repo set account <name>");
     }
+    ctx.say(&action);
     Ok(())
 }
 
-fn ls(cwd: &std::path::Path) -> Result<()> {
+fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-
-    println!("harnesses:");
-    let adapters = Adapter::load_dir(&paths.adapters())?;
-    if adapters.is_empty() {
-        println!("  (none — add {}/<name>.toml)", paths.adapters().display());
-    }
-    for a in &adapters {
-        let accounts = auth::accounts(&paths, a);
-        let creds = if accounts.is_empty() {
-            "not authed".to_string()
-        } else {
-            accounts.join(", ")
-        };
-        println!("  {:<10} {}", a.name, creds);
-    }
-
-    let editors = editor::Editor::load_dir(&paths.editors())?;
-    if !editors.is_empty() {
-        println!("\neditors:");
-        for e in &editors {
-            let state = if runtime::installed(&e.bin) {
-                "installed"
-            } else {
-                "not installed"
-            };
-            println!("  {:<10} {state}", e.name);
-        }
-    }
-
-    println!("\nsessions:");
-    let sessions = session::list(&paths.worktrees());
-    if sessions.is_empty() {
-        println!("  (none)");
-    }
     let base = session::default_branch(&paths.repo);
-    for id in sessions {
-        let sess = Session::new(&paths.worktrees(), id.clone());
-        let drift = match sess.behind(&paths.repo, &base) {
-            0 => String::new(),
-            n => format!("  ({n} behind {base})"),
-        };
-        println!("  {id:<10} {}{drift}", sess.label());
-    }
+
+    ctx.say(&report::Inventory {
+        harnesses: Adapter::load_dir(&paths.adapters())?
+            .iter()
+            .map(|a| report::Harness {
+                name: a.name.clone(),
+                accounts: auth::accounts(&paths, a),
+            })
+            .collect(),
+        adapters_dir: paths.adapters().display().to_string(),
+        editors: editor::Editor::load_dir(&paths.editors())?
+            .iter()
+            .map(|e| report::Editor {
+                name: e.name.clone(),
+                installed: runtime::installed(&e.bin),
+            })
+            .collect(),
+        sessions: session::list(&paths.worktrees())
+            .into_iter()
+            .map(|id| {
+                let sess = Session::new(&paths.worktrees(), id.clone());
+                report::Session {
+                    label: sess.label().to_string(),
+                    // `omh ls` is the wide view and does not ask git what state
+                    // the work is in; `omh s ls` is the command for that, and
+                    // asking here would cost a subprocess per session for a
+                    // column this listing does not print.
+                    work: report::Work::Clean,
+                    running: false,
+                    behind: sess.behind(&paths.repo, &base),
+                    id,
+                }
+            })
+            .collect(),
+        base,
+    });
     Ok(())
 }
 
-fn diff(cwd: &std::path::Path, id: Option<&str>, base: Option<&str>) -> Result<()> {
+fn diff(cwd: &std::path::Path, id: Option<&str>, base: Option<&str>, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
     let base = base
         .map(str::to_string)
         .unwrap_or_else(|| session::default_branch(&paths.repo));
-    let out = session.diff(&paths.repo, &base)?;
-    if out.trim().is_empty() {
-        // Silence reads as breakage. Say which comparison came up empty.
-        println!("no changes on {} (against {base})", session.label());
-    } else {
-        print!("{out}");
-    }
+    let patch = session.diff(&paths.repo, &base)?;
+    ctx.say(&report::Diff {
+        label: session.label().to_string(),
+        base,
+        patch,
+    });
     Ok(())
 }
 
@@ -4441,6 +4715,7 @@ fn commit(
     id: Option<&str>,
     message: Option<&str>,
     skip_carried: bool,
+    ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
@@ -4461,15 +4736,40 @@ fn commit(
     let base = session::default_branch(&paths.repo);
     let n = session.commits(&paths.repo, &base);
     let s = if n == 1 { "commit" } else { "commits" };
-    println!("committed to {} ({n} {s} on the branch)", session.label());
+    ctx.say(
+        &report::Action::new(
+            "committed",
+            format!("committed to {} ({n} {s} on the branch)", session.label()),
+        )
+        .data(serde_json::json!({
+            "session": session.id,
+            "branch": session.label(),
+            "commits": n,
+            "base": base,
+        })),
+    );
     Ok(())
 }
 
-fn push(cwd: &std::path::Path, id: Option<&str>, name: Option<&str>, pr: bool) -> Result<()> {
+fn push(
+    cwd: &std::path::Path,
+    id: Option<&str>,
+    name: Option<&str>,
+    pr: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
     let target = session.push(name)?;
-    println!("  {} → origin/{target}", session.label());
+    ctx.say(
+        &report::Action::new("pushed", format!("{} → origin/{target}", session.label())).data(
+            serde_json::json!({
+                "session": session.id,
+                "branch": session.label(),
+                "target": target,
+            }),
+        ),
+    );
 
     if !pr {
         return Ok(());
@@ -4492,7 +4792,7 @@ fn push(cwd: &std::path::Path, id: Option<&str>, name: Option<&str>, pr: bool) -
     Ok(())
 }
 
-fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
+fn rm(cwd: &std::path::Path, id: &str, ctx: &out::Ctx) -> Result<()> {
     session::validate_id(id)?;
     let paths = Paths::discover(cwd)?;
     let session = Session::new(&paths.worktrees(), id.to_string());
@@ -4530,27 +4830,51 @@ fn rm(cwd: &std::path::Path, id: &str) -> Result<()> {
     // that never received a commit preserves nothing, and saying otherwise
     // trains people to ignore a namespace filling with dead refs.
     let base = session::default_branch(&paths.repo);
-    match session.remove(&paths.repo, &base)? {
+    let action = match session.remove(&paths.repo, &base)? {
         session::Removed::BranchKept => {
             let n = session.commits(&paths.repo, &base);
             let s = if n == 1 { "commit" } else { "commits" };
-            println!("removed session {id}; branch omh/{id} kept ({n} {s} to review)");
-            println!("  review with  git log {base}..omh/{id}");
-            println!("  discard with git branch -D omh/{id}");
+            report::Action::new(
+                "session-removed",
+                format!("removed session {id}; branch omh/{id} kept ({n} {s} to review)"),
+            )
+            .next(format!("git log {base}..omh/{id}"))
+            .next(format!("git branch -D omh/{id}"))
+            .data(serde_json::json!({
+                "session": id,
+                "branch": format!("omh/{id}"),
+                "branch_kept": true,
+                "commits": n,
+            }))
         }
-        session::Removed::BranchDropped => {
-            println!("removed session {id}; branch omh/{id} dropped (no commits)");
+        session::Removed::BranchDropped => report::Action::new(
+            "session-removed",
+            format!("removed session {id}; branch omh/{id} dropped (no commits)"),
+        )
+        .data(serde_json::json!({
+            "session": id,
+            "branch": format!("omh/{id}"),
+            "branch_kept": false,
+            "commits": 0,
+        })),
+        session::Removed::NoBranch => {
+            report::Action::new("session-removed", format!("removed session {id}"))
+                .data(serde_json::json!({ "session": id, "branch_kept": false }))
         }
-        session::Removed::NoBranch => println!("removed session {id}"),
-    }
+    };
+    ctx.say(&action);
 
     // The review moment rides on something already happening rather than a
     // ritual nobody performs. Best-effort on purpose: a store omh cannot read
     // is a reason to say nothing, never a reason to leave a session that
     // cannot be removed.
+    //
+    // A nudge is advice, so it goes through `hint`: on stderr, and absent
+    // under `--json`, where a sentence about reviewing notes is noise in a
+    // stream something else is parsing.
     if let Ok(notes) = memory::load(&paths) {
         if let Some(line) = memory::session_nudge(&notes, id) {
-            println!("{line}");
+            ctx.hint(&line);
         }
     }
     Ok(())
@@ -4584,7 +4908,7 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, body).unwrap();
         };
-        install_bundled(&paths.base(), bundled::Shipped::Base).unwrap();
+        install_bundled(&paths.base(), bundled::Shipped::Base, &out::Ctx::plain()).unwrap();
         // Which servers the catalogue declares decides whether a feature was
         // *removed* rather than merely switched off, so the fixture has to
         // declare them — in the catalogue, which is the only place a server
@@ -5290,7 +5614,7 @@ mod tests {
         std::fs::write(paths.stacks().join("rust.toml"), "this is not toml {{{").unwrap();
 
         assert!(
-            say_hooks(&paths).is_none(),
+            say_hooks(&paths, &out::Ctx::plain()).is_none(),
             "a report built on stacks that would not load is a wrong report"
         );
     }
@@ -5437,7 +5761,15 @@ mod tests {
 
         let mut first = a_sandbox("omh/claude:abc123", &["cargo", "cc"]);
         first
-            .top_up(&paths, &runtime, &adapter, &[], &own, &repo)
+            .top_up(
+                &paths,
+                &runtime,
+                &adapter,
+                &[],
+                &own,
+                &repo,
+                &out::Ctx::plain(),
+            )
             .unwrap();
 
         assert_eq!(probes(dir.path()).len(), 1, "the first launch must ask");
@@ -5455,7 +5787,15 @@ mod tests {
 
         let mut second = a_sandbox("omh/claude:abc123", &["cargo", "cc"]);
         second
-            .top_up(&paths, &runtime, &adapter, &[], &own, &repo)
+            .top_up(
+                &paths,
+                &runtime,
+                &adapter,
+                &[],
+                &own,
+                &repo,
+                &out::Ctx::plain(),
+            )
             .unwrap();
         assert_eq!(
             probes(dir.path()).len(),
@@ -5491,6 +5831,7 @@ mod tests {
             &[],
             &base::Own::default(),
             &settings::RepoPolicy::default(),
+            &out::Ctx::plain(),
         )
         .unwrap();
 
@@ -5533,6 +5874,7 @@ mod tests {
             &[],
             &base::Own::default(),
             &settings::RepoPolicy::default(),
+            &out::Ctx::plain(),
         )
         .unwrap();
 
@@ -5577,6 +5919,7 @@ mod tests {
             &[],
             &base::Own::default(),
             &settings::RepoPolicy::default(),
+            &out::Ctx::plain(),
         );
 
         assert_eq!(
@@ -5816,7 +6159,7 @@ because = "a fixture"
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("claude.toml"), "name = \"stale\"\n").unwrap();
 
-        install_bundled(&dest, bundled::Shipped::Adapters).unwrap();
+        install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
 
         let shipped =
             std::fs::read_to_string(std::path::Path::new(BUNDLED_ADAPTERS).join("claude.toml"))
@@ -5838,7 +6181,7 @@ because = "a fixture"
         let mine = "name = \"mine, edited\"\n";
         std::fs::write(dest.join("claude.toml"), mine).unwrap();
 
-        install_bundled(&dest, bundled::Shipped::Adapters).unwrap();
+        install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(dest.join("claude.toml.yours")).unwrap(),
@@ -5870,7 +6213,7 @@ because = "a fixture"
             let mine = "this is what I wrote\n";
             std::fs::write(dest.join(first), mine).unwrap();
 
-            install_bundled(&dest, kind).unwrap();
+            install_bundled(&dest, kind, &out::Ctx::plain()).unwrap();
 
             // The name omh prints, spelled the way omh prints it.
             let backup = dest.join(format!("{first}.yours"));
@@ -5898,7 +6241,7 @@ because = "a fixture"
         let mine = b"name = \"caf\xe9\"\n"; // latin-1 é: valid file, invalid UTF-8
         std::fs::write(dest.join("claude.toml"), mine).unwrap();
 
-        install_bundled(&dest, bundled::Shipped::Adapters).unwrap();
+        install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
 
         assert_eq!(
             std::fs::read(dest.join("claude.toml.yours")).unwrap(),
@@ -5915,7 +6258,7 @@ because = "a fixture"
         std::fs::create_dir_all(&dest).unwrap();
         std::fs::write(dest.join("mine.toml"), "name = \"mine\"\n").unwrap();
 
-        install_bundled(&dest, bundled::Shipped::Adapters).unwrap();
+        install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain()).unwrap();
         assert_eq!(
             std::fs::read_to_string(dest.join("mine.toml")).unwrap(),
             "name = \"mine\"\n"
@@ -5987,6 +6330,55 @@ because = "a fixture"
         assert_eq!(passthrough(&given, &omh_globals()).unwrap(), given);
     }
 
+    /// **Nothing in this file writes to a stream directly.**
+    ///
+    /// The reason `out::Ctx` exists at all: 197 `println!`s here meant the
+    /// wording could not be tested, the same fact was phrased two ways in two
+    /// commands, and `--json` had nowhere to hook in. All of them now go
+    /// through `Ctx`, and this is what stops the 198th being added — the pull
+    /// is real, because a bare `println!` is one line and a report type is
+    /// twenty.
+    ///
+    /// Two exemptions, both named:
+    ///
+    /// - `main` itself renders the error and must write it without a `Ctx`
+    ///   method, because a `Ctx` method is what it would be reporting about.
+    /// - `memory_serve` speaks MCP on stdout. What it writes is protocol, not
+    ///   a report, and one report-shaped line would break the handshake.
+    ///
+    /// Read off the source rather than enforced by the type system, which
+    /// cannot express "no macro calls here". A grep in a test is cruder than a
+    /// lint and catches the same mistake at the same moment.
+    #[test]
+    fn no_command_writes_to_a_stream_behind_the_output_layer() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
+            .expect("this file is readable from its own test");
+
+        let offenders: Vec<(usize, &str)> = source
+            .lines()
+            .enumerate()
+            .map(|(i, line)| (i + 1, line.trim()))
+            // Only calls, never the word in a doc comment or a string that
+            // talks *about* the rule — this very comment mentions `println!`.
+            .filter(|(_, line)| {
+                ["println!", "print!(", "eprintln!", "eprint!("]
+                    .iter()
+                    .any(|m| line.starts_with(m))
+            })
+            .collect();
+
+        assert_eq!(
+            offenders.len(),
+            1,
+            "every write goes through out::Ctx but the error sink in `main` — found {offenders:#?}"
+        );
+        assert!(
+            offenders[0].1.contains("out::problem"),
+            "and the one exemption is the error renderer, not something new — got {:?}",
+            offenders[0]
+        );
+    }
+
     /// Derived from the parser rather than typed out, so a global added later
     /// inherits the guard instead of quietly falling outside it — the same
     /// reason `RESERVED` is checked against the subcommand list.
@@ -6033,7 +6425,7 @@ because = "a fixture"
         // failed, the write succeeded, and the edit was gone.
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o200)).unwrap();
 
-        let outcome = install_bundled(&dest, bundled::Shipped::Adapters);
+        let outcome = install_bundled(&dest, bundled::Shipped::Adapters, &out::Ctx::plain());
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let e = format!(

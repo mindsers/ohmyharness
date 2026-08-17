@@ -866,9 +866,19 @@ fn repo_set_is_gitignored_and_shared_says_it_is_not() {
     let out = sb.omh(&["repo", "set", "--shared", "idle_timeout", "30m"]);
     assert!(out.status.success());
     assert!(sb.settings().contains("30m"), "{}", sb.settings());
+    // On **stderr**, and that is the stronger place for it. This warning is
+    // the last thing standing between somebody and a token in git history,
+    // and the invocation where that actually happens is the scripted one —
+    // `omh repo set --shared … > log`, where anything on stdout goes to the
+    // file unread. stderr is the stream that still reaches a person there.
     assert!(
-        String::from_utf8_lossy(&out.stdout).contains("COMMITTED"),
-        "writing the committed file has to say so"
+        String::from_utf8_lossy(&out.stderr).contains("COMMITTED"),
+        "writing the committed file has to say so, where a redirect cannot hide it: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("COMMITTED"),
+        "and it is a diagnostic, so it does not land in the answer"
     );
 }
 
