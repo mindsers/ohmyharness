@@ -112,6 +112,14 @@ pub fn document(
             doc.dropped = dropped;
             Ok(doc)
         }
+        Render::OmpPlugin => {
+            let mut hooks = merge_hooks(sources, own, repo)?;
+            let mut dropped = suppressed_by_probe(&mut hooks, resolves);
+            let mut doc = omp_plugin(&hooks, binding, tools)?;
+            dropped.extend(std::mem::take(&mut doc.dropped));
+            doc.dropped = dropped;
+            Ok(doc)
+        }
         Render::Dir | Render::Concat => {
             anyhow::bail!(
                 "{cap}: `{:?}` is staged by the launcher, not rendered",
@@ -665,7 +673,7 @@ fn opencode_plugin(
             .push(one_hook(name, hook, &wired, slot, protocol));
     }
 
-    let mut out = String::from(PLUGIN_PREAMBLE);
+    let mut out = String::from(SHELL_BRIDGE) + PLUGIN_PREAMBLE;
     for (handler, blocks) in &bodies {
         // Every hook in a handler shares its parameter list, which is why the
         // drop above has to happen before a hook reaches one.
@@ -678,6 +686,273 @@ fn opencode_plugin(
     }
     out.push_str("}))\n");
     Ok(Document { body: out, dropped })
+}
+
+/// The four moments of oh-my-pi's that omh has a word for.
+///
+/// The two tool moments carry a call; the other two do not. Spelled out rather
+/// than "everything else", so an event name omp has not got is answerable as
+/// such instead of being classified as a moment without a call — see
+/// [`Moment::of`]. These duplicate the values in the omp adapter's
+/// `[capabilities.hooks.events]`, and the pairing is held by
+/// `every_moment_omp_has_registers_itself_under_the_right_name`.
+const OMP_TOOL_CALL: &str = "tool_call";
+const OMP_TOOL_RESULT: &str = "tool_result";
+const OMP_SESSION_START: &str = "session_start";
+const OMP_TURN_END: &str = "turn_end";
+
+/// What an omp moment can express, which is decided by whether a call is in
+/// scope at it.
+///
+/// The same distinction opencode's `Slot` draws, drawn on different evidence:
+/// there it is which handler a moment lives on, here it is simply which of the
+/// four `pi.on` events it is. A moment with no call has no `event.toolName` to
+/// narrow on and no `event.input` to read a field off, and — for `tool_call` —
+/// a call in scope is still not an advisory channel.
+#[derive(Clone, Copy, PartialEq)]
+enum Moment {
+    /// `tool_call`: can block a call, cannot advise, has the arguments.
+    Before,
+    /// `tool_result`: can rewrite what the model reads next, cannot block.
+    After,
+    /// `session_start` and `turn_end`: a `run` and nothing else.
+    Bare,
+}
+
+impl Moment {
+    /// `None` for an event oh-my-pi has not got.
+    ///
+    /// This fell through to `Bare`, which reads as "a moment with no call in
+    /// scope" — so an adapter typo came back as a statement about the harness:
+    /// `after-tool = "toolresult"` dropped every injecting hook with *"no way
+    /// to inject text at `after-tool`"*, which is false of omp and sends the
+    /// reader to the wrong software. `Slot::of` can fall through honestly
+    /// because `Slot::Bus` carries the unrecognised name forward into a real
+    /// opencode mechanism; `Bare` discards it. The two look symmetric and are
+    /// not.
+    fn of(event: &str) -> Option<Self> {
+        match event {
+            OMP_TOOL_CALL => Some(Moment::Before),
+            OMP_TOOL_RESULT => Some(Moment::After),
+            OMP_SESSION_START | OMP_TURN_END => Some(Moment::Bare),
+            _ => None,
+        }
+    }
+}
+
+/// oh-my-pi hook module: `pi.on(...)` registrations inside one factory.
+///
+/// Structurally the twin of [`opencode_plugin`] and deliberately not shared
+/// with it. The two agree on the shell bridge and on nothing else: opencode
+/// keeps a tool's arguments on `output`/`input` depending on the moment and
+/// dispatches its bus events through one catch-all, while every omp handler
+/// receives an `event` and every omp hook registers itself. A single
+/// generator over both would be a `match` on the harness in every line.
+fn omp_plugin(
+    hooks: &BTreeMap<String, hook::Hook>,
+    binding: &Binding,
+    tools: &BTreeMap<hook::Tool, String>,
+) -> Result<Document> {
+    let mut dropped = Vec::new();
+    // One `pi.on` per hook, in hook-name order.
+    //
+    // They were grouped by moment first, one registration holding every hook
+    // that shared it, and that was wrong in a way nothing reported: the first
+    // hook to return ended the handler, so a second injecting hook at the same
+    // moment simply never ran. It was not dropped and not warned about.
+    //
+    // Separate registrations hand the ordering back to omp, whose rules are
+    // per-handler and documented: `tool_call` takes the first block, and
+    // `tool_result` handlers chain, each seeing the last one's edits. omh
+    // cannot reproduce that from inside one handler and has no business
+    // trying.
+    let mut out = String::from(SHELL_BRIDGE) + OMP_PREAMBLE;
+
+    for (name, hook) in hooks {
+        let wired = match hook::wire(name, hook, binding, tools) {
+            Ok(wired) => wired,
+            Err(d) => {
+                dropped.push(d);
+                continue;
+            }
+        };
+        let give_up = |wanted: &str| hook::Dropped {
+            name: name.clone(),
+            wanted: wanted.to_string(),
+        };
+        let Some(moment) = Moment::of(wired.event) else {
+            anyhow::bail!(
+                "adapter maps `{}` to `{}`, which is not a moment oh-my-pi has —                  omh would report every hook there as a capability the harness                  lacks. Expected one of: {OMP_SESSION_START}, {OMP_TURN_END},                  {OMP_TOOL_CALL}, {OMP_TOOL_RESULT}.",
+                hook.on,
+                wired.event,
+            )
+        };
+        // A moment with no call in scope can express none of the things that
+        // need one. Named rather than emitted and left to fail at runtime: a
+        // handler referencing an `event.input` that is not there binds the
+        // empty string, so the hook would not fire and nothing would say why.
+        if moment == Moment::Bare {
+            let needs = match &hook.action {
+                _ if !wired.fields.is_empty() => Some("payload field"),
+                _ if !wired.tools.is_empty() => Some("way to narrow to a tool"),
+                hook::Action::Inject { .. } => Some("way to inject text"),
+                hook::Action::Refuse { .. } => Some("way to refuse a call"),
+                hook::Action::Run(_) => None,
+            };
+            if let Some(needs) = needs {
+                dropped.push(give_up(&format!("{needs} at `{}`", hook.on)));
+                continue;
+            }
+        }
+        // Advisory text has no channel before the call on this harness either:
+        // `tool_call` returns a block or it returns nothing. Checked before the
+        // binding is asked, because the binding *can* advise — just not here.
+        if matches!(hook.action, hook::Action::Inject { .. }) && moment == Moment::Before {
+            dropped.push(give_up("way to inject text before a tool runs"));
+            continue;
+        }
+        // A field the adapter maps for the harness, on a tool that has not got
+        // it. omp's `edit` takes one `input` string with the path inside a
+        // `[PATH#TAG]` payload, so `event.input.path` is never there — while
+        // `read`, which the same map serves correctly, does have it.
+        //
+        // Emitting it anyway bound `""`, and a hook that then guards on the
+        // value simply never fired: in the module, in `doctor`'s name list, not
+        // in `dropped`, indistinguishable from a hook with nothing to say.
+        //
+        // The knowledge is omp's and lives in omp's renderer because the schema
+        // has no way to say "this field exists on these tools and not those" —
+        // `fields` is one map per harness. That is a real limit of the adapter
+        // format and is recorded in `adapters/omp.toml` beside the map itself.
+        if let Some(edit) = tools.get(&hook::Tool::Edit) {
+            let wants_file = wired
+                .fields
+                .iter()
+                .any(|(f, _)| *f == hook::Field::ToolFile);
+            if wants_file && wired.tools.iter().any(|t| t == edit) {
+                dropped.push(give_up(&format!("`tool-file` on `{edit}`")));
+                continue;
+            }
+        }
+        // There is deliberately no mirror of that check for a `refuse` at
+        // `after-tool`. It reads like the obvious counterpart and would be dead
+        // code: omh refuses that pairing when the hook is *parsed*, so no such
+        // hook reaches a renderer — which is where the rule belongs, because it
+        // is true of every harness rather than of this one.
+        let protocol = match binding.protocol(&hook.action) {
+            Ok(p) => p,
+            Err(wanted) => {
+                dropped.push(give_up(wanted));
+                continue;
+            }
+        };
+        out.push_str(&omp_one_hook(name, hook, &wired, moment, protocol));
+    }
+
+    out.push_str("}\n");
+    Ok(Document { body: out, dropped })
+}
+
+/// One hook, as its own `pi.on` registration.
+fn omp_one_hook(
+    name: &str,
+    hook: &hook::Hook,
+    wired: &hook::Wired<'_>,
+    moment: Moment,
+    protocol: Option<&crate::adapter::Template>,
+) -> String {
+    // The handler *is* the hook's function scope, so a `return` ends this hook
+    // and nothing else — no IIFE, and no name mangled into an identifier to
+    // hold its result. opencode needs both because its harness gives one
+    // handler per moment and omh has to share it; omp does not.
+    let mut b = format!(
+        "  // {name}\n  pi.on({:?}, async (event, ctx) => {{\n",
+        wired.event
+    );
+    if !wired.tools.is_empty() {
+        let names = wired
+            .tools
+            .iter()
+            .map(|t| format!("{t:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        b.push_str(&format!(
+            "    if (![{names}].includes(event.toolName)) return\n"
+        ));
+    }
+    b.push_str("    const env = {}\n");
+    // Both tool moments keep the call's arguments on `event.input` — unlike
+    // opencode, where the parameter they hang off changes with the moment.
+    if moment != Moment::Bare {
+        for (field, at) in &wired.fields {
+            b.push_str(&format!(
+                "    env[{:?}] = String(event.input?.{at} ?? \"\")\n",
+                field.var()
+            ));
+        }
+    }
+    if let hook::Action::Inject {
+        capture: Some(capture),
+        ..
+    } = &hook.action
+    {
+        b.push_str(&format!(
+            "    const cap = sh({}, env)\n    if (!cap.ran || cap.code !== 0) warn({}, \"capture\", cap)\n    env[{:?}] = cap.out\n",
+            js(capture),
+            js(name),
+            hook::CAPTURE_VAR,
+        ));
+    }
+    if let Some(when) = &hook.when {
+        b.push_str(&format!(
+            "    const p = sh({}, env)\n    if (!p.ran || p.err) warn({}, \"its `when`\", p)\n",
+            js(when),
+            js(name),
+        ));
+        // A guard that could not be evaluated is not a guard that declined.
+        // Both leave `p.code` at 1, and returning from `tool_call` means allow
+        // — so a refusal whose predicate could not run let the call through,
+        // which is the one degradation this renderer must never make. An
+        // `inject` or a `run` in the same state still falls through to silence.
+        if let (hook::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
+            b.push_str(&format!(
+                "    if (!p.ran) {}\n",
+                t.template.replace(
+                    "{{text}}",
+                    &js(&format!(
+                        "omh: refusing — `{name}` could not evaluate its guard, so this call is blocked rather than allowed unchecked"
+                    )),
+                ),
+            ));
+        }
+        b.push_str("    if (p.code !== 0) return\n");
+    }
+    match &hook.action {
+        hook::Action::Run(run) => b.push_str(&format!(
+            "    const r = sh({}, env)\n    if (!r.ran || r.code !== 0) warn({}, \"its `run`\", r)\n",
+            js(run),
+            js(name),
+        )),
+        hook::Action::Inject { text, .. } | hook::Action::Refuse { text } => {
+            let template = protocol.map(|p| p.template.as_str()).unwrap_or_default();
+            b.push_str(&format!(
+                "    {}\n",
+                template
+                    .replace(
+                        "{{text}}",
+                        &format!(
+                            "t({}, {}, {}, env)",
+                            js(name),
+                            js(text),
+                            js(&hook::interpolating(text))
+                        ),
+                    )
+                    .replace("{{event}}", wired.event)
+            ));
+        }
+    }
+    b.push_str("  })\n");
+    b
 }
 
 /// One hook, as a block inside its handler.
@@ -785,13 +1060,34 @@ fn js(s: &str) -> String {
     serde_json::to_string(s).unwrap_or_else(|_| "\"\"".into())
 }
 
-/// The module's fixed head: opencode's plugin shape, plus the shell bridge.
+/// opencode's module shape, emitted after [`SHELL_BRIDGE`].
+///
+/// Split from the bridge when a second harness needed the same bridge under a
+/// different shape — this half is the part that differs.
+const PLUGIN_PREAMBLE: &str = "export default (async () => ({\n";
+
+/// oh-my-pi's hook-factory shape, emitted after [`SHELL_BRIDGE`].
+///
+/// A default-exported function receiving `pi`, rather than opencode's object of
+/// named handlers. Each hook registers itself inside it with `pi.on(...)`.
+///
+/// Nothing here emits opencode's `Slot::Bus` type test, because `pi.on` has
+/// already done it: opencode dispatches its bus moments through one catch-all
+/// handler, so the generated program must check which event it got. [`Moment`]
+/// is the Rust-side equivalent and is load-bearing — it decides what a moment
+/// can express — but it never reaches the emitted module.
+const OMP_PREAMBLE: &str = "export default function (pi) {\n";
+
+/// The shell bridge both generated modules share.
+///
+/// One copy, because a fix to how a hook's text expands is a fix to what omh
+/// *means*, and a harness that missed it would mean something else.
 ///
 /// `node:child_process` rather than the `$` helper opencode passes each plugin.
 /// `$` is Bun's shell, and its behaviour around exit codes and quoting is a
 /// claim about a runtime omh does not control; `spawnSync` behaves the same on
 /// anything that can load this file at all.
-const PLUGIN_PREAMBLE: &str = r#"// Generated by omh. Edits are overwritten at launch.
+const SHELL_BRIDGE: &str = r#"// Generated by omh. Edits are overwritten at launch.
 import { spawnSync } from "node:child_process"
 
 // `ran` is false when the shell could not start or was killed by a signal —
@@ -820,8 +1116,15 @@ const sh = (script, env) => {
 // nothing, while a missing binary, a syntax error or a permission problem all
 // leave a message. Exit status alone cannot tell those apart — a deliberate
 // `false` and a `command not found` are both just non-zero.
-const warn = (hook, phase, r) =>
-  console.error(`omh: hook ${hook}: ${phase} did not run${r.err ? " — " + r.err : ""}`)
+const warn = (hook, phase, r) => {
+  // "did not run" was printed for both, and it is false of the second: a
+  // `turn-end` hook running a failing test suite reported that its `run` did
+  // not run. `out` is carried too — a tool that writes its diagnostics to
+  // stdout left the old message with no evidence at all.
+  const what = r.ran ? `exited ${r.code}` : "could not run"
+  const said = [r.err, r.out].filter(Boolean).join(" ").slice(0, 300)
+  console.error(`omh: hook ${hook}: ${phase} ${what}${said ? " — " + said : ""}`)
+}
 
 // A hook's text is written once, in omh's words, and may name the payload
 // fields bound above it. Expanding it through the same shell keeps one meaning
@@ -837,7 +1140,6 @@ const t = (hook, raw, word, env) => {
   return r.out
 }
 
-export default (async () => ({
 "#;
 
 fn claude_settings(hooks: &BTreeMap<String, hook::Rendered>) -> Result<String> {
@@ -1734,9 +2036,14 @@ mod tests {
         let measured = BTreeMap::from([("cargo".to_string(), false)]);
 
         let claude = claude_hooks();
-        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 2] = [
+        // Every render path, which is what "on every render path" means — a
+        // third arm was added to `document`'s match without this list moving,
+        // and deleting `suppressed_by_probe` from that arm alone left the suite
+        // green. This test's own doc predicts exactly that.
+        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 3] = [
             (hooks_binding(&claude), &claude.tools),
             (opencode_hooks(), &opencode().tools),
+            (omp_hooks(), &omp().tools),
         ];
         for (binding, tools) in paths {
             let out = document(
@@ -1780,6 +2087,529 @@ mod tests {
         opencode()
             .supports(Capability::Hooks)
             .expect("opencode has hooks")
+    }
+
+    fn omp() -> &'static Adapter {
+        static CELL: std::sync::OnceLock<Adapter> = std::sync::OnceLock::new();
+        CELL.get_or_init(|| Adapter::find(Path::new(ADAPTERS), "omp").unwrap())
+    }
+
+    fn omp_hooks() -> &'static Binding {
+        omp().supports(Capability::Hooks).expect("omp has hooks")
+    }
+
+    fn omp_module(hooks: &[(&str, &str)]) -> Document {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body) in hooks {
+            file(dir.path(), &format!("h/{name}.json"), body);
+        }
+        document(
+            Capability::Hooks,
+            omp_hooks(),
+            &[dir.path().join("h")],
+            &Default::default(),
+            &Default::default(),
+            &omp().tools,
+            &Default::default(),
+        )
+        .unwrap()
+    }
+
+    fn dropped_for(doc: &Document, name: &str) -> String {
+        doc.dropped
+            .iter()
+            .find(|d| d.name == name)
+            .unwrap_or_else(|| panic!("{name} was not dropped: {:?}", doc.dropped))
+            .wanted
+            .clone()
+    }
+
+    /// Each moment omh knows about registers itself under omp's own name for
+    /// it — and under the *right* one.
+    ///
+    /// This asserted a set: that each of omp's four event names appeared
+    /// somewhere in the module. Swapping `session-start` and `turn-end` in the
+    /// adapter leaves that set unchanged, so the one table whose entire content
+    /// is a mapping was checked per-set and the swap passed the whole suite.
+    /// Each hook is now paired with the event its own moment must produce.
+    #[test]
+    fn every_moment_omp_has_registers_itself_under_the_right_name() {
+        for (name, moment, event) in [
+            ("fmt", "after-tool", "tool_result"),
+            ("test", "turn-end", "turn_end"),
+            ("orient", "session-start", "session_start"),
+            ("guard", "before-tool", "tool_call"),
+        ] {
+            let body = format!(r#"{{"on":"{moment}","run":"echo hi"}}"#);
+            let doc = omp_module(&[(name, body.as_str())]);
+            assert!(doc.dropped.is_empty(), "dropped: {:?}", doc.dropped);
+            assert!(
+                doc.body.contains(&format!("pi.on({event:?}")),
+                "omh's `{moment}` must reach omp as `{event}`: {}",
+                doc.body
+            );
+        }
+    }
+
+    /// The two protocols land in the two moments that have them, in omp's
+    /// words rather than omh's.
+    #[test]
+    fn omp_blocks_before_the_call_and_rewrites_after_it() {
+        let doc = omp_module(&[
+            (
+                "guard",
+                r#"{"on":"before-tool","tools":["shell"],"refuse":"denied"}"#,
+            ),
+            (
+                "nudge",
+                r#"{"on":"after-tool","tools":["read"],"inject":"noted"}"#,
+            ),
+        ]);
+        assert!(
+            doc.body.contains("return { block: true, reason:"),
+            "no block protocol: {}",
+            doc.body
+        );
+        assert!(
+            doc.body
+                .contains("return { content: [...(event.content ?? []),"),
+            "no content-append protocol: {}",
+            doc.body
+        );
+        // The tool guard reads omp's own word for the tool, off the property
+        // omp puts it on.
+        assert!(
+            doc.body
+                .contains(r#"if (!["bash"].includes(event.toolName)) return"#),
+            "tool guard is not omp's: {}",
+            doc.body
+        );
+    }
+
+    /// A nudge is never promoted to a wall.
+    ///
+    /// `tool_call` can block or say nothing, so advisory text has no channel
+    /// there — the one translation omh refuses to make silently. Dropped **by
+    /// name**, saying what it asked for.
+    ///
+    /// The mirror case, a `refuse` at `after-tool`, is not tested here because
+    /// it cannot reach a renderer: omh refuses that pairing when the hook is
+    /// parsed. Writing this test is what established that — the renderer had a
+    /// branch for it, and the branch was unreachable.
+    #[test]
+    fn omp_never_swaps_a_nudge_for_a_wall() {
+        let doc = omp_module(&[(
+            "early",
+            r#"{"on":"before-tool","tools":["read"],"inject":"advice"}"#,
+        )]);
+        assert_eq!(
+            dropped_for(&doc, "early"),
+            "way to inject text before a tool runs"
+        );
+        assert!(
+            !doc.body.contains("event.content"),
+            "a dropped hook still reached the module: {}",
+            doc.body
+        );
+    }
+
+    /// A moment with no call in scope cannot narrow to a tool or read a field
+    /// off one, and says so rather than binding an empty string.
+    #[test]
+    fn a_moment_without_a_call_admits_it_has_no_payload() {
+        let doc = omp_module(&[
+            (
+                "narrow",
+                r#"{"on":"turn-end","tools":["edit"],"run":"true"}"#,
+            ),
+            (
+                "field",
+                r#"{"on":"session-start","run":"echo $OMH_TOOL_FILE"}"#,
+            ),
+        ]);
+        assert_eq!(
+            dropped_for(&doc, "narrow"),
+            "way to narrow to a tool at `turn-end`"
+        );
+        assert_eq!(
+            dropped_for(&doc, "field"),
+            "payload field at `session-start`"
+        );
+    }
+
+    /// Two hooks that both speak at the same moment both get to speak.
+    ///
+    /// omp runs one handler per registration, in registration order, and
+    /// `tool_result` handlers **chain** — each sees the previous one's
+    /// modifications. Collapsing several omh hooks into one registration threw
+    /// that away: the first hook to return ended the handler, so a second
+    /// injecting hook at the same moment was silently never run. Nothing said
+    /// so — it was not dropped, not warned about, just absent.
+    ///
+    /// Asserted as one registration per surviving hook, which is the invariant
+    /// that keeps omp's ordering rules meaning what omp says they mean.
+    #[test]
+    fn hooks_sharing_a_moment_each_get_their_own_handler() {
+        let doc = omp_module(&[
+            (
+                "first",
+                r#"{"on":"after-tool","tools":["read"],"inject":"one"}"#,
+            ),
+            (
+                "second",
+                r#"{"on":"after-tool","tools":["read"],"inject":"two"}"#,
+            ),
+        ]);
+        assert!(doc.dropped.is_empty(), "dropped: {:?}", doc.dropped);
+        assert_eq!(
+            doc.body.matches(r#"pi.on("tool_result""#).count(),
+            2,
+            "both hooks must reach the model, not just the first: {}",
+            doc.body
+        );
+        for text in ["\"one\"", "\"two\""] {
+            assert!(
+                doc.body.contains(text),
+                "{text} never reaches the module: {}",
+                doc.body
+            );
+        }
+    }
+
+    /// The staged file has to be something a JavaScript runtime will load.
+    ///
+    /// The omp generator is a hand-built string generator like opencode's, and
+    /// a module that does not parse takes **every** hook down at once rather
+    /// than the one that broke it. It is fed the same awkward body opencode's
+    /// is — quotes, backslashes, backticks, a literal `}`, a `%`, and an `awk`
+    /// program whose braces would defeat any brace-counting check.
+    ///
+    /// `#[ignore]` for the reason opencode's twin is: it needs `node`. Run with
+    /// `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn an_omp_module_is_something_a_runtime_can_load() {
+        let body = omp_module(&[
+            ("fmt", r#"{"on":"turn-end","run":"cargo fmt"}"#),
+            (
+                "awkward",
+                r#"{"on":"before-tool","tools":["shell"],"when":"awk '{print $1}' </dev/null; case \"$OMH_TOOL_COMMAND\" in *\"}\"*) ;; *) false ;; esac","refuse":"no \" quote, back\\slash, `tick`, 100%"}"#,
+            ),
+            (
+                "noisy",
+                r#"{"on":"after-tool","tools":["read"],"inject":"back\\slash `tick` \" quote 100% $OMH_TOOL_FILE"}"#,
+            ),
+        ])
+        .body;
+        assert!(
+            body.contains("export default function"),
+            "omp imports the default export: {body}"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, &body).unwrap();
+        let out = std::process::Command::new("node")
+            .args(["--check", module.to_str().unwrap()])
+            .output()
+            .expect("node is required to check the program omh generates");
+        assert!(
+            out.status.success(),
+            "the generated module does not parse:\n{}\n{body}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// An event name omp does not have is an adapter error, not a harness
+    /// limitation, and it says so.
+    ///
+    /// `Moment::of` classified anything unrecognised as "no call in scope", so
+    /// a typo in `[capabilities.hooks.events]` came back as *"no way to refuse
+    /// a call at `before-tool`"* — a statement that oh-my-pi cannot block a
+    /// tool call, which is untrue and sends the reader to the harness instead
+    /// of to the one-word mismatch. The drop rule is "say what it asked for";
+    /// blaming the harness for the adapter fails it.
+    #[test]
+    fn an_event_omp_does_not_have_is_named_as_an_adapter_error() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("typo.toml"),
+            r#"
+name    = "typo"
+bin     = "typo"
+install = "true"
+
+[tools]
+shell = "bash"
+
+[capabilities.hooks]
+path   = "$HOME/.typo/omh.ts"
+render = "omp-plugin"
+
+[capabilities.hooks.events]
+before-tool = "toolcall"
+
+[capabilities.hooks.refuse]
+template = 'return { block: true, reason: {{text}} }'
+"#,
+        )
+        .unwrap();
+        let adapter = Adapter::find(d.path(), "typo").unwrap();
+        let binding = adapter.supports(Capability::Hooks).unwrap();
+        let src = tempfile::tempdir().unwrap();
+        file(
+            src.path(),
+            "h/guard.json",
+            r#"{"on":"before-tool","tools":["shell"],"refuse":"no"}"#,
+        );
+        let err = document(
+            Capability::Hooks,
+            binding,
+            &[src.path().join("h")],
+            &Default::default(),
+            &Default::default(),
+            &adapter.tools,
+            &Default::default(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("toolcall"),
+            "the refusal must name the event nobody has: {err}"
+        );
+    }
+
+    /// A guard that could not be evaluated blocks the call it guards.
+    ///
+    /// `when` failing to run is not the same as `when` declining. Both left
+    /// `p.code` at 1 and returned, and returning from a `tool_call` handler
+    /// means *allow* — so `git-unavailable`, under fork pressure or in an image
+    /// where `/bin/sh` is not where the runtime looks, let every git call
+    /// through while `doctor` still reported the module present and correct.
+    ///
+    /// A `refuse` whose predicate is unavailable must fail closed. An `inject`
+    /// or a `run` in the same state still degrades to a no-op, because there
+    /// the no-op *is* the safe answer — the asymmetry is the whole point.
+    #[test]
+    fn a_refusal_whose_guard_cannot_be_evaluated_blocks() {
+        let doc = omp_module(&[(
+            "guard",
+            r#"{"on":"before-tool","tools":["shell"],"when":"test -x /nope","refuse":"use omh commit"}"#,
+        )]);
+        assert!(
+            doc.body.contains("if (!p.ran) return { block: true"),
+            "an unevaluable guard on a refusal must block, not fall through: {}",
+            doc.body
+        );
+        let advisory = omp_module(&[(
+            "nudge",
+            r#"{"on":"after-tool","tools":["read"],"when":"test -x /nope","inject":"noted"}"#,
+        )]);
+        assert!(
+            !advisory.body.contains("block: true"),
+            "an advisory hook must still degrade to silence: {}",
+            advisory.body
+        );
+    }
+
+    /// `warn` says which of the three things happened.
+    ///
+    /// It hard-coded "did not run" and fired for any non-zero exit, so a
+    /// `turn-end` hook running `cargo test` against a failing suite reported
+    /// `hook test: its \`run\` did not run` — a false statement, with `r.out`
+    /// discarded, leaving a user debugging it no evidence at all.
+    #[test]
+    fn a_warning_distinguishes_not_running_from_running_and_failing() {
+        let body = omp_module(&[("test", r#"{"on":"turn-end","run":"cargo test"}"#)]).body;
+        assert!(
+            body.contains("could not run") && body.contains("exited"),
+            "the bridge must be able to say both things: {body}"
+        );
+    }
+
+    /// A file path on omp's `edit` is a thing this harness cannot say, so the
+    /// hook wanting it is dropped by name rather than handed an empty string.
+    ///
+    /// omp's edit tool takes one `input` string with the path embedded in
+    /// `[PATH#TAG]` sections, so `event.input.path` is never there. The adapter
+    /// wrote that down and the renderer emitted the binding anyway: the hook
+    /// shipped, bound `""`, and never fired — present in the module, present in
+    /// `omh doctor`'s name list, absent from `dropped`, and indistinguishable
+    /// from a hook with nothing to say. Naming it is the whole rule.
+    #[test]
+    fn a_file_path_on_omps_edit_tool_is_dropped_by_name() {
+        let doc = omp_module(&[(
+            "fmt-one",
+            r#"{"on":"after-tool","tools":["edit"],"run":"prettier $OMH_TOOL_FILE"}"#,
+        )]);
+        let wanted = dropped_for(&doc, "fmt-one");
+        assert!(
+            wanted.contains("tool-file") && wanted.contains("edit"),
+            "the drop must name the field and the tool it cannot come from: {wanted}"
+        );
+        assert!(
+            !doc.body.contains(r#"env["OMH_TOOL_FILE"]"#),
+            "a dropped hook left its binding behind: {}",
+            doc.body
+        );
+    }
+
+    /// The same field on `read` is fine, and stays.
+    ///
+    /// The pair matters: dropping every `tool-file` hook would cost omp a
+    /// capability it has, which is the other half of the capability floor.
+    #[test]
+    fn a_file_path_on_omps_read_tool_still_works() {
+        let doc = omp_module(&[(
+            "cite",
+            r#"{"on":"after-tool","tools":["read"],"run":"echo $OMH_TOOL_FILE"}"#,
+        )]);
+        assert!(doc.dropped.is_empty(), "dropped: {:?}", doc.dropped);
+        assert!(
+            doc.body
+                .contains(r#"env["OMH_TOOL_FILE"] = String(event.input?.path ?? "")"#),
+            "read's path is real and must still be bound: {}",
+            doc.body
+        );
+    }
+
+    /// The inject protocol survives a tool result that carries no content.
+    ///
+    /// `[...undefined]` throws, and a tool returning nothing is ordinary. The
+    /// generated module has no `try`/`catch` anywhere, and this file's own
+    /// bridge says a hook degrades to a no-op rather than to an error — while
+    /// on omp a throw out of a handler becomes model-visible error text, which
+    /// turns a nudge into exactly the wall the renderer exists to prevent.
+    #[test]
+    fn injecting_into_an_empty_tool_result_does_not_throw() {
+        let doc = omp_module(&[(
+            "cite",
+            r#"{"on":"after-tool","tools":["read"],"inject":"noted"}"#,
+        )]);
+        assert!(
+            doc.body.contains("event.content ?? []"),
+            "the spread must tolerate a result with no content: {}",
+            doc.body
+        );
+    }
+
+    /// A `when` predicate and a `capture` both reach the module.
+    ///
+    /// Neither had a guard on this path, and deleting both emission blocks left
+    /// the suite green. That is not academic: the shipped `git-unavailable`
+    /// hook is `before-tool` + `refuse` narrowed to the shell tool, and its
+    /// `when` predicate is the **only** thing restricting it to git commands —
+    /// losing it turns "block git" into "block every bash call", silently.
+    #[test]
+    fn a_when_predicate_and_a_capture_reach_the_omp_module() {
+        let doc = omp_module(&[
+            (
+                "guard",
+                r#"{"on":"before-tool","tools":["shell"],"when":"case \"$OMH_TOOL_COMMAND\" in git*) ;; *) false ;; esac","refuse":"use omh commit"}"#,
+            ),
+            (
+                "orient",
+                r#"{"on":"after-tool","tools":["read"],"capture":"omh graph query","inject":"context: $OMH_CAPTURE"}"#,
+            ),
+        ]);
+        assert!(doc.dropped.is_empty(), "dropped: {:?}", doc.dropped);
+        assert!(
+            doc.body.contains("in git*)") && doc.body.contains("if (p.code !== 0) return"),
+            "the `when` predicate and its gate must both be emitted: {}",
+            doc.body
+        );
+        assert!(
+            doc.body.contains("omh graph query") && doc.body.contains("OMH_CAPTURE"),
+            "the capture and the variable it binds must both be emitted: {}",
+            doc.body
+        );
+    }
+
+    /// omp keeps a call's arguments on `event.input`, and that is asserted
+    /// rather than described.
+    ///
+    /// Reading the wrong parameter does not fail — it binds the empty string,
+    /// so the hook simply never fires and nothing says why. opencode has the
+    /// same guard for the same reason; omp's claim to differ from it was the
+    /// untested half.
+    #[test]
+    fn the_payload_field_is_read_where_omp_keeps_it() {
+        let doc = omp_module(&[(
+            "guard",
+            r#"{"on":"before-tool","tools":["shell"],"when":"test -n \"$OMH_TOOL_COMMAND\"","refuse":"no"}"#,
+        )]);
+        assert!(
+            doc.body
+                .contains(r#"env["OMH_TOOL_COMMAND"] = String(event.input?.command ?? "")"#),
+            "the field must be read off `event.input`, under omp's name for it: {}",
+            doc.body
+        );
+    }
+
+    /// Text that names a payload field is expanded, not emitted raw.
+    ///
+    /// Every other omp test uses literal inject text, so the `t()` wrapper —
+    /// which runs the text through the same shell that bound `$OMH_*` — could
+    /// be removed without a red test. Without it a hook's references reach the
+    /// model as the characters `$OMH_TOOL_FILE`.
+    #[test]
+    fn text_naming_a_field_is_expanded_on_omp() {
+        let doc = omp_module(&[(
+            "cite",
+            r#"{"on":"after-tool","tools":["read"],"inject":"see $OMH_TOOL_FILE"}"#,
+        )]);
+        assert!(
+            doc.body.contains(r#"t("cite", "see $OMH_TOOL_FILE""#),
+            "the text must go through the expander with its raw form beside it: {}",
+            doc.body
+        );
+    }
+
+    /// A hook's name never lands where JavaScript would read it as code.
+    ///
+    /// omh's own hook names carry `-` (`graph-read`, `git-unavailable`), and
+    /// `-` is a minus sign in an identifier position: `const r_graph-read` does
+    /// not parse, and a module that does not parse takes every *other* hook
+    /// down with it.
+    ///
+    /// This began as a test that the name was *slugged* into an identifier,
+    /// which is how the first generator held its per-hook result. Giving each
+    /// hook its own `pi.on` deleted the identifier, and with it the entire bug
+    /// class — so the guard now asserts the property that made slugging
+    /// necessary, rather than the mechanism that used to satisfy it. A test
+    /// pinned to the mechanism would have gone green on an implementation that
+    /// no longer has one.
+    #[test]
+    fn a_hyphenated_hook_name_never_reaches_code_position() {
+        let doc = omp_module(&[(
+            "graph-read",
+            r#"{"on":"after-tool","tools":["read"],"inject":"context"}"#,
+        )]);
+        let loose: Vec<&str> = doc
+            .body
+            .lines()
+            .filter(|l| l.contains("graph-read"))
+            .filter(|l| !l.trim_start().starts_with("//") && !l.contains("\"graph-read\""))
+            .collect();
+        assert!(
+            loose.is_empty(),
+            "the name appears outside a comment or a string literal: {loose:?}"
+        );
+        assert!(
+            doc.body.contains("// graph-read"),
+            "the hook is not labelled in the module at all: {}",
+            doc.body
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn show_the_omp_module() {
+        println!("{}", omp_module(&[
+            ("fmt", r#"{"on":"after-tool","tools":["edit"],"run":"cargo fmt"}"#),
+            ("graph-read", r#"{"on":"after-tool","tools":["read"],"inject":"see the graph"}"#),
+            ("git-unavailable", r#"{"on":"before-tool","tools":["shell"],"when":"case \"$OMH_TOOL_COMMAND\" in git*) ;; *) false ;; esac","refuse":"use omh commit"}"#),
+            ("test", r#"{"on":"turn-end","run":"cargo test"}"#),
+        ]).body);
     }
 
     fn plugin(hooks: &[(&str, &str)]) -> Document {

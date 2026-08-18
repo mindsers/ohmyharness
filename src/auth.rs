@@ -249,6 +249,30 @@ fn placeholder(path: &std::path::Path) -> &'static str {
     }
 }
 
+/// Whether the files on the host can decide this login at all.
+///
+/// `unfilled` reports what is *missing*, and for an adapter naming `token`
+/// files that answers the question outright. For a [`Probe`] adapter it cannot:
+/// the credentials are somewhere `unfilled` has no way to read — which is the
+/// entire reason the probe exists — so it falls through to "does the creds
+/// directory hold anything", and that is true from the harness's first start.
+///
+/// omp shipped in exactly that state. `unfilled` came back empty because
+/// `~/.omp/agent/` held `agent.db`, written by starting omp and never by
+/// logging in, and `omh auth omp` announced a captured account to a user who
+/// had opened the harness, run nothing, and quit. The probe was added to
+/// prevent that false positive and was wired into `doctor` alone, leaving the
+/// function its own documentation cites still answering the old way.
+///
+/// [`Probe`]: crate::adapter::Probe
+pub fn decided_by_files(adapter: &Adapter) -> bool {
+    // An adapter with neither is the pre-existing weak path: nothing to stat
+    // and nothing to ask, so the directory heuristic is all there is. It stays
+    // "decided" because saying otherwise would make every such adapter
+    // unconfirmable without giving anyone a way to confirm it.
+    !adapter.token.is_empty() || adapter.token_probe.is_none()
+}
+
 /// Declared credential files that still hold nothing but a placeholder.
 ///
 /// "Something was written" is too weak a success test: a harness writes its
@@ -363,6 +387,55 @@ mod tests {
 
     fn claude() -> Adapter {
         Adapter::find(Path::new(ADAPTERS), "claude").unwrap()
+    }
+
+    fn omp() -> Adapter {
+        Adapter::find(Path::new(ADAPTERS), "omp").unwrap()
+    }
+
+    /// A harness whose credentials omh cannot stat is never *decided* by them.
+    ///
+    /// `unfilled` answers "is anything obviously missing", and for an adapter
+    /// with `token` files that is the whole question. For a `token-probe`
+    /// adapter it is not: omp keeps credentials in SQLite, so `unfilled` falls
+    /// through to "does the creds directory hold anything", which is true from
+    /// the harness's first boot — settings, model_perf, usage_history. An empty
+    /// `unfilled` there means *nothing is obviously missing*, never *the login
+    /// worked*, and `omh auth` said the second.
+    #[test]
+    fn a_probe_adapter_is_never_decided_by_its_files() {
+        assert!(
+            decided_by_files(&claude()),
+            "claude names token files; those files are the answer"
+        );
+        assert!(
+            !decided_by_files(&omp()),
+            "omp keeps credentials in SQLite — the files cannot answer, which is \
+             why it declares a probe at all"
+        );
+    }
+
+    /// And the boot-noise case itself: an omp account that never logged in.
+    ///
+    /// This is the state the bug produced — the creds directory holds a
+    /// database written by starting the harness, `unfilled` is empty, and the
+    /// old code read that as a completed login.
+    #[test]
+    fn boot_noise_alone_does_not_decide_an_omp_login() {
+        let (_d, paths) = fixture();
+        let account = dir(&paths, "omp", "personal");
+        std::fs::create_dir_all(account.join(".omp/agent")).unwrap();
+        // What omp writes just by starting: settings and telemetry, no token.
+        std::fs::write(account.join(".omp/agent/agent.db"), "SQLite format 3\0…").unwrap();
+
+        assert!(
+            unfilled(&omp(), &account, "/home/agent").is_empty(),
+            "the files are all present — this is exactly why they cannot decide"
+        );
+        assert!(
+            !decided_by_files(&omp()),
+            "so omh must not report this as a captured login on the files alone"
+        );
     }
 
     fn opencode() -> Adapter {

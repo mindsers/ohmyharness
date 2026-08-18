@@ -1,0 +1,171 @@
+name = "omp"
+bin  = "omp"
+# A release binary, not a package manager. oh-my-pi ships one static executable
+# per platform and publishes no npm package, so this is `curl` where the other
+# two adapters are `npm install -g`. `latest` rather than the pinned `v17.3.3`
+# these paths were read against, for the same reason the others are unpinned:
+# an adapter that installs an old harness is a different lie from one that
+# points at the wrong path, and only the second is omh's to tell.
+install = """curl -fsSL https://github.com/can1357/oh-my-pi/releases/latest/download/omp-linux-$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) -o /usr/local/bin/omp && chmod +x /usr/local/bin/omp"""
+
+# The whole directory, and it has to be: omp keeps credentials in **SQLite**
+# (`auth_credentials`, `auth_credential_blocks` in `agent.db`), and a bind-
+# mounted file cannot survive the rename SQLite does through its `-wal` and
+# `-shm` sidecars.
+#
+# `~/.omp/agent` is the default profile's directory. omp resolves it through
+# `getAgentDir()`, which moves to `~/.omp/profiles/<name>/agent` when an omp
+# profile is active — so omh's `--profile` and omp's are two different words
+# that happen to be spelled the same, and an omp profile is outside what this
+# adapter carries.
+creds = ["$HOME/.omp/agent/"]
+
+# No `token`. There is no file whose existence proves an omp login: the
+# credentials are rows in `agent.db`, and that database is created by boot noise
+# — settings, model_perf, usage_history — on the first start. Pointing `token`
+# at it would report a successful login for a session that never logged in,
+# which is the exact false positive `auth::unfilled` exists to prevent, so the
+# question is asked of the harness instead — see `[token-probe]` below.
+login = "run `/login` inside omp, then exit"
+
+[token-probe]
+run = "omp usage --json"
+# `omp usage` reports "usage limits for every authenticated account"; with no
+# accounts its `reports` array is empty — verified by running it. `accountId`
+# is the per-report field, read off the source rather than off a logged-in run,
+# and it is the one claim here that `omh doctor` still has to settle.
+ready = "accountId"
+
+# How this harness names the things an agent does. Verified against
+# `docs/tools/*.md` at v17.3.3: `bash` takes `command`, `read` takes `path`.
+#
+# No `search`: omp has `grep` and `glob` as separate tools and omh's vocabulary
+# has one word for both, so a hook narrowing to `search` is dropped by name
+# rather than silently matching half of what it asked for. The same reasoning,
+# and the same omission, as the opencode adapter.
+[tools]
+edit  = "edit"
+read  = "read"
+shell = "bash"
+
+# omp prefers `AGENTS.md` and reads `CLAUDE.md` only as one more flavour of the
+# same file, so there is nothing to put in `also` — unlike Claude Code, where
+# both names are live and the bytes are identical either way.
+[capabilities.rules]
+path   = "/work/AGENTS.md"
+render = "concat"
+# The **personal** file, never the repo's: `rules::compose` already puts this
+# project's own AGENTS.md into every session, so importing that one would
+# deliver the same prose twice. omp's user-scope rules file is `RULES.md` in the
+# agent directory. It also reads a user-scope `AGENTS.md` beside it; that one is
+# left alone because omh imports one personal rules file per harness, not
+# because importing it would duplicate anything.
+import = "$HOME/.omp/agent/RULES.md"
+
+# `<agent-dir>/skills/<name>/SKILL.md`, one level deep and not recursive. From
+# `packages/coding-agent/src/discovery/builtin.ts`, not from the prose: the docs
+# name `.omp/skills` for a project and leave the user root to `getAgentDir()`.
+[capabilities.skills]
+path   = "$HOME/.omp/agent/skills"
+render = "dir"
+import = "$HOME/.omp/agent/skills"
+
+# User scope. omp also reads `.omp/mcp.json` and `.omp/.mcp.json` from a
+# project, and neither is where omh mounts yours — the user file is the one
+# that is omh's to own, the way `$HOME/.config/opencode/opencode.json` is.
+#
+# The document shape is Claude Code's: `{ "mcpServers": { name: { command, … } } }`,
+# with `type` defaulting to `stdio` when absent. That is why this renders with
+# `mcp-json` and needs no renderer of its own.
+[capabilities.mcp]
+path   = "$HOME/.omp/agent/mcp.json"
+render = "mcp-json"
+import = "$HOME/.omp/agent/mcp.json"
+# No `verify`/`ready`, and this is the one place this adapter is weaker than
+# `claude`. omp has no `mcp` subcommand: its listing is `/mcp`, a slash command
+# inside the TUI, and reaching it head-lessly means starting an agent session —
+# so the check would spend a model call to answer a question about a file.
+#
+# It was tried. `omp -p '/mcp list'` went in, `omh doctor` ran it, and the
+# result was worse than nothing: the command wrote output that ran into the next
+# check's line and swallowed it, so the run reported on six capabilities while
+# claiming seven. A check that cannot fail cleanly is not a check.
+#
+# What that costs is exactly what `adapters.md` says it costs — this path is a
+# claim no `doctor` run can settle, the same state the `claude` adapter's `mcp`
+# binding was in for a year while pointing somewhere nothing reads. It is on
+# record rather than papered over.
+
+[capabilities.commands]
+path   = "$HOME/.omp/agent/commands"
+render = "dir"
+import = "$HOME/.omp/agent/commands"
+
+# `~/.omp/agent/agents/*.md`, per `docs/task-agent-discovery.md`. The singular
+# `agent` in the path is the config root; the plural is the directory.
+[capabilities.subagents]
+path   = "$HOME/.omp/agent/agents"
+render = "dir"
+import = "$HOME/.omp/agent/agents"
+
+# Hooks are a **module**, not a configuration file — the second harness in a row
+# to be so, which confirms what `OpencodePlugin`'s doc already suspected on one
+# example: declarative hook config is the exception, not the rule.
+#
+# A hook module default-exports a factory that receives `pi` and registers
+# handlers with `pi.on(...)`. Discovery scans `<scope>/hooks/pre/` and
+# `<scope>/hooks/post/`, but pre/post is only where a file is *found*: the
+# factories are loaded as extension modules and bind whatever moments they
+# register, so one module under `pre/` carries all four. That last clause is a
+# claim about oh-my-pi, and `omh doctor` is what settles it.
+[capabilities.hooks]
+path   = "$HOME/.omp/agent/hooks/pre/omh.ts"
+render = "omp-plugin"
+
+# omh's moments, in omp's words. All four exist, as they do on claude —
+# opencode is the one that maps three.
+#
+# Mapping `session-start` is not the same as being able to *speak* there. omp's
+# session and turn events are observational: their return value is ignored, so
+# only a `run` survives and an `inject` at `session-start` is dropped by name.
+# `graph-orient` is dropped here for that reason, where opencode drops it for
+# not having the moment at all. Closing that gap needs `pi.sendMessage`, which
+# is on omp's superset API and is not mapped because no run has confirmed its
+# signature — an unverified template that silently does nothing is worse than a
+# hook dropped out loud.
+[capabilities.hooks.events]
+session-start = "session_start"
+turn-end      = "turn_end"
+before-tool   = "tool_call"
+after-tool    = "tool_result"
+
+# Where this harness keeps each field. Property names on `event.input` — the
+# call's arguments — read in the renderer's own language the way opencode's
+# are, not jq paths. Naming `event` itself would send the next person adding a
+# field to `event.toolName`, which the renderer would emit as
+# `event.input?.toolName` and bind to the empty string.
+#
+# `tool-file` is `path`, which is `read`'s parameter. It is **not** `edit`'s:
+# omp's edit tool takes a single `input` string with the path embedded in
+# `[PATH#TAG]` sections. A hook narrowing to `edit` *and* wanting the file is
+# therefore dropped by name in the renderer rather than handed `""` — the
+# schema has one `fields` map per harness and no way to say "this field exists
+# on these tools and not those", so that one lives in `render::omp_plugin`.
+[capabilities.hooks.fields]
+tool-file    = "path"
+tool-command = "command"
+
+# Advisory text, at the one moment there is a channel for it: a `tool_result`
+# handler returning `content` replaces what the model reads next, so appending
+# to it reaches the model. The renderer is what restricts this to `after-tool`
+# — `tool_call` can only block, and turning a nudge into a wall is the one
+# translation omh refuses to make silently.
+[capabilities.hooks.inject]
+template = 'return { content: [...(event.content ?? []), { type: "text", text: {{text}} }] }'
+
+# Blocking, with a reason the model is shown. `{ block: true, reason }` from a
+# `tool_call` handler: the wrapper stops the call and `reason` becomes the
+# thrown error text. A decision said out loud, the way `permissionDecision` is
+# on Claude Code, rather than a throw the shell has to interpret.
+[capabilities.hooks.refuse]
+template = 'return { block: true, reason: {{text}} }'

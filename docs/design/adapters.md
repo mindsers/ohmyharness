@@ -49,6 +49,35 @@ cleanly with **zero** capabilities and every harness silently degrades to
 nothing — the worst possible failure for a tool whose entire promise is that
 your setup is already there.
 
+## `token` or `token-probe`, never both
+
+`token` names the file(s) whose contents prove a login. It is the better answer
+wherever it applies, because a stat needs no container and cannot be wrong about
+what it saw.
+
+Some harnesses keep credentials somewhere omh cannot read — omp keeps them in
+SQLite. There the only file that could be named is created by the harness
+*starting*, so declaring it would report a login for every session that merely
+opened the tool. Such an adapter declares a probe instead:
+
+```toml
+[token-probe]
+run   = "omp usage --json"   # asked inside the sandbox, where the credentials are
+ready = "accountId"          # what that answer says when the login is real
+```
+
+The pair is **refused at load**, not resolved by precedence: an adapter
+declaring both leaves omh with two answers to one question and no rule for which
+wins. It is the same shape as `verify`/`ready` one level up — when the claim is
+about software omh did not write, ask that software — and the same rule applies
+to the answer: the probe passes only when the command *succeeds* and its output
+names `ready`, because a harness that errors out will happily print the marker
+inside its error text.
+
+A probe cannot be run by `omh auth`, which tears the container down before it
+can ask. So `omh auth` on such a harness records the account and says the login
+is **unconfirmed**, and `omh doctor` is what settles it.
+
 ## Renderers
 
 | Render | Used by | Effect |
@@ -57,6 +86,15 @@ your setup is already there.
 | `concat` | rules | join the sections into one document, staged and mounted read-only |
 | `mcp-json`, `codex-toml`, `opencode-json` | mcp | reshape the canonical server list |
 | `claude-settings` | hooks | reshape the canonical hook list |
+| `opencode-plugin`, `omp-plugin` | hooks | generate a JavaScript module |
+
+Two of those emit a **program**, and they are separate renders rather than one
+parameterised by the harness. They agree on the shell bridge — how a hook body
+runs, how a failed predicate is reported, how `$OMH_*` expands — and on nothing
+else: opencode registers one object of named handlers and reads a call's
+arguments off `output` or `input` depending on the moment, while omp gives each
+hook its own `pi.on(...)` registration and hands every handler an `event`. Sharing the
+generator would mean a `match` on the harness in every line of it.
 
 `concat` is mounted, never written into the worktree — writing there made omh's
 staging indistinguishable from the agent's work and carried omh's rules into
@@ -163,10 +201,10 @@ anything read it. See [Troubleshooting](../troubleshooting.md#why-it-exists).
 
 ### The bar for shipping one
 
-Both bundled adapters are verified by `doctor` against a real container,
-hooks included on both — opencode's being a generated plugin rather than a
-config file, so it is checked by `node --check` inside the sandbox rather than
-by existing. Any third adapter inherits the same bar.
+All three bundled adapters are verified by `doctor` against a real container,
+hooks included on every one — opencode's and omp's being generated plugins
+rather than config files, so they are checked by `node --check` inside the
+sandbox rather than by existing. Any fourth adapter inherits the same bar.
 
 Do not read the check *count* as an adapter fact: it varies with the
 capabilities your profile declares and with whether a login has been captured
@@ -175,7 +213,15 @@ for that harness.
 `opencode` passing `doctor` is **not** the same as `opencode` being proven — it
 means the paths are right, not that the harness has been driven for real work.
 Only `claude` has. That distinction is deliberate and is repeated wherever the
-claim appears.
+claim appears, and it applies to `omp` in the same words.
+
+`omp` carries one claim weaker than the other two, and it is written here rather
+than left in a comment: its `token-probe` greps `omp usage --json` for
+`accountId`, and that field name was read out of oh-my-pi's source rather than
+observed in the output of a logged-in run. `doctor` reports the probe green only
+against an account that actually logged in, so an adapter shipped without one
+has had its *shape* checked and not its *answer*. The other two adapters have no
+equivalent gap because a token file either holds bytes or does not.
 
 ## Adding an editor
 
@@ -193,11 +239,24 @@ they have no capabilities to declare. See [Editors](../editors.md).
 
 ## Breadth is capped on purpose
 
-Adapter breadth stays at two harnesses until the base set is earned.
+Adapter breadth stays at three harnesses until the base set is earned.
 
 **Breadth before depth is how distributions die.** Ten adapters that each half-work
-is a worse product than two that are verified, and it is a much worse product to
+is a worse product than three that are verified, and it is a much worse product to
 maintain, because every one of them is a standing claim about software you do not
 control.
+
+The cap moved from two to three for `omp`, and the reasoning is worth keeping
+because it is the argument any fourth one has to beat. `omp` was not adopted for
+coverage. It was adopted because it is the **second harness to express hooks as a
+program rather than as configuration**, and that is a fact about the design omh
+could not learn from one example: `opencode-plugin`'s own doc called declarative
+hook config the norm and a plugin the exception, and it had exactly one data
+point. Two independent harnesses agreeing that hooks are code is what turns
+[the hook vocabulary](#hooks-three-maps-and-a-template) from a convenience into
+the only place a hook is written once.
+
+A third adapter that had taught omh nothing would not have been worth its
+maintenance, whatever it cost to write.
 
 See the [roadmap](roadmap.md) for when that cap lifts.

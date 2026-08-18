@@ -289,8 +289,10 @@ never `mv`*.
 
 ### 9.4 Hooks are an enhancement only
 
-`claude` declares rules, mcp and hooks; `opencode` declares rules and mcp. Only
-**rules and MCP are universal**, so nothing load-bearing may sit on a hook. Where
+`claude`, `opencode` and `omp` all declare rules, mcp and hooks today. That is a
+fact about three adapters, not a guarantee about the next one — **rules and MCP
+are the universal pair**, and a harness with no hook moment omh can spell is
+still a harness omh must run. So nothing load-bearing may sit on a hook. Where
 one exists, a `Stop` hook sharpens write timing. Ingestion needs no hook at all —
 the server watches the directory, so a `git pull`, a branch switch, a human's
 editor and the agent's writes are all just files changing.

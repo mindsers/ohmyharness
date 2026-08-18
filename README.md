@@ -94,7 +94,7 @@ $ omh init
 ```
 omh init — decided, asked nothing
 
-  harnesses  2 (claude, opencode)
+  harnesses  3 (claude, omp, opencode)
   editors    4 (code, cursor, nvim, zed)
   harness    claude  (found on your host)
   stack      rust (from Cargo.toml) → test `cargo test`, format `cargo fmt`
@@ -128,7 +128,7 @@ $ omh claude                  # sandboxed, logged in, configured
 
 ```
 omh init                          set this repo up
-omh <harness> [args…]             claude · opencode   ← bare name = run an agent
+omh <harness> [args…]      claude · omp · opencode   ← bare name = run an agent
 omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [account]      log in once; repeat for several accounts
@@ -385,7 +385,7 @@ whether anything reads it. That gap is what `doctor` closes.
 | **`omh eject`** | a credible exit: write out the raw per-harness config and step aside. |
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |
 | **Egress allowlist** | designed, not wired. |
-| **Second harness** | `opencode` passes `doctor`, but only `claude` has been driven for real work. |
+| **Other harnesses** | `opencode` and `omp` pass `doctor`, but only `claude` has been driven for real work. |
 
 Known rough edges: the graph store is shared across sessions of one repo, so an
 agent can query another session's graph (mitigated, not prevented);

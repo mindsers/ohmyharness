@@ -18,7 +18,7 @@ verified runtime.
 **Success criterion:** `omh init && omh claude` is visibly better than raw
 `claude`, with zero questions asked.
 
-*Not in v0: a second adapter, memory, breadth in the capability superset.*
+*Not in v0: further adapters, memory, breadth in the capability superset.*
 [Breadth before depth is how distributions die.](adapters.md#breadth-is-capped-on-purpose)
 
 ## v0.5 — backends
@@ -73,7 +73,7 @@ Marketplace plugin port: Claude Code plugins re-rendered for other harnesses.
 This is the thing nothing else can do, and it makes curation nearly free —
 inherit Anthropic's taste, port it everywhere. It sits at v3 rather than v1
 because it is worth very little until the ports are verified, which needs v2's
-second adapter and v1's evidence.
+portability work and v1's evidence.
 
 ## v4 — memory and graph, re-justified
 
