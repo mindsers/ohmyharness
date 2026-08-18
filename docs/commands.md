@@ -38,6 +38,13 @@ for a person or for a program, so the two cannot disagree about what happened.
 |---|---|
 | `--json` | The answer as JSON, with stable field names. |
 | `--color auto\|always\|never` | Defaults to `auto`: styled on a terminal, plain in a pipe. |
+| `NO_COLOR` | Set and non-empty, it turns `auto` plain. |
+
+`NO_COLOR` speaks for a user who has not said otherwise, so `--color always`
+still wins over it — that is you, on this one run, with your own hands. An
+**empty** `NO_COLOR` counts as unset, per [no-color.org](https://no-color.org):
+presence alone is not the trigger, and an empty value is what a shell leaves
+behind when a wrapper script unsets a variable badly.
 
 **stdout is the answer; stderr is everything else.** What a command was asked
 for goes to stdout, so `omh s ls > sessions.txt` captures exactly that.
@@ -47,6 +54,40 @@ when stdout is redirected — and stay out of the file.
 `--json` never emits colour, whatever `--color` says, because a script setting
 `--color always` in a wrapper should not break `jq`. It also suppresses hints,
 which are prose for a person.
+
+**JSON carries the fact, not the sentence.** The human column is English for a
+reader; the JSON field is the thing a script would otherwise have to parse it
+back out of:
+
+```console
+$ omh s ls
+  s01  omh/s01  stopped  ?  (1 behind main)
+
+$ omh s ls --json
+{
+  "base": "main",
+  "leftovers": [],
+  "sessions": [
+    {
+      "behind": 1,
+      "id": "s01",
+      "label": "omh/s01",
+      "running": false,
+      "work": { "state": "unknown" }
+    }
+  ]
+}
+```
+
+`work.state` is one of `clean`, `uncommitted`, `unpushed`, `published` or
+`unknown` — `uncommitted` and `unpushed` carry a `count`, `published` carries
+the `branch`. The one that earns the enum is **`unknown`**: it means omh could
+not tell, which is a different answer from `clean` and the one most dangerous to
+confuse with it. The human column prints `?` for it, and the string version of
+this API printed `""` for both.
+
+`work` is `null` — not `unknown` — where nobody asked, so a caller can tell an
+unanswered question from an unanswerable one.
 
 Both flags are omh's own, so `omh claude --json` is **refused** rather than
 handed to the harness — see [omh's flags come before the harness
@@ -296,9 +337,14 @@ you how to review or discard it:
 ```console
 $ omh s rm s01
 removed session s01; branch omh/s01 kept (3 commits to review)
-  review with  git log main..omh/s01
-  discard with git branch -D omh/s01
+  git log main..omh/s01
+  git branch -D omh/s01
 ```
+
+The summary is the answer and goes to stdout; the two commands are next steps
+and go to stderr, so they reach you here and stay out of anything you redirect.
+They carry no `review with` label because a suggested command is reproduced
+exactly — a line you cannot select and paste is worse than no line.
 
 A branch with **no** commits is dropped. Keeping it preserved nothing —
 `worktree remove --force` has already discarded anything uncommitted — while a
