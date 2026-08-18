@@ -357,10 +357,58 @@ pub fn problem(p: &Palette, e: &anyhow::Error) -> String {
 pub trait Report {
     /// For a person. May be styled; may reflow; may omit what a person can see
     /// for themselves.
+    ///
+    /// **The answer only.** A next step rendered here is on stdout by
+    /// construction, and `omh s ls > sessions.txt` then captures advice the
+    /// file was never meant to hold — see [`asides`](Self::asides).
     fn human(&self, p: &Palette) -> String;
 
     /// For a program. Stable field names, nothing elided, no styling.
     fn json(&self) -> serde_json::Value;
+
+    /// What this report has to say that is **not** the answer.
+    ///
+    /// Defaulted, because most reports are all answer. The two that are not
+    /// used to render these lines into [`human`](Self::human), which put them
+    /// on stdout: `omh s ls` wrote *clear each with omh s rm <id>* into any
+    /// file it was redirected into, and `omh s rm` wrote its two review
+    /// commands into one.
+    ///
+    /// Carried here rather than emitted at the call site because only the
+    /// report knows which of its lines are advice, and only [`Ctx`] knows the
+    /// stream and the format. Splitting it that way is what stops the next
+    /// `.next(…)` quietly landing back on stdout: there is no longer a way to
+    /// express one that does.
+    fn asides(&self) -> Asides {
+        Asides::default()
+    }
+}
+
+/// Warnings and next steps a report carries, for [`Ctx::say`] to place.
+///
+/// Two lists rather than one because they are not the same offer: a hint is a
+/// promise that the line can be selected and pasted, and a warning mixed into
+/// them breaks that promise for every line — the reader can no longer tell
+/// which is which without reading them all. Same reason `Action` keeps `next`
+/// and `notes` apart.
+#[derive(Debug, Default, Clone)]
+pub struct Asides {
+    /// Something is wrong but the command carried on.
+    pub warnings: Vec<String>,
+    /// A command the user may want next, reproduced so it can be pasted.
+    pub hints: Vec<String>,
+}
+
+impl Asides {
+    pub fn warn(mut self, msg: impl Into<String>) -> Self {
+        self.warnings.push(msg.into());
+        self
+    }
+
+    pub fn hint(mut self, msg: impl Into<String>) -> Self {
+        self.hints.push(msg.into());
+        self
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -384,8 +432,32 @@ pub struct Ctx {
 impl Ctx {
     /// The answer to what the user asked. **stdout**, because it is the thing
     /// they would want to redirect into a file.
+    ///
+    /// Anything the report carries that is *not* the answer goes to **stderr**
+    /// afterwards, through the same [`warn`](Self::warn) and
+    /// [`hint`](Self::hint) every other caller uses. Under `--json` it is
+    /// dropped instead of printed: [`Report::json`] already carries the same
+    /// facts as fields — `next`, `leftovers` — and a second copy as prose on
+    /// stderr is noise in whatever is parsing the first.
     pub fn say<R: Report + ?Sized>(&self, report: &R) {
         print!("{}", emit(report, self.format, &self.palette));
+
+        // Flushed before the asides rather than left to the runtime. When both
+        // streams are the same terminal the user reads them as one transcript,
+        // and stdout is block-buffered the moment it is anything else, so
+        // without this the advice can overtake the answer it is about.
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+
+        if self.format == Format::Json {
+            return;
+        }
+        let asides = report.asides();
+        for warning in &asides.warnings {
+            self.warn(warning);
+        }
+        for hint in &asides.hints {
+            self.hint(hint);
+        }
     }
 
     /// Something is wrong but the command carried on. **stderr.**

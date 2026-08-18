@@ -1381,7 +1381,9 @@ fn s_ls_names_what_removed_sessions_left_behind() {
     std::fs::create_dir_all(sb.home.join(".omh/run/repo/doctor")).unwrap();
 
     let out = sb.omh(&["s", "ls"]);
-    let printed = String::from_utf8_lossy(&out.stdout);
+    // On **stderr**: a leftover is something wrong, not what `s ls` was asked
+    // for, and `omh s ls > sessions.txt` must not collect it.
+    let printed = String::from_utf8_lossy(&out.stderr);
     assert!(
         printed.contains("s02"),
         "a run directory left behind: {printed}"
@@ -1393,6 +1395,63 @@ fn s_ls_names_what_removed_sessions_left_behind() {
     assert!(
         !printed.contains("doctor"),
         "scratch staging is not a removed session: {printed}"
+    );
+}
+
+/// The promise in `docs/commands.md`, pinned against the command that broke it.
+///
+/// *stdout is the answer; stderr is everything else* was documented and then
+/// contradicted by this exact invocation: the leftovers warning and its
+/// `omh s rm` hint were appended to the table, so both landed in the file. A
+/// prose rule nothing checks is a rule that drifts back — this is the check.
+#[test]
+fn a_redirected_s_ls_collects_the_sessions_and_nothing_else() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
+
+    let out = sb.omh(&["s", "ls"]);
+    let answer = String::from_utf8_lossy(&out.stdout);
+    let aside = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        !answer.contains("omh s rm"),
+        "a next step is not part of a redirected answer — got {answer:?}"
+    );
+    assert!(
+        !answer.contains("left something behind"),
+        "nor is a warning — got {answer:?}"
+    );
+    assert!(
+        aside.contains("left something behind") && aside.contains("omh s rm"),
+        "both still reach the person watching — got {aside:?}"
+    );
+}
+
+/// `--json` carries the same facts as fields, and drops the prose entirely.
+///
+/// The asides are suppressed rather than merely unstyled: `leftovers` is
+/// already in the document, so a sentence about it on stderr is a second copy
+/// for something that is parsing the first.
+#[test]
+fn json_carries_leftovers_as_a_field_and_says_nothing_about_them() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
+
+    let out = sb.omh(&["s", "ls", "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`--json` is one document");
+
+    assert_eq!(
+        doc["leftovers"],
+        serde_json::json!(["s03"]),
+        "the fact is a field"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "",
+        "and the prose about it is gone"
     );
 }
 

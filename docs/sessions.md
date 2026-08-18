@@ -187,6 +187,11 @@ $ omh s down s01          # stop the container, keep worktree and branch
 $ omh s rm s01            # remove the session — branch survives
 ```
 
+`s ls` reports state as English for you and as fields for a script: `omh s ls
+--json` gives each session's `running`, `behind` and `work.state` without
+anyone parsing the table — see [what every command
+prints](commands.md#what-every-command-prints).
+
 Sessions idle longer than `idle_timeout` are stopped on the next launch.
 N sessions means N containers, so this is not a nicety — see
 [risks](design/risks.md).

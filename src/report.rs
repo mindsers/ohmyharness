@@ -77,15 +77,31 @@ impl Action {
 }
 
 impl Report for Action {
-    fn human(&self, p: &out::Palette) -> String {
+    /// The summary and its consequences — not `next`.
+    ///
+    /// `notes` stay here because a consequence is part of what happened:
+    /// *branch omh/s01 kept* is the answer to `omh s rm`, not advice about it.
+    /// `next` is advice, so it leaves through [`Report::asides`] and lands on
+    /// stderr.
+    fn human(&self, _p: &out::Palette) -> String {
         let mut s = format!("{}\n", self.summary);
         for note in &self.notes {
             s.push_str(&format!("  {note}\n"));
         }
-        for command in &self.next {
-            s.push_str(&format!("  {}\n", p.paint(out::DIM, command)));
-        }
         s
+    }
+
+    /// Indented as they always were, so only the *stream* changed here.
+    ///
+    /// The two spaces group the commands under the summary they belong to, and
+    /// a shell ignores leading whitespace on a pasted line — the property
+    /// `a_suggested_command_survives_being_pasted` is really guarding is that
+    /// nothing is inserted *within* the command.
+    fn asides(&self) -> out::Asides {
+        out::Asides {
+            warnings: Vec::new(),
+            hints: self.next.iter().map(|c| format!("  {c}")).collect(),
+        }
     }
 
     fn json(&self) -> serde_json::Value {
@@ -237,7 +253,11 @@ pub struct Sessions {
 
 impl Report for Sessions {
     fn human(&self, p: &out::Palette) -> String {
-        if self.sessions.is_empty() && self.leftovers.is_empty() {
+        // No longer `&& leftovers.is_empty()`. With the leftovers on stderr,
+        // that condition left stdout holding an empty table for the repo whose
+        // sessions have all been removed badly — the one case where "no
+        // sessions" is the answer and something is also wrong.
+        if self.sessions.is_empty() {
             return format!("{}\n", p.paint(out::DIM, "no sessions"));
         }
 
@@ -261,25 +281,30 @@ impl Report for Sessions {
                 },
             ]);
         }
-        let mut out_s = table.render(p);
+        table.render(p)
+    }
 
-        if !self.leftovers.is_empty() {
-            out_s.push('\n');
-            out_s.push_str(&format!(
-                "{} removed but left something behind: {}\n",
+    /// The leftovers, which are not what `omh s ls` was asked for.
+    ///
+    /// Both lines used to be appended to the table above, so
+    /// `omh s ls > sessions.txt` wrote them into the file — the exact case
+    /// `docs/commands.md` promises they stay out of. They are still in `json`
+    /// as `leftovers`, where a script wanted them all along.
+    fn asides(&self) -> out::Asides {
+        if self.leftovers.is_empty() {
+            return out::Asides::default();
+        }
+        out::Asides::default()
+            .warn(format!(
+                "{} removed but left something behind: {}",
                 if self.leftovers.len() == 1 {
                     "1 session was"
                 } else {
                     "sessions were"
                 },
                 self.leftovers.join(", ")
-            ));
-            out_s.push_str(&format!(
-                "{}\n",
-                p.paint(out::DIM, "  clear each with  omh s rm <id>")
-            ));
-        }
-        out_s
+            ))
+            .hint("  clear each with  omh s rm <id>")
     }
 
     fn json(&self) -> serde_json::Value {
@@ -2099,8 +2124,15 @@ mod tests {
         let human = emit(&action, Format::Human, &Palette::plain());
         assert!(human.starts_with("removed session s01"));
         assert!(
-            human.contains("git log main..omh/s01"),
-            "and the next step is offered to the person — got {human:?}"
+            !human.contains("git log main..omh/s01"),
+            "the next step is not part of the answer — it would land in a \
+             redirected stdout — got {human:?}"
+        );
+        let hints = action.asides().hints;
+        assert_eq!(
+            hints.iter().map(|h| h.trim()).collect::<Vec<_>>(),
+            vec!["git log main..omh/s01"],
+            "it is still offered to the person, on stderr"
         );
     }
 
@@ -2121,10 +2153,15 @@ mod tests {
             .next("omh s rm s01")
             .note("teammates keep it until you commit the deletion");
 
+        let hints = action.asides().hints;
+        assert!(
+            hints.iter().any(|l| l.trim() == "omh s rm s01"),
+            "the command is handed over verbatim — got {hints:?}"
+        );
         let human = emit(&action, Format::Human, &Palette::plain());
         assert!(
-            human.lines().any(|l| l.trim() == "omh s rm s01"),
-            "the command is on a line of its own, verbatim — got {human:?}"
+            human.contains("teammates keep it"),
+            "the consequence is the answer and stays on stdout — got {human:?}"
         );
 
         let machine = action.json();
