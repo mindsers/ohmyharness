@@ -47,6 +47,32 @@ pub fn pointer_file() -> String {
     format!("gitdir: {GUEST_GITDIR}\n")
 }
 
+/// Where the `pre-push` hook lands inside the container.
+///
+/// Mounted read-only rather than written into the gitdir, so the agent cannot
+/// take it away. Measured: against a read-only mount `rm` gives `Resource
+/// busy`, and overwriting or `chmod -x` give `Read-only file system` — the
+/// three ways a file-owning agent silently disarms a hook, all closed.
+///
+/// It is still not a wall. `git push --no-verify` and
+/// `git -c core.hooksPath=… push` never consult the file at all, and both were
+/// measured pushing to a reachable remote with this mount in place. What the
+/// mount buys is that the hook cannot *quietly* stop being there — a bypass now
+/// takes a deliberate flag, which is a different thing from a missing file.
+pub const GUEST_PRE_PUSH: &str = "/omh/shadow/hooks/pre-push";
+
+/// The hook's body, so the launcher can stage the same bytes it mounts.
+pub fn pre_push_hook() -> String {
+    // A quoted heredoc, not `echo '…'`. The message is prose and prose has
+    // apostrophes: `the sandbox's own` closed the single quote, and the hook
+    // became a script that does not parse. It still exited non-zero, so it
+    // still refused and a test asserting failure still passed — but what the
+    // agent read was `unexpected EOF while looking for matching \`'\`` with no
+    // mention of omh, which is the whole reason it exists rather than letting
+    // git fail on its own.
+    format!("#!/bin/sh\ncat >&2 <<'OMH'\n{NO_PUSH}\nOMH\nexit 1\n")
+}
+
 /// The sandbox's own repository for one session.
 pub struct Shadow {
     /// The gitdir, mounted into the container. Agent-writable.
@@ -273,12 +299,18 @@ impl Shadow {
     /// | `git push` | refused, 0 commits |
     /// | `git push --no-verify` | **pushed** |
     /// | `git -c core.hooksPath=/dev/null push` | **pushed** |
-    /// | `rm hooks/pre-push; git push` | **pushed** |
+    /// | `rm hooks/pre-push; git push` | **pushed**, until the mount |
     ///
-    /// The gitdir is mounted read-write because the agent commits into it, so
-    /// the hook is a file the agent owns. Nothing here contains a determined
-    /// one — and nothing ever did: the container has `curl` and unrestricted
-    /// egress, so a push was never the narrow path out.
+    /// That last row is why `container::plan` mounts `GUEST_PRE_PUSH` read-only
+    /// over this copy: the gitdir is writable because the agent commits into
+    /// it, so without the mount the hook is a file the agent can simply take
+    /// away. With it, `rm` gives `Resource busy` and overwriting gives
+    /// `Read-only file system`.
+    ///
+    /// The first two rows are unaffected — neither flag reads the file — so
+    /// this is still not a wall. Nothing here contains a determined agent, and
+    /// nothing ever did: the container has `curl` and unrestricted egress, so a
+    /// push was never the narrow path out.
     ///
     /// What it is for is the *honest* path, which is the likely one. git's own
     /// error for a repository with no remote suggests `git remote add`, so git
@@ -309,20 +341,11 @@ impl Shadow {
         let hooks = gitdir.join("hooks");
         std::fs::create_dir_all(&hooks)?;
         let hook = hooks.join("pre-push");
-        // A quoted heredoc, not `echo '…'`. The message is prose and prose has
-        // apostrophes: `the sandbox's own` closed the single quote, and the
-        // hook became a script that does not parse. It still exited non-zero,
-        // so it still refused and a test asserting failure still passed — but
-        // what the agent read was `unexpected EOF while looking for matching
-        // \`'\`` with no mention of omh, which is the whole reason the hook
-        // exists rather than letting git fail on its own.
-        //
-        // `<<'OMH'` quotes the delimiter, so nothing inside is interpolated and
-        // no punctuation in the message can reach the shell.
-        std::fs::write(
-            &hook,
-            format!("#!/bin/sh\ncat >&2 <<'OMH'\n{NO_PUSH}\nOMH\nexit 1\n"),
-        )?;
+        // Written here as well as mounted read-only over the top: the mount is
+        // what the agent meets, and this is what a host-side reader would see
+        // and what makes the gitdir self-contained if it is ever inspected
+        // outside a container.
+        std::fs::write(&hook, pre_push_hook())?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

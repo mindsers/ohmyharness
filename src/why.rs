@@ -652,6 +652,34 @@ mod tests {
     /// so the command built to explain omh's choices has to know them. An
     /// instruction printed as the way out and then not recognised is the shape
     /// CONTRIBUTING singles out: it worked, it said so, and it was wrong.
+    /// Every name the shipped manifest records as rejected has to be
+    /// answerable, because `rejected` is where a *retired* entry goes and the
+    /// manifest promises `omh why` still answers for it.
+    ///
+    /// `git-unavailable` is the case that made this matter: it shipped as a
+    /// hook through 2026.08, and a user with it in their settings from before
+    /// then types the name omh told them to type. Deleting the whole
+    /// `[[rejected]]` block for it left the suite green — the `Rejected` arm is
+    /// exercised only through a hand-built fixture, never against what omh
+    /// actually ships.
+    #[test]
+    fn every_rejected_name_the_manifest_ships_is_answerable() {
+        let m = manifest();
+        let names: Vec<String> = m.rejected.iter().map(|r| r.name.clone()).collect();
+        assert!(
+            names.iter().any(|n| n == "git-unavailable"),
+            "the retired hook is the one users still have written down: {names:?}"
+        );
+
+        let c = catalog(&m, vec![]);
+        for name in &names {
+            assert!(
+                matches!(c.why(name), Verdict::Rejected { .. }),
+                "`omh why {name}` has to answer, not shrug"
+            );
+        }
+    }
+
     #[test]
     fn a_feature_is_explained_even_when_no_entry_shares_its_name() {
         let m = manifest();

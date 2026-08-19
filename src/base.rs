@@ -2099,7 +2099,33 @@ command = "c"
     #[test]
     fn no_shipped_hook_refuses_a_git_command() {
         use std::io::Write;
-        for (name, r) in all_rendered() {
+
+        // A table, not one string. The first version fired
+        // `git status && git commit -m wip` alone, and a hook refusing only
+        // `git push` sailed through it — which is precisely the shape the
+        // manifest argues against shipping, so the guard could not see the
+        // thing its own reasoning is about.
+        //
+        // The separator shapes come from the retired hook's own test, which
+        // found that an earlier pattern matched none of them. A newline-
+        // separated script is the one agents emit most and the easiest to miss.
+        let shapes = [
+            "git status",
+            "git push",
+            "git push --no-verify origin main",
+            "git commit -m wip",
+            "git stash",
+            "git reset --hard HEAD",
+            "cd /work && git push",
+            "true; git commit -am x",
+            "echo hi | git commit -F -",
+            "  git status",
+            "cd /work\ngit push origin main",
+        ];
+        for ((name, r), command) in all_rendered()
+            .into_iter()
+            .flat_map(|h| shapes.iter().map(move |c| (h.clone(), *c)))
+        {
             let mut child = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&r.command)
@@ -2108,9 +2134,7 @@ command = "c"
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .expect("sh must run");
-            let payload = serde_json::json!({
-                "tool_input": { "command": "git status && git commit -m wip" }
-            });
+            let payload = serde_json::json!({ "tool_input": { "command": command } });
             child
                 .stdin
                 .take()
@@ -2126,7 +2150,8 @@ command = "c"
             // reads the decision would pass it as "did not refuse".
             assert!(
                 out.status.success(),
-                "{name} exited {:?}, which is how a hook blocks without saying so: {}",
+                "{name} exited {:?} on `{command}`, which is how a hook blocks \
+                 without saying so: {}",
                 out.status.code(),
                 String::from_utf8_lossy(&out.stderr)
             );
@@ -2142,7 +2167,7 @@ command = "c"
             assert_ne!(
                 decision.as_deref(),
                 Some("deny"),
-                "{name} refuses git, and git is the agent's now: {said}"
+                "{name} refuses `{command}`, and git is the agent's now: {said}"
             );
         }
     }
