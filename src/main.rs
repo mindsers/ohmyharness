@@ -4653,11 +4653,29 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
     auth::login_outcome(status.success(), &unfilled)
         .map_err(|e| e.context(format!("run `omh auth {harness} {account}` again")))?;
     let all = auth::accounts(&paths, &adapter);
-    let mut action = report::Action::new(
-        "account-captured",
-        format!("`{account}` captured for {harness}"),
-    )
-    .data(serde_json::json!({
+    // What the files can and cannot settle. For a harness naming `token` files
+    // an empty `unfilled` *is* the login; for one that keeps credentials
+    // somewhere omh cannot stat it means only that nothing is obviously
+    // missing, and saying "captured" there announced a login to users who had
+    // opened the harness, run nothing and quit.
+    let decided = auth::decided_by_files(&adapter);
+    let mut action = if decided {
+        report::Action::new(
+            "account-captured",
+            format!("`{account}` captured for {harness}"),
+        )
+    } else {
+        report::Action::new(
+            "account-recorded",
+            format!("`{account}` recorded for {harness} — login not confirmed"),
+        )
+        .note(format!(
+            "{harness} keeps its credentials where omh cannot read them, so only \
+             {harness} can say whether the login took"
+        ))
+        .next(format!("omh doctor {harness}"))
+    };
+    action = action.data(serde_json::json!({
         "harness": harness,
         "account": account,
         "reauthenticated": already,

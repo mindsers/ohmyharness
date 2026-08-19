@@ -2,7 +2,7 @@
 
 ```
 omh init                          set this repo up
-omh <harness> [args…]             claude · opencode   ← bare name = run an agent
+omh <harness> [args…]      claude · omp · opencode   ← bare name = run an agent
 omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [account]      log in once; repeat for several accounts

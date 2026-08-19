@@ -67,7 +67,7 @@ $ omh init
 ```
 omh init — decided, asked nothing
 
-  harnesses  2 (claude, opencode)
+  harnesses  3 (claude, omp, opencode)
   editors    4 (code, cursor, nvim, zed)
   harness    claude  (found on your host)
   stack      rust (from Cargo.toml) → test `cargo test`, format `cargo fmt`

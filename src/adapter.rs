@@ -32,6 +32,22 @@ pub struct Adapter {
     /// telemetry.
     #[serde(default)]
     pub token: Vec<String>,
+    /// How to ask the harness whether it is logged in, for the harnesses where
+    /// no file can answer.
+    ///
+    /// `token` assumes credentials land somewhere omh can stat. omp keeps them
+    /// in SQLite, so the only file that could be named is created by boot noise
+    /// and every unauthenticated session would read as logged in — the exact
+    /// false positive [`crate::auth::unfilled`] exists to prevent. The same
+    /// move `verify`/`ready` already make for MCP: when a claim is about
+    /// software omh did not write, ask that software.
+    ///
+    /// Mutually exclusive with `token` rather than a fallback for it. A harness
+    /// that can be asked *and* stat'd would have two answers and no rule for
+    /// which wins, and the one time that happened for MCP the stale answer was
+    /// the confident one.
+    #[serde(default, rename = "token-probe")]
+    pub token_probe: Option<Probe>,
     /// What the user has to do once the harness opens. Every harness starts its
     /// login differently and none of them say so on the way in.
     #[serde(default)]
@@ -147,7 +163,13 @@ pub struct Binding {
     /// and the rest still ship.
     #[serde(default)]
     pub events: BTreeMap<crate::hook::Event, String>,
-    /// Where each canonical payload field lives in this harness's stdin schema.
+    /// Where each canonical payload field lives in this harness's payload.
+    ///
+    /// Read in the renderer's own language, never one syntax for all three:
+    /// jq paths for Claude Code, which hands a hook its payload on stdin, and
+    /// JavaScript property names for both plugin renders, which receive an
+    /// object. Calling this "the stdin schema" was true of one harness and
+    /// wrong about the other two.
     #[serde(default)]
     pub fields: BTreeMap<crate::hook::Field, String>,
     /// This harness's protocol for putting text in the agent's context.
@@ -214,6 +236,22 @@ pub struct Template {
     pub template: String,
 }
 
+/// A question put to the harness, and the answer that means yes.
+///
+/// The same shape as `verify`/`ready` on a [`Binding`], and deliberately the
+/// same shape: "run this and look for that" is one idea, and it now has one
+/// spelling. Both fields are required — a probe with no marker greps for
+/// nothing and passes on any output at all, which is worse than no probe,
+/// because it reports an answer.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Probe {
+    /// Run inside the sandbox, where the harness and its credentials are.
+    pub run: String,
+    /// What that command's output says when a login is real.
+    pub ready: String,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Render {
@@ -236,6 +274,20 @@ pub enum Render {
     /// that was scoped as "the three maps exercised elsewhere" turned out to
     /// need a code generator. The hook *bodies* stay shell; the module is glue.
     OpencodePlugin,
+    /// An oh-my-pi hook module: a default-exported factory, not a config file.
+    ///
+    /// The second harness to express hooks as a program, which settles the
+    /// question `OpencodePlugin`'s doc left open — declarative hook config is
+    /// the exception, not the rule, and omh's vocabulary earns its keep by
+    /// being the only place a hook is written once.
+    ///
+    /// Distinct from `OpencodePlugin` rather than shared with it: opencode
+    /// registers one object of named handlers and reads a tool's arguments off
+    /// `output`/`input` depending on the moment, while omp gives every hook
+    /// its own `pi.on(...)` registration and hands each handler an `event`. The two
+    /// emit different programs from the same maps, which is exactly what a
+    /// `render` names.
+    OmpPlugin,
 }
 
 impl Adapter {
@@ -283,8 +335,35 @@ impl Adapter {
                 path.display()
             );
         }
+        adapter.check_login(&path)?;
         adapter.check_hook_maps(&path)?;
         Ok(adapter)
+    }
+
+    /// A harness proves a login one way, not two.
+    ///
+    /// `token` is stat'd and `token-probe` is asked, and an adapter declaring
+    /// both leaves omh with two answers and no rule for which wins. There *was*
+    /// a rule — `credential_checks` dropped the probe whenever `token` was
+    /// non-empty — but it lived in one consumer, went unmentioned, and
+    /// `auth::decided_by_files` needed the same fact and could not see it.
+    ///
+    /// Refused here rather than modelled as an enum. An enum would make the
+    /// state unrepresentable and would cost a `TryFrom` shim plus a rename at
+    /// every `adapter.token` reader; this is the same trade `Template`'s doc
+    /// records — put the check where it can actually be enforced, and hold it
+    /// with a test, rather than build a type that looks like a guarantee.
+    fn check_login(&self, path: &Path) -> Result<()> {
+        if !self.token.is_empty() && self.token_probe.is_some() {
+            anyhow::bail!(
+                "adapter {} declares both `token` and `token-probe` — omh would \
+                 have two answers to whether this harness is logged in and no \
+                 rule for which wins. Keep `token` if a file proves the login, \
+                 `token-probe` if only the harness can say.",
+                path.display()
+            );
+        }
+        Ok(())
     }
 
     pub fn supports(&self, cap: Capability) -> Option<&Binding> {
@@ -424,7 +503,62 @@ mod tests {
         let all = Adapter::load_dir(Path::new(REAL)).unwrap();
         assert_eq!(
             all.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["claude", "opencode"]
+            ["claude", "omp", "opencode"]
+        );
+    }
+
+    /// Every path here is a claim about oh-my-pi, read out of its own source at
+    /// the version this adapter was written against — `v17.3.3`, tag-pinned
+    /// rather than `main`, because a doc read off the default branch describes
+    /// software nobody is running yet.
+    ///
+    /// The user roots come from `packages/coding-agent/src/discovery/builtin.ts`
+    /// rather than from the prose: the docs name `.omp/skills` for a project and
+    /// leave the user root to `getAgentDir()`, which resolves to
+    /// `~/.omp/agent` — and to `~/.omp/profiles/<name>/agent` when a profile is
+    /// active, which is why omh's own `--profile` and omp's are not the same
+    /// word twice.
+    #[test]
+    fn omp_reads_where_its_documentation_says() {
+        let omp = Adapter::find(Path::new(REAL), "omp").unwrap();
+        let path = |c: Capability| omp.supports(c).map(|b| b.path.as_str());
+        assert_eq!(path(Capability::Skills), Some("$HOME/.omp/agent/skills"));
+        assert_eq!(
+            path(Capability::Commands),
+            Some("$HOME/.omp/agent/commands")
+        );
+        assert_eq!(
+            path(Capability::Subagents),
+            Some("$HOME/.omp/agent/agents"),
+            "`~/.omp/agent/agents/*.md` per docs/task-agent-discovery.md; the \
+             singular `agent` is the config root, not the agent directory"
+        );
+        assert_eq!(
+            path(Capability::Mcp),
+            Some("$HOME/.omp/agent/mcp.json"),
+            "user scope; the project files omp also reads are `.omp/mcp.json` \
+             and `.omp/.mcp.json`, and neither is where omh mounts yours"
+        );
+        // AGENTS.md, not CLAUDE.md: omp prefers the former and reads the latter
+        // only as a fallback flavour.
+        assert_eq!(path(Capability::Rules), Some("/work/AGENTS.md"));
+    }
+
+    /// omp's tool vocabulary, and the one word of omh's it cannot spell.
+    ///
+    /// `search` is absent for the same reason it is absent on opencode: `grep`
+    /// and `glob` are separate tools there, omh has one word for both, and a
+    /// hook narrowing to `search` is dropped by name rather than silently
+    /// matching half of what it asked for.
+    #[test]
+    fn omp_spells_the_tools_it_has_and_no_others() {
+        let omp = Adapter::find(Path::new(REAL), "omp").unwrap();
+        assert_eq!(omp.tools[&crate::hook::Tool::Shell], "bash");
+        assert_eq!(omp.tools[&crate::hook::Tool::Read], "read");
+        assert_eq!(omp.tools[&crate::hook::Tool::Edit], "edit");
+        assert!(
+            !omp.tools.contains_key(&crate::hook::Tool::Search),
+            "omp has grep and glob as separate tools; half a claim is worse than none"
         );
     }
 
@@ -444,9 +578,9 @@ mod tests {
         }
         // Hooks were the last absent one, and they are absent no longer:
         // opencode grew a plugin system, so omh generates a module rather than
-        // a config file. Both shipped adapters express all six capabilities
-        // now, which is the capability floor `decisions.md` asks for reached
-        // rather than merely approached.
+        // a config file. All three shipped adapters express all six
+        // capabilities, which is the capability floor `decisions.md` asks for
+        // reached rather than merely approached.
         // opencode *does* have subagents — agent markdown files under
         // `~/.config/opencode/agents/`, with `mode: subagent` in the
         // frontmatter. This adapter said otherwise, so omh dropped them at
@@ -457,6 +591,15 @@ mod tests {
             oc.supports(Capability::Subagents).is_some(),
             "opencode has agent files; dropping them costs a feature the user had"
         );
+
+        // The floor is a floor, not a claude-and-opencode fact. omp expresses
+        // all six too, and the one that took work is `hooks`: it has no
+        // declarative hook config either, so declaring it meant a second code
+        // generator rather than a second path.
+        let omp = Adapter::find(Path::new(REAL), "omp").unwrap();
+        for cap in Capability::ALL {
+            assert!(omp.supports(cap).is_some(), "omp should support {cap}");
+        }
     }
 
     fn write(dir: &Path, name: &str, body: &str) -> PathBuf {
@@ -700,6 +843,46 @@ mod tests {
         let err = Adapter::find(d.path(), "mute").unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("events"), "must name what is missing: {msg}");
+    }
+
+    /// An adapter cannot both stat a token and ask the harness.
+    ///
+    /// `token_probe`'s doc calls the two "mutually exclusive rather than a
+    /// fallback", and for a while nothing enforced it: `credential_checks`
+    /// resolved the pair with a `.filter(|_| adapter.token.is_empty())`, which
+    /// *is* a rule for which wins, applied without a word. An adapter declaring
+    /// both parsed, loaded, launched, and quietly lost its probe — a claim the
+    /// adapter made, dropped in silence, which is the failure
+    /// `deny_unknown_fields` exists one level up to prevent.
+    ///
+    /// Refused where the zero-capability check already lives, so the rule holds
+    /// for every consumer rather than for the one that happened to encode it.
+    #[test]
+    fn an_adapter_cannot_both_stat_a_token_and_ask_the_harness() {
+        let d = tempfile::tempdir().unwrap();
+        write(
+            d.path(),
+            "greedy.toml",
+            r#"
+name    = "greedy"
+bin     = "greedy"
+install = "true"
+token   = ["$HOME/.greedy/token.json"]
+
+[token-probe]
+run   = "greedy whoami"
+ready = "account"
+
+[capabilities.rules]
+path   = "/work/AGENTS.md"
+render = "concat"
+"#,
+        );
+        let err = Adapter::find(d.path(), "greedy").unwrap_err().to_string();
+        assert!(
+            err.contains("token") && err.contains("token-probe"),
+            "the refusal must name both halves so it can be acted on: {err}"
+        );
     }
 
     #[test]

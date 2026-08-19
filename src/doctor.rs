@@ -83,6 +83,20 @@ pub enum Expect {
         names: Vec<String>,
         ready: String,
     },
+    /// The harness's own answer to "are you logged in" says `ready`.
+    ///
+    /// `Loaded` without the names: there is nothing to match *per item*, so
+    /// `ready` is looked for anywhere in the output rather than on a line with
+    /// something else. The distinction `Loaded` draws — every other line is
+    /// another server that may well be fine — has no analogue here, because a
+    /// login is one fact.
+    ///
+    /// This exists because `AtomicWrite` cannot be asked of a harness that
+    /// keeps no token file. omp keeps credentials in SQLite, and the database
+    /// is created on first start by settings and telemetry, so the strongest
+    /// host-side statement available is "a file exists that would exist
+    /// anyway".
+    Answers { command: String, ready: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,16 +142,32 @@ pub fn credential_checks(adapter: &Adapter) -> Vec<Check> {
     // The *token* is what must survive. The account record beside it is written
     // in place by every harness seen so far, and it sits directly in $HOME where
     // there is no directory to mount — so it is deliberately not a hard check.
-    adapter
-        .token
-        .iter()
-        .map(|template| Check {
-            name: "token".into(),
-            guest: expand(template.trim_end_matches('/'), GUEST_HOME),
-            expect: Expect::AtomicWrite,
-            dir: template.ends_with('/'),
-        })
-        .collect()
+    let files = adapter.token.iter().map(|template| Check {
+        name: "token".into(),
+        guest: expand(template.trim_end_matches('/'), GUEST_HOME),
+        expect: Expect::AtomicWrite,
+        dir: template.ends_with('/'),
+    });
+    // No `token`-is-empty filter here. There was one, and it was a rule for
+    // which of the two wins written in a single consumer and nowhere else —
+    // `auth::decided_by_files` needed the same fact and could not see it. The
+    // pair is refused by `Adapter::check_login` now, so an adapter declaring
+    // both never reaches this function and a guard here would be dead.
+    //
+    // `guest` is the home directory rather than the worktree: unlike `Loaded`,
+    // where a harness resolves its config from the project it was asked from, a
+    // login is an account fact and the same from anywhere. Naming `/work` would
+    // imply a project-scoped answer that is not on offer.
+    let probe = adapter.token_probe.iter().map(|p| Check {
+        name: "login".into(),
+        guest: PathBuf::from(GUEST_HOME),
+        expect: Expect::Answers {
+            command: p.run.clone(),
+            ready: p.ready.clone(),
+        },
+        dir: true,
+    });
+    files.chain(probe).collect()
 }
 
 /// What must be true inside the sandbox, given this profile and adapter.
@@ -190,7 +220,11 @@ pub fn checks(
             Render::ClaudeSettings => Expect::NonEmptyFile,
             // A program gets a stronger check than a config file, not a weaker
             // one: that it parses, and that the hooks omh did not drop are in it.
-            Render::OpencodePlugin => Expect::Parses(
+            //
+            // Both plugin renders, because both emit plain JavaScript under a
+            // `.ts` name — the extension is what each harness's loader expects,
+            // not a claim that either module needs a TypeScript parser.
+            Render::OpencodePlugin | Render::OmpPlugin => Expect::Parses(
                 hook_names(&sources, own, repo, binding, &adapter.tools, resolves)
                     .unwrap_or_default(),
             ),
@@ -481,6 +515,45 @@ pub fn probe_script(checks: &[Check]) -> String {
                  else printf 'fail\\t{name}\\tmissing:%s\\n' \"$missing\"; fi\n",
                 shell_list(names)
             )),
+            // One fact, so `ready` is looked for anywhere in stdout rather than
+            // on a line with a name beside it.
+            //
+            // **A login is the exit status and the marker, never the marker
+            // alone.** The first version asked only whether `ready` appeared
+            // anywhere in the command's combined output, and a harness that
+            // errored out was then judged by the words its error happened to
+            // contain: `harness usage --json` exiting 1 with "run /login to
+            // obtain an accountId" on stderr reported a successful login. That
+            // is the exact false positive `token-probe` exists to remove,
+            // arriving through the check meant to replace it.
+            //
+            // stdout and stderr are kept apart for the same reason. The marker
+            // has to come from the answer, not from a warning printed beside
+            // it; both are still quoted back on failure, because "no account"
+            // and "no such subcommand" are indistinguishable from an exit code
+            // and decide whether the user runs `omh auth` or fixes the adapter.
+            //
+            // `grep -F`: `ready` is a marker an adapter author wrote, not a
+            // pattern. Read as a basic regex, `usage: omp [options]` matches
+            // any line holding one of `o i t p n s`, which is a far looser
+            // check than anything anyone typed.
+            //
+            // `command` reaches `printf` as an **argument**, never inside the
+            // format string. Interpolated into the format, a `%` in a command
+            // was read as a directive and a `'` closed the quote and broke the
+            // whole concatenated probe — taking every other check with it.
+            Expect::Answers { command, ready } => out.push_str(&format!(
+                "e=$(mktemp 2>/dev/null || echo /tmp/omh-login.$$); \
+                 out=$( cd '{path}' 2>/dev/null && {command} 2>\"$e\" ); code=$?; \
+                 err=$(cat \"$e\" 2>/dev/null); rm -f \"$e\"; \
+                 if [ \"$code\" -eq 0 ] && printf '%s' \"$out\" | grep -qF -- {ready}; \
+                 then printf 'ok\\t{name}\\t%s reports %s\\n' {cmd} {ready}; \
+                 else printf 'fail\\t{name}\\t%s exited %s without %s: %s\\n' \
+                   {cmd} \"$code\" {ready} \
+                   \"$(printf '%s %s' \"$out\" \"$err\" | head -c 200 | tr '\\n' ' ')\"; fi\n",
+                cmd = single_quote(command),
+                ready = single_quote(ready),
+            )),
         }
     }
     out
@@ -533,6 +606,79 @@ mod tests {
     use std::path::Path;
 
     const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+
+    /// A harness whose credentials are not a file still gets its login checked.
+    ///
+    /// `credential_checks` reads `token`, and omp declares none — its
+    /// credentials are rows in SQLite, and the database is created by boot
+    /// noise. Left as-is, the harness with the *weakest* host-side evidence
+    /// would be the one omh checked least, which is backwards: it is precisely
+    /// the case where only the harness can answer.
+    #[test]
+    fn a_harness_that_keeps_no_token_file_is_asked_instead() {
+        let omp = Adapter::find(Path::new(ADAPTERS), "omp").unwrap();
+        assert!(
+            omp.token.is_empty(),
+            "this test is about the no-token case; omp grew a token file"
+        );
+        let checks = credential_checks(&omp);
+        let login = checks
+            .iter()
+            .find(|c| c.name == "login")
+            .unwrap_or_else(|| panic!("no login check: {checks:?}"));
+        assert_eq!(
+            login.expect,
+            Expect::Answers {
+                command: "omp usage --json".into(),
+                ready: "accountId".into(),
+            }
+        );
+    }
+
+    /// The probe omh generates is a script `sh` will actually run.
+    ///
+    /// `probe_script` writes shell out of Rust format strings, and this arm
+    /// nests a `$( … )` inside a quoted `printf` argument inside an `if`. A
+    /// quoting mistake there is invisible in every assertion that greps the
+    /// generated text for a substring — the script would be staged, run, and
+    /// fail as though the *harness* were broken.
+    #[test]
+    fn the_login_probe_is_a_script_sh_can_parse() {
+        let script = probe_script(&credential_checks(
+            &Adapter::find(Path::new(ADAPTERS), "omp").unwrap(),
+        ));
+        assert!(script.contains("omp usage --json"), "{script}");
+        let out = std::process::Command::new("/bin/sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("sh is available");
+        assert!(
+            out.status.success(),
+            "generated probe does not parse: {}\n--- script ---\n{script}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// And a harness that *does* keep one is not asked twice.
+    ///
+    /// The two are alternatives, not a belt and braces: a file check and a
+    /// probe that disagree have no rule for which wins, and the adapter schema
+    /// says so in `token_probe`'s own doc.
+    #[test]
+    fn a_harness_with_a_token_file_is_not_also_interrogated() {
+        let claude = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let checks = credential_checks(&claude);
+        assert!(
+            checks.iter().all(|c| c.name != "login"),
+            "claude has token files and should not be probed: {checks:?}"
+        );
+        assert!(
+            checks.iter().any(|c| c.expect == Expect::AtomicWrite),
+            "the token files are still checked: {checks:?}"
+        );
+    }
 
     struct Fx {
         _dir: tempfile::TempDir,
@@ -806,6 +952,39 @@ mod tests {
             assert!(
                 p.starts_with("/work") || p.starts_with(GUEST_HOME),
                 "{p} is not a sandbox path"
+            );
+        }
+    }
+
+    /// A generated **program** is checked by parsing it, on every harness that
+    /// emits one.
+    ///
+    /// `NonEmptyFile` passes for a module with a syntax error, for one where
+    /// every hook was dropped, and for one that throws on every event — which
+    /// is why `Parses` exists. A second plugin render was added to that arm and
+    /// nothing asserted it had been: downgrading omp's entry to `NonEmptyFile`
+    /// left the suite green, so omh had no evidence anywhere that it stages
+    /// valid JavaScript for omp.
+    #[test]
+    fn every_generated_program_is_checked_by_parsing_it() {
+        let fx = fixture();
+        for harness in ["opencode", "omp"] {
+            let cs = checks(
+                &fx.profile,
+                &adapter(harness),
+                &decided().0,
+                &decided().1,
+                &Default::default(),
+            )
+            .unwrap();
+            let hooks = cs
+                .iter()
+                .find(|c| c.name == "hooks")
+                .unwrap_or_else(|| panic!("{harness} stages a hooks module: {cs:?}"));
+            assert!(
+                matches!(hooks.expect, Expect::Parses(_)),
+                "{harness} emits a program, so it must be parsed: {:?}",
+                hooks.expect
             );
         }
     }
@@ -1151,6 +1330,118 @@ mod tests {
         let outcomes = parse(&String::from_utf8_lossy(&out.stdout));
         assert_eq!(outcomes.len(), 1, "one check, one line: {script}");
         outcomes.into_iter().next().unwrap()
+    }
+
+    /// Run the login probe against a fake harness with a chosen answer.
+    ///
+    /// `code` and `err` are separate arguments because the defect this fixture
+    /// was written for lived exactly in their being conflated.
+    fn login_probe_against(out: &str, err: &str, code: i32) -> Outcome {
+        let stub = tempfile::tempdir().unwrap();
+        let at = stub.path().join("harness");
+        std::fs::write(
+            &at,
+            format!(
+                "#!/bin/sh\ncat <<'EOF'\n{out}\nEOF\ncat >&2 <<'EOF'\n{err}\nEOF\nexit {code}\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let script = probe_script(&[Check {
+            name: "login".into(),
+            guest: stub.path().to_path_buf(),
+            expect: Expect::Answers {
+                command: "harness usage --json".into(),
+                ready: "accountId".into(),
+            },
+            dir: true,
+        }]);
+        let sh = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    stub.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("sh must run");
+        let outcomes = parse(&String::from_utf8_lossy(&sh.stdout));
+        assert_eq!(outcomes.len(), 1, "one check, one line: {script}");
+        outcomes.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_harness_that_names_an_account_passes_the_login_probe() {
+        let out = login_probe_against(r#"{"reports":[{"accountId":"me@example.com"}]}"#, "", 0);
+        assert!(out.ok, "a real account must pass: {out:?}");
+    }
+
+    #[test]
+    fn a_harness_with_no_accounts_fails_the_login_probe() {
+        let out = login_probe_against(r#"{"reports":[]}"#, "", 0);
+        assert!(!out.ok, "an empty report list is not a login: {out:?}");
+    }
+
+    /// The defect: a probe that **failed** was read as a login.
+    ///
+    /// The arm never looked at the exit status and folded stderr into the text
+    /// it grepped, so a harness that errored out was judged by whatever words
+    /// its error happened to contain — and `accountId` is exactly the word an
+    /// authentication error or a usage message names. Reproduced before the
+    /// fix: a command exiting 1 whose stderr read "run /login to obtain an
+    /// accountId" reported `ok`.
+    ///
+    /// This is the false positive `token-probe` was added to remove, arriving
+    /// through the check that replaced it.
+    #[test]
+    fn a_probe_that_failed_is_never_a_login() {
+        let out = login_probe_against(
+            "",
+            "error: no authenticated account; run /login to obtain an accountId",
+            1,
+        );
+        assert!(
+            !out.ok,
+            "the marker appeared in an error, on a failed run: {out:?}"
+        );
+    }
+
+    /// A missing subcommand is a broken probe, not a missing login, and the
+    /// report has to carry enough of the harness's own words to tell them
+    /// apart — that being the whole justification for this arm quoting output.
+    #[test]
+    fn a_broken_probe_says_what_the_harness_said() {
+        let out = login_probe_against("", "usage: harness [options]\nunknown flag: --json", 2);
+        assert!(!out.ok, "a broken probe cannot report a login: {out:?}");
+        assert!(
+            out.detail.contains("usage:") || out.detail.contains("unknown flag"),
+            "the harness's own words must survive into the report: {out:?}"
+        );
+    }
+
+    /// A multi-line answer must not break the tab-separated wire format.
+    ///
+    /// `parse` reads one outcome per line, so an unflattened multi-line error
+    /// would be read as extra checks — the failure `omp.toml` records for the
+    /// `omp -p '/mcp list'` verify command, which swallowed the next check's
+    /// line and made a seven-check run report six.
+    #[test]
+    fn a_multi_line_failure_stays_one_protocol_line() {
+        let out = login_probe_against("", "line one\nline two\nline three", 1);
+        assert!(!out.ok);
+        assert!(
+            !out.detail.contains('\n'),
+            "the detail must be flattened: {out:?}"
+        );
     }
 
     /// The bug this check exists for: omh's document was valid, mounted, and at

@@ -74,7 +74,7 @@ heard of is also not an error, and omh will not guess a flag for it:
 ```console
 $ omh attach emacs
 Error: unknown tool `emacs`
-  harnesses: claude, opencode
+  harnesses: claude, omp, opencode
   editors:   code, cursor, nvim, zed
 ```
 

@@ -2295,9 +2295,10 @@ mod tests {
     #[test]
     fn unsupported_capabilities_are_reported_not_silently_dropped() {
         let fx = fixture();
-        // Both shipped adapters express every capability now — what the
-        // capability floor asks for, reached by teaching omh to write a plugin.
-        for harness in ["claude", "opencode"] {
+        // All three shipped adapters express every capability — what the
+        // capability floor asks for, reached by teaching omh to write a plugin
+        // twice, since neither opencode nor omp has declarative hook config.
+        for harness in ["claude", "omp", "opencode"] {
             assert!(
                 plan_for(&fx, harness).dropped.is_empty(),
                 "{harness} gives up no whole capability"
@@ -2311,6 +2312,23 @@ mod tests {
         assert_eq!(named, ["graph-first", "graph-orient", "graph-read"]);
         let msg = oc.degradation().expect("and they are said out loud");
         assert!(msg.contains("graph-read"), "by name: {msg}");
+
+        // omp gives up the same three, and for reasons that are its own rather
+        // than opencode's: it *has* a `session-start` moment, so `graph-orient`
+        // is dropped for having no advisory channel there rather than for the
+        // moment being absent. Pinned here because nothing else asserts which
+        // hooks survive the new renderer's drop rules — a regression in them
+        // stayed green everywhere else.
+        let omp = plan_for(&fx, "omp");
+        let named: Vec<&str> = omp.dropped_hooks.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(named, ["graph-first", "graph-orient", "graph-read"]);
+        assert!(
+            omp.dropped_hooks
+                .iter()
+                .any(|d| d.name == "graph-orient" && d.wanted.contains("session-start")),
+            "the reason has to name the moment it asked for: {:?}",
+            omp.dropped_hooks
+        );
 
         let (_dir, plain) = without_hooks();
         let p = plan_with(&fx, &plain, decided());

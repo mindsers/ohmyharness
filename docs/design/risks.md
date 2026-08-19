@@ -62,8 +62,10 @@ project, and it is not a technical one.
   [code graph](../code-graph.md#what-the-agent-can-still-see).
 - **`.claude.json` is a single-file mount** that cannot be atomically replaced.
   `doctor` reports it rather than pretending otherwise.
-- **Only `claude` has been driven for real work.** `opencode` passes `doctor`,
-  which proves its paths and nothing about its behaviour.
+- **Only `claude` has been driven for real work.** `opencode` and `omp` pass
+  `doctor`, which proves their paths and nothing about their behaviour. `omp`
+  carries one gap beyond that: its login probe greps for a field name read out
+  of oh-my-pi's source, and no logged-in run has confirmed it.
 - **A seeded profile and the shipped base set drift by design.** `init` copies
   the [base set](base-set.md) into your profile once and never rewrites it, so
   your edits survive — but an upgrade moves the manifest and not your copy.
