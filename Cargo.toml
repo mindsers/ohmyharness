@@ -28,12 +28,17 @@ toml = "1.1"
 # a round trip through `toml::to_string_pretty` deletes every comment in it.
 # Already in the tree as `toml`'s own dependency, so this is an edge, not code.
 toml_edit = "0.22"
+# `Session::diff` stages the worktree into an index of its own so a review can
+# see files the agent created without touching the index the user's git shares.
+# A dev-dependency until that shipped, which `cargo test` hid: the test profile
+# links dev-dependencies into the bin target, so the suite went green against a
+# binary `cargo build` could not produce.
+tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-tempfile = "3"
 
 [[bin]]
 name = "omh"

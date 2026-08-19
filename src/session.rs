@@ -208,12 +208,97 @@ impl Session {
         Ok(outcome)
     }
 
-    pub fn diff(&self, repo: &Path, base: &str) -> Result<String> {
+    /// What this session changed, against the point it forked from.
+    ///
+    /// Against the **working tree**, not the branch tip, because the agent
+    /// never commits — it cannot today, and once the shadow repo lands its
+    /// commits still are not this branch's. `base...branch` answered with an
+    /// empty string for the whole span of a session, right up until the user
+    /// ran `omh s commit`, while the rules told the agent the user reviews
+    /// before committing. A review command that is silent about the work it
+    /// exists to show is worse than one that does not exist.
+    ///
+    /// The merge base, not `base` itself, so trunk moving under a running
+    /// session cannot manufacture changes it never made — the property the old
+    /// three-dot form had and this has to keep.
+    ///
+    /// Through a throwaway index, because `git diff <commit>` reports tracked
+    /// paths only and a file the agent *created* is untracked until somebody
+    /// stages it — which is most of what there is to review. `add -A` against
+    /// `GIT_INDEX_FILE` gets the whole worktree without touching the index the
+    /// user's own git commands share.
+    pub fn diff(&self, base: &str) -> Result<String> {
         let branch = self
             .branch
             .as_deref()
             .context("a scratch session has no branch")?;
-        git(repo, &["diff", "--stat", &format!("{base}...{branch}")])
+
+        // The same guard `commit` carries, for the same reason and with more at
+        // stake. A worktree left detached — `git checkout <sha>` to look at
+        // something, a bisect abandoned halfway — no longer has the branch's
+        // committed work *on disk*, and a diff taken from the worktree reports
+        // what is there. So the session's own commits go missing from the
+        // review and the command still exits 0.
+        //
+        // Answering against the branch instead does not rescue it: `checkout`
+        // removed the files, `add -A` reports the worktree it was given, and
+        // both forms print the same short answer. Measured, rather than argued
+        // — the choice of ref is not what is wrong, the worktree is. So this
+        // refuses instead, and a review that cannot be trusted is never handed
+        // over as one that can.
+        let head = git(&self.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        anyhow::ensure!(
+            head.trim() == branch,
+            "{} is on {} rather than {branch}; omh will not report a diff from a worktree that \
+             left its branch — the session's commits are not in it. Put it back with `git -C {} \
+             checkout {branch}`",
+            self.id,
+            head.trim(),
+            self.worktree.display()
+        );
+
+        let merge_base = git(&self.worktree, &["merge-base", base, branch])?;
+        let merge_base = merge_base.trim();
+
+        let index = tempfile::NamedTempFile::new().context("staging a diff index")?;
+        // `read-tree HEAD` first, for two reasons neither of which is obvious
+        // and both of which were measured. It is not cosmetic: an earlier
+        // comment here claimed an empty index would report every path as added,
+        // which is false — `diff --cached` compares blob hashes, so unchanged
+        // paths produce no diff either way, and a maintainer who tested that
+        // claim would have deleted the line.
+        //
+        // One: `NamedTempFile` leaves a **zero-byte** file, and git rejects one
+        // as an index — `fatal: index file smaller than expected`. A path that
+        // does not exist would be fine; the one we are handed is not.
+        //
+        // Two, and the reason the guard below exists: `add -A` skips a path
+        // `info/exclude` names, so against an empty index that path is absent
+        // and the diff calls it a deletion — a file reported as removed while
+        // it sits on disk. `carry` writes that exclude file, and a `carry_in`
+        // entry naming an already-tracked path is a misconfiguration it warns
+        // about rather than refuses, so the case is reachable.
+        let index = index.path();
+        git_with_index(&self.worktree, index, &["read-tree", "HEAD"])?;
+        git_with_index(&self.worktree, index, &["add", "-A", "."])?;
+
+        // The same unstage `commit` does, from the same list, because the
+        // reason is the same: omh mounts its rules over a placeholder it writes
+        // into the worktree, and `info/exclude` cannot hide that placeholder
+        // when the repo tracks the filename. Reading the worktree meant a
+        // review opened with `AGENTS.md | 1 -` — omh's own scaffolding shown as
+        // the agent emptying the project's rules, in this repo among others.
+        //
+        // Reading one list is the point: a review that showed what a commit
+        // would not carry is a review of something nobody is going to get.
+        let unstage = unstage_rules_args();
+        let unstage: Vec<&str> = unstage.iter().map(String::as_str).collect();
+        git_with_index(&self.worktree, index, &unstage)?;
+        git_with_index(
+            &self.worktree,
+            index,
+            &["diff", "--cached", "--stat", merge_base],
+        )
     }
 
     /// Stage the agent's work in the worktree and commit it onto the branch.
@@ -595,6 +680,25 @@ fn git_owned(cwd: &Path, args: &[String]) -> Result<String> {
     git(cwd, &borrowed)
 }
 
+/// `git` against an index of our own, so a read-only command can stage the
+/// worktree without disturbing the one the user's git shares.
+fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .env("GIT_INDEX_FILE", index)
+        .args(args)
+        .output()
+        .context("running git")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(cwd)
@@ -730,7 +834,158 @@ mod tests {
         std::fs::write(s.worktree.join("new.rs"), "fn main() {}").unwrap();
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "add"]).unwrap();
-        assert!(s.diff(&root, "main").unwrap().contains("new.rs"));
+        assert!(s.diff("main").unwrap().contains("new.rs"));
+    }
+
+    /// The agent never commits — it cannot, and after the shadow repo lands its
+    /// commits still are not the branch's. So the work `diff` has to report is
+    /// the work sitting in the worktree, and a commit-to-commit diff reports
+    /// none of it: `omh s diff` answered with silence for the whole span of a
+    /// session, while `GIT_ABSENT` and `getting-started` both told the agent the
+    /// user reviews with it *before* committing.
+    #[test]
+    fn diff_reports_work_the_user_has_not_committed_yet() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
+
+        let out = s.diff("main").unwrap();
+        assert!(
+            out.contains("agent.rs"),
+            "uncommitted agent work must be reviewable: {out:?}"
+        );
+    }
+
+    /// omh stages its rules by mounting them over a placeholder it writes into
+    /// the worktree, and `info/exclude` cannot hide that placeholder when the
+    /// repo *tracks* the filename — gitignore semantics say nothing about a
+    /// file git already has. This repo tracks `AGENTS.md`, so the case is not
+    /// exotic: reading the worktree turned omh's own scaffolding into a line
+    /// saying the agent had emptied the project's rules.
+    ///
+    /// `commit` already unstages these for the same reason. Both now read the
+    /// one list, so what a review shows and what a commit carries cannot
+    /// disagree about omh's own files.
+    #[test]
+    fn diff_never_shows_omhs_own_staging_as_the_agents_work() {
+        let (d, root) = repo();
+        let rules = crate::carry::STAGED_RULES[1];
+        std::fs::write(root.join(rules), "# the project's real rules\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "rules the repo tracks"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        crate::carry::hide_staged_rules(&s.worktree).unwrap();
+        // the placeholder a bind mount needs its destination to be
+        std::fs::write(s.worktree.join(rules), "").unwrap();
+        std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
+
+        let out = s.diff("main").unwrap();
+        assert!(
+            !out.contains(rules),
+            "omh's own staging is not the agent's work: {out:?}"
+        );
+        assert!(
+            out.contains("agent.rs"),
+            "the agent's actual work still has to show: {out:?}"
+        );
+    }
+
+    /// The base moving under a running session must not manufacture changes the
+    /// session never made. Three-dot diff pinned this to the fork point; the
+    /// working-tree form has to keep that property rather than inherit `HEAD`'s.
+    #[test]
+    fn diff_ignores_commits_the_base_gained_after_the_session_forked() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
+
+        // trunk moves on while the agent works
+        std::fs::write(root.join("trunk.rs"), "fn trunk() {}").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "trunk work"]).unwrap();
+
+        let out = s.diff("main").unwrap();
+        assert!(out.contains("agent.rs"), "the session's own work: {out:?}");
+        assert!(
+            !out.contains("trunk.rs"),
+            "a file the session never touched must not appear as its change: {out:?}"
+        );
+    }
+
+    /// A worktree that wandered off its branch no longer holds the session's
+    /// committed work on disk, and a diff read from the worktree reports what
+    /// is there — so the commits vanish from the review and the command still
+    /// succeeds. Silence would be bad enough; a confident partial answer is
+    /// worse, because the user commits against it.
+    #[test]
+    fn diff_refuses_from_a_worktree_that_left_its_branch() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "the session's work"]).unwrap();
+
+        // the worktree is taken off its branch to look at something
+        git(&s.worktree, &["checkout", "-q", "HEAD~1"]).unwrap();
+        assert!(
+            !s.worktree.join("agent.rs").exists(),
+            "checkout takes the committed work off disk — the premise of this test"
+        );
+
+        let err = s.diff("main").unwrap_err().to_string();
+        assert!(
+            err.contains("omh/s01"),
+            "the branch it should be on has to be named: {err}"
+        );
+    }
+
+    /// `read-tree HEAD` is what makes the throwaway index start from the commit
+    /// rather than from nothing, and only this case proves it: `add -A` skips a
+    /// path `info/exclude` names, so against an empty index the path is simply
+    /// absent and the diff calls it a **deletion** — a file reported as removed
+    /// that is sitting right there on disk.
+    ///
+    /// Not hypothetical. `carry` writes that exclude file, and a `carry_in`
+    /// entry naming an already-tracked path is a live misconfiguration `carry`
+    /// warns about at launch rather than refuses.
+    ///
+    /// The mutation this is red against is `read-tree --empty`, not dropping
+    /// the call: `NamedTempFile` leaves a zero-byte file that git rejects
+    /// outright, so removing the line fails every diff test on `index file
+    /// smaller than expected` and proves nothing about *this*.
+    #[test]
+    fn diff_calls_an_excluded_tracked_file_changed_rather_than_deleted() {
+        let (d, root) = repo();
+        std::fs::write(root.join("local.env"), "KEY=1\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(
+            &root,
+            &["commit", "-q", "-m", "a tracked file carry_in also names"],
+        )
+        .unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+
+        let exclude = crate::carry::exclude_path(&s.worktree).unwrap();
+        std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        std::fs::write(&exclude, "local.env\n").unwrap();
+        std::fs::write(s.worktree.join("local.env"), "KEY=1\nKEY2=2\n").unwrap();
+
+        let out = s.diff("main").unwrap();
+        assert!(
+            !out.contains("deletion"),
+            "a file present on disk must never be reported as deleted: {out:?}"
+        );
+        assert!(
+            out.contains("local.env"),
+            "the change itself still has to show: {out:?}"
+        );
     }
 
     // ── committing a session's work ─────────────────────────────────────────
@@ -1383,7 +1638,7 @@ mod tests {
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "work"]).unwrap();
 
-        let out = s.diff(&root, &default_branch(&root)).unwrap();
+        let out = s.diff(&default_branch(&root)).unwrap();
         assert!(out.contains("new.rs"), "got: {out}");
     }
 

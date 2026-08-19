@@ -4742,7 +4742,7 @@ fn diff(cwd: &std::path::Path, id: Option<&str>, base: Option<&str>, ctx: &out::
     let base = base
         .map(str::to_string)
         .unwrap_or_else(|| session::default_branch(&paths.repo));
-    let summary = session.diff(&paths.repo, &base)?;
+    let summary = session.diff(&base)?;
     ctx.say(&report::Diff {
         label: session.label().to_string(),
         base,
