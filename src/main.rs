@@ -35,6 +35,7 @@ mod runtime;
 mod selection;
 mod session;
 mod settings;
+mod shadow;
 mod ssh;
 mod stack;
 mod why;

@@ -132,6 +132,17 @@ impl Paths {
         self.root.join("keys").join(self.repo_id())
     }
 
+    /// Where the sandbox's own repositories live — one gitdir per session,
+    /// plus the seed each was created from.
+    ///
+    /// A tree of its own rather than a sibling of the worktree it serves:
+    /// `session::list` reports every directory under `worktrees()` as a
+    /// session, so an `s01.git` beside `s01` would show up in `omh s ls` as a
+    /// session you could resume and `next_id` would count it.
+    pub fn shadows(&self) -> PathBuf {
+        self.root.join("shadow").join(self.repo_id())
+    }
+
     /// The local note store — keyed by repo, and outside the checkout so it
     /// outlives the worktree that produced it. A session is a git worktree
     /// holding tracked files only, and `omh s rm` removes it with `--force`,
