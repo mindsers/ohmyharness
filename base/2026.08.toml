@@ -151,54 +151,30 @@ remove  = "omh config mcp rm codegraph — the feature, server and hooks togethe
   why  = "orientation is re-paid at every context rebuild and describes the modules; this names the tools and the project variable once. Different claims, and the hook's 2,300 B is the one that repeats"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Git, which the session does not have
+# Git, which the sandbox now has one of its own
 # ─────────────────────────────────────────────────────────────────────────────
-
-[[entry]]
-name    = "git-unavailable"
-kind    = "hook"
-feature = "git-notice"
-since   = "2026.08"
-because = "an agent that meets `fatal: not a git repository` explains it to itself, and the explanation it reaches for is that something is broken — so it spends turns repairing what cannot be repaired, and offers the user a commit it has no way to make"
-remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml"
-
-  [[entry.measured]]
-  what  = "when it fires"
-  value = "640 B"
-  how   = "the notice delivered as `additionalContext`, measured by piping a `git status` call through the hook's own command — 717 B of JSON, 640 B of it prose. Pinned by `the_git_notice_reaches_the_agent_verbatim`, which compares the emitted context against the shipped string"
-  on    = "2026-08-11"
-
-  [[entry.measured]]
-  what  = "when it does not"
-  value = "0 B"
-  how   = "silent unless the Bash command is git. The match set is asserted by running the hook through `sh`, not by reading its text: it fires on `git …`, after `&&`, `;` and `|`, on a leading-whitespace call, and on a newline-separated script — that last one is the common shape an agent emits, and an earlier pattern missed every one"
-  on    = "2026-08-11"
-
-  [[entry.instead_of]]
-  name = "only the git-rules section"
-  why  = "a rules file decays as context grows, and this one has to hold at the moment the agent reaches for git. Both ship: the section stops the plan being made, the hook catches the call. They read from one string so they cannot drift"
-
-  [[entry.instead_of]]
-  name = "blocking the call outright"
-  why  = "the same reason `graph-first` nudges rather than blocks. Verified 2026-08-11 that the call is harmless: `git init` against an unreachable gitdir refuses, names the missing directory, and leaves the pointer file untouched — the worktree survives intact. What it costs is turns and a promise the agent cannot keep, which a nudge answers and a wall does not"
 
 [[entry]]
 name    = "git-rules"
 kind    = "rules"
 feature = "git-notice"
 since   = "2026.08"
-because = "the hook can only fire once the agent has decided to run git, and by then it may already have offered the user a commit — this is what stops the plan being made rather than catching the call"
+because = "the sandbox has a repository of its own — its worktree's `.git` still points into the checkout omh never mounts, so omh mounts a gitdir it made instead. That gives the agent `status`, `diff`, `log`, `stash` and `reset --hard`, and it gives the attached editor its source control panel back. What the agent cannot work out on its own is whose repository it is: commits here are not the branch anyone reviews, and an agent that assumes otherwise reports work as delivered that nobody will ever see"
 remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
-  value = "649 B"
-  how   = "the section as shipped, byte for byte, computed by `every_rules_section_costs_what_it_says`. It is the same sentence the hook emits — one string, two deliveries, so the size is paid twice only when the hook fires"
-  on    = "2026-08-12"
+  value = "594 B"
+  how   = "the section as shipped, byte for byte, computed by `every_rules_section_costs_what_it_says`. It reads `shadow::ARRANGEMENT`, which the seed commit's message reads too, so the size is the same sentence a `git log` renders for free"
+  on    = "2026-08-19"
 
   [[entry.instead_of]]
-  name = "only the git-unavailable hook"
-  why  = "interception without orientation. Both ship and read from `GIT_ABSENT`, so they cannot drift; the pairing is argued from the other side under `git-unavailable`"
+  name = "the git-unavailable hook, which shipped until 2026.08"
+  why  = "it refused every shell command containing `git`, which was right while the worktree's pointer led nowhere and is a wall in front of the feature now that it does not. Retired rather than retargeted: with git working there is nothing left for it to intercept. Recorded under `rejected` so `omh why git-unavailable` still answers"
+
+  [[entry.instead_of]]
+  name = "a hook refusing `git push` alone"
+  why  = "git already refuses it — there is no remote — and git's own `pre-push` inside the shadow says why in omh's words when the agent has added one. Measured 2026-08-19 against a reachable remote: the hook fires ahead of the transfer and the remote stays at zero commits. A shell pattern would have to recognise a push across every shape an agent emits, and this set's pattern for matching `git` at all shipped broken once by missing multi-line scripts"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Considered and rejected.
@@ -206,6 +182,11 @@ remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/s
 # Recorded so the same candidate is not re-litigated every time someone
 # rediscovers it. `omh why <name>` answers for these too.
 # ─────────────────────────────────────────────────────────────────────────────
+
+[[rejected]]
+name       = "git-unavailable"
+considered = "2026.08"
+because    = "shipped through 2026.08 as a hook refusing every shell command containing `git`, and correct for exactly as long as git could not work: the worktree's `.git` points at an admin directory in the checkout, which omh does not mount. The sandbox now has a repository of its own, so the same hook refuses the feature instead of explaining it. Recorded here because `should omh stop the agent running git?` is the question someone rediscovers, and the answer changed rather than being wrong the first time."
 
 [[rejected]]
 name       = "gitnexus"

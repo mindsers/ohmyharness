@@ -215,7 +215,7 @@ impl Shadow {
                 "--no-verify",
                 "--allow-empty",
                 "-m",
-                SEED_MESSAGE,
+                &seed_message(),
             ],
         )?;
         let seed = git(&building, worktree, &["rev-parse", "HEAD"])?;
@@ -325,14 +325,29 @@ const AUTHOR_EMAIL: &str = "sandbox@omh.invalid";
 /// Every `git log`, `git show` and editor timeline renders it, at the moment
 /// the agent is working out what this repository is — which a rules section,
 /// paid for once and then competing with everything after it, cannot reach.
-pub const SEED_MESSAGE: &str = "The session starts here.\n\n\
-     This repository is the sandbox's own, and it is not the branch anyone \
-     reviews. Commit as often as you like — that is what it is for, and \
-     `git reset --hard` back to a checkpoint is yours to use. What reaches the \
-     person you are working with is the state of the files, which they read \
-     with `omh s diff` and commit themselves on the host. Your commit messages \
-     here stay here.\n\n\
-     There is nothing to push and no remote to push to.";
+/// What the arrangement actually is, said once.
+///
+/// Two surfaces deliver it and they must not drift: the seed commit's message,
+/// which every `git log` and editor timeline renders at the moment the agent is
+/// working out what this repository is, and the `git-rules` section omh puts in
+/// the agent's context every turn. `GIT_ABSENT` was one string for the same
+/// reason, when the sentence it carried was the opposite one.
+pub const ARRANGEMENT: &str = "This repository is the sandbox's own, and it is not the branch \
+     anyone reviews. Commit as often as you like — that is what it is for, and `git reset --hard` \
+     back to a checkpoint is yours to use. What reaches the person you are working with is the \
+     state of the files, which they read with `omh s diff` and commit with `omh s commit` on the \
+     host, pushing with `omh s push` when they are ready. Your commit messages here stay here.\n\n\
+     There is nothing to push and no remote to push to. Say that rather than offering to push, \
+     and do not offer to commit on the host — that is theirs to do.";
+
+/// The seed commit's message, which is a delivery surface and not a label.
+///
+/// Every `git log`, `git show` and editor timeline renders it, at the moment
+/// the agent is working out what this repository is — which a rules section,
+/// paid for once and then competing with everything after it, cannot reach.
+pub fn seed_message() -> String {
+    format!("The session starts here.\n\n{ARRANGEMENT}")
+}
 
 /// Why a push cannot work, said where the agent is trying to push.
 const NO_PUSH: &str =

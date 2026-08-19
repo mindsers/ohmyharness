@@ -1872,7 +1872,7 @@ mod tests {
             );
         }
         assert!(
-            composed_rules(&p).contains(crate::base::GIT_ABSENT),
+            composed_rules(&p).contains(crate::shadow::ARRANGEMENT),
             "and omh's rules sections are part of the same features"
         );
     }
@@ -2578,7 +2578,7 @@ mod tests {
         .unwrap();
 
         let named: Vec<_> = p.dropped_hooks.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(named, ["git-unavailable", "graph-first", "graph-read"]);
+        assert_eq!(named, ["graph-first", "graph-read"]);
 
         let msg = p
             .degradation()

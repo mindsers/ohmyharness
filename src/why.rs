@@ -101,12 +101,13 @@ pub enum Verdict<'a> {
     /// Considered and turned down. Recorded so the same candidate is not
     /// re-litigated every time somebody rediscovers it.
     Rejected { rejection: &'a Rejected },
-    /// A feature with no entry of its own — `git-notice` names the pairing of
-    /// a hook and a rules section, and nothing is called that.
+    /// A feature with no entry of its own — `git-notice` is the name of the
+    /// arrangement, and the section it now ships alone is called something
+    /// else.
     ///
     /// Answerable because feature names are user-facing: they are the whole
     /// `[omh]` key space, and the manifest prints `git-notice = false` as the
-    /// way out of `git-unavailable`. A name omh tells you to type and then
+    /// way out of `git-rules`. A name omh tells you to type and then
     /// does not recognise is this command's own failure mode, pointing inward.
     Feature {
         name: String,
@@ -642,7 +643,7 @@ mod tests {
     }
 
     /// `git-notice` is a feature with no entry of its own, and the manifest
-    /// prints `git-notice = false` as the way out of `git-unavailable`. Asked
+    /// prints `git-notice = false` as the way out of `git-rules`. Asked
     /// about it, omh answered "nothing recorded under that name" and listed
     /// names that did not include it.
     ///
@@ -658,7 +659,7 @@ mod tests {
 
         let out = render(&c, &c.why("git-notice"), "2026.08");
         assert!(
-            out.contains("git-unavailable") && out.contains("git-rules"),
+            out.contains("git-rules"),
             "must list what the feature gathers: {out}"
         );
 

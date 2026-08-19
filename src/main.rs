@@ -5010,7 +5010,7 @@ mod tests {
             off.hooks.iter().map(|h| h.name).collect::<Vec<_>>()
         );
         assert!(
-            off.hooks.iter().any(|h| h.name == "git-unavailable"),
+            off.sections.iter().any(|s| s.name == "git-rules"),
             "without taking a different feature with it"
         );
         // The other half of the same wire. `settings::resolve` produces this

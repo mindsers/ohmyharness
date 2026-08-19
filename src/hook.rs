@@ -1445,8 +1445,8 @@ mod tests {
              [inject]\ntemplate = \"echo {{text}}\"\n",
         );
         let h = Hook::parse(r#"{"on":"before-tool","refuse":"no git here"}"#, "h.json").unwrap();
-        let d = dropped("git-unavailable", &h, &b);
-        assert_eq!(d.name, "git-unavailable");
+        let d = dropped("a-refusing-hook", &h, &b);
+        assert_eq!(d.name, "a-refusing-hook");
         assert!(
             d.wanted.contains("refuse"),
             "say what it wanted: {}",
@@ -1467,7 +1467,7 @@ mod tests {
             "h.json",
         )
         .unwrap();
-        let cmd = rendered("git-unavailable", &h, hooks_binding()).command;
+        let cmd = rendered("a-refusing-hook", &h, hooks_binding()).command;
         assert!(cmd.contains("permissionDecision"), "got: {cmd}");
         assert!(cmd.contains("deny"), "got: {cmd}");
         assert!(

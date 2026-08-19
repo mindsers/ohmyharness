@@ -593,7 +593,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            body.matches(crate::base::GIT_ABSENT).count(),
+            body.matches(crate::shadow::ARRANGEMENT).count(),
             1,
             "the generated one, and nothing else:\n{body}"
         );
@@ -710,7 +710,7 @@ mod tests {
             "yours before the project's:\n{body}"
         );
         assert!(
-            at("PROJECT") < at(crate::base::GIT_ABSENT),
+            at("PROJECT") < at(crate::shadow::ARRANGEMENT),
             "the project's before omh's:\n{body}"
         );
     }
