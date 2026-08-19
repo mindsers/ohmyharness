@@ -132,6 +132,21 @@ impl Paths {
         self.root.join("keys").join(self.repo_id())
     }
 
+    /// Where the sandbox's own repositories live — one gitdir per session,
+    /// plus the seed each was created from.
+    ///
+    /// A tree of its own rather than a sibling of the worktree it serves:
+    /// `session::list` reports every directory under `worktrees()` as a
+    /// session, so an `s01.git` beside `s01` would show up in `omh s ls` as a
+    /// session you could resume.
+    ///
+    /// `next_id` would *not* be fooled — it parses the name after `s` as a
+    /// number and `01.git` does not parse — but that is one enumerator getting
+    /// lucky, not a reason to put them together.
+    pub fn shadows(&self) -> PathBuf {
+        self.root.join("shadow").join(self.repo_id())
+    }
+
     /// The local note store — keyed by repo, and outside the checkout so it
     /// outlives the worktree that produced it. A session is a git worktree
     /// holding tracked files only, and `omh s rm` removes it with `--force`,
@@ -533,6 +548,40 @@ mod tests {
             repo: dir.path().join("beta"),
         };
         assert_ne!(a.staging("s01", "claude"), b.staging("s01", "claude"));
+    }
+
+    /// The hazard `shadows()` was moved out of `worktrees()` to avoid:
+    /// `session::list` reports every directory under `worktrees()` as a
+    /// session, so a gitdir living there shows up in `omh s ls` as one you
+    /// could resume.
+    #[test]
+    fn a_sandbox_repository_never_lives_where_sessions_are_counted() {
+        let f = fixture(&[]);
+        let p = &f.paths;
+        assert!(
+            !p.shadows().starts_with(p.worktrees()),
+            "shadows must not sit under worktrees: {} inside {}",
+            p.shadows().display(),
+            p.worktrees().display()
+        );
+    }
+
+    /// The same reason staging is keyed by repo, with a sharper edge: two
+    /// checkouts each running `s01` would share one gitdir, so the agent in
+    /// repo B would open on repo A's scratch history — the isolation this
+    /// whole module exists for, lost to a path collision.
+    #[test]
+    fn sandbox_repositories_are_keyed_by_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Paths {
+            root: dir.path().into(),
+            repo: dir.path().join("alpha"),
+        };
+        let b = Paths {
+            root: dir.path().into(),
+            repo: dir.path().join("beta"),
+        };
+        assert_ne!(a.shadows(), b.shadows());
     }
 
     #[test]
