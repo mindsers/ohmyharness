@@ -264,10 +264,31 @@ impl Shadow {
         Ok(())
     }
 
-    /// The one wall left standing, and git's own hook rather than a pattern
-    /// over the command line — git knows what a push is, and omh's pattern for
-    /// matching `git` at all shipped broken once by missing the multi-line
-    /// scripts agents most often emit.
+    /// A signpost on the accidental path, and **not a wall** — this said "the
+    /// one wall left standing" and that was wrong three ways, each one command
+    /// long. Measured against git 2.55.0 and a reachable remote:
+    ///
+    /// | what the agent runs | remote |
+    /// |---|---|
+    /// | `git push` | refused, 0 commits |
+    /// | `git push --no-verify` | **pushed** |
+    /// | `git -c core.hooksPath=/dev/null push` | **pushed** |
+    /// | `rm hooks/pre-push; git push` | **pushed** |
+    ///
+    /// The gitdir is mounted read-write because the agent commits into it, so
+    /// the hook is a file the agent owns. Nothing here contains a determined
+    /// one — and nothing ever did: the container has `curl` and unrestricted
+    /// egress, so a push was never the narrow path out.
+    ///
+    /// What it is for is the *honest* path, which is the likely one. git's own
+    /// error for a repository with no remote suggests `git remote add`, so git
+    /// walks the agent to the edge; this is what meets it there and says why in
+    /// omh's words rather than leaving it to read a transport failure.
+    ///
+    /// git's own hook rather than a pattern over the command line, because git
+    /// knows what a push is — though note that argument cuts both ways, and the
+    /// `--no-verify` row above is the same "every shape an agent emits" problem
+    /// the base set's retired pattern had.
     ///
     /// Worth knowing when it actually fires, because it is not when you would
     /// guess, and the sequence matters. Measured against git 2.55.0:
@@ -320,11 +341,6 @@ impl Shadow {
 const AUTHOR_NAME: &str = "omh sandbox";
 const AUTHOR_EMAIL: &str = "sandbox@omh.invalid";
 
-/// The seed commit's message, which is a delivery surface and not a label.
-///
-/// Every `git log`, `git show` and editor timeline renders it, at the moment
-/// the agent is working out what this repository is — which a rules section,
-/// paid for once and then competing with everything after it, cannot reach.
 /// What the arrangement actually is, said once.
 ///
 /// Two surfaces deliver it and they must not drift: the seed commit's message,
@@ -355,8 +371,30 @@ const NO_PUSH: &str =
      your work reaches the outside through the host, where `omh s commit` puts it on the branch \
      and `omh s push` sends it. Say that rather than trying to push yourself.";
 
+/// Config keys that turn `git` into "run whatever this repository says".
+///
+/// Every one of these is agent-writable — they live in `/omh/shadow/config`,
+/// which is a read-write mount because the agent commits through it. Today
+/// nothing host-side reads an *existing* shadow (`ensure` returns early, `reap`
+/// only unlinks), so none of them can fire. That is a property of the call
+/// sites, not of anything enforcing it.
+///
+/// It will stop being true: `Session::remove` already records that the refusal
+/// `rm` owes the agent's checkpoints "belongs with the harvest that gives them
+/// somewhere to go", and a harvest reads those commits **on the host, as the
+/// user**. Neutralised here rather than there, because the person writing the
+/// harvest will be reading a doc comment, and a doc comment is not a guard.
+const NEUTRALISED: [&str; 5] = [
+    "core.hooksPath=",
+    "core.pager=cat",
+    "core.fsmonitor=",
+    "core.sshCommand=",
+    "protocol.file.allow=never",
+];
+
 fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
+        .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
         // Explicitly, because a child inherits omh's cwd and `add -A .` is
         // resolved against it: invoked from inside the session's worktree, git
         // computes a prefix and seeds only that subtree, silently leaving the
@@ -636,6 +674,70 @@ mod tests {
         );
         let status = git(&s.gitdir, &wt, &["status", "--porcelain"]).unwrap();
         assert!(!status.contains(".env"), "and its exclude list: {status:?}");
+    }
+
+    /// A hook the *agent* plants in its own gitdir must not run when omh
+    /// touches that gitdir from the host.
+    ///
+    /// Nothing host-side reads an existing shadow today, so this cannot fire
+    /// yet — which is exactly why it is worth pinning now. The harvest
+    /// `Session::remove` already promises is a host-side reader of commits the
+    /// agent wrote, and it will be written by someone reading a doc comment.
+    #[test]
+    fn a_hook_the_sandbox_plants_does_not_run_on_the_host() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        // what an agent with a writable gitdir can arrange
+        let planted = shadow_dir.join("planted");
+        let hooks = shadow_dir.join("evil-hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        let hook = hooks.join("post-checkout");
+        std::fs::write(&hook, format!("#!/bin/sh\ntouch {}\n", planted.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // written the way the agent would: into the repository's own config
+        Command::new("git")
+            .arg("--git-dir")
+            .arg(&s.gitdir)
+            .args(["config", "core.hooksPath"])
+            .arg(&hooks)
+            .output()
+            .unwrap();
+
+        let _ = git(&s.gitdir, &wt, &["checkout", "-q", "--", "."]);
+
+        assert!(
+            !planted.exists(),
+            "the sandbox's own config decided what ran on the host"
+        );
+    }
+
+    /// "One string, two deliveries" is the reason `ARRANGEMENT` exists, and
+    /// only one of the two was pinned. The rules side is asserted three times
+    /// over; the seed commit's side was asserted nowhere, and replacing
+    /// `seed_message()` with a bare "The session starts here." left the whole
+    /// suite green.
+    ///
+    /// This is the delivery the module doc calls the one a rules section
+    /// "cannot reach" — it arrives on `git log`, at the moment the agent is
+    /// working out what this repository is — so losing it silently is losing
+    /// the argument for the refactor.
+    #[test]
+    fn the_seed_commit_carries_the_arrangement_to_git_log() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        let said = git(&s.gitdir, &wt, &["log", "-1", "--format=%B"]).unwrap();
+        assert!(
+            said.contains(ARRANGEMENT),
+            "the agent reads this on `git log` and nowhere else: {said}"
+        );
     }
 
     /// Checkpointing is the feature, and a checkpoint is a commit, and git

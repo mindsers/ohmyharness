@@ -673,16 +673,14 @@ pub struct Section {
     pub body: String,
 }
 
-/// What the agent is told about git, in one place.
-///
-/// Both deliveries read from here — the `git-rules` section and the
 /// The rules omh ships, one section per base-set entry.
 ///
 /// They live here rather than in the manifest for the reason hook commands do:
 /// `memory-rules` interpolates `GUEST_LOCAL_NOTES` and `git-rules` reads
-/// `GIT_ABSENT`, which the hook reads too. Flattened into TOML both couplings
-/// become two strings that can drift, and the drift is silent — a safety notice
-/// saying one thing in the rules and another in the hook.
+/// `shadow::ARRANGEMENT`, which the sandbox's seed commit reads too. Flattened
+/// into TOML both couplings become two strings that can drift, and the drift is
+/// silent — the agent's rules saying one thing about whose repository it is and
+/// its own `git log` saying another.
 ///
 /// They were prose `init` appended to `.omh/profile/AGENTS.md`, which meant they
 /// reached the repos where somebody remembered and nowhere else, could not be
@@ -1905,10 +1903,14 @@ command = "c"
 
     /// P5's whole point: the translation, exercised by a second harness.
     ///
-    /// Two of the five cross and three do not, and *which* is the result rather
-    /// than a disappointment — `git-unavailable` crosses because `refuse` gave
-    /// it a way to say it blocks, and the three nudges do not because opencode
-    /// has no advisory channel before a tool runs. Named, not silent.
+    /// One of the four crosses and three do not, and *which* is the result
+    /// rather than a disappointment: `graph-refresh` crosses because it is a
+    /// `run`, and the three nudges do not because opencode has no advisory
+    /// channel before a tool runs. Named, not silent.
+    ///
+    /// It used to be two of five, the second being `git-unavailable` — a
+    /// `refuse`, which opencode *can* express. Retiring that hook took the only
+    /// wall in the set with it, so what crosses now is narrower.
     #[test]
     fn omhs_hooks_translate_to_opencode_or_are_named() {
         let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), "opencode").unwrap();
@@ -1950,7 +1952,7 @@ command = "c"
         );
     }
 
-    /// omh's five are held to the format they impose on everybody else.
+    /// omh's four are held to the format they impose on everybody else.
     ///
     /// `base::hooks()` builds `hook::Hook` by struct literal, so `parse` — the
     /// function whose doc says "no caller can hold an unchecked hook" — is
@@ -1960,7 +1962,7 @@ command = "c"
     /// the point. Run-and-inject, neither, and a capture nothing reads are no
     /// longer things a struct literal can express, so no test is what stops
     /// them. What is left is the one check on a *value*: put a `$` in
-    /// `GIT_ABSENT` or `GREP_NUDGE` — a price, a `$PATH` mention, a shell
+    /// `GREP_NUDGE` — a price, a `$PATH` mention, a shell
     /// example — and the sandbox shell expands it to nothing, so the agent
     /// reads a sentence with a hole in it. Every assertion about the hook's
     /// text still passes, because the text is right; only the expansion is
@@ -1982,7 +1984,7 @@ command = "c"
     /// Every hook is a shell one-liner, and nothing else here would notice one
     /// that cannot parse.
     ///
-    /// The `git-unavailable` hook embeds prose, and prose contains apostrophes:
+    /// `GREP_NUDGE` embeds prose, and prose contains apostrophes:
     /// a `shell_quote` that lets one through produces `unexpected EOF while
     /// looking for matching '`, which is a hook that silently never runs. Every
     /// assertion over a hook's *command string* is satisfied by that hook —
@@ -2054,6 +2056,32 @@ command = "c"
         }
     }
 
+    /// The graph hooks advise and must never block. `graph-first` says so in
+    /// its own comment — "a nudge, not a wall — a hook that blocks correct work
+    /// gets disabled" — and until 2026.08 this was asserted as the second half
+    /// of a test about the one hook that *did* block. Retiring that hook took
+    /// this with it.
+    ///
+    /// What was left is weaker in three separate ways: one test checks
+    /// `graph-first` alone by string-searching its command for "exit 1"; another
+    /// asserts advises-XOR-refuses without saying which; and the git guard below
+    /// sends a `Bash` payload, which `graph-read` and `graph-orient` do not
+    /// match, so they pass it without being asked anything.
+    #[test]
+    fn the_graph_hooks_are_nudges_not_walls() {
+        for name in ["graph-first", "graph-read", "graph-orient"] {
+            let h = hooks()
+                .into_iter()
+                .find(|h| h.name == name)
+                .unwrap_or_else(|| panic!("the base set ships {name}"));
+            assert!(
+                matches!(h.hook.action, crate::hook::Action::Inject { .. }),
+                "{name} is a nudge and has to stay one: {:?}",
+                h.hook.action
+            );
+        }
+    }
+
     /// The sandbox has a repository of its own now — `shadow.rs` gives it one,
     /// mounted at `/omh/shadow` and named by a `.git` file over `/work/.git` —
     /// so `status`, `diff`, `log`, `stash` and `reset --hard` all work. A hook
@@ -2091,12 +2119,25 @@ command = "c"
                 .unwrap();
             let out = child.wait_with_output().unwrap();
             let said = String::from_utf8_lossy(&out.stdout);
+
+            // Exit status first, because Claude Code's *other* block mechanism
+            // for `PreToolUse` is exiting 2 with a reason on stderr — a hook
+            // refusing that way emits no JSON at all, and a check that only
+            // reads the decision would pass it as "did not refuse".
+            assert!(
+                out.status.success(),
+                "{name} exited {:?}, which is how a hook blocks without saying so: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+
             let decision = serde_json::from_str::<serde_json::Value>(&said)
                 .ok()
-                .and_then(|v| {
+                .map(|v| {
                     v["hookSpecificOutput"]["permissionDecision"]
                         .as_str()
-                        .map(str::to_string)
+                        .unwrap_or_default()
+                        .to_string()
                 });
             assert_ne!(
                 decision.as_deref(),

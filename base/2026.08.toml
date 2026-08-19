@@ -159,7 +159,7 @@ name    = "git-rules"
 kind    = "rules"
 feature = "git-notice"
 since   = "2026.08"
-because = "the sandbox has a repository of its own — its worktree's `.git` still points into the checkout omh never mounts, so omh mounts a gitdir it made instead. That gives the agent `status`, `diff`, `log`, `stash` and `reset --hard`, and it gives the attached editor its source control panel back. What the agent cannot work out on its own is whose repository it is: commits here are not the branch anyone reviews, and an agent that assumes otherwise reports work as delivered that nobody will ever see"
+because = "the sandbox has a repository of its own — its worktree's `.git` still points into the checkout omh never mounts, so omh mounts a gitdir it made instead. That gives the agent `status`, `diff`, `log`, `stash` and `reset --hard`, and puts a `.git` an editor attached over SSH can find. What the agent cannot work out on its own is whose repository it is: commits here are not the branch anyone reviews, and an agent that assumes otherwise reports work as delivered that nobody will ever see"
 remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml"
 
   [[entry.measured]]
@@ -174,7 +174,7 @@ remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/s
 
   [[entry.instead_of]]
   name = "a hook refusing `git push` alone"
-  why  = "git already refuses it — there is no remote — and git's own `pre-push` inside the shadow says why in omh's words when the agent has added one. Measured 2026-08-19 against a reachable remote: the hook fires ahead of the transfer and the remote stays at zero commits. A shell pattern would have to recognise a push across every shape an agent emits, and this set's pattern for matching `git` at all shipped broken once by missing multi-line scripts"
+  why  = "it would not contain anything, and nothing here does. The sandbox has `curl` and unrestricted egress, so a push was never the narrow way out — what a wall in front of it buys is orientation, not containment. git's own `pre-push` inside the shadow already provides that, in omh's words, on the path git itself walks the agent down: the error for a repository with no remote suggests `git remote add`. Measured 2026-08-19 against a reachable remote, both directions — the hook fires ahead of the transfer and the remote stays at zero commits, and `git push --no-verify` goes straight past it and lands one. A shell pattern would fare no better and would have to recognise a push across every shape an agent emits, which is how this set's pattern for matching `git` at all shipped broken once"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Considered and rejected.

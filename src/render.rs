@@ -2495,9 +2495,10 @@ template = 'return { block: true, reason: {{text}} }'
     /// A `when` predicate and a `capture` both reach the module.
     ///
     /// Neither had a guard on this path, and deleting both emission blocks left
-    /// the suite green. That is not academic: the shipped `git-unavailable`
-    /// hook is `before-tool` + `refuse` narrowed to the shell tool, and its
-    /// `when` predicate is the **only** thing restricting it to git commands —
+    /// the suite green. That is not academic: omh shipped exactly this shape
+    /// through 2026.08 — `git-unavailable` was `before-tool` + `refuse`
+    /// narrowed to the shell tool, and its `when` predicate was the **only**
+    /// thing restricting it to git commands —
     /// losing it turns "block git" into "block every bash call", silently.
     #[test]
     fn a_when_predicate_and_a_capture_reach_the_omp_module() {
@@ -2566,7 +2567,7 @@ template = 'return { block: true, reason: {{text}} }'
 
     /// A hook's name never lands where JavaScript would read it as code.
     ///
-    /// omh's own hook names carry `-` (`graph-read`, `git-unavailable`), and
+    /// omh's own hook names carry `-` (`graph-read`, `graph-first`), and
     /// `-` is a minus sign in an identifier position: `const r_graph-read` does
     /// not parse, and a module that does not parse takes every *other* hook
     /// down with it.

@@ -692,9 +692,9 @@ mod tests {
     /// This guard did not move when the map did. `check_hook_maps` refuses a
     /// `hooks` binding with no `events` because a binding that can express no
     /// moment "claimed to have them" — and forgetting to lift `[tools]` to the
-    /// top level has the same shape: `git-unavailable`, `graph-first` and
-    /// `graph-read` are all dropped, and the user reads "dropped 3 hooks
-    /// (unsupported)", which is never a true statement about any harness.
+    /// top level has the same shape: `graph-first` and `graph-read` are both
+    /// dropped, and the user reads "dropped 2 hooks (unsupported)", which is
+    /// never a true statement about any harness.
     #[test]
     fn a_harness_with_hooks_must_spell_the_tools() {
         let d = tempfile::tempdir().unwrap();

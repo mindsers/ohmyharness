@@ -534,7 +534,7 @@ mod tests {
     /// order is meaning. It could not be removed: `[use]` refuses to name it and
     /// `omh unuse` refuses to take it out. And it arrived *beside* omh's own
     /// generated section for the same feature, delivering the git notice twice
-    /// — the drift `GIT_ABSENT` exists as a single string to prevent.
+    /// — the drift `shadow::ARRANGEMENT` exists as a single string to prevent.
     ///
     /// The comment that used to sit on the sort asserted this could not happen.
     #[test]

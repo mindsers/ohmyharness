@@ -9,13 +9,16 @@
 //! ## Why the tag, and not a digest of the recipe
 //!
 //! `docs/design/adoption.md` gestured at `image::recipe_digest`, which shells
-//! out to `git hash-object`. git does not work inside an omh sandbox by design
-//! — the worktree's `.git` is a pointer at a host directory omh does not mount
-//! — so keying this cache on it makes the cache unbuildable in the environment
-//! omh ships. The tag is already content-addressed on the recipe (`tag_for`
-//! hashes the adapter's install; `stack_tag` hashes the whole layered
-//! Dockerfile), which is the property the digest was wanted for, and it costs
-//! no subprocess at all.
+//! out to `git hash-object`. The tag is already content-addressed on the recipe
+//! (`tag_for` hashes the adapter's install; `stack_tag` hashes the whole
+//! layered Dockerfile), which is the property the digest was wanted for, and it
+//! costs no subprocess at all.
+//!
+//! This used to rest on a second argument — that git does not work inside an
+//! omh sandbox, so a cache keyed on it would be unbuildable there. That was
+//! true until 2026.08 and is not now: the sandbox has a repository of its own
+//! (see `shadow`), and `git hash-object` runs fine in it. The decision stands
+//! on the cost alone, which is the argument that was always doing the work.
 //!
 //! ## The asymmetry this file exists to keep
 //!
