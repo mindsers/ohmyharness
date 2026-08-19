@@ -534,7 +534,7 @@ mod tests {
     /// order is meaning. It could not be removed: `[use]` refuses to name it and
     /// `omh unuse` refuses to take it out. And it arrived *beside* omh's own
     /// generated section for the same feature, delivering the git notice twice
-    /// — the drift `GIT_ABSENT` exists as a single string to prevent.
+    /// — the drift `shadow::ARRANGEMENT` exists as a single string to prevent.
     ///
     /// The comment that used to sit on the sort asserted this could not happen.
     #[test]
@@ -593,7 +593,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            body.matches(crate::base::GIT_ABSENT).count(),
+            body.matches(crate::shadow::ARRANGEMENT).count(),
             1,
             "the generated one, and nothing else:\n{body}"
         );
@@ -710,7 +710,7 @@ mod tests {
             "yours before the project's:\n{body}"
         );
         assert!(
-            at("PROJECT") < at(crate::base::GIT_ABSENT),
+            at("PROJECT") < at(crate::shadow::ARRANGEMENT),
             "the project's before omh's:\n{body}"
         );
     }

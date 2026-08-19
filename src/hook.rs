@@ -1445,8 +1445,8 @@ mod tests {
              [inject]\ntemplate = \"echo {{text}}\"\n",
         );
         let h = Hook::parse(r#"{"on":"before-tool","refuse":"no git here"}"#, "h.json").unwrap();
-        let d = dropped("git-unavailable", &h, &b);
-        assert_eq!(d.name, "git-unavailable");
+        let d = dropped("a-refusing-hook", &h, &b);
+        assert_eq!(d.name, "a-refusing-hook");
         assert!(
             d.wanted.contains("refuse"),
             "say what it wanted: {}",
@@ -1467,7 +1467,7 @@ mod tests {
             "h.json",
         )
         .unwrap();
-        let cmd = rendered("git-unavailable", &h, hooks_binding()).command;
+        let cmd = rendered("a-refusing-hook", &h, hooks_binding()).command;
         assert!(cmd.contains("permissionDecision"), "got: {cmd}");
         assert!(cmd.contains("deny"), "got: {cmd}");
         assert!(
@@ -1522,6 +1522,63 @@ mod tests {
                 .unwrap(),
             prose.replace("$$", "$"),
             "the prose has to survive shell quoting intact"
+        );
+    }
+
+    /// The same, for `refuse`, which is the template nothing else executes.
+    ///
+    /// It was covered until 2026.08 by a test over the shipped `git-unavailable`
+    /// hook, and retiring that hook took the coverage with it: the base set now
+    /// ships only `run` and `inject`, so every loop over `hooks()` stops
+    /// reaching this path. Verified by removing `hookEventName` from the claude
+    /// adapter's refuse template — two tests went red before, and none after.
+    ///
+    /// Rehomed onto a synthetic hook for exactly that reason. `refuse` is a
+    /// field users write and omh documents; whether the base set happens to use
+    /// it is not what decides if it works.
+    ///
+    /// `hookEventName` is the assertion that matters and the one that looks
+    /// redundant: Claude Code discards a `hookSpecificOutput` that does not name
+    /// its event, so without that key the decision never arrives and the tool
+    /// call proceeds — a refusing hook that silently refuses nothing.
+    #[test]
+    fn a_refusal_survives_the_shell_and_names_its_event() {
+        let prose = "no — it's the sandbox's own, and `git push` won't reach anyone";
+        let h = Hook::parse(
+            &serde_json::json!({ "on": "before-tool", "refuse": prose }).to_string(),
+            "h.json",
+        )
+        .unwrap();
+
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&rendered("a-refusing-hook", &h, hooks_binding()).command)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("sh must run");
+        assert!(
+            out.stderr.is_empty(),
+            "the harness shows the user stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .unwrap_or_else(|e| panic!("not JSON: {} ({e})", String::from_utf8_lossy(&out.stdout)));
+        let said = &doc["hookSpecificOutput"];
+        assert!(
+            said["hookEventName"].is_string(),
+            "without the event name the harness drops the decision and the call \
+             goes ahead: {doc}"
+        );
+        assert_eq!(
+            said["permissionDecision"].as_str(),
+            Some("deny"),
+            "a refusal is a decision, not a comment: {doc}"
+        );
+        assert_eq!(
+            said["permissionDecisionReason"].as_str().unwrap(),
+            prose,
+            "and the reason has to survive shell quoting intact"
         );
     }
 

@@ -389,6 +389,25 @@ pub fn plan(
             read_only: true,
             file: true,
         });
+
+        // The push hook, mounted read-only over the copy `ensure` wrote.
+        //
+        // The gitdir has to be writable — the agent commits into it — so
+        // everything in it is the agent's to delete, including the one hook
+        // that speaks up when it reaches for a remote. Mounted, it cannot be
+        // removed, rewritten or chmod-ed away. It can still be *bypassed*, by
+        // `--no-verify` and by `core.hooksPath`; see `shadow::GUEST_PRE_PUSH`
+        // for what that does and does not buy.
+        let hook = stage.join("shadow-pre-push");
+        if staging == Staging::Apply {
+            std::fs::write(&hook, crate::shadow::pre_push_hook())?;
+        }
+        mounts.push(Mount {
+            host: hook,
+            guest: crate::shadow::GUEST_PRE_PUSH.into(),
+            read_only: true,
+            file: true,
+        });
     }
 
     // The graph index, keyed by repo rather than harness — that is what lets
@@ -1260,6 +1279,35 @@ mod tests {
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
     }
 
+    /// The agent commits into the shadow, so the gitdir is a read-write mount,
+    /// so every file in it is a file the agent owns — including the `pre-push`
+    /// hook that is the only thing standing between it and a remote it added
+    /// itself. Measured: `rm` on a read-only mount gives `Resource busy`,
+    /// overwriting and `chmod -x` give `Read-only file system`, and without the
+    /// mount all three succeed.
+    ///
+    /// This does not make it a wall — `--no-verify` and `core.hooksPath` never
+    /// read the file — and the doc on `GUEST_PRE_PUSH` says so. It makes the
+    /// hook unable to *quietly* stop existing.
+    #[test]
+    fn the_sandbox_cannot_take_away_its_own_push_hook() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+
+        let hook = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.to_string_lossy() == crate::shadow::GUEST_PRE_PUSH)
+            .expect("the push hook has to be mounted, not merely written");
+        assert!(hook.read_only, "a hook the agent can rewrite is not a hook");
+        assert!(hook.file, "a directory here would bury the gitdir's hooks");
+        assert_eq!(
+            std::fs::read_to_string(&hook.host).expect("staged"),
+            crate::shadow::pre_push_hook(),
+            "and it has to be the hook omh wrote, not an empty placeholder"
+        );
+    }
+
     /// omh mounts its own documents over paths inside `/work`, and the
     /// sandbox's repository must not track any of them. Seeded before the
     /// staging loop it captured the project's real `.mcp.json` — a file this
@@ -1872,7 +1920,7 @@ mod tests {
             );
         }
         assert!(
-            composed_rules(&p).contains(crate::base::GIT_ABSENT),
+            composed_rules(&p).contains(crate::shadow::ARRANGEMENT),
             "and omh's rules sections are part of the same features"
         );
     }
@@ -2578,7 +2626,7 @@ mod tests {
         .unwrap();
 
         let named: Vec<_> = p.dropped_hooks.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(named, ["git-unavailable", "graph-first", "graph-read"]);
+        assert_eq!(named, ["graph-first", "graph-read"]);
 
         let msg = p
             .degradation()

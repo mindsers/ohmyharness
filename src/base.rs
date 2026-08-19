@@ -605,51 +605,6 @@ pub fn hooks() -> Vec<Hook> {
             },
         },
         Hook {
-            name: "git-unavailable",
-            // Silent unless the command is actually git, for the reason
-            // `graph-read` is silent on small files: a nudge on every shell call
-            // is noise the model tunes out, and the shell is most of what an
-            // agent runs.
-            //
-            // git is matched anywhere a command can start, not just at the
-            // front. `cd /work && git status` is the same mistake with a prefix,
-            // and a **newline** is the separator that matters most — multi-line
-            // shell is one of the most common shapes an agent emits, and an
-            // earlier version of this pattern missed every one of them.
-            // `[:blank:]` rather than `[:space:]` for the leading-whitespace
-            // case, so the newline arm stays the thing doing that work.
-            //
-            // A predicate now rather than an early `exit 0`, which is the one
-            // thing the translation changed: a `case` that matches nothing exits
-            // 0, so the no-match arm has to say `false` out loud or every shell
-            // call would be answered.
-            //
-            // Injects `GIT_ABSENT` so the sentence the agent meets here and the
-            // one the `git-rules` section carries cannot drift.
-            hook: Canonical {
-                on: Event::BeforeTool,
-                stack: None,
-                tools: vec![Tool::Shell],
-                when: Some(format!(
-                    "case \"${}\" in \
-                     git\\ *|git) ;; \
-                     *[\\;\\&\\|\\(]*git\\ *|*[[:blank:]]git\\ *) ;; \
-                     *\"\n\"git\\ *) ;; \
-                     *) false ;; esac",
-                    Field::ToolCommand.var()
-                )),
-                // A refusal, not a notice. As an `inject` the call went ahead:
-                // the agent read "git does not work here" and then ran
-                // `git status` anyway, spending a tool call to reach an error
-                // omh already knew was coming. git genuinely cannot work here —
-                // the worktree's `.git` points at an admin directory omh does
-                // not mount — so there is nothing for the call to discover.
-                action: Action::Refuse {
-                    text: GIT_ABSENT.to_string(),
-                },
-            },
-        },
-        Hook {
             name: "graph-first",
             // A nudge, not a wall: grep is right for a literal string, and a
             // hook that blocks correct work gets disabled.
@@ -718,36 +673,14 @@ pub struct Section {
     pub body: String,
 }
 
-/// What the agent is told about git, in one place.
-///
-/// Both deliveries read from here — the `git-rules` section and the
-/// `git-unavailable` hook — because two copies of a safety notice drift, and
-/// the one that drifts is never the one you are reading.
-///
-/// Written as a claim about *this session*, not about git: an agent told "git
-/// is broken" spends its turns trying to fix it, and the repair cannot work.
-///
-/// It also does no harm, which was checked rather than assumed — `git init`
-/// against an unreachable gitdir refuses (git 2.55.0), naming the missing
-/// directory, and leaves the pointer file exactly as it was. So this says the
-/// attempt is futile, not that it is dangerous. The expensive failure here is
-/// the agent promising a commit it cannot make.
-pub const GIT_ABSENT: &str = "git does not work in this session, by design and not by fault. \
-     The worktree's .git is a pointer at an admin directory on the host, which omh does not \
-     mount — so every git command fails with `fatal: not a git repository`. Do not try to \
-     repair it: `git init` refuses for the same reason, and re-cloning would only give you a \
-     second repository nobody is reviewing. Nothing here is broken and nothing is lost. Your \
-     work is already visible outside the sandbox, where the person you are working with \
-     reviews it with `omh s diff`, commits it with `omh s commit`, and pushes it with \
-     `omh s push`. Say that rather than offering to commit yourself.";
-
 /// The rules omh ships, one section per base-set entry.
 ///
 /// They live here rather than in the manifest for the reason hook commands do:
 /// `memory-rules` interpolates `GUEST_LOCAL_NOTES` and `git-rules` reads
-/// `GIT_ABSENT`, which the hook reads too. Flattened into TOML both couplings
-/// become two strings that can drift, and the drift is silent — a safety notice
-/// saying one thing in the rules and another in the hook.
+/// `shadow::ARRANGEMENT`, which the sandbox's seed commit reads too. Flattened
+/// into TOML both couplings become two strings that can drift, and the drift is
+/// silent — the agent's rules saying one thing about whose repository it is and
+/// its own `git log` saying another.
 ///
 /// They were prose `init` appended to `.omh/profile/AGENTS.md`, which meant they
 /// reached the repos where somebody remembered and nowhere else, could not be
@@ -771,11 +704,16 @@ pub fn sections() -> Vec<Section> {
         },
         Section {
             name: "git-rules",
-            // Orientation, where the hook is interception: a hook can only fire
-            // once the agent has decided to run git, and by then it may already
-            // have promised the user a commit. This is what stops the plan being
-            // made.
-            body: format!("## Git\n\n{GIT_ABSENT}\n"),
+            // Orientation, and now the only delivery: the hook that used to
+            // intercept the call is gone, because git works in the sandbox and
+            // a hook refusing it would refuse the feature. What is left is
+            // telling the agent whose repository it is before it forms a plan
+            // around the answer.
+            //
+            // Reads `shadow::ARRANGEMENT`, which the seed commit's message
+            // reads too — one string, two deliveries, the arrangement
+            // `GIT_ABSENT` had when the sentence was the opposite one.
+            body: format!("## Git\n\n{}\n", crate::shadow::ARRANGEMENT),
         },
         Section {
             name: "memory-rules",
@@ -1271,23 +1209,24 @@ mod tests {
         );
     }
 
-    /// The agent meets `fatal: not a git repository` and has to explain it to
-    /// itself. Left to guess it reaches for `git init`, which refuses for the
-    /// same reason and changes nothing — so the notice says the repair is
-    /// futile rather than leaving that to be discovered a turn later.
-    ///
-    /// Naming what to run instead is the load-bearing half: an agent that
-    /// knows only that git is missing still promises a commit it cannot make.
+    /// Naming what the *human* runs is the load-bearing half, and it survived
+    /// the change of subject. When git did not work, an agent told only that
+    /// still promised a commit it could not make. Now that git does work, an
+    /// agent told only "this is your own repository" promises one that lands
+    /// somewhere nobody looks — the same failure reached from the opposite
+    /// direction, which is why the sentence still ends in what to say instead.
     #[test]
-    fn the_git_section_says_the_repair_is_futile_and_what_to_do_instead() {
+    fn the_git_section_names_what_the_human_runs() {
         let body = section_body("git-rules");
+        for cmd in ["omh s diff", "omh s commit", "omh s push"] {
+            assert!(
+                body.contains(cmd),
+                "the agent has to be able to name {cmd}: {body}"
+            );
+        }
         assert!(
-            body.contains("git init"),
-            "the move it would otherwise make has to be named: {body}"
-        );
-        assert!(
-            body.contains("omh s commit") && body.contains("omh s push"),
-            "and what the human runs instead: {body}"
+            body.contains("nothing to push"),
+            "and be told the one thing it cannot do here: {body}"
         );
     }
 
@@ -1385,7 +1324,7 @@ mod tests {
             "memory is still installed, so its section stays"
         );
         assert!(
-            own.hooks.iter().any(|h| h.name == "git-unavailable"),
+            own.sections.iter().any(|s| s.name == "git-rules"),
             "git-notice has no server to remove, so nothing about it changes"
         );
     }
@@ -1962,28 +1901,16 @@ command = "c"
         assert!(h.command.contains(PROJECT_ENV), "got: {}", h.command);
     }
 
-    /// The rules file says this too, but a rules file decays as context grows —
-    /// which is the reason this repo already gives for preferring delivery
-    /// attached to the call. The hook fires at the moment the agent reaches for
-    /// git, which is where the sentence actually lands.
-    #[test]
-    fn the_git_notice_fires_on_the_call_that_would_fail() {
-        let h = rendered("git-unavailable");
-        assert_eq!(h.event, "PreToolUse");
-        assert_eq!(h.matcher, "Bash", "git arrives as a shell command");
-        assert!(
-            h.command.contains("git init"),
-            "the repair it would otherwise reach for has to be named: {}",
-            h.command
-        );
-    }
-
     /// P5's whole point: the translation, exercised by a second harness.
     ///
-    /// Two of the five cross and three do not, and *which* is the result rather
-    /// than a disappointment — `git-unavailable` crosses because `refuse` gave
-    /// it a way to say it blocks, and the three nudges do not because opencode
-    /// has no advisory channel before a tool runs. Named, not silent.
+    /// One of the four crosses and three do not, and *which* is the result
+    /// rather than a disappointment: `graph-refresh` crosses because it is a
+    /// `run`, and the three nudges do not because opencode has no advisory
+    /// channel before a tool runs. Named, not silent.
+    ///
+    /// It used to be two of five, the second being `git-unavailable` — a
+    /// `refuse`, which opencode *can* express. Retiring that hook took the only
+    /// wall in the set with it, so what crosses now is narrower.
     #[test]
     fn omhs_hooks_translate_to_opencode_or_are_named() {
         let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), "opencode").unwrap();
@@ -2018,51 +1945,14 @@ command = "c"
             vec!["graph-first", "graph-orient", "graph-read"],
             "the advisory ones are dropped by name, never downgraded to a wall"
         );
-        for landed in ["graph-refresh", "git-unavailable"] {
-            assert!(
-                doc.body.contains(landed),
-                "a `run` and a `refuse` are what this harness can express: {}",
-                doc.body
-            );
-        }
-    }
-
-    /// The git notice blocks the call rather than advising against it.
-    ///
-    /// It was an `inject` — a notice, with the call going ahead — so the agent
-    /// read "git does not work here" and then ran `git status` anyway, spending
-    /// a tool call to reach an error omh already knew was coming. git genuinely
-    /// cannot work in this sandbox: there is no repository at `/work` that the
-    /// agent may commit to, which is the whole point of the worktree model.
-    ///
-    /// It is the one hook in the base set that should block. The graph nudges
-    /// must not — `graph-first` says so itself, "a nudge, not a wall" — and the
-    /// format now carries the difference rather than leaving each renderer to
-    /// guess it.
-    #[test]
-    fn the_git_notice_blocks_rather_than_advises() {
-        let git = hooks()
-            .into_iter()
-            .find(|h| h.name == "git-unavailable")
-            .expect("the base set ships it");
         assert!(
-            matches!(git.hook.action, crate::hook::Action::Refuse { .. }),
-            "got: {:?}",
-            git.hook.action
+            doc.body.contains("graph-refresh"),
+            "a `run` is what this harness can express before a tool call: {}",
+            doc.body
         );
-
-        // And the nudges still do not, or the change went too far.
-        for name in ["graph-first", "graph-read", "graph-orient"] {
-            let h = hooks().into_iter().find(|h| h.name == name).unwrap();
-            assert!(
-                matches!(h.hook.action, crate::hook::Action::Inject { .. }),
-                "{name} is a nudge and has to stay one: {:?}",
-                h.hook.action
-            );
-        }
     }
 
-    /// omh's five are held to the format they impose on everybody else.
+    /// omh's four are held to the format they impose on everybody else.
     ///
     /// `base::hooks()` builds `hook::Hook` by struct literal, so `parse` — the
     /// function whose doc says "no caller can hold an unchecked hook" — is
@@ -2072,7 +1962,7 @@ command = "c"
     /// the point. Run-and-inject, neither, and a capture nothing reads are no
     /// longer things a struct literal can express, so no test is what stops
     /// them. What is left is the one check on a *value*: put a `$` in
-    /// `GIT_ABSENT` or `GREP_NUDGE` — a price, a `$PATH` mention, a shell
+    /// `GREP_NUDGE` — a price, a `$PATH` mention, a shell
     /// example — and the sandbox shell expands it to nothing, so the agent
     /// reads a sentence with a hole in it. Every assertion about the hook's
     /// text still passes, because the text is right; only the expansion is
@@ -2094,7 +1984,7 @@ command = "c"
     /// Every hook is a shell one-liner, and nothing else here would notice one
     /// that cannot parse.
     ///
-    /// The `git-unavailable` hook embeds prose, and prose contains apostrophes:
+    /// `GREP_NUDGE` embeds prose, and prose contains apostrophes:
     /// a `shell_quote` that lets one through produces `unexpected EOF while
     /// looking for matching '`, which is a hook that silently never runs. Every
     /// assertion over a hook's *command string* is satisfied by that hook —
@@ -2166,97 +2056,160 @@ command = "c"
         }
     }
 
-    /// Run the hook the way the harness does.
+    /// The graph hooks advise and must never block. `graph-first` says so in
+    /// its own comment — "a nudge, not a wall — a hook that blocks correct work
+    /// gets disabled" — and until 2026.08 this was asserted as the second half
+    /// of a test about the one hook that *did* block. Retiring that hook took
+    /// this with it.
     ///
-    /// Asserting on the command *string* proves the sentence is embedded, never
-    /// that a shell will emit it — and this one is a `case` over prose that has
-    /// to survive `sh` quoting. Two separate defects lived through the string
-    /// assertion above: the pattern matching nothing, and `shell_quote` letting
-    /// the apostrophe in "worktree's" end the argument, which is a syntax error
-    /// rather than a wrong answer.
-    fn fire_hook(command: &str) -> String {
-        use std::io::Write;
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&rendered("git-unavailable").command)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("sh must run");
-        let payload = serde_json::json!({ "tool_input": { "command": command } });
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(payload.to_string().as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(
-            out.stderr.is_empty(),
-            "the hook must not write to stderr: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8(out.stdout).unwrap()
-    }
-
-    /// The prose survives shell quoting intact — and arrives as a *decision*,
-    /// not a notice. The hook blocks the call now, so the reason travels under
-    /// `permissionDecisionReason` rather than `additionalContext`.
+    /// What was left is weaker in three separate ways: one test checks
+    /// `graph-first` alone by string-searching its command for "exit 1"; another
+    /// asserts advises-XOR-refuses without saying which; and the git guard below
+    /// sends a `Bash` payload, which `graph-read` and `graph-orient` do not
+    /// match, so they pass it without being asked anything.
     #[test]
-    fn the_git_notice_reaches_the_agent_verbatim() {
-        let fired = fire_hook("git status");
-        let parsed: serde_json::Value =
-            serde_json::from_str(&fired).unwrap_or_else(|e| panic!("not JSON: {fired} ({e})"));
-        let out = &parsed["hookSpecificOutput"];
-        // Claude Code discards a `hookSpecificOutput` that does not name its
-        // event, so this key is what makes the decision arrive at all — and
-        // deleting it from the template left the whole suite green.
-        assert_eq!(
-            out["hookEventName"].as_str(),
-            Some("PreToolUse"),
-            "a decision that does not name its moment is discarded: {fired}"
-        );
-        assert_eq!(
-            out["permissionDecision"].as_str(),
-            Some("deny"),
-            "the call is blocked, not merely commented on: {fired}"
-        );
-        assert_eq!(
-            out["permissionDecisionReason"].as_str().unwrap(),
-            GIT_ABSENT,
-            "the prose has to survive shell quoting intact"
-        );
-    }
-
-    /// The shapes an agent actually emits. A newline-separated script is the
-    /// most common of them and the easiest to miss, because a `case` separator
-    /// class written by hand does not include one.
-    #[test]
-    fn the_git_notice_matches_git_wherever_a_command_can_start() {
-        for command in [
-            "git status",
-            "cd /work && git status",
-            "cd /work; git init",
-            "cd /work\ngit status",
-            "  git status",
-            "echo hi | git apply",
-        ] {
+    fn the_graph_hooks_are_nudges_not_walls() {
+        for name in ["graph-first", "graph-read", "graph-orient"] {
+            let h = hooks()
+                .into_iter()
+                .find(|h| h.name == name)
+                .unwrap_or_else(|| panic!("the base set ships {name}"));
             assert!(
-                !fire_hook(command).trim().is_empty(),
-                "silent on {command:?}, which is a git call"
+                matches!(h.hook.action, crate::hook::Action::Inject { .. }),
+                "{name} is a nudge and has to stay one: {:?}",
+                h.hook.action
             );
         }
     }
 
-    /// Bash is most of what an agent runs, so a nudge on every call is the
-    /// noise `graph-read` exists to avoid. This is the `0 B` the manifest claims.
+    /// The sandbox has a repository of its own now — `shadow.rs` gives it one,
+    /// mounted at `/omh/shadow` and named by a `.git` file over `/work/.git` —
+    /// so `status`, `diff`, `log`, `stash` and `reset --hard` all work. A hook
+    /// that refuses `git` refuses the feature.
+    ///
+    /// Asserted by *running* every shipped hook against a git command rather
+    /// than by reading the set, because that is the shape the old defect had:
+    /// the predicate matched something other than what anyone believed, and
+    /// only firing it said so.
+    ///
+    /// The one wall left is git's own `pre-push` inside the shadow, which omh
+    /// does not ship as a hook and this therefore cannot see. That is the right
+    /// place for it — git knows what a push is, and this set's own pattern for
+    /// matching `git` at all shipped broken once by missing multi-line scripts.
     #[test]
-    fn the_git_notice_is_silent_on_everything_else() {
-        for command in ["cargo test", "ls -la", "echo git", "rg digital"] {
+    fn no_shipped_hook_refuses_a_git_command() {
+        use std::io::Write;
+
+        // A table, not one string. The first version fired
+        // `git status && git commit -m wip` alone, and a hook refusing only
+        // `git push` sailed through it — which is precisely the shape the
+        // manifest argues against shipping, so the guard could not see the
+        // thing its own reasoning is about.
+        //
+        // The separator shapes come from the retired hook's own test, which
+        // found that an earlier pattern matched none of them. A newline-
+        // separated script is the one agents emit most and the easiest to miss.
+        let shapes = [
+            "git status",
+            "git push",
+            "git push --no-verify origin main",
+            "git commit -m wip",
+            "git stash",
+            "git reset --hard HEAD",
+            "cd /work && git push",
+            "true; git commit -am x",
+            "echo hi | git commit -F -",
+            "  git status",
+            "cd /work\ngit push origin main",
+        ];
+        for ((name, r), command) in all_rendered()
+            .into_iter()
+            .flat_map(|h| shapes.iter().map(move |c| (h.clone(), *c)))
+        {
+            let mut child = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&r.command)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("sh must run");
+            // A broken pipe here is an answer, not a failure: a hook whose
+            // `when` declines exits without ever reading the payload, and the
+            // write then lands on a closed pipe. Only the *output* is under
+            // test — a hook that ignored the question cannot have refused it.
+            //
+            // Unwrapped, this was green on macOS and red on Linux, which is the
+            // shape of a race rather than a difference: the payload fits in the
+            // pipe buffer and the write completes before the child exits, until
+            // it does not. Widening the payload table from one command to eleven
+            // took this from 5 spawns to 55 and made it near-certain.
+            //
+            // Matched rather than discarded, so a write that fails for any
+            // other reason still fails the test.
+            let payload = serde_json::json!({ "tool_input": { "command": command } });
+            if let Err(e) = child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.to_string().as_bytes())
+            {
+                assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::BrokenPipe,
+                    "{name} could not be given a payload: {e}"
+                );
+            }
+            let out = child.wait_with_output().unwrap();
+            let said = String::from_utf8_lossy(&out.stdout);
+
+            // Exit status first, because Claude Code's *other* block mechanism
+            // for `PreToolUse` is exiting 2 with a reason on stderr — a hook
+            // refusing that way emits no JSON at all, and a check that only
+            // reads the decision would pass it as "did not refuse".
             assert!(
-                fire_hook(command).trim().is_empty(),
-                "fired on {command:?}, which is not a git call"
+                out.status.success(),
+                "{name} exited {:?} on `{command}`, which is how a hook blocks \
+                 without saying so: {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+
+            let decision = serde_json::from_str::<serde_json::Value>(&said)
+                .ok()
+                .map(|v| {
+                    v["hookSpecificOutput"]["permissionDecision"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()
+                });
+            assert_ne!(
+                decision.as_deref(),
+                Some("deny"),
+                "{name} refuses `{command}`, and git is the agent's now: {said}"
+            );
+        }
+    }
+
+    /// The other half, and the one a hook cannot reach: what the agent is told
+    /// before it forms a plan. A rules section still saying git does not work
+    /// costs a working feature just as completely as a hook that blocks it, and
+    /// is harder to notice because nothing fails.
+    #[test]
+    fn the_rules_do_not_tell_the_agent_git_is_broken() {
+        let git = sections()
+            .into_iter()
+            .find(|s| s.name == "git-rules")
+            .expect("git-rules is a section omh ships");
+        for wrong in [
+            "git does not work",
+            "not a git repository",
+            "Do not try to repair",
+        ] {
+            assert!(
+                !git.body.contains(wrong),
+                "the sandbox has git now; this still says {wrong:?}:\n{}",
+                git.body
             );
         }
     }

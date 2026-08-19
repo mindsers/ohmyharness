@@ -910,7 +910,7 @@ mod tests {
     /// commits still are not the branch's. So the work `diff` has to report is
     /// the work sitting in the worktree, and a commit-to-commit diff reports
     /// none of it: `omh s diff` answered with silence for the whole span of a
-    /// session, while `GIT_ABSENT` and `getting-started` both told the agent the
+    /// session, while the git rules section and `getting-started` both told the agent the
     /// user reviews with it *before* committing.
     #[test]
     fn diff_reports_work_the_user_has_not_committed_yet() {

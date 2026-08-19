@@ -191,9 +191,22 @@ pub fn checks(
         // mounts, and goes unchecked. Erring toward no check rather than a
         // check that fails forever, which is the trade `omh doctor` has to
         // make while it reads a profile rather than a plan.
+        // Rules keys on what omh generates. Hooks does *not*, and the
+        // difference is not a nicety: until 2026.08 `git-unavailable` was the
+        // one shipped hook outside `codegraph`, so `own.hooks` was never empty
+        // and this read as "always check hooks". Retiring it made every shipped
+        // hook a `codegraph` one, and a repo with `codegraph = false` then had
+        // its hooks check skipped in silence — including the repo's own hooks
+        // layer, which is exactly the case `render::merge_hooks` reasons is
+        // safe because "the document is never empty".
+        //
+        // So ask whether the *harness binds* the capability rather than whether
+        // omh happens to contribute to it. A hooks module gets mounted either
+        // way, and a mounted document nobody checks is what `doctor` exists to
+        // stop.
         let generated = match capability {
             Capability::Rules => !own.sections.is_empty(),
-            Capability::Hooks => !own.hooks.is_empty(),
+            Capability::Hooks => true,
             _ => false,
         };
         if sources.is_empty() && !generated {
@@ -932,6 +945,41 @@ mod tests {
         .map(|c| c.name)
         .collect();
         assert!(all.iter().any(|c| c == "hooks"), "got: {all:?}");
+    }
+
+    /// A repo that turns `codegraph` off still gets its hooks checked.
+    ///
+    /// This was true by accident until 2026.08 and then silently stopped being
+    /// true. `git-unavailable` was the one shipped hook outside `codegraph`, so
+    /// `own.hooks` was never empty; retiring it made every shipped hook a
+    /// `codegraph` one, and the gate keyed on `own.hooks` began skipping the
+    /// whole capability for anyone with the feature off — including the repo's
+    /// own hooks layer, checked by nothing and reported as a clean run.
+    ///
+    /// The old test asserted `hooks` is checked under *default* settings, which
+    /// is exactly the configuration where the accident held.
+    #[test]
+    fn hooks_are_checked_even_with_every_omh_hook_switched_off() {
+        let fx = fixture();
+        let none = crate::base::Own {
+            hooks: Vec::new(),
+            ..decided().0
+        };
+        let caps: Vec<String> = checks(
+            &fx.profile,
+            &adapter("opencode"),
+            &none,
+            &decided().1,
+            &Default::default(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+        assert!(
+            caps.iter().any(|c| c == "hooks"),
+            "a mounted hooks document nobody checks is what doctor is for: {caps:?}"
+        );
     }
 
     /// The entire point: doctor must inspect where the *harness* looks, not

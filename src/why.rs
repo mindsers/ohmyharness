@@ -101,12 +101,13 @@ pub enum Verdict<'a> {
     /// Considered and turned down. Recorded so the same candidate is not
     /// re-litigated every time somebody rediscovers it.
     Rejected { rejection: &'a Rejected },
-    /// A feature with no entry of its own — `git-notice` names the pairing of
-    /// a hook and a rules section, and nothing is called that.
+    /// A feature with no entry of its own — `git-notice` is the name of the
+    /// arrangement, and the section it now ships alone is called something
+    /// else.
     ///
     /// Answerable because feature names are user-facing: they are the whole
     /// `[omh]` key space, and the manifest prints `git-notice = false` as the
-    /// way out of `git-unavailable`. A name omh tells you to type and then
+    /// way out of `git-rules`. A name omh tells you to type and then
     /// does not recognise is this command's own failure mode, pointing inward.
     Feature {
         name: String,
@@ -642,7 +643,7 @@ mod tests {
     }
 
     /// `git-notice` is a feature with no entry of its own, and the manifest
-    /// prints `git-notice = false` as the way out of `git-unavailable`. Asked
+    /// prints `git-notice = false` as the way out of `git-rules`. Asked
     /// about it, omh answered "nothing recorded under that name" and listed
     /// names that did not include it.
     ///
@@ -651,6 +652,34 @@ mod tests {
     /// so the command built to explain omh's choices has to know them. An
     /// instruction printed as the way out and then not recognised is the shape
     /// CONTRIBUTING singles out: it worked, it said so, and it was wrong.
+    /// Every name the shipped manifest records as rejected has to be
+    /// answerable, because `rejected` is where a *retired* entry goes and the
+    /// manifest promises `omh why` still answers for it.
+    ///
+    /// `git-unavailable` is the case that made this matter: it shipped as a
+    /// hook through 2026.08, and a user with it in their settings from before
+    /// then types the name omh told them to type. Deleting the whole
+    /// `[[rejected]]` block for it left the suite green — the `Rejected` arm is
+    /// exercised only through a hand-built fixture, never against what omh
+    /// actually ships.
+    #[test]
+    fn every_rejected_name_the_manifest_ships_is_answerable() {
+        let m = manifest();
+        let names: Vec<String> = m.rejected.iter().map(|r| r.name.clone()).collect();
+        assert!(
+            names.iter().any(|n| n == "git-unavailable"),
+            "the retired hook is the one users still have written down: {names:?}"
+        );
+
+        let c = catalog(&m, vec![]);
+        for name in &names {
+            assert!(
+                matches!(c.why(name), Verdict::Rejected { .. }),
+                "`omh why {name}` has to answer, not shrug"
+            );
+        }
+    }
+
     #[test]
     fn a_feature_is_explained_even_when_no_entry_shares_its_name() {
         let m = manifest();
@@ -658,7 +687,7 @@ mod tests {
 
         let out = render(&c, &c.why("git-notice"), "2026.08");
         assert!(
-            out.contains("git-unavailable") && out.contains("git-rules"),
+            out.contains("git-rules"),
             "must list what the feature gathers: {out}"
         );
 
