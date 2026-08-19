@@ -1279,7 +1279,7 @@ fn doctor_cmd(
         .args(backend.args(&plan))
         .output()?;
     let outcomes = doctor::parse(&String::from_utf8_lossy(&out.stdout));
-    let _ = session.remove(&paths.repo, ""); // diagnostic: leave no session behind
+    let _ = session.remove(&paths.repo, "", &paths.shadows()); // diagnostic: leave no session behind
 
     if outcomes.is_empty() {
         anyhow::bail!(
@@ -4632,7 +4632,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
     let status = Command::new(backend.program())
         .args(backend.args(&plan))
         .status()?;
-    if let Err(e) = session.remove(&paths.repo, "") {
+    if let Err(e) = session.remove(&paths.repo, "", &paths.shadows()) {
         // A leftover `auth` worktree wins `session::current()` and silently
         // becomes the session the next launch runs in.
         ctx.warn(&format!("could not remove the auth worktree: {e}"));
@@ -4897,7 +4897,7 @@ fn rm(cwd: &std::path::Path, id: &str, ctx: &out::Ctx) -> Result<()> {
     // that never received a commit preserves nothing, and saying otherwise
     // trains people to ignore a namespace filling with dead refs.
     let base = session::default_branch(&paths.repo);
-    let action = match session.remove(&paths.repo, &base)? {
+    let action = match session.remove(&paths.repo, &base, &paths.shadows())? {
         session::Removed::BranchKept => {
             let n = session.commits(&paths.repo, &base);
             let s = if n == 1 { "commit" } else { "commits" };

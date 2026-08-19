@@ -165,7 +165,17 @@ impl Session {
             .unwrap_or(0)
     }
 
-    pub fn remove(&self, repo: &Path, base: &str) -> Result<Removed> {
+    /// Remove the session: its worktree, the repository the sandbox had, and
+    /// the branch only when it holds nothing to review.
+    ///
+    /// The shadow goes because session ids come back around — `next_id` is the
+    /// highest `sNN` among the worktrees plus one — and a shadow that outlives
+    /// its session is adopted by whoever inherits the name, opening a new agent
+    /// on someone else's history against a seed naming a tree it never had.
+    ///
+    /// Taken as an argument rather than reached for, so that removing a session
+    /// and forgetting its shadow is not something a caller can express.
+    pub fn remove(&self, repo: &Path, base: &str, shadows: &Path) -> Result<Removed> {
         // Decided before the worktree goes, because afterwards the branch is
         // the only thing left to ask.
         let outcome = match &self.branch {
@@ -205,6 +215,12 @@ impl Session {
                 let _ = git(repo, &["branch", "-D", branch]);
             }
         }
+
+        // Unconditionally, and unlike the branch. A branch can hold commits
+        // nobody has reviewed, which is why it survives; the shadow holds the
+        // agent's own checkpoints, which are not review artefacts and whose
+        // content is already in the worktree the line above discarded.
+        crate::shadow::Shadow::new(shadows, &self.id).reap();
         Ok(outcome)
     }
 
@@ -719,6 +735,12 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
 mod tests {
     use super::*;
 
+    /// Somewhere for `remove` to reap a shadow from. The tests that use it are
+    /// not about shadows; they just may not silently skip the reaping.
+    fn d_shadows() -> PathBuf {
+        std::env::temp_dir().join("omh-test-shadows")
+    }
+
     fn repo() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("repo");
@@ -734,6 +756,43 @@ mod tests {
         (dir, root)
     }
 
+    /// Session ids are reused: `next_id` is the highest `sNN` among the
+    /// worktrees plus one, so removing `s01` hands the next session that name
+    /// back. A shadow left behind is then adopted by a session that has nothing
+    /// to do with it — the new agent opens on someone else's scratch history,
+    /// and the seed recorded for it names a tree this worktree never had, so
+    /// everything measured from that seed is measured from a fiction.
+    ///
+    /// Deterministic rather than a race, and invisible: the shadow looks
+    /// perfectly well-formed, it just belongs to a session that is gone.
+    #[test]
+    fn removing_a_session_takes_its_shadow_with_it() {
+        let (dir, root) = repo();
+        let shadows = dir.path().join("shadow");
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+
+        let shadow = crate::shadow::Shadow::new(&shadows, &s.id);
+        shadow.ensure(&s.worktree, &[]).unwrap();
+        let first_seed = std::fs::read_to_string(&shadow.seed_record).unwrap();
+
+        s.remove(&root, "main", &shadows).unwrap();
+
+        // the id comes back around
+        assert_eq!(next_id(&dir.path().join("wt")), "s01");
+        let reborn = Session::new(&dir.path().join("wt"), "s01".into());
+        reborn.ensure(&root, "main").unwrap();
+        std::fs::write(reborn.worktree.join("different.rs"), "fn new() {}").unwrap();
+        let shadow = crate::shadow::Shadow::new(&shadows, &reborn.id);
+        shadow.ensure(&reborn.worktree, &[]).unwrap();
+
+        assert_ne!(
+            std::fs::read_to_string(&shadow.seed_record).unwrap(),
+            first_seed,
+            "a new session must not inherit the shadow of the one that had its id"
+        );
+    }
+
     /// `rm` keeps a branch so unreviewed work is unloseable. A branch with no
     /// commits holds no work to lose — `worktree remove --force` has already
     /// discarded anything uncommitted — so keeping it preserves nothing and
@@ -744,7 +803,7 @@ mod tests {
         let s = Session::new(&dir.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
 
-        let outcome = s.remove(&root, "main").unwrap();
+        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
         assert_eq!(outcome, Removed::BranchDropped);
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s01"]).is_err(),
@@ -764,7 +823,7 @@ mod tests {
         git(&s.worktree, &["add", "."]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
 
-        let outcome = s.remove(&root, "main").unwrap();
+        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
         assert_eq!(outcome, Removed::BranchKept);
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s02"]).is_ok(),
@@ -780,7 +839,10 @@ mod tests {
         let mut s = Session::new(&dir.path().join("wt"), "s03".into());
         s.branch = None;
         s.ensure(&root, "main").unwrap();
-        assert_eq!(s.remove(&root, "main").unwrap(), Removed::NoBranch);
+        assert_eq!(
+            s.remove(&root, "main", &d_shadows()).unwrap(),
+            Removed::NoBranch
+        );
     }
 
     #[test]
@@ -814,7 +876,7 @@ mod tests {
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
 
-        s.remove(&root, "main").unwrap();
+        s.remove(&root, "main", &d_shadows()).unwrap();
         assert!(!s.worktree.exists(), "worktree gone");
         assert!(s.branch_exists(&root), "branch must survive rm");
 
@@ -1715,7 +1777,7 @@ mod tests {
             &["commit", "-q", "--allow-empty", "-m", "trunk moved on"],
         )
         .unwrap();
-        s.remove(&root, "master").unwrap();
+        s.remove(&root, "master", &d_shadows()).unwrap();
         s.ensure(&root, "master").unwrap();
 
         assert_eq!(
@@ -1812,7 +1874,7 @@ mod tests {
         std::fs::remove_dir_all(root.join(".git/worktrees")).unwrap();
         assert!(s.worktree.exists());
 
-        s.remove(&root, "main")
+        s.remove(&root, "main", &d_shadows())
             .expect("must clean up what is actually there");
         assert!(!s.worktree.exists(), "the directory must be gone");
         assert!(s.branch_exists(&root), "and the branch still kept");
@@ -1822,7 +1884,7 @@ mod tests {
     fn removing_a_session_that_was_never_created_is_not_an_error() {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s09".into());
-        s.remove(&root, "main")
+        s.remove(&root, "main", &d_shadows())
             .expect("nothing to do is not a failure");
     }
 
@@ -1869,7 +1931,7 @@ mod tests {
         let (d, root) = repo();
         let s = Session::scratch(d.path().join("scratch/doctor"), "doctor".into());
         s.ensure(&root, "main").unwrap();
-        s.remove(&root, "main").unwrap();
+        s.remove(&root, "main", &d_shadows()).unwrap();
 
         assert!(!s.worktree.exists());
         assert_eq!(

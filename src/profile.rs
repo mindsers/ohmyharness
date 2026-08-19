@@ -138,7 +138,11 @@ impl Paths {
     /// A tree of its own rather than a sibling of the worktree it serves:
     /// `session::list` reports every directory under `worktrees()` as a
     /// session, so an `s01.git` beside `s01` would show up in `omh s ls` as a
-    /// session you could resume and `next_id` would count it.
+    /// session you could resume.
+    ///
+    /// `next_id` would *not* be fooled — it parses the name after `s` as a
+    /// number and `01.git` does not parse — but that is one enumerator getting
+    /// lucky, not a reason to put them together.
     pub fn shadows(&self) -> PathBuf {
         self.root.join("shadow").join(self.repo_id())
     }

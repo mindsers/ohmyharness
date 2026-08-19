@@ -13,8 +13,12 @@
 //! `omh s commit` and `omh s push` are untouched.
 //!
 //! What makes it safe is what is *not* in it. One commit, one branch, no
-//! remotes, and no object from the checkout — so an agent reading its own
+//! remotes, and no *commit* from the checkout — so an agent reading its own
 //! history learns nothing about yours, and there is no `main` here to move.
+//!
+//! Not "no object": a file whose content matches yours hashes to the same blob,
+//! so shared blobs are unavoidable and mean nothing. History is the thing that
+//! must not cross, and the guard is written against a commit for that reason.
 //!
 //! The governing rule for everything downstream: **never trust what the sandbox
 //! asserts.** The agent can write in this gitdir, so it can set `user.email`,
@@ -69,10 +73,18 @@ impl Shadow {
 
     /// Create the repository and seed it with the worktree as it stands.
     ///
-    /// Idempotent: relaunching into a running session must not reset the
-    /// agent's checkpoints, so an existing gitdir is left exactly as it is.
+    /// Idempotent for a *finished* shadow: relaunching into a running session
+    /// must not reset the agent's checkpoints, so one that has a seed recorded
+    /// is left exactly as it is. One without is the wreckage of a launch that
+    /// died partway through, and is rebuilt rather than adopted — see the two
+    /// notes in the body for why that cannot lose work.
     pub fn ensure(&self, worktree: &Path, excluded: &[String]) -> Result<()> {
-        if self.gitdir.exists() {
+        // Both, not just the directory. Seven subprocess calls stand between
+        // `git init` and a usable repository, and a launch killed anywhere in
+        // the middle leaves a directory that looks finished. The record is
+        // written last and only after the rename below, so its presence is what
+        // actually means "this one got there".
+        if self.gitdir.exists() && self.seed_record.exists() {
             return Ok(());
         }
         let parent = self
@@ -81,15 +93,45 @@ impl Shadow {
             .context("a shadow gitdir needs somewhere to live")?;
         std::fs::create_dir_all(parent)?;
 
+        // Built beside the real path and moved onto it, so the directory the
+        // rest of omh looks for never exists in a half-made state. Same
+        // filesystem by construction — both are children of `parent` — which is
+        // what makes the move atomic rather than a copy.
+        //
+        // Anything left over from an attempt that did not finish is removed
+        // first, and that is safe precisely because it did not finish: without
+        // a seed record it was never mounted, so there is no agent work in it
+        // to lose.
+        let building = parent.join(format!(
+            "{}.building",
+            self.gitdir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&building);
+        let _ = std::fs::remove_dir_all(&self.gitdir);
+
         // `init --bare` because the worktree is supplied per-command and is not
-        // this directory. A non-bare init would put a `.git` *inside* the
-        // gitdir and leave `core.bare` disagreeing with how it is used.
-        // `init` takes the directory as an argument rather than through
-        // `--git-dir`: it is the one command run before the repository exists,
-        // and git rejects `--work-tree` from a wrapper with nothing to wrap.
+        // this directory: the positional non-bare form puts a `.git` *inside*
+        // the directory it is given, one level deeper than anything here
+        // expects.
+        //
+        // Positional rather than through the `git()` wrapper because `--bare`
+        // and `--work-tree` cannot be combined — git refuses the pair, and
+        // confusingly blames the missing `--git-dir` it was in fact given. Not,
+        // as this once said, because the repository does not exist yet: `init`
+        // through the wrapper is fine, and accepts a `--work-tree` naming a
+        // path that is not there at all.
         let made = Command::new("git")
-            .args(["init", "-q", "--bare", "-b", &self.branch])
-            .arg(&self.gitdir)
+            // `--template=` empty, because `git init` otherwise copies the
+            // user's `init.templateDir` into this gitdir — and this gitdir is
+            // mounted into the container. That is a host-to-sandbox copy of
+            // arbitrary host files, in the one module whose thesis is that
+            // safety comes from what is *not* in here; template hooks would
+            // then also run inside the sandbox.
+            .args(["init", "-q", "--bare", "--template=", "-b", &self.branch])
+            .arg(&building)
             .output()
             .context("creating the sandbox's repository")?;
         anyhow::ensure!(
@@ -99,42 +141,97 @@ impl Shadow {
         );
         // Not `--bare` as the repository *behaves*: it has a worktree, it is
         // just one git is told about rather than one it sits in.
-        git(&self.gitdir, worktree, &["config", "core.bare", "false"])?;
-        git(
-            &self.gitdir,
-            worktree,
-            &["config", "core.worktree", &worktree.to_string_lossy()],
-        )?;
+        git(&building, worktree, &["config", "core.bare", "false"])?;
+
+        // And deliberately no `core.worktree`. It looks like the missing half
+        // of the line above and it is the opposite: this gitdir is written on
+        // the host and read inside a container, so a worktree path recorded
+        // here is a host path that does not exist there — and `core.worktree`
+        // outranks the directory the `.git` pointer sits in. Setting it made
+        // every command in the sandbox fail with `fatal: Invalid path` — the
+        // whole list this feature exists to restore.
+        //
+        // Nothing needs it. Host-side callers pass `--work-tree` themselves,
+        // and in the container the pointer file's own directory is the answer,
+        // which is `/work` and correct. Guarded by
+        // `the_pointer_file_alone_resolves_to_the_worktree_it_sits_in`, which
+        // resolves the way the container does rather than the way the tests
+        // used to — that blind spot is why this shipped.
 
         // Inside the gitdir, so nothing omh does appears in the user's tree —
         // the exclude file `carry` writes lives in the *worktree's* git dir and
         // is a different mechanism for a different repository.
-        self.write_exclude(excluded)?;
-        self.write_pre_push()?;
+        Self::write_exclude(&building, excluded)?;
+        Self::write_pre_push(&building)?;
+
+        // And deliberately no `core.hooksPath`, for the same reason as
+        // `core.worktree` above and learned the same way — by writing it and
+        // watching the container fail.
+        //
+        // A global `core.hooksPath` does send git looking elsewhere and would
+        // leave the hook installed but never consulted. That is a real hazard
+        // on the *host*, and it does not exist in the sandbox: the container
+        // carries no global git config at all, so `$GIT_DIR/hooks` is where it
+        // looks and the hook is right there. Pinning the value wrote a host
+        // path into a config only the container reads, which pointed at nothing
+        // and let a push through — verified by pushing to a reachable remote
+        // and finding two commits on it.
+        //
+        // If a host-side reader is ever added, it passes `-c core.hooksPath=`
+        // itself rather than recording anything here.
 
         // Everything the worktree holds except what was just excluded. `add -A`
         // rather than a path list: the seed has to be the tree the session
         // actually starts from, or every later diff is against a fiction.
-        git(&self.gitdir, worktree, &["add", "-A", "."])?;
+        git(&building, worktree, &["add", "-A", "."])?;
         git(
-            &self.gitdir,
+            &building,
             worktree,
             &[
                 "-c",
                 "user.name=omh",
                 "-c",
                 "user.email=omh@localhost",
+                // The user's global config governs this commit otherwise, and
+                // two ordinary settings turn it into a launch that will not
+                // start: `commit.gpgsign = true` fails with `gpg failed to
+                // sign the data`, and a `core.hooksPath` pointing at a husky or
+                // team hooks directory runs their `pre-commit` against omh's
+                // seed. Neither is the user asking for anything — this is a
+                // commit they never made, in a repository they cannot see.
+                "-c",
+                "commit.gpgsign=false",
                 "commit",
                 "-q",
+                "--no-verify",
                 "--allow-empty",
                 "-m",
                 SEED_MESSAGE,
             ],
         )?;
+        let seed = git(&building, worktree, &["rev-parse", "HEAD"])?;
 
-        let seed = git(&self.gitdir, worktree, &["rev-parse", "HEAD"])?;
+        // The record before the rename, so the two cannot disagree in the
+        // direction that matters. A crash between them leaves a seed naming a
+        // gitdir that is not there yet, and the next launch rebuilds both; the
+        // reverse — a gitdir with no seed — is the state the fast path above
+        // would wave through.
         std::fs::write(&self.seed_record, seed.trim())?;
+        std::fs::rename(&building, &self.gitdir)?;
         Ok(())
+    }
+
+    /// Remove the repository and the seed recorded for it.
+    ///
+    /// Best-effort on purpose: this runs while a session is being torn down,
+    /// and a shadow that will not delete is not a reason to fail a removal the
+    /// user asked for. What it must not do is leave the *seed* behind without
+    /// the gitdir — a seed naming a repository that is gone is exactly the
+    /// state `ensure`'s fast path reads as "already built" — so the record goes
+    /// last, after the directory it describes.
+    pub fn reap(&self) {
+        let _ = std::fs::remove_dir_all(&self.gitdir);
+        let _ = std::fs::remove_file(&self.seed_record);
     }
 
     /// Keep the agent's own `git status` clean at launch.
@@ -143,8 +240,11 @@ impl Shadow {
     /// here so an honest agent is not shown a secret to commit, not to stop a
     /// determined one — what stops the secret reaching the branch is the check
     /// on the host when work crosses back.
-    fn write_exclude(&self, excluded: &[String]) -> Result<()> {
-        let info = self.gitdir.join("info");
+    ///
+    /// Takes the directory rather than reading `self.gitdir`, because it runs
+    /// while the repository is still being built under another name.
+    fn write_exclude(gitdir: &Path, excluded: &[String]) -> Result<()> {
+        let info = gitdir.join("info");
         std::fs::create_dir_all(&info)?;
         // The carried files, and omh's own staged rules — the placeholder a
         // bind mount needs its destination to be is not the agent's work
@@ -164,20 +264,22 @@ impl Shadow {
     /// scripts agents most often emit.
     ///
     /// Worth knowing when it actually fires, because it is not when you would
-    /// guess. Measured in a container on 2026-08-19:
+    /// guess, and the sequence matters. Measured against git 2.55.0:
     ///
-    /// - No remote configured — the shipped state — and git fails first, on
-    ///   `no upstream branch`, before any hook runs. Safe, but the message is
-    ///   git's and it suggests `--set-upstream`, which fails again.
-    /// - The agent adds a remote it can genuinely reach, which is the case that
-    ///   matters and the only one where work could leave the machine. The hook
-    ///   fires ahead of the transfer and the remote stays empty.
+    /// - **No remote — the shipped state.** `git push` dies on `fatal: No
+    ///   configured push destination`, before any hook runs, and git's advice
+    ///   is `git remote add <name> <url>`. So the thing that ends the first
+    ///   attempt also hands the agent the recipe for the second.
+    /// - **A remote the agent added.** With one configured but no upstream, git
+    ///   asks for `--set-upstream`; supply it, or push by name, and the hook
+    ///   fires ahead of the transfer. Verified against a reachable remote,
+    ///   which stayed at zero commits.
     ///
     /// So this is not what makes a push impossible — having no remote is. It is
-    /// what makes the refusal say something true when the agent has built
-    /// itself one.
-    fn write_pre_push(&self) -> Result<()> {
-        let hooks = self.gitdir.join("hooks");
+    /// what catches the agent after git has talked it into fixing that, which
+    /// is the only route by which work could leave the machine.
+    fn write_pre_push(gitdir: &Path) -> Result<()> {
+        let hooks = gitdir.join("hooks");
         std::fs::create_dir_all(&hooks)?;
         let hook = hooks.join("pre-push");
         std::fs::write(&hook, format!("#!/bin/sh\necho '{NO_PUSH}' >&2\nexit 1\n"))?;
@@ -196,11 +298,12 @@ impl Shadow {
 /// the agent is working out what this repository is — which a rules section,
 /// paid for once and then competing with everything after it, cannot reach.
 pub const SEED_MESSAGE: &str = "The session starts here.\n\n\
-     This repository is the sandbox's own. It is not the branch anyone reviews: \
-     the person you are working with sees your work with `omh s diff` on the \
-     host, and decides at commit time whether to keep these commits as they are \
-     or squash them under a message of their own. Either way they read what you \
-     wrote here, so write messages worth keeping.\n\n\
+     This repository is the sandbox's own, and it is not the branch anyone \
+     reviews. Commit as often as you like — that is what it is for, and \
+     `git reset --hard` back to a checkpoint is yours to use. What reaches the \
+     person you are working with is the state of the files, which they read \
+     with `omh s diff` and commit themselves on the host. Your commit messages \
+     here stay here.\n\n\
      There is nothing to push and no remote to push to.";
 
 /// Why a push cannot work, said where the agent is trying to push.
@@ -211,6 +314,11 @@ const NO_PUSH: &str =
 
 fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
+        // Explicitly, because a child inherits omh's cwd and `add -A .` is
+        // resolved against it: invoked from inside the session's worktree, git
+        // computes a prefix and seeds only that subtree, silently leaving the
+        // rest of the tree out of the commit every later diff is measured from.
+        .current_dir(worktree)
         .arg("--git-dir")
         .arg(gitdir)
         .arg("--work-tree")
@@ -371,6 +479,79 @@ mod tests {
         assert!(hook.exists(), "a pre-push hook has to be installed");
         let out = Command::new("sh").arg(&hook).output().unwrap();
         assert!(!out.status.success(), "the hook must refuse");
+    }
+
+    /// Every other test here reaches the repository the way the *host* does,
+    /// through the private `git()` helper, which passes `--work-tree`. The
+    /// container never does that: it finds the repository through the `.git`
+    /// pointer omh mounts onto `/work`, and takes the worktree from wherever
+    /// that pointer sits.
+    ///
+    /// The difference is not academic. A `core.worktree` written on the host
+    /// records a host path, outranks the pointer's own directory, and made
+    /// every git command in the sandbox fail with `fatal: Invalid path` — while
+    /// the whole suite stayed green, because `--work-tree` overrode the bad
+    /// value on every call a test made. This resolves with no `--work-tree` at
+    /// all, which is the only way that class of mistake is visible from here.
+    #[test]
+    fn the_pointer_file_alone_resolves_to_the_worktree_it_sits_in() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        // the container's view: discovery through the pointer, nothing else
+        std::fs::write(wt.join(".git"), format!("gitdir: {}\n", s.gitdir.display())).unwrap();
+        let out = Command::new("git")
+            .current_dir(&wt)
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .unwrap();
+
+        assert!(
+            out.status.success(),
+            "git must work through the pointer alone: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            std::fs::canonicalize(&wt).unwrap().to_string_lossy(),
+            "the worktree is where the pointer sits, not somewhere recorded on the host"
+        );
+    }
+
+    /// `ensure` makes a repository out of seven subprocess calls, and a machine
+    /// that dies between the first and the last leaves a directory that looks
+    /// exactly like a finished one. Read as "seeded" because it exists, that
+    /// shadow opens the session on a repository with no seed and no exclude
+    /// list — the agent's first `git status` offers it the carried `.env`.
+    ///
+    /// So the directory only appears once it is complete, and a leftover from
+    /// an attempt that did not get there is not mistaken for the real thing.
+    #[test]
+    fn a_half_built_shadow_is_never_mistaken_for_a_finished_one() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+
+        // what a launch killed partway through leaves behind
+        Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&s.gitdir)
+            .output()
+            .unwrap();
+        assert!(!s.seed_record.exists(), "it never got as far as the seed");
+
+        s.ensure(&wt, &[".env".to_string()]).unwrap();
+
+        assert!(s.seed_record.exists(), "the seed has to be recorded");
+        assert_eq!(
+            git(&s.gitdir, &wt, &["rev-list", "--all", "--count"])
+                .unwrap()
+                .trim(),
+            "1",
+            "a finished shadow has its seed commit"
+        );
+        let status = git(&s.gitdir, &wt, &["status", "--porcelain"]).unwrap();
+        assert!(!status.contains(".env"), "and its exclude list: {status:?}");
     }
 
     /// Relaunching into a running session is ordinary — `omh claude` twice, an

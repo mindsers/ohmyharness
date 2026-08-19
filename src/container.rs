@@ -257,56 +257,6 @@ pub fn plan(
         file: false,
     });
 
-    // The repository the sandbox is allowed to have.
-    //
-    // Only for a session that has a branch: a scratch session is `omh auth` or
-    // `omh doctor` borrowing a writable `/work` for one command, with no work
-    // to check point and nothing that could ever be harvested from it.
-    //
-    // Seeded here rather than earlier because the seed has to be the tree the
-    // agent will actually open on — `carry_in` has run, and the placeholders
-    // the rules mount onto are placed by the capability loop below and covered
-    // by the exclude list either way.
-    if session.branch.is_some() {
-        let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
-
-        // Both writes are `Apply`-only, for the reason the mode exists: a
-        // `--dry-run` reports the plan a launch *would* carry out, and creating
-        // a repository is not reporting. The mounts are named either way, so
-        // what a dry run prints is still the truth about the launch.
-        if staging == Staging::Apply {
-            shadow.ensure(
-                &session.worktree,
-                &crate::config::policy_list(paths, "carry_in"),
-            )?;
-        }
-
-        mounts.push(Mount {
-            host: shadow.gitdir.clone(),
-            guest: crate::shadow::GUEST_GITDIR.into(),
-            read_only: false,
-            file: false,
-        });
-
-        // Staged rather than written into the worktree: `/work` is the user's
-        // branch, and a `.git` file omh authored there would be a file the
-        // worktree's own git has to explain. Here it exists only as something
-        // to mount, and the mount is what the container sees.
-        let pointer = stage.join("shadow-gitdir");
-        if staging == Staging::Apply {
-            if let Some(dir) = pointer.parent() {
-                std::fs::create_dir_all(dir)?;
-            }
-            std::fs::write(&pointer, crate::shadow::pointer_file())?;
-        }
-        mounts.push(Mount {
-            host: pointer,
-            guest: format!("{}/.git", crate::container_workdir()).into(),
-            read_only: true,
-            file: true,
-        });
-    }
-
     // Built once, which is what the type is for. Constructed inside the loop it
     // rebuilt all seven values six times and bought nothing its own doc claimed.
     let stager = Stager {
@@ -371,6 +321,74 @@ pub fn plan(
             continue;
         }
         dropped_hooks.extend(stager.stage(cap, &sources, &mut mounts)?);
+    }
+
+    // The repository the sandbox is allowed to have.
+    //
+    // Seeded *after* the capability loop, not before, and that ordering is the
+    // whole correctness of it. omh mounts its own documents over paths inside
+    // `/work` — `.mcp.json` among them, which this repo tracks — and a shadow
+    // seeded earlier captures the project's real file, then has omh's rendered
+    // one mounted on top. The agent then opens on `M .mcp.json`, a change it
+    // did not make; `git reset --hard` dies on `unable to unlink old
+    // '.mcp.json': Resource busy`, because a bind mount cannot be unlinked, so
+    // the one recovery this feature exists to give is the one thing that fails;
+    // and `git add -A` reads *through* the mount, committing omh's rendered
+    // document — credentials included — into the history a harvest replays.
+    //
+    // So the exclude list is built from the mounts themselves rather than
+    // guessed at: whatever omh put inside `/work`, the sandbox's repository
+    // does not track. Deriving it from `mounts` means a capability added later
+    // is covered without anyone remembering to come back here.
+    //
+    // Only for a session that has a branch: a scratch session is `omh auth` or
+    // `omh doctor` borrowing a writable `/work` for one command, with no work
+    // to check point and nothing that could ever be harvested from it.
+    if session.branch.is_some() {
+        let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
+
+        let workdir = crate::container_workdir();
+        let mut excluded = crate::config::policy_list(paths, "carry_in");
+        excluded.extend(mounts.iter().filter_map(|m| {
+            m.guest
+                .strip_prefix(workdir)
+                .ok()
+                .map(|rel| rel.display().to_string())
+                .filter(|rel| !rel.is_empty())
+        }));
+
+        // Both writes are `Apply`-only, for the reason the mode exists: a
+        // `--dry-run` reports the plan a launch *would* carry out, and creating
+        // a repository is not reporting. The mounts are named either way, so
+        // what a dry run prints is still the truth about the launch.
+        if staging == Staging::Apply {
+            shadow.ensure(&session.worktree, &excluded)?;
+        }
+
+        mounts.push(Mount {
+            host: shadow.gitdir.clone(),
+            guest: crate::shadow::GUEST_GITDIR.into(),
+            read_only: false,
+            file: false,
+        });
+
+        // Staged rather than written into the worktree: `/work` is the user's
+        // branch, and a `.git` file omh authored there would be a file the
+        // worktree's own git has to explain. Here it exists only as something
+        // to mount, and the mount is what the container sees.
+        let pointer = stage.join("shadow-gitdir");
+        if staging == Staging::Apply {
+            if let Some(dir) = pointer.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&pointer, crate::shadow::pointer_file())?;
+        }
+        mounts.push(Mount {
+            host: pointer,
+            guest: format!("{workdir}/.git").into(),
+            read_only: true,
+            file: true,
+        });
     }
 
     // The graph index, keyed by repo rather than harness — that is what lets
@@ -970,10 +988,14 @@ mod tests {
         let session = Session::new(&paths.root.join("worktrees"), "s01".into());
         std::fs::create_dir_all(&session.worktree).unwrap();
         // Every real session worktree has one: `git worktree add` writes a
-        // `.git` *file* naming the admin directory back in the checkout. The
-        // fixture needs it because omh mounts the sandbox's own pointer onto
-        // it, and a mount destination that does not exist makes docker create
-        // a directory there instead.
+        // `.git` *file* naming the admin directory back in the checkout.
+        //
+        // The fixture needs it because `concat_destinations_exist_...` asserts
+        // every `file` mount under `/work` has something on the host to land
+        // on, and the sandbox's `.git` pointer is now one of those. What docker
+        // does with a destination that is missing is the premise of that test
+        // and is recorded there — `carry.rs` and `session.rs` do not fully
+        // agree about it, and this comment is not the place to settle it.
         std::fs::write(
             session.worktree.join(".git"),
             "gitdir: /somewhere/in/the/checkout/.git/worktrees/s01\n",
@@ -1236,6 +1258,49 @@ mod tests {
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
         assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
+    }
+
+    /// omh mounts its own documents over paths inside `/work`, and the
+    /// sandbox's repository must not track any of them. Seeded before the
+    /// staging loop it captured the project's real `.mcp.json` — a file this
+    /// repo tracks — and omh's rendered one was then mounted on top, which cost
+    /// three things at once: the agent opened on `M .mcp.json`, a change it did
+    /// not make; `git reset --hard` died on `unable to unlink old '.mcp.json':
+    /// Resource busy`, because a bind mount cannot be unlinked, so the one
+    /// recovery this feature exists to give was the thing that failed; and
+    /// `git add -A` read through the mount and committed omh's rendered
+    /// document, credentials and all.
+    ///
+    /// Asserted against the mount list rather than a fixed set of filenames, so
+    /// a capability that starts staging something new is covered without anyone
+    /// remembering this test exists.
+    #[test]
+    fn nothing_omh_mounts_into_the_worktree_is_tracked_by_the_sandbox() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+
+        let staged: Vec<String> = p
+            .mounts
+            .iter()
+            .filter_map(|m| m.guest.strip_prefix("/work").ok())
+            .map(|rel| rel.display().to_string())
+            .filter(|rel| !rel.is_empty() && rel != ".git")
+            .collect();
+        assert!(
+            !staged.is_empty(),
+            "claude stages documents into /work; this test is vacuous otherwise"
+        );
+
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        let exclude =
+            std::fs::read_to_string(shadow.gitdir.join("info/exclude")).expect("a seeded shadow");
+        for rel in staged {
+            assert!(
+                exclude.lines().any(|l| l == rel),
+                "omh mounts {rel} into the worktree, so the sandbox's repository \
+                 must not track it. exclude list was:\n{exclude}"
+            );
+        }
     }
 
     /// git is dead in the sandbox because `/work/.git` is a pointer into the
