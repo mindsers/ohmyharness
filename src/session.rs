@@ -914,7 +914,11 @@ mod tests {
         let (d, root) = repo();
         std::fs::write(root.join("local.env"), "KEY=1\n").unwrap();
         git(&root, &["add", "-A"]).unwrap();
-        git(&root, &["commit", "-q", "-m", "a tracked file carry_in also names"]).unwrap();
+        git(
+            &root,
+            &["commit", "-q", "-m", "a tracked file carry_in also names"],
+        )
+        .unwrap();
 
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
