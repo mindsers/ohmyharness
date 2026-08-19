@@ -2134,13 +2134,32 @@ command = "c"
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .expect("sh must run");
+            // A broken pipe here is an answer, not a failure: a hook whose
+            // `when` declines exits without ever reading the payload, and the
+            // write then lands on a closed pipe. Only the *output* is under
+            // test — a hook that ignored the question cannot have refused it.
+            //
+            // Unwrapped, this was green on macOS and red on Linux, which is the
+            // shape of a race rather than a difference: the payload fits in the
+            // pipe buffer and the write completes before the child exits, until
+            // it does not. Widening the payload table from one command to eleven
+            // took this from 5 spawns to 55 and made it near-certain.
+            //
+            // Matched rather than discarded, so a write that fails for any
+            // other reason still fails the test.
             let payload = serde_json::json!({ "tool_input": { "command": command } });
-            child
+            if let Err(e) = child
                 .stdin
                 .take()
                 .unwrap()
                 .write_all(payload.to_string().as_bytes())
-                .unwrap();
+            {
+                assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::BrokenPipe,
+                    "{name} could not be given a payload: {e}"
+                );
+            }
             let out = child.wait_with_output().unwrap();
             let said = String::from_utf8_lossy(&out.stdout);
 
