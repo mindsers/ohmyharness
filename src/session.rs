@@ -208,12 +208,45 @@ impl Session {
         Ok(outcome)
     }
 
-    pub fn diff(&self, repo: &Path, base: &str) -> Result<String> {
-        let branch = self
-            .branch
+    /// What this session changed, against the point it forked from.
+    ///
+    /// Against the **working tree**, not the branch tip, because the agent
+    /// never commits — it cannot today, and once the shadow repo lands its
+    /// commits still are not this branch's. `base...branch` answered with an
+    /// empty string for the whole span of a session, right up until the user
+    /// ran `omh s commit`, while the rules told the agent the user reviews
+    /// before committing. A review command that is silent about the work it
+    /// exists to show is worse than one that does not exist.
+    ///
+    /// The merge base, not `base` itself, so trunk moving under a running
+    /// session cannot manufacture changes it never made — the property the old
+    /// three-dot form had and this has to keep.
+    ///
+    /// Through a throwaway index, because `git diff <commit>` reports tracked
+    /// paths only and a file the agent *created* is untracked until somebody
+    /// stages it — which is most of what there is to review. `add -A` against
+    /// `GIT_INDEX_FILE` gets the whole worktree without touching the index the
+    /// user's own git commands share.
+    pub fn diff(&self, base: &str) -> Result<String> {
+        self.branch
             .as_deref()
             .context("a scratch session has no branch")?;
-        git(repo, &["diff", "--stat", &format!("{base}...{branch}")])
+
+        let merge_base = git(&self.worktree, &["merge-base", base, "HEAD"])?;
+        let merge_base = merge_base.trim();
+
+        let index = tempfile::NamedTempFile::new().context("staging a diff index")?;
+        // `read-tree` first: `add -A` records only what changed against the
+        // index it is handed, and an empty one reports every path in the repo
+        // as added.
+        let index = index.path();
+        git_with_index(&self.worktree, index, &["read-tree", "HEAD"])?;
+        git_with_index(&self.worktree, index, &["add", "-A", "."])?;
+        git_with_index(
+            &self.worktree,
+            index,
+            &["diff", "--cached", "--stat", merge_base],
+        )
     }
 
     /// Stage the agent's work in the worktree and commit it onto the branch.
@@ -595,6 +628,25 @@ fn git_owned(cwd: &Path, args: &[String]) -> Result<String> {
     git(cwd, &borrowed)
 }
 
+/// `git` against an index of our own, so a read-only command can stage the
+/// worktree without disturbing the one the user's git shares.
+fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .env("GIT_INDEX_FILE", index)
+        .args(args)
+        .output()
+        .context("running git")?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "git {}: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(cwd)
@@ -730,7 +782,50 @@ mod tests {
         std::fs::write(s.worktree.join("new.rs"), "fn main() {}").unwrap();
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "add"]).unwrap();
-        assert!(s.diff(&root, "main").unwrap().contains("new.rs"));
+        assert!(s.diff("main").unwrap().contains("new.rs"));
+    }
+
+    /// The agent never commits — it cannot, and after the shadow repo lands its
+    /// commits still are not the branch's. So the work `diff` has to report is
+    /// the work sitting in the worktree, and a commit-to-commit diff reports
+    /// none of it: `omh s diff` answered with silence for the whole span of a
+    /// session, while `GIT_ABSENT` and `getting-started` both told the agent the
+    /// user reviews with it *before* committing.
+    #[test]
+    fn diff_reports_work_the_user_has_not_committed_yet() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
+
+        let out = s.diff("main").unwrap();
+        assert!(
+            out.contains("agent.rs"),
+            "uncommitted agent work must be reviewable: {out:?}"
+        );
+    }
+
+    /// The base moving under a running session must not manufacture changes the
+    /// session never made. Three-dot diff pinned this to the fork point; the
+    /// working-tree form has to keep that property rather than inherit `HEAD`'s.
+    #[test]
+    fn diff_ignores_commits_the_base_gained_after_the_session_forked() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
+
+        // trunk moves on while the agent works
+        std::fs::write(root.join("trunk.rs"), "fn trunk() {}").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "trunk work"]).unwrap();
+
+        let out = s.diff("main").unwrap();
+        assert!(out.contains("agent.rs"), "the session's own work: {out:?}");
+        assert!(
+            !out.contains("trunk.rs"),
+            "a file the session never touched must not appear as its change: {out:?}"
+        );
     }
 
     // ── committing a session's work ─────────────────────────────────────────
@@ -1383,7 +1478,7 @@ mod tests {
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "work"]).unwrap();
 
-        let out = s.diff(&root, &default_branch(&root)).unwrap();
+        let out = s.diff(&default_branch(&root)).unwrap();
         assert!(out.contains("new.rs"), "got: {out}");
     }
 
