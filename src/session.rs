@@ -228,17 +228,56 @@ impl Session {
     /// `GIT_INDEX_FILE` gets the whole worktree without touching the index the
     /// user's own git commands share.
     pub fn diff(&self, base: &str) -> Result<String> {
-        self.branch
+        let branch = self
+            .branch
             .as_deref()
             .context("a scratch session has no branch")?;
 
-        let merge_base = git(&self.worktree, &["merge-base", base, "HEAD"])?;
+        // The same guard `commit` carries, for the same reason and with more at
+        // stake. A worktree left detached — `git checkout <sha>` to look at
+        // something, a bisect abandoned halfway — no longer has the branch's
+        // committed work *on disk*, and a diff taken from the worktree reports
+        // what is there. So the session's own commits go missing from the
+        // review and the command still exits 0.
+        //
+        // Answering against the branch instead does not rescue it: `checkout`
+        // removed the files, `add -A` reports the worktree it was given, and
+        // both forms print the same short answer. Measured, rather than argued
+        // — the choice of ref is not what is wrong, the worktree is. So this
+        // refuses instead, and a review that cannot be trusted is never handed
+        // over as one that can.
+        let head = git(&self.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        anyhow::ensure!(
+            head.trim() == branch,
+            "{} is on {} rather than {branch}; omh will not report a diff from a worktree that \
+             left its branch — the session's commits are not in it. Put it back with `git -C {} \
+             checkout {branch}`",
+            self.id,
+            head.trim(),
+            self.worktree.display()
+        );
+
+        let merge_base = git(&self.worktree, &["merge-base", base, branch])?;
         let merge_base = merge_base.trim();
 
         let index = tempfile::NamedTempFile::new().context("staging a diff index")?;
-        // `read-tree` first: `add -A` records only what changed against the
-        // index it is handed, and an empty one reports every path in the repo
-        // as added.
+        // `read-tree HEAD` first, for two reasons neither of which is obvious
+        // and both of which were measured. It is not cosmetic: an earlier
+        // comment here claimed an empty index would report every path as added,
+        // which is false — `diff --cached` compares blob hashes, so unchanged
+        // paths produce no diff either way, and a maintainer who tested that
+        // claim would have deleted the line.
+        //
+        // One: `NamedTempFile` leaves a **zero-byte** file, and git rejects one
+        // as an index — `fatal: index file smaller than expected`. A path that
+        // does not exist would be fine; the one we are handed is not.
+        //
+        // Two, and the reason the guard below exists: `add -A` skips a path
+        // `info/exclude` names, so against an empty index that path is absent
+        // and the diff calls it a deletion — a file reported as removed while
+        // it sits on disk. `carry` writes that exclude file, and a `carry_in`
+        // entry naming an already-tracked path is a misconfiguration it warns
+        // about rather than refuses, so the case is reachable.
         let index = index.path();
         git_with_index(&self.worktree, index, &["read-tree", "HEAD"])?;
         git_with_index(&self.worktree, index, &["add", "-A", "."])?;
@@ -825,6 +864,74 @@ mod tests {
         assert!(
             !out.contains("trunk.rs"),
             "a file the session never touched must not appear as its change: {out:?}"
+        );
+    }
+
+    /// A worktree that wandered off its branch no longer holds the session's
+    /// committed work on disk, and a diff read from the worktree reports what
+    /// is there — so the commits vanish from the review and the command still
+    /// succeeds. Silence would be bad enough; a confident partial answer is
+    /// worse, because the user commits against it.
+    #[test]
+    fn diff_refuses_from_a_worktree_that_left_its_branch() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "the session's work"]).unwrap();
+
+        // the worktree is taken off its branch to look at something
+        git(&s.worktree, &["checkout", "-q", "HEAD~1"]).unwrap();
+        assert!(
+            !s.worktree.join("agent.rs").exists(),
+            "checkout takes the committed work off disk — the premise of this test"
+        );
+
+        let err = s.diff("main").unwrap_err().to_string();
+        assert!(
+            err.contains("omh/s01"),
+            "the branch it should be on has to be named: {err}"
+        );
+    }
+
+    /// `read-tree HEAD` is what makes the throwaway index start from the commit
+    /// rather than from nothing, and only this case proves it: `add -A` skips a
+    /// path `info/exclude` names, so against an empty index the path is simply
+    /// absent and the diff calls it a **deletion** — a file reported as removed
+    /// that is sitting right there on disk.
+    ///
+    /// Not hypothetical. `carry` writes that exclude file, and a `carry_in`
+    /// entry naming an already-tracked path is a live misconfiguration `carry`
+    /// warns about at launch rather than refuses.
+    ///
+    /// The mutation this is red against is `read-tree --empty`, not dropping
+    /// the call: `NamedTempFile` leaves a zero-byte file that git rejects
+    /// outright, so removing the line fails every diff test on `index file
+    /// smaller than expected` and proves nothing about *this*.
+    #[test]
+    fn diff_calls_an_excluded_tracked_file_changed_rather_than_deleted() {
+        let (d, root) = repo();
+        std::fs::write(root.join("local.env"), "KEY=1\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "a tracked file carry_in also names"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+
+        let exclude = crate::carry::exclude_path(&s.worktree).unwrap();
+        std::fs::create_dir_all(exclude.parent().unwrap()).unwrap();
+        std::fs::write(&exclude, "local.env\n").unwrap();
+        std::fs::write(s.worktree.join("local.env"), "KEY=1\nKEY2=2\n").unwrap();
+
+        let out = s.diff("main").unwrap();
+        assert!(
+            !out.contains("deletion"),
+            "a file present on disk must never be reported as deleted: {out:?}"
+        );
+        assert!(
+            out.contains("local.env"),
+            "the change itself still has to show: {out:?}"
         );
     }
 
