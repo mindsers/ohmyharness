@@ -1336,6 +1336,18 @@ mod tests {
              rather than shadow it"
         );
         assert!(pointer.read_only, "the pointer is omh's, not the agent's");
+        // Against the gitdir mount's own guest path, not against
+        // `pointer_file()` — comparing the shipped string to itself is a
+        // tautology that stayed green while the pointer named `/nowhere`. These
+        // are the two halves that have to agree: what the file says, and where
+        // the repository it names is actually mounted.
+        assert_eq!(
+            std::fs::read_to_string(&pointer.host)
+                .expect("the pointer is staged")
+                .trim(),
+            format!("gitdir: {}", gitdir.guest.display()),
+            "the pointer must name the gitdir omh actually mounts"
+        );
         assert_ne!(
             pointer.host,
             fx.session.worktree.join(".git"),
@@ -2769,6 +2781,10 @@ mod tests {
     /// only useful if what it prints is what would run.
     #[test]
     fn skipped_staging_writes_nothing() {
+        // Including the sandbox's repository, which lands under `shadow/`
+        // rather than `run/` and so was outside everything this test looked at
+        // — the `Apply` guard around `ensure` could be deleted and the suite
+        // stayed green.
         let fx = fixture();
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let p = plan(
@@ -2793,6 +2809,11 @@ mod tests {
         .unwrap();
 
         assert!(!fx.paths.root.join("run").exists(), "no staging directory");
+        assert!(
+            !fx.paths.shadows().exists(),
+            "a dry run created the sandbox's repository at {}",
+            fx.paths.shadows().display()
+        );
         for name in ["CLAUDE.md", "AGENTS.md"] {
             let guest = PathBuf::from("/work").join(name);
             let m = p

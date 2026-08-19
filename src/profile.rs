@@ -550,6 +550,40 @@ mod tests {
         assert_ne!(a.staging("s01", "claude"), b.staging("s01", "claude"));
     }
 
+    /// The hazard `shadows()` was moved out of `worktrees()` to avoid:
+    /// `session::list` reports every directory under `worktrees()` as a
+    /// session, so a gitdir living there shows up in `omh s ls` as one you
+    /// could resume.
+    #[test]
+    fn a_sandbox_repository_never_lives_where_sessions_are_counted() {
+        let f = fixture(&[]);
+        let p = &f.paths;
+        assert!(
+            !p.shadows().starts_with(p.worktrees()),
+            "shadows must not sit under worktrees: {} inside {}",
+            p.shadows().display(),
+            p.worktrees().display()
+        );
+    }
+
+    /// The same reason staging is keyed by repo, with a sharper edge: two
+    /// checkouts each running `s01` would share one gitdir, so the agent in
+    /// repo B would open on repo A's scratch history — the isolation this
+    /// whole module exists for, lost to a path collision.
+    #[test]
+    fn sandbox_repositories_are_keyed_by_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Paths {
+            root: dir.path().into(),
+            repo: dir.path().join("alpha"),
+        };
+        let b = Paths {
+            root: dir.path().into(),
+            repo: dir.path().join("beta"),
+        };
+        assert_ne!(a.shadows(), b.shadows());
+    }
+
     #[test]
     fn staging_still_separates_sessions_and_harnesses() {
         let f = fixture(&[]);

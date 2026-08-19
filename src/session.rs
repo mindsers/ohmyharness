@@ -217,9 +217,16 @@ impl Session {
         }
 
         // Unconditionally, and unlike the branch. A branch can hold commits
-        // nobody has reviewed, which is why it survives; the shadow holds the
-        // agent's own checkpoints, which are not review artefacts and whose
-        // content is already in the worktree the line above discarded.
+        // nobody has reviewed, which is why it survives.
+        //
+        // The shadow holds the agent's own checkpoints, and for its *tip* the
+        // content is already in the worktree the line above discarded. That is
+        // not true of the ones behind it: after a `git reset --hard` — one of
+        // the four commands this whole feature exists to restore — the
+        // pre-rollback checkpoints live nowhere else, and this destroys them
+        // without a word. Acceptable only while nothing can harvest them; the
+        // refusal `rm` owes them belongs with the harvest that gives them
+        // somewhere to go.
         crate::shadow::Shadow::new(shadows, &self.id).reap();
         Ok(outcome)
     }

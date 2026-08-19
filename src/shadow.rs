@@ -246,14 +246,11 @@ impl Shadow {
     fn write_exclude(gitdir: &Path, excluded: &[String]) -> Result<()> {
         let info = gitdir.join("info");
         std::fs::create_dir_all(&info)?;
-        // The carried files, and omh's own staged rules — the placeholder a
-        // bind mount needs its destination to be is not the agent's work
-        // either, and `commit` unstages the same list for the same reason.
-        let names = excluded
-            .iter()
-            .map(String::as_str)
-            .chain(crate::carry::STAGED_RULES);
-        let body: String = names.map(|n| format!("{n}\n")).collect();
+        // Just what the caller names. `container::plan` derives that from the
+        // mounts it is about to make, which already covers omh's staged rules —
+        // chaining `carry::STAGED_RULES` here as well only made the list
+        // disagree with its own source when a capability changed.
+        let body: String = excluded.iter().map(|n| format!("{n}\n")).collect();
         std::fs::write(info.join("exclude"), body)?;
         Ok(())
     }
@@ -282,7 +279,20 @@ impl Shadow {
         let hooks = gitdir.join("hooks");
         std::fs::create_dir_all(&hooks)?;
         let hook = hooks.join("pre-push");
-        std::fs::write(&hook, format!("#!/bin/sh\necho '{NO_PUSH}' >&2\nexit 1\n"))?;
+        // A quoted heredoc, not `echo '…'`. The message is prose and prose has
+        // apostrophes: `the sandbox's own` closed the single quote, and the
+        // hook became a script that does not parse. It still exited non-zero,
+        // so it still refused and a test asserting failure still passed — but
+        // what the agent read was `unexpected EOF while looking for matching
+        // \`'\`` with no mention of omh, which is the whole reason the hook
+        // exists rather than letting git fail on its own.
+        //
+        // `<<'OMH'` quotes the delimiter, so nothing inside is interpolated and
+        // no punctuation in the message can reach the shell.
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ncat >&2 <<'OMH'\n{NO_PUSH}\nOMH\nexit 1\n"),
+        )?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -365,8 +375,22 @@ mod tests {
             "a commit only the host should know about",
         ]);
 
+        // A real worktree, made the way omh makes one, because the `.git`
+        // pointer it writes is the *only* route from here back to the
+        // checkout's object store. Built as a plain directory instead, the
+        // isolation test could not reach the thing it exists to forbid: a leak
+        // that resolves the checkout through that pointer and writes
+        // `objects/info/alternates` passed, because there was no pointer to
+        // resolve. The guard was correct and the fixture made it decorative.
         let wt = dir.path().join("wt");
-        std::fs::create_dir_all(&wt).unwrap();
+        run(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "omh/s01",
+            wt.to_str().unwrap(),
+        ]);
         std::fs::write(wt.join("f.txt"), "base\n").unwrap();
         std::fs::write(wt.join(".env"), "SECRET=1\n").unwrap();
 
@@ -477,8 +501,35 @@ mod tests {
 
         let hook = s.gitdir.join("hooks/pre-push");
         assert!(hook.exists(), "a pre-push hook has to be installed");
+
         let out = Command::new("sh").arg(&hook).output().unwrap();
         assert!(!out.status.success(), "the hook must refuse");
+
+        // Asserting the *message*, not the exit code. A non-zero exit is what a
+        // shell syntax error gives you too — and that is exactly what this
+        // shipped: `NO_PUSH` contains an apostrophe, the script wrapped it in
+        // single quotes, and the hook refused only by failing to parse. The
+        // agent got `unexpected EOF while looking for matching \`'\`` and no
+        // mention of omh at all, while a test asserting failure stayed green.
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            said.contains("omh s commit"),
+            "a refusal has to say where work actually leaves: {said}"
+        );
+        assert!(
+            !said.contains("syntax error") && !said.contains("unexpected"),
+            "the hook must run, not merely fail to parse: {said}"
+        );
+
+        // git skips a hook it cannot execute, with a *hint* and exit 0 — the
+        // push then succeeds. A mode this test does not check is a wall that is
+        // not there.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&hook).unwrap().permissions().mode();
+            assert_eq!(mode & 0o111, 0o111, "git ignores a non-executable hook");
+        }
     }
 
     /// Every other test here reaches the repository the way the *host* does,
