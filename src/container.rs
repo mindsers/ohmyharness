@@ -257,6 +257,56 @@ pub fn plan(
         file: false,
     });
 
+    // The repository the sandbox is allowed to have.
+    //
+    // Only for a session that has a branch: a scratch session is `omh auth` or
+    // `omh doctor` borrowing a writable `/work` for one command, with no work
+    // to check point and nothing that could ever be harvested from it.
+    //
+    // Seeded here rather than earlier because the seed has to be the tree the
+    // agent will actually open on — `carry_in` has run, and the placeholders
+    // the rules mount onto are placed by the capability loop below and covered
+    // by the exclude list either way.
+    if session.branch.is_some() {
+        let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
+
+        // Both writes are `Apply`-only, for the reason the mode exists: a
+        // `--dry-run` reports the plan a launch *would* carry out, and creating
+        // a repository is not reporting. The mounts are named either way, so
+        // what a dry run prints is still the truth about the launch.
+        if staging == Staging::Apply {
+            shadow.ensure(
+                &session.worktree,
+                &crate::config::policy_list(paths, "carry_in"),
+            )?;
+        }
+
+        mounts.push(Mount {
+            host: shadow.gitdir.clone(),
+            guest: crate::shadow::GUEST_GITDIR.into(),
+            read_only: false,
+            file: false,
+        });
+
+        // Staged rather than written into the worktree: `/work` is the user's
+        // branch, and a `.git` file omh authored there would be a file the
+        // worktree's own git has to explain. Here it exists only as something
+        // to mount, and the mount is what the container sees.
+        let pointer = stage.join("shadow-gitdir");
+        if staging == Staging::Apply {
+            if let Some(dir) = pointer.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(&pointer, crate::shadow::pointer_file())?;
+        }
+        mounts.push(Mount {
+            host: pointer,
+            guest: format!("{}/.git", crate::container_workdir()).into(),
+            read_only: true,
+            file: true,
+        });
+    }
+
     // Built once, which is what the type is for. Constructed inside the loop it
     // rebuilt all seven values six times and bought nothing its own doc claimed.
     let stager = Stager {
@@ -919,6 +969,16 @@ mod tests {
 
         let session = Session::new(&paths.root.join("worktrees"), "s01".into());
         std::fs::create_dir_all(&session.worktree).unwrap();
+        // Every real session worktree has one: `git worktree add` writes a
+        // `.git` *file* naming the admin directory back in the checkout. The
+        // fixture needs it because omh mounts the sandbox's own pointer onto
+        // it, and a mount destination that does not exist makes docker create
+        // a directory there instead.
+        std::fs::write(
+            session.worktree.join(".git"),
+            "gitdir: /somewhere/in/the/checkout/.git/worktrees/s01\n",
+        )
+        .unwrap();
 
         let profile = Profile::resolve(&paths);
         Fx {
@@ -1169,12 +1229,54 @@ mod tests {
             .collect();
         assert_eq!(
             guests.len(),
-            3,
-            "worktree, graph cache and the note store only: {guests:?}"
+            4,
+            "worktree, graph cache, note store and the sandbox's own gitdir: {guests:?}"
         );
         assert!(guests.contains(&"/work".to_string()));
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
         assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
+        assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
+    }
+
+    /// git is dead in the sandbox because `/work/.git` is a pointer into the
+    /// user's checkout and the checkout is never mounted. The agent loses
+    /// `status`, `diff`, `stash` and `reset --hard`, and the attached editor
+    /// loses its source control panel — so omh gives it a repository of its
+    /// own and points `/work/.git` at that instead.
+    ///
+    /// A *file* mount, and that is the whole trick: it shadows the pointer
+    /// inside the container while the host's own file is never written, so
+    /// `omh s diff`, `omh s commit` and `omh s push` go on working outside.
+    #[test]
+    fn the_sandbox_is_given_a_repository_of_its_own() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+
+        let gitdir = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.to_string_lossy() == crate::shadow::GUEST_GITDIR)
+            .expect("the sandbox's gitdir has to be mounted");
+        assert!(!gitdir.read_only, "the agent commits into it");
+        assert!(!gitdir.file, "a gitdir is a directory");
+
+        let pointer = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.to_string_lossy() == "/work/.git")
+            .expect("`/work/.git` has to point at it");
+        assert!(
+            pointer.file,
+            "a directory mount here would bury the worktree's own pointer \
+             rather than shadow it"
+        );
+        assert!(pointer.read_only, "the pointer is omh's, not the agent's");
+        assert_ne!(
+            pointer.host,
+            fx.session.worktree.join(".git"),
+            "the host's own pointer must never be the thing mounted — writing \
+             through it would corrupt the worktree's registration"
+        );
     }
 
     /// The local note store is the one thing outside the worktree the agent
