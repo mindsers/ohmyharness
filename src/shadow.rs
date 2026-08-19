@@ -143,6 +143,19 @@ impl Shadow {
         // just one git is told about rather than one it sits in.
         git(&building, worktree, &["config", "core.bare", "false"])?;
 
+        // An identity of its own, because git will not commit without one and
+        // the container has no global config to supply it. Without this the
+        // agent's first checkpoint dies on `Author identity unknown` — the one
+        // thing this repository exists to let it do — on any machine nobody has
+        // configured, which is every container and every CI runner.
+        //
+        // It costs nothing in trust: the agent can rewrite this, and a harvest
+        // stamps authorship on the host anyway, per the module's own rule about
+        // not believing what the sandbox says about itself. This is here so an
+        // unconfigured machine works, not so the name can be relied on.
+        git(&building, worktree, &["config", "user.name", AUTHOR_NAME])?;
+        git(&building, worktree, &["config", "user.email", AUTHOR_EMAIL])?;
+
         // And deliberately no `core.worktree`. It looks like the missing half
         // of the line above and it is the opposite: this gitdir is written on
         // the host and read inside a container, so a worktree path recorded
@@ -188,10 +201,6 @@ impl Shadow {
             &building,
             worktree,
             &[
-                "-c",
-                "user.name=omh",
-                "-c",
-                "user.email=omh@localhost",
                 // The user's global config governs this commit otherwise, and
                 // two ordinary settings turn it into a launch that will not
                 // start: `commit.gpgsign = true` fails with `gpg failed to
@@ -301,6 +310,15 @@ impl Shadow {
         Ok(())
     }
 }
+
+/// Who the sandbox's own commits are authored as.
+///
+/// `.invalid` is reserved by RFC 2606 precisely so it can never resolve, which
+/// is what you want on an address nobody should write to. The name says where
+/// the commit was made rather than guessing at which harness made it — omh
+/// supports several, and the seed is written before any of them starts.
+const AUTHOR_NAME: &str = "omh sandbox";
+const AUTHOR_EMAIL: &str = "sandbox@omh.invalid";
 
 /// The seed commit's message, which is a delivery surface and not a label.
 ///
@@ -603,6 +621,61 @@ mod tests {
         );
         let status = git(&s.gitdir, &wt, &["status", "--porcelain"]).unwrap();
         assert!(!status.contains(".env"), "and its exclude list: {status:?}");
+    }
+
+    /// Checkpointing is the feature, and a checkpoint is a commit, and git
+    /// refuses to commit without an identity. The container carries no global
+    /// git config, so unless the repository brings its own the agent's first
+    /// `git commit` dies on `Author identity unknown` — the whole point of the
+    /// module, unavailable, on a machine that has never been configured.
+    ///
+    /// Asserted as *the repository carries an identity*, not as "a commit
+    /// works here", because a commit working here proves nothing. git invents
+    /// an identity from the OS user and hostname when it can, so on a developer
+    /// machine the commit succeeds with no config at all — deleting the two
+    /// lines this guards left it green, while CI, whose runner has an empty
+    /// gecos field, failed on `empty ident name`. A test that cannot go red on
+    /// the machine you are writing it on is decoration.
+    ///
+    /// The commit is still made, because config that is set and not honoured
+    /// would be its own bug.
+    #[test]
+    fn the_agent_can_commit_without_any_identity_of_its_own() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        // a file the seed already tracks, so `-a` stages it
+        std::fs::write(wt.join("f.txt"), "base\nthe agent's work\n").unwrap();
+        let out = Command::new("git")
+            .current_dir(&wt)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .arg("--git-dir")
+            .arg(&s.gitdir)
+            .arg("--work-tree")
+            .arg(&wt)
+            .args(["commit", "-q", "-am", "a checkpoint"])
+            .output()
+            .unwrap();
+
+        assert!(
+            out.status.success(),
+            "a sandbox with no git identity must still be able to check point: {}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        // The assertion that can actually fail here.
+        for (key, want) in [("user.name", AUTHOR_NAME), ("user.email", AUTHOR_EMAIL)] {
+            let got = git(&s.gitdir, &wt, &["config", "--local", key]).unwrap_or_default();
+            assert_eq!(
+                got.trim(),
+                want,
+                "the repository has to bring its own {key}; nothing in a \
+                 container supplies one"
+            );
+        }
     }
 
     /// Relaunching into a running session is ordinary — `omh claude` twice, an
