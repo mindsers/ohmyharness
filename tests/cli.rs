@@ -517,9 +517,9 @@ fn committing_with_no_session_says_so_rather_than_inventing_one() {
     assert!(err.contains("no sessions"), "got: {err}");
 }
 
-/// `s diff` compares `base...branch` and so sees only commits, which means
-/// nothing a session did is visible until something commits it. This is that
-/// pair, end to end.
+/// Committing does not *stop* `s diff` reporting: the work is the same work
+/// before and after, and a review that changed its answer at the moment of a
+/// commit would be reporting the commit rather than the session.
 #[test]
 fn work_committed_from_the_host_is_what_diff_then_reports() {
     let sb = sandbox();
@@ -535,6 +535,33 @@ fn work_committed_from_the_host_is_what_diff_then_reports() {
 
     let printed = String::from_utf8_lossy(&sb.omh(&["s", "diff", "s01"]).stdout).to_string();
     assert!(printed.contains("feature.rs"), "got: {printed}");
+}
+
+/// The agent cannot commit — that is the whole shape of a session — so the
+/// window in which `s diff` is the *only* way to see the work is the entire
+/// time the agent is running. It reported an empty diff for all of it, while
+/// the rules omh ships told the agent the user reviews before committing.
+///
+/// End to end rather than against `Session::diff`, because the unit tests
+/// would stay green if `s diff` stopped reaching it.
+#[test]
+fn diff_reports_a_sessions_work_before_anyone_commits_it() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
+
+    let out = sb.omh(&["s", "diff", "s01"]);
+
+    assert!(
+        out.status.success(),
+        "diff failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        printed.contains("feature.rs"),
+        "uncommitted work is the only work there is yet: {printed}"
+    );
 }
 
 /// A session id is a path component and `Session::new` joins it into the

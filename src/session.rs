@@ -281,6 +281,19 @@ impl Session {
         let index = index.path();
         git_with_index(&self.worktree, index, &["read-tree", "HEAD"])?;
         git_with_index(&self.worktree, index, &["add", "-A", "."])?;
+
+        // The same unstage `commit` does, from the same list, because the
+        // reason is the same: omh mounts its rules over a placeholder it writes
+        // into the worktree, and `info/exclude` cannot hide that placeholder
+        // when the repo tracks the filename. Reading the worktree meant a
+        // review opened with `AGENTS.md | 1 -` — omh's own scaffolding shown as
+        // the agent emptying the project's rules, in this repo among others.
+        //
+        // Reading one list is the point: a review that showed what a commit
+        // would not carry is a review of something nobody is going to get.
+        let unstage = unstage_rules_args();
+        let unstage: Vec<&str> = unstage.iter().map(String::as_str).collect();
+        git_with_index(&self.worktree, index, &unstage)?;
         git_with_index(
             &self.worktree,
             index,
@@ -841,6 +854,42 @@ mod tests {
         assert!(
             out.contains("agent.rs"),
             "uncommitted agent work must be reviewable: {out:?}"
+        );
+    }
+
+    /// omh stages its rules by mounting them over a placeholder it writes into
+    /// the worktree, and `info/exclude` cannot hide that placeholder when the
+    /// repo *tracks* the filename — gitignore semantics say nothing about a
+    /// file git already has. This repo tracks `AGENTS.md`, so the case is not
+    /// exotic: reading the worktree turned omh's own scaffolding into a line
+    /// saying the agent had emptied the project's rules.
+    ///
+    /// `commit` already unstages these for the same reason. Both now read the
+    /// one list, so what a review shows and what a commit carries cannot
+    /// disagree about omh's own files.
+    #[test]
+    fn diff_never_shows_omhs_own_staging_as_the_agents_work() {
+        let (d, root) = repo();
+        let rules = crate::carry::STAGED_RULES[1];
+        std::fs::write(root.join(rules), "# the project's real rules\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "rules the repo tracks"]).unwrap();
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        crate::carry::hide_staged_rules(&s.worktree).unwrap();
+        // the placeholder a bind mount needs its destination to be
+        std::fs::write(s.worktree.join(rules), "").unwrap();
+        std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
+
+        let out = s.diff("main").unwrap();
+        assert!(
+            !out.contains(rules),
+            "omh's own staging is not the agent's work: {out:?}"
+        );
+        assert!(
+            out.contains("agent.rs"),
+            "the agent's actual work still has to show: {out:?}"
         );
     }
 
