@@ -1369,6 +1369,62 @@ mod tests {
         }
     }
 
+    /// A carried file must never be **tracked** in the seed, and the reason is
+    /// not the one you would guess.
+    ///
+    /// Tracking it looks like a straight improvement: a tracked file survives
+    /// `git clean -fdx` without needing a mount, and without the mount the
+    /// agent can edit it with `sed -i` and `mv`, which a mountpoint refuses
+    /// with `Device or resource busy`. Measured, all of that is true.
+    ///
+    /// What is also true, and settles it: the harvest fetches this repository
+    /// into the *user's own*, and a fetch takes every reachable object. A
+    /// carried secret in the seed is therefore copied into the real repository
+    /// on every `omh s commit --keep` — measured, readable there with
+    /// `git cat-file -p`. Unreachable once the scratch ref goes, but it was
+    /// there, and "it gets garbage collected eventually" is not a thing to say
+    /// about somebody's credentials.
+    ///
+    /// So the mount stays and `sed -i` stays broken, and this guards the trade
+    /// against being quietly reversed by someone fixing the visible half.
+    #[test]
+    fn a_carried_file_is_never_in_the_seed_the_harvest_fetches() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        std::fs::write(wt.join(".env"), "API_TOKEN=ghp_abc123def456\n").unwrap();
+        s.ensure(&wt, &[".env".to_string()]).unwrap();
+
+        let tracked = git(&s.gitdir, &wt, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
+        assert!(
+            !tracked.contains(".env"),
+            "the seed must not track it: {tracked}"
+        );
+
+        // and the half that matters — what a harvest would carry across
+        git_in(
+            &checkout,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "fetch",
+                "-q",
+                &s.gitdir.to_string_lossy(),
+                "+HEAD:refs/omh/probe",
+            ],
+        )
+        .unwrap();
+        let objects = git_in(&checkout, &["rev-list", "--objects", "refs/omh/probe"]).unwrap();
+        for line in objects.lines() {
+            let oid = line.split_whitespace().next().unwrap_or_default();
+            let body = git_in(&checkout, &["cat-file", "-p", oid]).unwrap_or_default();
+            assert!(
+                !body.contains("ghp_abc123def456"),
+                "a fetch put the carried secret in the user's repository: {line}"
+            );
+        }
+    }
+
     /// Curation is the flag's headline behaviour and nothing executed it: every
     /// other test here passes `curate: false` while `--keep` only ever passes
     /// `true`. Deleting the `-i` left the suite green.

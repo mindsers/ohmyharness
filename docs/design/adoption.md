@@ -933,11 +933,12 @@ prompt §1.8 removes, and is here because it is what shows the weakness:
   appears later is not added to the list, so it is off, and `omh use --all` is
   the fix. The launcher reports entries that are off for this reason, so it
   surfaces rather than failing silently, but it is not obvious.
-- **Four tests are `#[ignore]`d for a reason that no longer holds.** They shell
-  out to git, which could not run inside an omh sandbox until 2026.08 — the
-  sandbox has a repository of its own now, so they may well pass there. Nobody
-  has run omh's suite inside an omh sandbox to find out, and the reason recorded
-  on each of them says so. CI runs them on the host either way.
+  Four tests used to be `#[ignore]`d here, because they shell out to git and git
+  could not run inside an omh sandbox. Measured against git 2.55.0: `git
+  hash-object --stdin` fails only against a *dangling* `.git` pointer — with no
+  repository at all it succeeds, and against the repository the sandbox now has
+  it succeeds and returns the same hash. The reason is gone, so the tests are
+  back.
 
 ---
 

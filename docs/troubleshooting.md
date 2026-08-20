@@ -312,6 +312,13 @@ sed: cannot rename ./sedXXXXXX: Device or resource busy
 Appending works (`echo LINE >> .env`), and so does anything that writes the file
 in place. Edits land on omh's staged copy, never on the file in your checkout.
 
+This is a trade, and the obvious way out was measured and rejected. Tracking the
+carried file in the sandbox's repository instead of mounting it would survive
+`git clean` *and* leave `sed -i` working — but the harvest fetches that
+repository into yours, and a fetch takes every reachable object, so the secret
+would be copied into your real repository on every `omh s commit --keep`.
+A test pins it so nobody fixes the visible half.
+
 A carried **directory** is a plain copy and has none of this — it is removable
 by `git clean -fdx`. omh warns when it carries one, though only when it actually
 copies: relaunch a session whose carried directory has not changed and the
