@@ -537,6 +537,51 @@ fn work_committed_from_the_host_is_what_diff_then_reports() {
     assert!(printed.contains("feature.rs"), "got: {printed}");
 }
 
+/// `--keep` is the harvest, and it says so rather than pretending it committed.
+///
+/// A session whose sandbox never ran has no repository to keep anything from,
+/// and the honest answer is "nothing to keep" — not a cheerful "committed" over
+/// an empty branch, which is the report a user would act on.
+#[test]
+fn keeping_a_sessions_own_commits_says_so_when_there_are_none() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
+
+    let out = sb.omh(&["s", "commit", "--keep"]);
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("no sandbox repository") || said.contains("nothing to keep"),
+        "a session with no sandbox repository has nothing to keep, and has to \
+         say which: {said}"
+    );
+    assert!(
+        !said.contains("committed to"),
+        "and must not report a commit it did not make: {said}"
+    );
+}
+
+/// `-m` and `--keep` are two ways to land the same work and must not both run:
+/// the squash lands the content first, and git's patch-id then drops every
+/// replanted commit as already applied — the granular history `--keep` exists
+/// to deliver, gone with nothing said.
+#[test]
+fn a_message_and_keeping_the_agents_commits_are_refused_together() {
+    let sb = sandbox();
+    sb.session("s01");
+
+    let out = sb.omh(&["s", "commit", "-m", "squashed", "--keep"]);
+
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("cannot be used with"), "got: {err}");
+}
+
 /// The agent cannot commit — that is the whole shape of a session — so the
 /// window in which `s diff` is the *only* way to see the work is the entire
 /// time the agent is running. It reported an empty diff for all of it, while
