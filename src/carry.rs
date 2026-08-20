@@ -93,6 +93,124 @@ pub fn apply(repo: &Path, worktree: &Path, patterns: &[String]) -> Result<Vec<Ca
     Ok(out)
 }
 
+/// Stage the carried files for mounting, and say where each one landed.
+///
+/// The copy used to go straight into the worktree, which was right while `/work`
+/// held no git. It does now, and `git clean -fdx` removes an untracked file
+/// whether or not `info/exclude` names it — so the agent could delete the `.env`
+/// its app needs and not get it back until the next launch.
+///
+/// A bind mount survives that, because a mountpoint cannot be **unlinked**. So
+/// the copy is staged outside the worktree and mounted over a placeholder,
+/// which leaves three properties the copy did not have: `git clean` reports
+/// `Resource busy` and cleans everything else; the agent can still write to it,
+/// because the mount is read-write; and what it writes lands on omh's copy
+/// rather than on the file in the user's checkout.
+///
+/// Unlink is the whole of the guarantee, and two things scope it. `git clean`
+/// exits **1** after the warning — it finishes the job and still reports
+/// failure, so an agent running `git clean -fdx && …` or anything under
+/// `set -e` sees its command fail. And `: > .env` truncates the file to zero
+/// bytes, exit 0, straight through to the staged copy: the mount stops the file
+/// being removed, not its contents being destroyed. That is inherent to being
+/// writable, which is the point of it.
+///
+/// That last one is why this stages rather than mounting the source. Mounting
+/// the checkout's own file read-write was measured letting an agent append to
+/// the real `.env` — the exact reach outside the sandbox the worktree model
+/// exists to prevent.
+///
+/// **Files only. A carried directory gets none of this.** `is_dir()` is skipped
+/// below, so omh mounts nothing and the directory keeps `apply`'s plain copy —
+/// measured, `git clean -fdx` prints `Removing certs/`, exits 0, and the
+/// directory and everything in it is gone. Silently, and with a success code.
+///
+/// Mounting the directory instead would not have helped, which is why it is not
+/// done: a directory mountpoint protects itself and not its contents, so
+/// `clean` empties it first and only then reports `Resource busy` on the
+/// directory — and because the mount is read-write, those deletions reach the
+/// staged copy too. Protecting the contents means one mount per file, unbounded
+/// in whatever the user chose to carry.
+///
+/// So a carried directory is exposed exactly as it was before this change. The
+/// launcher says so at the point it carries one; this is the reason.
+pub fn to_mount(repo: &Path, into: &Path, patterns: &[String]) -> Result<Vec<Staged>> {
+    for pattern in patterns {
+        validate_pattern(pattern)?;
+    }
+    let mut out: Vec<Staged> = Vec::new();
+    for pattern in patterns {
+        let rel = pattern.trim().trim_end_matches('/');
+        let src = repo.join(rel);
+        // Absent and already-tracked are `apply`'s to report — it runs first and
+        // says so to the user. Silently skipped here so the two cannot disagree
+        // about what happened, only about what to do next.
+        if !src.exists() || tracked(repo, rel) || src.is_dir() {
+            continue;
+        }
+        // One entry, one mount. `carry_in = [".env", ".env/"]` both normalise to
+        // the same `rel`, and docker refuses a plan with two mounts on one
+        // destination — `Duplicate mount point: /work/.env`, a launch failure
+        // naming a path the user never wrote. Redundant before this change,
+        // fatal after it.
+        if out.iter().any(|s: &Staged| s.rel == rel) {
+            continue;
+        }
+        let at = into.join(rel);
+        // The invariant `Staged` documents, checked where the value is made.
+        debug_assert!(
+            at.starts_with(into),
+            "a staged file outside the staging directory is the checkout's own"
+        );
+        out.push(Staged {
+            rel: rel.to_string(),
+            host: at,
+        });
+    }
+    Ok(out)
+}
+
+/// Put the bytes where `to_mount` said they would be.
+///
+/// Split from the decision because a dry run has to *name* the same mounts a
+/// real launch would make without writing anything —
+/// `skipped_staging_still_reports_the_real_mounts` asserts exactly that, and it
+/// went red the moment a fixture had a `carry_in` entry. Deciding is reads of
+/// the checkout and is safe either way; this is the half that is not.
+pub fn materialise(repo: &Path, staged: &[Staged]) -> Result<()> {
+    for item in staged {
+        if let Some(parent) = item.host.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("making room for staged {}", item.rel))?;
+        }
+        let src = repo.join(&item.rel);
+        std::fs::copy(&src, &item.host)
+            .with_context(|| format!("staging {} to {}", src.display(), item.host.display()))?;
+    }
+    Ok(())
+}
+
+/// One carried file, staged and waiting to be mounted.
+///
+/// Unlike `Carried`, `Removed` and the rest of the reports in this crate, this
+/// is not a record of something already decided — `host` *becomes* the source of
+/// a read-write bind mount. "It is in the staging directory and never in the
+/// checkout" is the whole of the security property here: a `host` pointing at
+/// the checkout's own file mounts the user's real `.env` writable into the
+/// sandbox, which is the reach this design exists to prevent.
+///
+/// Asserted where it is built rather than enforced by the type, which would
+/// mean a fallible constructor for an invariant one function can uphold. If a
+/// second producer ever appears, make the fields private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Staged {
+    /// Where it goes inside `/work`.
+    pub rel: String,
+    /// The staged copy, which is what gets mounted. Always under the staging
+    /// directory this was asked to write into.
+    pub host: PathBuf,
+}
+
 /// Whether git already has this path on the branch the session will start from.
 ///
 /// Asked of the checkout rather than the worktree, because that is where the
@@ -221,6 +339,70 @@ fn exclude(worktree: &Path, patterns: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The three skips guard `materialise`'s `fs::copy`, which fails on a
+    /// missing source and on a directory. Drop either and the error propagates
+    /// out of `plan` and no session launches at all — for a `carry_in` naming a
+    /// file the user does not currently have, or a directory, which is what
+    /// omh's own generated settings file suggests (`certs/`).
+    ///
+    /// Both cases were graceful and *reported* before mounting existed:
+    /// `Action::Missing` says "not in this checkout", and a directory gets
+    /// copied. One line in a skip condition is what keeps that true.
+    #[test]
+    fn nothing_is_staged_for_a_path_that_cannot_be_copied() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let into = dir.path().join("staged");
+        std::fs::create_dir_all(repo.join("certs")).unwrap();
+        std::fs::write(repo.join("certs/ca.pem"), "cert\n").unwrap();
+
+        let staged =
+            to_mount(&repo, &into, &["gone.env".to_string(), "certs".to_string()]).unwrap();
+
+        assert!(
+            staged.is_empty(),
+            "a missing file and a directory are both left to `apply`: {staged:?}"
+        );
+        // and the half that turns a skip into an outage
+        materialise(&repo, &staged).expect("nothing to copy is not a failure");
+    }
+
+    /// `validate_pattern` runs here as well as in `apply`, and the duplication
+    /// is load-bearing rather than redundant: the two are reached from
+    /// different callers, and this module's own doc calls `carry_in` "the only
+    /// path by which a secret reaches the agent". Deleting the loop left the
+    /// whole suite green.
+    #[test]
+    fn a_pattern_that_escapes_the_repo_is_refused_before_anything_is_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(to_mount(
+            dir.path(),
+            &dir.path().join("staged"),
+            &["../../.ssh/id_rsa".to_string()]
+        )
+        .is_err());
+    }
+
+    /// One entry, one mount. Two patterns that normalise to the same path made
+    /// docker refuse the launch with `Duplicate mount point: /work/.env`, a
+    /// failure naming a path the user never typed.
+    #[test]
+    fn two_patterns_for_one_path_produce_one_mount() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        std::fs::write(repo.join(".env"), "S=1\n").unwrap();
+
+        let staged = to_mount(
+            &repo,
+            &dir.path().join("staged"),
+            &[".env".to_string(), ".env/".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(staged.len(), 1, "{staged:?}");
+    }
 
     fn repo(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let d = tempfile::tempdir().unwrap();

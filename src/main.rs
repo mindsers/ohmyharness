@@ -3226,6 +3226,21 @@ fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
         match item.action {
             // What was carried is progress, not a warning: it is the launcher
             // saying what it did, and it happens on every normal launch.
+            // A directory is carried and *not* protected: `stage_for_mount`
+            // mounts files only, so `git clean -fdx` in the sandbox removes a
+            // carried directory and everything in it — silently, and with a
+            // success code. Said here because `carried certs/` and `carried
+            // .env` are otherwise the same sentence for two different fates,
+            // and only one of them survives the agent tidying up.
+            carry::Action::Copied | carry::Action::Refreshed
+                if paths.repo.join(item.path.trim_end_matches('/')).is_dir() =>
+            {
+                ctx.warn(&format!(
+                    "carried {} — a directory, so `git clean` in the sandbox can \
+                     still remove it. Carrying the files individually keeps them.",
+                    item.path
+                ));
+            }
             carry::Action::Copied => ctx.progress(&format!("carried {}", item.path)),
             carry::Action::Refreshed => ctx.progress(&format!("refreshed {}", item.path)),
             // The mistake, named where it is made rather than three commands
