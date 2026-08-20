@@ -607,17 +607,7 @@ mod tests {
     /// digesting the wrong string forever: the false direction was covered by a
     /// hand-built `Facts`, and the true direction — that the digest omh
     /// computes is the digest a note would pin — by nothing.
-    ///
-    /// `#[ignore]`d because it shells out to git, and until 2026.08 git could not
-    /// run inside an omh sandbox at all — the worktree's `.git` was a pointer at
-    /// an admin directory omh does not mount, so git failed where finding no
-    /// repository would have succeeded. That premise is gone: the sandbox has a
-    /// repository of its own now, so this may well pass there. Left ignored
-    /// because nobody has run omh's suite inside an omh sandbox to find out, and
-    /// an ignore that is merely unverified is cheaper than a red suite. Runs on
-    /// the host and in CI.
     #[test]
-    #[ignore]
     fn judge_agrees_with_the_recipe_digest_a_note_would_pin() {
         let (_d, paths) = repo_with(&[]);
         let now = crate::image::recipe_digest(&crate::image::base_dockerfile()).unwrap();
@@ -657,17 +647,7 @@ mod tests {
     /// harness digest while the recipe still carries an unstable tag — so the
     /// dependency is discovered here rather than in a store full of notes that
     /// went stale on a toolchain bump.
-    ///
-    /// `#[ignore]`d because it shells out to git, and until 2026.08 git could not
-    /// run inside an omh sandbox at all — the worktree's `.git` was a pointer at
-    /// an admin directory omh does not mount, so git failed where finding no
-    /// repository would have succeeded. That premise is gone: the sandbox has a
-    /// repository of its own now, so this may well pass there. Left ignored
-    /// because nobody has run omh's suite inside an omh sandbox to find out, and
-    /// an ignore that is merely unverified is cheaper than a red suite. Runs on
-    /// the host and in CI.
     #[test]
-    #[ignore]
     fn a_harness_recipe_is_never_pinned_while_it_carries_an_unstable_tag() {
         let shipped = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/adapters"));
         let harnesses = crate::adapter::Adapter::load_dir(shipped).unwrap();

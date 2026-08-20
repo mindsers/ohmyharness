@@ -909,6 +909,26 @@ repo and should be a decision, not a side effect of setup.
 
 ---
 
+## 3.6 omh's own suite could not run in an omh sandbox — resolved
+
+Four tests digest the image recipe with `git hash-object`, and until 2026.08
+that failed inside a session: the worktree's `.git` was a pointer at an admin
+directory omh does not mount, so git found a repository it could not open. They
+were `#[ignore]`d, and a turn-end `cargo test` hook in this repo was red for a
+reason omh imposed on itself.
+
+The sandbox has a repository of its own now, and `recipe_digest` never needed a
+repository — only the git binary. Measured against git 2.55.0:
+
+```console
+no repository at all      ce013625030ba8dba906f756967f9e9ca394464a   exit 0
+dangling .git             fatal: not a git repository: (null)        exit 128
+the sandbox's repository  ce013625030ba8dba906f756967f9e9ca394464a   exit 0
+```
+
+Only the dangling pointer ever failed, and there is no longer one to find. The
+ignores are gone.
+
 # Part 4 — Known limitations
 
 - **The probe checks launchers.** It asks *is this program installed*. For
@@ -933,11 +953,6 @@ prompt §1.8 removes, and is here because it is what shows the weakness:
   appears later is not added to the list, so it is off, and `omh use --all` is
   the fix. The launcher reports entries that are off for this reason, so it
   surfaces rather than failing silently, but it is not obvious.
-- **Four tests are `#[ignore]`d for a reason that no longer holds.** They shell
-  out to git, which could not run inside an omh sandbox until 2026.08 — the
-  sandbox has a repository of its own now, so they may well pass there. Nobody
-  has run omh's suite inside an omh sandbox to find out, and the reason recorded
-  on each of them says so. CI runs them on the host either way.
 
 ---
 
