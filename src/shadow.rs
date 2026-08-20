@@ -410,7 +410,14 @@ impl Shadow {
                 "fetch",
                 "-q",
                 &self.gitdir.to_string_lossy(),
-                &format!("HEAD:{scratch}"),
+                // Forced. The ref is omh's own scratch namespace, and every
+                // failure path leaves it behind — including the carried-secret
+                // refusal, whose own advice is "drop that commit in the sandbox
+                // and harvest again". Dropping a commit is a rewind, so the next
+                // fetch was non-fast-forward and `--keep` died permanently for
+                // that session, with a message naming a ref the user has never
+                // heard of. Following omh's instructions must not brick omh.
+                &format!("+HEAD:{scratch}"),
             ],
         )?;
 
@@ -425,8 +432,35 @@ impl Shadow {
         }
         self.refuse_carried(repo, &range, carried)?;
 
+        // The guard `Session::commit` makes and this did not: "omh will not
+        // commit to a branch it did not open". Without it a session worktree
+        // that wandered — `worktree add -b` losing to git's DWIM, or one left
+        // detached — still had its branch rewritten by `update-ref`, while the
+        // `reset --mixed` below fixed the *worktree's own* unrelated HEAD. The
+        // commits landed on a branch nobody was standing on and omh reported
+        // success.
+        let head = git_in(worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        anyhow::ensure!(
+            head.trim() == branch,
+            "{} is on {} rather than {branch}; omh will not move a branch the \
+             session is not on",
+            worktree.display(),
+            head.trim()
+        );
+
         let before = git_in(repo, &["rev-parse", branch])?.trim().to_string();
-        let replant = repo.join(".git/omh-harvest");
+
+        // Named for the session. One path shared by every harvest meant the
+        // first thing a second one did was force-remove the first one's
+        // worktree — measured, `worktree remove --force` tears down a live
+        // interactive rebase and exits 0, so curation in progress simply
+        // vanished. Under the common dir rather than `.git`, which is a *file*
+        // in a linked worktree or a submodule and made `worktree add` fail on
+        // "could not create leading directories".
+        let common = git_in(repo, &["rev-parse", "--git-common-dir"])?;
+        let replant = repo
+            .join(common.trim())
+            .join(format!("omh-harvest-{}", self.branch));
         let _ = git_in(
             repo,
             &["worktree", "remove", "--force", &replant.to_string_lossy()],
@@ -443,11 +477,27 @@ impl Shadow {
             ],
         )?;
 
-        let curated = Self::replant(&replant, branch, &seed, curate)
+        let curated = Self::replant(&replant, branch, &seed, curate, &scratch)
             .and_then(|()| Self::stamp(&replant, &before));
-        let tip = curated
+        // Counted *after* curation, because the number is reported as what was
+        // kept and the user drops commits in the todo list — `--empty=drop`
+        // removes more. Taken from the range that actually landed, this said
+        // "kept 3" over a branch that got 1.
+        let landed = curated
             .and_then(|()| git_in(&replant, &["rev-parse", "HEAD"]))
-            .map(|t| t.trim().to_string());
+            .and_then(|tip| {
+                let tip = tip.trim().to_string();
+                let n = git_in(
+                    &replant,
+                    &["rev-list", "--count", &format!("{before}..{tip}")],
+                )?;
+                Ok((tip, n.trim().parse::<usize>().unwrap_or(0)))
+            });
+
+        // Removed before any error surfaces, so no message may point at it:
+        // `worktree remove --force` deletes a conflicted rebase and all, exit 0.
+        // What survives a failure is the fetched ref, and that is what
+        // `replant`'s message names.
         let _ = git_in(
             repo,
             &["worktree", "remove", "--force", &replant.to_string_lossy()],
@@ -456,40 +506,91 @@ impl Shadow {
         // Only now. Until the branch has the work, the fetched ref is the copy
         // that survives a failure — and after it, the same ref is the only thing
         // keeping the pre-curation objects reachable in the user's repository.
-        let tip = tip?;
-        git_in(repo, &["update-ref", &format!("refs/heads/{branch}"), &tip])?;
+        let (tip, landed) = landed?;
+        // With `before` as the expected old value. `update-ref` will force-move
+        // a branch that is checked out in another worktree — `git branch -f`
+        // refuses, this does not — so without the third argument a commit made
+        // on the session branch while the todo list sat open was discarded, and
+        // omh reported a cheerful "kept N".
+        git_in(
+            repo,
+            &["update-ref", &format!("refs/heads/{branch}"), &tip, &before],
+        )
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "{e}\n\n{branch} moved while the harvest was running, so nothing was \
+                 written. The work is still at {scratch} — run `omh s commit \
+                 --keep` again"
+            )
+        })?;
         git_in(repo, &["update-ref", "-d", &scratch])?;
 
         // The branch moved under a live worktree, so its index describes the
         // commit that used to be HEAD. Without this `git status` reports files
         // deleted that are sitting on disk.
         git_in(worktree, &["reset", "-q", "--mixed"])?;
-        Ok(count)
+        Ok(landed)
     }
 
     /// The curation pass: the agent's commits onto the branch, the user's shape.
-    fn replant(at: &Path, branch: &str, seed: &str, curate: bool) -> Result<()> {
+    fn replant(at: &Path, branch: &str, seed: &str, curate: bool, scratch: &str) -> Result<()> {
         let mut args = vec!["rebase", "--onto", branch, seed, "--empty=drop"];
         if curate {
             args.push("-i");
         } else {
             args.push("-q");
         }
-        git_in(at, &args).map(|_| ()).map_err(|e| {
-            anyhow::anyhow!(
-                "{e}\n\nthe branch is untouched and the work is safe — omh fetched it \
-                 before replanting. Resolve it in {} and re-run, or harvest with \
-                 `-m` instead to take the files without the history",
-                at.display()
-            )
-        })
+
+        // Inherited stdio when curating, and this is the whole flag working or
+        // not. `git_in` captures output, so `rebase -i` launched an editor with
+        // no terminal and `vi` sat there forever — measured, by a check that
+        // hung for two minutes. With an editor that exits without a tty it is
+        // worse: the rebase proceeds on the *unedited* todo, no error, and omh
+        // reports a curation that never happened.
+        //
+        // `session.rs` already carries this rule for `git commit` in the same
+        // words — "an editor with nowhere to draw hangs". This was written
+        // without reading it.
+        if curate {
+            let ok = Command::new("git")
+                .current_dir(at)
+                .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
+                .args(&args)
+                .status()
+                .context("running git rebase -i")?;
+            return if ok.success() {
+                Ok(())
+            } else {
+                Err(Self::replant_failed(scratch))
+            };
+        }
+
+        git_in(at, &args)
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("{e}\n\n{}", Self::replant_failed(scratch)))
+    }
+
+    /// What is true after a replant that did not finish, whichever way it went.
+    fn replant_failed(scratch: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            "the branch is untouched and nothing is lost — omh fetched the work \
+             before replanting, and it is still at {scratch}. Look at it with \
+             `git log {scratch}`, or take the files without the history using \
+             `omh s commit -m`"
+        )
     }
 
     /// The enforcement pass. Non-interactive on purpose.
+    ///
+    /// `--allow-empty` on the amend because `--empty=drop` governs commits that
+    /// *become* empty and keeps ones that started that way. An agent's
+    /// `git commit --allow-empty` marker then reached here and the amend died
+    /// on "doing so would make it empty", taking the whole harvest — and the
+    /// curation the user had just done — with it.
     fn stamp(at: &Path, from: &str) -> Result<()> {
         let exec = format!(
             "git -c user.name='{AUTHOR_NAME}' -c user.email='{AUTHOR_EMAIL}' \
-             commit -q --amend --no-edit --reset-author"
+             commit -q --amend --no-edit --reset-author --allow-empty"
         );
         git_in(
             at,
@@ -502,11 +603,23 @@ impl Shadow {
 
     /// Stop if anything the user carried in reached a commit.
     ///
-    /// Path *and* content, because a path check alone closes one of four doors:
-    /// `git add -f .env` it catches, a copy under another name it does not, nor
-    /// a value pasted into source, nor one in a commit message. omh is in a
-    /// position no scanner is — it staged these files, so it knows the exact
-    /// bytes and never has to guess.
+    /// Four doors, and a path check closes one of them: `git add -f .env` it
+    /// catches, a copy under another name it does not, nor a value pasted into
+    /// source, nor one written into a commit message.
+    ///
+    /// So three searches, not two. `-S` is a pickaxe over diff *content* and
+    /// does not read messages at all — measured, it finds nothing for a secret
+    /// that appears only in a subject line, while `--grep` finds it. What `-S`
+    /// does give, and the reason it is the right tool for the other two, is
+    /// that it reports a secret added in one commit and removed in a later one
+    /// inside the same range: both change the occurrence count, so both are
+    /// named.
+    ///
+    /// omh is in a position no scanner is — it staged these files, so it knows
+    /// the bytes and never has to guess. With one caveat worth stating: it
+    /// reads them from the checkout *now*, so a secret rotated mid-session is
+    /// matched at its new value and an agent commit holding the old one goes
+    /// through.
     fn refuse_carried(&self, repo: &Path, range: &str, carried: &[String]) -> Result<()> {
         for rel in carried {
             let rel = rel.trim().trim_end_matches('/');
@@ -519,14 +632,22 @@ impl Shadow {
                      history with `omh s commit -m`"
                 );
             }
-            for needle in Self::needles(&repo.join(rel)) {
-                let hit = git_in(repo, &["log", "--oneline", "-S", &needle, range])?;
-                if let Some(line) = hit.lines().next() {
-                    anyhow::bail!(
-                        "{line} contains a line from {rel}, which you carried in. \
-                         omh will not rewrite your history to hide a secret — drop \
-                         that commit in the sandbox and harvest again"
-                    );
+            for needle in Self::needles(&repo.join(rel))? {
+                for (how, args) in [
+                    ("contains", vec!["log", "--oneline", "-S", &needle, range]),
+                    (
+                        "mentions",
+                        vec!["log", "--oneline", "--grep", &needle, range],
+                    ),
+                ] {
+                    let hit = git_in(repo, &args)?;
+                    if let Some(line) = hit.lines().next() {
+                        anyhow::bail!(
+                            "{line} {how} a line from {rel}, which you carried in. \
+                             omh will not rewrite your history to hide a secret — \
+                             drop that commit in the sandbox and harvest again"
+                        );
+                    }
                 }
             }
         }
@@ -535,14 +656,48 @@ impl Shadow {
 
     /// Lines worth searching for: long enough to mean something, and not a
     /// comment or a blank.
-    fn needles(at: &Path) -> Vec<String> {
-        std::fs::read_to_string(at)
-            .unwrap_or_default()
+    ///
+    /// Walks a directory, because `carry_in` takes one and `read_to_string` on
+    /// a directory is an `Err` — which, defaulted, meant **zero needles and a
+    /// content scan that silently did nothing**. A `certs/` entry got the path
+    /// check only, so `cp certs/deploy.key infra/key.pem` and commit put a
+    /// private key on the branch through the door this function exists to shut.
+    ///
+    /// Unreadable is an error, not an empty answer. A file that has been
+    /// rotated, renamed or made unreadable since launch is a case where omh
+    /// cannot tell whether the harvest is clean, and "cannot tell" must not
+    /// spell the same as "clean" in the one module whose subject is the user's
+    /// secrets. Binary files are the exception the loop takes deliberately:
+    /// they decode-fail, and a byte sequence is not a line to search for.
+    fn needles(at: &Path) -> Result<Vec<String>> {
+        if at.is_dir() {
+            let mut out = Vec::new();
+            for entry in std::fs::read_dir(at)
+                .with_context(|| format!("reading carried directory {}", at.display()))?
+                .flatten()
+            {
+                out.extend(Self::needles(&entry.path())?);
+            }
+            return Ok(out);
+        }
+        if !at.exists() {
+            return Ok(Vec::new());
+        }
+        let body = match std::fs::read_to_string(at) {
+            Ok(body) => body,
+            // Not text. Nothing to search for line-wise, and the path check
+            // still covers it.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(e).with_context(|| format!("reading carried file {}", at.display()))
+            }
+        };
+        Ok(body
             .lines()
             .map(str::trim)
             .filter(|l| l.len() >= 12 && !l.starts_with('#') && !l.starts_with("//"))
             .map(str::to_string)
-            .collect()
+            .collect())
     }
 
     /// Remove the repository and the seed recorded for it.
@@ -696,7 +851,14 @@ const NO_PUSH: &str =
 /// somewhere to go", and a harvest reads those commits **on the host, as the
 /// user**. Neutralised here rather than there, because the person writing the
 /// harvest will be reading a doc comment, and a doc comment is not a guard.
-const NEUTRALISED: [&str; 5] = [
+const NEUTRALISED: [&str; 6] = [
+    // `ensure` has carried this since the seed commit and said why: a global
+    // `commit.gpgsign = true` fails with `gpg failed to sign the data`, over a
+    // commit the user never made in a repository they cannot see. The harvest
+    // then added three more commit sites and read none of that — the
+    // checkpoint, the replant and the stamp all died for anyone who signs by
+    // default. `--no-verify` covers hooks and nothing of signing.
+    "commit.gpgsign=false",
     "core.hooksPath=",
     "core.pager=cat",
     "core.fsmonitor=",
@@ -1152,6 +1314,7 @@ mod tests {
             ("force-added", "add-f"),
             ("copied under another name", "copy"),
             ("pasted into source", "inline"),
+            ("written into a commit message", "message"),
         ] {
             let (d, wt, shadow_dir) = fixture();
             let checkout = d.path().join("checkout");
@@ -1169,13 +1332,24 @@ mod tests {
                     std::fs::copy(wt.join(".env"), wt.join("config.bak")).unwrap();
                     git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
                 }
-                _ => {
+                "inline" => {
                     std::fs::write(wt.join("k.rs"), "const K = \"API_TOKEN=ghp_abc123def456\";")
                         .unwrap();
                     git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
                 }
+                // The door `-S` cannot see: a pickaxe reads diff content and
+                // never the message. Measured — it finds nothing here.
+                _ => {
+                    std::fs::write(wt.join("note.rs"), "fn n() {}").unwrap();
+                    git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+                }
             }
-            git(&s.gitdir, &wt, &["commit", "-qm", "Save config"]).unwrap();
+            let subject = if plant == "message" {
+                "note: API_TOKEN=ghp_abc123def456"
+            } else {
+                "Save config"
+            };
+            git(&s.gitdir, &wt, &["commit", "-qm", subject]).unwrap();
 
             let err = s
                 .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], false)
@@ -1195,9 +1369,59 @@ mod tests {
         }
     }
 
-    /// Each of these three made a harvest report success    /// Each of these three made a harvest report success    /// Each of these three made a harvest report success and leave commits
-    /// behind — measured before any of this was written, against the
-    /// replant that ran without them.
+    /// Curation is the flag's headline behaviour and nothing executed it: every
+    /// other test here passes `curate: false` while `--keep` only ever passes
+    /// `true`. Deleting the `-i` left the suite green.
+    ///
+    /// A sequence editor that *edits* the todo, not one that accepts it. An
+    /// editor that exits without touching the list is behaviourally identical
+    /// to `-q`, so it proves the branch was taken and nothing about what it
+    /// does — this drops a line, which is the whole point of opening the list.
+    ///
+    /// It also pins the count. Reported from the commits *fetched*, "kept 3"
+    /// printed over a branch that got 1.
+    #[test]
+    fn curating_drops_what_the_user_drops_and_says_so() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        // Separate files, so dropping the middle commit is a clean drop
+        // rather than a conflict — the curation is what is under test here.
+        for m in ["one", "two", "three"] {
+            std::fs::write(wt.join(format!("{m}.rs")), format!("fn {m}() {{}}\n")).unwrap();
+            git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+            git(&s.gitdir, &wt, &["commit", "-qm", m]).unwrap();
+        }
+
+        // the user opens the list and deletes the middle pick
+        let editor = d.path().join("drop-one.sh");
+        std::fs::write(&editor, "#!/bin/sh\nsed -i.bak '2d' \"$1\"\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        git_in(
+            &checkout,
+            &["config", "sequence.editor", &editor.to_string_lossy()],
+        )
+        .unwrap();
+
+        let landed = s.harvest(&checkout, &wt, "omh/s01", &[], true).unwrap();
+
+        let log = git_in(&checkout, &["log", "--format=%s", "main..omh/s01"]).unwrap();
+        let on_branch = log.lines().count();
+        assert_eq!(on_branch, 2, "one of the three was dropped: {log}");
+        assert_eq!(
+            landed, on_branch,
+            "the number reported is what landed, not what was offered: {log}"
+        );
+    }
+
+    /// Two of the three states that made a harvest report success while leaving    /// Two of the three states that made a harvest report success while leaving
+    /// commits behind — measured against the replant that ran without them.
+    /// The third, an interrupted rebase, has its own test below.
     #[test]
     fn a_harvest_refuses_a_history_it_cannot_see_all_of() {
         let (_d, wt, shadow_dir) = fixture();
@@ -1260,7 +1484,7 @@ mod tests {
         assert!(!seed.is_empty());
     }
 
-    /// Checkpointing is the feature, and a checkpoint is a commit, and git    /// Checkpointing is the feature, and a checkpoint is a commit, and git
+    /// Checkpointing is the feature, and a checkpoint is a commit, and git
     /// refuses to commit without an identity. The container carries no global
     /// git config, so unless the repository brings its own the agent's first
     /// `git commit` dies on `Author identity unknown` — the whole point of the
