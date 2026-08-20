@@ -784,7 +784,7 @@ fn session_up(
     }
 
     say_rules(&plan, ctx);
-    image::ensure_stack(backend.program(), adapter, recipe)?;
+    image::ensure_stack(backend.program(), adapter, recipe, &paths.repo)?;
     image::ensure_network(backend.program(), &plan.network)?;
 
     let key = ssh::ensure_key(&paths.keys())?;
@@ -1268,7 +1268,7 @@ fn doctor_cmd(
         return Ok(());
     }
 
-    image::ensure_stack(backend.program(), &adapter, &sandbox.recipe())?;
+    image::ensure_stack(backend.program(), &adapter, &sandbox.recipe(), &paths.repo)?;
     image::ensure_network(backend.program(), &plan.network)?;
 
     let account_name = account
@@ -3868,7 +3868,7 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // on this laptop*, which is the laptop building the image.
                 let (own, repo) = resolved(&paths)?;
                 let sandbox = sandbox(&paths, &adapter, &repo)?;
-                image::ensure_stack(backend.program(), &adapter, &sandbox.recipe())?;
+                image::ensure_stack(backend.program(), &adapter, &sandbox.recipe(), &paths.repo)?;
                 if sandbox.tag != image::tag_for(&adapter) {
                     summary.stack_image = Some(sandbox.tag.clone());
                 }
@@ -4531,6 +4531,7 @@ impl Sandbox {
             program,
             adapter,
             &recipe.iter().map(String::as_str).collect::<Vec<_>>(),
+            &paths.repo,
         )?;
         let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
         self.resolves = measure(program, paths, &self.tag, &wanted, ctx)?;

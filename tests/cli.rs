@@ -95,6 +95,52 @@ impl Sandbox {
         log
     }
 
+    /// A `docker` that has no images yet, so a build actually happens, and
+    /// answers `images`/`ps` from files the test seeds.
+    ///
+    /// Separate from `fake_docker` because that one exits 0 for everything:
+    /// `image inspect` succeeds, `exists()` reports the tag present, and the
+    /// build — and therefore the reap — is skipped before it is reached. A
+    /// shim that says yes to everything cannot test the path taken when
+    /// something is missing.
+    fn fake_docker_with_nothing_built(&self, tags: &[&str], in_use: &[&str]) -> PathBuf {
+        let log = self.bin.join("docker.log");
+        let images = self.bin.join("images");
+        let containers = self.bin.join("containers");
+        std::fs::write(&images, format!("{}\n", tags.join("\n"))).unwrap();
+        std::fs::write(&containers, format!("{}\n", in_use.join("\n"))).unwrap();
+        let shim = self.bin.join("docker");
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 case \"$1 $2\" in\n\
+                 \"image inspect\") exit 1 ;;\n\
+                 \"image rm\") echo \"Untagged: $3\"; echo 'Deleted: sha256:00'; exit 0 ;;\n\
+                 esac\n\
+                 if [ \"$1\" = images ]; then cat {images}; fi\n\
+                 if [ \"$1\" = ps ]; then cat {containers}; fi\n\
+                 if [ \"$1\" = inspect ]; then echo true; fi\nexit 0\n",
+                log = log.display(),
+                images = images.display(),
+                containers = containers.display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::create_dir_all(self.repo.join(".omh")).unwrap();
+        std::fs::write(
+            self.repo.join(".omh/settings.toml"),
+            "runtime = \"docker\"\n",
+        )
+        .unwrap();
+        log
+    }
+
     fn docker_calls(&self, log: &Path) -> Vec<String> {
         std::fs::read_to_string(log)
             .unwrap_or_default()
@@ -2046,4 +2092,49 @@ fn every_json_answer_is_one_document_and_not_several() {
             args.join(" ")
         );
     }
+}
+
+/// The reap has to be wired to the build, or the whole feature is a set of
+/// well-tested functions nobody calls.
+///
+/// `superseded` is pure and thoroughly tested, and every one of those tests
+/// stays green with the `reap` call deleted from `build` — measured: the unit
+/// suite, `tests/cli.rs` under `--include-ignored`, and the doc tests all pass
+/// with the feature disconnected, leaving four dead-code warnings as the only
+/// signal. That is the original bug in its original form: images stop being
+/// collected, nothing says so, and it is invisible until a disk fills.
+///
+/// Driven through `omh init` with a `docker` that reports nothing built, so a
+/// real build runs and the reap after it is reached. No container runtime is
+/// involved: what is asserted is which removals omh *asks* for, which is omh's
+/// half of the bargain. Whether docker honours them is docker's, and no test
+/// here can settle it.
+#[test]
+fn a_build_asks_docker_to_remove_the_tags_it_replaced() {
+    let sb = sandbox();
+    sb.git_init();
+    let log = sb.fake_docker_with_nothing_built(
+        &["omh/base:stale", "omh/base:latest", "omh/base:held"],
+        &["omh/base:held"],
+    );
+
+    sb.omh(&["init"]);
+
+    let removals: Vec<String> = sb
+        .docker_calls(&log)
+        .into_iter()
+        .filter(|c| c.starts_with("image rm "))
+        .collect();
+    assert!(
+        removals.iter().any(|c| c.ends_with("omh/base:stale")),
+        "the build never asked for the tag it replaced: {removals:?}"
+    );
+    assert!(
+        !removals.iter().any(|c| c.ends_with("omh/base:latest")),
+        "`latest` is the one removal that cannot be undone: {removals:?}"
+    );
+    assert!(
+        !removals.iter().any(|c| c.ends_with("omh/base:held")),
+        "a container still references it: {removals:?}"
+    );
 }

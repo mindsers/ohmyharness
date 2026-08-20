@@ -364,6 +364,34 @@ $ omh s down s01
 N sessions is N containers. `idle_timeout` stops unused ones; see
 [Sessions](sessions.md#lifecycle).
 
+### `omh: removed omh/claude:… this build replaced`
+
+A build removes the images it supersedes. omh tags an image with a hash of its
+recipe, so once a recipe changes the previous tag of the same kind is dead and
+nothing will ask for it again. Before this, nothing removed them.
+
+"Of the same kind" is the load-bearing part, and it is decided by labels omh
+stamps at build time — `omh.kind`, plus the adapter, plus the checkout for a
+stack layer — not by the image name. `omh/claude` legitimately holds the
+harness layer *and* one toolchain layer per checkout, all of them current, so
+the name alone cannot tell you which are dead.
+
+Never removed: `:latest`, and any tag a container still references.
+
+Two limits worth knowing. Images built before omh stamped labels carry none, so
+they belong to no class and are never collected — `docker images 'omh/*'` will
+show them and they are yours to remove. And a superseded tag usually frees far
+less than its `SIZE` column suggests, because it shares almost every layer with
+the tag that replaced it; the space is returned when a whole chain dies.
+
+### `docker image rm` is not what filled my disk
+
+Buildkit's cache is separate and `omh` never touches it. `docker system df`
+shows it; `docker buildx du` breaks it down. On the machine that prompted this
+feature it was 8.8 GB against 14.86 GB of images. Only `docker builder prune`
+reclaims it, and it takes every cached layer with it, so omh leaves that
+decision to you.
+
 ### The graph shows a project I do not recognise
 
 Graphs are shared per repo across sessions, so `list_projects` shows all of
