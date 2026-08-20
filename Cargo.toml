@@ -27,7 +27,7 @@ toml = "1.1"
 # so the writers use the format-preserving document rather than the serializer:
 # a round trip through `toml::to_string_pretty` deletes every comment in it.
 # Already in the tree as `toml`'s own dependency, so this is an edge, not code.
-toml_edit = "0.22"
+toml_edit = "0.25"
 # `Session::diff` stages the worktree into an index of its own so a review can
 # see files the agent created without touching the index the user's git shares.
 # A dev-dependency until that shipped, which `cargo test` hid: the test profile
