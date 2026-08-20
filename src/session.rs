@@ -233,9 +233,9 @@ impl Session {
 
     /// What this session changed, against the point it forked from.
     ///
-    /// Against the **working tree**, not the branch tip, because the agent
-    /// never commits — it cannot today, and once the shadow repo lands its
-    /// commits still are not this branch's. `base...branch` answered with an
+    /// Against the **working tree**, not the branch tip, because the agent's
+    /// commits are not this branch's — they go to the sandbox's own repository,
+    /// and reach here only when the user asks with `omh s commit --keep`. `base...branch` answered with an
     /// empty string for the whole span of a session, right up until the user
     /// ran `omh s commit`, while the rules told the agent the user reviews
     /// before committing. A review command that is silent about the work it

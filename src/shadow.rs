@@ -1419,7 +1419,7 @@ mod tests {
         );
     }
 
-    /// Two of the three states that made a harvest report success while leaving    /// Two of the three states that made a harvest report success while leaving
+    /// Two of the three states that made a harvest report success while leaving
     /// commits behind — measured against the replant that ran without them.
     /// The third, an interrupted rebase, has its own test below.
     #[test]

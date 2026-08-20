@@ -166,21 +166,20 @@ applies to them identically — **a hook you can edit is a hook omh can never sh
 fix to.**
 
 That leaves the catalogue tier **empty on a fresh install**, and that is the
-honest state of it: the five hooks omh ships belong to a feature, and the other
+honest state of it: the four hooks omh ships belong to a feature, and the other
 two are this repo's. `~/.omh/hooks/` is where *your* hooks go, and where any
 genuinely optional hook omh ships later would land — a turn-end notification, a
 secret scanner — the kind that serves no feature and is pure preference.
 
-Applying the seven this repo has today:
+Applying the six this repo has today:
 
 | | | |
 |---|---|---|
 | `graph-refresh` | omh's | the graph does not vanish, it **lies** — `search_graph` keeps answering about code the session has changed |
-| `git-unavailable` | omh's | the agent meets `fatal: not a git repository`, decides something is broken, and spends turns repairing what cannot be repaired |
 | `graph-orient`, `graph-first`, `graph-read` | omh's | the graph stays correct and goes unused — the agent greps what it could have queried |
 | `rust-test`, `rust-format` | the project's | no test at turn end, no format on edit |
 
-Only omh's five are absent from every directory and uneditable, generated from
+Only omh's four are absent from every directory and uneditable, generated from
 the manifest at launch. The other two are files, and that is the difference the
 next section is about.
 
@@ -205,7 +204,7 @@ feature = "codegraph"
 | Feature | What it is | Removed by |
 |---|---|---|
 | `codegraph` | the MCP server, plus `graph-orient`, `graph-first`, `graph-read`, `graph-refresh` | `omh config mcp rm codegraph` — takes all five |
-| `git-notice` | the `git-unavailable` hook, plus the rules section saying the same thing | nothing to uninstall; `[omh]` or not at all |
+| `git-notice` | the rules section telling the agent whose repository the sandbox's git is | nothing to uninstall; `[omh]` or not at all |
 | `memory` | the MCP server, plus the note-taking rules section | `omh config mcp rm memory` |
 
 **A feature is not a group of hooks. It is a group of entries across kinds** — a
@@ -278,7 +277,8 @@ feature it belongs to, and whether that feature is on here.
 
 This also repairs something the current model cannot do. `init` seeds these with
 `write_if_absent`, so a hook you edited or deleted never returns and **omh can
-never ship a fix to its own machinery**. `git-unavailable` has already been
+never ship a fix to its own machinery**. `git-unavailable`, before it was
+retired, had already been
 rewritten once, after an earlier pattern missed the newline-separated scripts
 agents most often emit; every repo initialised before that fix still carries the
 broken one. Generated-at-launch means the fix arrives with the upgrade.
@@ -354,7 +354,7 @@ moments every harness has.
 has the same moments and different names for the things that happen in them.
 
 **The payload protocol**, which is the one that matters. Read what the shipped
-hooks actually do: `git-unavailable` runs `jq -r '.tool_input.command'` — parsing
+hooks actually do: `git-unavailable` ran `jq -r '.tool_input.command'` — parsing
 Claude's stdin schema — and emits
 `{"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":…}}`,
 which is Claude's output protocol. Translate every name in that file and the
@@ -398,7 +398,7 @@ wanted.
 
 Two kinds: **`run`** executes and its output is ignored (`graph-refresh`,
 `rust-test`, `rust-format`), **`inject`** puts text in the agent's context
-(`graph-first`, `graph-read`, `git-unavailable`). The renderer owns the protocol
+(`graph-first`, `graph-read`). The renderer owns the protocol
 that delivers each, which is exactly the knowledge that was hand-written into
 every hook body.
 
@@ -868,8 +868,10 @@ other direction: a session editing that file changes the rules it runs under
 next launch. That is visible rather than hidden — the composed file names where
 each section came from — and the alternative silently ignores work in progress.
 
-**omh's own section stops being prose somebody pasted.** The "git does not work
-in this session" notice and the note-taking protocol are written by hand into
+**omh's own section stops being prose somebody pasted.** The git notice — then
+"git does not work in this session", now the sentence telling the agent whose
+repository the sandbox's own git is — and the note-taking protocol were written
+by hand into
 `.omh/profile/AGENTS.md` today, which means they exist in the repos where
 somebody remembered and nowhere else. They become base-set entries with
 `kind = "rules"` — a rule section belonging to a feature, exactly as its hooks do
@@ -930,12 +932,14 @@ rule, silently, in a way that looks exactly like working.
 
 That is why the format gained [`refuse`](../configuration.md#writing-a-hook): a
 hook now says whether it advises or blocks, and each harness spells both in
-data. `git-unavailable` is the base set's one refusal — git genuinely cannot
-work in the sandbox, so advising and letting the call through spent a tool call
-to reach an error omh already knew about.
+data. `git-unavailable` was the base set's one refusal, for as long as git
+genuinely could not work in the sandbox: advising and letting the call through
+spent a tool call to reach an error omh already knew about. The sandbox has a
+repository of its own now and the hook is retired, so **nothing omh ships
+refuses a call** — but the field stays, because `refuse` is a thing users write.
 
-**The result, measured rather than asserted.** Two of five cross to opencode and
-three are named:
+**The result, measured rather than asserted.** One of four crosses to opencode
+and three are named:
 
 ```console
 $ omh opencode
@@ -993,7 +997,7 @@ P2 rewrote five `remove` fields in the manifest. Each currently reads
 `rm .omh/profile/hooks/<name>.json`, which will name a path that no longer
 exists — and a `remove` instruction that silently does nothing is worse than
 none, because `omh why` presents it as the way out. The four graph hooks point at
-`omh config mcp rm codegraph`; `git-unavailable` points at `[omh] git-notice`,
+`omh config mcp rm codegraph`; `git-rules` points at `[omh] git-notice`,
 since there is nothing to uninstall.
 
 `feature` lands in the same phase, and it needs the test the other fields have:

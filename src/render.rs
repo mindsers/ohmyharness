@@ -1940,8 +1940,8 @@ mod tests {
     /// in exactly the way the code is wrong" — and these tests broke it: with a
     /// copy in the fixture, five separate mutations to `adapters/opencode.toml`
     /// left the whole suite green, including one that turns the refusal into
-    /// `console.error` and one that renames the tool so `git-unavailable` can
-    /// never match. The copy had already drifted, too: it omitted `edit`.
+    /// `console.error` and one that renamed the tool so the then-shipped `git-unavailable`
+    /// could never match. The copy had already drifted, too: it omitted `edit`.
     /// What `init` reports held back is exactly what a launch holds back.
     ///
     /// `init` has no document to render, so it asks `held_back` directly while

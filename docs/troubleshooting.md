@@ -298,6 +298,51 @@ If you hit the old behaviour on an older build, the tell is that `omh init`
 appears to do nothing: it uses `write_if_absent`, sees the file exists, and
 leaves it alone, so the advice and the problem never meet.
 
+### `Device or resource busy` editing a file omh carried in
+
+`carry_in` files are bind-mounted rather than copied, so `git clean -fdx` in the
+sandbox cannot delete them — a mountpoint cannot be unlinked. The same property
+blocks every write-temp-then-rename edit, which is what `sed -i` and `mv` do:
+
+```console
+$ sed -i s/OLD/NEW/ .env
+sed: cannot rename ./sedXXXXXX: Device or resource busy
+```
+
+Appending works (`echo LINE >> .env`), and so does anything that writes the file
+in place. Edits land on omh's staged copy, never on the file in your checkout.
+
+A carried **directory** is a plain copy and has none of this — it is removable
+by `git clean -fdx`. omh warns when it carries one, though only when it actually
+copies: relaunch a session whose carried directory has not changed and the
+warning does not repeat.
+
+### `omh will not move a branch the session is not on`
+
+`omh s commit --keep` refuses when the session's worktree has left its branch —
+a `git checkout` to look at something, or an abandoned bisect. Put it back:
+
+```console
+$ git -C ~/.omh/worktrees/<repo>/<session> checkout omh/<session>
+```
+
+Related refusals from the same command, all meaning "a harvest here would
+silently drop work", all about the sandbox's **own** repository: a detached
+HEAD, an interrupted rebase or merge, and commits no branch there can reach.
+The detached and stranded cases each print a `git --git-dir=…` command — one to
+put it back, one to show you what it found. The interrupted case names the
+marker it saw and leaves finishing or aborting to you.
+
+### `omh will not rewrite your history to hide a secret`
+
+`--keep` found something you listed in `carry_in` inside a commit the agent
+made — added with `git add -f`, copied under another name, pasted into source,
+or written into a commit message. omh knows the bytes it carried in, so it can
+tell, and it stops rather than quietly rewriting the agent's work.
+
+Drop that commit in the sandbox and harvest again, or take the files without the
+history with `omh s commit -m`. The branch is untouched either way.
+
 ### Sessions are piling up
 
 ```console

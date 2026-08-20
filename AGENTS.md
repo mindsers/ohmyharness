@@ -17,8 +17,8 @@ was fixed and all three were too weak — one compared dates by month and passed
 the exact fabricated date that shipped. The original defect is the best mutation
 you will ever get; fix it first and you have thrown it away.
 
-Prefer asserting invariants over asserting output shape. `exactly one writable
-mount, and it is the worktree` survives refactoring; `the 4th mount string equals
+Prefer asserting invariants over asserting output shape. `every writable mount
+is one of these, by name` survives refactoring; `the 4th mount string equals
 "..."` does not.
 
 This rule exists because ~950 lines shipped untested and carried four bugs, all

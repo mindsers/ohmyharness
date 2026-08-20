@@ -15,6 +15,7 @@ the runtime backend is kept swappable.
   base/                       the curated base set, versioned
   creds/<harness>/<account>/  captured logins, one directory per account
   worktrees/<repo>/<session>/ the agent's working directory
+  shadow/<repo>/<session>.git the repository the sandbox gets, and `.seed` beside it
   keys/<repo>/                per-repo ed25519 keypair
   run/<repo>/<session>/<harness>/  staged profile, regenerated per launch
   sessions.json               session → container, branch, port

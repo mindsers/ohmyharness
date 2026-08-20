@@ -274,9 +274,8 @@ nobody.
 
 ### Names omh ships are omh's
 
-`graph-orient`, `graph-first`, `graph-read`, `graph-refresh` and
-`git-unavailable` are generated from the [base set](design/base-set.md), not
-files. A hook file answering to one of those names is an **error naming both**
+`graph-orient`, `graph-first`, `graph-read` and `graph-refresh` are generated
+from the [base set](design/base-set.md), not files. A hook file answering to one of those names is an **error naming both**
 — it would not override omh's, and it would not run, and a hook that is
 committed, reviewed and silently inert is worse than one that refuses to start.
 To be rid of omh's, switch the feature off with `[omh]`.
@@ -816,3 +815,10 @@ Two traps here, both found by running it rather than reasoning about it:
   shared with your main checkout. It is never committed, and carried paths are
   untracked there by definition, so the effect is invisible; but it is not
   scoped to the worktree, and that is a fact rather than an intention.
+
+Both of those are about the worktree's own git, which is what runs on the
+**host**. Inside the sandbox the agent reads a different repository entirely —
+see [Sessions](sessions.md#the-agent-has-git-and-it-is-not-yours) — and its
+exclude list is written separately, from the same `carry_in` patterns, into the
+gitdir omh mounts. Two mechanisms, one list, so a `carry_in` entry keeps the
+file out of both `git status`es.

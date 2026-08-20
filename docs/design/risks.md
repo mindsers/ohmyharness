@@ -16,6 +16,21 @@ Several accounts widens this gap rather than narrowing it.
 worktree branch — which is why `omh s rm` never deletes one. Conflating the two
 is how people end up surprised by what an agent could reach.
 
+**2b. The sandbox's own git repository is agent-writable, and its push wall is a
+signpost.** The agent commits into a gitdir omh mounts read-write, so every file
+in it — including the `pre-push` hook — is the agent's to change. That hook is
+bypassable by `--no-verify` and by `core.hooksPath`, measured against git
+2.55.0. It is not containment and is not meant to be: with `curl` and risk 5
+below, a push was never the narrow way out. What stops work reaching your remote
+is that the repository has no remote and no commit of yours in it. omh does not
+trust anything that repository asserts — authorship is stamped and carried
+secrets are refused on the host, when work crosses back.
+
+**2c. `omh s rm` destroys the agent's own commits.** The worktree's content is
+already on disk and the branch survives, but checkpoints the agent made and you
+did not harvest with `omh s commit --keep` go with the session — and after a
+`git reset --hard` in the sandbox, those were the only copies.
+
 **3. sshd is an attack surface pointed at yourself.** Loopback-only, per-repo
 keys, no password auth. All three are asserted by tests, because the failure
 mode of getting the bind address wrong is publishing a shell inside your sandbox

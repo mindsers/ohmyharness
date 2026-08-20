@@ -65,26 +65,21 @@ $ omh s push fix/tap-guard
 
 Not a stylistic choice. A worktree's `.git` is a file holding an absolute path
 to an admin directory in your checkout, and omh mounts only the worktree — so
-inside the sandbox that pointer leads nowhere and every git command fails with
-`fatal: not a git repository`.
-
-The agent is told this, and told not to try to repair it. Not because repairing
-is dangerous — `git init` there refuses for the same reason and leaves the
-pointer untouched, checked against git 2.55.0 rather than assumed — but because
-it cannot work, and an agent that thinks git is merely broken will offer to
-commit work it has no way to commit.
+that pointer leads nowhere from inside a container, and pushing to your remote
+is not something the sandbox is in a position to do.
 
 The branch itself is in your checkout the whole time — worktrees share a ref
 store — so once the work is committed, `git log omh/s01` and `git push` work
 from your own repo without `~/.omh` entering into it.
 
-Two things are writable — the worktree, because that is the work, and
-credentials, because tokens refresh in place. **Nothing else is**, and a test
-asserts exactly that rather than asserting a list of mount strings.
+What is writable is a short list, and it grew: the worktree, because that is the
+work; credentials, because tokens refresh in place; the sandbox's own repository
+(below); each file `carry_in` hands over, so the agent can edit config it was
+given; and two caches outside `/work` — the code graph and the local note store.
 
-Worth being precise about what this buys: a sandbox protects your *host*. What
-protects your *repo* is the worktree branch. That is why `omh s rm` never
-deletes a branch.
+**Nothing else is**, and a test asserts the set by name rather than asserting a
+list of mount strings, so adding one is a decision somebody has to make on
+purpose.
 
 ### Worktrees live outside the repo
 
@@ -95,6 +90,57 @@ deletes a branch.
 Nested inside the repo, your IDE would index every session's full copy of the
 codebase — three sessions, four indexes, and a machine that sounds like it is
 about to take off.
+
+## The agent has git, and it is not yours
+
+Until 2026.08 it had none: the dangling pointer meant every command failed with
+`fatal: not a git repository`, so omh refused the call outright rather than let
+an agent spend turns repairing what could not be repaired. That cost the agent
+`status`, `diff`, `log`, `stash` and `reset --hard` — and cost an attached
+editor its source control panel, since the editor runs *inside* the container —
+for the editors that have one; `omh attach nvim` never did.
+
+So omh gives it a repository of its own. A gitdir under `~/.omh/shadow/`, seeded
+with a single commit of the tree the session started from — minus everything omh
+put there, so your carried `.env` and omh's own staged documents are not in it
+either — mounted at `/omh/shadow`, and named by a `.git` file mounted over
+`/work/.git`. That last
+mount is the whole trick: it shadows the pointer for the container's view only,
+so your own file is never written and everything on this page still works.
+
+**What makes it safe is what is not in it.** It starts at one commit on one
+branch, gains whatever the agent does, and never has a remote or a commit from
+your checkout — an agent reading its own history learns
+nothing about yours, and there is no `main` in there to move. Shared *blobs* are
+unavoidable, since a file whose content matches yours hashes the same; history
+is the thing that must not cross.
+
+It lives at `~/.omh/shadow/<session>.git`, on the branch `<session>-scratch`, so
+you can read it from the host if you want to:
+
+```console
+$ git --git-dir=~/.omh/shadow/s01.git log --oneline
+```
+
+**Its commits are not yours until you ask for them.** `omh s commit` squashes the
+files into one commit of your own and never looks at that repository;
+`omh s commit --keep` replants the agent's commits, messages and all, after you
+curate them. Whichever you use, `omh s rm` takes the repository with the session
+— so checkpoints you did not harvest go with it, and after a `git reset --hard`
+in the sandbox those are the only copies there were.
+
+Push is the one thing still walled, by git's own `pre-push` hook inside that
+repository. Be clear about what that is: a signpost, not a control. There is no
+remote, so a push fails anyway; the hook is what meets the agent after git's own
+error suggests `git remote add`, and it is bypassable by `--no-verify`. Checked
+against git 2.55.0 rather than assumed, both directions.
+
+Nothing here contains a determined agent, and nothing ever did — the container
+has `curl` and outbound network. See [Risks](design/risks.md).
+
+Worth being precise about what this buys: a sandbox protects your *host*. What
+protects your *repo* is the worktree branch. That is why `omh s rm` never
+deletes a branch.
 
 ## What a container is compared against
 

@@ -636,10 +636,14 @@ mod tests {
     /// and change under a toolchain upgrade, marking every image-pinned note in
     /// every repo stale on the same day.
     ///
-    /// `#[ignore]`d because it shells out to git, which does not work inside an
-    /// omh sandbox: the worktree's `.git` is a pointer at an admin directory
-    /// omh does not mount, so git fails where finding no repository at all
-    /// would have succeeded. Runs on the host and in CI.
+    /// `#[ignore]`d because it shells out to git, and until 2026.08 git could not
+    /// run inside an omh sandbox at all — the worktree's `.git` was a pointer at
+    /// an admin directory omh does not mount, so git failed where finding no
+    /// repository would have succeeded. That premise is gone: the sandbox has a
+    /// repository of its own now, so this may well pass there. Left ignored
+    /// because nobody has run omh's suite inside an omh sandbox to find out, and
+    /// an ignore that is merely unverified is cheaper than a red suite. Runs on
+    /// the host and in CI.
     #[test]
     #[ignore]
     fn an_image_recipe_digest_is_stable_across_toolchains() {

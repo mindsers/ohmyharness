@@ -248,7 +248,8 @@ omh s diff [id]       what the agent changed
 omh s commit [-m …]   commit that work onto the session branch
 omh s push [name]     push it to origin under a name a reviewer can read
 omh s down [id]       stop the container, keep the worktree and branch
-omh s rm <id>         remove the session — its container, its worktree, its staging
+omh s rm <id>         remove the session — its container, its worktree, its staging,
+                       and the repository the sandbox had
 ```
 
 `diff`, `commit` and `push` default to the most recent session; `-s` names
@@ -325,10 +326,50 @@ Error: omh/s01 is a session id, not a branch name
 command when it is not. It is never a dependency: a repo on a non-GitHub remote
 is a normal repo.
 
-**The agent cannot do any of this itself.** git does not work inside the session
-— the worktree's `.git` points at an admin directory on the host, which omh does
-not mount — so the sandbox is told as much, and told not to try to repair it.
-See `omh why git-unavailable`.
+### Keeping the agent's own commits
+
+The agent commits as it works, into a repository of its own that is not this
+branch — see [Sessions](sessions.md#the-agent-has-git-and-it-is-not-yours).
+`--keep` brings those commits here instead of squashing the files into one:
+
+```console
+$ omh s commit --keep
+```
+
+It opens the list first, as `git rebase -i` does, so you reorder, reword and
+drop before anything lands. What you keep arrives with the messages the agent
+wrote — which is the point, because it wrote them while it still had the context
+you would be reconstructing from a diff.
+
+`--skip-carried` has no meaning here and is ignored: `--keep` refuses a carried
+file rather than dropping it, for the reason below.
+
+Mutually exclusive with `-m`. Running both would put the squashed content on the
+branch first, and git's patch-id then drops the replanted commits as already
+applied — the granular history gone, with nothing said.
+
+Every commit is authored `omh sandbox <sandbox@omh.invalid>`, whatever the agent
+set in its own config. The sandbox does not get to say who wrote something on
+your branch.
+
+`--keep` refuses rather than repairing. The cases, and they are the whole set:
+
+- **A carried file reached a commit** — by `git add -f`, copied under another
+  name, pasted into source, or written into a message. omh knows the bytes it
+  carried in, so it can tell; it will not rewrite your history to hide a secret.
+  Drop the commit in the sandbox and harvest again.
+- **The sandbox's repository is mid-rebase or mid-merge, detached, or has commits
+  no branch there can reach.** The detached case was measured leaving work
+  behind while reporting success; the other two are the same shape, argued
+  rather than measured.
+- **The session's worktree is not on its branch**, so omh will not move a branch
+  the session left.
+- **The branch moved while you were curating.** Nothing is written.
+- **The session has no sandbox repository yet** — nothing has run in it.
+
+The branch is untouched in every case. For the first two the work never left the
+sandbox; for the rest omh had already fetched it into your repository, so a
+failure part-way through loses nothing either way.
 
 **`rm` never deletes a branch that has commits.** Unreviewed agent work must be
 unloseable, so the branch outlives the session that produced it, and `rm` tells

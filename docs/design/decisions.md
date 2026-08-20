@@ -8,6 +8,8 @@ these, the reason is what you need to argue with.
 | Category | **distribution** | the parts exist; assembly and subtraction are the value |
 | Runtime | **pluggable backend** | `sbx` where available, Docker as fallback; no vendor lock |
 | Repo exposure | **git worktree, auto-branch** | the agent cannot reach your checkout or `main`; review is `git diff` |
+| Git in the sandbox | **a repository of its own** | your checkout is never mounted, so the agent gets a gitdir holding one commit and none of your history |
+| Getting work back | **`omh s commit`, squash or `--keep`** | you choose at commit time whether the agent's own commits and messages land |
 | Code graph | **wire an existing MCP server** | distributions package, they don't reinvent |
 | Language | **Rust** | single binary; `omh` wraps every invocation, so startup is felt |
 | LLM routing | **not ours** | one env var in `settings.toml` |
