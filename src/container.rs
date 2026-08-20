@@ -334,11 +334,33 @@ pub fn plan(
     // Read-write, because a carried file is config the agent may legitimately
     // edit, and from a staged copy so those edits cannot reach the checkout.
     //
-    // Placed before the shadow block so the seed excludes these paths: they are
-    // in `carry_in`, and that list is what the shadow's `info/exclude` is built
-    // from.
-    let carried = if staging == Staging::Apply {
-        crate::carry::stage_for_mount(
+    // Before the shadow block for consistency with the "derive the exclude list
+    // from the mounts" rule that block states, and for nothing else. The
+    // ordering is not load-bearing and this used to claim it was: the shadow
+    // seeds `excluded` from the `carry_in` policy *first* and only then extends
+    // it from the mounts, so a carried path is excluded either way — it just
+    // ends up in the list twice. What the mount-derived entry does add is the
+    // normalised form, so a pattern written `./.env` or `certs/` reaches git as
+    // something it can match.
+    // `branch.is_some()` as well as `Apply`, and the first is the one that
+    // matters. `omh doctor` and `omh auth` borrow a writable `/work` for one
+    // command through `Session::scratch`, and neither calls `carry_in` — that
+    // runs in `run` and `attach` only. Keyed on `Apply` alone this staged a
+    // plaintext copy of the user's `.env` and mounted it read-write into the
+    // doctor probe and into the OAuth container, with nothing printed, because
+    // `carry_in`'s whole reporting surface lives in a launcher neither reaches.
+    // `omh doctor --dry-run` wrote the copy to disk on its way past.
+    //
+    // The same test the shadow block makes below, for a version of the same
+    // reason: a session with no branch is not doing work, so it needs neither a
+    // repository of its own nor anything of the user's to do it with.
+    // Decided for every plan, written only for a real one. A dry run has to
+    // name the mounts a launch would make — `skipped_staging_still_reports_the_
+    // real_mounts` says so and went red when this staged and named in one step,
+    // leaving `--dry-run` printing a plan missing the mount that holds the
+    // user's secret. Deciding is reads of the checkout and is safe either way.
+    let carried = if session.branch.is_some() {
+        crate::carry::to_mount(
             &paths.repo,
             &stage.join("carried"),
             &crate::config::policy_list(paths, "carry_in"),
@@ -346,12 +368,23 @@ pub fn plan(
     } else {
         Vec::new()
     };
+    if staging == Staging::Apply {
+        crate::carry::materialise(&paths.repo, &carried)?;
+    }
     for item in &carried {
         // A bind mount needs its destination to exist, and docker creates a
         // *directory* when it does not — the same reason the rules placeholders
-        // are placed. `apply` will usually have left the real file here already;
-        // this covers the case where it could not.
-        place_destination(&session.worktree.join(&item.rel))?;
+        // are placed.
+        //
+        // A backstop with no reachable case today: `run` and `attach` both call
+        // `carry_in` before this, so `apply` has always left the real file here,
+        // and the `branch.is_some()` test above is what keeps the paths that do
+        // not out. Kept for the reason `Session::commit` keeps its twin — the
+        // guarantee is about what is on disk when docker looks, and that is not
+        // this function's to assume.
+        if staging == Staging::Apply {
+            place_destination(&session.worktree.join(&item.rel))?;
+        }
         mounts.push(Mount {
             host: item.host.clone(),
             guest: PathBuf::from(crate::container_workdir()).join(&item.rel),
@@ -1041,6 +1074,19 @@ mod tests {
             r#"{"mcpServers":{"m":{"command":"m"}}}"#,
         );
 
+        // A carried file, because every invariant in this file is expressed
+        // over the mount set and none of them could see a carried mount while
+        // the fixture had no `carry_in`. Three guards that already existed —
+        // the mount-destination one, the dry-run write one and the dry-run
+        // parity one — went straight past the carried mount for that reason.
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        std::fs::write(paths.repo.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(
+            paths.repo.join(".omh/settings.toml"),
+            "carry_in = [\".env\"]\n",
+        )
+        .unwrap();
+
         let session = Session::new(&paths.root.join("worktrees"), "s01".into());
         std::fs::create_dir_all(&session.worktree).unwrap();
         // Every real session worktree has one: `git worktree add` writes a
@@ -1307,13 +1353,84 @@ mod tests {
             .collect();
         assert_eq!(
             guests.len(),
-            4,
-            "worktree, graph cache, note store and the sandbox's own gitdir: {guests:?}"
+            5,
+            "worktree, graph cache, note store, the sandbox's own gitdir, and \
+             the one carried file the fixture declares: {guests:?}"
+        );
+        assert!(
+            guests.contains(&"/work/.env".to_string()),
+            "a carried file is writable on purpose — it is config the agent may \
+             edit, and the write lands on omh's copy rather than the checkout"
         );
         assert!(guests.contains(&"/work".to_string()));
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
         assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
+    }
+
+    /// `omh doctor` and `omh auth` must not be handed the user's secrets.
+    ///
+    /// Both borrow a writable `/work` for one command through
+    /// `Session::scratch`, and neither calls `carry_in` — that runs only in
+    /// `run` and `attach`. So staging keyed on `Staging::Apply` alone put a
+    /// plaintext copy of the user's `.env` into the doctor probe container and
+    /// into the OAuth container `auth` gives network access to, with nothing
+    /// printed: `carry_in`'s entire reporting surface is in the launcher it
+    /// never reached. `omh doctor --dry-run` wrote the copy to disk too.
+    ///
+    /// `branch.is_some()` is the same test the shadow block uses twelve lines
+    /// down, for a version of the same reason: a session with no branch is not
+    /// doing work, so it needs neither a repository nor a credential.
+    #[test]
+    fn a_session_with_no_branch_is_handed_no_carried_secret() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.paths.repo.join(".omh")).unwrap();
+        std::fs::write(fx.paths.repo.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            "carry_in = [\".env\"]\n",
+        )
+        .unwrap();
+
+        let scratch = Session::scratch(fx.paths.scratch("doctor"), "doctor".into());
+        std::fs::create_dir_all(&scratch.worktree).unwrap();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let (own, repo) = decided_from(&fx);
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &scratch,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+                image: crate::image::tag_for(&adapter),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(
+            !p.mounts
+                .iter()
+                .any(|m| m.guest.to_string_lossy() == "/work/.env"),
+            "a borrowed /work must not be given the user's secrets: {:?}",
+            p.mounts.iter().map(|m| &m.guest).collect::<Vec<_>>()
+        );
+        assert!(
+            !fx.paths
+                .staging("doctor", "claude")
+                .join("carried")
+                .exists(),
+            "and nothing may write a plaintext copy of them to disk"
+        );
     }
 
     /// A carried file arrives as a mount, not as a copy in the worktree.
