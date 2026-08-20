@@ -1380,10 +1380,17 @@ mod tests {
     /// What is also true, and settles it: the harvest fetches this repository
     /// into the *user's own*, and a fetch takes every reachable object. A
     /// carried secret in the seed is therefore copied into the real repository
-    /// on every `omh s commit --keep` — measured, readable there with
-    /// `git cat-file -p`. Unreachable once the scratch ref goes, but it was
-    /// there, and "it gets garbage collected eventually" is not a thing to say
-    /// about somebody's credentials.
+    /// by every harvest that gets past `preflight` — measured, readable there
+    /// with `git cat-file -p`.
+    ///
+    /// On the success path it is unreachable afterwards, because the scratch
+    /// ref is deleted, and "gc will get it eventually" is not a thing to say
+    /// about somebody's credentials. On a *failure* path it is worse than that:
+    /// the ref is kept deliberately — that is what makes a failed replant
+    /// recoverable — so the secret would sit reachable from a live ref in the
+    /// user's repository until someone noticed it. Every refusal after the
+    /// fetch lands there: a carried file in a commit, a branch that moved, a
+    /// replant that conflicted.
     ///
     /// So the mount stays and `sed -i` stays broken, and this guards the trade
     /// against being quietly reversed by someone fixing the visible half.
@@ -1417,7 +1424,10 @@ mod tests {
         let objects = git_in(&checkout, &["rev-list", "--objects", "refs/omh/probe"]).unwrap();
         for line in objects.lines() {
             let oid = line.split_whitespace().next().unwrap_or_default();
-            let body = git_in(&checkout, &["cat-file", "-p", oid]).unwrap_or_default();
+            // `unwrap`, not `unwrap_or_default`: an unreadable object would
+            // otherwise pass this assertion as an empty string, which is the
+            // vacuous pass this test exists to not be.
+            let body = git_in(&checkout, &["cat-file", "-p", oid]).unwrap();
             assert!(
                 !body.contains("ghp_abc123def456"),
                 "a fetch put the carried secret in the user's repository: {line}"

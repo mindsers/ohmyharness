@@ -56,6 +56,15 @@ pub const GUEST_HOME: &str = "/home/agent";
 ///
 /// `git hash-object` is a stable SHA-1 of the text, for ever, and shells out
 /// exactly as `carry.rs` and `session.rs` already do.
+///
+/// It needs the git *binary* and not a repository — measured, `hash-object
+/// --stdin` outside any repository returns the same hash it returns inside one.
+/// The single state that breaks it is a **dangling** `.git`, where git finds a
+/// repository it cannot open, and since this call passes neither `--git-dir`
+/// nor `current_dir` it inherits whatever cwd omh was run from. That is not
+/// hypothetical: `report.rs` records a moved checkout leaving exactly such a
+/// pointer. It is also why four tests here were `#[ignore]`d until 2026.08 —
+/// the sandbox used to be that state, and no longer is.
 pub fn recipe_digest(recipe: &str) -> Result<String> {
     use anyhow::Context;
     use std::io::Write;

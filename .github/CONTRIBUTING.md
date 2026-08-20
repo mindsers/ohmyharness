@@ -7,9 +7,14 @@ $ ./scripts/test-install.sh     # install.sh, and every refusal it should make
 $ omh doctor                    # the only thing that verifies an adapter
 ```
 
-A few tests are `#[ignore]`d because they need a container runtime — the wiring
-between a guard and the command that reaches it, which nothing in process can
-observe. `cargo test -- --include-ignored` runs them, and so does CI.
+A few tests are `#[ignore]`d because they need `node` on `PATH`: they run the
+JavaScript omh generates through `node --check`, which is the only thing that
+proves a rendered module will load. `cargo test -- --include-ignored` runs them,
+and so does CI.
+
+Four more used to be ignored because they shell out to git, which could not run
+inside an omh sandbox. That stopped being true in 2026.08 — see
+[adoption](../docs/design/adoption.md) — and they run with everything else now.
 
 ## Read this first
 

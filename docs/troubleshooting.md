@@ -316,8 +316,10 @@ This is a trade, and the obvious way out was measured and rejected. Tracking the
 carried file in the sandbox's repository instead of mounting it would survive
 `git clean` *and* leave `sed -i` working — but the harvest fetches that
 repository into yours, and a fetch takes every reachable object, so the secret
-would be copied into your real repository on every `omh s commit --keep`.
-A test pins it so nobody fixes the visible half.
+would be copied into your real repository by every harvest that gets that far.
+On a harvest that then *fails*, omh keeps the fetched ref on purpose so nothing
+is lost — which would leave the secret reachable from a live ref until someone
+noticed. A test pins it so nobody fixes the visible half.
 
 A carried **directory** is a plain copy and has none of this — it is removable
 by `git clean -fdx`. omh warns when it carries one, though only when it actually
