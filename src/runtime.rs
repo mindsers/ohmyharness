@@ -75,7 +75,8 @@ impl Runtime for Docker {
     }
 
     fn args(&self, plan: &Plan) -> Vec<String> {
-        let mut a: Vec<String> = vec!["run".into(), "--rm".into()];
+        // Never fetch: see `a_launch_never_fetches_an_image_it_could_not_find`.
+        let mut a: Vec<String> = vec!["run".into(), "--rm".into(), "--pull=never".into()];
         if plan.tty {
             a.push("-it".into());
         }
@@ -105,6 +106,9 @@ impl Runtime for Docker {
         let mut a: Vec<String> = vec![
             "run".into(),
             "-d".into(),
+            // Never fetch: see
+            // `a_launch_never_fetches_an_image_it_could_not_find`.
+            "--pull=never".into(),
             // A real init as PID 1. The entrypoint ends in `exec sleep
             // infinity`, which reaps nothing, so every `dtach` that exited left
             // a zombie behind for the life of the session. Harmless one at a
@@ -670,6 +674,37 @@ mod tests {
         assert!(!Docker
             .exec_args("n", &["x".into()], false)
             .contains(&"-it".to_string()));
+    }
+    /// `docker run <tag>` defaults to `--pull=missing`, so a tag with no local
+    /// image is fetched from Docker Hub. omh's tags carry no registry prefix,
+    /// and `omh/claude` is a name every user of a given omh version shares and
+    /// anyone can precompute from this repository — so a squatted `omh/*` would
+    /// be pulled and run, with the user's credential directory mounted and its
+    /// `ENTRYPOINT` ahead of anything omh asked for.
+    ///
+    /// `probe_args` has carried this flag since it shipped, and its comment
+    /// claimed the probe was "the one path that runs an image `ensure*` has not
+    /// just built". Reaping falsified that: an image can now be removed between
+    /// `exists` returning true and `docker run` firing — two checkouts launching
+    /// seconds apart is enough, because `--rm` with no `--name` means nothing
+    /// references the image until the container actually starts.
+    ///
+    /// A missing tag must be `No such image`, never a fetch.
+    #[test]
+    fn a_launch_never_fetches_an_image_it_could_not_find() {
+        let mut plan = sample_plan();
+        plan.image = "omh/claude:hash".into();
+
+        for args in [
+            Docker.args(&plan),
+            Docker.up_args(&plan, "omh-x-s01", 2222, "ssh-ed25519 AAAA"),
+        ] {
+            let tag_at = args.iter().position(|a| a == "omh/claude:hash").unwrap();
+            assert!(
+                args[1..tag_at].iter().any(|a| a == "--pull=never"),
+                "a tag reaped out from under this launch must fail, not pull: {args:?}"
+            );
+        }
     }
 }
 

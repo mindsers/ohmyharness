@@ -223,12 +223,22 @@ pub fn stack_tag(adapter: &Adapter, installs: &[&str]) -> String {
 /// the dev sandbox. Its construction — `stack_tag` and `stack_dockerfile` — is
 /// tested thoroughly; that the build *works* is `omh doctor`'s to prove, which
 /// is the coverage line `CLAUDE.md` draws and not one a green suite can cross.
-pub fn ensure_stack(program: &str, adapter: &Adapter, installs: &[&str]) -> Result<String> {
+pub fn ensure_stack(
+    program: &str,
+    adapter: &Adapter,
+    installs: &[&str],
+    repo: &Path,
+) -> Result<String> {
     ensure(program, adapter)?;
     let tag = stack_tag(adapter, installs);
     if tag != tag_for(adapter) && !exists(program, &tag) {
         eprintln!("omh: building {tag} — this repo's toolchain, first run only");
-        build(program, &tag, &stack_dockerfile(adapter, installs))?;
+        build(
+            program,
+            &tag,
+            &stack_dockerfile(adapter, installs),
+            &Kind::Stack(adapter, repo),
+        )?;
     }
     Ok(tag)
 }
@@ -261,15 +271,106 @@ fn mount_parents(adapter: &Adapter) -> Vec<String> {
 
 /// `docker build` arguments. The Dockerfile arrives on stdin, so nothing is
 /// written to disk and the build context stays empty.
-pub fn build_args(tag: &str, context: &Path) -> Vec<String> {
-    vec![
-        "build".into(),
-        "-t".into(),
-        tag.into(),
+///
+/// The class is stamped on as labels because the tag cannot carry it: a tag is
+/// a hash of a recipe and says nothing about what kind of thing it names, and
+/// `reap` has to know. See `Kind`.
+pub fn build_args(tag: &str, context: &Path, kind: &Kind) -> Vec<String> {
+    let mut a: Vec<String> = vec!["build".into(), "-t".into(), tag.into()];
+    for (k, v) in kind.stamp() {
+        a.push("--label".into());
+        a.push(format!("{k}={v}"));
+    }
+    a.extend([
         "-f".into(),
         "-".into(),
         context.to_string_lossy().into_owned(),
-    ]
+    ]);
+    a
+}
+
+/// What an image omh built *is*, as opposed to what it is called.
+///
+/// This exists because the first reaper did not have it and guessed instead,
+/// from the one thing a tag does carry — its repository. The guess is wrong,
+/// and not subtly: `tag_for` and `stack_tag` both format
+/// `omh/{adapter}:{hash}`, so `omh/claude` holds the harness layer *and* one
+/// stack layer per checkout, all of them current. Reading the repository as the
+/// class made a stack build delete the harness image it had just been built
+/// from; the next launch rebuilt the harness, and that build deleted the stack.
+/// Two multi-minute builds on every launch, for ever, from a change whose whole
+/// purpose was to stop rebuilds.
+///
+/// The repository is not the equivalence class and no amount of parsing makes
+/// it one. Docker keeps labels beside the image, so the class travels with the
+/// thing it describes and cannot drift from it — the same reason
+/// `Plan::labels` stamps a container with what it was made of.
+///
+/// An image built before omh stamped anything carries no `omh.*` labels, is in
+/// no class, and is never reaped. That is deliberate: the alternative is an
+/// empty class matching every unlabelled image on the machine.
+pub enum Kind<'a> {
+    /// One recipe per omh version, shared by every adapter and every checkout.
+    Base,
+    /// One recipe per adapter per omh version.
+    Harness(&'a Adapter),
+    /// One per *checkout*, because the recipe is that repo's toolchain. This is
+    /// the case a repository cannot express.
+    ///
+    /// `repo` is the checkout's full path and not `Paths::repo_name`, which is
+    /// a directory basename: two checkouts both called `api` would otherwise
+    /// share a class and reap each other, which is the same bug one level
+    /// quieter. A host path in image metadata is already the house style —
+    /// `Plan::labels` puts whole mount paths in `omh.mounts`.
+    Stack(&'a Adapter, &'a Path),
+}
+
+impl Kind<'_> {
+    /// The labels that identify this class. Two images with equal stamps are
+    /// the same kind of thing built from different recipes, which is exactly
+    /// when the older one is dead.
+    pub fn stamp(&self) -> Vec<(String, String)> {
+        let mut s = vec![("omh.kind".to_string(), self.name().to_string())];
+        match self {
+            Kind::Base => {}
+            Kind::Harness(a) => s.push(("omh.adapter".into(), a.name.clone())),
+            Kind::Stack(a, repo) => {
+                s.push(("omh.adapter".into(), a.name.clone()));
+                s.push(("omh.repo".into(), repo.to_string_lossy().into_owned()));
+            }
+        }
+        s
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Kind::Base => "base",
+            Kind::Harness(_) => "harness",
+            Kind::Stack(..) => "stack",
+        }
+    }
+
+    /// `docker images` arguments listing exactly this class.
+    ///
+    /// Docker applies `--filter label=k=v` as exact equality and ANDs repeated
+    /// ones, so the match is docker's to make and omh never parses a label
+    /// value back — which matters because two of the three values are free
+    /// text: an adapter's `name` comes from a TOML file a user can drop in, and
+    /// a checkout path can contain very nearly anything. Verified 2026-08-20
+    /// against docker 29.7.2 that `--filter label=omh.repo=/checkouts/a,b`
+    /// matches that image and only that image, comma and all.
+    ///
+    /// Deliberately not scoped to a repository as well. One notion of "same
+    /// kind" is enough, and the second one is what broke this.
+    pub fn list_args(&self) -> Vec<String> {
+        let mut a: Vec<String> = vec!["images".into()];
+        for (k, v) in self.stamp() {
+            a.push("--filter".into());
+            a.push(format!("label={k}={v}"));
+        }
+        a.extend(["--format".into(), "{{.Repository}}:{{.Tag}}".into()]);
+        a
+    }
 }
 
 /// Arguments that run a short diagnostic script inside the image, and nothing
@@ -310,17 +411,22 @@ pub fn ensure(program: &str, adapter: &Adapter) -> Result<()> {
     let base = base_tag();
     if !exists(program, &base) {
         eprintln!("omh: building {base} (first run only)");
-        build(program, &base, &base_dockerfile())?;
+        build(program, &base, &base_dockerfile(), &Kind::Base)?;
     }
     let t = tag_for(adapter);
     if !exists(program, &t) {
         eprintln!("omh: building {t}");
-        build(program, &t, &harness_dockerfile(adapter))?;
+        build(
+            program,
+            &t,
+            &harness_dockerfile(adapter),
+            &Kind::Harness(adapter),
+        )?;
     }
     Ok(())
 }
 
-fn build(program: &str, tag: &str, dockerfile: &str) -> Result<()> {
+fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind) -> Result<()> {
     use anyhow::Context;
     use std::io::Write;
     use std::process::Stdio;
@@ -330,7 +436,7 @@ fn build(program: &str, tag: &str, dockerfile: &str) -> Result<()> {
     std::fs::create_dir_all(&context)?;
 
     let mut child = std::process::Command::new(program)
-        .args(build_args(tag, &context))
+        .args(build_args(tag, &context, kind))
         .stdin(Stdio::piped())
         .spawn()
         .with_context(|| format!("running {program} build"))?;
@@ -344,53 +450,107 @@ fn build(program: &str, tag: &str, dockerfile: &str) -> Result<()> {
     if !status.success() {
         anyhow::bail!("failed to build {tag}");
     }
-    reap(program, tag);
+    reap(program, tag, kind);
     Ok(())
 }
 
 /// Remove the tags this build just replaced.
 ///
-/// Here rather than at a `omh image prune` the user has to remember, because
-/// the moment a new tag exists is the moment the old one is dead — and the
-/// failure this prevents is silent until the disk is full, at which point
-/// docker wedges and every sandbox in every repo stops working. It cost this
-/// machine 14 images and about 20 GB before anyone noticed.
+/// Here rather than at an `omh image prune` the user has to remember, because
+/// the moment a new tag exists is the moment the old one *of the same kind* is
+/// dead, and the cost of not doing it is silent until the disk is full.
 ///
-/// Best-effort, and quiet about the difference between "nothing to do" and
-/// "docker would not". A build that succeeded must not fail because tidying up
-/// after it did — the image the user asked for is there either way. What it
-/// does *not* do is claim: only tags docker confirms gone are reported.
-fn reap(program: &str, built: &str) {
-    let Ok(tags) = list_tags(program, built) else {
-        return;
+/// Best-effort: a build that succeeded must not fail because tidying up after
+/// it did, so nothing here returns an error. It is not silent, though. A
+/// removal docker declines because a container holds the image is expected and
+/// says nothing; anything else is reported, because a reaper that has been
+/// failing on every build for months is indistinguishable from one that is
+/// working unless it says so — and that indistinguishability is the whole
+/// failure this feature exists to end.
+fn reap(program: &str, built: &str, kind: &Kind) {
+    let tags = match list_tags(program, kind) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("omh: could not list images to reap: {e}");
+            return;
+        }
     };
     let in_use = images_in_use(program);
-    let gone: Vec<String> = superseded(built, &tags, &in_use)
-        .into_iter()
-        .filter(|t| {
-            std::process::Command::new(program)
-                .args(["image", "rm", t])
-                .output()
-                .map(|o| o.status.success())
-                .unwrap_or(false)
-        })
-        .collect();
+    let mut gone = Vec::new();
+    for tag in superseded(built, &tags, &in_use) {
+        match remove_image(program, &tag) {
+            Removal::Deleted => gone.push(tag),
+            // Docker holding a line omh already tried to hold means the two
+            // disagreed about what is in use, which the ID-shaped `{{.Image}}`
+            // makes possible. The image stays, which is the right outcome, so
+            // there is nothing to tell anyone.
+            Removal::InUse => {}
+            // An untag is not a removal. `docker image rm` exits 0 for one, so
+            // counting exit codes would report a reclaim that did not happen:
+            // the image is still there under its other name.
+            Removal::Untagged => {}
+            Removal::Failed(why) => eprintln!("omh: could not remove {tag}: {why}"),
+        }
+    }
     if !gone.is_empty() {
-        eprintln!(
-            "omh: removed {} image{} this build replaced",
-            gone.len(),
-            if gone.len() == 1 { "" } else { "s" }
-        );
+        eprintln!("omh: removed {} this build replaced", gone.join(", "));
     }
 }
 
-/// Every tag of the repository `built` belongs to.
-fn list_tags(program: &str, built: &str) -> Result<Vec<String>> {
-    let repo = built.rsplit_once(':').map(|(r, _)| r).unwrap_or(built);
+/// What `docker image rm` actually did, which its exit code does not say.
+enum Removal {
+    /// The image is gone and its unique layers are reclaimable.
+    Deleted,
+    /// The name is gone; the image survives under another tag. Exit code 0,
+    /// zero bytes freed.
+    Untagged,
+    /// A container references it. Expected, and not a problem.
+    InUse,
+    Failed(String),
+}
+
+fn remove_image(program: &str, tag: &str) -> Removal {
+    let out = match std::process::Command::new(program)
+        .args(["image", "rm", tag])
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => return Removal::Failed(e.to_string()),
+    };
+    if out.status.success() {
+        return classify_removal(&String::from_utf8_lossy(&out.stdout));
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.contains("is using its referenced image") {
+        Removal::InUse
+    } else {
+        Removal::Failed(err.trim().to_string())
+    }
+}
+
+/// Read a successful `docker image rm` for what it did.
+///
+/// Split from the call so the distinction can be tested. Whether docker prints
+/// `Deleted:` is docker's behaviour and no unit test settles it; that omh reads
+/// an `Untagged:`-only run as *not* a removal is omh's own logic, and it is the
+/// difference between an honest report and a count of exit codes.
+fn classify_removal(stdout: &str) -> Removal {
+    if stdout
+        .lines()
+        .any(|l| l.trim_start().starts_with("Deleted:"))
+    {
+        Removal::Deleted
+    } else {
+        Removal::Untagged
+    }
+}
+
+/// Every tag of the same class as the one just built.
+fn list_tags(program: &str, kind: &Kind) -> Result<Vec<String>> {
     let out = std::process::Command::new(program)
-        .args(["images", "--format", "{{.Repository}}:{{.Tag}}", repo])
+        .args(kind.list_args())
         .output()?;
-    anyhow::ensure!(out.status.success(), "listing images for {repo}");
+    anyhow::ensure!(out.status.success(), "listing images to reap");
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
         .map(str::trim)
@@ -401,21 +561,45 @@ fn list_tags(program: &str, built: &str) -> Result<Vec<String>> {
 
 /// Images any container references, running or stopped.
 ///
-/// Stopped counts: `omh s down` leaves the container so the session can be
-/// resumed, and resuming it needs the image it was created from.
+/// Stopped counts, though not for the reason it first looks like. omh removes
+/// its own container on `omh s down` — `down` calls `container_remove`, which
+/// is `docker rm -f` — so a stopped container omh can still see is one that
+/// died *outside* omh's control: a host reboot, an OOM kill, a daemon crash.
+/// Docker refuses to drop an image such a container references, and plain
+/// `docker ps` would not show it.
+///
+/// Read two ways because `{{.Image}}` is not reliably a tag: docker prints
+/// whatever the container config holds, which degrades to a bare image ID once
+/// that reference stops resolving — including when an earlier reap untagged it.
+/// The `omh.image` label is the tag omh itself launched, stamped by
+/// `Plan::labels`, and it does not degrade.
 fn images_in_use(program: &str) -> Vec<String> {
-    std::process::Command::new(program)
-        .args(["ps", "-a", "--format", "{{.Image}}"])
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    let read = |args: &[&str]| -> Vec<String> {
+        std::process::Command::new(program)
+            .args(args)
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut v = read(&["ps", "-a", "--format", "{{.Image}}"]);
+    v.extend(read(&[
+        "ps",
+        "-a",
+        "--filter",
+        "label=omh.image",
+        "--format",
+        "{{.Label \"omh.image\"}}",
+    ]));
+    v.sort();
+    v.dedup();
+    v
 }
 
 /// The plan names a per-project network; something has to create it. Without
@@ -522,30 +706,30 @@ pub fn container_remove(program: &str, name: &str) -> Result<()> {
 
 /// The tags a freshly built one replaces.
 ///
-/// A tag omh chooses is a hash of the recipe that produced it, so the moment a
-/// recipe changes the previous tag is dead — nothing will ever ask for it
-/// again, and until now nothing removed it either. Two weeks of ordinary work
-/// left 14 omh images and about 20 GB, which is what filled the disk and wedged
-/// Docker.
+/// A tag omh chooses is a hash of the recipe that produced it, so once a recipe
+/// changes the previous tag of that same kind is dead: nothing will ever ask
+/// for it again, and until now nothing removed it either.
 ///
 /// Decided here, as a function over lists, rather than inside the code that
 /// shells out: which images should go is omh's own logic and is worth testing;
 /// whether docker agrees to remove one is not something a unit test can settle.
 ///
-/// Two things are never superseded. **`latest`** is a name a person may have
-/// typed, where the hashes are names omh generated — reaping it would take away
-/// something nobody can reconstruct from a recipe. And **anything a container
-/// references**, however old, because that is a session someone is still using;
-/// docker would refuse, but omh should not be asking, nor reporting a removal
-/// that did not happen.
+/// `tags` is one class — `Kind`, and not the docker repository, because a
+/// repository holds several live tags at once and reading it as the class is
+/// what made the first version of this eat the image it was built from.
+///
+/// Two things in a class are still never superseded. **`latest`**, because no
+/// current recipe reproduces it: omh v0 tagged `omh/base:latest` and
+/// `omh/{harness}:latest` (`129b530`), and `fac15ea` replaced both with recipe
+/// hashes. A hash tag removed by mistake comes back by re-running the recipe;
+/// `:latest` is reachable from no recipe omh still has, which makes it the one
+/// removal that cannot be undone. And **anything a container references**,
+/// however old, because that is a session someone is still using; docker would
+/// refuse, but omh should not be asking, nor reporting a removal that did not
+/// happen.
 pub fn superseded(built: &str, tags: &[String], in_use: &[String]) -> Vec<String> {
-    let repo = |t: &str| t.rsplit_once(':').map(|(r, _)| r.to_string());
-    let Some(mine) = repo(built) else {
-        return Vec::new();
-    };
     tags.iter()
         .filter(|t| t.as_str() != built)
-        .filter(|t| repo(t).as_deref() == Some(mine.as_str()))
         .filter(|t| !t.ends_with(":latest"))
         .filter(|t| !in_use.iter().any(|u| u == *t))
         .cloned()
@@ -565,22 +749,41 @@ mod tests {
     use super::*;
 
     /// omh tags an image by hashing its recipe, so a recipe change builds a new
-    /// tag and the old one is superseded the moment it does. Nothing removed
-    /// it. Measured on a two-week-old machine: six `omh/claude` tags, three
-    /// `omh/opencode`, two `omh/omp`, three `omh/base` — 14 tags and about
-    /// 20 GB, which is what wedged Docker and stopped every sandbox test
-    /// running.
+    /// tag and the old one of that kind is superseded the moment it does.
+    /// Nothing removed it.
+    ///
+    /// Measured 2026-08-18 with `docker system df` on a two-week-old machine:
+    /// 14.86 GB of images, 9.95 GB of it reclaimable, across 14 omh tags — six
+    /// `omh/claude`, three `omh/opencode`, three `omh/base`, two `omh/omp`.
+    ///
+    /// Summing the `SIZE` column of `docker images` instead gives about 20 GB,
+    /// and that is the number *not* to quote: it charges every tag the full
+    /// cost of the `node:22-bookworm-slim` and apt layers they share. What one
+    /// superseded harness tag actually returns is its own install layer, which
+    /// `docker system df -v` puts in the hundreds of kilobytes. The cost being
+    /// paid down here is unbounded tag growth, not the gigabytes the `SIZE`
+    /// column advertises — a whole dead chain frees real space, one dead tag
+    /// beside its replacement mostly does not.
+    ///
+    /// Two things were observed on that machine and one is inferred: the disk
+    /// filled, and Docker stopped responding until it was restarted by hand.
+    /// That the first caused the second is a reasonable read and was never
+    /// measured, so it is not a claim this makes.
+    ///
+    /// Also not addressed here, and larger on that machine than the images:
+    /// buildkit's cache, 8.8 GB with 2.16 GB reclaimable. `docker image rm`
+    /// cannot reach it — only `docker builder prune` can, and taking somebody's
+    /// build cache is not a thing to do without being asked.
     ///
     /// omh reaps sessions, worktrees, staging and the sandbox's repository. An
     /// image is the one thing it creates and never takes back.
     #[test]
-    fn a_new_build_supersedes_the_older_tags_of_its_own_repository() {
+    fn a_new_build_supersedes_the_older_tags_of_its_class() {
         let tags = vec![
             "omh/claude:new".to_string(),
             "omh/claude:old".to_string(),
             "omh/claude:older".to_string(),
             "omh/claude:latest".to_string(),
-            "omh/opencode:other".to_string(),
         ];
 
         let gone = superseded("omh/claude:new", &tags, &[]);
@@ -595,29 +798,121 @@ mod tests {
             "never the one just built: {gone:?}"
         );
         assert!(
-            !gone.contains(&"omh/opencode:other".to_string()),
-            "another adapter's image is not this build's to remove: {gone:?}"
-        );
-        assert!(
             !gone.contains(&"omh/claude:latest".to_string()),
-            "`latest` is a name a person may have typed, not a hash omh chose: \
-             {gone:?}"
+            "no recipe omh still has reproduces `latest`, so removing it is \
+             the one removal that cannot be undone: {gone:?}"
         );
     }
 
-    /// A tag another session's container is running is not superseded, whatever
-    /// its age. Docker would refuse the removal anyway — this is so omh does
-    /// not ask, and does not report removing something it did not.
+    /// A tag a container references is not superseded, whatever its age.
+    /// Docker would refuse the removal anyway — this is so omh does not ask,
+    /// and does not report removing something it did not.
+    ///
+    /// The stale tag is here so the test cannot pass by returning nothing.
     #[test]
     fn a_tag_a_container_is_using_survives_a_newer_build() {
         let tags = vec![
             "omh/claude:new".to_string(),
-            "omh/claude:running".to_string(),
+            "omh/claude:held".to_string(),
+            "omh/claude:stale".to_string(),
         ];
 
-        let gone = superseded("omh/claude:new", &tags, &["omh/claude:running".to_string()]);
+        let gone = superseded("omh/claude:new", &tags, &["omh/claude:held".to_string()]);
 
-        assert!(gone.is_empty(), "a live session keeps its image: {gone:?}");
+        assert_eq!(
+            gone,
+            vec!["omh/claude:stale".to_string()],
+            "the held tag stays and the stale one goes: {gone:?}"
+        );
+    }
+
+    /// `docker image rm` exits 0 whether it deleted an image or merely dropped
+    /// one of its names, and only the first frees a byte. Counting exit codes
+    /// reports a reclaim that did not happen — and then `exists` says the tag
+    /// is missing, so the next launch rebuilds it anyway.
+    #[test]
+    fn dropping_a_name_is_not_removing_an_image() {
+        let untagged = "Untagged: omh/claude:old\n";
+        let deleted = "Untagged: omh/claude:old\nDeleted: sha256:9aeb9a1e2d14\n";
+
+        assert!(
+            matches!(classify_removal(untagged), Removal::Untagged),
+            "the image survives under its other name"
+        );
+        assert!(matches!(classify_removal(deleted), Removal::Deleted));
+    }
+
+    /// The tag space is not one-live-tag-per-repository, and the first version
+    /// of `superseded` assumed it was.
+    ///
+    /// `stack_tag` and `tag_for` both format `omh/{adapter}:{hash}` — the same
+    /// docker repository — so `omh/claude` holds the harness layer *and* one
+    /// stack layer per checkout, every one of them current. Grouping by
+    /// repository and keeping the newest made a stack build delete the harness
+    /// image it was built from; the next launch rebuilt the harness, and that
+    /// build deleted the stack.
+    ///
+    /// The class is `Kind`, stamped on at build time, so the three below are
+    /// three different classes and no build of one supersedes another.
+    #[test]
+    fn a_stack_build_and_a_harness_build_are_not_the_same_class() {
+        let adapter = claude();
+        let here = Path::new("/checkouts/api");
+        let there = Path::new("/checkouts/web");
+
+        let harness = Kind::Harness(&adapter).stamp();
+        let mine = Kind::Stack(&adapter, here).stamp();
+        let theirs = Kind::Stack(&adapter, there).stamp();
+
+        assert_ne!(
+            mine, harness,
+            "a stack layer is not the harness layer it was built FROM"
+        );
+        assert_ne!(
+            mine, theirs,
+            "another checkout's toolchain is not this build's to replace"
+        );
+        assert_ne!(
+            harness,
+            Kind::Base.stamp(),
+            "the harness layer is not the base it was built FROM"
+        );
+    }
+
+    /// The class has to reach docker, or it is a comment. Every value is free
+    /// text — an adapter's `name` comes from a droppable TOML file, a checkout
+    /// path can hold a comma — so the match is docker's to make by exact label
+    /// equality, and omh never parses a label value back.
+    #[test]
+    fn the_listing_asks_docker_for_exactly_one_class() {
+        let adapter = claude();
+        let args = Kind::Stack(&adapter, Path::new("/checkouts/api")).list_args();
+
+        for (k, v) in Kind::Stack(&adapter, Path::new("/checkouts/api")).stamp() {
+            assert!(
+                args.windows(2)
+                    .any(|w| w[0] == "--filter" && w[1] == format!("label={k}={v}")),
+                "{k} is part of the class but not part of the query: {args:?}"
+            );
+        }
+    }
+
+    /// An image built before omh stamped anything carries no `omh.*` labels, so
+    /// it is in no class and no build reaps it. Never collecting them is the
+    /// right trade against reaping every unlabelled image on the machine.
+    #[test]
+    fn an_unstamped_image_is_in_nobodys_class() {
+        let adapter = claude();
+        for kind in [
+            Kind::Base,
+            Kind::Harness(&adapter),
+            Kind::Stack(&adapter, Path::new("/checkouts/api")),
+        ] {
+            assert!(
+                !kind.stamp().is_empty(),
+                "an empty stamp would match every unlabelled image"
+            );
+        }
     }
 
     fn adapters() -> &'static Path {
@@ -1154,7 +1449,7 @@ mod tests {
 
     #[test]
     fn build_reads_the_dockerfile_from_stdin() {
-        let args = build_args("omh/x:latest", Path::new("/tmp/ctx"));
+        let args = build_args("omh/x:latest", Path::new("/tmp/ctx"), &Kind::Base);
         assert_eq!(args[0], "build");
         assert!(args.contains(&"-t".into()) && args.contains(&"omh/x:latest".into()));
         assert!(
