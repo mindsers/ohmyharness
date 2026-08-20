@@ -344,7 +344,78 @@ fn build(program: &str, tag: &str, dockerfile: &str) -> Result<()> {
     if !status.success() {
         anyhow::bail!("failed to build {tag}");
     }
+    reap(program, tag);
     Ok(())
+}
+
+/// Remove the tags this build just replaced.
+///
+/// Here rather than at a `omh image prune` the user has to remember, because
+/// the moment a new tag exists is the moment the old one is dead — and the
+/// failure this prevents is silent until the disk is full, at which point
+/// docker wedges and every sandbox in every repo stops working. It cost this
+/// machine 14 images and about 20 GB before anyone noticed.
+///
+/// Best-effort, and quiet about the difference between "nothing to do" and
+/// "docker would not". A build that succeeded must not fail because tidying up
+/// after it did — the image the user asked for is there either way. What it
+/// does *not* do is claim: only tags docker confirms gone are reported.
+fn reap(program: &str, built: &str) {
+    let Ok(tags) = list_tags(program, built) else {
+        return;
+    };
+    let in_use = images_in_use(program);
+    let gone: Vec<String> = superseded(built, &tags, &in_use)
+        .into_iter()
+        .filter(|t| {
+            std::process::Command::new(program)
+                .args(["image", "rm", t])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        })
+        .collect();
+    if !gone.is_empty() {
+        eprintln!(
+            "omh: removed {} image{} this build replaced",
+            gone.len(),
+            if gone.len() == 1 { "" } else { "s" }
+        );
+    }
+}
+
+/// Every tag of the repository `built` belongs to.
+fn list_tags(program: &str, built: &str) -> Result<Vec<String>> {
+    let repo = built.rsplit_once(':').map(|(r, _)| r).unwrap_or(built);
+    let out = std::process::Command::new(program)
+        .args(["images", "--format", "{{.Repository}}:{{.Tag}}", repo])
+        .output()?;
+    anyhow::ensure!(out.status.success(), "listing images for {repo}");
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Images any container references, running or stopped.
+///
+/// Stopped counts: `omh s down` leaves the container so the session can be
+/// resumed, and resuming it needs the image it was created from.
+fn images_in_use(program: &str) -> Vec<String> {
+    std::process::Command::new(program)
+        .args(["ps", "-a", "--format", "{{.Image}}"])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The plan names a per-project network; something has to create it. Without
@@ -449,6 +520,38 @@ pub fn container_remove(program: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// The tags a freshly built one replaces.
+///
+/// A tag omh chooses is a hash of the recipe that produced it, so the moment a
+/// recipe changes the previous tag is dead — nothing will ever ask for it
+/// again, and until now nothing removed it either. Two weeks of ordinary work
+/// left 14 omh images and about 20 GB, which is what filled the disk and wedged
+/// Docker.
+///
+/// Decided here, as a function over lists, rather than inside the code that
+/// shells out: which images should go is omh's own logic and is worth testing;
+/// whether docker agrees to remove one is not something a unit test can settle.
+///
+/// Two things are never superseded. **`latest`** is a name a person may have
+/// typed, where the hashes are names omh generated — reaping it would take away
+/// something nobody can reconstruct from a recipe. And **anything a container
+/// references**, however old, because that is a session someone is still using;
+/// docker would refuse, but omh should not be asking, nor reporting a removal
+/// that did not happen.
+pub fn superseded(built: &str, tags: &[String], in_use: &[String]) -> Vec<String> {
+    let repo = |t: &str| t.rsplit_once(':').map(|(r, _)| r.to_string());
+    let Some(mine) = repo(built) else {
+        return Vec::new();
+    };
+    tags.iter()
+        .filter(|t| t.as_str() != built)
+        .filter(|t| repo(t).as_deref() == Some(mine.as_str()))
+        .filter(|t| !t.ends_with(":latest"))
+        .filter(|t| !in_use.iter().any(|u| u == *t))
+        .cloned()
+        .collect()
+}
+
 pub fn exists(program: &str, tag: &str) -> bool {
     std::process::Command::new(program)
         .args(["image", "inspect", tag])
@@ -460,6 +563,62 @@ pub fn exists(program: &str, tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// omh tags an image by hashing its recipe, so a recipe change builds a new
+    /// tag and the old one is superseded the moment it does. Nothing removed
+    /// it. Measured on a two-week-old machine: six `omh/claude` tags, three
+    /// `omh/opencode`, two `omh/omp`, three `omh/base` — 14 tags and about
+    /// 20 GB, which is what wedged Docker and stopped every sandbox test
+    /// running.
+    ///
+    /// omh reaps sessions, worktrees, staging and the sandbox's repository. An
+    /// image is the one thing it creates and never takes back.
+    #[test]
+    fn a_new_build_supersedes_the_older_tags_of_its_own_repository() {
+        let tags = vec![
+            "omh/claude:new".to_string(),
+            "omh/claude:old".to_string(),
+            "omh/claude:older".to_string(),
+            "omh/claude:latest".to_string(),
+            "omh/opencode:other".to_string(),
+        ];
+
+        let gone = superseded("omh/claude:new", &tags, &[]);
+
+        assert!(
+            gone.contains(&"omh/claude:old".to_string())
+                && gone.contains(&"omh/claude:older".to_string()),
+            "the tags this build replaces: {gone:?}"
+        );
+        assert!(
+            !gone.contains(&"omh/claude:new".to_string()),
+            "never the one just built: {gone:?}"
+        );
+        assert!(
+            !gone.contains(&"omh/opencode:other".to_string()),
+            "another adapter's image is not this build's to remove: {gone:?}"
+        );
+        assert!(
+            !gone.contains(&"omh/claude:latest".to_string()),
+            "`latest` is a name a person may have typed, not a hash omh chose: \
+             {gone:?}"
+        );
+    }
+
+    /// A tag another session's container is running is not superseded, whatever
+    /// its age. Docker would refuse the removal anyway — this is so omh does
+    /// not ask, and does not report removing something it did not.
+    #[test]
+    fn a_tag_a_container_is_using_survives_a_newer_build() {
+        let tags = vec![
+            "omh/claude:new".to_string(),
+            "omh/claude:running".to_string(),
+        ];
+
+        let gone = superseded("omh/claude:new", &tags, &["omh/claude:running".to_string()]);
+
+        assert!(gone.is_empty(), "a live session keeps its image: {gone:?}");
+    }
 
     fn adapters() -> &'static Path {
         Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/adapters"))
