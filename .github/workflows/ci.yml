@@ -24,8 +24,10 @@ env:
 # means updating branch protection in the same breath, or the rule waits on a
 # name nothing produces and every pull request blocks without saying why.
 jobs:
-  # One test in tests/cli.rs runs `omh init`, which builds the base image
-  # through Docker. It is `#[ignore]`d, so this is the job that opts back in.
+  # `--include-ignored` below opts back in to the tests that need something the
+  # default run cannot assume: the ones in tests/cli.rs that build the base
+  # image through Docker, and the ones in src/render.rs that put omh's
+  # generated JavaScript through `node --check`.
   test-linux:
     name: run tests (linux, with docker)
     runs-on: ubuntu-latest

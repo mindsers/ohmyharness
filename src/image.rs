@@ -57,21 +57,43 @@ pub const GUEST_HOME: &str = "/home/agent";
 /// `git hash-object` is a stable SHA-1 of the text, for ever, and shells out
 /// exactly as `carry.rs` and `session.rs` already do.
 ///
-/// It needs the git *binary* and not a repository — measured, `hash-object
-/// --stdin` outside any repository returns the same hash it returns inside one.
-/// The single state that breaks it is a **dangling** `.git`, where git finds a
-/// repository it cannot open, and since this call passes neither `--git-dir`
-/// nor `current_dir` it inherits whatever cwd omh was run from. That is not
-/// hypothetical: `report.rs` records a moved checkout leaving exactly such a
-/// pointer. It is also why four tests here were `#[ignore]`d until 2026.08 —
-/// the sandbox used to be that state, and no longer is.
+/// It needs the git *binary* and not a repository, and `GIT_DIR` is pointed at
+/// a path that cannot exist so it stays that way. Left to inherit the ambient
+/// repository, the answer depends on where omh was launched from — measured:
+///
+///   no repository, or a sha1 one   bee8b835…  (40 hex)
+///   a `--object-format=sha256` one  cf82dc1e…  (64 hex)
+///   a dangling `.git`               fatal: not a git repository
+///
+/// The middle row is the one that matters, and it is the mass false positive
+/// this function's doc argues against arriving by another road: a user whose
+/// repo is SHA-256 pins digests nobody else's omh will ever compute, so every
+/// image-pinned note in it reads stale. `--object-format` is not a fix — git
+/// rejects it on `hash-object`. A `GIT_DIR` that resolves to nothing is,
+/// and it closes the dangling-pointer row in the same line: that state is what
+/// kept four tests here `#[ignore]`d until 2026.08, and `report.rs` records a
+/// moved checkout producing one.
+/// The exact `git` invocation `recipe_digest` makes.
+///
+/// Built here rather than inline so a test can run the real thing from a
+/// directory of its choosing. Asserting that the env is *set* would be a claim
+/// about the code's shape; running this command inside a `--object-format=sha256`
+/// repository and getting 40 hex back is a claim about what it does.
+fn digest_command() -> std::process::Command {
+    let mut c = std::process::Command::new("git");
+    // A directory that cannot exist, so no ambient repository decides the hash
+    // algorithm. See the note on `recipe_digest`.
+    c.env("GIT_DIR", "/omh-recipe-digest-has-no-repository")
+        .args(["hash-object", "--stdin"]);
+    c
+}
+
 pub fn recipe_digest(recipe: &str) -> Result<String> {
     use anyhow::Context;
     use std::io::Write;
     use std::process::Stdio;
 
-    let mut child = std::process::Command::new("git")
-        .args(["hash-object", "--stdin"])
+    let mut child = digest_command()
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -640,11 +662,71 @@ mod tests {
         );
     }
 
+    /// The digest must not depend on the repository omh happens to be launched
+    /// from.
+    ///
+    /// `recipe_digest` spawns git with no `current_dir`, so the ambient
+    /// repository is whatever the user's shell was in — and a repository
+    /// created with `--object-format=sha256` answers `hash-object` in 64 hex
+    /// instead of 40. Every image-pinned note that user commits then carries a
+    /// digest nobody else's omh will ever compute.
+    ///
+    /// Asserted over the *command shape* rather than by changing the process's
+    /// directory: `set_current_dir` is process-global, and a test that moves it
+    /// moves it for every other test running beside it.
+    #[test]
+    fn a_recipe_digest_does_not_inherit_the_repository_it_is_run_beside() {
+        let dir = tempfile::tempdir().unwrap();
+        let odd = dir.path().join("sha256");
+        let made = std::process::Command::new("git")
+            .args(["init", "-q", "--object-format=sha256"])
+            .arg(&odd)
+            .output()
+            .expect("git must be installed to run this test");
+        if !made.status.success() {
+            return; // git too old for sha256; nothing to prove here
+        }
+
+        // omh's own command, run from inside that repository — the thing under
+        // test — against a bare one that inherits it, which is the premise.
+        let run = |pinned: bool| {
+            let mut c = if pinned {
+                digest_command()
+            } else {
+                let mut c = std::process::Command::new("git");
+                c.args(["hash-object", "--stdin"]);
+                c
+            };
+            c.current_dir(&odd);
+            let mut ch = c
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            use std::io::Write;
+            ch.stdin.take().unwrap().write_all(b"a recipe").unwrap();
+            let out = ch.wait_with_output().unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        let inherited = run(false);
+        let pinned = run(true);
+        assert_eq!(
+            inherited.len(),
+            64,
+            "the premise: a sha256 repository answers in 64 hex"
+        );
+        assert_eq!(
+            pinned,
+            recipe_digest("a recipe").unwrap(),
+            "and omh's digest must be the same wherever it was run from"
+        );
+    }
+
     /// The one place a literal is correct: the whole point of this digest is
     /// that the value never moves. `DefaultHasher` would pass every test here
     /// and change under a toolchain upgrade, marking every image-pinned note in
     /// every repo stale on the same day.
-    ///
     #[test]
     fn an_image_recipe_digest_is_stable_across_toolchains() {
         assert_eq!(

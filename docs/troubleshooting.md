@@ -314,9 +314,11 @@ in place. Edits land on omh's staged copy, never on the file in your checkout.
 
 This is a trade, and the obvious way out was measured and rejected. Tracking the
 carried file in the sandbox's repository instead of mounting it would survive
-`git clean` *and* leave `sed -i` working — but the harvest fetches that
-repository into yours, and a fetch takes every reachable object, so the secret
-would be copied into your real repository by every harvest that gets that far.
+`git clean` *and* leave `sed -i` working — but a tracked file is in the tree of
+every commit that follows it, and the harvest fetches that repository into
+yours, so the secret would be copied into your real repository by every harvest
+that gets that far. Fetching less does not help: `--depth=1` still carries the
+blob, because it is in the tree of the commit it does fetch.
 On a harvest that then *fails*, omh keeps the fetched ref on purpose so nothing
 is lost — which would leave the secret reachable from a live ref until someone
 noticed. A test pins it so nobody fixes the visible half.

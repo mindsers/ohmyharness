@@ -1377,11 +1377,21 @@ mod tests {
     /// agent can edit it with `sed -i` and `mv`, which a mountpoint refuses
     /// with `Device or resource busy`. Measured, all of that is true.
     ///
-    /// What is also true, and settles it: the harvest fetches this repository
-    /// into the *user's own*, and a fetch takes every reachable object. A
-    /// carried secret in the seed is therefore copied into the real repository
-    /// by every harvest that gets past `preflight` — measured, readable there
-    /// with `git cat-file -p`.
+    /// What is also true, and settles it: a tracked file is in the tree of
+    /// **every commit that follows it**, so any fetch that brings one agent
+    /// commit brings the file. The harvest fetches this repository into the
+    /// *user's own*, so a carried secret in the seed is copied into the real
+    /// repository by every harvest that gets past `preflight` — measured,
+    /// readable there with `git cat-file -p`.
+    ///
+    /// Stated that way on purpose. "A fetch takes every reachable object" is
+    /// true and invites three rebuttals that all fail: `--depth=1` fetches one
+    /// commit and still carries the blob, because it is in that commit's tree;
+    /// there is no transport that fetches a range; and the seed cannot be
+    /// excluded because it is the rebase base `replant` needs. `--filter=blob:none`
+    /// is worse than none of them — the shadow sets no `uploadpack.allowFilter`,
+    /// so git warns, sends the blob anyway, and leaves the user's repository a
+    /// promisor pointing at a directory `omh s rm` deletes.
     ///
     /// On the success path it is unreachable afterwards, because the scratch
     /// ref is deleted, and "gc will get it eventually" is not a thing to say
@@ -1400,13 +1410,25 @@ mod tests {
         let checkout = d.path().join("checkout");
         let s = Shadow::new(&shadow_dir, "s01");
         std::fs::write(wt.join(".env"), "API_TOKEN=ghp_abc123def456\n").unwrap();
-        s.ensure(&wt, &[".env".to_string()]).unwrap();
+        std::fs::write(wt.join("cert.pem"), "BEGIN-ghp_abc123def456-END\n").unwrap();
+        // Two, because a partially-effective exclusion passes a test that
+        // carries one.
+        s.ensure(&wt, &[".env".to_string(), "cert.pem".to_string()])
+            .unwrap();
 
         let tracked = git(&s.gitdir, &wt, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
-        assert!(
-            !tracked.contains(".env"),
-            "the seed must not track it: {tracked}"
-        );
+        // `ls-files`, not only `ls-tree`: staging the file without committing it
+        // is the *other* way to make `git clean` spare it, and it leaves the
+        // tree clean. `harvest` then runs `add -A .` and commits the index
+        // before it fetches, so the index-only variant leaks too — through a
+        // commit omh makes itself.
+        let staged = git(&s.gitdir, &wt, &["ls-files"]).unwrap();
+        for probe in [&tracked, &staged] {
+            assert!(
+                !probe.contains(".env") && !probe.contains("cert.pem"),
+                "the seed must neither track nor stage a carried file: {probe}"
+            );
+        }
 
         // and the half that matters — what a harvest would carry across
         git_in(
@@ -1422,17 +1444,31 @@ mod tests {
         )
         .unwrap();
         let objects = git_in(&checkout, &["rev-list", "--objects", "refs/omh/probe"]).unwrap();
+        // Non-vacuity. An enumeration that returns nothing passes every
+        // assertion below without looking at anything, and one typo in the
+        // refspec is all that takes.
+        assert!(
+            !objects.trim().is_empty(),
+            "the probe enumerated no objects, so it proved nothing"
+        );
+        let mut read_a_blob = false;
         for line in objects.lines() {
             let oid = line.split_whitespace().next().unwrap_or_default();
             // `unwrap`, not `unwrap_or_default`: an unreadable object would
             // otherwise pass this assertion as an empty string, which is the
             // vacuous pass this test exists to not be.
             let body = git_in(&checkout, &["cat-file", "-p", oid]).unwrap();
+            read_a_blob |= body.contains("base");
             assert!(
                 !body.contains("ghp_abc123def456"),
                 "a fetch put the carried secret in the user's repository: {line}"
             );
         }
+        assert!(
+            read_a_blob,
+            "the enumeration never read file content, so a leak in one would \
+             not have been seen"
+        );
     }
 
     /// Curation is the flag's headline behaviour and nothing executed it: every
