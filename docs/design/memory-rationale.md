@@ -307,7 +307,7 @@ recognising as one rule rather than three coincidences:
 - [`omh s rm`](../sessions.md) keeps a branch that holds commits
 - [idle reaping](risks.md) leaves a session with no recorded use alone, because
   *"stopping a container on a guess is worse than one extra container"*
-- only the worktree and credentials mount writable
+- the writable mounts are a short named set
 
 ### Retrieval is one call, not a walk
 

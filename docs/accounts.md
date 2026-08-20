@@ -94,8 +94,9 @@ A placeholder is recognised as one, so it never counts as a login.
 
 ## The invariant this bends
 
-> The worktree is writable because that is the work. Credentials are writable
-> because tokens refresh in place. **Nothing else is.**
+> The writable mounts are a short named set — the worktree, credentials,
+> carried files, the sandbox's own git repository, and two caches.
+> **Nothing else is.**
 
 This is the weakest part of the current security model, and it is weaker than
 what `sbx` offers: there, secrets are injected at the egress proxy and the agent

@@ -933,11 +933,11 @@ prompt §1.8 removes, and is here because it is what shows the weakness:
   appears later is not added to the list, so it is off, and `omh use --all` is
   the fix. The launcher reports entries that are off for this reason, so it
   surfaces rather than failing silently, but it is not obvious.
-- **omh's own suite cannot pass in an omh sandbox.** Four tests digest the image
-  recipe with `git hash-object`, which costs a subprocess the tag does not.
-  They are `#[ignore]`d with the reason recorded; CI runs them on the host. A
-  turn-end `cargo test` hook in this repo is therefore red for a reason omh
-  itself imposes.
+- **Four tests are `#[ignore]`d for a reason that no longer holds.** They shell
+  out to git, which could not run inside an omh sandbox until 2026.08 — the
+  sandbox has a repository of its own now, so they may well pass there. Nobody
+  has run omh's suite inside an omh sandbox to find out, and the reason recorded
+  on each of them says so. CI runs them on the host either way.
 
 ---
 

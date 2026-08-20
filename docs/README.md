@@ -20,7 +20,7 @@ It goes from nothing to a sandboxed agent with your setup already inside it.
 | [Getting started](getting-started.md) | install, `omh init`, your first session |
 | [Commands](commands.md) | every command, what it does, what it prints |
 | [Configuration](configuration.md) | the catalogue, settings and their layers, provenance, `carry_in` |
-| [Sessions](sessions.md) | what a session actually is, persistence, worktrees |
+| [Sessions](sessions.md) | what a session actually is, the git the agent gets, persistence, worktrees |
 | [Accounts](accounts.md) | `omh auth`, several logins per harness |
 | [Editors](editors.md) | attaching VS Code, Zed, Cursor or Neovim over SSH |
 | [Code graph](code-graph.md) | the graph, the four hooks, `omh graph` |

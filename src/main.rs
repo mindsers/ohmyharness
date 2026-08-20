@@ -301,9 +301,9 @@ enum SessionsCmd {
         #[arg(long)]
         base: Option<String>,
     },
-    /// Commit a session's work onto its branch. Run on the host: the sandbox
-    /// has no git, and the worktree omh keeps out of your way is not somewhere
-    /// you should have to go.
+    /// Commit a session's work onto its branch. Run on the host: the sandbox's
+    /// git is its own repository and cannot reach yours, and the worktree omh
+    /// keeps out of your way is not somewhere you should have to go.
     Commit {
         /// The message, verbatim. Without it, git opens your editor.
         #[arg(short = 'm', long)]
@@ -312,7 +312,8 @@ enum SessionsCmd {
         #[arg(long)]
         skip_carried: bool,
         /// Keep the agent's own commits and messages instead of squashing the
-        /// work into one. Opens the list so you can reorder, reword and drop.
+        /// work into one. Opens the list in your editor, as `rebase -i` does,
+        /// so you can reorder, reword and drop.
         #[arg(long, conflicts_with = "message")]
         keep: bool,
     },

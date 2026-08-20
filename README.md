@@ -165,7 +165,7 @@ harnesses take turns inhabiting.
  ┌──────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │
  │  sshd 127.0.0.1 ──── your editor attaches here        │
- │  /work  ← worktree, the only writable code            │
+ │  /work  ← worktree, the code you get back             │
  │  staged profile, read-only                            │
  │  graph cache ← volume keyed by REPO, not harness       │
  └──────────────────────────────────────────────────────┘

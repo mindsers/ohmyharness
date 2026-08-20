@@ -20,7 +20,8 @@ omh's job is to be a boundary, so the interesting bugs are the ones that move
 it. In rough order of how much they matter:
 
 - **A mount that is writable and should not be.** The invariant is that nothing
-  beyond the session worktree and the credential files is writable from inside
+  beyond a named set — the worktree, credentials, carried files, the sandbox's
+  own git repository and two caches — is writable from inside
   the sandbox. A stray `rw` is the difference between a sandbox and a
   suggestion.
 - **Credentials reaching somewhere they should not** — mounted outside the path

@@ -63,7 +63,7 @@ eventually caught by a human reading tool output.
 
 ### Assert invariants, not output shape
 
-> *exactly one writable mount, and it is the worktree*
+> *the writable mounts are exactly this named set*
 
 survives refactoring.
 
@@ -85,7 +85,7 @@ product, not fixing a test.
 
 | Invariant | Why |
 |---|---|
-| nothing beyond the worktree and credentials is writable | a stray `rw` is the difference between a sandbox and a suggestion |
+| every writable mount is one of a named set | a stray `rw` is the difference between a sandbox and a suggestion |
 | credentials mount where the harness reads, writable | anywhere else and the session is logged out; read-only and refreshed tokens vanish |
 | a named-but-missing account stops the launch | otherwise the session runs logged out and says nothing |
 | staged links resolve under `/omh/layers/…` | host paths do not exist in the sandbox; skills silently vanish |

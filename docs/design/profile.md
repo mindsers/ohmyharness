@@ -166,12 +166,12 @@ applies to them identically — **a hook you can edit is a hook omh can never sh
 fix to.**
 
 That leaves the catalogue tier **empty on a fresh install**, and that is the
-honest state of it: the five hooks omh ships belong to a feature, and the other
+honest state of it: the four hooks omh ships belong to a feature, and the other
 two are this repo's. `~/.omh/hooks/` is where *your* hooks go, and where any
 genuinely optional hook omh ships later would land — a turn-end notification, a
 secret scanner — the kind that serves no feature and is pure preference.
 
-Applying the seven this repo has today:
+Applying the six this repo has today:
 
 | | | |
 |---|---|---|
@@ -179,7 +179,7 @@ Applying the seven this repo has today:
 | `graph-orient`, `graph-first`, `graph-read` | omh's | the graph stays correct and goes unused — the agent greps what it could have queried |
 | `rust-test`, `rust-format` | the project's | no test at turn end, no format on edit |
 
-Only omh's five are absent from every directory and uneditable, generated from
+Only omh's four are absent from every directory and uneditable, generated from
 the manifest at launch. The other two are files, and that is the difference the
 next section is about.
 

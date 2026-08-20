@@ -313,7 +313,9 @@ Appending works (`echo LINE >> .env`), and so does anything that writes the file
 in place. Edits land on omh's staged copy, never on the file in your checkout.
 
 A carried **directory** is a plain copy and has none of this — it is removable
-by `git clean -fdx`, and omh warns when it carries one.
+by `git clean -fdx`. omh warns when it carries one, though only when it actually
+copies: relaunch a session whose carried directory has not changed and the
+warning does not repeat.
 
 ### `omh will not move a branch the session is not on`
 
@@ -325,9 +327,11 @@ $ git -C ~/.omh/worktrees/<repo>/<session> checkout omh/<session>
 ```
 
 Related refusals from the same command, all meaning "a harvest here would
-silently drop work": a detached HEAD or an interrupted rebase **inside the
-sandbox's own repository**, and commits no branch there can reach. Each names
-the `git --git-dir=…` command that shows you what it found.
+silently drop work", all about the sandbox's **own** repository: a detached
+HEAD, an interrupted rebase or merge, and commits no branch there can reach.
+The detached and stranded cases each print a `git --git-dir=…` command — one to
+put it back, one to show you what it found. The interrupted case names the
+marker it saw and leaves finishing or aborting to you.
 
 ### `omh will not rewrite your history to hide a secret`
 
