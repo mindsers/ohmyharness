@@ -166,14 +166,20 @@ revisits, so `git-unavailable` — rewritten once, after the old pattern was
 found to miss the multi-line scripts agents most often emit — would have gone
 on running broken in every repo initialised before the fix.
 
-**`git-unavailable` blocks; the rest advise.** It is the one entry in the base
-set that refuses a call rather than commenting on it, and the reason is that git
-genuinely cannot work in the sandbox — the worktree's `.git` points at an admin
-directory omh does not mount. As a notice the agent read "git does not work
-here" and then ran `git status` anyway, spending a tool call to reach an error
-omh already knew was coming.
+**Nothing in the base set refuses a call.** One entry did until 2026.08:
+`git-unavailable` blocked every shell command containing `git`, and it was right
+for exactly as long as git could not work — the worktree's `.git` points at an
+admin directory omh does not mount. As a *notice* the agent read "git does not
+work here" and ran `git status` anyway, spending a tool call to reach an error
+omh already knew was coming, so it became a refusal.
 
-The three graph hooks stay advisory on purpose, and `graph-first` states the
+The sandbox has a repository of its own now, so the same hook refuses the
+feature rather than explaining it, and it is retired. `omh why git-unavailable`
+still answers, from the `rejected` table — *should omh stop the agent running
+git?* is a question someone rediscovers, and the answer changed rather than
+having been wrong the first time.
+
+What is left is a set where every hook advises, and `graph-first` states the
 rule: *a nudge, not a wall — a hook that blocks correct work gets disabled.* The
 distinction became load-bearing when a second harness arrived, because advising
 and blocking are one field apart on Claude Code and two different mechanisms on
@@ -195,9 +201,10 @@ MCP servers are pure data and live entirely in the manifest. Hook **commands**
 stay in `src/base.rs`: they are intricate shell that interpolates `GRAPH_BIN`
 and `$OMH_GRAPH_PROJECT`, and flattening them into TOML would break that
 compile-time coupling. Rules **bodies** stay there for the same reason —
-`memory-rules` interpolates the guest note path and `git-rules` reads the
-string the `git-unavailable` hook also emits, and two copies of a safety notice
-drift, with the one that drifts never being the one you are reading.
+`memory-rules` interpolates the guest note path and `git-rules` reads
+`shadow::ARRANGEMENT`, which the sandbox's seed commit reads too — and two
+copies of the same sentence drift, with the one that drifts never being the one
+you are reading.
 
 So the manifest carries *curation metadata* while the code carries the thing
 itself — two sources describing one base set, which can drift. A test

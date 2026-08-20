@@ -156,8 +156,8 @@ $ omh graph               # browse the codebase as a graph
 ```
 
 Those run on the host, against the worktree you never have to visit. The agent
-cannot run them itself: git does not work inside the sandbox, and it is told so
-rather than left to discover it.
+cannot run them itself: the sandbox has a repository of its own but no way to
+reach yours, and it is told so rather than left to discover it.
 
 Closing your terminal does not kill the agent — running `omh claude` again
 reattaches to the session you left. See [Sessions](sessions.md).

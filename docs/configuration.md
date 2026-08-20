@@ -274,9 +274,8 @@ nobody.
 
 ### Names omh ships are omh's
 
-`graph-orient`, `graph-first`, `graph-read`, `graph-refresh` and
-`git-unavailable` are generated from the [base set](design/base-set.md), not
-files. A hook file answering to one of those names is an **error naming both**
+`graph-orient`, `graph-first`, `graph-read` and `graph-refresh` are generated
+from the [base set](design/base-set.md), not files. A hook file answering to one of those names is an **error naming both**
 — it would not override omh's, and it would not run, and a hook that is
 committed, reviewed and silently inert is worse than one that refuses to start.
 To be rid of omh's, switch the feature off with `[omh]`.

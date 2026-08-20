@@ -934,7 +934,7 @@ prompt §1.8 removes, and is here because it is what shows the weakness:
   the fix. The launcher reports entries that are off for this reason, so it
   surfaces rather than failing silently, but it is not obvious.
 - **omh's own suite cannot pass in an omh sandbox.** Four tests digest the image
-  recipe with `git hash-object`, and git does not work in the sandbox by design.
+  recipe with `git hash-object`, which costs a subprocess the tag does not.
   They are `#[ignore]`d with the reason recorded; CI runs them on the host. A
   turn-end `cargo test` hook in this repo is therefore red for a reason omh
   itself imposes.

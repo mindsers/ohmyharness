@@ -42,6 +42,11 @@ git worktree on its own branch. Your checkout is never mounted. Review with
 `omh s diff`, ship with `omh s commit` and `omh s push`, discard by deleting a
 branch. You never go near the worktree directory itself.
 
+The agent gets git too — its own repository, holding one commit and none of your
+history, so `stash` and `reset --hard` are its to use. `omh s commit --keep`
+brings its commits onto your branch with the messages it wrote, after you
+curate them.
+
 **Your setup, in any harness.** Rules, skills, MCP servers, commands, subagents
 and hooks are declared once and rendered into whatever shape each harness reads.
 Switch from Claude Code to opencode and everything follows.

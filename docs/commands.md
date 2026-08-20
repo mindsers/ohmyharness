@@ -325,10 +325,42 @@ Error: omh/s01 is a session id, not a branch name
 command when it is not. It is never a dependency: a repo on a non-GitHub remote
 is a normal repo.
 
-**The agent cannot do any of this itself.** git does not work inside the session
-— the worktree's `.git` points at an admin directory on the host, which omh does
-not mount — so the sandbox is told as much, and told not to try to repair it.
-See `omh why git-unavailable`.
+### Keeping the agent's own commits
+
+The agent commits as it works, into a repository of its own that is not this
+branch — see [Sessions](sessions.md#the-agent-has-git-and-it-is-not-yours).
+`--keep` brings those commits here instead of squashing the files into one:
+
+```console
+$ omh s commit --keep
+```
+
+It opens the list first, as `git rebase -i` does, so you reorder, reword and
+drop before anything lands. What you keep arrives with the messages the agent
+wrote — which is the point, because it wrote them while it still had the context
+you would be reconstructing from a diff.
+
+Mutually exclusive with `-m`. Running both would put the squashed content on the
+branch first, and git's patch-id then drops the replanted commits as already
+applied — the granular history gone, with nothing said.
+
+Every commit is authored `omh sandbox <sandbox@omh.invalid>`, whatever the agent
+set in its own config. The sandbox does not get to say who wrote something on
+your branch.
+
+`--keep` refuses rather than repairing, in three cases worth knowing:
+
+- **A carried file reached a commit** — by `git add -f`, copied under another
+  name, pasted into source, or written into a message. omh knows the bytes it
+  carried in, so it can tell; it will not rewrite your history to hide a secret.
+  Drop the commit in the sandbox and harvest again.
+- **The sandbox's repository is mid-rebase, detached, or has commits no branch
+  can reach.** All three made a harvest succeed while silently leaving work
+  behind.
+- **The branch moved while you were curating.** Nothing is written.
+
+In every case the branch is untouched and the work is safe — omh fetches it into
+your repository before replanting, so a failure loses nothing.
 
 **`rm` never deletes a branch that has commits.** Unreviewed agent work must be
 unloseable, so the branch outlives the session that produced it, and `rm` tells
