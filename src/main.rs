@@ -311,6 +311,10 @@ enum SessionsCmd {
         /// Commit without the files omh carried in from your checkout.
         #[arg(long)]
         skip_carried: bool,
+        /// Keep the agent's own commits and messages instead of squashing the
+        /// work into one. Opens the list so you can reorder, reword and drop.
+        #[arg(long, conflicts_with = "message")]
+        keep: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
     Push {
@@ -517,11 +521,13 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             SessionsCmd::Commit {
                 message,
                 skip_carried,
+                keep,
             } => commit(
                 &cwd,
                 cli.session.as_deref(),
                 message.as_deref(),
                 *skip_carried,
+                *keep,
                 ctx,
             ),
             SessionsCmd::Push { name, pr } => {
@@ -4797,10 +4803,52 @@ fn commit(
     id: Option<&str>,
     message: Option<&str>,
     skip_carried: bool,
+    keep: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
+
+    // Two ways to land the same work, and the user picks which at the moment
+    // they land it. `-m` squashes the files into one commit of their own and
+    // never reads the sandbox's repository at all — it is the same `git add -A`
+    // it always was. `--keep` replants the agent's commits, messages included.
+    //
+    // One writer either way. Doing both puts the squashed content on the branch
+    // first, and git's patch-id then drops every replanted commit as already
+    // applied — the granular history disappears with nothing said, which is the
+    // whole thing `--keep` exists to deliver.
+    if keep {
+        let branch = session
+            .branch
+            .as_deref()
+            .context("a scratch session has no branch to commit to")?;
+        let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
+        let carried = config::policy_list(&paths, "carry_in");
+        let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, true)?;
+        let base = session::default_branch(&paths.repo);
+        let n = session.commits(&paths.repo, &base);
+        ctx.say(
+            &report::Action::new(
+                "committed",
+                match landed {
+                    0 => format!("nothing to keep — {} has made no commits", session.label()),
+                    _ => format!(
+                        "kept {landed} of {}'s own commits ({n} on the branch)",
+                        session.label()
+                    ),
+                },
+            )
+            .data(serde_json::json!({
+                "session": session.id,
+                "branch": session.label(),
+                "kept": landed,
+                "commits": n,
+                "base": base,
+            })),
+        );
+        return Ok(());
+    }
 
     // The same list the launcher copies from, so what `commit` refuses to
     // publish and what omh put there cannot disagree.
