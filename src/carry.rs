@@ -97,6 +97,68 @@ pub fn apply(repo: &Path, worktree: &Path, patterns: &[String]) -> Result<Vec<Ca
 ///
 /// Asked of the checkout rather than the worktree, because that is where the
 /// `carry_in` entry is aimed and where the user can see the answer.
+/// Stage the carried files for mounting, and say where each one landed.
+///
+/// The copy used to go straight into the worktree, which was right while `/work`
+/// held no git. It does now, and `git clean -fdx` removes an untracked file
+/// whether or not `info/exclude` names it — so the agent could delete the `.env`
+/// its app needs and not get it back until the next launch.
+///
+/// A bind mount survives that, because a mountpoint cannot be unlinked. So the
+/// copy is staged outside the worktree and mounted over a placeholder, which
+/// leaves three properties the copy did not have: `git clean` reports
+/// `Resource busy` and cleans everything else; the agent can still write to it,
+/// because the mount is read-write; and what it writes lands on omh's copy
+/// rather than on the file in the user's checkout.
+///
+/// That last one is why this stages rather than mounting the source. Mounting
+/// the checkout's own file read-write was measured letting an agent append to
+/// the real `.env` — the exact reach outside the sandbox the worktree model
+/// exists to prevent.
+///
+/// **Files only, and directories are genuinely not covered.** Mounting a
+/// carried *directory* protects the directory and not what is in it: measured,
+/// `git clean -fdx` reports `failed to remove certs/: Resource busy` and then
+/// removes `certs/ca.pem` from inside it, because the files within are not
+/// mountpoints. Protecting them would mean one mount per file, which is
+/// unbounded in what the user chose to carry, so a carried directory keeps the
+/// copy behaviour and keeps the exposure that goes with it. Said here rather
+/// than discovered later.
+pub fn stage_for_mount(repo: &Path, into: &Path, patterns: &[String]) -> Result<Vec<Staged>> {
+    for pattern in patterns {
+        validate_pattern(pattern)?;
+    }
+    let mut out = Vec::new();
+    for pattern in patterns {
+        let rel = pattern.trim().trim_end_matches('/');
+        let src = repo.join(rel);
+        // Absent and already-tracked are `apply`'s to report — it runs first and
+        // says so to the user. Silently skipped here so the two cannot disagree
+        // about what happened, only about what to do next.
+        if !src.exists() || tracked(repo, rel) || src.is_dir() {
+            continue;
+        }
+        let at = into.join(rel);
+        if let Some(parent) = at.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(&src, &at).with_context(|| format!("staging {}", src.display()))?;
+        out.push(Staged {
+            rel: rel.to_string(),
+            host: at,
+        });
+    }
+    Ok(out)
+}
+
+/// One carried file, staged and waiting to be mounted.
+pub struct Staged {
+    /// Where it goes inside `/work`.
+    pub rel: String,
+    /// The staged copy, which is what gets mounted.
+    pub host: PathBuf,
+}
+
 fn tracked(repo: &Path, rel: &str) -> bool {
     std::process::Command::new("git")
         .current_dir(repo)

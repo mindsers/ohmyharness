@@ -323,6 +323,43 @@ pub fn plan(
         dropped_hooks.extend(stager.stage(cap, &sources, &mut mounts)?);
     }
 
+    // What `carry_in` names, mounted rather than copied.
+    //
+    // `carry::apply` has already put a copy in the worktree and told the user
+    // what it did; this stages a second copy outside `/work` and mounts it over
+    // the first. The mount is what the agent meets, and it is what survives
+    // `git clean -fdx` — an untracked file is removed by `-x` whether or not
+    // `info/exclude` names it, and a mountpoint cannot be unlinked.
+    //
+    // Read-write, because a carried file is config the agent may legitimately
+    // edit, and from a staged copy so those edits cannot reach the checkout.
+    //
+    // Placed before the shadow block so the seed excludes these paths: they are
+    // in `carry_in`, and that list is what the shadow's `info/exclude` is built
+    // from.
+    let carried = if staging == Staging::Apply {
+        crate::carry::stage_for_mount(
+            &paths.repo,
+            &stage.join("carried"),
+            &crate::config::policy_list(paths, "carry_in"),
+        )?
+    } else {
+        Vec::new()
+    };
+    for item in &carried {
+        // A bind mount needs its destination to exist, and docker creates a
+        // *directory* when it does not — the same reason the rules placeholders
+        // are placed. `apply` will usually have left the real file here already;
+        // this covers the case where it could not.
+        place_destination(&session.worktree.join(&item.rel))?;
+        mounts.push(Mount {
+            host: item.host.clone(),
+            guest: PathBuf::from(crate::container_workdir()).join(&item.rel),
+            read_only: false,
+            file: true,
+        });
+    }
+
     // The repository the sandbox is allowed to have.
     //
     // Seeded *after* the capability loop, not before, and that ordering is the
@@ -1277,6 +1314,58 @@ mod tests {
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
         assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
+    }
+
+    /// A carried file arrives as a mount, not as a copy in the worktree.
+    ///
+    /// It was a copy, and that was fine while `/work` had no git in it. It does
+    /// now, and `git clean -fdx` deletes an untracked file whether or not
+    /// `info/exclude` names it — `-x` means "ignored files too". Measured in a
+    /// container: the copy is removed, and the agent loses the `.env` the app
+    /// needs for the rest of the session, since `carry_in` only runs at launch.
+    ///
+    /// A bind-mounted file survives because it is a *mountpoint*: `git clean`
+    /// reports `failed to remove .env: Resource busy` and — the part that makes
+    /// this the right fix rather than an adequate one — carries on cleaning
+    /// everything else, so the agent's command still does its job.
+    ///
+    /// Read-write, so the agent can still edit what it was given, and sourced
+    /// from a staged copy rather than from the checkout: mounting the user's own
+    /// file read-write let an agent append to the real `.env`, which is the
+    /// isolation this whole model exists for.
+    #[test]
+    fn a_carried_file_is_mounted_rather_than_copied_into_the_worktree() {
+        let fx = fixture();
+        std::fs::create_dir_all(fx.paths.repo.join(".omh")).unwrap();
+        std::fs::write(fx.paths.repo.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            "carry_in = [\".env\"]\n",
+        )
+        .unwrap();
+
+        let p = plan_for(&fx, "claude");
+
+        let carried = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.to_string_lossy() == "/work/.env")
+            .expect("a carried file has to be mounted into the worktree");
+        assert!(carried.file, "a file, so the mountpoint resists unlink");
+        assert!(
+            !carried.read_only,
+            "the agent has to be able to edit what it was handed"
+        );
+        assert_ne!(
+            carried.host,
+            fx.paths.repo.join(".env"),
+            "mounting the checkout's own file lets the agent write to it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&carried.host).expect("staged"),
+            "SECRET=1\n",
+            "and the staged copy has to be the file it stands in for"
+        );
     }
 
     /// The agent commits into the shadow, so the gitdir is a read-write mount,
