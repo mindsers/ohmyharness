@@ -404,8 +404,6 @@ mod tests {
         assert_eq!(staged.len(), 1, "{staged:?}");
     }
 
-    use super::*;
-
     fn repo(files: &[(&str, &str)]) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let d = tempfile::tempdir().unwrap();
         let repo = d.path().join("repo");
