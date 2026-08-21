@@ -1420,8 +1420,12 @@ fn work_state(session: &Session, repo: &std::path::Path, base: &str) -> report::
         // first `s push`. Measured against the base branch instead, because a
         // blank here reads as a session nobody touched.
         None => match session.commits(repo, base) {
-            0 => Work::Clean,
-            n => Work::ToPush(n),
+            Ok(0) => Work::Clean,
+            Ok(n) => Work::ToPush(n),
+            // The same rule as the accessors above: a git that cannot answer is
+            // never rendered as an answer. `Clean` here would read as a session
+            // holding nothing, over a branch nobody can count.
+            Err(_) => Work::Unknown,
         },
     }
 }
@@ -4836,8 +4840,9 @@ fn commit(
                 match landed {
                     0 => format!("nothing to keep — {} has made no commits", session.label()),
                     _ => format!(
-                        "kept {landed} of {}'s own commits ({n} on the branch)",
-                        session.label()
+                        "kept {landed} of {}'s own commits{}",
+                        session.label(),
+                        branch_tally(&n)
                     ),
                 },
             )
@@ -4845,7 +4850,7 @@ fn commit(
                 "session": session.id,
                 "branch": session.label(),
                 "kept": landed,
-                "commits": n,
+                "commits": n.as_ref().ok(),
                 "base": base,
             })),
         );
@@ -4867,20 +4872,35 @@ fn commit(
     // the same number `omh s rm` will use to decide the branch survives.
     let base = session::default_branch(&paths.repo);
     let n = session.commits(&paths.repo, &base);
-    let s = if n == 1 { "commit" } else { "commits" };
     ctx.say(
         &report::Action::new(
             "committed",
-            format!("committed to {} ({n} {s} on the branch)", session.label()),
+            format!("committed to {}{}", session.label(), branch_tally(&n)),
         )
         .data(serde_json::json!({
             "session": session.id,
             "branch": session.label(),
-            "commits": n,
+            "commits": n.as_ref().ok(),
             "base": base,
         })),
     );
     Ok(())
+}
+
+/// What a session's branch holds, appended to an answer that is true without it.
+///
+/// Empty when git could not take the count — `commits` returns a `Result`
+/// precisely because a base that does not resolve is a question with no answer,
+/// and *"(0 commits on the branch)"* is the wrong one. The sentence in front of
+/// this reports what omh just did, which is true either way.
+fn branch_tally(n: &Result<usize>) -> String {
+    match n {
+        Ok(n) => format!(
+            " ({n} {} on the branch)",
+            if *n == 1 { "commit" } else { "commits" }
+        ),
+        Err(_) => String::new(),
+    }
 }
 
 fn push(
@@ -4965,18 +4985,39 @@ fn rm(cwd: &std::path::Path, id: &str, ctx: &out::Ctx) -> Result<()> {
     let action = match session.remove(&paths.repo, &base, &paths.shadows())? {
         session::Removed::BranchKept => {
             let n = session.commits(&paths.repo, &base);
-            let s = if n == 1 { "commit" } else { "commits" };
+            // Two ways to be kept, and they are not the same news. A branch
+            // kept because it holds three commits is an invitation to review
+            // them; one kept because omh could not tell what it holds is a
+            // question, and saying "3 commits" for it would be an invention.
+            //
+            // The review command changes with it: the only reason omh cannot
+            // count is that `base` does not resolve in this checkout, so
+            // `git log <base>..` would fail in the user's hands for exactly the
+            // reason they are being shown the line.
+            let (kept, review) = match &n {
+                Ok(n) => (
+                    format!(
+                        "kept ({n} {} to review)",
+                        if *n == 1 { "commit" } else { "commits" }
+                    ),
+                    format!("git log {base}..omh/{id}"),
+                ),
+                Err(_) => (
+                    format!("kept — omh could not count it against {base}"),
+                    format!("git log omh/{id}"),
+                ),
+            };
             report::Action::new(
                 "session-removed",
-                format!("removed session {id}; branch omh/{id} kept ({n} {s} to review)"),
+                format!("removed session {id}; branch omh/{id} {kept}"),
             )
-            .next(format!("git log {base}..omh/{id}"))
+            .next(review)
             .next(format!("git branch -D omh/{id}"))
             .data(serde_json::json!({
                 "session": id,
                 "branch": format!("omh/{id}"),
                 "branch_kept": true,
-                "commits": n,
+                "commits": n.as_ref().ok(),
             }))
         }
         session::Removed::BranchDropped => report::Action::new(

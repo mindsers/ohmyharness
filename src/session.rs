@@ -157,12 +157,27 @@ impl Session {
     ///
     /// The question `remove` needs answered: whether keeping the branch would
     /// preserve anything.
-    pub fn commits(&self, repo: &Path, base: &str) -> usize {
-        let Some(branch) = &self.branch else { return 0 };
-        git(repo, &["rev-list", "--count", &format!("{base}..{branch}")])
-            .ok()
-            .and_then(|out| out.trim().parse().ok())
-            .unwrap_or(0)
+    ///
+    /// **An error is never zero**, which is the rule `uncommitted` states a few
+    /// lines below and this used to break — with more at stake, because the
+    /// caller acts on the answer by deleting a branch. `rev-list` fails
+    /// whenever `base` does not resolve locally: a repo that renamed its trunk,
+    /// or a clone whose `main` exists only as `origin/main`, which
+    /// `default_branch` will happily name. Read as zero, that failure spelled
+    /// *no commits*, and `omh s rm` deleted a branch holding work nobody had
+    /// reviewed while reporting that it had preserved nothing.
+    ///
+    /// `behind` above is deliberately not given the same treatment: it feeds a
+    /// column that says how far a session has drifted, and a blank there is a
+    /// missing nicety rather than a destroyed branch.
+    pub fn commits(&self, repo: &Path, base: &str) -> Result<usize> {
+        let Some(branch) = &self.branch else {
+            return Ok(0);
+        };
+        let out = git(repo, &["rev-list", "--count", &format!("{base}..{branch}")])?;
+        out.trim()
+            .parse()
+            .with_context(|| format!("counting commits on {branch}"))
     }
 
     /// Remove the session: its worktree, the repository the sandbox had, and
@@ -178,10 +193,16 @@ impl Session {
     pub fn remove(&self, repo: &Path, base: &str, shadows: &Path) -> Result<Removed> {
         // Decided before the worktree goes, because afterwards the branch is
         // the only thing left to ask.
+        //
+        // A question git could not answer keeps the branch. Dropping one is
+        // irreversible and justified by exactly one fact — that it holds
+        // nothing — so anything short of that fact has to fall the other way.
         let outcome = match &self.branch {
             None => Removed::NoBranch,
-            Some(_) if self.commits(repo, base) > 0 => Removed::BranchKept,
-            Some(_) => Removed::BranchDropped,
+            Some(_) => match self.commits(repo, base) {
+                Ok(0) => Removed::BranchDropped,
+                _ => Removed::BranchKept,
+            },
         };
 
         if git(
@@ -838,6 +859,48 @@ mod tests {
         );
     }
 
+    /// The same half, when git cannot answer the question at all.
+    ///
+    /// `commits` asks `rev-list <base>..<branch>`, and a base that does not
+    /// resolve locally makes that fail rather than return a number — a repo
+    /// whose trunk was renamed, or a clone whose `main` exists only as
+    /// `origin/main`. Read as zero, the failure means `rm` reports *no commits*
+    /// and deletes a branch holding work nobody has reviewed.
+    ///
+    /// The base is passed explicitly rather than through `default_branch`,
+    /// which is about to learn to return a ref that resolves: routed through
+    /// it, this test would stop reproducing anything and still pass.
+    #[test]
+    fn a_branch_is_kept_when_omh_cannot_count_what_is_on_it() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s03".into());
+        s.ensure(&root, "main").unwrap();
+
+        std::fs::write(s.worktree.join("work.txt"), "agent output").unwrap();
+        git(&s.worktree, &["add", "."]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
+
+        // The repo renames its trunk, which is the whole reason `main` stops
+        // resolving. Asserted rather than assumed: without this the test can
+        // quietly become a second copy of the one above.
+        git(&root, &["branch", "-m", "main", "trunk"]).unwrap();
+        assert!(
+            git(&root, &["rev-list", "--count", "main..omh/s03"]).is_err(),
+            "the precondition is that git cannot answer; it just did"
+        );
+
+        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
+        assert!(
+            git(&root, &["rev-parse", "--verify", "omh/s03"]).is_ok(),
+            "a count omh could not take is not a branch it may delete"
+        );
+        assert_eq!(
+            outcome,
+            Removed::BranchKept,
+            "and it has to say so, or `rm` reports work it did not destroy as dropped"
+        );
+    }
+
     /// A scratch session (`omh auth`, `omh doctor`) has no branch at all, and
     /// asking git about one would error rather than report nothing to keep.
     #[test]
@@ -1402,7 +1465,7 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("config.toml"), "got: {err}");
-        assert_eq!(s.commits(&root, "main"), 0, "nothing may land");
+        assert_eq!(s.commits(&root, "main").unwrap(), 0, "nothing may land");
     }
 
     /// The escape hatch, because refusing forever would make a carried file that
@@ -1472,7 +1535,7 @@ mod tests {
 
         assert!(err.to_string().contains("aborted"), "got: {err}");
         assert_eq!(
-            s.commits(&root, "main"),
+            s.commits(&root, "main").unwrap(),
             0,
             "nothing may land on the branch"
         );
