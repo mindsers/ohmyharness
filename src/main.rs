@@ -4889,12 +4889,6 @@ fn commit(
     Ok(())
 }
 
-/// What a session's branch holds, appended to an answer that is true without it.
-///
-/// Empty when git could not take the count — `commits` returns a `Result`
-/// precisely because a base that does not resolve is a question with no answer,
-/// and *"(0 commits on the branch)"* is the wrong one. The sentence in front of
-/// this reports what omh just did, which is true either way.
 /// Say that the count could not be taken, where the answer merely omits it.
 ///
 /// `branch_tally` going quiet is right for the answer — what omh did is true
@@ -4909,6 +4903,12 @@ fn warn_uncounted(n: &Result<usize>, ctx: &out::Ctx, base: &str) {
     }
 }
 
+/// What a session's branch holds, appended to an answer that is true without it.
+///
+/// Empty when git could not take the count — `commits` returns a `Result`
+/// precisely because a base that does not resolve is a question with no answer,
+/// and *"(0 commits on the branch)"* is the wrong one. The sentence in front of
+/// this reports what omh just did, which is true either way.
 fn branch_tally(n: &Result<usize>) -> String {
     match n {
         Ok(n) => format!(
@@ -5077,6 +5077,28 @@ fn rm(cwd: &std::path::Path, id: &str, ctx: &out::Ctx) -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// The tally omits itself rather than saying zero.
+    ///
+    /// `omh s rm` deleted a branch because a count it could not take read as
+    /// `0`; this is the same mistake one layer out, where it would be printed
+    /// rather than acted on. A pure function over the `Result`, so the guard
+    /// needs no repository and cannot be defeated by a fixture.
+    #[test]
+    fn a_tally_omh_could_not_take_is_absent_rather_than_zero() {
+        assert_eq!(branch_tally(&Ok(1)), " (1 commit on the branch)");
+        assert_eq!(branch_tally(&Ok(3)), " (3 commits on the branch)");
+        assert_eq!(
+            branch_tally(&Ok(0)),
+            " (0 commits on the branch)",
+            "a real zero is still an answer and still gets said"
+        );
+        assert_eq!(
+            branch_tally(&Err(anyhow::anyhow!("bad revision"))),
+            "",
+            "and a count nobody took says nothing at all"
+        );
+    }
 
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");

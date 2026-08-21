@@ -241,10 +241,13 @@ pub struct Session {
     /// Commits the base branch has that this session does not.
     /// **`None` means omh could not count**, which is not `Some(0)`.
     ///
-    /// The same distinction `work` above keeps, for the same reason and in the
-    /// same failure: a base that does not resolve in this checkout. The table
-    /// renders both as a blank cell — a glance column has nowhere to put a
-    /// question — but JSON says `null` rather than a number nobody took.
+    /// Not quite `work`'s `Option`, which keeps *nobody asked* apart from every
+    /// answer and carries *cannot tell* one level in, as `Work::Unknown`. This
+    /// column is always asked for, so it needs two states rather than three,
+    /// and `None` is the failure — a base that does not resolve in this
+    /// checkout. The table renders `None` and `Some(0)` alike, because a glance
+    /// column has nowhere to put a question; JSON says `null` rather than a
+    /// number nobody took.
     pub behind: Option<usize>,
 }
 

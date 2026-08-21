@@ -25,9 +25,9 @@ pub enum Removed {
     BranchDropped,
     /// There was no branch to speak of.
     ///
-    /// A scratch session (`omh auth`, `omh doctor`) never had one — and so did
-    /// a session id nothing ever created, which `omh s rm` reaches because it
-    /// builds a session rather than looking one up. Reporting *kept* or
+    /// A scratch session (`omh auth`, `omh doctor`) never had one, and neither
+    /// did a session id nothing ever created, which `omh s rm` reaches because
+    /// it builds a session rather than looking one up. Reporting *kept* or
     /// *dropped* there is a claim about work that never existed.
     NoBranch,
 }
@@ -481,7 +481,7 @@ impl Session {
     ///
     /// An error is never zero. The pointer these commands run through is the one
     /// this module documents as leading nowhere inside the sandbox, and a stale
-    /// one on the host is what `remove` at line 141 already handles; reporting
+    /// one on the host is what `remove` already handles; reporting
     /// that as a clean session is how work gets discarded.
     pub fn uncommitted(&self) -> Result<usize> {
         let out = git_owned(&self.worktree, &status_args())?;
@@ -1986,6 +1986,33 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s09".into());
         s.remove(&root, "main", &d_shadows())
             .expect("nothing to do is not a failure");
+    }
+
+    /// The drift count fails where the commit count does, and says so.
+    ///
+    /// Nothing destructive reads `behind` — it fills a column. It is a
+    /// `Result` anyway because it asks git the same question in the same
+    /// checkouts, and because the answer reaches JSON, where `0` for *cannot
+    /// tell* is a number omh did not have. Written as the twin of
+    /// `a_branch_is_kept_when_omh_cannot_count_what_is_on_it`, over the same
+    /// fixture, so the pair cannot drift apart.
+    #[test]
+    fn a_drift_count_omh_cannot_take_is_not_zero_either() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s04".into());
+        s.ensure(&root, "main").unwrap();
+
+        assert_eq!(
+            s.behind(&root, "main").unwrap(),
+            0,
+            "a session made from the tip is behind nothing"
+        );
+
+        git(&root, &["branch", "-m", "main", "trunk"]).unwrap();
+        assert!(
+            s.behind(&root, "main").is_err(),
+            "a base that does not resolve is a question with no answer, not zero"
+        );
     }
 
     /// …and it has no branch to report either way.
