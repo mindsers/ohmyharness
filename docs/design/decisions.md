@@ -27,6 +27,8 @@ these, the reason is what you need to argue with.
 | Write default | **a value never lands in the committed file; a name may** | `omh repo set`/`omh config set` take a value you typed and default away from git. `omh use`/`unuse` and `omh repo enable`/`disable` write only names, and what a project uses is a fact about the project |
 | Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
 | Tool vocabulary | **one closed set, per-adapter map** | the one thing skills, subagents and hooks all leak |
+| Naming a session | **`sNN` first, one form** | several sandboxes of one repo are reached from one place, so the selector leads and everything after it is unchanged — designed, see [git](git.md) |
+| Staying current | **`omh sNN sync`, merged on the host** | no commit of yours may enter the sandbox, so it receives files and conflict markers rather than history — designed, see [git](git.md) |
 | Portability | **store the standard where one exists** | skills and rules already travel; only hooks and subagents need omh |
 
 Each is expanded where it applies: [architecture](architecture.md) for runtime

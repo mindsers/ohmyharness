@@ -344,6 +344,17 @@ The detached and stranded cases each print a `git --git-dir=…` command — one
 put it back, one to show you what it found. The interrupted case names the
 marker it saw and leaves finishing or aborting to you.
 
+### `--keep` a second time says `Could not apply`
+
+`omh s commit --keep` replays from the point the session started, and nothing
+records that you already kept some of it. So the second run offers you commits
+that are on your branch already and then fails applying them — or, when the
+patches happen to be droppable, quietly keeps nothing.
+
+The branch is untouched. Take the rest of the work with `omh s commit -m`, which
+does not read the sandbox's repository at all. Measured 2026-08-21 against git
+2.55.0; the fix is the replay point in [Git](design/git.md#the-replay-point).
+
 ### `omh will not rewrite your history to hide a secret`
 
 `--keep` found something you listed in `carry_in` inside a commit the agent

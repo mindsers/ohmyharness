@@ -115,12 +115,16 @@ nothing about yours, and there is no `main` in there to move. Shared *blobs* are
 unavoidable, since a file whose content matches yours hashes the same; history
 is the thing that must not cross.
 
-It lives at `~/.omh/shadow/<session>.git`, on the branch `<session>-scratch`, so
-you can read it from the host if you want to:
+It lives at `~/.omh/shadow/<repo>/<session>.git`, on the branch
+`<session>-scratch` — keyed by the checkout, like every other per-repo path omh
+keeps — so you can read it from the host if you want to:
 
 ```console
-$ git --git-dir=~/.omh/shadow/s01.git log --oneline
+$ git --git-dir=~/.omh/shadow/myrepo/s01.git log --oneline
 ```
+
+Reading it is the only way to see those commits today. [Git](design/git.md)
+designs the commands that make it unnecessary.
 
 **Its commits are not yours until you ask for them.** `omh s commit` squashes the
 files into one commit of your own and never looks at that repository;

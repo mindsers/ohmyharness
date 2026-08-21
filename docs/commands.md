@@ -367,6 +367,14 @@ your branch.
 - **The branch moved while you were curating.** Nothing is written.
 - **The session has no sandbox repository yet** — nothing has run in it.
 
+One case is missing from that list because it is a defect rather than a
+refusal: **`--keep` is not repeatable.** It replays from the point the session
+started every time, so a second run offers you commits already on your branch
+and then usually dies applying them. Measured 2026-08-21 against git 2.55.0.
+Until it is fixed, treat `--keep` as one landing per session and use
+`omh s commit -m` for the rest. The fix is the replay point in
+[Git](design/git.md#the-replay-point).
+
 The branch is untouched in every case. For the first two the work never left the
 sandbox; for the rest omh had already fetched it into your repository, so a
 failure part-way through loses nothing either way.
@@ -390,6 +398,19 @@ exactly — a line you cannot select and paste is worse than no line.
 A branch with **no** commits is dropped. Keeping it preserved nothing —
 `worktree remove --force` has already discarded anything uncommitted — while a
 namespace filling with dead refs trains you to ignore the ones that matter.
+
+A branch omh cannot *count* is kept too, and says so — that count is
+`git rev-list <base>..<branch>`, and it has no answer in a checkout whose
+default branch exists only as `origin/<name>`. Dropping a branch is
+irreversible and justified by one fact only, that it holds nothing, so anything
+short of that fact falls the other way:
+
+```console
+$ omh s rm s01
+removed session s01; branch omh/s01 kept — omh could not count it against main
+  git log omh/s01
+  git branch -D omh/s01
+```
 
 ## `omh config …` · `c`
 
