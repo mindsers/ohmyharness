@@ -1328,7 +1328,7 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     .unwrap_or(false),
                 label: sess.label().to_string(),
                 work: Some(work_state(&sess, &paths.repo, &base)),
-                behind: sess.behind(&paths.repo, &base),
+                behind: sess.behind(&paths.repo, &base).ok(),
                 id,
             }
         })
@@ -4754,7 +4754,7 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     // asked* — `Work::Clean` would be a claim, and a false one.
                     work: None,
                     running: false,
-                    behind: sess.behind(&paths.repo, &base),
+                    behind: sess.behind(&paths.repo, &base).ok(),
                     id,
                 }
             })
@@ -4834,6 +4834,7 @@ fn commit(
         let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, true)?;
         let base = session::default_branch(&paths.repo);
         let n = session.commits(&paths.repo, &base);
+        warn_uncounted(&n, ctx, &base);
         ctx.say(
             &report::Action::new(
                 "committed",
@@ -4872,6 +4873,7 @@ fn commit(
     // the same number `omh s rm` will use to decide the branch survives.
     let base = session::default_branch(&paths.repo);
     let n = session.commits(&paths.repo, &base);
+    warn_uncounted(&n, ctx, &base);
     ctx.say(
         &report::Action::new(
             "committed",
@@ -4893,6 +4895,20 @@ fn commit(
 /// precisely because a base that does not resolve is a question with no answer,
 /// and *"(0 commits on the branch)"* is the wrong one. The sentence in front of
 /// this reports what omh just did, which is true either way.
+/// Say that the count could not be taken, where the answer merely omits it.
+///
+/// `branch_tally` going quiet is right for the answer — what omh did is true
+/// whether or not it can count afterwards — but quiet is not the same as
+/// unsaid. This is the same failure `omh s rm` will meet later, and meeting it
+/// there for the first time, over a branch, is worse than hearing about it now
+/// over a commit that already succeeded. On stderr, like every other warning,
+/// so it stays out of anything being redirected.
+fn warn_uncounted(n: &Result<usize>, ctx: &out::Ctx, base: &str) {
+    if let Err(e) = n {
+        ctx.warn(&format!("could not count this branch against {base} — {e:#}"));
+    }
+}
+
 fn branch_tally(n: &Result<usize>) -> String {
     match n {
         Ok(n) => format!(
@@ -4983,26 +4999,30 @@ fn rm(cwd: &std::path::Path, id: &str, ctx: &out::Ctx) -> Result<()> {
     // trains people to ignore a namespace filling with dead refs.
     let base = session::default_branch(&paths.repo);
     let action = match session.remove(&paths.repo, &base, &paths.shadows())? {
-        session::Removed::BranchKept => {
-            let n = session.commits(&paths.repo, &base);
+        session::Removed::BranchKept(n) => {
             // Two ways to be kept, and they are not the same news. A branch
             // kept because it holds three commits is an invitation to review
             // them; one kept because omh could not tell what it holds is a
             // question, and saying "3 commits" for it would be an invention.
             //
-            // The review command changes with it: the only reason omh cannot
-            // count is that `base` does not resolve in this checkout, so
-            // `git log <base>..` would fail in the user's hands for exactly the
-            // reason they are being shown the line.
-            let (kept, review) = match &n {
-                Ok(n) => (
+            // The count comes back from `remove` rather than being asked
+            // again: it is the number that *made* the decision, and a second
+            // call could answer differently and narrate a decision nobody took.
+            //
+            // The review command changes with it. What stops omh counting is a
+            // range end that does not resolve, and for a branch this session is
+            // standing on that is the base — so a line beginning `<base>..`
+            // would fail in the user's hands for the reason they are being
+            // shown it.
+            let (kept, review) = match n {
+                Some(n) => (
                     format!(
                         "kept ({n} {} to review)",
-                        if *n == 1 { "commit" } else { "commits" }
+                        if n == 1 { "commit" } else { "commits" }
                     ),
                     format!("git log {base}..omh/{id}"),
                 ),
-                Err(_) => (
+                None => (
                     format!("kept — omh could not count it against {base}"),
                     format!("git log omh/{id}"),
                 ),
@@ -5017,7 +5037,7 @@ fn rm(cwd: &std::path::Path, id: &str, ctx: &out::Ctx) -> Result<()> {
                 "session": id,
                 "branch": format!("omh/{id}"),
                 "branch_kept": true,
-                "commits": n.as_ref().ok(),
+                "commits": n,
             }))
         }
         session::Removed::BranchDropped => report::Action::new(
