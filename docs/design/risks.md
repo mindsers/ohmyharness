@@ -26,22 +26,26 @@ is that the repository has no remote and no commit of yours in it. omh does not
 trust anything that repository asserts — authorship is stamped and carried
 secrets are refused on the host, when work crosses back.
 
-Narrowing it is cheap and is scheduled with the [git work](git.md). The gitdir
-has to be writable because the agent commits into it; its `config` does not.
-Measured 2026-08-21: `commit`, `checkout -b`, `stash`, `reset --hard`, `rebase`
-and `gc` never write that file, and when it cannot be replaced `git config` and
-`git remote add` fail cleanly with nothing half-written. Mounting it read-only
-therefore closes the whole agent-writable-config class — `diff.external`,
-textconv, `core.hooksPath`, `core.sshCommand`, `protocol.file.allow` — at the
-mount, rather than by omh remembering the right `-c` flag at every call site
-forever. That matters more than it used to, because `omh sNN log` and `diff`
-will read this gitdir **on the host**, where a diff driver the agent named runs
-as you. It also takes `git remote add` away, which is the route git's own
-error message walks the agent to — though not the hook's job: measured
-2026-08-21, `git push <url> <ref>` needs nothing in config and still meets it.
-What changes on the `remote add` route is that the agent reads a filesystem
-error rather than omh's sentence, which is a reason to put the fact in the
-arrangement, not a reason to skip the mount. Measured with `chflags uchg` standing in for a
+**Narrowed.** The gitdir has to be writable because the agent commits into it;
+its `config` does not. omh rewrites that file from its own view at every launch
+and mounts it read-only, which closes the agent-writable-config class —
+textconv drivers, `core.hooksPath`, `core.sshCommand`, `protocol.file.allow` —
+at the mount rather than by omh remembering the right `-c` flag at every call
+site forever.
+
+Measured inside a real container: `commit`, `checkout -b` and `reset --hard`
+never write that file and do not notice it, while `git config` and
+`git remote add` meet `could not write config file /omh/shadow/config: Resource
+busy` with nothing half-written. It is `Resource busy` rather than `Read-only
+file system` because git replaces the file by renaming a lock over it, and what
+refuses is the rename onto a mount point.
+
+Taking `git remote add` away closes the route git's own error message walks the
+agent down, so the arrangement now says adding a remote will not work either.
+The `pre-push` hook keeps its job on the other route: `git push <url> <ref>`
+needs nothing in config and still meets it. What remains open is everything
+else in 2b — the hook is still bypassable by `--no-verify`, and risk 5 is
+untouched. Measured with `chflags uchg` standing in for a
 read-only bind mount — both make a rename-over fail — so the claim owes a check
 inside a real container, which is `doctor`'s job.
 
