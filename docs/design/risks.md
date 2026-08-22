@@ -62,14 +62,29 @@ to the local network.
 secret reaches the agent, so patterns are validated against escaping the repo.
 A teammate's commit should not be able to copy your `~/.ssh` into a sandbox.
 
-**4b. Closed.** The carried-secret scan read its needle as a regular
-expression: `--keep` searches the agent's commit messages for lines from the
-files you carried in, and passed them to `git log --grep` without `-F`, so a
-secret containing a metacharacter did not match itself — `KEY=ab+cd/ef12345==`,
-an ordinary base64 value, went through. The same default broke the feature from
-the other side, where an unbalanced `[` in a carried line made `git log` exit
-128 and `--keep` stay dead for that session. Both measured 2026-08-21; both
-guarded. The content half was always a fixed-string pickaxe and never affected.
+**4b. Closed.** The carried-secret scan read its needle as a *pattern* rather
+than as bytes. `--keep` searches the agent's commit messages for lines from the
+files you carried in, and passed them to `git log --grep` without `-F` — and
+which pattern language that is depends on the reader's `grep.patternType`.
+Measured 2026-08-21 against git 2.55.0, on a subject quoting the secret
+verbatim: a `*` in a secret was missed under **all three** settings, a `+` was
+missed under `extended` and `perl` (found under the `basic` default), and an
+unbalanced `[` was a fatal error everywhere — taking `--keep` down for that
+session entirely. A guard whose reach depends on the user's dotfiles is not a
+guard; `-F` pins it. The content half was always a literal pickaxe and was never
+affected.
+
+**4d. What the carried-secret scan still cannot see.** It works from *needles* —
+the lines of the files you carried in — and three kinds of line never become
+one. A file that is not UTF-8 yields **no needles at all**, so a carried
+keystore, `.p12` or DER key is protected only by its path: copy it under another
+name and nothing catches it, and `certs/` is the second example `carry_in`'s own
+documentation gives. A line shorter than 12 characters, or one starting with `#`
+or `//`, is dropped silently. And a carried file deleted or renamed in your
+checkout between launch and harvest yields nothing either, which is strictly
+worse than the rotation caveat already documented in the code: rotation leaves a
+needle at the new value, deletion leaves none. All three fail open, none is
+reported.
 
 **4c. The sandbox's exclude list is frozen at the first launch.** omh derives
 what the sandbox's repository must not track from the mounts it is about to

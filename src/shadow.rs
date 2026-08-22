@@ -616,14 +616,24 @@ impl Shadow {
     /// named.
     ///
     /// **`-F` on the `--grep`, or the needle is a pattern rather than the bytes
-    /// it is.** `--grep` takes a POSIX basic regular expression by default, so
-    /// a secret carrying a metacharacter does not match itself — measured
-    /// against git 2.55.0, `KEY=ab+cd/ef12345==` in a commit subject is not
-    /// found, because `+` means *one or more of the previous character* and
-    /// base64 is full of them. The same default takes the feature down from the
-    /// other side: an unbalanced `[` in a carried line is a syntax error, `git
-    /// log` exits 128, and `--keep` stays dead for that session. `-S` needs no
-    /// such flag; a pickaxe is already a fixed string.
+    /// it is.** `--grep` takes a *pattern*, and which language it is written in
+    /// is the reader's setting: `grep.patternType` is `basic` unless someone
+    /// says otherwise, and people do say otherwise. Measured against git 2.55.0
+    /// across all three, on a commit subject quoting the secret verbatim:
+    ///
+    /// | in the secret | `basic` | `extended` | `perl` |
+    /// |---|---|---|---|
+    /// | `*` | **missed** | missed | missed |
+    /// | `+` | found | **missed** | **missed** |
+    /// | `[` | fatal | fatal | fatal |
+    ///
+    /// So a `*` in a secret goes through on a stock install, a `+` goes through
+    /// for anyone who set `extended` or `perl`, and an unbalanced `[` takes the
+    /// whole feature down — `git log` exits 128, the harvest fails, and
+    /// `--keep` stays dead for that session. A guard whose reach depends on the
+    /// user's dotfiles is not a guard. `-F` pins it: fixed strings, whatever
+    /// `grep.patternType` says. `-S` needs no such flag — a pickaxe is already
+    /// literal unless `--pickaxe-regex` asks otherwise.
     ///
     /// omh is in a position no scanner is — it staged these files, so it knows
     /// the bytes and never has to guess. With one caveat worth stating: it
@@ -1381,16 +1391,18 @@ mod tests {
 
     /// A secret is matched as the bytes it is, not as a pattern.
     ///
-    /// The message half of the scan hands the needle to `git log --grep`, which
-    /// is a POSIX basic regular expression unless told otherwise. So a secret
-    /// carrying a metacharacter does not match itself: `+` means *one or more
-    /// of the previous character*, and base64 is full of them. Measured against
-    /// git 2.55.0 — `--grep` finds nothing for a commit whose subject quotes
-    /// this value verbatim, and `-F --grep` finds it.
+    /// The needle carries a `*` deliberately, and the choice is the whole
+    /// worth of the test. `--grep` reads a pattern in whatever language
+    /// `grep.patternType` names, and `*` is a quantifier in all three of them,
+    /// so this is red on any machine. A `+` would not be: it is literal under
+    /// `basic`, which is the default, and only bites the people who set
+    /// `extended` or `perl` — this test was written with one and passed for
+    /// the author's dotfiles rather than for git.
     ///
     /// Planted in the **message only**, because that is the one door `-S`
     /// cannot see: the pickaxe is already a fixed string and would have caught
-    /// it in a diff.
+    /// it in a diff, and the test would then have proved nothing about the
+    /// path it exists for.
     #[test]
     fn a_secret_that_looks_like_a_pattern_is_still_caught() {
         let (d, wt, shadow_dir) = fixture();
@@ -1398,9 +1410,9 @@ mod tests {
         let s = Shadow::new(&shadow_dir, "s01");
         s.ensure(&wt, &[".env".to_string()]).unwrap();
 
-        // `+` and `/` are ordinary base64. As a regex this matches `abcd…`,
-        // `abbcd…` and never the literal the agent actually wrote.
-        let secret = "KEY=ab+cd/ef12345==";
+        // `*` and `/` are ordinary base64. As a pattern this matches `KEY=acd…`
+        // and `KEY=abbcd…` — never the literal bytes the agent wrote.
+        let secret = "KEY=ab*cd/ef12345==";
         std::fs::write(checkout.join(".env"), format!("{secret}\n")).unwrap();
         std::fs::write(wt.join(".env"), format!("{secret}\n")).unwrap();
 
@@ -1436,7 +1448,11 @@ mod tests {
     /// feature down rather than letting something through: an unbalanced `[` is
     /// a syntax error to `--grep`, so `git log` exits 128, the harvest fails,
     /// and `--keep` stays dead for that session until the file changes.
-    /// Measured — `fatal: command line, 'SECRET=a[bc': missing terminating ]`.
+    ///
+    /// Measured under every `grep.patternType` — `fatal: command line,
+    /// 'SECRET=a[bc': brackets ([ ]) not balanced` under `basic` and
+    /// `extended`, `missing terminating ] for character class` under `perl`.
+    /// The wording moves with the setting; the exit code does not.
     #[test]
     fn a_carried_line_that_is_not_a_regex_does_not_break_the_harvest() {
         let (d, wt, shadow_dir) = fixture();
