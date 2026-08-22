@@ -579,7 +579,7 @@ fn work_committed_from_the_host_is_what_diff_then_reports() {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    let printed = String::from_utf8_lossy(&sb.omh(&["s", "diff", "s01"]).stdout).to_string();
+    let printed = String::from_utf8_lossy(&sb.omh(&["s01", "diff"]).stdout).to_string();
     assert!(printed.contains("feature.rs"), "got: {printed}");
 }
 
@@ -641,7 +641,7 @@ fn diff_reports_a_sessions_work_before_anyone_commits_it() {
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
 
-    let out = sb.omh(&["s", "diff", "s01"]);
+    let out = sb.omh(&["s01", "diff"]);
 
     assert!(
         out.status.success(),
@@ -1457,7 +1457,7 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
     let run = sb.home.join(".omh/run/repo/s01");
     std::fs::create_dir_all(&run).unwrap();
 
-    let out = sb.omh(&["s", "rm", "s01"]);
+    let out = sb.omh(&["s01", "rm"]);
     assert!(
         out.status.success(),
         "rm failed: {}",
@@ -1514,7 +1514,7 @@ fn removing_a_session_that_committed_keeps_the_branch_for_review() {
         assert!(out.status.success(), "git {args:?}: {out:?}");
     }
 
-    let out = sb.omh(&["s", "rm", "s01", "--json"]);
+    let out = sb.omh(&["s01", "rm", "--json"]);
     assert!(
         out.status.success(),
         "rm failed: {}",
@@ -1539,6 +1539,26 @@ fn removing_a_session_that_committed_keeps_the_branch_for_review() {
         doc["commits"],
         serde_json::json!(1),
         "and the count reported is the one that decided it"
+    );
+}
+
+/// `ls` is the one verb the prefix cannot scope, so it says so.
+///
+/// Every other session verb acts on one session; `ls` is about the set. Taking
+/// the prefix and ignoring it would list every session while looking like it
+/// had listed one, which is the kind of quiet wrongness this whole selector
+/// exists to remove.
+#[test]
+fn scoping_the_one_verb_that_lists_them_all_is_refused() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+
+    let out = sb.omh(&["s01", "ls"]);
+    assert!(!out.status.success(), "it has to refuse, not quietly widen");
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("s01") && said.contains("omh s ls"),
+        "and name both what it dropped and what to type: {said}"
     );
 }
 

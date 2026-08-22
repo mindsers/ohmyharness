@@ -459,7 +459,7 @@ the hardening in step 6 of the order below, this work closes or narrows
    may *write*. Verified inside a real container, which the host stand-in got
    right for the wrong reason — `Resource busy`, not `Read-only file system`.
 7. `omh sNN log`, and `diff` grows `-p` and a checkpoint argument.
-8. The selector: `sNN` in, three spellings out.
+8. **Landed (#53).** The selector: `sNN` in, three spellings out.
 9. `--keep [selection]`, and `--edit` for the todo.
 10. `omh sNN sync`, the conflict-marker guard on `commit`, and the one-shot
     note the next launch delivers.

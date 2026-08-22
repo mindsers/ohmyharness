@@ -120,6 +120,71 @@ impl Cli {
     }
 }
 
+/// Lift a leading `sNN` out of the command line and into the session.
+///
+/// One form, and three deletions. `omh s diff`, `omh s diff s01`, `omh s -s s01
+/// diff` and `omh -s s01 s diff` all meant the same thing, over two mechanisms
+/// applied unevenly — `rm` required the positional, `commit` and `push` ignored
+/// it, and `push` could not have one because that slot is the branch name.
+///
+/// The desugaring is literal: `omh s01 log` is `omh sessions --session s01
+/// log`. When what follows is not a session verb the prefix still names the
+/// session and the command runs where it lives, which is what covers the
+/// launch — `sessions` has no verb for starting a harness.
+///
+/// Pure, and separate from `Cli::parse` for that reason: what a command line
+/// means is worth testing without a repository, a container or a clock.
+///
+/// The pattern matters more than the list. `s\d+` is what `next_id` generates,
+/// so it always matches a real session and can never collide with a command —
+/// and `--session` stays for an id that is not `sNN`, which is why this can
+/// refuse a name given twice rather than choosing between them.
+fn session_prefix(argv: Vec<String>) -> Result<(Option<String>, Vec<String>)> {
+    let Some(first) = argv.get(1) else {
+        return Ok((None, argv));
+    };
+    let looks_like_a_session =
+        first.len() > 1 && first.starts_with('s') && first[1..].chars().all(|c| c.is_ascii_digit());
+    if !looks_like_a_session {
+        return Ok((None, argv));
+    }
+
+    if let Some(at) = argv.iter().position(|a| a == "--session" || a == "-s") {
+        anyhow::bail!(
+            "this names the session twice — `{first}` and `{}`. Name it once:\n  omh {first} …",
+            argv.get(at + 1).map(String::as_str).unwrap_or("")
+        );
+    }
+
+    // Session verbs from the parser rather than a list here, for the reason
+    // `omh_globals` reads its flags the same way: a list written out is one
+    // that stops being true the first time a verb is added.
+    let verbs: Vec<String> = {
+        use clap::Subcommand;
+        SessionsCmd::augment_subcommands(clap::Command::new("s"))
+            .get_subcommands()
+            .flat_map(|c| {
+                std::iter::once(c.get_name().to_string())
+                    .chain(c.get_all_aliases().map(str::to_string))
+            })
+            .collect()
+    };
+
+    let mut rest: Vec<String> = std::iter::once(argv[0].clone())
+        .chain(argv.iter().skip(2).cloned())
+        .collect();
+    // A session verb goes back through the namespace it belongs to. Anything
+    // else — a harness name, `attach`, `graph` — is left where it was, and a
+    // bare `omh s01` becomes `omh s`, whose own error names the verbs.
+    if rest
+        .get(1)
+        .is_none_or(|next| verbs.iter().any(|v| v == next))
+    {
+        rest.insert(1, "s".to_string());
+    }
+    Ok((Some(first.clone()), rest))
+}
+
 /// omh's own long flags, taken from the parser rather than written out.
 ///
 /// A list would rot: the next global flag added would fall outside the guard
@@ -291,12 +356,11 @@ enum SessionsCmd {
     Ls,
     /// Remove a session — its container and its worktree. A branch holding
     /// commits is kept.
-    Rm { session: String },
+    Rm,
     /// Stop a sandbox. The worktree and branch survive.
-    Down { session: Option<String> },
+    Down,
     /// What a session changed, against its base branch.
     Diff {
-        session: Option<String>,
         /// Defaults to the repo's own default branch.
         #[arg(long)]
         base: Option<String>,
@@ -484,14 +548,35 @@ fn main() -> std::process::ExitCode {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let cli = Cli::parse();
-    let (format, palette) = cli.output();
-    let ctx = out::Ctx { format, palette };
+    // One sink for every failure, including the ones that happen before there
+    // is a `Cli` to ask about colour — `no_command_writes_to_a_stream_behind_
+    // the_output_layer` allows exactly one, and the exemption is this renderer
+    // rather than whichever error happened to need it first.
+    //
+    // The palette starts plain and is replaced the moment the parse resolves
+    // one, so a refusal is painted the way every other refusal is.
+    let mut palette = out::Palette::plain();
+    let outcome = (|| -> Result<()> {
+        // The session is lifted out of the command line before clap sees it,
+        // so every command below reads it from one place.
+        let (named, argv) = session_prefix(std::env::args().collect())?;
+        let mut cli = Cli::parse_from(argv);
+        cli.session = cli.session.or(named);
+        let (format, resolved) = cli.output();
+        palette = resolved;
+        dispatch(
+            &cli,
+            &out::Ctx {
+                format,
+                palette: resolved,
+            },
+        )
+    })();
 
-    match dispatch(&cli, &ctx) {
+    match outcome {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
-            eprint!("{}", out::problem(&ctx.palette, &e));
+            eprint!("{}", out::problem(&palette, &e));
             std::process::ExitCode::FAILURE
         }
     }
@@ -510,15 +595,29 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx),
 
         Cmd::Sessions { cmd } => match cmd {
-            SessionsCmd::Ls => sessions_ls(&cwd, ctx),
-            SessionsCmd::Rm { session } => rm(&cwd, session, ctx),
-            SessionsCmd::Down { session } => down(&cwd, session.as_deref(), ctx),
-            SessionsCmd::Diff { session, base } => diff(
-                &cwd,
-                session.as_deref().or(cli.session.as_deref()),
-                base.as_deref(),
-                ctx,
-            ),
+            // One source for which session a command acts on, now that the
+            // prefix and `--session` both land in `cli.session`. `rm` used to
+            // require its own positional and `diff` accepted either, which is
+            // how the same question came to have two answers.
+            // The one combination the prefix makes expressible and meaningless.
+            // Ignoring the scope would be worse than refusing it: `omh s01 ls`
+            // would list every session and look like it had listed one.
+            SessionsCmd::Ls => {
+                if let Some(id) = cli.session.as_deref() {
+                    anyhow::bail!(
+                        "`ls` lists every session; drop the `{id}`:\n  omh s ls\n  omh {id} diff                            acts on that one"
+                    );
+                }
+                sessions_ls(&cwd, ctx)
+            }
+            SessionsCmd::Rm => {
+                let id = cli.session.as_deref().context(
+                    "which session? name it first:\n  omh s01 rm\n  omh s ls   lists them",
+                )?;
+                rm(&cwd, id, ctx)
+            }
+            SessionsCmd::Down => down(&cwd, cli.session.as_deref(), ctx),
+            SessionsCmd::Diff { base } => diff(&cwd, cli.session.as_deref(), base.as_deref(), ctx),
             SessionsCmd::Commit {
                 message,
                 skip_carried,
@@ -5126,6 +5225,100 @@ mod tests {
 
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");
+
+    /// A full command line, program name included, the way `main` sees it.
+    fn cli_argv(parts: &[&str]) -> Vec<String> {
+        std::iter::once("omh")
+            .chain(parts.iter().copied())
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The session goes first, and everything after it is what you would have
+    /// typed anyway.
+    ///
+    /// Four spellings meant the same thing before this — `s diff`, `s diff s01`,
+    /// `s -s s01 diff`, `-s s01 s diff` — over two mechanisms applied unevenly:
+    /// `rm` required the positional, `commit` and `push` ignored it, and `push`
+    /// could not have one because that slot is the branch name. This is the one
+    /// form they collapse into.
+    #[test]
+    fn a_session_named_first_is_the_session_the_command_acts_on() {
+        // a session verb: the prefix desugars to the sessions namespace
+        assert_eq!(
+            session_prefix(cli_argv(&["s01", "diff"])).unwrap(),
+            (Some("s01".to_string()), cli_argv(&["s", "diff"]))
+        );
+        // The verbs come from the parser, not from a list here, so `log` joins
+        // this the moment `SessionsCmd` has it — which is the next step in the
+        // spec and exactly why the list is derived.
+        assert!(
+            !session_prefix(cli_argv(&["s01", "push", "fix/x"]))
+                .unwrap()
+                .1
+                .contains(&"s01".to_string()),
+            "the id is lifted out, never left in the arguments"
+        );
+        // …carrying its own flags untouched
+        assert_eq!(
+            session_prefix(cli_argv(&["s02", "commit", "--keep", "1,3"])).unwrap(),
+            (
+                Some("s02".to_string()),
+                cli_argv(&["s", "commit", "--keep", "1,3"])
+            )
+        );
+    }
+
+    /// The one place the desugaring is not a pure alias: a launch.
+    ///
+    /// `sessions` has no verb for starting a harness, so when what follows is
+    /// not a session verb the prefix still names the session and the command
+    /// runs where it lives. Everything after a harness name is still the
+    /// harness's argv.
+    #[test]
+    fn a_session_named_first_also_works_for_what_sessions_has_no_verb_for() {
+        assert_eq!(
+            session_prefix(cli_argv(&["s01", "claude", "--resume", "x"])).unwrap(),
+            (
+                Some("s01".to_string()),
+                cli_argv(&["claude", "--resume", "x"])
+            )
+        );
+        assert_eq!(
+            session_prefix(cli_argv(&["s01", "attach", "zed"])).unwrap(),
+            (Some("s01".to_string()), cli_argv(&["attach", "zed"]))
+        );
+    }
+
+    /// Anything that is not `sNN` is left exactly as it was.
+    #[test]
+    fn a_command_that_is_not_a_session_is_not_read_as_one() {
+        for line in [
+            vec!["s", "diff"],
+            vec!["init"],
+            vec!["claude"],
+            vec!["sessions", "ls"],
+            // a harness whose name merely starts with s
+            vec!["sourcegraph"],
+        ] {
+            assert_eq!(
+                session_prefix(cli_argv(&line)).unwrap(),
+                (None, cli_argv(&line)),
+                "{line:?} is not a session prefix"
+            );
+        }
+    }
+
+    /// Naming the session twice is a question, not something to resolve.
+    #[test]
+    fn a_session_named_twice_is_refused_rather_than_picked() {
+        let err = session_prefix(cli_argv(&["s01", "--session", "s02", "log"]))
+            .expect_err("two names for one session is not something to guess at");
+        assert!(
+            err.to_string().contains("s01") && err.to_string().contains("s02"),
+            "the refusal has to name both: {err}"
+        );
+    }
 
     /// `resolved` is the wiring between the manifest and every launch, and
     /// nothing reached it: replacing its body with a pair of defaults — omh
