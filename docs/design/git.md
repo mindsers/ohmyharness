@@ -364,13 +364,18 @@ ship:
   `--no-textconv` closes it, and it is a per-command flag rather than a config
   key, so the helpers add it by verb. Measured against git 2.55.0 with a driver
   the sandbox named, which ran on the host until this landed.
-- **Landed (#51): sanitise what is printed.** `out::untrusted` strips C0/C1
-  except newline. Checkpoint subjects are agent-authored text rendered inside
-  omh's own report frames, and git quotes the refs and paths an agent chose
-  straight back in its stderr — which `problem` prints. An escape sequence there
-  repaints omh's own output, and `committed to main` is four words. Applied at
-  the four bail sites that carry git's stderr into an error, and waiting for
-  `log`'s checkpoint subjects.
+- **Landed (#51, extended in #52): sanitise what is printed.** `out::untrusted`
+  strips C0/C1 except newline. An escape sequence in agent-authored text
+  repaints omh's own output, and `committed to main` is four words.
+
+  Which text needs it was measured rather than guessed. git **quotes a path**
+  by default — `core.quotePath` renders an escape as a literal `\033` — so the
+  `--stat` summary `omh sNN diff` prints is already safe. git **does not quote
+  a subject**: `log --oneline` hands one back with its bytes intact. So the
+  sites are the four that carry git's stderr into an error, and the two in
+  `refuse_carried` that name the commit they found — which is the message
+  saying omh refused to publish a secret, and therefore the one worth forging.
+  `log`'s checkpoint subjects will need it for the same reason.
 - **Name the gitdir explicitly and inherit no `GIT_*`.** Host-side calls rely on
   `current_dir` today, so an ambient `GIT_DIR` — omh run from inside a hook, or
   from `rebase --exec` — redirects them wholesale.

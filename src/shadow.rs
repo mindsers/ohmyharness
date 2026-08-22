@@ -843,8 +843,15 @@ impl Shadow {
     fn refuse_carried(&self, repo: &Path, range: &str, carried: &[String]) -> Result<()> {
         for rel in carried {
             let rel = rel.trim().trim_end_matches('/');
+            // Sanitised where it is read, not where it is printed. What comes
+            // back is a sha and the agent's own subject line, and git quotes
+            // neither: measured, `core.quotePath` renders an escape inside a
+            // *path* as a literal `\033`, and leaves a **subject** exactly as
+            // it was written. The message below is the one that says omh
+            // refused to publish a secret, so a subject that can clear the line
+            // and answer for it is the forgery that matters most here.
             let found = git_in(repo, &["log", "--oneline", range, "--", rel])?;
-            if let Some(line) = found.lines().next() {
+            if let Some(line) = found.lines().next().map(crate::out::untrusted) {
                 anyhow::bail!(
                     "{rel} is a carried file and {line} has it. omh will not \
                      rewrite your history to hide a secret — drop that commit in \
@@ -861,7 +868,7 @@ impl Shadow {
                     ),
                 ] {
                     let hit = git_in(repo, &args)?;
-                    if let Some(line) = hit.lines().next() {
+                    if let Some(line) = hit.lines().next().map(crate::out::untrusted) {
                         anyhow::bail!(
                             "{line} {how} a line from {rel}, which you carried in. \
                              omh will not rewrite your history to hide a secret — \
@@ -1929,6 +1936,55 @@ mod tests {
             subjects,
             vec!["The second round", "The first round"],
             "each round lands once, in order: {log}"
+        );
+    }
+
+    /// The refusal quotes the agent's subject line, so it may not carry escapes.
+    ///
+    /// `refuse_carried` names the commit it found — sha and subject, straight
+    /// from `git log --oneline`. Measured: git quotes a *path* by default
+    /// (`core.quotePath` renders an escape as a literal `\033`), and does not
+    /// quote a **subject** at all, which arrives with its bytes intact.
+    ///
+    /// This is the message that says omh refused to publish a secret. A subject
+    /// that can clear the line and print something else is a forged answer to
+    /// the one question this whole guard exists to answer.
+    #[test]
+    fn a_refusal_cannot_be_repainted_by_the_subject_it_quotes() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[".env".to_string()]).unwrap();
+
+        let secret = "API_TOKEN=ghp_abc123def456";
+        std::fs::write(checkout.join(".env"), format!("{secret}\n")).unwrap();
+        std::fs::write(wt.join(".env"), format!("{secret}\n")).unwrap();
+        std::fs::write(wt.join("note.rs"), "fn n() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        // the secret is in the subject, which is the door `-S` cannot see — and
+        // the subject also clears the line and writes its own answer
+        git(
+            &s.gitdir,
+            &wt,
+            &[
+                "commit",
+                "-qm",
+                &format!(
+                    "note: {secret}{}[2K\rcommitted to main, nothing carried",
+                    '\u{1b}'
+                ),
+            ],
+        )
+        .unwrap();
+
+        let err = s
+            .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("carried"), "it still has to refuse: {err}");
+        assert!(
+            !err.contains('\u{1b}'),
+            "and it may not hand the terminal to the subject it quotes: {err:?}"
         );
     }
 
