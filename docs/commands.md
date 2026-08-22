@@ -352,7 +352,7 @@ Every commit is authored `omh sandbox <sandbox@omh.invalid>`, whatever the agent
 set in its own config. The sandbox does not get to say who wrote something on
 your branch.
 
-`--keep` refuses rather than repairing. The cases, and they are the whole set:
+`--keep` refuses rather than repairing, in these cases and no others:
 
 - **A carried file reached a commit** — by `git add -f`, copied under another
   name, pasted into source, or written into a message. omh knows the bytes it
@@ -366,18 +366,22 @@ your branch.
   the session left.
 - **The branch moved while you were curating.** Nothing is written.
 - **The session has no sandbox repository yet** — nothing has run in it.
+- **omh cannot tell which commits are new.** `--keep` replays from the point it
+  last handed over, and that point can stop meaning anything two ways: an agent
+  that `reset --hard`s below it, or a record that is unreadable, empty or no
+  longer a commit git knows. Replaying from the start of the session would offer
+  the branch work it already has, so omh stops and says to take the files with
+  `omh s commit -m`.
 
-One case is missing from that list because it is a defect rather than a
-refusal: **`--keep` is not repeatable.** It replays from the point the session
-started every time, so a second run offers you commits already on your branch
-and then usually dies applying them. Measured 2026-08-21 against git 2.55.0.
-Until it is fixed, treat `--keep` as one landing per session and use
-`omh s commit -m` for the rest. The fix is the replay point in
-[Git](design/git.md#the-replay-point).
+`--keep` is repeatable otherwise: land some work, let the agent carry on, land
+the rest. Each round takes only what the last one did not.
 
-The branch is untouched in every case. For the first two the work never left the
-sandbox; for the rest omh had already fetched it into your repository, so a
-failure part-way through loses nothing either way.
+The branch is untouched in every case, and nothing is lost in any of them: omh
+fetches the sandbox's work into your repository before it replants, so even a
+refusal that happens after the fetch leaves the commits reachable there. An
+earlier version of this said the first two refusals happen before the work
+leaves the sandbox. They do not — the carried-file scan reads the fetched
+commits, which is how it can see them at all.
 
 **`rm` never deletes a branch that has commits.** Unreviewed agent work must be
 unloseable, so the branch outlives the session that produced it, and `rm` tells

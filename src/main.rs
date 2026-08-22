@@ -4839,6 +4839,28 @@ fn commit(
             &report::Action::new(
                 "committed",
                 match landed {
+                    // Two ways to keep nothing, and they are different news. A
+                    // session that has never handed anything over has made no
+                    // commits; one that has is simply up to date, and telling
+                    // that user their agent "has made no commits" contradicts
+                    // the branch they are looking at.
+                    // Swallowed rather than propagated, because this only
+                    // chooses between two ways of saying nothing happened and
+                    // the harvest above already succeeded — failing here would
+                    // report a command that worked as a command that did not.
+                    //
+                    // `true` on error, and the direction matters. `landed`
+                    // fails only for a record that *exists* and could not be
+                    // read, so the session has handed something over before:
+                    // "nothing new" is then the true sentence and "has made no
+                    // commits" is a stronger claim than omh can make, about a
+                    // branch the user can see. An earlier version defaulted the
+                    // other way and called it the vaguer answer. It is not.
+                    0 if shadow.landed().map(|l| l.is_some()).unwrap_or(true) => format!(
+                        "nothing new to keep — everything {} has committed is already on \
+                         the branch",
+                        session.label()
+                    ),
                     0 => format!("nothing to keep — {} has made no commits", session.label()),
                     _ => format!(
                         "kept {landed} of {}'s own commits{}",

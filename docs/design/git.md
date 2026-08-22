@@ -54,7 +54,7 @@ Four workflows, not a feature list.
 |---|---|
 | **read the change** before landing it | `omh s diff` prints `--stat` only. The patch is in a worktree the docs tell you never to enter. |
 | **know what the agent has been doing** | Its commits are invisible until `--keep` opens a `rebase -i` todo. `s ls` does not count them; `s rm` destroys them without saying they existed. |
-| **land work in stages** | `--keep` replays from the seed every time. Measured: a second run re-lists commits already on the branch, then dies on `Could not apply`. |
+| ~~**land work in stages**~~ — landed (#50) | `--keep` replayed from the seed every time. Measured: a second run re-listed commits already on the branch, then died on `Could not apply`. It replays from what it last handed over now. |
 | **not fall behind trunk** | `s ls` reports `behind 12` and offers nothing. The session works against stale code until it is abandoned. |
 
 Everything else about the git story holds up. The worktree boundary, the
@@ -414,7 +414,7 @@ the hardening in step 6 of the order below, this work closes or narrows
 | **Landed in #46.** `rm` deleted a branch holding unreviewed commits. `Session::commits` reads a git *failure* as `0`, and `remove` turns `0` into `branch -D`. A base that resolves only as `origin/<name>` — `default_branch` verifies no local ref — makes `rev-list` fail. | `removed session s01; branch omh/s01 dropped (no commits)`, with one commit on it. Contradicts the invariant [commands.md](../commands.md) states outright. |
 | **Landed.** `worktree add -b` was silently overridden when the base existed only on the remote: git's DWIM won and checked out trunk itself. Every review path then refused, and `s ls` reported a branch that was never created. | `git worktree add -b omh/s02 ../wt2 main` → `Preparing worktree (new branch 'main')`. `--no-guess-remote` does not help; resolving the base to a commit first does. One cause, two symptoms: with only a remote-tracking *ref* and no remote configured, the same base instead fails outright with `invalid reference: main`. |
 | **Landed.** The carried-secret scan over messages read a pattern, not a literal — and which pattern language depends on the reader's `grep.patternType`. | Measured across all three settings: `*` in a secret is missed by every one, `+` by `extended` and `perl` (the `basic` default finds it), and `[` is fatal everywhere, taking `--keep` down for the session. `-F` matches the bytes regardless. The first measurement of this used a `+` and was taken on a machine configured `perl` — the defect is real, the example was the author's dotfiles. |
-| **`--keep` is not idempotent.** The replay point above is the fix. | The second run lists commits already on the branch in the todo, then `Could not apply 8eac520`. |
+| **Landed (#50).** `--keep` was not idempotent — the replay point is the fix. | The second run listed commits already on the branch in the todo, then `Could not apply 8eac520`. |
 | **`rebase -i` without a terminal** keeps everything and reports a curation that never happened. Fixed by `--keep [selection]`; the tty guard moves to `--edit`. | With stdin from `/dev/null` the rebase runs the unedited todo, exits 0, and omh would report `kept 2`. |
 | **Ambient `GIT_*` redirects host-side calls.** They rely on `current_dir` alone; `shadow`'s own helper is safe because it passes both paths explicitly. | Argued, not measured. |
 
@@ -427,7 +427,7 @@ the hardening in step 6 of the order below, this work closes or narrows
 3. **Landed (#48).** `-F` on the carried-secret message scan.
 4. **Landed (#49).** The sandbox's exclude list is rewritten on every launch
    rather than at the first one — [risks](risks.md#security) 4c.
-5. The replay point, and `--keep` becomes repeatable.
+5. **Landed (#50).** The replay point, and `--keep` becomes repeatable.
 6. The neutralised set grows, agent-authored text is sanitised at the render
    boundary, and the sandbox's `config` is mounted read-only — the gate on 7,
    and what narrows [risks](risks.md#security) 2b.
