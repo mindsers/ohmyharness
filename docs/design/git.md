@@ -420,12 +420,13 @@ the hardening in step 6 of the order below, this work closes or narrows
 
 ## Order
 
-1. `commits()` returns a `Result`; nothing drops a branch on an unanswered
-   question.
-2. Resolve the base to a commit before `worktree add`, and assert HEAD after.
-3. `-F` on the carried-secret message scan.
-4. **Landed.** The sandbox's exclude list is rewritten on every launch rather
-   than at the first one — [risks](risks.md#security) 4c.
+1. **Landed (#46).** `commits()` returns a `Result`; nothing drops a branch on
+   an unanswered question.
+2. **Landed (#47).** Resolve the base to a commit before `worktree add`, and
+   assert HEAD after.
+3. **Landed (#48).** `-F` on the carried-secret message scan.
+4. **Landed (#49).** The sandbox's exclude list is rewritten on every launch
+   rather than at the first one — [risks](risks.md#security) 4c.
 5. The replay point, and `--keep` becomes repeatable.
 6. The neutralised set grows, agent-authored text is sanitised at the render
    boundary, and the sandbox's `config` is mounted read-only — the gate on 7,

@@ -101,7 +101,9 @@ impl Shadow {
     ///
     /// Idempotent for a *finished* shadow: relaunching into a running session
     /// must not reset the agent's checkpoints, so one that has a seed recorded
-    /// is left exactly as it is. One without is the wreckage of a launch that
+    /// keeps every commit, ref and index it had. The one thing it does not keep
+    /// is the exclude list, which is derived from mounts that move between
+    /// launches — see the comment on the fast path. One without is the wreckage of a launch that
     /// died partway through, and is rebuilt rather than adopted — see the two
     /// notes in the body for why that cannot lose work.
     pub fn ensure(&self, worktree: &Path, excluded: &[String]) -> Result<()> {
@@ -113,16 +115,25 @@ impl Shadow {
         if self.gitdir.exists() && self.seed_record.exists() {
             // The repository is left exactly as it is — that is what makes
             // relaunching safe — but the exclude list is not part of "as it
-            // is". It is derived from the mounts omh is about to make, and
-            // those change: switch a capability on and the document it mounts
-            // inside `/work` is one this repository has never heard of, so
+            // is". `container::plan` builds it from the `carry_in` policy and
+            // then from the mounts it is about to make, and the second half
+            // moves: switch harness, or switch a capability on, and a document
+            // lands inside `/work` that this repository has never heard of, so
             // `git add -A` sweeps omh's rendered file — credentials and all —
             // into a history `--keep` replays onto the branch.
             //
             // Written here rather than through a `refresh` the caller has to
-            // remember, because a caller that forgets reintroduces exactly this
-            // and nothing goes red. `ensure` already takes the list; the only
-            // question was whether it believed it on the second launch.
+            // remember. The tests would catch `plan` forgetting one today; what
+            // they cannot catch is the *next* caller of `ensure`, which would
+            // be a path they do not cover. `ensure` already takes the list, so
+            // the only question was whether it believed it on the second
+            // launch.
+            //
+            // Wholesale, so anything the agent added to this file for its own
+            // housekeeping goes with it. That is the trade: merging would keep
+            // those, and would also keep an entry omh has since dropped —
+            // leaving a path silently untracked in the one repository whose
+            // job is to show the agent its own work.
             Self::write_exclude(&self.gitdir, excluded)?;
             return Ok(());
         }
@@ -753,17 +764,25 @@ impl Shadow {
     /// determined one — what stops the secret reaching the branch is the check
     /// on the host when work crosses back.
     ///
-    /// Takes the directory rather than reading `self.gitdir`, because it runs
-    /// while the repository is still being built under another name.
+    /// Takes the directory rather than reading `self.gitdir`, because the
+    /// first of its two callers runs while the repository is still being built
+    /// under another name. The second is the fast path in `ensure`, which
+    /// passes the finished gitdir on every relaunch.
     fn write_exclude(gitdir: &Path, excluded: &[String]) -> Result<()> {
         let info = gitdir.join("info");
-        std::fs::create_dir_all(&info)?;
+        // Named, because this is the one write that can fail a launch which
+        // would otherwise have been a no-op — the fast path in `ensure` did no
+        // I/O at all before. `Permission denied (os error 13)` with no path is
+        // not something a user can act on, and the directory it names is one
+        // the agent can chmod.
+        std::fs::create_dir_all(&info).with_context(|| format!("preparing {}", info.display()))?;
         // Just what the caller names. `container::plan` derives that from the
         // mounts it is about to make, which already covers omh's staged rules —
         // chaining `carry::STAGED_RULES` here as well only made the list
         // disagree with its own source when a capability changed.
         let body: String = excluded.iter().map(|n| format!("{n}\n")).collect();
-        std::fs::write(info.join("exclude"), body)?;
+        let at = info.join("exclude");
+        std::fs::write(&at, body).with_context(|| format!("writing {}", at.display()))?;
         Ok(())
     }
 
