@@ -2193,7 +2193,16 @@ fn a_build_asks_docker_to_remove_the_tags_it_replaced() {
         &["omh/base:held"],
     );
 
-    sb.omh(&["init"]);
+    // Asked, not assumed. This has failed twice on CI with an empty removal
+    // list, which is what a build that never ran looks like from here — and the
+    // discarded status meant the message said nothing about why. Every
+    // neighbouring test in this file already checks it.
+    let init = sb.omh(&["init"]);
+    assert!(
+        init.status.success(),
+        "init failed, so no build ran and no reap followed it:\n{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
 
     let removals: Vec<String> = sb
         .docker_calls(&log)
