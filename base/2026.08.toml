@@ -164,7 +164,7 @@ remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/s
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
-  value = "594 B"
+  value = "721 B"
   how   = "the section as shipped, byte for byte, computed by `every_rules_section_costs_what_it_says`. It reads `shadow::ARRANGEMENT`, which the seed commit's message reads too, so the size is the same sentence a `git log` renders for free"
   on    = "2026-08-19"
 

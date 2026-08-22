@@ -478,6 +478,25 @@ pub fn plan(
             read_only: true,
             file: true,
         });
+
+        // The config, mounted read-only over the copy `ensure` just wrote.
+        //
+        // Staged as a *copy of what is on disk* rather than composed here: git
+        // records `repositoryformatversion` and `filemode` when it creates the
+        // repository, and a file assembled from omh's idea of the keys would be
+        // a repository git reads differently from the one it made. `ensure` has
+        // already put it in the state omh wants; this carries those bytes in.
+        let config = stage.join("shadow-config");
+        if staging == Staging::Apply {
+            std::fs::copy(shadow.gitdir.join("config"), &config)
+                .with_context(|| format!("staging the sandbox's config for {}", session.id))?;
+        }
+        mounts.push(Mount {
+            host: config,
+            guest: crate::shadow::GUEST_CONFIG.into(),
+            read_only: true,
+            file: true,
+        });
     }
 
     // The graph index, keyed by repo rather than harness — that is what lets
@@ -1511,6 +1530,46 @@ mod tests {
             std::fs::read_to_string(&hook.host).expect("staged"),
             crate::shadow::pre_push_hook(),
             "and it has to be the hook omh wrote, not an empty placeholder"
+        );
+    }
+
+    /// The sandbox cannot rewrite the file that decides what its git does.
+    ///
+    /// Same shape as the push hook above and the same reason: the gitdir is
+    /// read-write because the agent commits into it, so every file in it is the
+    /// agent's — including the one holding `core.sshCommand`, `core.hooksPath`
+    /// and the textconv drivers. `ensure` puts it back at each launch, which
+    /// bounds how long a key survives; the mount is what stops it being set at
+    /// all for the life of the container.
+    #[test]
+    fn the_sandbox_cannot_rewrite_the_config_that_decides_what_git_does() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+
+        let config = p
+            .mounts
+            .iter()
+            .find(|m| m.guest.to_string_lossy() == crate::shadow::GUEST_CONFIG)
+            .expect("the config has to be mounted, not merely written");
+        assert!(
+            config.read_only,
+            "a config the agent can rewrite is not a config omh controls"
+        );
+        assert!(
+            config.file,
+            "a directory here would bury the gitdir's config"
+        );
+
+        let staged = std::fs::read_to_string(&config.host).expect("staged");
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        assert_eq!(
+            staged,
+            std::fs::read_to_string(shadow.gitdir.join("config")).expect("a seeded shadow"),
+            "and it has to be the bytes git wrote, not a file omh composed"
+        );
+        assert!(
+            staged.contains("sandbox@omh.invalid"),
+            "including the identity the agent needs to commit at all: {staged}"
         );
     }
 
