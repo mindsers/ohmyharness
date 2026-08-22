@@ -341,7 +341,21 @@ impl Shadow {
                 })
             }
         };
-        Ok(Some(landed.trim().to_string()).filter(|l| !l.is_empty()))
+        let landed = landed.trim();
+        // Empty is not absent either, and it is the likelier of the two: the
+        // write that produces this record truncates before it writes, so a
+        // process killed in that window leaves zero bytes where a commit id
+        // was. Read as *never harvested* it would replay from the seed and skip
+        // the ancestry check on the way past — the widest failure available,
+        // reached by the narrowest accident.
+        anyhow::ensure!(
+            !landed.is_empty(),
+            "{} is empty, which is what an interrupted write leaves behind. omh \
+             cannot tell what it last handed over, and will not guess. Take the \
+             files as they stand with `omh s commit -m`",
+            self.landed_record.display()
+        );
+        Ok(Some(landed.to_string()))
     }
 
     /// Refuse to harvest from a repository whose history is not all reachable.
@@ -600,7 +614,7 @@ impl Shadow {
                     &replant,
                     &["rev-list", "--count", &format!("{before}..{tip}")],
                 )?;
-                // Not `unwrap_or(0)` either — the same rule, seventy lines on.
+                // Not `unwrap_or(0)` either — the same rule as the count above.
                 // This is the number the user is told was kept, over a branch
                 // that has already moved: "kept 0" after landing three is a lie
                 // about work they now have.
@@ -659,15 +673,29 @@ impl Shadow {
         // record as a ref in the user's repository and moving both in one
         // `update-ref --stdin` transaction: a change to what the record *is*,
         // not to when it is written.
-        let handed_over = git_in(repo, &["rev-parse", &scratch])?;
+        // Everything from here on runs *after* the branch already has the
+        // work, and this function's other failures promise the opposite — "the
+        // branch is untouched", "nothing was written". A bare git error here
+        // would be read the same way and it would be the wrong way round, so
+        // each of these says what is already true of the branch.
+        let landed_on = |what: &str| {
+            format!(
+                "{what}, but {branch} already has the work — the harvest itself \
+                 succeeded. A later `--keep` may offer those commits again"
+            )
+        };
+        let handed_over = git_in(repo, &["rev-parse", &scratch])
+            .with_context(|| landed_on("omh could not read back what it handed over"))?;
         std::fs::write(&self.landed_record, handed_over.trim())
-            .with_context(|| format!("recording what {} handed over", self.branch))?;
-        git_in(repo, &["update-ref", "-d", &scratch])?;
+            .with_context(|| landed_on("omh could not record what it handed over"))?;
+        git_in(repo, &["update-ref", "-d", &scratch])
+            .with_context(|| landed_on("omh could not clean up its own scratch ref"))?;
 
         // The branch moved under a live worktree, so its index describes the
         // commit that used to be HEAD. Without this `git status` reports files
         // deleted that are sitting on disk.
-        git_in(worktree, &["reset", "-q", "--mixed"])?;
+        git_in(worktree, &["reset", "-q", "--mixed"])
+            .with_context(|| landed_on("omh could not refresh the session's index"))?;
         Ok(landed)
     }
 
@@ -1706,6 +1734,76 @@ mod tests {
             vec!["The second round", "The first round"],
             "each round lands once, in order: {log}"
         );
+    }
+
+    /// A record omh cannot read is not a session that never landed.
+    ///
+    /// The two failures this covers arrive by different routes and meet in the
+    /// same place. **Unreadable** is a permissions or I/O fault on a record that
+    /// exists. **Empty** is what an interrupted write leaves: `fs::write`
+    /// truncates before it writes, so a process killed in that window leaves
+    /// zero bytes where a commit id was — the very window this file documents a
+    /// few dozen lines above, in the code that does the writing.
+    ///
+    /// Either one read as *never harvested* replays from the seed and skips the
+    /// ancestry check with it, offering the branch everything it already has.
+    /// That is the defect the record exists to close, so neither may spell the
+    /// same as absent.
+    #[test]
+    fn a_record_omh_cannot_read_is_not_a_session_that_never_landed() {
+        for (name, break_it) in [
+            ("empty", 0usize),
+            #[cfg(unix)]
+            ("unreadable", 1usize),
+        ] {
+            let (d, wt, shadow_dir) = fixture();
+            let checkout = d.path().join("checkout");
+            let s = Shadow::new(&shadow_dir, "s01");
+            s.ensure(&wt, &[]).unwrap();
+            std::fs::write(wt.join("f.txt"), "base\nfirst\n").unwrap();
+            git(&s.gitdir, &wt, &["commit", "-qam", "The first round"]).unwrap();
+            s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap();
+            let tip = git_in(&checkout, &["rev-parse", "omh/s01"]).unwrap();
+
+            match break_it {
+                0 => std::fs::write(&s.landed_record, "").unwrap(),
+                _ => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(
+                            &s.landed_record,
+                            std::fs::Permissions::from_mode(0o000),
+                        )
+                        .unwrap();
+                    }
+                }
+            }
+
+            std::fs::write(wt.join("f.txt"), "base\nfirst\nsecond\n").unwrap();
+            git(&s.gitdir, &wt, &["commit", "-qam", "The second round"]).unwrap();
+
+            let outcome = s.harvest(&checkout, &wt, "omh/s01", &[], false);
+            assert!(
+                outcome.is_err(),
+                "{name}: a record omh cannot read must not read as a session that \
+                 never landed"
+            );
+            assert_eq!(
+                git_in(&checkout, &["rev-parse", "omh/s01"]).unwrap(),
+                tip,
+                "{name}: and the branch must not move on a refusal"
+            );
+
+            #[cfg(unix)]
+            if break_it == 1 {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &s.landed_record,
+                    std::fs::Permissions::from_mode(0o644),
+                );
+            }
+        }
     }
 
     /// Removing a session takes its replay point with it.
