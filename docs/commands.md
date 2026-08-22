@@ -352,7 +352,7 @@ Every commit is authored `omh sandbox <sandbox@omh.invalid>`, whatever the agent
 set in its own config. The sandbox does not get to say who wrote something on
 your branch.
 
-`--keep` refuses rather than repairing. The cases, and they are the whole set:
+`--keep` refuses rather than repairing, in these cases and no others:
 
 - **A carried file reached a commit** — by `git add -f`, copied under another
   name, pasted into source, or written into a message. omh knows the bytes it
@@ -366,15 +366,13 @@ your branch.
   the session left.
 - **The branch moved while you were curating.** Nothing is written.
 - **The session has no sandbox repository yet** — nothing has run in it.
+- **The sandbox rewound past what you already kept.** `--keep` replays from the
+  point it last handed over, so an agent that `reset --hard`s below that point
+  leaves omh unable to say which commits are new. Replaying from the start of
+  the session would offer the branch work it already has, so omh stops and says
+  to take the files with `omh s commit -m`.
 
-One more refusal, and it is about the same record: **a sandbox that rewound
-past what you already kept.** `--keep` replays from the point it last handed
-over, so an agent that `reset --hard`s below that point leaves omh unable to
-say which commits are new. Replaying from the start of the session instead
-would offer the branch work it already has, so omh stops and says to take the
-files with `omh s commit -m`.
-
-`--keep` is otherwise repeatable: land some work, let the agent carry on, land
+`--keep` is repeatable otherwise: land some work, let the agent carry on, land
 the rest. Each round takes only what the last one did not.
 
 The branch is untouched in every case. For the first two the work never left the

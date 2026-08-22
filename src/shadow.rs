@@ -315,14 +315,33 @@ impl Shadow {
     /// and `stamp` rewrites them again. Recording what landed on the branch
     /// would be recording something this range can never mention.
     ///
-    /// Unreadable is absent rather than an error, and that direction is chosen:
-    /// the cost of forgetting is offering work twice, which the ancestry check
-    /// below turns into a refusal. The cost of failing here would be a session
-    /// that can never harvest again.
-    pub fn landed(&self) -> Option<String> {
-        let landed = std::fs::read_to_string(&self.landed_record).ok()?;
-        let landed = landed.trim();
-        (!landed.is_empty()).then(|| landed.to_string())
+    /// **Absent and unreadable are different answers.** Only "not there" means
+    /// *never harvested*. Every other failure is a record that exists and could
+    /// not be read, and reading that as `None` replays from the seed — offering
+    /// the branch everything it already has, which is the defect this record
+    /// exists to close, reached by a permissions error rather than by a second
+    /// run.
+    ///
+    /// An earlier version collapsed the two and excused it by saying the
+    /// ancestry check downstream would catch it. It does not: that check lives
+    /// inside the arm where a record *was* read, so the one case being excused
+    /// is the one case it never sees. `needles` in this file already states the
+    /// rule this now follows — cannot tell must not spell the same as clean.
+    pub fn landed(&self) -> Result<Option<String>> {
+        let landed = match std::fs::read_to_string(&self.landed_record) {
+            Ok(landed) => landed,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "reading what {} last handed over, at {}",
+                        self.branch,
+                        self.landed_record.display()
+                    )
+                })
+            }
+        };
+        Ok(Some(landed.trim().to_string()).filter(|l| !l.is_empty()))
     }
 
     /// Refuse to harvest from a repository whose history is not all reachable.
@@ -486,16 +505,21 @@ impl Shadow {
         // longer reaches. Replaying from the seed instead would hand the branch
         // work it already has, and picking a different point for the user is
         // not omh's to do, so it stops.
-        let from = match self.landed() {
+        let from = match self.landed()? {
             Some(landed) => {
+                // `is_ok` covers two answers and the message names both: *not
+                // an ancestor*, which is the agent having rewound, and *git
+                // could not tell*, which is a record that no longer reads as a
+                // commit at all. Refusing is right for either; blaming the agent
+                // for the second would not be.
                 let reaches =
                     git_in(repo, &["merge-base", "--is-ancestor", &landed, &scratch]).is_ok();
                 anyhow::ensure!(
                     reaches,
                     "the sandbox's history no longer reaches {}, which is what omh last \
-                     kept from it — a `reset --hard` or a rebase below that point. omh \
-                     will not guess which commits are new. Take the files as they stand \
-                     with `omh s commit -m`",
+                     kept from it — a `reset --hard` or a rebase below that point, or a \
+                     record git can no longer read as a commit. omh will not guess which \
+                     commits are new. Take the files as they stand with `omh s commit -m`",
                     &landed[..landed.len().min(8)]
                 );
                 landed
@@ -576,7 +600,15 @@ impl Shadow {
                     &replant,
                     &["rev-list", "--count", &format!("{before}..{tip}")],
                 )?;
-                Ok((tip, n.trim().parse::<usize>().unwrap_or(0)))
+                // Not `unwrap_or(0)` either — the same rule, seventy lines on.
+                // This is the number the user is told was kept, over a branch
+                // that has already moved: "kept 0" after landing three is a lie
+                // about work they now have.
+                let n: usize = n
+                    .trim()
+                    .parse()
+                    .with_context(|| format!("counting what landed on {branch}"))?;
+                Ok((tip, n))
             });
 
         // Removed before any error surfaces, so no message may point at it:
@@ -614,7 +646,19 @@ impl Shadow {
         //
         // After the branch has it, never before: a record written earlier would
         // claim a handover that a later failure undid, and the next harvest
-        // would skip commits nobody ever received.
+        // would skip commits nobody ever received. Skipping is the worse of the
+        // two, because what it loses goes quietly.
+        //
+        // **The window on the other side is open and this does not close it.** A
+        // ref move and a file write cannot be one operation, so a process killed
+        // between them leaves the branch holding work the record does not
+        // mention, and the next harvest offers it again — this defect, reached
+        // by a crash rather than by a second run. It surfaces as a refusal or a
+        // no-op rather than as damage, because the replant drops what is already
+        // upstream and fails loudly when it cannot. Closing it means keeping the
+        // record as a ref in the user's repository and moving both in one
+        // `update-ref --stdin` transaction: a change to what the record *is*,
+        // not to when it is written.
         let handed_over = git_in(repo, &["rev-parse", &scratch])?;
         std::fs::write(&self.landed_record, handed_over.trim())
             .with_context(|| format!("recording what {} handed over", self.branch))?;
@@ -1623,16 +1667,19 @@ mod tests {
     /// The loop the replay point exists for: work, keep, work again, keep
     /// again. Only the new commits land, in order, once each.
     ///
-    /// **This one was green before the replay point, and stays green without
-    /// it** — measured both ways. git drops a replayed commit whose patch is
-    /// already upstream, and for work that only ever appends, that covers the
-    /// whole round. What it does not cover is `harvesting_twice_keeps_nothing_
-    /// the_second_time` above, where the replayed patch no longer fits and the
-    /// harvest dies on `Could not apply` instead.
+    /// **This is the shape of the loop, not the guard for it**, and that is
+    /// measured rather than assumed: with the replay point neutralised it stays
+    /// green. Replaying a round that is already on the branch gives git a patch
+    /// whose id is upstream, and it drops it — so the incremental path repairs
+    /// itself and says nothing.
     ///
-    /// So this is here as the shape of the loop rather than as the guard for
-    /// it, which is worth saying rather than leaving for someone to discover
-    /// when they mutate the code and nothing goes red.
+    /// Editing the same line each round instead of appending was tried, on the
+    /// theory that a stale context would make the replay conflict. It does not:
+    /// the patch-id match happens first, and the test stays green that way too.
+    /// The guard is `harvesting_twice_keeps_nothing_the_second_time`, where
+    /// nothing is new and the replayed patch has nowhere to go.
+    ///
+    /// Recorded so the next person does not spend the same hour proving it.
     #[test]
     fn a_second_harvest_takes_only_what_is_new() {
         let (d, wt, shadow_dir) = fixture();
@@ -1677,14 +1724,14 @@ mod tests {
         git(&s.gitdir, &wt, &["commit", "-qam", "Some work"]).unwrap();
         s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap();
         assert!(
-            s.landed().is_some(),
+            s.landed().unwrap().is_some(),
             "the precondition is that a harvest recorded one"
         );
 
         s.reap();
 
         assert!(
-            Shadow::new(&shadow_dir, "s01").landed().is_none(),
+            Shadow::new(&shadow_dir, "s01").landed().unwrap().is_none(),
             "the next session to take this id must start from its own seed"
         );
     }

@@ -4844,7 +4844,13 @@ fn commit(
                     // commits; one that has is simply up to date, and telling
                     // that user their agent "has made no commits" contradicts
                     // the branch they are looking at.
-                    0 if shadow.landed().is_some() => format!(
+                    // `unwrap_or(false)` rather than `?`: this is the
+                    // sentence for a harvest that already succeeded, and a
+                    // record omh cannot read is not a reason to fail a command
+                    // that did its job. The two messages differ in how they
+                    // explain nothing happening, and the vaguer one is the
+                    // right fallback.
+                    0 if shadow.landed().map(|l| l.is_some()).unwrap_or(false) => format!(
                         "nothing new to keep — everything {} has committed is already on \
                          the branch",
                         session.label()

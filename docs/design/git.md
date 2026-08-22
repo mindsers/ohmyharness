@@ -54,7 +54,7 @@ Four workflows, not a feature list.
 |---|---|
 | **read the change** before landing it | `omh s diff` prints `--stat` only. The patch is in a worktree the docs tell you never to enter. |
 | **know what the agent has been doing** | Its commits are invisible until `--keep` opens a `rebase -i` todo. `s ls` does not count them; `s rm` destroys them without saying they existed. |
-| **land work in stages** | `--keep` replays from the seed every time. Measured: a second run re-lists commits already on the branch, then dies on `Could not apply`. |
+| ~~**land work in stages**~~ — landed (#50) | `--keep` replayed from the seed every time. Measured: a second run re-listed commits already on the branch, then died on `Could not apply`. It replays from what it last handed over now. |
 | **not fall behind trunk** | `s ls` reports `behind 12` and offers nothing. The session works against stale code until it is abandoned. |
 
 Everything else about the git story holds up. The worktree boundary, the
