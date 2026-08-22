@@ -61,6 +61,37 @@ pub fn pointer_file() -> String {
 /// takes a deliberate flag, which is a different thing from a missing file.
 pub const GUEST_PRE_PUSH: &str = "/omh/shadow/hooks/pre-push";
 
+/// Where the sandbox's own config lands inside the container.
+///
+/// Mounted read-only over the copy `ensure` wrote, for the reason the push hook
+/// is: the gitdir has to be writable because the agent commits into it, so
+/// every file in it is the agent's to change — and this one decides what `git`
+/// does. `NEUTRALISED` answers that for calls omh makes on the host; nothing
+/// answers it for the agent's own git inside the container.
+///
+/// Measured inside a real container, because a host-side stand-in got the
+/// answer right and the reason wrong. `commit`, `checkout -b` and
+/// `reset --hard` never write this file and do not notice it. `git config` and
+/// `git remote add` do, and meet:
+///
+/// ```text
+/// error: could not write config file /omh/shadow/config: Resource busy
+/// fatal: could not set 'remote.origin.url' to 'https://example.com/x.git'
+/// ```
+///
+/// `Resource busy`, not `Read-only file system` — git replaces this file by
+/// renaming a lock over it, and what refuses is the rename onto a mount point
+/// rather than the read-only flag. An unreplaceable file on the host says
+/// `Operation not permitted` for the same reason, which is close enough to
+/// mislead and not close enough to quote.
+///
+/// That second one is the interesting one. `git push` fails for want of a
+/// remote and git's own error suggests `git remote add` — which now fails too,
+/// so the route git talks the agent into is closed rather than signposted. The
+/// `pre-push` hook keeps its job on the other route: `git push <url> <ref>`
+/// needs nothing in config and still meets it.
+pub const GUEST_CONFIG: &str = "/omh/shadow/config";
+
 /// The hook's body, so the launcher can stage the same bytes it mounts.
 pub fn pre_push_hook() -> String {
     // A quoted heredoc, not `echo '…'`. The message is prose and prose has
@@ -146,6 +177,7 @@ impl Shadow {
             // leaving a path silently untracked in the one repository whose
             // job is to show the agent its own work.
             Self::write_exclude(&self.gitdir, excluded)?;
+            Self::write_config(&self.gitdir)?;
             return Ok(());
         }
         let parent = self
@@ -214,8 +246,7 @@ impl Shadow {
         // stamps authorship on the host anyway, per the module's own rule about
         // not believing what the sandbox says about itself. This is here so an
         // unconfigured machine works, not so the name can be relied on.
-        git(&building, worktree, &["config", "user.name", AUTHOR_NAME])?;
-        git(&building, worktree, &["config", "user.email", AUTHOR_EMAIL])?;
+        Self::write_config(&building)?;
 
         // And deliberately no `core.worktree`. It looks like the missing half
         // of the line above and it is the opposite: this gitdir is written on
@@ -887,6 +918,75 @@ impl Shadow {
             .collect())
     }
 
+    /// omh's own view of what this repository's config may say.
+    ///
+    /// Everything `git init` needs to know about the repository, plus an
+    /// identity, and nothing else. Anything the agent added is dropped — not
+    /// because a relaunch is a boundary, it can set the key again a second
+    /// later, but because a key that persists is one omh will still be reading
+    /// long after whatever wrote it, and several of them turn `git` into *run
+    /// whatever this repository says*.
+    ///
+    /// Written by asking git rather than by composing the file: `git init`
+    /// records `repositoryformatversion` and `filemode` here, and a hand-built
+    /// config that forgot either would be a repository git reads differently
+    /// from the one it made. So the keys outside the allowlist are unset one by
+    /// one and the rest is left exactly as git wrote it.
+    ///
+    /// The identity is not a claim about who wrote anything — a harvest stamps
+    /// authorship on the host — it is there because git will not commit without
+    /// one and the container has no global config to supply it.
+    fn write_config(gitdir: &Path) -> Result<()> {
+        const KEEP: [&str; 5] = [
+            "core.repositoryformatversion",
+            "core.filemode",
+            "core.bare",
+            "core.logallrefupdates",
+            "core.worktree",
+        ];
+
+        let listed = Command::new("git")
+            .arg("--git-dir")
+            .arg(gitdir)
+            .args(["config", "--list", "--local", "--name-only"])
+            .output()
+            .with_context(|| format!("reading the config of {}", gitdir.display()))?;
+        // A repository with no config to list is one being built; there is
+        // nothing to drop and the identity below still has to be written.
+        let listed = String::from_utf8_lossy(&listed.stdout);
+        for key in listed.lines().map(str::trim).filter(|k| !k.is_empty()) {
+            if KEEP.contains(&key) || key == "user.name" || key == "user.email" {
+                continue;
+            }
+            let dropped = Command::new("git")
+                .arg("--git-dir")
+                .arg(gitdir)
+                .args(["config", "--unset-all", key])
+                .output()
+                .with_context(|| format!("dropping {key} from {}", gitdir.display()))?;
+            anyhow::ensure!(
+                dropped.status.success(),
+                "git config --unset-all {key}: {}",
+                String::from_utf8_lossy(&dropped.stderr).trim()
+            );
+        }
+
+        for (key, value) in [("user.name", AUTHOR_NAME), ("user.email", AUTHOR_EMAIL)] {
+            let set = Command::new("git")
+                .arg("--git-dir")
+                .arg(gitdir)
+                .args(["config", key, value])
+                .output()
+                .with_context(|| format!("setting {key} on {}", gitdir.display()))?;
+            anyhow::ensure!(
+                set.status.success(),
+                "git config {key}: {}",
+                String::from_utf8_lossy(&set.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
     /// Remove the repository and the seed recorded for it.
     ///
     /// Best-effort on purpose: this runs while a session is being torn down,
@@ -1019,8 +1119,10 @@ pub const ARRANGEMENT: &str = "This repository is the sandbox's own, and it is n
      back to a checkpoint is yours to use. What reaches the person you are working with is the \
      state of the files, which they read with `omh s diff` and commit with `omh s commit` on the \
      host, pushing with `omh s push` when they are ready. Your commit messages here stay here.\n\n\
-     There is nothing to push and no remote to push to. Say that rather than offering to push, \
-     and do not offer to commit on the host — that is theirs to do.";
+     There is nothing to push and no remote to push to, and adding one will not work either — \
+     the config is not yours to write. That is the arrangement rather than a fault to repair. Say \
+     so rather than offering to push, and do not offer to commit on the host — that is theirs to \
+     do.";
 
 /// The seed commit's message, which is a delivery surface and not a label.
 ///
@@ -1845,6 +1947,62 @@ mod tests {
         assert!(
             !marker.exists(),
             "a driver the sandbox named ran on the host, as the user"
+        );
+    }
+
+    /// The sandbox's config is omh's again at every launch.
+    ///
+    /// The gitdir is mounted read-write because the agent commits through it,
+    /// so every key in it is the agent's to set — and several of them turn
+    /// `git` into *run whatever this repository says*. `NEUTRALISED` answers
+    /// that for the calls omh makes, but only for the ones that remember to,
+    /// and only host-side: inside the container the agent reads its own config
+    /// with nothing filtering it.
+    ///
+    /// So the file becomes omh's own view again on every launch, and what the
+    /// agent set in between does not survive. Not because a relaunch is a
+    /// boundary — it is not, the agent can set it again a second later — but
+    /// because a key that persists is one omh will still be reading a week
+    /// later, long after whatever wrote it.
+    #[test]
+    fn the_sandboxs_config_is_omhs_again_at_every_launch() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        // the agent makes its repository into one that runs things
+        for (key, value) in [
+            ("diff.pwn.textconv", "/bin/sh"),
+            ("core.sshCommand", "/bin/sh"),
+            ("core.hooksPath", "/tmp/mine"),
+        ] {
+            git(&s.gitdir, &wt, &["config", key, value]).unwrap();
+        }
+        std::fs::write(wt.join("agent.rs"), "fn main() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qm", "a checkpoint"]).unwrap();
+        let checkpoint = git(&s.gitdir, &wt, &["rev-parse", "HEAD"]).unwrap();
+
+        s.ensure(&wt, &[]).unwrap();
+
+        let config = std::fs::read_to_string(s.gitdir.join("config")).unwrap();
+        for key in ["textconv", "sshCommand", "hooksPath"] {
+            assert!(
+                !config.contains(key),
+                "{key} survived a relaunch:\n{config}"
+            );
+        }
+        assert_eq!(
+            git(&s.gitdir, &wt, &["config", "user.email"])
+                .unwrap()
+                .trim(),
+            AUTHOR_EMAIL,
+            "and the identity omh needs to commit at all is still there"
+        );
+        assert_eq!(
+            git(&s.gitdir, &wt, &["rev-parse", "HEAD"]).unwrap(),
+            checkpoint,
+            "and the agent's work is untouched"
         );
     }
 
