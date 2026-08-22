@@ -989,7 +989,7 @@ impl Shadow {
             listed.status.success(),
             "reading the config of {}: {}",
             gitdir.display(),
-            String::from_utf8_lossy(&listed.stderr).trim()
+            crate::out::untrusted(String::from_utf8_lossy(&listed.stderr).trim())
         );
         // A **set**, because `--list --name-only` prints a key once per value.
         // Unsetting takes every value at once, so a multi-valued key arriving

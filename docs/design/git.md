@@ -448,10 +448,11 @@ the hardening in step 6 of the order below, this work closes or narrows
 5. **Landed (#50).** The replay point, and `--keep` becomes repeatable.
 6. **Landed (#51).** The neutralised set grows and agent-authored text is
    sanitised at the render boundary — the gate on 7.
-6b. The sandbox's `config` rewritten each launch and mounted read-only, which
-   narrows [risks](risks.md#security) 2b. Split from 6: that one is about what a
-   host-side *read* may execute, this is about what the sandbox may *write*, and
-   the second needs verifying inside a real container rather than on the host.
+6b. **Landed (#52).** The sandbox's `config` rewritten each launch and mounted
+   read-only, which narrows [risks](risks.md#security) 2b. Split from 6: that
+   one is about what a host-side *read* may execute, this about what the sandbox
+   may *write*. Verified inside a real container, which the host stand-in got
+   right for the wrong reason — `Resource busy`, not `Read-only file system`.
 7. `omh sNN log`, and `diff` grows `-p` and a checkpoint argument.
 8. The selector: `sNN` in, three spellings out.
 9. `--keep [selection]`, and `--edit` for the todo.
