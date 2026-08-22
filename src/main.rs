@@ -4899,7 +4899,9 @@ fn commit(
 /// so it stays out of anything being redirected.
 fn warn_uncounted(n: &Result<usize>, ctx: &out::Ctx, base: &str) {
     if let Err(e) = n {
-        ctx.warn(&format!("could not count this branch against {base} — {e:#}"));
+        ctx.warn(&format!(
+            "could not count this branch against {base} — {e:#}"
+        ));
     }
 }
 
