@@ -411,7 +411,7 @@ unloseable, so the branch outlives the session that produced it, and `rm` tells
 you how to review or discard it:
 
 ```console
-$ omh s rm s01
+$ omh s01 rm
 removed session s01; branch omh/s01 kept (3 commits to review)
   git log main..omh/s01
   git branch -D omh/s01
@@ -433,7 +433,7 @@ irreversible and justified by one fact only, that it holds nothing, so anything
 short of that fact falls the other way:
 
 ```console
-$ omh s rm s01
+$ omh s01 rm
 removed session s01; branch omh/s01 kept — omh could not count it against main
   git log omh/s01
   git branch -D omh/s01

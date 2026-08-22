@@ -173,7 +173,7 @@ harness is reported instead:
 ```console
 $ omh claude
 Error: session s01 is running opencode and cannot be reused for this launch (image (…))
-  stop it with        omh s down s01
+  stop it with        omh s01 down
   or start a fresh one  omh --new claude
 ```
 
@@ -233,8 +233,8 @@ answered.
 
 ```console
 $ omh s ls                # sessions, branches, state
-$ omh s down s01          # stop the container, keep worktree and branch
-$ omh s rm s01            # remove the session — branch survives
+$ omh s01 down            # stop the container, keep worktree and branch
+$ omh s01 rm              # remove the session — branch survives
 ```
 
 `s ls` reports state as English for you and as fields for a script: `omh s ls

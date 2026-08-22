@@ -510,7 +510,6 @@ impl Sandbox {
     /// these tests are about is the host-side path out of a session — the half
     /// that has to work whether or not a sandbox is running.
     fn session(&self, id: &str) -> PathBuf {
-        self.git_init();
         let origin = self._dir.path().join("origin.git");
         Command::new("git")
             .args(["init", "-q", "--bare"])
@@ -526,10 +525,26 @@ impl Sandbox {
                 .expect("git must be installed to run this test");
             assert!(out.status.success(), "git {args:?}: {out:?}");
         };
-        git(&["config", "user.email", "t@example.com"]);
-        git(&["config", "user.name", "t"]);
-        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
-        git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        // Once per repository, so a test can ask for a second session. It could
+        // not before — `git_init` *deletes* `.git`, so a second call left the
+        // first session's worktree pointing at a gitdir that no longer existed
+        // and every command in it answered `not a git repository: (null)`. That
+        // is why every test naming a session had exactly one to name, which is
+        // the arrangement where `--session s01` and naming nothing give the
+        // same answer and a selector that did nothing would pass them all.
+        let first_session = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(["remote"])
+            .output()
+            .is_ok_and(|o| !o.status.success() || o.stdout.is_empty());
+        if first_session {
+            self.git_init();
+            git(&["config", "user.email", "t@example.com"]);
+            git(&["config", "user.name", "t"]);
+            git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+            git(&["remote", "add", "origin", origin.to_str().unwrap()]);
+        }
 
         let worktree = self
             .home
@@ -546,6 +561,63 @@ impl Sandbox {
             &format!("omh/{id}"),
         ]);
         worktree
+    }
+}
+
+/// The session named first is the session acted on — not the one omh would
+/// have picked.
+///
+/// Two sessions, because with one the question cannot be asked: `pick` falls
+/// back to the only session there is, so every assertion holds whether the
+/// prefix works or is dropped on the floor. Both directions, because whichever
+/// of the two `pick` prefers would otherwise carry a test that proves nothing.
+#[test]
+fn the_session_named_first_is_the_one_the_command_acts_on() {
+    let sb = sandbox();
+    let one = sb.session("s01");
+    let two = sb.session("s02");
+    std::fs::write(one.join("only-in-s01.rs"), "fn main() {}").unwrap();
+    std::fs::write(two.join("only-in-s02.rs"), "fn main() {}").unwrap();
+
+    for (named, mine, theirs) in [
+        ("s01", "only-in-s01.rs", "only-in-s02.rs"),
+        ("s02", "only-in-s02.rs", "only-in-s01.rs"),
+    ] {
+        let out = sb.omh(&[named, "diff"]);
+        let printed = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            printed.contains(mine) && !printed.contains(theirs),
+            "`omh {named} diff` has to report {named}: {printed}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// The spellings the prefix replaced are gone, not quietly still accepted.
+///
+/// A deletion nothing asserts is one a later change restores by accident — and
+/// `diff` taking an id in two places is how the session came to have two
+/// answers in the first place.
+#[test]
+fn the_spellings_the_prefix_replaced_are_refused() {
+    let sb = sandbox();
+    sb.session("s01");
+    for line in [
+        vec!["s", "diff", "s01"],
+        vec!["s", "rm", "s01"],
+        vec!["s", "down", "s01"],
+        vec!["graph", "s01"],
+    ] {
+        let out = sb.omh(&line);
+        let said = String::from_utf8_lossy(&out.stderr);
+        // Refused *for naming it there*, not for some unrelated reason further
+        // down — a test that only asks for a non-zero exit passes on the day
+        // the command breaks for a different cause entirely.
+        assert!(
+            !out.status.success() && said.contains("unexpected argument"),
+            "`omh {}` names the session where it no longer goes: {said}",
+            line.join(" ")
+        );
     }
 }
 
@@ -1608,7 +1680,7 @@ fn a_redirected_s_ls_collects_the_sessions_and_nothing_else() {
     let aside = String::from_utf8_lossy(&out.stderr);
 
     assert!(
-        !answer.contains("omh s rm"),
+        !answer.contains("rm"),
         "a next step is not part of a redirected answer — got {answer:?}"
     );
     assert!(
@@ -1616,7 +1688,7 @@ fn a_redirected_s_ls_collects_the_sessions_and_nothing_else() {
         "nor is a warning — got {answer:?}"
     );
     assert!(
-        aside.contains("left something behind") && aside.contains("omh s rm"),
+        aside.contains("left something behind") && aside.contains("rm"),
         "both still reach the person watching — got {aside:?}"
     );
 }

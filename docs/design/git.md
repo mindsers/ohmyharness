@@ -111,22 +111,30 @@ the command runs where it lives — `omh s01 claude`, `omh s01 attach zed`,
 `omh s01 graph`. Same rule, and it covers the launch, which `sessions` has no
 verb for.
 
-**The value is the deletions.** All four of these work today and mean the same
-thing:
+**The value is the deletions.** All four of these worked before #53 and meant
+the same thing:
 
 ```console
-$ omh s diff              # current
+$ omh s diff              # the session omh picks
 $ omh s diff s01          # positional
 $ omh s -s s01 diff       # flag after the namespace
 $ omh -s s01 s diff       # flag before it
 ```
 
-Four spellings, two mechanisms, applied unevenly — `rm` requires the positional,
-`commit` and `push` ignore it, and `push` cannot have it because that slot is
-the branch name. So this is one form and three removals: the positional session
-leaves `s diff`, `s down` and `graph`; the required positional leaves `s rm`;
-`--session` stays, because it is what the prefix desugars to and the only way to
-name an id that is not `sNN`.
+Four spellings, two mechanisms, applied unevenly — `rm` *required* the
+positional, `diff`, `down` and `graph` took one or not, and `commit` and `push`
+had no field to read one from, so naming a session there was a parse error
+rather than something ignored. `push` could not have had one, because that slot
+is the branch name. So this is one form and three removals: the positional
+session left `s diff`, `s down` and `graph`; the required positional left
+`s rm`; `--session` stays, because it is what the prefix desugars to and the
+only way to name an id that is not `sNN`.
+
+Naming it twice — `omh s01 -s s02 diff` — is refused rather than resolved, and
+after the parse rather than before it, because clap is what knows that
+`--session s02`, `--session=s02`, `-s s02` and `-ss02` are one flag. The first
+version scanned argv for two whole tokens and let the other two spellings
+through.
 
 Two rules make the parse unambiguous:
 
