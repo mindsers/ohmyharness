@@ -146,28 +146,61 @@ impl Session {
         // `origin/main`, which is the one branch the worktree exists to keep an
         // agent away from. `--no-guess-remote` does not switch it off; a
         // resolved commit leaves nothing to guess.
-        let start = start_point(repo, base)?;
-        let args: Vec<&str> = if self.branch_exists(repo) {
-            vec!["worktree", "add", &path, &branch]
+        // Resolved inside this arm and nowhere else. Resuming reattaches to a
+        // branch that already exists and asks git nothing about `base`, so
+        // taking the start point first made a session that was resumable
+        // yesterday fail today because the trunk was renamed in between — and
+        // fail talking about a base the command that ran never reads.
+        let args: Vec<String> = if self.branch_exists(repo) {
+            ["worktree", "add", &path, &branch]
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         } else {
             // Explicit base: without it git branches from whatever HEAD is,
             // which produces a session whose diff has the wrong baseline.
-            vec!["worktree", "add", "-b", &branch, &path, &start]
+            vec![
+                "worktree".into(),
+                "add".into(),
+                "-b".into(),
+                branch.clone(),
+                path.clone(),
+                start_point(repo, base)?,
+            ]
         };
-        git(repo, &args).with_context(|| format!("creating worktree for session {}", self.id))?;
+        git_owned(repo, &args)
+            .with_context(|| format!("creating worktree for session {}", self.id))?;
 
         // Asked rather than assumed. Every review path already refuses a
         // worktree that is not on its branch, and each of them refuses *later*,
         // after an agent has worked in it. This is the same question at the one
         // moment the answer is still free.
-        let head = git(&self.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
-        anyhow::ensure!(
-            head.trim() == branch,
-            "git put {} on {} rather than {branch}; omh will not hand back a session \
-             it cannot review",
-            self.id,
-            head.trim()
-        );
+        //
+        // Unreachable as the code stands — a resolved commit leaves git nothing
+        // to guess with, and the resume arm names a branch `branch_exists` just
+        // confirmed. It is here for the next person who passes a name to
+        // `worktree add`, which is how this broke the first time.
+        //
+        // **And it takes the worktree with it.** `ensure` opens by treating an
+        // existing directory as a finished session, so a failure that left one
+        // behind would be waved through by the very next launch: the session
+        // omh refused to hand back once would be handed back silently, on the
+        // wrong branch, which is worse than never having checked.
+        let head = git(&self.worktree, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        let wrong = match &head {
+            Ok(head) => head.trim() != branch,
+            Err(_) => true,
+        };
+        if wrong {
+            let _ = git(repo, &["worktree", "remove", "--force", &path]);
+            let head = head?;
+            anyhow::bail!(
+                "git put {} on {} rather than {branch}; omh will not hand back a session \
+                 it cannot review",
+                self.id,
+                head.trim()
+            );
+        }
         Ok(())
     }
 
@@ -695,8 +728,14 @@ pub fn validate_id(id: &str) -> Result<()> {
 /// fixed point: a name is re-resolved by whatever git command receives it, and
 /// that is exactly how `worktree add -b` ends up guessing.
 fn start_point(repo: &Path, base: &str) -> Result<String> {
-    let resolved = resolvable(repo, base)
-        .with_context(|| format!("{base} is not a branch, a tag or a commit in this checkout"))?;
+    // Two failures wear this message, and it names both rather than picking the
+    // likelier one. `rev-parse --quiet` exits non-zero for a ref that is not
+    // there *and* for a checkout git cannot read at all, so a confident "no
+    // such branch" would send someone hunting a spelling mistake while their
+    // object store is the thing that is broken.
+    let resolved = resolvable(repo, base).with_context(|| {
+        format!("cannot resolve {base} here — no branch, tag or commit by that name, or a checkout git could not read")
+    })?;
     Ok(git(
         repo,
         &["rev-parse", "--verify", &format!("{resolved}^{{commit}}")],
@@ -1842,9 +1881,9 @@ mod tests {
         .unwrap();
 
         let base = default_branch(&root);
-        assert!(
-            base.ends_with("trunk"),
-            "the remote's answer has to win over the local `main`, and this said {base}"
+        assert_eq!(
+            base, "origin/trunk",
+            "the remote's answer has to win over the local `main`"
         );
         // Spelled `origin/trunk`, because `trunk` is not a local branch in this
         // fixture and the answer is handed to `rev-list` and `merge-base` by
@@ -1853,6 +1892,87 @@ mod tests {
         assert!(
             git(&root, &["rev-parse", "--verify", "--quiet", &base]).is_ok(),
             "and it has to be a ref this checkout can answer about"
+        );
+    }
+
+    /// Resuming asks git nothing about the base, so a base gone bad cannot stop
+    /// it.
+    ///
+    /// `omh rm` keeps a branch that holds work, so a session id outlives its
+    /// worktree and `ensure` reattaches. Taking the start point before choosing
+    /// the arm made that reattachment depend on a name the command it runs
+    /// never reads — so a trunk renamed between the two launches turned a
+    /// resumable session into an error about `main`.
+    #[test]
+    fn resuming_does_not_need_the_base_to_resolve() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("work.txt"), "agent output").unwrap();
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
+        s.remove(&root, "main", &d_shadows()).unwrap();
+
+        // the repo renames its trunk while the session is put away
+        git(&root, &["branch", "-m", "main", "trunk"]).unwrap();
+        assert!(
+            git(&root, &["rev-parse", "--verify", "--quiet", "main"]).is_err(),
+            "the precondition is that the old base no longer resolves"
+        );
+
+        s.ensure(&root, "main")
+            .expect("reattaching to a branch that exists asks nothing of the base");
+        assert_eq!(
+            git(&s.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap()
+                .trim(),
+            "omh/s01"
+        );
+    }
+
+    /// The local branch wins, because it is the one the user can move.
+    ///
+    /// `main` and `origin/main` are one branch to a person and two refs to git,
+    /// and they diverge whenever the remote is ahead. The order is a decision,
+    /// not an accident, so it is asserted rather than left to the reading of a
+    /// doc comment.
+    #[test]
+    fn a_base_that_is_both_local_and_remote_means_the_local_one() {
+        let (_d, root) = repo();
+        let local = git(&root, &["rev-parse", "main"])
+            .unwrap()
+            .trim()
+            .to_string();
+        git(
+            &root,
+            &["commit", "-q", "--allow-empty", "-m", "the remote moved on"],
+        )
+        .unwrap();
+        let ahead = git(&root, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        git(&root, &["update-ref", "refs/remotes/origin/main", &ahead]).unwrap();
+        git(&root, &["update-ref", "refs/heads/main", &local]).unwrap();
+
+        assert_ne!(local, ahead, "the fixture has to actually diverge");
+        assert_eq!(
+            start_point(&root, "main").unwrap(),
+            local,
+            "the branch the user can move is the one they meant"
+        );
+    }
+
+    /// A base that resolves nowhere is an error, and says both reasons.
+    #[test]
+    fn a_base_that_names_nothing_is_refused() {
+        let (_d, root) = repo();
+        let err = start_point(&root, "no-such-thing")
+            .expect_err("a name git cannot resolve is not a start point");
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("no-such-thing"),
+            "the message has to name what it could not resolve: {said}"
         );
     }
 
@@ -1973,14 +2093,18 @@ mod tests {
 
     /// A checkout whose default branch exists only on the remote.
     ///
-    /// `git clone --branch <other>` is the ordinary way to get one, and it is
-    /// not exotic: a clone made to work on one branch, or a checkout whose
-    /// local trunk was deleted after a merge, both land here. `origin/HEAD`
-    /// still names `main`, which is what `default_branch` reads.
+    /// An ordinary clone, worked on elsewhere, with the local trunk deleted —
+    /// after a merge, say. `origin/HEAD` still names `main` because nothing
+    /// updates it, and `main` is what `default_branch` therefore reads.
+    ///
+    /// This fixture told a different story first: that `git clone --branch
+    /// <other>` gets you here. Measured, it does not — that clone points
+    /// `origin/HEAD` at `origin/other`, so `default_branch` returns a name that
+    /// does resolve and the bug never fires. The fixture only worked because it
+    /// then forced `remote set-head`, which no user does. A fixture that has to
+    /// stage the precondition by hand is describing something nobody meets.
     fn clone_without_local_trunk() -> (tempfile::TempDir, PathBuf) {
         let (d, src) = repo_on("main");
-        git(&src, &["checkout", "-q", "-b", "other"]).unwrap();
-        git(&src, &["commit", "-q", "--allow-empty", "-m", "other work"]).unwrap();
 
         let clone = d.path().join("clone");
         git(
@@ -1988,8 +2112,6 @@ mod tests {
             &[
                 "clone",
                 "-q",
-                "--branch",
-                "other",
                 src.to_str().unwrap(),
                 clone.to_str().unwrap(),
             ],
@@ -1997,7 +2119,8 @@ mod tests {
         .unwrap();
         git(&clone, &["config", "user.email", "t@example.com"]).unwrap();
         git(&clone, &["config", "user.name", "t"]).unwrap();
-        git(&clone, &["remote", "set-head", "origin", "main"]).unwrap();
+        git(&clone, &["checkout", "-q", "-b", "feature"]).unwrap();
+        git(&clone, &["branch", "-D", "main"]).unwrap();
         (d, clone)
     }
 
@@ -2050,9 +2173,10 @@ mod tests {
     /// The same base, in a repo with no remote configured, fails the other way.
     ///
     /// Only the remote-tracking *ref* is there — no `remote.origin`, so git has
-    /// nothing to guess from and refuses outright with `invalid reference:
-    /// main` instead of quietly taking the branch over. Measured: one cause,
-    /// two symptoms, and the loud one still means no session can start here.
+    /// nothing to guess from. Handed the bare name it refused outright with
+    /// `invalid reference: main` rather than quietly taking the branch over:
+    /// one cause, two symptoms, and this was the loud one. Measured. A session
+    /// starts either way now, which is what this asserts.
     #[test]
     fn a_base_that_is_only_a_remote_ref_still_opens_a_session() {
         let (d, root) = repo_on("other");
