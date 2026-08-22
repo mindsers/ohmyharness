@@ -45,7 +45,10 @@ arrangement, not a reason to skip the mount. Measured with `chflags uchg` standi
 read-only bind mount — both make a rename-over fail — so the claim owes a check
 inside a real container, which is `doctor`'s job.
 
-**2c. `omh s rm` destroys the agent's own commits.** The worktree's content is
+**2c. `omh s rm` destroys the agent's own commits.** *(Partly addressed: what
+has already been harvested is on the branch, and `--keep` is repeatable now, so
+the window is what the agent has done since the last landing rather than the
+whole session. Seeing them and refusing over them still needs `omh sNN log`.)* The worktree's content is
 already on disk and the branch survives, but checkpoints the agent made and you
 did not harvest with `omh s commit --keep` go with the session — and after a
 `git reset --hard` in the sandbox, those were the only copies. Nothing counts
@@ -118,17 +121,15 @@ with a real harness.
 running `claude` natively, but no better, and the worktree makes it easier to
 forget that you are both in there.
 
-**8b. One measured defect left on the host side of git.** Measured 2026-08-21
-against git 2.55.0, with its test owed before the fix, and ordered in
-[Git](git.md#order). Two others are closed: `omh s rm` deleting a branch it
-could not count — a count with no answer now keeps the branch and says so — and
-a session being created on trunk itself, where git's remote DWIM overrode
-`worktree add -b`. The start point is a resolved commit now, and `default_branch`
-returns a ref this checkout can actually answer about.
-
-- **`omh s commit --keep` is not repeatable.** It replays from where the session
-  started, so a second run offers commits already on your branch and fails
-  applying them.
+**8b. Closed.** Three measured defects on the host side of git, all fixed.
+`omh s rm` deleted a branch it could not count — a count with no answer now
+keeps the branch and says so. A session could be created on trunk itself, where
+git's remote DWIM overrode `worktree add -b` — the start point is a resolved
+commit now, and `default_branch` returns a ref this checkout can answer about.
+And `omh s commit --keep` was not repeatable, replaying from where the session
+started, so a second run offered commits already on the branch and died applying
+them — it replays from what it last handed over now, and refuses rather than
+guessing when the sandbox has rewound below that point.
 
 **8c. An orphaned sandbox repository is adopted by the next session that takes
 its id.** Ids are the highest `sNN` plus one, so they come back around, and

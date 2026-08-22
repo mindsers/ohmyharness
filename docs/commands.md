@@ -367,13 +367,15 @@ your branch.
 - **The branch moved while you were curating.** Nothing is written.
 - **The session has no sandbox repository yet** — nothing has run in it.
 
-One case is missing from that list because it is a defect rather than a
-refusal: **`--keep` is not repeatable.** It replays from the point the session
-started every time, so a second run offers you commits already on your branch
-and then usually dies applying them. Measured 2026-08-21 against git 2.55.0.
-Until it is fixed, treat `--keep` as one landing per session and use
-`omh s commit -m` for the rest. The fix is the replay point in
-[Git](design/git.md#the-replay-point).
+One more refusal, and it is about the same record: **a sandbox that rewound
+past what you already kept.** `--keep` replays from the point it last handed
+over, so an agent that `reset --hard`s below that point leaves omh unable to
+say which commits are new. Replaying from the start of the session instead
+would offer the branch work it already has, so omh stops and says to take the
+files with `omh s commit -m`.
+
+`--keep` is otherwise repeatable: land some work, let the agent carry on, land
+the rest. Each round takes only what the last one did not.
 
 The branch is untouched in every case. For the first two the work never left the
 sandbox; for the rest omh had already fetched it into your repository, so a

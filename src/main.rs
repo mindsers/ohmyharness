@@ -4839,6 +4839,16 @@ fn commit(
             &report::Action::new(
                 "committed",
                 match landed {
+                    // Two ways to keep nothing, and they are different news. A
+                    // session that has never handed anything over has made no
+                    // commits; one that has is simply up to date, and telling
+                    // that user their agent "has made no commits" contradicts
+                    // the branch they are looking at.
+                    0 if shadow.landed().is_some() => format!(
+                        "nothing new to keep — everything {} has committed is already on \
+                         the branch",
+                        session.label()
+                    ),
                     0 => format!("nothing to keep — {} has made no commits", session.label()),
                     _ => format!(
                         "kept {landed} of {}'s own commits{}",

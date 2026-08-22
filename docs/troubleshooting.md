@@ -344,16 +344,16 @@ The detached and stranded cases each print a `git --git-dir=…` command — one
 put it back, one to show you what it found. The interrupted case names the
 marker it saw and leaves finishing or aborting to you.
 
-### `--keep` a second time says `Could not apply`
+### `the sandbox's history no longer reaches …`
 
-`omh s commit --keep` replays from the point the session started, and nothing
-records that you already kept some of it. So the second run offers you commits
-that are on your branch already and then fails applying them — or, when the
-patches happen to be droppable, quietly keeps nothing.
+`omh s commit --keep` replays from the point it last handed over. An agent that
+`reset --hard`s below that point — or rebases across it — leaves a record the
+sandbox's history no longer contains, and omh cannot tell which commits are new
+from what is left. Replaying from the start of the session would offer the
+branch work it already has.
 
-The branch is untouched. Take the rest of the work with `omh s commit -m`, which
-does not read the sandbox's repository at all. Measured 2026-08-21 against git
-2.55.0; the fix is the replay point in [Git](design/git.md#the-replay-point).
+The branch is untouched. Take the files as they stand with `omh s commit -m`,
+which does not read the sandbox's repository at all.
 
 ### `omh will not rewrite your history to hide a secret`
 

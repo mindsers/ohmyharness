@@ -82,6 +82,16 @@ pub struct Shadow {
     /// there is something the agent can delete, and losing the seed is losing
     /// the only fixed point a harvest can replay from.
     pub seed_record: PathBuf,
+    /// What the last harvest took, in the sandbox's own commit ids.
+    ///
+    /// Beside the seed and for the same reason: the gitdir is mounted, so
+    /// anything recorded inside it is the agent's to delete, and a replay point
+    /// that can be forged is a branch that can be handed work twice.
+    ///
+    /// Absent until the first harvest, which is why it is an `Option` rather
+    /// than a second seed — a session that has never landed anything replays
+    /// from the seed, and that is not a missing record, it is the first round.
+    pub landed_record: PathBuf,
     /// Named for the session so the user can tell which sandbox an editor
     /// window is showing, and `-scratch` because that is what it is: the
     /// history the user curates before any of it becomes the branch's.
@@ -93,6 +103,7 @@ impl Shadow {
         Self {
             gitdir: shadow_dir.join(format!("{session_id}.git")),
             seed_record: shadow_dir.join(format!("{session_id}.seed")),
+            landed_record: shadow_dir.join(format!("{session_id}.landed")),
             branch: format!("{session_id}-scratch"),
         }
     }
@@ -296,6 +307,24 @@ impl Shadow {
         Ok(seed.trim().to_string())
     }
 
+    /// What the last harvest took, if there has been one.
+    ///
+    /// A *sandbox-side* commit, deliberately: the range a harvest replays is
+    /// computed in the fetched history's ids, and the ids the branch ended up
+    /// with are different commits — `replant` rewrites them onto a new parent
+    /// and `stamp` rewrites them again. Recording what landed on the branch
+    /// would be recording something this range can never mention.
+    ///
+    /// Unreadable is absent rather than an error, and that direction is chosen:
+    /// the cost of forgetting is offering work twice, which the ancestry check
+    /// below turns into a refusal. The cost of failing here would be a session
+    /// that can never harvest again.
+    pub fn landed(&self) -> Option<String> {
+        let landed = std::fs::read_to_string(&self.landed_record).ok()?;
+        let landed = landed.trim();
+        (!landed.is_empty()).then(|| landed.to_string())
+    }
+
     /// Refuse to harvest from a repository whose history is not all reachable.
     ///
     /// Three states make a harvest succeed while quietly dropping commits, and
@@ -445,11 +474,43 @@ impl Shadow {
             ],
         )?;
 
-        let range = format!("{seed}..{scratch}");
-        let count = git_in(repo, &["rev-list", "--count", &range])?
+        // Where to replay from: what the last harvest took, or the seed if
+        // this is the first. Replaying from the seed every time is what made
+        // `--keep` a one-shot — the second run offered commits the branch had
+        // already been given, and whether that duplicated them or died applying
+        // them came down to whether the patches still fitted.
+        //
+        // The record is checked against the history it claims to be part of. An
+        // agent that `reset --hard`s below it — one of the four commands this
+        // repository exists to give back — leaves a replay point the sandbox no
+        // longer reaches. Replaying from the seed instead would hand the branch
+        // work it already has, and picking a different point for the user is
+        // not omh's to do, so it stops.
+        let from = match self.landed() {
+            Some(landed) => {
+                let reaches =
+                    git_in(repo, &["merge-base", "--is-ancestor", &landed, &scratch]).is_ok();
+                anyhow::ensure!(
+                    reaches,
+                    "the sandbox's history no longer reaches {}, which is what omh last \
+                     kept from it — a `reset --hard` or a rebase below that point. omh \
+                     will not guess which commits are new. Take the files as they stand \
+                     with `omh s commit -m`",
+                    &landed[..landed.len().min(8)]
+                );
+                landed
+            }
+            None => seed.clone(),
+        };
+
+        let range = format!("{from}..{scratch}");
+        // Not `unwrap_or(0)`. A count that did not parse is a question git did
+        // not answer, and zero here means *nothing to keep* — it returns
+        // success without ever running the carried-secret scan below.
+        let count: usize = git_in(repo, &["rev-list", "--count", &range])?
             .trim()
-            .parse::<usize>()
-            .unwrap_or(0);
+            .parse()
+            .with_context(|| format!("counting what {} has to hand over", self.branch))?;
         if count == 0 {
             git_in(repo, &["update-ref", "-d", &scratch])?;
             return Ok(0);
@@ -501,7 +562,7 @@ impl Shadow {
             ],
         )?;
 
-        let curated = Self::replant(&replant, branch, &seed, curate, &scratch)
+        let curated = Self::replant(&replant, branch, &from, curate, &scratch)
             .and_then(|()| Self::stamp(&replant, &before));
         // Counted *after* curation, because the number is reported as what was
         // kept and the user drops commits in the todo list — `--empty=drop`
@@ -547,6 +608,16 @@ impl Shadow {
                  --keep` again"
             )
         })?;
+        // Recorded before the ref goes, because the ref is what names it. From
+        // here the next harvest replays from this point rather than from the
+        // seed, which is what makes landing work in rounds possible at all.
+        //
+        // After the branch has it, never before: a record written earlier would
+        // claim a handover that a later failure undid, and the next harvest
+        // would skip commits nobody ever received.
+        let handed_over = git_in(repo, &["rev-parse", &scratch])?;
+        std::fs::write(&self.landed_record, handed_over.trim())
+            .with_context(|| format!("recording what {} handed over", self.branch))?;
         git_in(repo, &["update-ref", "-d", &scratch])?;
 
         // The branch moved under a live worktree, so its index describes the
@@ -755,6 +826,10 @@ impl Shadow {
     pub fn reap(&self) {
         let _ = std::fs::remove_dir_all(&self.gitdir);
         let _ = std::fs::remove_file(&self.seed_record);
+        // With the seed, and for the reason the seed goes: session ids come
+        // back around, and a replay point inherited by a stranger says a branch
+        // has already been given commits it has never seen.
+        let _ = std::fs::remove_file(&self.landed_record);
     }
 
     /// Keep the agent's own `git status` clean at launch.
@@ -1504,6 +1579,150 @@ mod tests {
             .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], false)
             .expect("a carried line nobody committed is not a reason to refuse");
         assert_eq!(landed, 1, "the agent's commit still has to land");
+    }
+
+    /// Landing the same work twice is not landing it twice.
+    ///
+    /// The harvest replayed from the seed every time, and nothing recorded what
+    /// had already been kept — so a second `--keep` offered commits that were
+    /// on the branch already. Whether that duplicated them or died applying
+    /// them depended on whether the patches still fitted; measured against git
+    /// 2.55.0, an edit to a line a later commit also touched conflicts, and
+    /// `--keep` reported nothing but `Could not apply`.
+    ///
+    /// Landing twice must be a no-op, and the branch must not move.
+    #[test]
+    fn harvesting_twice_keeps_nothing_the_second_time() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        std::fs::write(wt.join("f.txt"), "base\nadded\n").unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qam", "Add a line"]).unwrap();
+        std::fs::write(wt.join("f.txt"), "base\nadded\nmore\n").unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qam", "Add another"]).unwrap();
+
+        assert_eq!(s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap(), 2);
+        let tip = git_in(&checkout, &["rev-parse", "omh/s01"]).unwrap();
+
+        assert_eq!(
+            s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap(),
+            0,
+            "there is nothing new to keep, and saying so is the whole job"
+        );
+        assert_eq!(
+            git_in(&checkout, &["rev-parse", "omh/s01"]).unwrap(),
+            tip,
+            "and a branch with nothing to add must not move"
+        );
+    }
+
+    /// The second harvest takes what the first one did not.
+    ///
+    /// The loop the replay point exists for: work, keep, work again, keep
+    /// again. Only the new commits land, in order, once each.
+    ///
+    /// **This one was green before the replay point, and stays green without
+    /// it** — measured both ways. git drops a replayed commit whose patch is
+    /// already upstream, and for work that only ever appends, that covers the
+    /// whole round. What it does not cover is `harvesting_twice_keeps_nothing_
+    /// the_second_time` above, where the replayed patch no longer fits and the
+    /// harvest dies on `Could not apply` instead.
+    ///
+    /// So this is here as the shape of the loop rather than as the guard for
+    /// it, which is worth saying rather than leaving for someone to discover
+    /// when they mutate the code and nothing goes red.
+    #[test]
+    fn a_second_harvest_takes_only_what_is_new() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        std::fs::write(wt.join("f.txt"), "base\nfirst\n").unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qam", "The first round"]).unwrap();
+        assert_eq!(s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap(), 1);
+
+        std::fs::write(wt.join("f.txt"), "base\nfirst\nsecond\n").unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qam", "The second round"]).unwrap();
+
+        assert_eq!(
+            s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap(),
+            1,
+            "only the round that has not landed yet"
+        );
+        let log = git_in(&checkout, &["log", "--format=%s", "main..omh/s01"]).unwrap();
+        let subjects: Vec<&str> = log.lines().collect();
+        assert_eq!(
+            subjects,
+            vec!["The second round", "The first round"],
+            "each round lands once, in order: {log}"
+        );
+    }
+
+    /// Removing a session takes its replay point with it.
+    ///
+    /// Ids come back around — `next_id` is the highest `sNN` plus one — so a
+    /// record left behind is inherited by a session that has nothing to do with
+    /// it, and says a branch has already been handed commits it has never seen.
+    /// The seed goes for this reason and this goes with it.
+    #[test]
+    fn reaping_takes_the_replay_point_with_it() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        std::fs::write(wt.join("f.txt"), "base\nwork\n").unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qam", "Some work"]).unwrap();
+        s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap();
+        assert!(
+            s.landed().is_some(),
+            "the precondition is that a harvest recorded one"
+        );
+
+        s.reap();
+
+        assert!(
+            Shadow::new(&shadow_dir, "s01").landed().is_none(),
+            "the next session to take this id must start from its own seed"
+        );
+    }
+
+    /// A sandbox that rewound past what you kept is refused, not replayed.
+    ///
+    /// `git reset --hard` is one of the four commands this repository exists to
+    /// give back, so an agent dropping a checkpoint below the point omh already
+    /// harvested is ordinary. What is not ordinary is what a harvest could do
+    /// about it: the record names a commit the history no longer reaches, and
+    /// replaying from the seed instead would offer the branch work it already
+    /// has. Neither is omh's to choose, so it stops and names the way out.
+    #[test]
+    fn a_sandbox_that_rewound_past_what_you_kept_is_refused() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        let start = git(&s.gitdir, &wt, &["rev-parse", "HEAD"]).unwrap();
+
+        std::fs::write(wt.join("f.txt"), "base\nkept\n").unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qam", "Work that gets kept"]).unwrap();
+        s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap();
+
+        // the agent rewinds behind what omh already took
+        git(&s.gitdir, &wt, &["reset", "-q", "--hard", start.trim()]).unwrap();
+        std::fs::write(wt.join("g.txt"), "different\n").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qm", "A different direction"]).unwrap();
+
+        let err = s
+            .harvest(&checkout, &wt, "omh/s01", &[], false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("omh s commit -m"),
+            "a refusal has to say what to do instead: {err}"
+        );
     }
 
     /// A carried file must never be **tracked** in the seed, and the reason is
