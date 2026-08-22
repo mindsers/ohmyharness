@@ -136,14 +136,38 @@ impl Session {
         // `omh rm` keeps branches on purpose, so a session id can outlive its
         // worktree. Reattach to the existing branch rather than failing — that
         // is what resuming a session means.
+        //
+        // The start point is a **commit**, never the name it came from, and
+        // that is the whole correctness of the second arm. `worktree add -b
+        // <branch> <path> <base>` looks unambiguous and is not: when `base` has
+        // no local ref but exactly one remote has it, git's DWIM takes over,
+        // creates a branch named after the base, and ignores `-b`. Measured
+        // against git 2.55.0 — the session landed on `main`, tracking
+        // `origin/main`, which is the one branch the worktree exists to keep an
+        // agent away from. `--no-guess-remote` does not switch it off; a
+        // resolved commit leaves nothing to guess.
+        let start = start_point(repo, base)?;
         let args: Vec<&str> = if self.branch_exists(repo) {
             vec!["worktree", "add", &path, &branch]
         } else {
             // Explicit base: without it git branches from whatever HEAD is,
             // which produces a session whose diff has the wrong baseline.
-            vec!["worktree", "add", "-b", &branch, &path, base]
+            vec!["worktree", "add", "-b", &branch, &path, &start]
         };
         git(repo, &args).with_context(|| format!("creating worktree for session {}", self.id))?;
+
+        // Asked rather than assumed. Every review path already refuses a
+        // worktree that is not on its branch, and each of them refuses *later*,
+        // after an agent has worked in it. This is the same question at the one
+        // moment the answer is still free.
+        let head = git(&self.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])?;
+        anyhow::ensure!(
+            head.trim() == branch,
+            "git put {} on {} rather than {branch}; omh will not hand back a session \
+             it cannot review",
+            self.id,
+            head.trim()
+        );
         Ok(())
     }
 
@@ -659,6 +683,46 @@ pub fn validate_id(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The commit a base name means here.
+///
+/// `main` and `origin/main` are one branch to a person and two refs to git, and
+/// a checkout can easily have only the second — a clone made with `--branch`,
+/// or one whose local trunk was deleted after a merge. Both are tried, in that
+/// order, because a local branch is the one the user can move and therefore the
+/// one they mean.
+///
+/// Returns the commit rather than the name that found it. Every caller wants a
+/// fixed point: a name is re-resolved by whatever git command receives it, and
+/// that is exactly how `worktree add -b` ends up guessing.
+fn start_point(repo: &Path, base: &str) -> Result<String> {
+    let resolved = resolvable(repo, base)
+        .with_context(|| format!("{base} is not a branch, a tag or a commit in this checkout"))?;
+    Ok(git(
+        repo,
+        &["rev-parse", "--verify", &format!("{resolved}^{{commit}}")],
+    )?
+    .trim()
+    .to_string())
+}
+
+/// The spelling of `base` that git can answer about here, if either can.
+fn resolvable(repo: &Path, base: &str) -> Option<String> {
+    [base.to_string(), format!("origin/{base}")]
+        .into_iter()
+        .find(|name| {
+            git(
+                repo,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{name}^{{commit}}"),
+                ],
+            )
+            .is_ok()
+        })
+}
+
 /// The branch a session should be reviewed against. Hardcoding `main` breaks
 /// every repo that still uses `master`, or any other convention — and it fails
 /// at review time, after the agent has already done the work.
@@ -674,11 +738,21 @@ pub fn default_branch(repo: &Path) -> String {
         &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     ) {
         if let Some(name) = head.trim().strip_prefix("origin/") {
-            let remote_ref = format!("refs/remotes/origin/{name}");
-            if !name.is_empty()
-                && git(repo, &["rev-parse", "--verify", "--quiet", &remote_ref]).is_ok()
-            {
-                return name.to_string();
+            // The spelling that resolves, not the bare name. What comes back
+            // here is handed straight to `rev-list`, `merge-base` and
+            // `worktree add` by every caller, and in a checkout whose local
+            // trunk is absent — a clone made with `--branch`, or one whose
+            // `main` was deleted after a merge — the bare name resolves to
+            // nothing. `s diff` could then take no merge base and `commits`
+            // could take no count, which is the failure that used to end with
+            // a deleted branch.
+            //
+            // `origin/main` is a fine thing to print, too: it is where the
+            // session is measured from, said exactly.
+            if !name.is_empty() {
+                if let Some(resolved) = resolvable(repo, name) {
+                    return resolved;
+                }
             }
         }
     }
@@ -1767,7 +1841,47 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(default_branch(&root), "trunk");
+        let base = default_branch(&root);
+        assert!(
+            base.ends_with("trunk"),
+            "the remote's answer has to win over the local `main`, and this said {base}"
+        );
+        // Spelled `origin/trunk`, because `trunk` is not a local branch in this
+        // fixture and the answer is handed to `rev-list` and `merge-base` by
+        // every caller. This asserted the bare name until the day a clone
+        // without a local trunk proved that name resolves to nothing.
+        assert!(
+            git(&root, &["rev-parse", "--verify", "--quiet", &base]).is_ok(),
+            "and it has to be a ref this checkout can answer about"
+        );
+    }
+
+    /// Whatever it names has to be a ref this checkout can answer about.
+    ///
+    /// `origin/HEAD` is read for the *name* and the name is then handed to
+    /// `rev-list` and `merge-base` by every caller. In a clone whose local
+    /// trunk is absent that name resolves to nothing, so `s diff` cannot take a
+    /// merge base and `commits` cannot count — and a count that cannot be taken
+    /// was, until recently, a branch omh deleted.
+    #[test]
+    fn the_default_branch_is_a_ref_that_resolves() {
+        let (_d, root) = repo_on("other");
+        git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .unwrap();
+
+        let base = default_branch(&root);
+        assert!(
+            git(&root, &["rev-parse", "--verify", "--quiet", &base]).is_ok(),
+            "every range is measured from {base}, and git cannot resolve it here"
+        );
     }
 
     /// Regression: `origin/HEAD` is a cached guess from clone time that nothing
@@ -1854,6 +1968,118 @@ mod tests {
         assert_eq!(
             git(&s.worktree, &["rev-parse", "HEAD"]).unwrap().trim(),
             tip
+        );
+    }
+
+    /// A checkout whose default branch exists only on the remote.
+    ///
+    /// `git clone --branch <other>` is the ordinary way to get one, and it is
+    /// not exotic: a clone made to work on one branch, or a checkout whose
+    /// local trunk was deleted after a merge, both land here. `origin/HEAD`
+    /// still names `main`, which is what `default_branch` reads.
+    fn clone_without_local_trunk() -> (tempfile::TempDir, PathBuf) {
+        let (d, src) = repo_on("main");
+        git(&src, &["checkout", "-q", "-b", "other"]).unwrap();
+        git(&src, &["commit", "-q", "--allow-empty", "-m", "other work"]).unwrap();
+
+        let clone = d.path().join("clone");
+        git(
+            d.path(),
+            &[
+                "clone",
+                "-q",
+                "--branch",
+                "other",
+                src.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        git(&clone, &["config", "user.email", "t@example.com"]).unwrap();
+        git(&clone, &["config", "user.name", "t"]).unwrap();
+        git(&clone, &["remote", "set-head", "origin", "main"]).unwrap();
+        (d, clone)
+    }
+
+    /// The session must be on the branch omh named, whatever git would rather.
+    ///
+    /// `worktree add -b <branch> <path> <base>` looks unambiguous and is not:
+    /// when `base` has no local ref but exactly one remote has it, git's DWIM
+    /// takes over, creates a branch named after the *base*, and ignores `-b`
+    /// entirely. Measured against git 2.55.0 — the session lands on `main`,
+    /// tracking `origin/main`, which is the one branch omh exists to keep an
+    /// agent away from.
+    ///
+    /// Nothing then works: `diff`, `commit` and `--keep` all refuse a worktree
+    /// that is not on its branch, and `s ls` reports a branch that was never
+    /// created. `--no-guess-remote` does not help; a resolved commit does.
+    #[test]
+    fn a_session_lands_on_its_own_branch_when_the_base_is_only_on_the_remote() {
+        let (d, root) = clone_without_local_trunk();
+
+        assert!(
+            git(&root, &["rev-parse", "--verify", "--quiet", "main"]).is_err(),
+            "the precondition is that `main` is not a local branch here"
+        );
+        assert!(
+            git(
+                &root,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/main"
+                ]
+            )
+            .is_ok(),
+            "…but is a branch the remote has, which is what makes git guess"
+        );
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+
+        assert_eq!(
+            git(&s.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap()
+                .trim(),
+            "omh/s01",
+            "the session is on the branch omh opened, not on the base it forked from"
+        );
+    }
+
+    /// The same base, in a repo with no remote configured, fails the other way.
+    ///
+    /// Only the remote-tracking *ref* is there — no `remote.origin`, so git has
+    /// nothing to guess from and refuses outright with `invalid reference:
+    /// main` instead of quietly taking the branch over. Measured: one cause,
+    /// two symptoms, and the loud one still means no session can start here.
+    #[test]
+    fn a_base_that_is_only_a_remote_ref_still_opens_a_session() {
+        let (d, root) = repo_on("other");
+        git(&root, &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
+        git(
+            &root,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .unwrap();
+        assert!(
+            git(&root, &["rev-parse", "--verify", "--quiet", "main"]).is_err(),
+            "the precondition is that `main` is not a local branch here"
+        );
+
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main")
+            .expect("a base git can resolve at all is enough to start a session");
+
+        assert_eq!(
+            git(&s.worktree, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .unwrap()
+                .trim(),
+            "omh/s01"
         );
     }
 
