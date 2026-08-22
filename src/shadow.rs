@@ -615,6 +615,16 @@ impl Shadow {
     /// inside the same range: both change the occurrence count, so both are
     /// named.
     ///
+    /// **`-F` on the `--grep`, or the needle is a pattern rather than the bytes
+    /// it is.** `--grep` takes a POSIX basic regular expression by default, so
+    /// a secret carrying a metacharacter does not match itself — measured
+    /// against git 2.55.0, `KEY=ab+cd/ef12345==` in a commit subject is not
+    /// found, because `+` means *one or more of the previous character* and
+    /// base64 is full of them. The same default takes the feature down from the
+    /// other side: an unbalanced `[` in a carried line is a syntax error, `git
+    /// log` exits 128, and `--keep` stays dead for that session. `-S` needs no
+    /// such flag; a pickaxe is already a fixed string.
+    ///
     /// omh is in a position no scanner is — it staged these files, so it knows
     /// the bytes and never has to guess. With one caveat worth stating: it
     /// reads them from the checkout *now*, so a secret rotated mid-session is
@@ -637,7 +647,7 @@ impl Shadow {
                     ("contains", vec!["log", "--oneline", "-S", &needle, range]),
                     (
                         "mentions",
-                        vec!["log", "--oneline", "--grep", &needle, range],
+                        vec!["log", "--oneline", "-F", "--grep", &needle, range],
                     ),
                 ] {
                     let hit = git_in(repo, &args)?;
@@ -1367,6 +1377,85 @@ mod tests {
                 "{name}: and the branch must be untouched"
             );
         }
+    }
+
+    /// A secret is matched as the bytes it is, not as a pattern.
+    ///
+    /// The message half of the scan hands the needle to `git log --grep`, which
+    /// is a POSIX basic regular expression unless told otherwise. So a secret
+    /// carrying a metacharacter does not match itself: `+` means *one or more
+    /// of the previous character*, and base64 is full of them. Measured against
+    /// git 2.55.0 — `--grep` finds nothing for a commit whose subject quotes
+    /// this value verbatim, and `-F --grep` finds it.
+    ///
+    /// Planted in the **message only**, because that is the one door `-S`
+    /// cannot see: the pickaxe is already a fixed string and would have caught
+    /// it in a diff.
+    #[test]
+    fn a_secret_that_looks_like_a_pattern_is_still_caught() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[".env".to_string()]).unwrap();
+
+        // `+` and `/` are ordinary base64. As a regex this matches `abcd…`,
+        // `abbcd…` and never the literal the agent actually wrote.
+        let secret = "KEY=ab+cd/ef12345==";
+        std::fs::write(checkout.join(".env"), format!("{secret}\n")).unwrap();
+        std::fs::write(wt.join(".env"), format!("{secret}\n")).unwrap();
+
+        std::fs::write(wt.join("note.rs"), "fn n() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["commit", "-qm", &format!("ship with {secret}")],
+        )
+        .unwrap();
+
+        let err = s
+            .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], false)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("carried"),
+            "a secret that is its own regex still has to be refused: {err}"
+        );
+        assert!(
+            git_in(&checkout, &["log", "--oneline", "main..omh/s01"])
+                .unwrap()
+                .trim()
+                .is_empty(),
+            "and the branch must be untouched"
+        );
+    }
+
+    /// A carried line that is not valid regex must not break the harvest.
+    ///
+    /// The same defect from the other side, and this one takes the whole
+    /// feature down rather than letting something through: an unbalanced `[` is
+    /// a syntax error to `--grep`, so `git log` exits 128, the harvest fails,
+    /// and `--keep` stays dead for that session until the file changes.
+    /// Measured — `fatal: command line, 'SECRET=a[bc': missing terminating ]`.
+    #[test]
+    fn a_carried_line_that_is_not_a_regex_does_not_break_the_harvest() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[".env".to_string()]).unwrap();
+
+        let carried = "SECRET_TOKEN=a[bcdefgh";
+        std::fs::write(checkout.join(".env"), format!("{carried}\n")).unwrap();
+        std::fs::write(wt.join(".env"), format!("{carried}\n")).unwrap();
+
+        std::fs::write(wt.join("work.rs"), "fn work() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qm", "Ordinary work"]).unwrap();
+
+        let landed = s
+            .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], false)
+            .expect("a carried line nobody committed is not a reason to refuse");
+        assert_eq!(landed, 1, "the agent's commit still has to land");
     }
 
     /// A carried file must never be **tracked** in the seed, and the reason is

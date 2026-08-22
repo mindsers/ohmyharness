@@ -62,13 +62,14 @@ to the local network.
 secret reaches the agent, so patterns are validated against escaping the repo.
 A teammate's commit should not be able to copy your `~/.ssh` into a sandbox.
 
-**4b. The carried-secret scan reads a needle as a regular expression.** `--keep`
-searches the agent's commit messages for lines from the files you carried in,
-and passes them to `git log --grep` without `-F`. A secret containing a regex
-metacharacter is therefore not matched by itself: `KEY=ab+cd/ef12345==` — an
-ordinary base64 value — goes through, measured 2026-08-21. The content half of
-the scan is a fixed-string pickaxe and is unaffected, so this is the
-message-only path. One flag closes it; see [Git](git.md#foundations).
+**4b. Closed.** The carried-secret scan read its needle as a regular
+expression: `--keep` searches the agent's commit messages for lines from the
+files you carried in, and passed them to `git log --grep` without `-F`, so a
+secret containing a metacharacter did not match itself — `KEY=ab+cd/ef12345==`,
+an ordinary base64 value, went through. The same default broke the feature from
+the other side, where an unbalanced `[` in a carried line made `git log` exit
+128 and `--keep` stay dead for that session. Both measured 2026-08-21; both
+guarded. The content half was always a fixed-string pickaxe and never affected.
 
 **4c. The sandbox's exclude list is frozen at the first launch.** omh derives
 what the sandbox's repository must not track from the mounts it is about to
