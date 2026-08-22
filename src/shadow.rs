@@ -81,9 +81,11 @@ pub const GUEST_PRE_PUSH: &str = "/omh/shadow/hooks/pre-push";
 ///
 /// `Resource busy`, not `Read-only file system` — git replaces this file by
 /// renaming a lock over it, and what refuses is the rename onto a mount point
-/// rather than the read-only flag. An unreplaceable file on the host says
-/// `Operation not permitted` for the same reason, which is close enough to
-/// mislead and not close enough to quote.
+/// rather than the read-only flag. The host stand-in used before this was
+/// measured says `Operation not permitted`, and for a different reason again:
+/// an immutable flag refusing the rename, not a mount. Same outcome, three
+/// different mechanisms, which is exactly how a stand-in gets quoted as if it
+/// were the thing.
 ///
 /// That second one is the interesting one. `git push` fails for want of a
 /// remote and git's own error suggests `git remote add` — which now fails too,
@@ -937,12 +939,38 @@ impl Shadow {
     /// authorship on the host — it is there because git will not commit without
     /// one and the container has no global config to supply it.
     fn write_config(gitdir: &Path) -> Result<()> {
-        const KEEP: [&str; 5] = [
+        // What git records about the repository itself, as opposed to what it
+        // should *do* — and the difference is the whole allowlist. Several of
+        // these are detected from the filesystem when the repository is made
+        // and differ by platform: `ignorecase` and `precomposeunicode` appear
+        // on macOS and not on a case-sensitive Linux box, `symlinks` on
+        // Windows. Dropping one leaves a repository git reads differently from
+        // the one it created — paths differing only in case become two files,
+        // accented filenames flip between NFC and NFD and read as modified.
+        //
+        // The two `extensions.*` keys git itself sets, by name rather than by
+        // prefix. The prefix was wider than it needed to be: git refuses to
+        // work in a repository whose extensions it does not recognise, so a
+        // preserved `extensions.whatever` from an older shadow is a harvest
+        // that can never run again. Losing a real one would be worse, which is
+        // why these two are named.
+        //
+        // Guarded by `refreshing_keeps_what_git_records_about_the_repository`,
+        // which measures against a fresh `git init` on the machine running it
+        // rather than against this list. A git that starts recording something
+        // new turns it red on the platform where that matters, which is the
+        // only way a list like this stays true.
+        const KEEP: [&str; 10] = [
             "core.repositoryformatversion",
             "core.filemode",
             "core.bare",
             "core.logallrefupdates",
             "core.worktree",
+            "core.ignorecase",
+            "core.precomposeunicode",
+            "core.symlinks",
+            "extensions.objectformat",
+            "extensions.refstorage",
         ];
 
         let listed = Command::new("git")
@@ -951,10 +979,30 @@ impl Shadow {
             .args(["config", "--list", "--local", "--name-only"])
             .output()
             .with_context(|| format!("reading the config of {}", gitdir.display()))?;
-        // A repository with no config to list is one being built; there is
-        // nothing to drop and the identity below still has to be written.
+        // Asked rather than assumed. Empty output means *no keys*; a listing
+        // that failed means omh does not know what is in there, and the two
+        // must not spell the same — this function's whole job is dropping what
+        // it finds, so believing an empty answer it never got would sanitise
+        // nothing and report success. The relaunch path is exactly where a key
+        // worth dropping would be.
+        anyhow::ensure!(
+            listed.status.success(),
+            "reading the config of {}: {}",
+            gitdir.display(),
+            String::from_utf8_lossy(&listed.stderr).trim()
+        );
+        // A **set**, because `--list --name-only` prints a key once per value.
+        // Unsetting takes every value at once, so a multi-valued key arriving
+        // twice meant a second `--unset-all` with nothing left to remove, exit
+        // 5, empty stderr — and a launch aborted over a key that had already
+        // gone. Measured against git 2.55.0.
         let listed = String::from_utf8_lossy(&listed.stdout);
-        for key in listed.lines().map(str::trim).filter(|k| !k.is_empty()) {
+        let keys: std::collections::BTreeSet<&str> = listed
+            .lines()
+            .map(str::trim)
+            .filter(|k| !k.is_empty())
+            .collect();
+        for key in keys {
             if KEEP.contains(&key) || key == "user.name" || key == "user.email" {
                 continue;
             }
@@ -1948,6 +1996,106 @@ mod tests {
             !marker.exists(),
             "a driver the sandbox named ran on the host, as the user"
         );
+    }
+
+    /// A key with two values is one key, and dropping it is one job.
+    ///
+    /// `config --list --name-only` prints a key once **per value**, so a
+    /// multi-valued key arrives twice — and `--unset-all` removes every value
+    /// on the first call, leaving the second to exit 5 with empty stderr. Read
+    /// as a failure that aborts the launch, which is what it did: a shadow from
+    /// before the config was mounted read-only, where an agent had ever run
+    /// `git config --add` twice, could not be relaunched at all. The error
+    /// named a key and said nothing else.
+    ///
+    /// The module's own rule, from the fetch a few hundred lines up: following
+    /// omh's instructions must not brick omh. Neither may upgrading omh.
+    #[test]
+    fn a_key_with_two_values_does_not_brick_the_next_launch() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        // what a shadow from before the read-only mount can hold
+        git(&s.gitdir, &wt, &["config", "--add", "core.gitproxy", "one"]).unwrap();
+        git(&s.gitdir, &wt, &["config", "--add", "core.gitproxy", "two"]).unwrap();
+        assert_eq!(
+            git(
+                &s.gitdir,
+                &wt,
+                &["config", "--list", "--local", "--name-only"]
+            )
+            .unwrap()
+            .lines()
+            .filter(|k| k.trim() == "core.gitproxy")
+            .count(),
+            2,
+            "the precondition is that git lists the key once per value"
+        );
+
+        s.ensure(&wt, &[])
+            .expect("a key with two values is still just a key to drop");
+
+        let config = std::fs::read_to_string(s.gitdir.join("config")).unwrap();
+        assert!(!config.contains("gitproxy"), "and it is gone:\n{config}");
+    }
+
+    /// Refreshing keeps what git records about the repository itself.
+    ///
+    /// The allowlist cannot be a list of keys someone remembered: `git init`
+    /// writes what it detected about *this* filesystem, and that differs by
+    /// platform — `core.ignorecase` and `core.precomposeunicode` on macOS,
+    /// neither on a case-sensitive Linux box, `extensions.objectformat` in a
+    /// sha256 repository. Drop one and the repository git reads is not the one
+    /// git made: paths that differ only in case become two files, accented
+    /// filenames flip between NFC and NFD and read as modified.
+    ///
+    /// So the guard is measured against a fresh `git init` on the machine
+    /// running it, rather than against a list in this file. A git that starts
+    /// recording something new turns this red on the platform where it matters.
+    #[test]
+    fn refreshing_keeps_what_git_records_about_the_repository() {
+        let (d, wt, shadow_dir) = fixture();
+        let pristine = d.path().join("pristine.git");
+        Command::new("git")
+            .args(["init", "-q", "--bare", "--template="])
+            .arg(&pristine)
+            .output()
+            .unwrap();
+        let listed = Command::new("git")
+            .arg("--git-dir")
+            .arg(&pristine)
+            .args(["config", "--list", "--local", "--name-only"])
+            .output()
+            .unwrap();
+        let expected: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|k| !k.is_empty() && *k != "core.bare")
+            .map(str::to_string)
+            .collect();
+        assert!(
+            !expected.is_empty(),
+            "a fresh `git init` records something, or this test is vacuous"
+        );
+
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        s.ensure(&wt, &[]).unwrap();
+
+        let kept = git(
+            &s.gitdir,
+            &wt,
+            &["config", "--list", "--local", "--name-only"],
+        )
+        .unwrap();
+        for key in expected {
+            assert!(
+                kept.lines().any(|k| k.trim() == key),
+                "{key} is something git recorded about this repository and omh \
+                 dropped it. kept:\n{kept}"
+            );
+        }
     }
 
     /// The sandbox's config is omh's again at every launch.
