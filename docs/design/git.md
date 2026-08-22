@@ -424,8 +424,8 @@ the hardening in step 6 of the order below, this work closes or narrows
    question.
 2. Resolve the base to a commit before `worktree add`, and assert HEAD after.
 3. `-F` on the carried-secret message scan.
-4. The sandbox's exclude list is rewritten on every launch rather than at the
-   first one — [risks](risks.md#security) 4c, and the cheapest item here.
+4. **Landed.** The sandbox's exclude list is rewritten on every launch rather
+   than at the first one — [risks](risks.md#security) 4c.
 5. The replay point, and `--keep` becomes repeatable.
 6. The neutralised set grows, agent-authored text is sanitised at the render
    boundary, and the sandbox's `config` is mounted read-only — the gate on 7,

@@ -1557,6 +1557,38 @@ mod tests {
         }
     }
 
+    /// …including one that appears after the sandbox already exists.
+    ///
+    /// The sibling above proves the first launch derives the list from the
+    /// mounts. This proves the second one does too, which is a different
+    /// question: the repository is deliberately left as it is on relaunch, and
+    /// the exclude list was left with it — so a capability switched on later,
+    /// or a `carry_in` entry added later, mounted a document the sandbox had
+    /// never heard of and `git add -A` swept it in.
+    #[test]
+    fn a_mount_added_after_the_first_launch_still_reaches_the_exclude_list() {
+        let fx = fixture();
+        let _first = plan_for(&fx, "claude");
+
+        // the user carries one more file in, between launches
+        std::fs::write(fx.paths.repo.join(".secrets"), "TOKEN=2\n").unwrap();
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            "carry_in = [\".env\", \".secrets\"]\n",
+        )
+        .unwrap();
+        let _second = plan_for(&fx, "claude");
+
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        let exclude =
+            std::fs::read_to_string(shadow.gitdir.join("info/exclude")).expect("a seeded shadow");
+        assert!(
+            exclude.lines().any(|l| l == ".secrets"),
+            "a file carried in after the sandbox was built is still omh's to keep \
+             out of its history. exclude list was:\n{exclude}"
+        );
+    }
+
     /// git is dead in the sandbox because `/work/.git` is a pointer into the
     /// user's checkout and the checkout is never mounted. The agent loses
     /// `status`, `diff`, `stash` and `reset --hard`, and the attached editor

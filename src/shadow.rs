@@ -111,6 +111,19 @@ impl Shadow {
         // written last and only after the rename below, so its presence is what
         // actually means "this one got there".
         if self.gitdir.exists() && self.seed_record.exists() {
+            // The repository is left exactly as it is — that is what makes
+            // relaunching safe — but the exclude list is not part of "as it
+            // is". It is derived from the mounts omh is about to make, and
+            // those change: switch a capability on and the document it mounts
+            // inside `/work` is one this repository has never heard of, so
+            // `git add -A` sweeps omh's rendered file — credentials and all —
+            // into a history `--keep` replays onto the branch.
+            //
+            // Written here rather than through a `refresh` the caller has to
+            // remember, because a caller that forgets reintroduces exactly this
+            // and nothing goes red. `ensure` already takes the list; the only
+            // question was whether it believed it on the second launch.
+            Self::write_exclude(&self.gitdir, excluded)?;
             return Ok(());
         }
         let parent = self
@@ -1744,6 +1757,50 @@ mod tests {
                  container supplies one"
             );
         }
+    }
+
+    /// The exclude list follows the mounts, and the mounts change under it.
+    ///
+    /// omh derives what the sandbox's repository must not track from the mounts
+    /// it is about to make, and wrote that list once — when the repository was
+    /// created. Switch a capability on afterwards and the mount it adds inside
+    /// `/work` is a file the existing sandbox neither tracks nor excludes, so
+    /// the agent's own `git add -A` commits omh's rendered document — MCP
+    /// environment and all — into a history `omh s commit --keep` replays onto
+    /// the branch.
+    ///
+    /// Asserted as the property that matters rather than as a line in a file:
+    /// the document cannot be staged. A test that greps `info/exclude` passes
+    /// for a list that git never reads.
+    #[test]
+    fn a_capability_added_later_is_still_kept_out_of_the_sandboxs_history() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[".env".to_string()]).unwrap();
+
+        std::fs::write(wt.join("agent.rs"), "fn main() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A"]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-q", "-m", "a checkpoint"]).unwrap();
+        let checkpoint = git(&s.gitdir, &wt, &["rev-parse", "HEAD"]).unwrap();
+
+        // the next launch mounts one more document inside /work
+        let grown = [".env".to_string(), ".mcp.json".to_string()];
+        s.ensure(&wt, &grown).unwrap();
+
+        // what the mount would put there, credentials and all
+        std::fs::write(wt.join(".mcp.json"), "{\"env\":{\"TOKEN\":\"sk-live-42\"}}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        let staged = git(&s.gitdir, &wt, &["diff", "--cached", "--name-only"]).unwrap();
+
+        assert!(
+            !staged.contains(".mcp.json"),
+            "a document omh mounted is not the agent's work to commit: staged {staged:?}"
+        );
+        assert_eq!(
+            git(&s.gitdir, &wt, &["rev-parse", "HEAD"]).unwrap(),
+            checkpoint,
+            "and refreshing the list must not disturb what the agent already did"
+        );
     }
 
     /// Relaunching into a running session is ordinary — `omh claude` twice, an
