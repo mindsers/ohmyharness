@@ -343,16 +343,34 @@ shadow… That is a property of the call sites, not of anything enforcing it."*
 These commands end that property, so the neutralised set grows **before** they
 ship:
 
-- **`diff.external=`, `--no-ext-diff`, `--no-textconv`.** Rendering a patch runs
-  the diff machinery, and the diff machinery is configurable to *execute
-  programs*. The shadow's config is in a read-write mount. Without this,
-  `omh sNN diff 4` is arbitrary code execution on the host, as you, from a
-  config line the agent wrote.
-- **Sanitise what is printed.** Checkpoint subjects are agent-authored text
-  rendered inside omh's own report frames. Control characters and ANSI escapes
-  let a subject line forge omh's output, and `committed to main` is four words.
-  Strip C0/C1 except newline at the render boundary, once, for every
-  agent-authored string.
+- **Landed (#51): `--no-textconv`, `--no-ext-diff`, and `diff.external=`.** The
+  diff machinery is configurable to *execute programs*, and both halves of that
+  configuration are the agent's: the driver is a config key in a read-write
+  mount, and the `.gitattributes` naming it sits in `/work`. So a host-side read
+  that produces a diff runs what the agent chose, as you, outside the container.
+
+  Which half is live was measured rather than assumed, and this page had it
+  wrong: **textconv is the vector, not `diff.external`.**
+
+  | read | textconv | external diff |
+  |---|---|---|
+  | `log -S` | **runs** | no |
+  | `log -p`, `show` | **runs** | no |
+  | `git diff` | **runs** | **runs** |
+  | `log --grep` | no | no |
+
+  The log family will not run an external driver without `--ext-diff`, which
+  nothing passes — so the key alone would have left the real hole open.
+  `--no-textconv` closes it, and it is a per-command flag rather than a config
+  key, so the helpers add it by verb. Measured against git 2.55.0 with a driver
+  the sandbox named, which ran on the host until this landed.
+- **Landed (#51): sanitise what is printed.** `out::untrusted` strips C0/C1
+  except newline. Checkpoint subjects are agent-authored text rendered inside
+  omh's own report frames, and git quotes the refs and paths an agent chose
+  straight back in its stderr — which `problem` prints. An escape sequence there
+  repaints omh's own output, and `committed to main` is four words. Applied at
+  the four bail sites that carry git's stderr into an error, and waiting for
+  `log`'s checkpoint subjects.
 - **Name the gitdir explicitly and inherit no `GIT_*`.** Host-side calls rely on
   `current_dir` today, so an ambient `GIT_DIR` — omh run from inside a hook, or
   from `rebase --exec` — redirects them wholesale.
@@ -428,9 +446,12 @@ the hardening in step 6 of the order below, this work closes or narrows
 4. **Landed (#49).** The sandbox's exclude list is rewritten on every launch
    rather than at the first one — [risks](risks.md#security) 4c.
 5. **Landed (#50).** The replay point, and `--keep` becomes repeatable.
-6. The neutralised set grows, agent-authored text is sanitised at the render
-   boundary, and the sandbox's `config` is mounted read-only — the gate on 7,
-   and what narrows [risks](risks.md#security) 2b.
+6. **Landed (#51).** The neutralised set grows and agent-authored text is
+   sanitised at the render boundary — the gate on 7.
+6b. The sandbox's `config` rewritten each launch and mounted read-only, which
+   narrows [risks](risks.md#security) 2b. Split from 6: that one is about what a
+   host-side *read* may execute, this is about what the sandbox may *write*, and
+   the second needs verifying inside a real container rather than on the host.
 7. `omh sNN log`, and `diff` grows `-p` and a checkpoint argument.
 8. The selector: `sNN` in, three spellings out.
 9. `--keep [selection]`, and `--edit` for the todo.
