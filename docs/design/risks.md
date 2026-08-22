@@ -103,15 +103,14 @@ with a real harness.
 running `claude` natively, but no better, and the worktree makes it easier to
 forget that you are both in there.
 
-**8b. Two measured defects on the host side of git.** Measured 2026-08-21
-against git 2.55.0, with tests owed before fixes, and ordered in
-[Git](git.md#order). A third — `omh s rm` deleting a branch it could not count —
-is fixed: a count with no answer now keeps the branch and says so.
+**8b. One measured defect left on the host side of git.** Measured 2026-08-21
+against git 2.55.0, with its test owed before the fix, and ordered in
+[Git](git.md#order). Two others are closed: `omh s rm` deleting a branch it
+could not count — a count with no answer now keeps the branch and says so — and
+a session being created on trunk itself, where git's remote DWIM overrode
+`worktree add -b`. The start point is a resolved commit now, and `default_branch`
+returns a ref this checkout can actually answer about.
 
-- **A session can be created on trunk itself.** `worktree add -b` is overridden
-  by git's remote DWIM when the base has no local ref, so the session lands on
-  `main` rather than `omh/sNN`. Every review path then refuses and the session
-  is a dead end from launch.
 - **`omh s commit --keep` is not repeatable.** It replays from where the session
   started, so a second run offers commits already on your branch and fails
   applying them.
