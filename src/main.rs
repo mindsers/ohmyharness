@@ -1328,7 +1328,7 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     .unwrap_or(false),
                 label: sess.label().to_string(),
                 work: Some(work_state(&sess, &paths.repo, &base)),
-                behind: sess.behind(&paths.repo, &base),
+                behind: sess.behind(&paths.repo, &base).ok(),
                 id,
             }
         })
@@ -1420,8 +1420,12 @@ fn work_state(session: &Session, repo: &std::path::Path, base: &str) -> report::
         // first `s push`. Measured against the base branch instead, because a
         // blank here reads as a session nobody touched.
         None => match session.commits(repo, base) {
-            0 => Work::Clean,
-            n => Work::ToPush(n),
+            Ok(0) => Work::Clean,
+            Ok(n) => Work::ToPush(n),
+            // The same rule as the accessors above: a git that cannot answer is
+            // never rendered as an answer. `Clean` here would read as a session
+            // holding nothing, over a branch nobody can count.
+            Err(_) => Work::Unknown,
         },
     }
 }
@@ -4750,7 +4754,7 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     // asked* — `Work::Clean` would be a claim, and a false one.
                     work: None,
                     running: false,
-                    behind: sess.behind(&paths.repo, &base),
+                    behind: sess.behind(&paths.repo, &base).ok(),
                     id,
                 }
             })
@@ -4830,14 +4834,16 @@ fn commit(
         let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, true)?;
         let base = session::default_branch(&paths.repo);
         let n = session.commits(&paths.repo, &base);
+        warn_uncounted(&n, ctx, &base);
         ctx.say(
             &report::Action::new(
                 "committed",
                 match landed {
                     0 => format!("nothing to keep — {} has made no commits", session.label()),
                     _ => format!(
-                        "kept {landed} of {}'s own commits ({n} on the branch)",
-                        session.label()
+                        "kept {landed} of {}'s own commits{}",
+                        session.label(),
+                        branch_tally(&n)
                     ),
                 },
             )
@@ -4845,7 +4851,7 @@ fn commit(
                 "session": session.id,
                 "branch": session.label(),
                 "kept": landed,
-                "commits": n,
+                "commits": n.as_ref().ok(),
                 "base": base,
             })),
         );
@@ -4867,20 +4873,52 @@ fn commit(
     // the same number `omh s rm` will use to decide the branch survives.
     let base = session::default_branch(&paths.repo);
     let n = session.commits(&paths.repo, &base);
-    let s = if n == 1 { "commit" } else { "commits" };
+    warn_uncounted(&n, ctx, &base);
     ctx.say(
         &report::Action::new(
             "committed",
-            format!("committed to {} ({n} {s} on the branch)", session.label()),
+            format!("committed to {}{}", session.label(), branch_tally(&n)),
         )
         .data(serde_json::json!({
             "session": session.id,
             "branch": session.label(),
-            "commits": n,
+            "commits": n.as_ref().ok(),
             "base": base,
         })),
     );
     Ok(())
+}
+
+/// Say that the count could not be taken, where the answer merely omits it.
+///
+/// `branch_tally` going quiet is right for the answer — what omh did is true
+/// whether or not it can count afterwards — but quiet is not the same as
+/// unsaid. This is the same failure `omh s rm` will meet later, and meeting it
+/// there for the first time, over a branch, is worse than hearing about it now
+/// over a commit that already succeeded. On stderr, like every other warning,
+/// so it stays out of anything being redirected.
+fn warn_uncounted(n: &Result<usize>, ctx: &out::Ctx, base: &str) {
+    if let Err(e) = n {
+        ctx.warn(&format!(
+            "could not count this branch against {base} — {e:#}"
+        ));
+    }
+}
+
+/// What a session's branch holds, appended to an answer that is true without it.
+///
+/// Empty when git could not take the count — `commits` returns a `Result`
+/// precisely because a base that does not resolve is a question with no answer,
+/// and *"(0 commits on the branch)"* is the wrong one. The sentence in front of
+/// this reports what omh just did, which is true either way.
+fn branch_tally(n: &Result<usize>) -> String {
+    match n {
+        Ok(n) => format!(
+            " ({n} {} on the branch)",
+            if *n == 1 { "commit" } else { "commits" }
+        ),
+        Err(_) => String::new(),
+    }
 }
 
 fn push(
@@ -4963,14 +5001,39 @@ fn rm(cwd: &std::path::Path, id: &str, ctx: &out::Ctx) -> Result<()> {
     // trains people to ignore a namespace filling with dead refs.
     let base = session::default_branch(&paths.repo);
     let action = match session.remove(&paths.repo, &base, &paths.shadows())? {
-        session::Removed::BranchKept => {
-            let n = session.commits(&paths.repo, &base);
-            let s = if n == 1 { "commit" } else { "commits" };
+        session::Removed::BranchKept(n) => {
+            // Two ways to be kept, and they are not the same news. A branch
+            // kept because it holds three commits is an invitation to review
+            // them; one kept because omh could not tell what it holds is a
+            // question, and saying "3 commits" for it would be an invention.
+            //
+            // The count comes back from `remove` rather than being asked
+            // again: it is the number that *made* the decision, and a second
+            // call could answer differently and narrate a decision nobody took.
+            //
+            // The review command changes with it. What stops omh counting is a
+            // range end that does not resolve, and for a branch this session is
+            // standing on that is the base — so a line beginning `<base>..`
+            // would fail in the user's hands for the reason they are being
+            // shown it.
+            let (kept, review) = match n {
+                Some(n) => (
+                    format!(
+                        "kept ({n} {} to review)",
+                        if n == 1 { "commit" } else { "commits" }
+                    ),
+                    format!("git log {base}..omh/{id}"),
+                ),
+                None => (
+                    format!("kept — omh could not count it against {base}"),
+                    format!("git log omh/{id}"),
+                ),
+            };
             report::Action::new(
                 "session-removed",
-                format!("removed session {id}; branch omh/{id} kept ({n} {s} to review)"),
+                format!("removed session {id}; branch omh/{id} {kept}"),
             )
-            .next(format!("git log {base}..omh/{id}"))
+            .next(review)
             .next(format!("git branch -D omh/{id}"))
             .data(serde_json::json!({
                 "session": id,
@@ -5016,6 +5079,28 @@ fn rm(cwd: &std::path::Path, id: &str, ctx: &out::Ctx) -> Result<()> {
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    /// The tally omits itself rather than saying zero.
+    ///
+    /// `omh s rm` deleted a branch because a count it could not take read as
+    /// `0`; this is the same mistake one layer out, where it would be printed
+    /// rather than acted on. A pure function over the `Result`, so the guard
+    /// needs no repository and cannot be defeated by a fixture.
+    #[test]
+    fn a_tally_omh_could_not_take_is_absent_rather_than_zero() {
+        assert_eq!(branch_tally(&Ok(1)), " (1 commit on the branch)");
+        assert_eq!(branch_tally(&Ok(3)), " (3 commits on the branch)");
+        assert_eq!(
+            branch_tally(&Ok(0)),
+            " (0 commits on the branch)",
+            "a real zero is still an answer and still gets said"
+        );
+        assert_eq!(
+            branch_tally(&Err(anyhow::anyhow!("bad revision"))),
+            "",
+            "and a count nobody took says nothing at all"
+        );
+    }
 
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
     const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");

@@ -14,10 +14,21 @@ use std::process::Command;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Removed {
     /// Commits nobody has reviewed; the branch outlives the session.
-    BranchKept,
+    ///
+    /// Carries the count that decided it, and `None` when git could not take
+    /// one — a branch kept because it holds three commits is an invitation to
+    /// review them, and one kept because omh could not tell is a question. The
+    /// caller used to re-ask `commits` to tell them apart, which is two answers
+    /// to one question and a window for them to disagree.
+    BranchKept(Option<usize>),
     /// Nothing was committed, so the branch preserved nothing.
     BranchDropped,
-    /// A scratch session (`omh auth`, `omh doctor`) never had one.
+    /// There was no branch to speak of.
+    ///
+    /// A scratch session (`omh auth`, `omh doctor`) never had one, and neither
+    /// did a session id nothing ever created, which `omh s rm` reaches because
+    /// it builds a session rather than looking one up. Reporting *kept* or
+    /// *dropped* there is a claim about work that never existed.
     NoBranch,
 }
 
@@ -145,24 +156,47 @@ impl Session {
 
     /// How many commits `base` has that this session does not. A session that
     /// silently drifts behind trunk makes the agent work against stale code.
-    pub fn behind(&self, repo: &Path, base: &str) -> usize {
-        let Some(branch) = &self.branch else { return 0 };
-        git(repo, &["rev-list", "--count", &format!("{branch}..{base}")])
-            .ok()
-            .and_then(|out| out.trim().parse().ok())
-            .unwrap_or(0)
+    ///
+    /// `Ok(0)` and *cannot tell* are different answers, for the reason
+    /// `commits` below is a `Result`: this asks git the same question, in the
+    /// same checkouts, and fails in the same ones. Nothing destructive reads
+    /// it — but it is rendered beside a column that now says `?` for exactly
+    /// this failure, and it was emitted into JSON as `"behind": 0`, which is a
+    /// number omh did not have.
+    pub fn behind(&self, repo: &Path, base: &str) -> Result<usize> {
+        let Some(branch) = &self.branch else {
+            return Ok(0);
+        };
+        let out = git(repo, &["rev-list", "--count", &format!("{branch}..{base}")])?;
+        out.trim()
+            .parse()
+            .with_context(|| format!("counting how far {branch} is behind {base}"))
     }
 
     /// Commits on this session's branch that are not already in `base`.
     ///
     /// The question `remove` needs answered: whether keeping the branch would
     /// preserve anything.
-    pub fn commits(&self, repo: &Path, base: &str) -> usize {
-        let Some(branch) = &self.branch else { return 0 };
-        git(repo, &["rev-list", "--count", &format!("{base}..{branch}")])
-            .ok()
-            .and_then(|out| out.trim().parse().ok())
-            .unwrap_or(0)
+    ///
+    /// **An error is never zero** — the rule `uncommitted` states elsewhere in
+    /// this file, which this used to break with more at stake, because the
+    /// caller acts on the answer by deleting a branch.
+    ///
+    /// `rev-list <base>..<branch>` fails whenever either end does not resolve.
+    /// The base end is the reachable one for a live session: a repo that
+    /// renamed its trunk, or a clone whose `main` exists only as
+    /// `origin/main`, which `default_branch` will happily name. Read as zero,
+    /// that failure spelled *no commits*, and `omh s rm` deleted a branch
+    /// holding work nobody had reviewed while reporting it had preserved
+    /// nothing.
+    pub fn commits(&self, repo: &Path, base: &str) -> Result<usize> {
+        let Some(branch) = &self.branch else {
+            return Ok(0);
+        };
+        let out = git(repo, &["rev-list", "--count", &format!("{base}..{branch}")])?;
+        out.trim()
+            .parse()
+            .with_context(|| format!("counting commits on {branch}"))
     }
 
     /// Remove the session: its worktree, the repository the sandbox had, and
@@ -178,10 +212,24 @@ impl Session {
     pub fn remove(&self, repo: &Path, base: &str, shadows: &Path) -> Result<Removed> {
         // Decided before the worktree goes, because afterwards the branch is
         // the only thing left to ask.
+        //
+        // A question git could not answer keeps the branch. Dropping one is
+        // irreversible and justified by exactly one fact — that it holds
+        // nothing — so anything short of that fact has to fall the other way.
+        //
+        // Asked of a branch that exists, and that test is not a formality:
+        // `rev-list <base>..<branch>` fails for a missing *branch* exactly as
+        // it does for a missing base, so an id nothing ever created answered
+        // "cannot count" and was reported as a branch kept — over a branch that
+        // was never there, with a `git log` line that fails the same way.
         let outcome = match &self.branch {
             None => Removed::NoBranch,
-            Some(_) if self.commits(repo, base) > 0 => Removed::BranchKept,
-            Some(_) => Removed::BranchDropped,
+            Some(_) if !self.branch_exists(repo) => Removed::NoBranch,
+            Some(_) => match self.commits(repo, base) {
+                Ok(0) => Removed::BranchDropped,
+                Ok(n) => Removed::BranchKept(Some(n)),
+                Err(_) => Removed::BranchKept(None),
+            },
         };
 
         if git(
@@ -433,7 +481,7 @@ impl Session {
     ///
     /// An error is never zero. The pointer these commands run through is the one
     /// this module documents as leading nowhere inside the sandbox, and a stale
-    /// one on the host is what `remove` at line 141 already handles; reporting
+    /// one on the host is what `remove` already handles; reporting
     /// that as a clean session is how work gets discarded.
     pub fn uncommitted(&self) -> Result<usize> {
         let out = git_owned(&self.worktree, &status_args())?;
@@ -831,10 +879,55 @@ mod tests {
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
 
         let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
-        assert_eq!(outcome, Removed::BranchKept);
+        assert_eq!(outcome, Removed::BranchKept(Some(1)));
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s02"]).is_ok(),
             "unreviewed work must be unloseable"
+        );
+    }
+
+    /// The same half, when git cannot answer the question at all.
+    ///
+    /// `commits` asks `rev-list <base>..<branch>`, and a base that does not
+    /// resolve locally makes that fail rather than return a number — a repo
+    /// whose trunk was renamed, or a clone whose `main` exists only as
+    /// `origin/main`. Read as zero, the failure means `rm` reports *no commits*
+    /// and deletes a branch holding work nobody has reviewed.
+    ///
+    /// The base is passed explicitly rather than through `default_branch`.
+    /// What that function returns is a moving target — it is where the
+    /// unresolvable name comes from in the first place — and a test that
+    /// sourced its precondition from the code under repair would stop
+    /// reproducing anything the day that changed, while still passing.
+    #[test]
+    fn a_branch_is_kept_when_omh_cannot_count_what_is_on_it() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s03".into());
+        s.ensure(&root, "main").unwrap();
+
+        std::fs::write(s.worktree.join("work.txt"), "agent output").unwrap();
+        git(&s.worktree, &["add", "."]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
+
+        // The repo renames its trunk, which is the whole reason `main` stops
+        // resolving. Asserted rather than assumed: without this the test can
+        // quietly become a second copy of the one above.
+        git(&root, &["branch", "-m", "main", "trunk"]).unwrap();
+        assert!(
+            git(&root, &["rev-list", "--count", "main..omh/s03"]).is_err(),
+            "the precondition is that git cannot answer; it just did"
+        );
+
+        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
+        assert!(
+            git(&root, &["rev-parse", "--verify", "omh/s03"]).is_ok(),
+            "a count omh could not take is not a branch it may delete"
+        );
+        assert_eq!(
+            outcome,
+            Removed::BranchKept(None),
+            "and it has to say *why* it was kept: a count omh never took is not a \
+             count of zero, and `rm` renders the two differently"
         );
     }
 
@@ -1402,7 +1495,7 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("config.toml"), "got: {err}");
-        assert_eq!(s.commits(&root, "main"), 0, "nothing may land");
+        assert_eq!(s.commits(&root, "main").unwrap(), 0, "nothing may land");
     }
 
     /// The escape hatch, because refusing forever would make a carried file that
@@ -1472,7 +1565,7 @@ mod tests {
 
         assert!(err.to_string().contains("aborted"), "got: {err}");
         assert_eq!(
-            s.commits(&root, "main"),
+            s.commits(&root, "main").unwrap(),
             0,
             "nothing may land on the branch"
         );
@@ -1801,12 +1894,12 @@ mod tests {
         let (d, root) = repo_on("master");
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "master").unwrap();
-        assert_eq!(s.behind(&root, "master"), 0);
+        assert_eq!(s.behind(&root, "master").unwrap(), 0);
 
         for m in ["one", "two"] {
             git(&root, &["commit", "-q", "--allow-empty", "-m", m]).unwrap();
         }
-        assert_eq!(s.behind(&root, "master"), 2);
+        assert_eq!(s.behind(&root, "master").unwrap(), 2);
     }
 
     // ── choosing a session ──────────────────────────────────────────────────
@@ -1893,6 +1986,61 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s09".into());
         s.remove(&root, "main", &d_shadows())
             .expect("nothing to do is not a failure");
+    }
+
+    /// The drift count fails where the commit count does, and says so.
+    ///
+    /// Nothing destructive reads `behind` — it fills a column. It is a
+    /// `Result` anyway because it asks git the same question in the same
+    /// checkouts, and because the answer reaches JSON, where `0` for *cannot
+    /// tell* is a number omh did not have. Written as the twin of
+    /// `a_branch_is_kept_when_omh_cannot_count_what_is_on_it`, over the same
+    /// fixture, so the pair cannot drift apart.
+    #[test]
+    fn a_drift_count_omh_cannot_take_is_not_zero_either() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s04".into());
+        s.ensure(&root, "main").unwrap();
+
+        assert_eq!(
+            s.behind(&root, "main").unwrap(),
+            0,
+            "a session made from the tip is behind nothing"
+        );
+
+        git(&root, &["branch", "-m", "main", "trunk"]).unwrap();
+        assert!(
+            s.behind(&root, "main").is_err(),
+            "a base that does not resolve is a question with no answer, not zero"
+        );
+    }
+
+    /// …and it has no branch to report either way.
+    ///
+    /// `omh s rm` builds a session rather than looking one up, so an id nothing
+    /// ever created reaches `remove` with a branch name that resolves to
+    /// nothing. `rev-list <base>..<branch>` fails for a missing branch exactly
+    /// as it does for a missing base, so the rule *a count omh could not take
+    /// keeps the branch* answered a question nobody had asked: it reported a
+    /// branch kept, over a branch that was never there, and offered
+    /// `git log omh/s09` — which fails the same way.
+    ///
+    /// Kept and dropped are both claims about work. Neither is available here.
+    #[test]
+    fn a_session_id_nothing_created_has_no_branch_to_keep() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s09".into());
+
+        assert!(
+            git(&root, &["rev-parse", "--verify", "omh/s09"]).is_err(),
+            "the precondition is that the branch is not there"
+        );
+
+        assert_eq!(
+            s.remove(&root, "main", &d_shadows()).unwrap(),
+            Removed::NoBranch,
+            "a branch that does not exist was neither kept nor dropped"
+        );
     }
 
     // ── session ids are path components ─────────────────────────────────────

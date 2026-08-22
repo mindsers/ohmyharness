@@ -239,7 +239,16 @@ pub struct Session {
     /// both, and makes the mistake unspellable rather than merely absent.
     pub work: Option<Work>,
     /// Commits the base branch has that this session does not.
-    pub behind: usize,
+    /// **`None` means omh could not count**, which is not `Some(0)`.
+    ///
+    /// Not quite `work`'s `Option`, which keeps *nobody asked* apart from every
+    /// answer and carries *cannot tell* one level in, as `Work::Unknown`. This
+    /// column is always asked for, so it needs two states rather than three,
+    /// and `None` is the failure — a base that does not resolve in this
+    /// checkout. The table renders `None` and `Some(0)` alike, because a glance
+    /// column has nowhere to put a question; JSON says `null` rather than a
+    /// number nobody took.
+    pub behind: Option<usize>,
 }
 
 /// Every session in this checkout, and what earlier ones left behind.
@@ -276,8 +285,8 @@ impl Report for Sessions {
                     None => Cell::plain(""),
                 },
                 match s.behind {
-                    0 => Cell::plain(""),
-                    n => Cell::styled(format!("({n} behind {})", self.base), out::DIM),
+                    Some(0) | None => Cell::plain(""),
+                    Some(n) => Cell::styled(format!("({n} behind {})", self.base), out::DIM),
                 },
             ]);
         }
@@ -406,8 +415,8 @@ impl Report for Inventory {
                     Cell::styled(&sess.id, out::NAME),
                     Cell::plain(&sess.label),
                     match sess.behind {
-                        0 => Cell::plain(""),
-                        n => Cell::styled(format!("({n} behind {})", self.base), out::DIM),
+                        Some(0) | None => Cell::plain(""),
+                        Some(n) => Cell::styled(format!("({n} behind {})", self.base), out::DIM),
                     },
                 ]);
             }
@@ -1727,7 +1736,7 @@ mod tests {
             label: "claude".into(),
             running: false,
             work: Some(work),
-            behind: 0,
+            behind: Some(0),
         }
     }
 

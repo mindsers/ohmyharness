@@ -57,6 +57,32 @@ for the base set to ever **shrink**. Arguments for adding are always available;
 *"this now costs 4.1 KB before you type anything, up from 2.3"* is the fact that
 forces the other conversation, and it is free to produce.
 
+## Next — the git repairs
+
+Not a milestone. Four measured defects in the path that gets work out of a
+session, one of which deletes unreviewed commits — [risks](risks.md) 4b and 8b.
+They land before anything on this list continues, each with its failing test
+first, and they are the foundation the milestone below rests on.
+
+Two cheap hardenings ride along, because they are in the same files and the
+loop below makes them urgent: the sandbox's exclude list rewritten on every
+launch (4c), and its `config` mounted read-only (2b), which matters once omh
+reads that gitdir from the host.
+
+## v1.5 — the work loop
+
+[Git](git.md), designed and not built. The sandbox has a repository and the
+worktree boundary holds; what is missing is the loop around them — reading a
+session's work, landing it in stages, staying current with trunk, and reaching
+several sessions of one repo from one place.
+
+Ordered here rather than later because it is the daily experience of using omh
+for real work, and because two of its four surfaces are corrections to things
+that already exist rather than new product.
+
+**Success criterion:** a session's work can be read, curated and landed without
+typing `git` and without knowing that a session is a worktree.
+
 ## v2 — portability
 
 Second adapter driven for real work, [`omh eject`](trust.md), full `omh import`

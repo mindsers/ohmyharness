@@ -1487,6 +1487,61 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
 /// `doctor` and `auth` stage into the same tree under their own names and are
 /// not sessions anybody can resume, so the marker `idle::touch` writes is what
 /// separates a session that ran from scratch staging that never was one.
+/// The everyday path, end to end: work is on the branch, the session goes, and
+/// the branch stays for review.
+///
+/// `Session::remove`'s decision is pinned by unit tests. What this pins is that
+/// the command wired to it does not delete the branch and reports the count
+/// that decided the outcome — the number now travels *with* the outcome rather
+/// than being asked for a second time.
+///
+/// Asserted against git and the JSON document rather than the sentence: the
+/// prose may be reworded, the branch may not go missing.
+#[test]
+fn removing_a_session_that_committed_keeps_the_branch_for_review() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let worktree = sb.session("s01");
+
+    std::fs::write(worktree.join("work.txt"), "agent output").unwrap();
+    for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "agent work"]] {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(&args)
+            .output()
+            .expect("git must be installed to run this test");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    }
+
+    let out = sb.omh(&["s", "rm", "s01", "--json"]);
+    assert!(
+        out.status.success(),
+        "rm failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let alive = Command::new("git")
+        .arg("-C")
+        .arg(&sb.repo)
+        .args(["rev-parse", "--verify", "omh/s01"])
+        .output()
+        .unwrap();
+    assert!(
+        alive.status.success(),
+        "unreviewed work must outlive the session that made it"
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`--json` is one document");
+    assert_eq!(doc["branch_kept"], serde_json::json!(true));
+    assert_eq!(
+        doc["commits"],
+        serde_json::json!(1),
+        "and the count reported is the one that decided it"
+    );
+}
+
 #[test]
 fn s_ls_names_what_removed_sessions_left_behind() {
     let sb = sandbox();
