@@ -1050,7 +1050,7 @@ const NO_PUSH: &str =
 /// somewhere to go", and a harvest reads those commits **on the host, as the
 /// user**. Neutralised here rather than there, because the person writing the
 /// harvest will be reading a doc comment, and a doc comment is not a guard.
-const NEUTRALISED: [&str; 6] = [
+const NEUTRALISED: [&str; 7] = [
     // `ensure` has carried this since the seed commit and said why: a global
     // `commit.gpgsign = true` fails with `gpg failed to sign the data`, over a
     // commit the user never made in a repository they cannot see. The harvest
@@ -1063,6 +1063,11 @@ const NEUTRALISED: [&str; 6] = [
     "core.fsmonitor=",
     "core.sshCommand=",
     "protocol.file.allow=never",
+    // `git diff` runs an external driver by default; the log family will not
+    // without `--ext-diff`, which nothing here passes. Both are the agent's to
+    // name — this config lives in a read-write mount — so the key is closed
+    // rather than left to depend on which verb a future reader picks.
+    "diff.external=",
 ];
 
 /// `git` in an ordinary repository — the user's checkout, or a worktree of it.
@@ -1071,18 +1076,59 @@ const NEUTRALISED: [&str; 6] = [
 /// *both* sides: the sandbox's repository, which needs the explicit pair, and
 /// the user's own, which does not. Carries the same neutralising flags, since
 /// half of what it touches came from the sandbox.
+/// The flags a read has to carry, for the reads that can execute something.
+///
+/// A textconv driver is two halves and the agent owns both: the driver is a
+/// config key in a gitdir mounted read-write, and the `.gitattributes` naming
+/// it sits in `/work`. A host-side read that produces a diff then runs whatever
+/// the agent chose, as the user, outside the container. Measured against git
+/// 2.55.0: `log -S`, `log -p` and `show` all run it; `--no-textconv` stops
+/// them; `--grep` never touches it.
+///
+/// By verb, because these are diff options rather than config: `status`,
+/// `commit` and `add` reject them outright, and a blanket flag would break
+/// every write this module makes. `rev-list`, `log`, `show` and `diff` accept
+/// both — checked, since guessing which verbs take which option is how this
+/// kind of guard ends up unarmed.
+///
+/// `--no-ext-diff` belongs with it even though the log family already ignores
+/// external drivers without `--ext-diff`: `git diff` does not, and the next
+/// reader added here should not have to know which family its verb is in.
+/// Returns the argument list with the flags inserted, or unchanged.
+///
+/// **After the verb, not before it.** These are subcommand options: put in
+/// front they are read as options to `git` itself, and every call dies on
+/// `unknown option: --no-textconv` — which is how the first version of this
+/// disarmed the whole module rather than just failing to guard it.
+fn guarded(args: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+    if matches!(args.first(), Some(&"log" | &"show" | &"diff" | &"rev-list")) {
+        out.splice(
+            1..1,
+            ["--no-textconv".to_string(), "--no-ext-diff".to_string()],
+        );
+    }
+    out
+}
+
+/// `git` in an ordinary repository — the user's checkout, or a worktree of it.
+///
+/// Its stderr goes through `out::untrusted` on the way into the error, because
+/// git quotes back the refs and paths it was given and half of what this module
+/// hands it came from the sandbox. A branch name carrying an escape sequence
+/// would otherwise repaint omh's own output on its way past.
 fn git_in(at: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(at)
         .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
-        .args(args)
+        .args(guarded(args))
         .output()
         .context("running git")?;
     if !out.status.success() {
         anyhow::bail!(
             "git {}: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
+            crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -1100,14 +1146,14 @@ fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
         .arg(gitdir)
         .arg("--work-tree")
         .arg(worktree)
-        .args(args)
+        .args(guarded(args))
         .output()
         .context("running git")?;
     if !out.status.success() {
         anyhow::bail!(
             "git {}: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
+            crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -1733,6 +1779,72 @@ mod tests {
             subjects,
             vec!["The second round", "The first round"],
             "each round lands once, in order: {log}"
+        );
+    }
+
+    /// A converter the sandbox named does not run on the host.
+    ///
+    /// Both halves of a textconv driver are the agent's to write: the driver
+    /// itself is a config key in a gitdir omh mounts read-write, and the
+    /// `.gitattributes` naming it sits in `/work`. So a host-side read of the
+    /// sandbox that produces a diff runs whatever the agent chose, as the user,
+    /// outside the container.
+    ///
+    /// Measured against git 2.55.0, and not what the plan for this assumed:
+    ///
+    /// | read | textconv | external diff |
+    /// |---|---|---|
+    /// | `log -S` | **runs** | no |
+    /// | `log -p`, `show` | **runs** | no |
+    /// | `git diff` | **runs** | **runs** |
+    /// | `log --grep` | no | no |
+    ///
+    /// So the live half is textconv, not `diff.external` — the log family will
+    /// not run an external diff without `--ext-diff`, which nothing here
+    /// passes. `--no-textconv` is what closes it, and it is a per-command flag
+    /// rather than a config key, which is why the helpers add it by verb.
+    #[test]
+    fn a_converter_the_sandbox_named_does_not_run_on_the_host() {
+        let (d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        let marker = d.path().join("THE-CONVERTER-RAN");
+        let conv = d.path().join("conv.sh");
+        std::fs::write(
+            &conv,
+            format!("#!/bin/sh\ntouch {}\ncat \"$1\"\n", marker.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&conv, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // both halves are the agent's: the driver in its own config, the
+        // attributes in its own worktree
+        git(
+            &s.gitdir,
+            &wt,
+            &["config", "diff.pwn.textconv", conv.to_str().unwrap()],
+        )
+        .unwrap();
+        std::fs::write(wt.join(".gitattributes"), "* diff=pwn\n").unwrap();
+        std::fs::write(wt.join("f.txt"), "SECRET=abc123def456\n").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qm", "a checkpoint"]).unwrap();
+
+        // omh reads the sandbox, on the host, the way a `log` or `show` would
+        let _ = git(
+            &s.gitdir,
+            &wt,
+            &["log", "--oneline", "-S", "SECRET=abc123def456", "HEAD"],
+        );
+
+        assert!(
+            !marker.exists(),
+            "a driver the sandbox named ran on the host, as the user"
         );
     }
 

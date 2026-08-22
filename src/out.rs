@@ -339,6 +339,27 @@ pub fn hint(p: &Palette, msg: &str) -> String {
 /// disk. The context chain exists precisely so the innermost cause survives,
 /// and dropping it is how an error message becomes something the user has to
 /// reproduce under `strace` to act on.
+/// Text omh did not write, made safe to print.
+///
+/// Everything the sandbox names reaches a terminal eventually: git quotes the
+/// refs, paths and branch names an agent chose straight back in its stderr, and
+/// `problem` prints that. A control sequence in one of them moves the cursor,
+/// clears the line, or repaints what omh just said — and omh's own output is
+/// the thing a user trusts to tell them whether their work is safe.
+///
+/// Newline survives because git's messages are several lines and reflowing them
+/// into one is its own kind of lie. Everything else in C0 and C1 goes, which
+/// takes ESC with it and so takes every escape sequence built on it.
+pub fn untrusted(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\n' => c,
+            c if c.is_control() => '\u{fffd}',
+            c => c,
+        })
+        .collect()
+}
+
 pub fn problem(p: &Palette, e: &anyhow::Error) -> String {
     let mut out = format!("{}: {}\n", p.paint(BAD, ME), e);
     for cause in e.chain().skip(1) {
@@ -530,6 +551,28 @@ pub fn emit<R: Report + ?Sized>(report: &R, format: Format, p: &Palette) -> Stri
 
 #[cfg(test)]
 mod tests {
+
+    /// Text the sandbox wrote cannot paint the terminal.
+    ///
+    /// git hands back the branch and ref names an agent chose, and omh prints
+    /// them. An escape sequence in one repaints omh's own output, which is the
+    /// line a user reads to decide whether their work is safe.
+    #[test]
+    fn text_the_sandbox_wrote_cannot_paint_the_terminal() {
+        let forged = "omh/s01\u{1b}[2K\rcommitted to main";
+        let safe = untrusted(forged);
+        assert!(!safe.contains('\u{1b}'), "no escape survives: {safe:?}");
+        assert!(!safe.contains('\r'), "nor a carriage return: {safe:?}");
+        assert!(
+            safe.contains("omh/s01") && safe.contains("committed to main"),
+            "and the text itself is still readable: {safe:?}"
+        );
+        assert_eq!(
+            untrusted("fatal: bad object\nhint: try again"),
+            "fatal: bad object\nhint: try again",
+            "a newline is how git writes, not something to strip"
+        );
+    }
     use super::*;
 
     /// A column is as wide as the terminal draws it, not as wide as its bytes.
