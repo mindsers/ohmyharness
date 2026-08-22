@@ -877,7 +877,7 @@ fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
         anyhow::bail!(
             "git {}: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
+            crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -893,7 +893,7 @@ fn git(cwd: &Path, args: &[&str]) -> Result<String> {
         anyhow::bail!(
             "git {}: {}",
             args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
+            crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
         );
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
