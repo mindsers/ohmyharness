@@ -101,7 +101,9 @@ impl Shadow {
     ///
     /// Idempotent for a *finished* shadow: relaunching into a running session
     /// must not reset the agent's checkpoints, so one that has a seed recorded
-    /// is left exactly as it is. One without is the wreckage of a launch that
+    /// keeps every commit, ref and index it had. The one thing it does not keep
+    /// is the exclude list, which is derived from mounts that move between
+    /// launches — see the comment on the fast path. One without is the wreckage of a launch that
     /// died partway through, and is rebuilt rather than adopted — see the two
     /// notes in the body for why that cannot lose work.
     pub fn ensure(&self, worktree: &Path, excluded: &[String]) -> Result<()> {
@@ -111,6 +113,28 @@ impl Shadow {
         // written last and only after the rename below, so its presence is what
         // actually means "this one got there".
         if self.gitdir.exists() && self.seed_record.exists() {
+            // The repository is left exactly as it is — that is what makes
+            // relaunching safe — but the exclude list is not part of "as it
+            // is". `container::plan` builds it from the `carry_in` policy and
+            // then from the mounts it is about to make, and the second half
+            // moves: switch harness, or switch a capability on, and a document
+            // lands inside `/work` that this repository has never heard of, so
+            // `git add -A` sweeps omh's rendered file — credentials and all —
+            // into a history `--keep` replays onto the branch.
+            //
+            // Written here rather than through a `refresh` the caller has to
+            // remember. The tests would catch `plan` forgetting one today; what
+            // they cannot catch is the *next* caller of `ensure`, which would
+            // be a path they do not cover. `ensure` already takes the list, so
+            // the only question was whether it believed it on the second
+            // launch.
+            //
+            // Wholesale, so anything the agent added to this file for its own
+            // housekeeping goes with it. That is the trade: merging would keep
+            // those, and would also keep an entry omh has since dropped —
+            // leaving a path silently untracked in the one repository whose
+            // job is to show the agent its own work.
+            Self::write_exclude(&self.gitdir, excluded)?;
             return Ok(());
         }
         let parent = self
@@ -740,17 +764,25 @@ impl Shadow {
     /// determined one — what stops the secret reaching the branch is the check
     /// on the host when work crosses back.
     ///
-    /// Takes the directory rather than reading `self.gitdir`, because it runs
-    /// while the repository is still being built under another name.
+    /// Takes the directory rather than reading `self.gitdir`, because the
+    /// first of its two callers runs while the repository is still being built
+    /// under another name. The second is the fast path in `ensure`, which
+    /// passes the finished gitdir on every relaunch.
     fn write_exclude(gitdir: &Path, excluded: &[String]) -> Result<()> {
         let info = gitdir.join("info");
-        std::fs::create_dir_all(&info)?;
+        // Named, because this is the one write that can fail a launch which
+        // would otherwise have been a no-op — the fast path in `ensure` did no
+        // I/O at all before. `Permission denied (os error 13)` with no path is
+        // not something a user can act on, and the directory it names is one
+        // the agent can chmod.
+        std::fs::create_dir_all(&info).with_context(|| format!("preparing {}", info.display()))?;
         // Just what the caller names. `container::plan` derives that from the
         // mounts it is about to make, which already covers omh's staged rules —
         // chaining `carry::STAGED_RULES` here as well only made the list
         // disagree with its own source when a capability changed.
         let body: String = excluded.iter().map(|n| format!("{n}\n")).collect();
-        std::fs::write(info.join("exclude"), body)?;
+        let at = info.join("exclude");
+        std::fs::write(&at, body).with_context(|| format!("writing {}", at.display()))?;
         Ok(())
     }
 
@@ -1744,6 +1776,50 @@ mod tests {
                  container supplies one"
             );
         }
+    }
+
+    /// The exclude list follows the mounts, and the mounts change under it.
+    ///
+    /// omh derives what the sandbox's repository must not track from the mounts
+    /// it is about to make, and wrote that list once — when the repository was
+    /// created. Switch a capability on afterwards and the mount it adds inside
+    /// `/work` is a file the existing sandbox neither tracks nor excludes, so
+    /// the agent's own `git add -A` commits omh's rendered document — MCP
+    /// environment and all — into a history `omh s commit --keep` replays onto
+    /// the branch.
+    ///
+    /// Asserted as the property that matters rather than as a line in a file:
+    /// the document cannot be staged. A test that greps `info/exclude` passes
+    /// for a list that git never reads.
+    #[test]
+    fn a_capability_added_later_is_still_kept_out_of_the_sandboxs_history() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[".env".to_string()]).unwrap();
+
+        std::fs::write(wt.join("agent.rs"), "fn main() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A"]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-q", "-m", "a checkpoint"]).unwrap();
+        let checkpoint = git(&s.gitdir, &wt, &["rev-parse", "HEAD"]).unwrap();
+
+        // the next launch mounts one more document inside /work
+        let grown = [".env".to_string(), ".mcp.json".to_string()];
+        s.ensure(&wt, &grown).unwrap();
+
+        // what the mount would put there, credentials and all
+        std::fs::write(wt.join(".mcp.json"), "{\"env\":{\"TOKEN\":\"sk-live-42\"}}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        let staged = git(&s.gitdir, &wt, &["diff", "--cached", "--name-only"]).unwrap();
+
+        assert!(
+            !staged.contains(".mcp.json"),
+            "a document omh mounted is not the agent's work to commit: staged {staged:?}"
+        );
+        assert_eq!(
+            git(&s.gitdir, &wt, &["rev-parse", "HEAD"]).unwrap(),
+            checkpoint,
+            "and refreshing the list must not disturb what the agent already did"
+        );
     }
 
     /// Relaunching into a running session is ordinary — `omh claude` twice, an

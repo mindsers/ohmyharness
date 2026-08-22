@@ -1557,6 +1557,53 @@ mod tests {
         }
     }
 
+    /// …including one that appears after the sandbox already exists.
+    ///
+    /// The sibling above proves the first launch derives the list from the
+    /// mounts. This proves the second one does too, which is a different
+    /// question: the repository is deliberately left as it is on relaunch, and
+    /// the exclude list was left with it — so a document mounted later was one
+    /// the sandbox had never heard of, and `git add -A` swept it in.
+    ///
+    /// Switching harness is the lever, because it is a first-class thing to do
+    /// here — one session, `omh opencode` then `omh claude` — and because it
+    /// moves the mount set and nothing else. A first version varied `carry_in`,
+    /// which reaches the list twice over, once as policy and once as the mount
+    /// it produces: it passed with the mount half of the derivation disabled
+    /// outright, proving only that `carry_in` is copied through, which was
+    /// never the defect.
+    #[test]
+    fn a_mount_added_after_the_first_launch_still_reaches_the_exclude_list() {
+        let fx = fixture();
+        let work_mounts = |p: &Plan| -> Vec<String> {
+            p.mounts
+                .iter()
+                .filter_map(|m| m.guest.strip_prefix("/work").ok())
+                .map(|rel| rel.display().to_string())
+                .filter(|rel| !rel.is_empty() && rel != ".git")
+                .collect()
+        };
+
+        let first = work_mounts(&plan_for(&fx, "opencode"));
+        let second = work_mounts(&plan_for(&fx, "claude"));
+        let arrived: Vec<&String> = second.iter().filter(|r| !first.contains(r)).collect();
+        assert!(
+            !arrived.is_empty(),
+            "the harnesses have to differ in what they put in /work, or this is vacuous"
+        );
+
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        let exclude =
+            std::fs::read_to_string(shadow.gitdir.join("info/exclude")).expect("a seeded shadow");
+        for rel in arrived {
+            assert!(
+                exclude.lines().any(|l| l == *rel),
+                "{rel} was mounted by the second launch and the sandbox built by the \
+                 first has never heard of it. exclude list was:\n{exclude}"
+            );
+        }
+    }
+
     /// git is dead in the sandbox because `/work/.git` is a pointer into the
     /// user's checkout and the checkout is never mounted. The agent loses
     /// `status`, `diff`, `stash` and `reset --hard`, and the attached editor

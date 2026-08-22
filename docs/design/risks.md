@@ -86,15 +86,14 @@ worse than the rotation caveat already documented in the code: rotation leaves a
 needle at the new value, deletion leaves none. All three fail open, none is
 reported.
 
-**4c. The sandbox's exclude list is frozen at the first launch.** omh derives
-what the sandbox's repository must not track from the mounts it is about to
-make — its rendered rules, `.mcp.json`, the files you carried in — and writes
-that list once, when the repository is created. A capability switched on later
-adds a mount inside `/work` which the existing sandbox neither tracks nor
-excludes, so the agent's own `git add -A` commits omh's rendered document, MCP
-environment included, into a history `omh s commit --keep` replays onto your
-branch. Rewriting the list on every launch closes it and touches no commit;
-scheduled with the [git work](git.md).
+**4c. Closed.** The sandbox's exclude list was frozen at the first launch. omh
+derives what that repository must not track from the mounts it is about to
+make — its rendered rules, `.mcp.json`, the files you carried in — and wrote the
+list once, when the repository was created. A capability switched on later, or a
+`carry_in` entry added later, mounted a document the existing sandbox neither
+tracked nor excluded, so the agent's own `git add -A` swept omh's rendered file —
+MCP environment included — into a history `omh s commit --keep` replays onto your
+branch. The list is rewritten on every launch now, which touches no commit.
 
 **5. Egress is unrestricted.** The allowlist is designed and not wired. An agent
 in a session can reach the network freely.
