@@ -253,9 +253,14 @@ impl Session {
     /// The question `remove` needs answered: whether keeping the branch would
     /// preserve anything.
     ///
-    /// **An error is never zero** — the rule `uncommitted` states elsewhere in
-    /// this file, which this used to break with more at stake, because the
-    /// caller acts on the answer by deleting a branch.
+    /// **An error is never zero.** A git that would not answer is not a git
+    /// that answered *none*, and this used to break that with more at stake
+    /// than most, because the caller acts on the answer by deleting a branch.
+    ///
+    /// The rule was stated on `uncommitted` until #59 removed that method, at
+    /// which point this citation pointed at nothing — so it is stated here,
+    /// where it is relied on. `changed` carries it too: it returns the paths
+    /// or the failure, never an empty list standing in for both.
     ///
     /// `rev-list <base>..<branch>` fails whenever either end does not resolve.
     /// The base end is the reachable one for a live session: a repo that
@@ -622,6 +627,10 @@ impl Session {
     /// `-z` emits NUL-separated records and never quotes. A rename is two
     /// records — the new name, then the old — so the old one is skipped by
     /// looking at the status rather than at the path.
+    ///
+    /// **An error is never an empty list**, the rule `commits` relies on a few
+    /// hundred lines up: a git that would not answer is not a session that
+    /// changed nothing, and every caller here renders those differently.
     pub fn changed(&self) -> Result<Vec<String>> {
         let out = git_owned(&self.worktree, &status_args())?;
         let mut records = out.split('\0').filter(|r| !r.is_empty());
