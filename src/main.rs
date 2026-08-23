@@ -6457,13 +6457,6 @@ mod tests {
     /// in.
     #[test]
     fn a_sandbox_omh_cannot_read_is_asked_about_rather_than_assumed_empty() {
-        let refused = |paths: &Paths, session: &Session, why: &str| {
-            let err = may_remove(paths, session, false)
-                .unwrap_or_else(|_| panic!("{why} — omh cannot tell, so it asks"));
-            let _ = err;
-        };
-        let _ = refused;
-
         // A truncated replay record. `landed` bails on it deliberately: the
         // write truncates before it writes, so a process killed in that window
         // leaves zero bytes — and the session has demonstrably been harvested,
