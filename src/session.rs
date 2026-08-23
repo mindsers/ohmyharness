@@ -603,20 +603,6 @@ impl Session {
         Ok(())
     }
 
-    /// Entries in the worktree's `git status`, committed to nothing.
-    ///
-    /// `-uall` because git collapses an untracked directory into one line, and
-    /// a session where the agent wrote a whole new module would otherwise read
-    /// as a single stray file — this is the number `s ls` is glanced at for.
-    ///
-    /// An error is never zero. The pointer these commands run through is the one
-    /// this module documents as leading nowhere inside the sandbox, and a stale
-    /// one on the host is what `remove` already handles; reporting
-    /// that as a clean session is how work gets discarded.
-    pub fn uncommitted(&self) -> Result<usize> {
-        Ok(self.changed()?.len())
-    }
-
     /// The paths behind that count.
     ///
     /// The same `status` the count runs, kept rather than discarded: `s ls`
@@ -1672,7 +1658,7 @@ mod tests {
         std::fs::write(s.worktree.join("CLAUDE.md"), "staged by omh").unwrap();
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
 
-        assert_eq!(s.uncommitted().unwrap(), 1);
+        assert_eq!(s.changed().unwrap().len(), 1);
     }
 
     #[test]
@@ -1681,7 +1667,7 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
 
-        assert_eq!(s.uncommitted().unwrap(), 0);
+        assert_eq!(s.changed().unwrap().len(), 0);
     }
 
     /// Before a push there is no upstream to measure against, which is a
@@ -1753,7 +1739,7 @@ mod tests {
         std::fs::write(s.worktree.join("CLAUDE.md"), "omh generated rules").unwrap();
 
         assert_eq!(
-            s.uncommitted().ok(),
+            s.changed().ok().map(|c| c.len()),
             Some(0),
             "omh's own staging is not work"
         );
@@ -1776,7 +1762,7 @@ mod tests {
             std::fs::write(s.worktree.join(format!("newmodule/f{i}.rs")), "fn f() {}").unwrap();
         }
 
-        assert_eq!(s.uncommitted().unwrap(), 12);
+        assert_eq!(s.changed().unwrap().len(), 12);
     }
 
     /// `carry_in` is documented as the only path by which a secret reaches the
