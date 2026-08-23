@@ -118,6 +118,14 @@ impl Sandbox {
                  \"image inspect\") exit 1 ;;\n\
                  \"image rm\") echo \"Untagged: $3\"; echo 'Deleted: sha256:00'; exit 0 ;;\n\
                  esac\n\
+                 # omh sends the Dockerfile on stdin (`-f -`) so nothing is\n\
+                 # written to disk. A shim that exits without reading it leaves\n\
+                 # omh writing into a pipe with no reader, and omh sets SIGPIPE\n\
+                 # to SIG_DFL on purpose — so it dies of signal 13, silently,\n\
+                 # whenever the Dockerfile loses the race with this exit. That\n\
+                 # is what failed this test on the linux runner three times\n\
+                 # across three branches, each time saying only `init failed`.\n\
+                 if [ \"$1\" = build ]; then cat > /dev/null; fi\n\
                  if [ \"$1\" = images ]; then cat {images}; fi\n\
                  if [ \"$1\" = ps ]; then cat {containers}; fi\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\nexit 0\n",
