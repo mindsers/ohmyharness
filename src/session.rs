@@ -1280,7 +1280,7 @@ impl Session {
             Some(0) | Some(2) => Ok(String::from_utf8_lossy(&out.stdout)
                 .lines()
                 .filter(|line| !line.is_empty())
-                .map(|line| crate::out::untrusted(line))
+                .map(crate::out::untrusted)
                 .collect()),
             _ => anyhow::bail!(
                 "git diff --check: {}",
