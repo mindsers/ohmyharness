@@ -1778,47 +1778,111 @@ pub fn chosen(spec: &str, available: usize) -> Result<Vec<usize>> {
     Ok(out)
 }
 
-/// Whether a `git <verb> -h` listing names an option.
+/// The options a `git <verb> -h` listing names.
 ///
 /// Pure, so the interesting half is a table rather than a fact about whichever
-/// git this machine has. Split from the running for the reason
-/// `memory::deliver::plan_delivery` gives for injecting `current_exe`: the
-/// part that can be wrong silently is the parse.
+/// git this machine has — the split `memory::deliver::plan_delivery` makes for
+/// the same reason: the part that can be wrong silently is the parse.
 ///
-/// Matched as a whole word. `--empty` as a substring is also in `--empty-arg`
-/// and would be in any future option spelled that way, and an option omh
-/// believes in wrongly is worse than one it does not know about.
-pub(crate) fn lists_option(help: &str, option: &str) -> bool {
-    help.lines().map(str::trim).any(|line| {
-        line.strip_prefix(option)
-            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '-'))
-    })
+/// **Parsed as git writes it**, which took a correction. The first version
+/// matched an option only at the start of a line, and git puts the short alias
+/// first whenever there is one: `-n, --no-commit`, `-e, --[no-]edit`. Against a
+/// real listing it answered *no* to eight of nine options cherry-pick has,
+/// including the `--no-commit` its own test comment called eternal. `--empty`
+/// worked by luck — it has no short form and takes no negation, so it lands
+/// first on its line. A future git that gives it either would have been read as
+/// a git too old to have it.
+///
+/// Empty means the text was not a listing at all — a shim that printed
+/// something else, a verb git does not know. That is a different answer from
+/// *this option is absent*, and the caller has to be able to tell.
+pub(crate) fn options_in(help: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in help.lines() {
+        // The option column is what comes before the description, and git
+        // separates them by a run of spaces. Descriptions do mention options —
+        // `opposite of --no-verify`, `be quiet. implies --no-stat` — and a
+        // mention is not a declaration.
+        //
+        // Belt and braces, honestly labelled: the value split below already
+        // stops at the first space, so for every listing git actually prints
+        // this line changes nothing. It matters only for a description whose
+        // first word after a comma is an option, and no git verb checked
+        // produces one — so no test here covers it, and deleting it would go
+        // unnoticed. It stays because it makes the rule *about the column*
+        // rather than correct by coincidence.
+        let column = line.trim_start();
+        let column = column.split("  ").next().unwrap_or_default().trim();
+        if !column.starts_with('-') {
+            continue;
+        }
+        for token in column.split(',') {
+            let token = token.trim();
+            // Whatever the option takes, said several ways: `<file>`,
+            // `=<n>`, `(stop|drop|keep)`.
+            let token = token
+                .split([' ', '='])
+                .next()
+                .unwrap_or_default()
+                .trim_end_matches(|c| c == '[' || c == '<' || c == '(');
+            if token.len() < 2 || !token.starts_with('-') {
+                continue;
+            }
+            out.insert(token.to_string());
+            // `--[no-]edit` declares `--edit` and `--no-edit`; a caller asking
+            // for either is asking about this line.
+            if let Some(rest) = token.strip_prefix("--[no-]") {
+                out.insert(format!("--{rest}"));
+                out.insert(format!("--no-{rest}"));
+            }
+        }
+    }
+    out
 }
 
-/// Whether this git knows an option — asked of the binary, not inferred from a
-/// version number.
+/// Whether this git knows an option, or whether omh could not ask.
 ///
 /// omh cannot check a version it cannot name. `cherry-pick --empty=` is newer
 /// than everything else omh asks of git and #56 made it a dependency of
 /// `--keep <selection>`, and the release that introduced it was not verifiable
-/// from here. Asking the binary needs no such table, answers for whatever git
-/// is actually on this machine, and keeps answering as git grows.
+/// from here. Asking the binary needs no such table and answers for whatever
+/// git is on this machine.
 ///
-/// Measured 2026-08-23: `git <verb> -h` prints the option list on **stdout**,
-/// the first usage line on stderr, exits **129**, and needs no repository. So
-/// the status is ignored on purpose and both streams are read.
-pub fn git_supports(verb: &str, option: &str) -> bool {
-    Command::new("git")
+/// **Three answers, not two.** `Err` is *omh could not ask* — git absent, git
+/// unspawnable, a version-manager shim that prints "no version set", a `.git/
+/// config` with one bad line (measured: `git --version` still succeeds while
+/// `git cherry-pick -h` exits 128 printing nothing). Every one of those was
+/// `false` in the first version, so a user with no git on PATH was told their
+/// git was too old to name checkpoints.
+///
+/// Measured 2026-08-23 against git 2.55.0: `git <verb> -h` prints the whole
+/// listing on **stdout**, leaves stderr empty, exits **129**, and needs no
+/// repository. An earlier note here said the usage line went to stderr; that
+/// was zsh's MULTIOS merging the streams in the shell that measured it, not
+/// git. The status is still ignored — 129 is the ordinary answer — and both
+/// streams are still read, since a shim may use either.
+pub fn git_supports(verb: &str, option: &str) -> Result<bool> {
+    let out = Command::new("git")
         .args([verb, "-h"])
         .output()
-        .is_ok_and(|out| {
-            let said = format!(
-                "{}{}",
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            );
-            lists_option(&said, option)
-        })
+        .with_context(|| format!("asking git whether `{verb}` takes `{option}`"))?;
+    let said = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let options = options_in(&said);
+    anyhow::ensure!(
+        !options.is_empty(),
+        "`git {verb} -h` listed no options at all, so omh cannot tell what this git \
+         supports. It said: {}",
+        crate::out::untrusted(said.trim())
+    );
+    // `--empty=` and `--empty` are one question. Every comment in this tree
+    // names the flag with its `=`, both call sites without it, and a listing
+    // has neither — so accepting both spellings is what stops an edit that
+    // merely aligns prose with code from refusing every git in existence.
+    Ok(options.contains(option.trim_end_matches('=')))
 }
 
 /// The pager the *user* chose, resolved by git in the user's own checkout.
@@ -2835,46 +2899,99 @@ mod tests {
         );
     }
 
-    /// An option listing says what git can do, and omh reads it as a word.
+    /// The options a listing declares, read the way git writes them.
+    ///
+    /// The shapes are taken from real `git <verb> -h` output rather than
+    /// invented, because the first version of this was written against an
+    /// invented sample: it matched only an option at the start of a line, and
+    /// git puts the short alias first whenever there is one. Against the real
+    /// cherry-pick listing it answered *no* to eight of the nine options that
+    /// command has.
     #[test]
-    fn an_option_is_recognised_as_a_whole_word_or_not_at_all() {
-        let help = "usage: git cherry-pick [--edit] [-n]\n\
-                    \n\
-                    \x20   --empty (stop|drop|keep)\n\
-                    \x20                         how to handle commits that become empty\n\
-                    \x20   --[no-]allow-empty    preserve initially empty commits\n";
+    fn an_option_listing_is_read_the_way_git_writes_it() {
+        // Verbatim shapes from git 2.55.0.
+        let help = "usage: git cherry-pick [--edit] [-n] [-m <parent-number>]\n\
+            \x20   --quit                end revert or cherry-pick sequence\n\
+            \x20   -n, --no-commit       don't automatically commit\n\
+            \x20   -e, --[no-]edit       edit the commit message\n\
+            \x20   --[no-]ff             allow fast-forward\n\
+            \x20   --empty (stop|drop|keep)\n\
+            \x20                         how to handle commits that become empty\n\
+            \x20   -S, --[no-]gpg-sign[=<key-id>]\n\
+            \x20                         GPG sign commit\n\
+            \x20   --[no-]keep-redundant-commits\n\
+            \x20                         deprecated: use --empty=keep instead\n\
+            \x20   --verify              opposite of --no-rebase-merges\n";
+        let found = options_in(help);
+        let has = |o: &str| found.contains(o);
 
-        assert!(lists_option(help, "--empty"));
-        assert!(lists_option(help, "--[no-]allow-empty"));
+        assert!(has("--empty"), "the option omh actually asks about");
+        // A long form behind a short one. The first version missed every one
+        // of these, and its own test comment called `--no-commit` eternal.
+        assert!(has("--no-commit") && has("-n"));
+        assert!(has("--edit") && has("-e"), "and behind a negation as well");
+        // A negatable option declares both spellings.
+        assert!(has("--ff") && has("--no-ff"));
+        assert!(has("--gpg-sign"), "…and one that also takes a value");
+        assert!(has("--keep-redundant-commits"));
+
         assert!(
-            !lists_option(help, "--empty-tree"),
-            "an option git does not have is not found in one it does"
+            !has("--empty=keep"),
+            "a description that *mentions* an option does not declare one — this line \
+             says `deprecated: use --empty=keep instead`"
+        );
+        assert!(!has("--no-such-option"), "and absence is absence");
+        // The same rule on one line rather than two. `--verify  opposite of
+        // --no-verify` is verbatim from `git rebase -h`: what follows the
+        // description column is prose, and prose that names an option is not a
+        // git that has it.
+        assert!(has("--verify"), "the declaration is read");
+        assert!(
+            !has("--no-rebase-merges"),
+            "and its description is not — that option is not declared here"
         );
         assert!(
-            !lists_option("usage: git cherry-pick [-n]\n", "--empty"),
-            "and a listing without it says so"
+            options_in("no options here at all\n").is_empty(),
+            "text that is not a listing declares nothing, which is not the same as an \
+             option being absent"
         );
-        // The case the whole-word rule exists for: `--empty` must not be found
-        // inside `--empty-arg`, or omh passes a flag git will reject.
-        assert!(!lists_option(
-            "    --empty-arg <n>   something else\n",
-            "--empty"
-        ));
     }
 
-    /// The real git on this machine, asked rather than assumed.
+    /// The verb selects the listing. It is not decoration.
     ///
-    /// A companion to the table above: it proves the two halves are wired
-    /// together and that `-h` really answers, which is the part a table cannot
-    /// say. Asserted against an option git has had for decades and one it will
-    /// never have, so it does not go red when git grows.
+    /// Asking `cherry-pick` and reading `commit`'s answer is the mutation the
+    /// first version of this test could not see: every plausible verb lists
+    /// `-n`, so `-n` alone proves nothing about which one was asked. Both
+    /// options here are ancient, so this does not go red as git grows.
     #[test]
-    fn git_answers_what_it_supports() {
+    fn git_answers_for_the_verb_it_was_asked_about() {
+        assert!(git_supports("merge", "--ff-only").unwrap());
         assert!(
-            git_supports("cherry-pick", "-n"),
-            "git has had --no-commit forever"
+            !git_supports("cherry-pick", "--ff-only").unwrap(),
+            "cherry-pick has no --ff-only, and asking it must not answer for merge"
         );
-        assert!(!git_supports("cherry-pick", "--no-such-option-ever"));
+        assert!(git_supports("cherry-pick", "--empty").unwrap());
+        assert!(
+            git_supports("cherry-pick", "--empty=").unwrap(),
+            "the spelling every comment in this tree uses is the same question"
+        );
+        assert!(!git_supports("cherry-pick", "--no-such-option-ever").unwrap());
+    }
+
+    /// Not being able to ask is not an answer.
+    ///
+    /// A verb git does not know prints a suggestion rather than a listing, so
+    /// nothing is declared — which must be an error, not *this option is
+    /// absent*. Collapsed into `false`, a user with no git on PATH was told
+    /// their git was too old to name checkpoints.
+    #[test]
+    fn a_git_that_cannot_answer_is_not_a_git_that_said_no() {
+        let err = git_supports("not-a-git-verb-at-all", "--empty")
+            .expect_err("nothing was listed, so nothing can be concluded");
+        assert!(
+            err.to_string().contains("listed no options"),
+            "the refusal says what happened: {err}"
+        );
     }
 
     /// `--keep 1,3-4` means those checkpoints, in that order.

@@ -135,63 +135,81 @@ pub struct Outcome {
 /// Only what omh uses **today**. `merge-tree --write-tree` belongs here when
 /// `sync` ships and not before: a doctor that fails over a capability nothing
 /// calls is one people learn to ignore.
-/// The one line here no test on a healthy machine can pin: this machine's git
-/// *has* `--empty`, so passing `true` in place of the probe agrees with the
-/// probe, and only a machine without it could tell them apart. Everything the
-/// answer feeds is a table below; this is the seam, and it is named rather
-/// than papered over.
 pub fn git_checks() -> Vec<Outcome> {
-    let version = std::process::Command::new("git")
-        .arg("--version")
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
-    git_checks_from(
-        version,
-        crate::shadow::git_supports("cherry-pick", "--empty"),
-    )
+    match version_of(std::process::Command::new("git").arg("--version").output()) {
+        Ok(version) => git_checks_from(
+            version,
+            crate::shadow::git_supports("cherry-pick", "--empty"),
+        ),
+        Err(why) => vec![Outcome {
+            name: "git on the host".into(),
+            ok: false,
+            detail: format!("{why} — every way work leaves a session runs git here"),
+        }],
+    }
 }
 
-/// The report, given the answers — so both are assertable on a machine that
-/// can only give one of them.
+/// What `git --version` said, or why it does not count as an answer.
+///
+/// Over the process result rather than the process, so all four states are a
+/// table. Three of them were unreachable by any test while this was inline,
+/// and two mutations proved it: a `git` that exits 0 saying nothing rendered a
+/// green tick with a blank cell, and ignoring a non-zero exit did the same.
+fn version_of(asked: std::io::Result<std::process::Output>) -> Result<String, String> {
+    let out = asked.map_err(|e| format!("omh could not run git: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "git is on PATH and would not answer `--version`: {}",
+            crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
+        ));
+    }
+    match String::from_utf8_lossy(&out.stdout).trim() {
+        // A `git` that exits 0 and says nothing is a wrapper, not git. The
+        // same guard `user_pager` carries in `shadow.rs`, missing here until a
+        // review found it.
+        "" => Err("git answered `--version` with nothing at all".to_string()),
+        said => Ok(said.to_string()),
+    }
+}
+
+/// The report, given the answers — so each is assertable on a machine that can
+/// only give one of them.
 ///
 /// Injected for the reason `plan_delivery` gives: the part that can be wrong
 /// silently is the decision, and the shelling-out part is the part that fails
-/// loudly. The first version of this probed inline and its test compared the
-/// result against the same call, which is a tautology — it passed against an
+/// loudly. The first version probed inline and its test compared the result
+/// against the same call, which is a tautology — it passed against an
 /// `ok: true` hardcoded in place of the probe.
-fn git_checks_from(version: Option<String>, keeps_a_selection: bool) -> Vec<Outcome> {
-    let Some(version) = version else {
-        return vec![Outcome {
-            name: "git on the host".into(),
-            ok: false,
-            detail: "not installed, or not on PATH — every way work leaves a session \
-                     runs git here"
-                .into(),
-        }];
+///
+/// **One outcome, and it fails only when git cannot be used at all.** The
+/// capability rides in the detail rather than as a second red line, because
+/// the argument for leaving `merge-tree` out of this applies here too: a
+/// `doctor` that goes red over something the user never calls is one they stop
+/// running. A user who never names checkpoints is not broken, and `doctor`'s
+/// exit code is what `troubleshooting.md` tells them means *the adapter is
+/// wrong*.
+fn git_checks_from(
+    version: String,
+    keeps_a_selection: Result<bool, anyhow::Error>,
+) -> Vec<Outcome> {
+    let selections = match keeps_a_selection {
+        Ok(true) => "takes a `--keep` selection".to_string(),
+        Ok(false) => "no `cherry-pick --empty`, so `--keep <selection>` cannot run here — \
+             `--keep` on its own is unaffected"
+            .to_string(),
+        // Could not ask. Not the same as *cannot do it*, and the reason is
+        // git's own — a shim, a bad config line, a version manager with no
+        // version set.
+        Err(e) => format!("omh could not tell whether `--keep <selection>` works here: {e}"),
     };
-
-    vec![
-        Outcome {
-            name: "git on the host".into(),
-            ok: true,
-            detail: version,
-        },
-        Outcome {
-            name: "keep a selection".into(),
-            ok: keeps_a_selection,
-            detail: match keeps_a_selection {
-                true => "`cherry-pick --empty` — `omh sNN commit --keep 1,3-4` works".into(),
-                false => "`cherry-pick` here has no `--empty`, so `--keep <selection>` \
-                          cannot run. `--keep` on its own is unaffected"
-                    .into(),
-            },
-        },
-    ]
+    vec![Outcome {
+        name: "git on the host".into(),
+        ok: true,
+        detail: format!("{version} — {selections}"),
+    }]
 }
 
-/// What must be true of the memory server, given the base set declares one.
+/// What must be true of the memory server, given the base set declares one./// What must be true of the memory server, given the base set declares one.
 ///
 /// Built from the declared command rather than from a literal, so a manifest
 /// that changes what it launches changes what gets probed.
@@ -687,54 +705,111 @@ pub fn passed(outcomes: &[Outcome]) -> bool {
 
 #[cfg(test)]
 mod tests {
-    /// The host's git is checked, and reported by name.
+    /// Four ways `git --version` can answer, and only one is a version.
     ///
-    /// Every other check here runs in the sandbox; these run where the harvest
-    /// does. A version string is the first thing a bug report needs, and the
-    /// capability is the one `--keep <selection>` depends on.
+    /// Every arm but the last was unreachable while this was inline, and two
+    /// mutations proved it: a `git` exiting 0 with nothing to say rendered a
+    /// green tick and a blank cell, counted as a pass.
     #[test]
-    fn the_hosts_git_is_checked_where_the_harvest_runs() {
-        let named = |checks: &[Outcome], name: &str| {
-            checks
-                .iter()
-                .find(|o| o.name == name)
-                .unwrap_or_else(|| panic!("no check named {name}: {checks:?}"))
-                .clone()
+    fn only_a_version_counts_as_a_version() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = |code: i32, stdout: &str, stderr: &str| std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
         };
 
-        let able = git_checks_from(Some("git version 2.55.0".into()), true);
         assert_eq!(
-            named(&able, "git on the host").detail,
+            version_of(Ok(output(0, "git version 2.55.0\n", ""))).unwrap(),
             "git version 2.55.0",
-            "the version is reported verbatim — it is the first thing a bug report needs"
+            "trimmed, so the report stays a table"
         );
-        assert!(named(&able, "keep a selection").ok);
 
-        // The answer this machine cannot give, which is the one that matters:
-        // the check has to go red and say what still works.
-        let old = git_checks_from(Some("git version 2.30.0".into()), false);
-        let selection = named(&old, "keep a selection");
-        assert!(!selection.ok, "a git without it fails the check");
+        // On PATH, and would not answer. macOS without the developer tools is
+        // the everyday case, and it says so — omh must not overwrite that with
+        // a guess about PATH.
+        let err = version_of(Ok(output(1, "", "xcode-select: note: no developer tools")))
+            .expect_err("a git that fails is not a git that answered");
+        assert!(err.contains("developer tools"), "git's own words: {err}");
+
+        let err = version_of(Ok(output(0, "  \n", "")))
+            .expect_err("a wrapper that says nothing is not git");
+        assert!(err.contains("nothing at all"), "{err}");
+
+        let err = version_of(Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "No such file or directory",
+        )))
+        .expect_err("no git at all");
+        assert!(err.contains("could not run git"), "{err}");
+    }
+
+    /// The host's git is reported where the harvest runs — and fails only
+    /// when git cannot be used at all.
+    ///
+    /// Every other check in this module runs inside the sandbox; this one runs
+    /// where `--keep` does. The capability rides in the detail rather than as
+    /// a second red line: a `doctor` that goes red over something the user
+    /// never calls is one they stop running, which is the same argument that
+    /// kept `merge-tree` out of here.
+    #[test]
+    fn the_hosts_git_is_reported_and_only_a_missing_git_fails() {
+        let only = |checks: Vec<Outcome>| {
+            assert_eq!(checks.len(), 1, "one row, not a cascade: {checks:?}");
+            checks.into_iter().next().unwrap()
+        };
+
+        let able = only(git_checks_from("git version 2.55.0".into(), Ok(true)));
+        assert!(able.ok);
         assert!(
-            selection
-                .detail
-                .contains("`--keep` on its own is unaffected"),
-            "and says what the user can still do: {selection:?}"
+            able.detail.starts_with("git version 2.55.0"),
+            "the version verbatim — the first thing a bug report needs: {able:?}"
         );
         assert!(
-            named(&old, "git on the host").ok,
-            "git being old is not git being absent"
+            able.detail.contains("--keep"),
+            "and what it means for the command: {able:?}"
         );
 
-        // No git at all is one failure, not two, and it says why it matters.
-        let none = git_checks_from(None, false);
-        assert_eq!(none.len(), 1);
-        assert!(!none[0].ok && none[0].detail.contains("PATH"));
+        // A git too old for selections is still a working git. The user who
+        // never names checkpoints must not be told their adapter is broken.
+        let old = only(git_checks_from("git version 2.30.0".into(), Ok(false)));
+        assert!(old.ok, "an old git is not a failed check: {old:?}");
+        // A run of spaces means a line continuation left its indentation in
+        // the string. `cargo fmt` joins those lines, so the padding ships —
+        // caught here once already, in this very sentence.
+        for row in [&able, &old] {
+            assert!(
+                !row.detail.contains("  "),
+                "the detail carries a fold's indentation: {row:?}"
+            );
+        }
+        assert!(old.detail.contains("--empty") && old.detail.contains("--keep"));
 
-        // …and the real thing is wired to the real probe.
-        assert_eq!(
-            named(&git_checks(), "keep a selection").ok,
-            crate::shadow::git_supports("cherry-pick", "--empty")
+        // Could not ask is its own answer, and it carries git's reason.
+        let unsure = only(git_checks_from(
+            "git version 2.55.0".into(),
+            Err(anyhow::anyhow!("bad config line 2 in .git/config")),
+        ));
+        assert!(
+            unsure.detail.contains("bad config line 2"),
+            "git's own words reach the user: {unsure:?}"
+        );
+        assert!(
+            !unsure.detail.contains("no `cherry-pick --empty`"),
+            "and omh does not turn *could not tell* into a verdict: {unsure:?}"
+        );
+
+        // The real thing, against the real git: a version, read from stdout
+        // and trimmed. What it says about selections is this machine's answer
+        // and is asserted above for both.
+        let here = only(git_checks());
+        assert!(
+            here.ok && here.detail.starts_with("git version"),
+            "this machine has git: {here:?}"
+        );
+        assert!(
+            !here.detail.contains('\n'),
+            "trimmed, so the report stays a table: {here:?}"
         );
     }
 

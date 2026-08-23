@@ -342,7 +342,11 @@ happened, while `--keep` on the same history succeeds.
 introduced it was not verifiable here. omh cannot check a version it cannot
 name — so it asks the binary instead: `git <verb> -h` lists the options that
 git has, needs no repository, and keeps answering as git grows. Measured, it
-exits 129 and prints to both streams, so the status is ignored on purpose.
+exits **129** and prints the whole listing on **stdout**, so the status is
+ignored on purpose. An earlier note here said the usage line went to stderr; it
+does not — that was zsh's MULTIOS merging the streams inside the shell that
+measured it. Both are still read, because a version-manager shim may use
+either, but that is defensiveness rather than a split that exists.
 
 `omh doctor` reports it, and `--keep <selection>` refuses up front with the
 command that still works — rather than the usage dump git would produce after

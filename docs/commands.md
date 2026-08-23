@@ -181,10 +181,12 @@ Launches the real image with the real mounts and checks the guest paths the
 adapter claims. The only thing that can verify an adapter. See
 [Troubleshooting](troubleshooting.md).
 
-It also checks the host's git, which is where every way work leaves a session
-actually runs — the version, and whether it can take a `--keep` selection. That
-one is asked of the binary rather than compared against a version number, so it
-answers for whatever git you have.
+It also reports the host's git, which is where every way work leaves a session
+actually runs — the version, and whether it can take a `--keep` selection,
+asked of the binary rather than compared against a version number. Only a git
+omh cannot use at all fails the check: an older git that cannot name
+checkpoints is still a working git, and a `doctor` that goes red over something
+you never run is one you stop running.
 
 ## `omh why <thing>`
 
