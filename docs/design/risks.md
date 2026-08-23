@@ -117,7 +117,9 @@ at this boundary, and **not one was catchable by the test suite.**
 Git is the case nobody noticed: it is the external binary omh leans on hardest,
 and `doctor` has never probed it — not a version, not a behaviour. The [git
 work](git.md) adds a version-dependent claim (`merge-tree --write-tree`, git
-≥ 2.38), which is the occasion to close both.
+≥ 2.38), which is the occasion to close both — and to pin what
+`cherry-pick --empty=` needs, which #56 made a dependency of `--keep
+<selection>` without being able to measure the floor.
 
 **7. Auth is verified but was hard-won.** A real `omh auth claude <account>`
 login completes and persists. Five bugs preceded that, every one at the boundary

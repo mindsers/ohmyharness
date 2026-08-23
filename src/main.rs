@@ -172,10 +172,13 @@ fn session_prefix(argv: Vec<String>) -> (Option<String>, Vec<String>) {
 
     // Which reading is meant, decided by what each one parses to rather than by
     // whether it parses at all. `omh s01 commit --keep 1,3` proved the weaker
-    // rule wrong: the sessions reading is refused by clap — `--keep` takes no
-    // value yet — and the line as written parses fine, as a request to launch a
-    // harness called `commit`. A mistyped verb must not become a launch, so a
-    // fallback is a launch only when what it names is not a session verb.
+    // rule wrong when `--keep` was still a flag with no value: the sessions
+    // reading was refused by clap and the line as written parsed fine, as a
+    // request to launch a harness called `commit`. #56 gave `--keep` a value,
+    // so that line now parses both ways — but the rule it established stands
+    // for every line that still does not, `omh s01 commit --whatever` among
+    // them. A mistyped verb must not become a launch, so a fallback is a
+    // launch only when what it names is not a session verb.
     let launch = match (
         Cli::try_parse_from(&through_sessions),
         Cli::try_parse_from(&as_written),
@@ -444,10 +447,17 @@ enum SessionsCmd {
         #[arg(long)]
         skip_carried: bool,
         /// Keep the agent's own commits and messages instead of squashing the
-        /// work into one. Opens the list in your editor, as `rebase -i` does,
-        /// so you can reorder, reword and drop.
-        #[arg(long, conflicts_with = "message")]
-        keep: bool,
+        /// work into one.
+        ///
+        /// On its own it takes every checkpoint since the last handover, in
+        /// order, with no editor. With a selection — `--keep 1,3-4` — it takes
+        /// those, in that order, by the numbers `omh sNN log` printed.
+        #[arg(long, conflicts_with = "message", num_args = 0..=1, default_missing_value = "")]
+        keep: Option<String>,
+        /// Open the list in your editor, as `rebase -i` does, to reorder,
+        /// reword and drop by hand.
+        #[arg(long, requires = "keep", conflicts_with = "message")]
+        edit: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
     Push {
@@ -702,12 +712,14 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 message,
                 skip_carried,
                 keep,
+                edit,
             } => commit(
                 &cwd,
                 cli.session.as_deref(),
                 message.as_deref(),
                 *skip_carried,
-                *keep,
+                keep.as_deref(),
+                *edit,
                 ctx,
             ),
             SessionsCmd::Push { name, pr } => {
@@ -5133,7 +5145,91 @@ fn diff_report(
     })
 }
 
-/// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done.
+/// Turn what the user typed into what the harvest takes.
+///
+/// Everything refusable *about the selection* is refused here, before
+/// `harvest` makes a worktree, fetches, or touches the branch. That is not
+/// everything `--keep` can refuse — `harvest` still turns away carried
+/// secrets, a worktree that left its branch and a replay point it cannot
+/// place, all after the fetch — but those need the sandbox read to answer.
+/// A number, a merge and a missing terminal do not.
+///
+/// `terminal` is passed rather than probed, the rule `Cli::output` states in
+/// this file: *resolved here and passed down rather than consulted where it is
+/// used*. Probing inline made the decision untestable — no test process has a
+/// terminal, so every test took the same arm and a mutation reopening the
+/// editor for every real user left the suite green.
+fn what_to_keep(
+    shadow: &shadow::Shadow,
+    session: &Session,
+    selection: &str,
+    edit: bool,
+    terminal: bool,
+) -> Result<shadow::Keep> {
+    // Before the terminal check, so a line that names the same thing twice is
+    // told so rather than being told about a terminal it also lacks. The
+    // opposite order made this unreachable: every test, and every script, hit
+    // the tty message first and this could be deleted without a test noticing.
+    anyhow::ensure!(
+        !edit || selection.is_empty(),
+        "`--edit` opens the whole list for editing, so `--keep {selection} --edit` names \
+         what to take twice. Use one: `--keep {selection}` takes those, `--keep --edit` \
+         opens all of them"
+    );
+    if edit {
+        // The measured hole this closes: with stdin not a terminal, `rebase -i`
+        // runs the *unedited* todo, exits 0, and omh reports a curation that
+        // never happened. `--edit` is the only path that needs a person, so it
+        // is the only one that has to ask.
+        anyhow::ensure!(
+            terminal,
+            "`--edit` opens the list in your editor and there is no terminal here. \
+             git would run the list unedited and report success. Drop `--edit` to keep \
+             everything, or name what you want: `omh {} commit --keep 1,3-4`",
+            session.id
+        );
+        return Ok(shadow::Keep::Edit);
+    }
+    if selection.is_empty() {
+        return Ok(shadow::Keep::All);
+    }
+
+    // Resolved against the session's own list, so a number means the commit it
+    // meant on screen.
+    let read = shadow.checkpoints(&session.worktree)?;
+    let mut ids = Vec::new();
+    for number in shadow::chosen(selection, read.commits.len())? {
+        // `chosen` bounds the number by the length of this list and
+        // `checkpoints` numbers it contiguously from 1, so this cannot miss.
+        let checkpoint = &read.commits[number - 1];
+        debug_assert_eq!(checkpoint.number, number);
+        // Already on the branch. Replaying it would apply it twice, and the
+        // divider in `omh sNN log` is where the user read that it was theirs.
+        anyhow::ensure!(
+            !checkpoint.landed,
+            "checkpoint {number} is already on {}. `omh {} log` draws the line: everything \
+             below it has been handed over, and handing it over again applies it twice",
+            session.branch.as_deref().unwrap_or("the branch"),
+            session.id
+        );
+        // A merge, which a selection replays one commit at a time and git will
+        // not do without being told which side to take. Refused here rather
+        // than by git after the fetch, where the message is *"is a merge but no
+        // -m option was given"* — advice about a flag `--keep` forbids and that
+        // means something else entirely in omh.
+        anyhow::ensure!(
+            checkpoint.touched.is_some(),
+            "checkpoint {number} is a merge, and omh will not choose which side of one to \
+             take. `omh {} commit --keep` replays the whole range instead — note that git \
+             flattens a merge when it does",
+            session.id
+        );
+        ids.push(checkpoint.id.clone());
+    }
+    Ok(shadow::Keep::These(ids))
+}
+
+/// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done.
 ///
 /// Deliberately not `session::pick`: that invents the *next* id when none
 /// exists, which is right for a launch — it is about to create that worktree —
@@ -5163,7 +5259,8 @@ fn commit(
     id: Option<&str>,
     message: Option<&str>,
     skip_carried: bool,
-    keep: bool,
+    keep: Option<&str>,
+    edit: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -5178,14 +5275,38 @@ fn commit(
     // first, and git's patch-id then drops every replanted commit as already
     // applied — the granular history disappears with nothing said, which is the
     // whole thing `--keep` exists to deliver.
-    if keep {
+    if let Some(selection) = keep {
         let branch = session
             .branch
             .as_deref()
             .context("a scratch session has no branch to commit to")?;
         let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
         let carried = config::policy_list(&paths, "carry_in");
-        let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, true)?;
+        let keep = what_to_keep(
+            &shadow,
+            &session,
+            selection,
+            edit,
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+        )?;
+        let named = match &keep {
+            shadow::Keep::These(ids) => Some(ids.len()),
+            _ => None,
+        };
+        let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, keep)?;
+        // Named four, landed three. git drops a commit whose patch is already
+        // on the branch — measured, it says `patch contents already upstream`
+        // on stderr and exits 0, and the helper that runs it keeps only stdout
+        // on success. Without this the user reads `kept 3` after asking for
+        // four and is left to wonder which one, or whether they miscounted.
+        if let Some(named) = named.filter(|named| *named > landed) {
+            ctx.warn(&format!(
+                "you named {named} checkpoint{}, and {landed} reached {branch} — git drops a \
+                 commit whose changes are already there. `omh {} log` shows what is left",
+                if named == 1 { "" } else { "s" },
+                session.id
+            ));
+        }
         let base = session::default_branch(&paths.repo);
         let n = session.commits(&paths.repo, &base);
         warn_uncounted(&n, ctx, &base);
@@ -5520,6 +5641,18 @@ mod tests {
                 Some("s02".to_string()),
                 cli_argv(&["s", "commit", "--keep", "1,3"])
             )
+        );
+        // A session verb whose flags do not parse stays a session verb. This
+        // is the case `--keep 1,3` used to cover, before #56 gave `--keep` a
+        // value and both readings started parsing: without the verb check, the
+        // fallback would offer to launch a harness called `commit`.
+        assert_eq!(
+            session_prefix(cli_argv(&["s02", "commit", "--whatever"])),
+            (
+                Some("s02".to_string()),
+                cli_argv(&["s", "commit", "--whatever"])
+            ),
+            "a session verb omh cannot parse is not a harness"
         );
     }
 
@@ -5902,6 +6035,299 @@ mod tests {
                 session.id
             );
         }
+    }
+
+    /// `--keep` binds a value only when one is given.
+    ///
+    /// `num_args = 0..=1` with `default_missing_value` is the clap shape most
+    /// prone to silently binding the wrong thing — a following flag, or a
+    /// following verb — and the three forms are one assertion each.
+    #[test]
+    fn keep_takes_a_selection_or_nothing_and_never_the_next_word() {
+        let parse = |args: &[&str]| {
+            let argv: Vec<String> = std::iter::once("omh")
+                .chain(args.iter().copied())
+                .map(str::to_string)
+                .collect();
+            match Cli::try_parse_from(&argv).map(|cli| cli.cmd) {
+                Ok(Cmd::Sessions {
+                    cmd: SessionsCmd::Commit { keep, edit, .. },
+                }) => Ok((keep, edit)),
+                Ok(_) => panic!("{args:?} did not parse as a commit"),
+                Err(e) => Err(e.to_string()),
+            }
+        };
+
+        assert_eq!(parse(&["s", "commit"]).unwrap(), (None, false));
+        assert_eq!(
+            parse(&["s", "commit", "--keep"]).unwrap(),
+            (Some(String::new()), false),
+            "a bare --keep is not a missing value"
+        );
+        assert_eq!(
+            parse(&["s", "commit", "--keep", "1,3-4"]).unwrap(),
+            (Some("1,3-4".to_string()), false)
+        );
+        assert_eq!(
+            parse(&["s", "commit", "--keep", "--edit"]).unwrap(),
+            (Some(String::new()), true),
+            "--keep does not swallow the flag after it"
+        );
+        assert!(
+            parse(&["s", "commit", "--edit"])
+                .unwrap_err()
+                .contains("--keep"),
+            "--edit is about the list --keep takes"
+        );
+        assert!(
+            parse(&["s", "commit", "--keep", "-m", "x"])
+                .unwrap_err()
+                .contains("cannot be used with"),
+            "and squashing is the other way to land work, not a modifier of this one"
+        );
+    }
+
+    /// What `--keep` and `--edit` mean, as a table.
+    ///
+    /// The headline of this change is that `--keep` alone no longer opens an
+    /// editor, and nothing could prove it while `is_terminal` was consulted
+    /// inline: no test process has a terminal, so every test took the same arm
+    /// and a mutation that reopened the editor for every real user left the
+    /// suite green. With the answer passed in, the decision is a table.
+    #[test]
+    fn what_keep_and_edit_mean_together() {
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+
+        let keep = |selection: &str, edit: bool, terminal: bool| {
+            what_to_keep(&shadow, &session, selection, edit, terminal)
+        };
+        let _ = &paths;
+
+        assert_eq!(
+            keep("", false, true).unwrap(),
+            shadow::Keep::All,
+            "a bare --keep takes everything and opens nothing, terminal or not"
+        );
+        assert_eq!(keep("", false, false).unwrap(), shadow::Keep::All);
+        assert_eq!(
+            keep("", true, true).unwrap(),
+            shadow::Keep::Edit,
+            "--edit is what asks for the list"
+        );
+        assert!(
+            keep("", true, false)
+                .unwrap_err()
+                .to_string()
+                .contains("no terminal"),
+            "and it needs somewhere to draw"
+        );
+        // Reachable at last: this refusal used to sit behind the terminal
+        // check, so a script naming both was told about a terminal instead.
+        assert!(
+            keep("1", true, true)
+                .unwrap_err()
+                .to_string()
+                .contains("twice"),
+            "a selection and --edit name what to take twice"
+        );
+    }
+
+    /// A merge cannot be picked one commit at a time, and is turned away
+    /// before the fetch rather than by git afterwards.
+    ///
+    /// `log` renders a merge as `merge`, so `--keep 3` naming one is an
+    /// ordinary thing to type. git's own answer is *"is a merge but no -m
+    /// option was given"* — advice about a flag `--keep` forbids, and one that
+    /// means something else entirely in omh.
+    #[test]
+    fn a_selection_naming_a_merge_is_refused_before_anything_moves() {
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+        let sandbox_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("--git-dir")
+                .arg(&shadow.gitdir)
+                .arg("--work-tree")
+                .arg(&session.worktree)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        };
+        let seed = shadow.seed().unwrap();
+        sandbox_git(&["checkout", "-q", "-b", "side", &seed]);
+        std::fs::write(session.worktree.join("side.rs"), "fn side() {}\n").unwrap();
+        sandbox_git(&["add", "-A", "."]);
+        sandbox_git(&["commit", "-q", "--no-verify", "-m", "on the side"]);
+        sandbox_git(&["checkout", "-q", "-"]);
+        sandbox_git(&["merge", "-q", "--no-ff", "side", "-m", "Merge the side"]);
+
+        let read = shadow.checkpoints(&session.worktree).unwrap();
+        let merge = read
+            .commits
+            .iter()
+            .find(|c| c.touched.is_none())
+            .expect("the merge is a checkpoint");
+        let err = what_to_keep(&shadow, &session, &merge.number.to_string(), false, false)
+            .expect_err("a merge cannot be picked on its own");
+        assert!(
+            err.to_string().contains("merge") && !err.to_string().contains("-m option"),
+            "refused in omh's words, not git's: {err}"
+        );
+        assert!(
+            !paths.repo.join(".git/omh-harvest-s01-scratch").exists(),
+            "and nothing was built to find that out"
+        );
+    }
+
+    /// A number the session does not have is refused against the session's own
+    /// list.
+    ///
+    /// The CLI test that claimed this could not reach it: `sb.session()`
+    /// builds a worktree and no sandbox repository, so every spec — `9`, `0`,
+    /// `two`, `4-2` — died identically inside `seed()`, about a record the
+    /// user has never heard of. Replacing `chosen`'s body with a parser that
+    /// ignored every rule left that test green.
+    #[test]
+    fn a_number_the_session_does_not_have_is_refused_with_the_range() {
+        let (_paths, session, shadow) = a_session_with_two_checkpoints();
+        for spec in ["9", "0", "two", "4-2", "1,1"] {
+            let err = what_to_keep(&shadow, &session, spec, false, false)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("1 to 2") || err.contains("twice") || err.contains("backwards"),
+                "`{spec}` is refused against the session's own list: {err}"
+            );
+        }
+    }
+
+    /// A repository, a session, and a sandbox holding two checkpoints.
+    fn a_session_with_two_checkpoints() -> (Paths, Session, shadow::Shadow) {
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["commit", "-q", "--allow-empty", "-m", "root"],
+        ] {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        }
+        std::fs::create_dir_all(paths.shadows()).unwrap();
+        let session = Session::new(&paths.worktrees().join("s01"), "s01".to_string());
+        session.ensure(&paths.repo, "main").unwrap();
+        let shadow = shadow::Shadow::new(&paths.shadows(), "s01");
+        shadow.ensure(&session.worktree, &[]).unwrap();
+        for name in ["one", "two"] {
+            std::fs::write(
+                session.worktree.join(format!("{name}.rs")),
+                format!("fn {name}() {{}}\n"),
+            )
+            .unwrap();
+            for args in [
+                vec!["add", "-A", "."],
+                vec!["commit", "-q", "--no-verify", "-m", name],
+            ] {
+                let out = Command::new("git")
+                    .arg("--git-dir")
+                    .arg(&shadow.gitdir)
+                    .arg("--work-tree")
+                    .arg(&session.worktree)
+                    .args(&args)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{args:?}: {out:?}");
+            }
+        }
+        (paths, session, shadow)
+    }
+
+    /// Work the branch already has cannot be handed over twice.
+    ///
+    /// `omh sNN log` numbers every checkpoint, including the ones below the
+    /// divider, so `--keep 1` is a reasonable thing to type about work that
+    /// has already landed — and replaying it applies the same patch a second
+    /// time. Refused by name rather than skipped, because silently dropping a
+    /// number the user typed lands a different set than the one they asked
+    /// for.
+    #[test]
+    fn a_selection_naming_work_the_branch_already_has_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["commit", "-q", "--allow-empty", "-m", "root"],
+        ] {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        }
+        std::fs::create_dir_all(paths.shadows()).unwrap();
+        let session = Session::new(&paths.worktrees().join("s01"), "s01".to_string());
+        session.ensure(&paths.repo, "main").unwrap();
+        let shadow = shadow::Shadow::new(&paths.shadows(), "s01");
+        shadow.ensure(&session.worktree, &[]).unwrap();
+
+        let mut ids = Vec::new();
+        for name in ["one", "two"] {
+            std::fs::write(
+                session.worktree.join(format!("{name}.rs")),
+                format!("fn {name}() {{}}\n"),
+            )
+            .unwrap();
+            for args in [
+                vec!["add", "-A", "."],
+                vec!["commit", "-q", "--no-verify", "-m", name],
+            ] {
+                let out = Command::new("git")
+                    .arg("--git-dir")
+                    .arg(&shadow.gitdir)
+                    .arg("--work-tree")
+                    .arg(&session.worktree)
+                    .args(&args)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{args:?}: {out:?}");
+            }
+            let head = Command::new("git")
+                .arg("--git-dir")
+                .arg(&shadow.gitdir)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            ids.push(String::from_utf8_lossy(&head.stdout).trim().to_string());
+        }
+        // The first was handed over; the second was not.
+        std::fs::write(&shadow.landed_record, format!("{}\n", ids[0])).unwrap();
+
+        let err = what_to_keep(&shadow, &session, "1", false, false)
+            .expect_err("checkpoint 1 is already on the branch");
+        assert!(
+            err.to_string().contains('1') && err.to_string().contains("already"),
+            "the refusal names the number and says why: {err}"
+        );
+        assert!(
+            what_to_keep(&shadow, &session, "2", false, false).is_ok(),
+            "and the one that has not landed is still keepable"
+        );
     }
 
     /// A session whose sandbox never ran is *nothing yet*; one whose

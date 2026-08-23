@@ -247,6 +247,7 @@ omh s ls              sessions, their branches and state
 omh s log             what the agent has committed inside the sandbox
 omh s diff [n] [-p]   what changed — the session, or one checkpoint
 omh s commit [-m …]   commit that work onto the session branch
+omh s commit --keep [n,m-o] [--edit]   keep the agent's own commits
 omh s push [name]     push it to origin under a name a reviewer can read
 omh s down            stop the container, keep the worktree and branch
 omh s rm              remove the session — its container, its worktree, its staging,
@@ -367,6 +368,28 @@ omh rewrites that file to a ten-key allowlist on every launch and mounts it
 read-only. The reason omh has to name a pager at all is that same hardening —
 without it, a host-side read is pinned to no pager at all.
 
+### `omh sNN commit --keep` — the agent's own commits, curated
+
+```console
+$ omh s01 commit --keep          # all of them, in order, no editor
+$ omh s01 commit --keep 1,3-4    # these, in this order
+$ omh s01 commit --keep --edit   # the todo, for people who want it
+```
+
+The numbers are the ones `omh s01 log` printed, and the order is yours — `3,1`
+lands the third checkpoint and then the first. Reordering is half of what
+curating a history is for, so a selection is never quietly sorted.
+
+Refused rather than resolved, and refused before anything moves: a number
+outside the session's range, a range that runs backwards, a checkpoint named
+twice, and a number naming work the branch already has. That last one is
+ordinary to type — `log` numbers every checkpoint, including the ones below the
+line — and replaying it would apply the same patch a second time.
+
+`--edit` is the only form that needs a terminal, and it says so when there
+isn't one. Without that check, git runs the unedited list, exits 0, and omh
+reports a curation that never happened.
+
 ### Getting work out of a session
 
 The worktree lives under `~/.omh/worktrees/` so your IDE does not index it, and
@@ -429,9 +452,10 @@ branch — see [Sessions](sessions.md#the-agent-has-git-and-it-is-not-yours).
 $ omh s commit --keep
 ```
 
-It opens the list first, as `git rebase -i` does, so you reorder, reword and
-drop before anything lands. What you keep arrives with the messages the agent
-wrote — which is the point, because it wrote them while it still had the context
+On its own it takes every checkpoint since the last handover, in order, and
+opens nothing. `--keep 1,3-4` takes those, in that order; `--keep --edit` opens
+the list, as `git rebase -i` does, so you reorder, reword and drop by hand.
+What you keep arrives with the messages the agent wrote — which is the point, because it wrote them while it still had the context
 you would be reconstructing from a diff.
 
 `--skip-carried` has no meaning here and is ignored: `--keep` refuses a carried

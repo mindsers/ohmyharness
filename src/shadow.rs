@@ -483,8 +483,8 @@ impl Shadow {
     /// The sandbox's own commits, numbered, with what each one touched.
     ///
     /// **Numbered from the oldest**, so a number keeps meaning the same commit
-    /// as the agent adds more. The numbers are what `diff` and `--keep` will
-    /// take — neither does yet — and a selection typed against a list one
+    /// as the agent adds more. The numbers are what `diff <n>` (#55) and
+    /// `--keep <selection>` (#56) take, and a selection typed against a list one
     /// commit out of date would land a different set of commits than the one
     /// on screen, silently.
     ///
@@ -874,16 +874,24 @@ impl Shadow {
         worktree: &Path,
         branch: &str,
         carried: &[String],
-        curate: bool,
+        keep: Keep,
     ) -> Result<usize> {
         self.preflight(worktree)?;
 
         // Whatever the agent has not checkpointed yet is still its work, and a
         // harvest that drops it is the tail of the session gone. Measured: the
         // uncommitted remainder simply did not arrive.
-        if !git(&self.gitdir, worktree, &["status", "--porcelain"])?
-            .trim()
-            .is_empty()
+        //
+        // Not for a selection. The numbers were resolved before this ran, so a
+        // commit made here is one the user could not have named — it would be
+        // swept up, left unapplied, and then recorded as handed over by a
+        // replay point that had no way to know it was new. A selection takes
+        // exactly what it names, and the uncommitted tail stays where the next
+        // `--keep` can still see it.
+        if !matches!(keep, Keep::These(_))
+            && !git(&self.gitdir, worktree, &["status", "--porcelain"])?
+                .trim()
+                .is_empty()
         {
             git(&self.gitdir, worktree, &["add", "-A", "."])?;
             git(
@@ -1016,11 +1024,12 @@ impl Shadow {
             ],
         )?;
 
-        let curated = Self::replant(&replant, branch, &from, curate, &scratch)
+        let curated = Self::replant(&replant, branch, &from, &keep, &scratch)
             .and_then(|()| Self::stamp(&replant, &before));
         // Counted *after* curation, because the number is reported as what was
-        // kept and the user drops commits in the todo list — `--empty=drop`
-        // removes more. Taken from the range that actually landed, this said
+        // kept and it is not always what was asked for: `--edit` lets the user
+        // drop commits from the todo, a selection can name one git then finds
+        // already applied, and `--empty=drop` removes more on every path. Taken from the range that actually landed, this said
         // "kept 3" over a branch that got 1.
         let landed = curated
             .and_then(|()| git_in(&replant, &["rev-parse", "HEAD"]))
@@ -1100,8 +1109,25 @@ impl Shadow {
                  succeeded. A later `--keep` may offer those commits again"
             )
         };
-        let handed_over = git_in(repo, &["rev-parse", &scratch])
-            .with_context(|| landed_on("omh could not read back what it handed over"))?;
+        // What was handed over, which for a selection is **not** what was
+        // fetched. `scratch` is the sandbox's HEAD; recording it after
+        // `--keep 1,3` would file checkpoints 2 and 4 as already delivered —
+        // `log` would draw no divider and call them the branch's, the next
+        // `--keep` would say *nothing new to keep*, `--keep 2` would refuse by
+        // name, and `omh sNN rm` would then delete the only copy. Every screen
+        // the user could check would agree the work was safe.
+        //
+        // The record says *everything up to here has been handed over*, so it
+        // may only advance across commits that actually were. A selection that
+        // skips one stops there; the skipped commit stays offerable, and a
+        // later `--keep` re-offering one that already landed is harmless —
+        // measured, git drops it as `patch contents already upstream`.
+        let handed_over = match &keep {
+            Keep::These(taken) => Self::advanced_past(repo, &from, &scratch, taken)
+                .with_context(|| landed_on("omh could not work out what it handed over"))?,
+            _ => git_in(repo, &["rev-parse", &scratch])
+                .with_context(|| landed_on("omh could not read back what it handed over"))?,
+        };
         std::fs::write(&self.landed_record, handed_over.trim())
             .with_context(|| landed_on("omh could not record what it handed over"))?;
         git_in(repo, &["update-ref", "-d", &scratch])
@@ -1116,24 +1142,90 @@ impl Shadow {
     }
 
     /// The curation pass: the agent's commits onto the branch, the user's shape.
-    fn replant(at: &Path, branch: &str, seed: &str, curate: bool, scratch: &str) -> Result<()> {
-        let mut args = vec!["rebase", "--onto", branch, seed, "--empty=drop"];
-        if curate {
-            args.push("-i");
-        } else {
-            args.push("-q");
+    fn replant(at: &Path, branch: &str, seed: &str, keep: &Keep, scratch: &str) -> Result<()> {
+        // A selection is `cherry-pick`, and everything else is `rebase`.
+        //
+        // The design said a selection would be a generated rebase todo,
+        // delivered through `GIT_SEQUENCE_EDITOR` pointed at omh's own binary.
+        // That works — measured, including the quoting it exists to get right:
+        // an unquoted path with a space in it dies as *No such file or
+        // directory*, and git appends the todo path afterwards as one properly
+        // quoted argument even when the repository's path has spaces. It was
+        // dropped for something simpler rather than because it failed.
+        //
+        // `cherry-pick <a> <b>` **is** "these commits, in this order", which is
+        // what a selection means. It needs no editor, so no `sh -c`, no
+        // quoting, no second entry point into omh, and no `hide = true`
+        // subcommand that `RESERVED` then has to know about.
+        //
+        // The first attempt failed in a way worth recording: `current_exe()`
+        // inside a unit test is the *test harness*, so git delivered the todo
+        // by running the test binary with `sequence` as a filter — matching
+        // nothing, exiting 0, and replaying the unedited list. Both selection
+        // tests failed exactly that way.
+        //
+        // That is a fact about `current_exe()` in-crate and **not** a reason
+        // the mechanism was untestable, which is what an earlier version of
+        // this comment claimed. `tests/cli.rs` runs the real binary, and
+        // `memory::deliver::plan_delivery` in this same repo takes
+        // `current_exe` as a parameter for exactly this purpose — "injected
+        // rather than probed so the whole decision is a table test". Either
+        // would have reached it. The honest reason for the change is the list
+        // above: fewer moving parts, not an impossibility.
+        //
+        // `rebase` stays for `All` and `Edit`: those are "everything in the
+        // range, in order", which is what rebase is for, and a merge in that
+        // range replays under rebase while `cherry-pick` would need to be told
+        // which parent to follow.
+        if let Keep::These(ids) = keep {
+            // Onto the branch, not onto the fetched tip: this worktree was
+            // created at the sandbox's HEAD so `rebase --onto` could move the
+            // whole range, and a selection starts from the branch instead.
+            git_in(at, &["reset", "-q", "--hard", branch])
+                .map_err(|e| anyhow::anyhow!("{e}\n\n{}", Self::replant_failed(scratch)))?;
+            let mut args = vec!["cherry-pick", "--empty=drop"];
+            args.extend(ids.iter().map(String::as_str));
+            let out = Command::new("git")
+                .current_dir(at)
+                .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
+                .args(&args)
+                .output()
+                .context("running git cherry-pick")?;
+            if out.status.success() {
+                return Ok(());
+            }
+            // Both streams, and git's hints removed. Measured on a conflict:
+            // `CONFLICT (content): Merge conflict in f.txt` goes to **stdout**
+            // — so an error built from stderr alone never names the file — and
+            // stderr carries four `hint:` lines telling the user to run
+            // `git add`, `cherry-pick --continue`, `--skip` and `--abort`.
+            // There is nowhere to run them: `harvest` force-removes this
+            // worktree before this error is ever printed. Advice that cannot
+            // be followed, printed beside advice that can, is worse than none.
+            let said = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let said: Vec<&str> = said
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with("hint:"))
+                .collect();
+            return Err(anyhow::anyhow!(
+                "{}\n\n{}",
+                crate::out::untrusted(&said.join("\n")),
+                Self::replant_failed(scratch)
+            ));
         }
 
-        // Inherited stdio when curating, and this is the whole flag working or
-        // not. `git_in` captures output, so `rebase -i` launched an editor with
-        // no terminal and `vi` sat there forever — measured, by a check that
-        // hung for two minutes. With an editor that exits without a tty it is
-        // worse: the rebase proceeds on the *unedited* todo, no error, and omh
-        // reports a curation that never happened.
-        //
-        // `session.rs` already carries this rule for `git commit` in the same
-        // words — "an editor with nowhere to draw hangs". This was written
-        // without reading it.
+        let mut args = vec!["rebase", "--onto", branch, seed, "--empty=drop"];
+        let curate = *keep == Keep::Edit;
+        match keep {
+            Keep::Edit => args.push("-i"),
+            _ => args.push("-q"),
+        }
+
         if curate {
             let ok = Command::new("git")
                 .current_dir(at)
@@ -1151,6 +1243,32 @@ impl Shadow {
         git_in(at, &args)
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("{e}\n\n{}", Self::replant_failed(scratch)))
+    }
+
+    /// How far the replay point may move, given what was actually taken.
+    ///
+    /// Walks the replayed range oldest-first and stops at the first commit the
+    /// selection did not name. What comes back is a commit id, so the record
+    /// keeps meaning one thing — *everything up to here* — rather than
+    /// becoming a set, which is a change to what the record **is** and to
+    /// every reader of it.
+    ///
+    /// Returns `from` unchanged when the oldest pending commit was not taken.
+    /// That is a no-op write, and it is the right answer: nothing before it
+    /// has been handed over.
+    fn advanced_past(repo: &Path, from: &str, scratch: &str, taken: &[String]) -> Result<String> {
+        let ordered = git_in(
+            repo,
+            &["rev-list", "--reverse", &format!("{from}..{scratch}")],
+        )?;
+        let mut point = from.to_string();
+        for id in ordered.lines().map(str::trim).filter(|id| !id.is_empty()) {
+            if !taken.iter().any(|t| t == id) {
+                break;
+            }
+            point = id.to_string();
+        }
+        Ok(point)
     }
 
     /// What is true after a replant that did not finish, whichever way it went.
@@ -1576,6 +1694,89 @@ const NO_PUSH: &str =
     "omh: nothing to push from here. This repository is the sandbox's own and has no remote — \
      your work reaches the outside through the host, where `omh s commit` puts it on the branch \
      and `omh s push` sends it. Say that rather than trying to push yourself.";
+
+/// What `--keep` was asked to take.
+///
+/// A `bool` said *interactive or not*, which is not the question — `--keep`
+/// with no selection wants everything and no editor, and the editor is a third
+/// thing rather than the absence of a selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Keep {
+    /// Everything since the last handover, in order, with no editor.
+    All,
+    /// These commits, in this order. Sandbox-side ids, already resolved from
+    /// the numbers `log` printed and already checked against the range.
+    These(Vec<String>),
+    /// The todo, in the user's own editor. The only path that needs a terminal.
+    Edit,
+}
+
+/// Which checkpoints a `--keep 1,3-4` names, in the order it names them.
+///
+/// **The user's order, not sorted.** Reordering is half of what curating a
+/// history is for, and a selection that quietly sorted itself would land a
+/// different history than the one the user read on screen.
+///
+/// Everything ambiguous is refused rather than resolved, and refused *here* —
+/// before a worktree is made, before a fetch, before the branch could move.
+/// Each of the refusals below is a plausible thing to type that would
+/// otherwise mean something: `4-2` reversed is a guess about intent, `1,1`
+/// applies a commit twice, and a number past the end is no commit at all.
+/// (Whether the *list* is current is a different question, and not one this
+/// can answer — see `checkpoints` for why the numbers are stable.)
+pub fn chosen(spec: &str, available: usize) -> Result<Vec<usize>> {
+    let range = || match available {
+        0 => "this session has no checkpoints to keep".to_string(),
+        1 => "there is one, numbered 1".to_string(),
+        n => format!("they are numbered 1 to {n}"),
+    };
+    let number = |raw: &str| -> Result<usize> {
+        let n: usize = raw.trim().parse().map_err(|_| {
+            anyhow::anyhow!("`{spec}` is not a list of checkpoint numbers — {}", range())
+        })?;
+        anyhow::ensure!(
+            n >= 1 && n <= available,
+            "there is no checkpoint {n} in this session — {}",
+            range()
+        );
+        Ok(n)
+    };
+
+    let mut out: Vec<usize> = Vec::new();
+    anyhow::ensure!(
+        !spec.trim().is_empty(),
+        "no checkpoints named. `--keep` on its own takes all of them; \
+         `--keep 1,3-4` takes those — {}",
+        range()
+    );
+    for part in spec.split(',') {
+        // `split_once` rather than `split`, so `1-2-3` is one malformed
+        // element rather than quietly becoming `1-2`.
+        match part.split_once('-') {
+            Some((from, to)) => {
+                let (from, to) = (number(from)?, number(to)?);
+                anyhow::ensure!(
+                    from <= to,
+                    "`{spec}` runs backwards at `{}`. omh will not guess whether that means \
+                     {to} to {from} or a typo — name them in the order you want them",
+                    part.trim()
+                );
+                out.extend(from..=to);
+            }
+            None => out.push(number(part)?),
+        }
+    }
+    // After expansion, because `1-2,2` is the same mistake as `2,2` written
+    // less obviously.
+    for (at, n) in out.iter().enumerate() {
+        anyhow::ensure!(
+            !out[..at].contains(n),
+            "`{spec}` names checkpoint {n} twice. Applying it twice is not what the list \
+             showed you"
+        );
+    }
+    Ok(out)
+}
 
 /// The pager the *user* chose, resolved by git in the user's own checkout.
 ///
@@ -2591,6 +2792,72 @@ mod tests {
         );
     }
 
+    /// `--keep 1,3-4` means those checkpoints, in that order.
+    #[test]
+    fn a_selection_names_checkpoints_in_the_order_it_lists_them() {
+        assert_eq!(chosen("1,3-4", 4).unwrap(), vec![1, 3, 4]);
+        assert_eq!(chosen("2", 4).unwrap(), vec![2], "one is a selection");
+        assert_eq!(chosen("1-4", 4).unwrap(), vec![1, 2, 3, 4], "a whole range");
+        // The user's order, not sorted. Reordering is half of what curating a
+        // history is for, and a selection that silently sorted itself would
+        // land a different history than the one on screen.
+        assert_eq!(chosen("3,1", 4).unwrap(), vec![3, 1]);
+        // Spaces are what a person types after a comma.
+        assert_eq!(chosen(" 1, 3 - 4 ", 4).unwrap(), vec![1, 3, 4]);
+    }
+
+    /// Everything that is not a selection is refused, before anything moves.
+    ///
+    /// Each of these is a plausible thing to type, and each would otherwise
+    /// resolve to *something* — an empty rebase, a commit picked twice, a
+    /// number that means a different commit than the one on screen.
+    #[test]
+    fn a_selection_that_cannot_mean_what_it_says_is_refused() {
+        let refused = |spec: &str, because: &str| {
+            let err = chosen(spec, 4)
+                .map(|got| format!("{got:?}"))
+                .expect_err(&format!("`{spec}` is not a selection: {because}"));
+            err.to_string()
+        };
+
+        assert!(
+            refused("", "nothing was named").contains("no checkpoints"),
+            "an empty selection is a question, not everything"
+        );
+        assert!(refused("0", "the numbers start at 1").contains('0'));
+        assert!(
+            refused("9", "there are four").contains("1 to 4"),
+            "the refusal names the range the list actually has"
+        );
+        assert!(refused("2-9", "the range runs past the end").contains("1 to 4"));
+        assert!(refused("two", "not a number").contains("two"));
+        assert!(refused("1,,2", "an empty element").contains("1,,2"));
+        assert!(
+            refused("4-2", "backwards").contains("4-2"),
+            "a descending range is ambiguous — reversing it is a guess"
+        );
+        assert!(
+            refused("1,1", "twice").contains('1'),
+            "a commit picked twice applies twice, which is not what the list showed"
+        );
+        assert!(refused("-", "no numbers at all").contains('-'));
+    }
+
+    /// A selection is checked against the session's own list, not against
+    /// arithmetic.
+    #[test]
+    fn a_selection_is_bounded_by_what_the_session_has() {
+        assert!(chosen("1", 1).is_ok());
+        assert!(
+            chosen("2", 1).is_err(),
+            "one checkpoint means one valid number"
+        );
+        assert!(
+            chosen("1", 0).is_err(),
+            "and an empty sandbox has none at all"
+        );
+    }
+
     /// The isolation the sandbox is *for*, asserted as an invariant rather than
     /// a mount list: whatever else the shadow gains, the checkout's commits are
     /// never reachable from it. A shadow seeded by cloning, or by pointing at
@@ -2882,7 +3149,9 @@ mod tests {
         git(&s.gitdir, &wt, &["commit", "-qm", "Extract helper"]).unwrap();
         std::fs::write(wt.join("tail.rs"), "fn t() {}").unwrap(); // never checkpointed
 
-        let landed = s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap();
+        let landed = s
+            .harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+            .unwrap();
 
         let log = git_in(&checkout, &["log", "--format=%an|%s", "main..omh/s01"]).unwrap();
         let lines: Vec<&str> = log.lines().collect();
@@ -2967,7 +3236,7 @@ mod tests {
             git(&s.gitdir, &wt, &["commit", "-qm", subject]).unwrap();
 
             let err = s
-                .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], false)
+                .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], Keep::All)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -3021,7 +3290,7 @@ mod tests {
         .unwrap();
 
         let err = s
-            .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], false)
+            .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], Keep::All)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3064,7 +3333,7 @@ mod tests {
         git(&s.gitdir, &wt, &["commit", "-qm", "Ordinary work"]).unwrap();
 
         let landed = s
-            .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], false)
+            .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], Keep::All)
             .expect("a carried line nobody committed is not a reason to refuse");
         assert_eq!(landed, 1, "the agent's commit still has to land");
     }
@@ -3091,11 +3360,16 @@ mod tests {
         std::fs::write(wt.join("f.txt"), "base\nadded\nmore\n").unwrap();
         git(&s.gitdir, &wt, &["commit", "-qam", "Add another"]).unwrap();
 
-        assert_eq!(s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap(), 2);
+        assert_eq!(
+            s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+                .unwrap(),
+            2
+        );
         let tip = git_in(&checkout, &["rev-parse", "omh/s01"]).unwrap();
 
         assert_eq!(
-            s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap(),
+            s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+                .unwrap(),
             0,
             "there is nothing new to keep, and saying so is the whole job"
         );
@@ -3133,13 +3407,18 @@ mod tests {
 
         std::fs::write(wt.join("f.txt"), "base\nfirst\n").unwrap();
         git(&s.gitdir, &wt, &["commit", "-qam", "The first round"]).unwrap();
-        assert_eq!(s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap(), 1);
+        assert_eq!(
+            s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+                .unwrap(),
+            1
+        );
 
         std::fs::write(wt.join("f.txt"), "base\nfirst\nsecond\n").unwrap();
         git(&s.gitdir, &wt, &["commit", "-qam", "The second round"]).unwrap();
 
         assert_eq!(
-            s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap(),
+            s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+                .unwrap(),
             1,
             "only the round that has not landed yet"
         );
@@ -3191,7 +3470,7 @@ mod tests {
         .unwrap();
 
         let err = s
-            .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], false)
+            .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], Keep::All)
             .unwrap_err()
             .to_string();
         assert!(err.contains("carried"), "it still has to refuse: {err}");
@@ -3449,7 +3728,8 @@ mod tests {
             s.ensure(&wt, &[]).unwrap();
             std::fs::write(wt.join("f.txt"), "base\nfirst\n").unwrap();
             git(&s.gitdir, &wt, &["commit", "-qam", "The first round"]).unwrap();
-            s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap();
+            s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+                .unwrap();
             let tip = git_in(&checkout, &["rev-parse", "omh/s01"]).unwrap();
 
             match break_it {
@@ -3470,7 +3750,7 @@ mod tests {
             std::fs::write(wt.join("f.txt"), "base\nfirst\nsecond\n").unwrap();
             git(&s.gitdir, &wt, &["commit", "-qam", "The second round"]).unwrap();
 
-            let outcome = s.harvest(&checkout, &wt, "omh/s01", &[], false);
+            let outcome = s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All);
             assert!(
                 outcome.is_err(),
                 "{name}: a record omh cannot read must not read as a session that \
@@ -3507,7 +3787,8 @@ mod tests {
         s.ensure(&wt, &[]).unwrap();
         std::fs::write(wt.join("f.txt"), "base\nwork\n").unwrap();
         git(&s.gitdir, &wt, &["commit", "-qam", "Some work"]).unwrap();
-        s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap();
+        s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+            .unwrap();
         assert!(
             s.landed().unwrap().is_some(),
             "the precondition is that a harvest recorded one"
@@ -3539,7 +3820,8 @@ mod tests {
 
         std::fs::write(wt.join("f.txt"), "base\nkept\n").unwrap();
         git(&s.gitdir, &wt, &["commit", "-qam", "Work that gets kept"]).unwrap();
-        s.harvest(&checkout, &wt, "omh/s01", &[], false).unwrap();
+        s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+            .unwrap();
 
         // the agent rewinds behind what omh already took
         git(&s.gitdir, &wt, &["reset", "-q", "--hard", start.trim()]).unwrap();
@@ -3548,7 +3830,7 @@ mod tests {
         git(&s.gitdir, &wt, &["commit", "-qm", "A different direction"]).unwrap();
 
         let err = s
-            .harvest(&checkout, &wt, "omh/s01", &[], false)
+            .harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3659,9 +3941,233 @@ mod tests {
         );
     }
 
-    /// Curation is the flag's headline behaviour and nothing executed it: every
-    /// other test here passes `curate: false` while `--keep` only ever passes
-    /// `true`. Deleting the `-i` left the suite green.
+    /// A selection lands exactly those commits, in the order it named them.
+    ///
+    /// The order is the half that is easy to get wrong and impossible to see:
+    /// a rebase that sorted the todo would land the same set and a different
+    /// history, and every assertion about *which* commits arrived would still
+    /// pass.
+    #[test]
+    fn a_selection_lands_those_commits_in_that_order() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        // Separate files, so reordering is a clean replay rather than a
+        // conflict — what is under test is the selection, not merge.
+        for m in ["one", "two", "three", "four"] {
+            std::fs::write(wt.join(format!("{m}.rs")), format!("fn {m}() {{}}\n")).unwrap();
+            git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+            git(&s.gitdir, &wt, &["commit", "-qm", m]).unwrap();
+        }
+        let ids: Vec<String> = s
+            .checkpoints(&wt)
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+
+        // `--keep 3,1` — the third checkpoint, then the first.
+        let landed = s
+            .harvest(
+                &checkout,
+                &wt,
+                "omh/s01",
+                &[],
+                Keep::These(vec![ids[2].clone(), ids[0].clone()]),
+            )
+            .unwrap();
+
+        let log = git_in(&checkout, &["log", "--format=%s", "main..omh/s01"]).unwrap();
+        let on_branch: Vec<&str> = log.lines().collect();
+        assert_eq!(
+            on_branch,
+            vec!["one", "three"],
+            "newest first from `git log`, so `three` was applied first: {log}"
+        );
+        assert_eq!(landed, 2, "and the count is what arrived: {log}");
+    }
+
+    /// What a selection leaves out stays out.
+    ///
+    /// The commits omh did not name are still in the fetched range, and a
+    /// rebase that ignored the todo would replay all four while every
+    /// assertion about the two that *are* there kept passing.
+    #[test]
+    fn a_selection_leaves_the_rest_where_they_were() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        for m in ["one", "two", "three", "four"] {
+            std::fs::write(wt.join(format!("{m}.rs")), format!("fn {m}() {{}}\n")).unwrap();
+            git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+            git(&s.gitdir, &wt, &["commit", "-qm", m]).unwrap();
+        }
+        let ids: Vec<String> = s
+            .checkpoints(&wt)
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+
+        s.harvest(
+            &checkout,
+            &wt,
+            "omh/s01",
+            &[],
+            Keep::These(vec![ids[0].clone(), ids[1].clone()]),
+        )
+        .unwrap();
+
+        let log = git_in(&checkout, &["log", "--format=%s", "main..omh/s01"]).unwrap();
+        assert_eq!(log.lines().count(), 2, "two of the four: {log}");
+        assert!(
+            !log.contains("three") && !log.contains("four"),
+            "the ones not named are not on the branch: {log}"
+        );
+        // The assertion that used to stand here — that the sandbox still holds
+        // `three` and `four` — was a tautology: nothing in `harvest` touches
+        // the sandbox's own history, so no mutation could redden it. Worse,
+        // its comment claimed it was what made a second `--keep` able to take
+        // them, which was the one thing that was **not** true. The real guard
+        // is the next test.
+    }
+
+    /// A selection takes exactly what it names, and does not sweep the
+    /// uncommitted tail into a commit nobody asked for.
+    ///
+    /// `harvest` commits whatever the agent left behind before it does
+    /// anything else, so `--keep` never drops the tail of a session. For a
+    /// selection that sweep is a trap: the numbers were resolved *before* it
+    /// ran, so the commit it makes is one the user could not have named. It
+    /// would be created, left unapplied, and — before the replay point learned
+    /// to stop at what was skipped — recorded as handed over. Work invented by
+    /// the command that then abandoned it.
+    #[test]
+    fn a_selection_does_not_sweep_up_work_the_user_could_not_have_named() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        for m in ["one", "two"] {
+            std::fs::write(wt.join(format!("{m}.rs")), format!("fn {m}() {{}}\n")).unwrap();
+            git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+            git(&s.gitdir, &wt, &["commit", "-qm", m]).unwrap();
+        }
+        let ids: Vec<String> = s
+            .checkpoints(&wt)
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+        // …and then the agent keeps working, without committing.
+        std::fs::write(wt.join("in-flight.rs"), "fn later() {}\n").unwrap();
+
+        s.harvest(
+            &checkout,
+            &wt,
+            "omh/s01",
+            &[],
+            Keep::These(vec![ids[0].clone()]),
+        )
+        .unwrap();
+
+        let log = git(&s.gitdir, &wt, &["log", "--format=%s"]).unwrap();
+        assert!(
+            !log.contains("Work in progress"),
+            "a selection made a commit the user never named: {log}"
+        );
+        let read = s.checkpoints(&wt).unwrap();
+        assert_eq!(
+            read.commits.len(),
+            2,
+            "still two checkpoints, not three: {read:?}"
+        );
+        assert!(
+            read.uncommitted > 0,
+            "and the tail is still where the next `--keep` can see it: {read:?}"
+        );
+    }
+
+    /// A second `--keep` brings the rest, which a partial handover must not
+    /// make impossible.
+    ///
+    /// This is the guard for the defect the record write used to carry:
+    /// `harvest` recorded the fetched HEAD whatever was taken, so after
+    /// `--keep 1,3` checkpoints 2 and 4 read as already handed over. `log`
+    /// drew no divider, a second `--keep` said *nothing new to keep*, naming
+    /// one refused it as already on the branch, and `omh sNN rm` then deleted
+    /// the only copy — with every screen the user could check agreeing the
+    /// work was safe.
+    ///
+    /// Two harvests, because one cannot see it. Every assertion about the
+    /// first is satisfied by the broken version.
+    #[test]
+    fn a_second_keep_brings_what_the_first_selection_left() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        for m in ["one", "two", "three", "four"] {
+            std::fs::write(wt.join(format!("{m}.rs")), format!("fn {m}() {{}}\n")).unwrap();
+            git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+            git(&s.gitdir, &wt, &["commit", "-qm", m]).unwrap();
+        }
+        let ids: Vec<String> = s
+            .checkpoints(&wt)
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.id.clone())
+            .collect();
+
+        // `--keep 1,3` — skipping 2, which is what makes the replay point
+        // unable to advance past it.
+        s.harvest(
+            &checkout,
+            &wt,
+            "omh/s01",
+            &[],
+            Keep::These(vec![ids[0].clone(), ids[2].clone()]),
+        )
+        .unwrap();
+        let read = s.checkpoints(&wt).unwrap();
+        assert!(
+            read.commits.iter().filter(|c| c.landed).count() <= 1,
+            "only what was taken and everything before it may read as handed over: {:?}",
+            read.commits
+        );
+
+        // …and then the rest.
+        let landed = s
+            .harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
+            .unwrap();
+        let log = git_in(&checkout, &["log", "--format=%s", "main..omh/s01"]).unwrap();
+        for m in ["one", "two", "three", "four"] {
+            assert!(
+                log.contains(m),
+                "`{m}` never reached the branch across two harvests: {log}"
+            );
+        }
+        assert!(
+            landed >= 2,
+            "the second harvest brought the ones the first left: {log}"
+        );
+    }
+
+    /// Curation is `--edit`'s headline behaviour, and this is the only test
+    /// that executes it. It cannot be reached from `tests/cli.rs` by
+    /// construction — `--edit` refuses without a terminal and no test process
+    /// has one — so if this goes, the `-i` path has no coverage at all.
+    ///
+    /// It once read "every other test passes `curate: false` while `--keep`
+    /// only ever passes `true`", which was true of the `bool` that `Keep`
+    /// replaced in #56 and is worth keeping only as the reason the test
+    /// exists: deleting the `-i` left the suite green.
     ///
     /// A sequence editor that *edits* the todo, not one that accepts it. An
     /// editor that exits without touching the list is behaviourally identical
@@ -3698,7 +4204,9 @@ mod tests {
         )
         .unwrap();
 
-        let landed = s.harvest(&checkout, &wt, "omh/s01", &[], true).unwrap();
+        let landed = s
+            .harvest(&checkout, &wt, "omh/s01", &[], Keep::Edit)
+            .unwrap();
 
         let log = git_in(&checkout, &["log", "--format=%s", "main..omh/s01"]).unwrap();
         let on_branch = log.lines().count();

@@ -128,8 +128,9 @@ designs the commands that make it unnecessary.
 
 **Its commits are not yours until you ask for them.** `omh s commit` squashes the
 files into one commit of your own and never looks at that repository;
-`omh s commit --keep` replants the agent's commits, messages and all, after you
-curate them. Whichever you use, `omh s rm` takes the repository with the session
+`omh s commit --keep` replants the agent's commits, messages and all — every one
+since the last handover, or the ones you name by their number in `omh s01 log`:
+`--keep 1,3-4`. Whichever you use, `omh s rm` takes the repository with the session
 — so checkpoints you did not harvest go with it, and after a `git reset --hard`
 in the sandbox those are the only copies there were.
 

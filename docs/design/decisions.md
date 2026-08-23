@@ -78,6 +78,30 @@ The base set is also the part of omh with the least evidence behind it. See
   host; the worktree branch protects the repo. They are not substitutes, and
   conflating them is how people end up surprised.
 
+## Deviations from a written design, ratified
+
+**A `--keep` selection is a `cherry-pick`, not a generated rebase todo (#56).**
+[Git](git.md) specified the todo, delivered through `GIT_SEQUENCE_EDITOR`
+pointed at omh's own binary. The implementation used `cherry-pick` instead, and
+the first justification given for that was wrong — it claimed the designed
+mechanism could not be reached by a test, when `tests/cli.rs` runs the real
+binary and `memory::deliver` in this repo already injects `current_exe` for
+exactly that reason.
+
+Kept anyway, on measurement rather than on the argument that failed. Both
+mechanisms were run against the same history: `--keep 3,1` lands `three` then
+`one` under each, and a selected merge is refused by each — `'pick' does not
+accept merge commits` from the todo, `is a merge but no -m option was given`
+from `cherry-pick` — so omh's own up-front refusal is correct either way and the
+user never sees either message. **The two are user-visibly identical**, and
+`cherry-pick` is the smaller mechanism: no editor, no `sh -c` quoting, no second
+entry point into omh, no `hide = true` subcommand for `RESERVED` to carry.
+
+The one real difference is a raised git floor: `cherry-pick --empty=` is newer
+than `rebase --empty=`, so a selection fails on an older git where the todo
+would have worked. The exact version is unmeasured — only 2.55 was available —
+and pinning it is part of `omh doctor` learning git.
+
 ## Reversals worth knowing about
 
 Two decisions were made, shipped, and undone. Both are more instructive than the
