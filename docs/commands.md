@@ -9,7 +9,7 @@ omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
-omh sessions ls|diff|commit|push|down|rm  s   omh s diff, omh s push fix/x
+omh sessions ls|log|diff|commit|push|down|rm  s  omh s01 log, omh s01 diff
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
 omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
@@ -244,6 +244,7 @@ Everything omh knows about: harnesses, editors, sessions and their state.
 
 ```
 omh s ls              sessions, their branches and state
+omh s log             what the agent has committed inside the sandbox
 omh s diff            what the agent changed
 omh s commit [-m …]   commit that work onto the session branch
 omh s push [name]     push it to origin under a name a reviewer can read
@@ -257,7 +258,7 @@ anyway.**
 
 ```console
 $ omh s diff          # the session you were last in
-$ omh s01 diff        # that one
+$ omh s01 log         # that one
 $ omh s01 commit -m "Fix the tap guard"
 $ omh s01 rm
 $ omh s01 claude      # launch into it
@@ -279,8 +280,8 @@ all. `down` with no session stops every sandbox, which is the one place acting
 on all of them is what you mean.
 
 `s ls` also names ids that have a container or a run directory but no worktree —
-sessions removed by a version of omh that only took half of one down. `omh s rm
-<id>` clears them.
+sessions removed by a version of omh that only took half of one down. `omh
+<id> rm` clears them.
 
 ### omh's flags come before the harness name
 
@@ -296,6 +297,37 @@ $ omh claude -- --new      # claude's, even though omh has one too
 
 Long forms only — `-s` and `-a` are left to the harness, which is likelier to
 want them.
+
+### `omh sNN log` — what the agent has committed
+
+Newest first, and until this existed you could not tell the agent had been
+committing at all: its work first became visible when `omh s commit --keep`
+opened a rebase todo, which is late to find out there are eleven of them.
+
+```console
+$ omh s01 log
+s01 · 4 checkpoints, 2 not yours yet · 2 behind main
+
+  4  12m  Extract the tap guard into its own function  3 files  +48 −12
+  3  38m  Add the failing test first                   1 file   +23
+  ────────────────────────── yours from here ──────────────────────────
+  2   1h  Fix typo                                     1 file   +1 −1
+  1   1h  Rename shadow to sandbox repo               12 files  +90 −90
+
+  uncommitted in the session: 2 files
+```
+
+**Numbered from the oldest**, so a number keeps meaning the same commit as the
+agent commits more — and they are what `omh s01 commit --keep` takes. Above the
+line is work your branch has never seen; below it is what a previous `--keep`
+already handed over.
+
+The uncommitted line matters as much as the checkpoints: that is the work
+`--keep` would sweep into a *Work in progress* commit, shown before it happens
+rather than after.
+
+A session whose sandbox has never run says so and exits 0 — asking to see the
+agent's work before the agent has run is an ordinary thing to do.
 
 ### Getting work out of a session
 

@@ -411,6 +411,11 @@ enum SessionsCmd {
     Rm,
     /// Stop a sandbox. The worktree and branch survive.
     Down,
+    /// What the agent has committed inside the sandbox, newest first.
+    ///
+    /// Numbered, so nothing here asks for an object id: the numbers are what
+    /// `diff` and `--keep` take.
+    Log,
     /// What a session changed, against its base branch.
     Diff {
         /// Defaults to the repo's own default branch.
@@ -669,6 +674,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 rm(&cwd, id, ctx)
             }
             SessionsCmd::Down => down(&cwd, cli.session.as_deref(), ctx),
+            SessionsCmd::Log => log_cmd(&cwd, cli.session.as_deref(), ctx),
             SessionsCmd::Diff { base } => diff(&cwd, cli.session.as_deref(), base.as_deref(), ctx),
             SessionsCmd::Commit {
                 message,
@@ -4912,6 +4918,50 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 }
             })
             .collect(),
+        base,
+    });
+    Ok(())
+}
+
+/// The sandbox's own history, read from the host.
+///
+/// `log_cmd` rather than `log`, because `log` is what a reader of this file
+/// expects to be a logging helper.
+fn log_cmd(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let session = existing_session(&paths, id)?;
+    let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
+
+    // A session whose sandbox has never run has no repository to read, and that
+    // is *no checkpoints* rather than a failure — asking to see the agent's
+    // work before the agent has run is an ordinary thing to do. Checked on the
+    // seed record, which `ensure` writes last: a gitdir alone is what a launch
+    // killed halfway through leaves behind.
+    let checkpoints = match shadow.seed_record.exists() {
+        true => shadow.checkpoints(&session.worktree)?,
+        false => Vec::new(),
+    };
+
+    let base = session::default_branch(&paths.repo);
+    // Three answers, and the report renders each differently. A count omh could
+    // not take must not print as zero — `0 behind main` is reassurance, and the
+    // reason it could not be taken is worth saying out loud rather than
+    // becoming an absence.
+    let behind = match session.behind(&paths.repo, &base) {
+        Ok(behind) => Some(behind),
+        Err(e) => {
+            ctx.warn(&format!(
+                "could not tell how far behind {base} this is: {e}"
+            ));
+            None
+        }
+    };
+
+    ctx.say(&report::Log {
+        id: session.id.clone(),
+        checkpoints,
+        uncommitted: session.uncommitted()?,
+        behind,
         base,
     });
     Ok(())

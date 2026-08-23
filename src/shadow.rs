@@ -27,6 +27,7 @@
 //! the host, at the moment work crosses back.
 
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -389,6 +390,111 @@ impl Shadow {
             self.landed_record.display()
         );
         Ok(Some(landed.to_string()))
+    }
+
+    /// The sandbox's own commits, numbered, with what each one touched.
+    ///
+    /// **Numbered from the oldest**, so a number keeps meaning the same commit
+    /// as the agent adds more. Numbering from the newest would renumber the
+    /// whole list on every checkpoint, and the numbers are what `diff` and
+    /// `--keep` take — a selection typed against a list one commit out of date
+    /// would land a different set of commits than the one on screen, silently.
+    ///
+    /// Read on the host, from a gitdir the agent can write. Everything here
+    /// goes through `git`, so `guarded` adds `--no-textconv --no-ext-diff` and
+    /// `NEUTRALISED` closes the config keys — and the subject stays raw, to be
+    /// sanitised at the render boundary by whoever prints it.
+    pub fn checkpoints(&self, worktree: &Path) -> Result<Vec<Checkpoint>> {
+        let seed = self.seed()?;
+        // What the branch already has, in this repository's ids. Read from the
+        // replay point rather than compared against the branch, so the line
+        // drawn here is the line the next `--keep` will act on — asking the
+        // branch instead would answer with commits `stamp` rewrote, which this
+        // history cannot mention.
+        let handed: BTreeSet<String> = match self.landed()? {
+            Some(landed) => git(
+                &self.gitdir,
+                worktree,
+                &["rev-list", &format!("{seed}..{landed}")],
+            )
+            .with_context(|| {
+                format!(
+                    "reading what {} last handed over: the record names {landed}, which this \
+                     repository no longer has. An agent that rewound below the replay point \
+                     leaves exactly this",
+                    self.branch
+                )
+            })?
+            .lines()
+            .map(str::to_string)
+            .collect(),
+            None => BTreeSet::new(),
+        };
+
+        // One call, not one per commit. `--numstat` rather than `--shortstat`
+        // because the totals are then arithmetic omh does rather than a
+        // sentence omh parses — *3 files changed, 48 insertions(+)* is prose,
+        // and it changes with the locale git was built for.
+        //
+        // The record separator leads each header and the subject comes last, so
+        // the agent's own words cannot shift the fields that follow them.
+        let raw = git(
+            &self.gitdir,
+            worktree,
+            &[
+                "log",
+                "--reverse",
+                "--format=%x00%H%x00%at%x00%s",
+                "--numstat",
+                &format!("{seed}..HEAD"),
+            ],
+        )?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let mut out: Vec<Checkpoint> = Vec::new();
+        for line in raw.lines() {
+            if let Some(header) = line.strip_prefix('\0') {
+                let mut fields = header.splitn(3, '\0');
+                let id = fields.next().unwrap_or_default().to_string();
+                let at: u64 = fields
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .parse()
+                    .unwrap_or(now);
+                out.push(Checkpoint {
+                    number: out.len() + 1,
+                    landed: handed.contains(&id),
+                    id,
+                    subject: fields.next().unwrap_or_default().to_string(),
+                    // Saturating: a commit dated in the future is something an
+                    // agent can produce with one `GIT_COMMITTER_DATE`, and it
+                    // must read as *just now* rather than panicking on a
+                    // subtraction or reading as decades old.
+                    age: now.saturating_sub(at),
+                    files: 0,
+                    added: 0,
+                    removed: 0,
+                });
+                continue;
+            }
+            let Some(current) = out.last_mut() else {
+                continue;
+            };
+            let mut counts = line.split('\t');
+            let (Some(added), Some(removed)) = (counts.next(), counts.next()) else {
+                continue;
+            };
+            current.files += 1;
+            // `-` is git's answer for a binary file, which changed without
+            // having lines to count. The file still counts; the lines do not.
+            current.added += added.parse::<usize>().unwrap_or(0);
+            current.removed += removed.parse::<usize>().unwrap_or(0);
+        }
+        Ok(out)
     }
 
     /// Refuse to harvest from a repository whose history is not all reachable.
@@ -1159,6 +1265,29 @@ impl Shadow {
 /// is what you want on an address nobody should write to. The name says where
 /// the commit was made rather than guessing at which harness made it — omh
 /// supports several, and the seed is written before any of them starts.
+/// One commit the agent made inside the sandbox, as the user reads it.
+///
+/// `subject` is the agent's own words and is **not** sanitised here — the
+/// render boundary owns that, and a value sanitised twice is one nobody can
+/// match against git's own output when something goes wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    /// 1 is the oldest. Stable as the agent commits more.
+    pub number: usize,
+    /// The sandbox-side commit id, which is not the id it will have on the
+    /// branch: `harvest` replants and stamps, and both rewrite it.
+    pub id: String,
+    /// The agent's subject line, raw.
+    pub subject: String,
+    /// Seconds between this commit and now, for whoever formats it.
+    pub age: u64,
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
+    /// Already handed to the branch by a previous `--keep`.
+    pub landed: bool,
+}
+
 const AUTHOR_NAME: &str = "omh sandbox";
 const AUTHOR_EMAIL: &str = "sandbox@omh.invalid";
 
@@ -1376,6 +1505,142 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Commit in the sandbox the way the agent does, and answer with its id.
+    fn checkpoint(s: &Shadow, wt: &Path, file: &str, body: &str, subject: &str) -> String {
+        std::fs::write(wt.join(file), body).unwrap();
+        git(&s.gitdir, wt, &["add", "-A", "."]).unwrap();
+        git(
+            &s.gitdir,
+            wt,
+            &["commit", "-q", "--no-verify", "-m", subject],
+        )
+        .unwrap();
+        git(&s.gitdir, wt, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    /// The numbers are the interface — `diff N` and `--keep 1,3-4` take them —
+    /// so they have to name the same commit tomorrow as today. Oldest first is
+    /// what makes that true: a new checkpoint appends, and nothing renumbers.
+    #[test]
+    fn checkpoints_are_numbered_from_the_oldest_and_never_renumber() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+        let before: Vec<usize> = s
+            .checkpoints(&wt)
+            .unwrap()
+            .iter()
+            .map(|c| c.number)
+            .collect();
+        let first_subject = s.checkpoints(&wt).unwrap()[0].subject.clone();
+
+        checkpoint(&s, &wt, "three.rs", "fn three() {}\n", "Add three");
+        let after = s.checkpoints(&wt).unwrap();
+
+        assert_eq!(before, vec![1, 2], "two commits, numbered from the oldest");
+        assert_eq!(
+            after.iter().map(|c| c.number).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "a third appends rather than renumbering"
+        );
+        assert_eq!(
+            after[0].subject, first_subject,
+            "number 1 is still the same commit it was"
+        );
+        assert_eq!(after[0].subject, "Add one");
+        assert_eq!(after[2].subject, "Add three");
+    }
+
+    /// The seed is omh's commit, not the agent's, and it holds the whole
+    /// starting tree: counted as a checkpoint it would be number 1 in every
+    /// session, offering the user a review of their own files.
+    #[test]
+    fn the_seed_is_not_one_of_the_agents_checkpoints() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        assert!(
+            s.checkpoints(&wt).unwrap().is_empty(),
+            "a sandbox that has committed nothing has nothing to show"
+        );
+
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        let one = s.checkpoints(&wt).unwrap();
+        assert_eq!(
+            one.len(),
+            1,
+            "the agent's commit, and not the seed: {one:?}"
+        );
+    }
+
+    /// Which work is already the branch's, from the replay point — the same
+    /// record `--keep` replays from, so the line drawn here is the line the
+    /// next harvest will act on rather than a second opinion about it.
+    #[test]
+    fn checkpoints_say_which_have_already_been_handed_over() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        let handed = checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+        checkpoint(&s, &wt, "three.rs", "fn three() {}\n", "Add three");
+
+        assert!(
+            s.checkpoints(&wt).unwrap().iter().all(|c| !c.landed),
+            "nothing has been handed over yet"
+        );
+
+        std::fs::write(&s.landed_record, format!("{handed}\n")).unwrap();
+        let after = s.checkpoints(&wt).unwrap();
+
+        assert_eq!(
+            after.iter().map(|c| c.landed).collect::<Vec<_>>(),
+            vec![true, true, false],
+            "the line falls after what the last harvest took: {after:?}"
+        );
+    }
+
+    /// What a checkpoint touched, so the log answers *is this worth reading*
+    /// without a second command.
+    #[test]
+    fn a_checkpoint_reports_what_it_touched() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        std::fs::write(wt.join("a.rs"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(wt.join("b.rs"), "one\n").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["commit", "-q", "--no-verify", "-m", "Add two files"],
+        )
+        .unwrap();
+        // …then change one of them, so added and removed are different numbers
+        // and neither can stand in for the other.
+        std::fs::write(wt.join("a.rs"), "one\nchanged\nthree\nfour\n").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["commit", "-q", "--no-verify", "-m", "Change a"],
+        )
+        .unwrap();
+
+        let all = s.checkpoints(&wt).unwrap();
+        assert_eq!((all[0].files, all[0].added, all[0].removed), (2, 4, 0));
+        assert_eq!((all[1].files, all[1].added, all[1].removed), (1, 2, 1));
     }
 
     /// The isolation the sandbox is *for*, asserted as an invariant rather than

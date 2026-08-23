@@ -124,6 +124,221 @@ impl Report for Action {
     }
 }
 
+// ── omh sNN log ─────────────────────────────────────────────────────────────
+
+/// What the agent has committed inside the sandbox, and where the line is.
+///
+/// The command that changes how a session feels: until it existed you could
+/// not tell the agent had been committing at all, and `--keep` opening a rebase
+/// todo was the first sight of it.
+pub struct Log {
+    pub id: String,
+    pub checkpoints: Vec<crate::shadow::Checkpoint>,
+    /// Files changed in the worktree that no checkpoint holds yet.
+    pub uncommitted: usize,
+    /// How far the session's branch trails the base, or `None` when omh could
+    /// not tell — which is not the same as zero and does not print as it.
+    pub behind: Option<usize>,
+    pub base: String,
+}
+
+impl Log {
+    /// Checkpoints the next `--keep` would take.
+    fn pending(&self) -> usize {
+        self.checkpoints.iter().filter(|c| !c.landed).count()
+    }
+}
+
+/// A duration as a person reads it: `0s`, `12m`, `3h`, `9d`.
+///
+/// Pure, and given the seconds rather than reading a clock, so the rendering is
+/// testable without one. Deliberately one unit — this is a column beside a
+/// subject, and *2 hours 14 minutes ago* buys precision nobody is using to
+/// decide whether to read a diff.
+fn ago(seconds: u64) -> String {
+    match seconds {
+        s if s < 60 => format!("{s}s"),
+        s if s < 60 * 60 => format!("{}m", s / 60),
+        // Hours as far as two days, because *36h* still reads as "yesterday
+        // evening" while `1d` has already thrown that away.
+        s if s < 48 * 60 * 60 => format!("{}h", s / (60 * 60)),
+        s => format!("{}d", s / (24 * 60 * 60)),
+    }
+}
+
+impl Report for Log {
+    fn human(&self, p: &out::Palette) -> String {
+        let total = self.checkpoints.len();
+        let pending = self.pending();
+        let mut head = format!(
+            "{} · {total} checkpoint{}",
+            self.id,
+            if total == 1 { "" } else { "s" }
+        );
+        if pending > 0 {
+            head.push_str(&format!(", {pending} not yours yet"));
+        }
+        // Only when omh could take the count. `None` is *could not tell*, and
+        // the one rendering it must never have is `0 behind`, which reads as
+        // reassurance.
+        if let Some(behind) = self.behind.filter(|b| *b > 0) {
+            head.push_str(&format!(" · {behind} behind {}", self.base));
+        }
+        let mut s = out::heading(p, &head);
+        s.push('\n');
+
+        if self.checkpoints.is_empty() {
+            s.push_str(&out::nothing(
+                p,
+                "no checkpoints — the agent has not committed anything in this session",
+            ));
+        } else {
+            // Right-aligned against the widest number, so the column reads as a
+            // column of numbers rather than of text that happens to be digits.
+            let width = self.checkpoints.len().to_string().len();
+            let mut table = Table::new();
+            // Newest first: the checkpoint you want is nearly always the one
+            // that just happened. The *numbers* still count from the oldest —
+            // they are what `diff` and `--keep` take, and they have to mean the
+            // same thing tomorrow.
+            for c in self.checkpoints.iter().rev() {
+                table = table.row(vec![
+                    Cell::styled(format!("{:>width$}", c.number), out::NAME),
+                    Cell::styled(ago(c.age), out::DIM),
+                    // The agent's words, and the only untrusted value on the
+                    // line — see `out::untrusted`.
+                    Cell::plain(out::untrusted(&c.subject)),
+                    Cell::styled(
+                        format!("{} file{}", c.files, if c.files == 1 { "" } else { "s" }),
+                        out::DIM,
+                    ),
+                    Cell::styled(churn(c.added, c.removed), out::DIM),
+                ]);
+            }
+            let rendered = table.render(p);
+            let mut lines: Vec<String> = rendered.lines().map(str::to_string).collect();
+            // Drawn where the first already-handed-over row actually falls,
+            // rather than counting `pending` rows down. The two agree for the
+            // linear history a session normally has, and a history with a merge
+            // in it does not: `landed` means *ancestor of the replay point*,
+            // which a commit newer by date can fail to be. Counting would put
+            // the line at a row chosen by arithmetic that stopped being true.
+            //
+            // The line is still one line, so an interleaved history can leave a
+            // not-yours commit below it. The header's count comes from
+            // `pending` and stays exact either way — the number is what the
+            // user acts on, and it is the one that must not drift.
+            let first_landed = self.checkpoints.iter().rev().position(|c| c.landed);
+            if let Some(at) = first_landed.filter(|at| *at > 0) {
+                let widest = lines
+                    .iter()
+                    .map(|l| out::display_width(l))
+                    .max()
+                    .unwrap_or(0);
+                let label = " yours from here ";
+                // In characters throughout. `─` is three bytes, so sizing the
+                // rule by `len()` and halving it with `split_at` lands inside
+                // one and panics — which it did, on the first run of these
+                // tests, rather than merely drawing a crooked line.
+                let dashes = widest.saturating_sub(label.chars().count() + 2).max(4);
+                let left = "─".repeat(dashes / 2);
+                let right = "─".repeat(dashes - dashes / 2);
+                lines.insert(at, p.paint(out::DIM, &format!("  {left}{label}{right}")));
+            }
+            s.push_str(&lines.join("\n"));
+            s.push('\n');
+        }
+
+        // Always, including when it is zero: this is the work `--keep` sweeps
+        // into a *Work in progress* commit, and the moment to see it is before
+        // that happens rather than in the log afterwards.
+        s.push('\n');
+        s.push_str(&format!(
+            "  {}\n",
+            p.paint(
+                out::DIM,
+                &format!(
+                    "uncommitted in the session: {} file{}",
+                    self.uncommitted,
+                    if self.uncommitted == 1 { "" } else { "s" }
+                )
+            )
+        ));
+        s
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "session": self.id,
+            "base": self.base,
+            "behind": self.behind,
+            "uncommitted": self.uncommitted,
+            "pending": self.pending(),
+            "checkpoints": self.checkpoints.iter().rev().map(|c| json!({
+                "number": c.number,
+                "id": c.id,
+                // Raw here: a program reading this is not a terminal, and a
+                // subject with a replacement character in it is one it cannot
+                // match against git's own output.
+                "subject": c.subject,
+                "age_seconds": c.age,
+                "files": c.files,
+                "added": c.added,
+                "removed": c.removed,
+                "landed": c.landed,
+            })).collect::<Vec<_>>(),
+        })
+    }
+
+    fn asides(&self) -> out::Asides {
+        // `omh sNN diff <number>` belongs here and is not offered yet: `diff`
+        // does not take a number until the next step, and
+        // `the_session_lines_omh_prints_are_lines_omh_accepts` caught this line
+        // being written a step early — which is the whole reason that guard
+        // exists. It arrives with the argument it names.
+        let mut offered: Vec<(String, String)> = Vec::new();
+        if self.pending() > 0 {
+            offered.push((
+                format!("omh {} commit --keep", self.id),
+                format!(
+                    "bring the {} new one{} onto the branch",
+                    self.pending(),
+                    if self.pending() == 1 { "" } else { "s" }
+                ),
+            ));
+        }
+        // Padded to the widest command rather than by hand. Two hints written
+        // with counted spaces lined up until the session id changed width, and
+        // the promise a hint makes — that the line can be selected and pasted —
+        // is easier to believe from a column that is actually a column.
+        let widest = offered
+            .iter()
+            .map(|(cmd, _)| out::display_width(cmd))
+            .max()
+            .unwrap_or(0);
+        offered
+            .into_iter()
+            .fold(out::Asides::default(), |asides, (cmd, what)| {
+                let pad = " ".repeat(widest - out::display_width(&cmd) + 4);
+                asides.hint(format!("  {cmd}{pad}{what}"))
+            })
+    }
+}
+
+/// `+48 −12`, with each half dropped when it is zero.
+///
+/// A checkpoint that only adds lines reads `+48`, not `+48 −0`: the zero is
+/// noise in a column scanned for size, and every added-only commit would carry
+/// one.
+fn churn(added: usize, removed: usize) -> String {
+    match (added, removed) {
+        (0, 0) => String::new(),
+        (a, 0) => format!("+{a}"),
+        (0, r) => format!("−{r}"),
+        (a, r) => format!("+{a} −{r}"),
+    }
+}
+
 // ── omh s down ──────────────────────────────────────────────────────────────
 
 /// What `omh s down` did to each session it was asked about.
@@ -1727,6 +1942,215 @@ impl Report for Lint {
 
 #[cfg(test)]
 mod tests {
+    fn checkpoint(number: usize, subject: &str, landed: bool) -> crate::shadow::Checkpoint {
+        crate::shadow::Checkpoint {
+            number,
+            id: format!("{number:0>7}c"),
+            subject: subject.to_string(),
+            age: number as u64 * 600,
+            files: number,
+            added: number * 10,
+            removed: number,
+            landed,
+        }
+    }
+
+    fn a_log() -> Log {
+        Log {
+            id: "s01".into(),
+            checkpoints: vec![
+                checkpoint(1, "Rename shadow to sandbox repo", true),
+                checkpoint(2, "Fix typo", true),
+                checkpoint(3, "Add the failing test first", false),
+                checkpoint(4, "Extract the tap guard", false),
+            ],
+            uncommitted: 2,
+            behind: Some(2),
+            base: "main".into(),
+        }
+    }
+
+    /// The line is the whole point of the list: above it is work the branch has
+    /// never seen, below it is work `--keep` has already handed over. Newest
+    /// first, because the checkpoint you want to read is almost always the one
+    /// that just happened.
+    #[test]
+    fn the_log_draws_the_line_where_the_next_harvest_starts() {
+        let printed = a_log().human(&out::Palette::plain());
+        let lines: Vec<&str> = printed.lines().collect();
+        let at = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no line for {needle}: {printed}"))
+        };
+
+        assert!(
+            at("Extract the tap guard") < at("Add the failing test first"),
+            "newest first: {printed}"
+        );
+        assert!(
+            at("Add the failing test first") < at("yours from here"),
+            "unharvested work is above the line: {printed}"
+        );
+        assert!(
+            at("yours from here") < at("Fix typo"),
+            "and what the branch already has is below it: {printed}"
+        );
+    }
+
+    /// The count in the header is the one the user acts on, and it comes from
+    /// the flags rather than from where the line was drawn.
+    ///
+    /// A history with a merge in it can put a landed commit above an unlanded
+    /// one — `landed` means *ancestor of the replay point*, not *older*. One
+    /// divider cannot express that, so the line becomes approximate. The count
+    /// must not.
+    #[test]
+    fn the_count_is_exact_even_where_one_line_cannot_say_it() {
+        let mut log = a_log();
+        // oldest → newest: landed, not, landed, not
+        log.checkpoints[1].landed = false;
+        log.checkpoints[2].landed = true;
+        let printed = log.human(&out::Palette::plain());
+
+        assert!(
+            printed.contains("2 not yours yet"),
+            "two are not the branch's, wherever the line falls: {printed}"
+        );
+        assert_eq!(log.json()["pending"], json!(2));
+    }
+
+    /// A session with nothing landed yet has no line to draw, and a divider
+    /// over the whole list would say the opposite of what it means.
+    #[test]
+    fn a_log_with_nothing_handed_over_yet_has_no_line_to_draw() {
+        let mut log = a_log();
+        log.checkpoints.iter_mut().for_each(|c| c.landed = false);
+        let printed = log.human(&out::Palette::plain());
+        assert!(
+            !printed.contains("yours from here"),
+            "nothing is the branch's yet, so there is no line: {printed}"
+        );
+        assert!(
+            printed.contains("Fix typo"),
+            "every checkpoint is still listed: {printed}"
+        );
+    }
+
+    /// The subject is the agent's own words, arriving from a gitdir the agent
+    /// writes. Printed raw, one `\x1b[2K` repaints the line omh just wrote about
+    /// whether the user's work is safe.
+    #[test]
+    fn a_subject_the_agent_wrote_cannot_repaint_the_log() {
+        let mut log = a_log();
+        log.checkpoints[3].subject = "Fix \u{1b}[2K\u{1b}[31mnothing at all".into();
+        let printed = log.human(&out::Palette::plain());
+        assert!(
+            !printed.contains('\u{1b}'),
+            "no escape survives into omh's own output: {printed:?}"
+        );
+        assert!(
+            printed.contains("nothing at all"),
+            "the words still arrive: {printed}"
+        );
+    }
+
+    /// A sandbox that has committed nothing says so, rather than printing a
+    /// header over an empty table — the answer *is* "nothing yet", and a user
+    /// who sees column titles reads it as a listing that failed.
+    #[test]
+    fn a_sandbox_that_has_committed_nothing_says_so() {
+        let mut log = a_log();
+        log.checkpoints.clear();
+        log.uncommitted = 3;
+        let printed = log.human(&out::Palette::plain());
+        assert!(printed.contains("no checkpoints"), "it says so: {printed}");
+        assert!(
+            printed.contains('3'),
+            "and still reports the work that is there: {printed}"
+        );
+    }
+
+    /// A next step is not the answer, so it goes where every other next step
+    /// goes — `omh s01 log > review.txt` must not capture advice.
+    #[test]
+    fn what_to_type_next_is_an_aside_and_not_the_log() {
+        let log = a_log();
+        let printed = log.human(&out::Palette::plain());
+        let hints = log.asides().hints.join("\n");
+
+        assert!(
+            hints.contains("omh s01 commit --keep"),
+            "the harvest is offered: {hints}"
+        );
+        // Not `omh s01 diff 4`: `diff` does not take a number yet, and a hint
+        // is a promise that the line can be pasted.
+        assert!(
+            !hints.contains("diff 4"),
+            "nothing is offered that omh would refuse: {hints}"
+        );
+        assert!(
+            !printed.contains("--keep"),
+            "but not in the answer: {printed}"
+        );
+    }
+
+    /// A script reads numbers, not a table. The number is what `diff` and
+    /// `--keep` take, so it is the field that has to be there.
+    #[test]
+    fn a_program_reading_the_log_gets_the_numbers_not_the_english() {
+        let v = a_log().json();
+        let checkpoints = v["checkpoints"].as_array().expect("a list");
+        assert_eq!(checkpoints.len(), 4);
+        assert_eq!(
+            checkpoints[0]["number"],
+            json!(4),
+            "newest first, as printed"
+        );
+        assert_eq!(checkpoints[0]["landed"], json!(false));
+        assert_eq!(checkpoints[3]["number"], json!(1));
+        assert_eq!(checkpoints[3]["landed"], json!(true));
+        assert_eq!(v["pending"], json!(2), "what --keep would take");
+        assert_eq!(v["uncommitted"], json!(2));
+        assert_eq!(v["behind"], json!(2));
+    }
+
+    /// `behind` has three answers and one of them is *omh could not tell*. The
+    /// enum note at the top of this file is about exactly this: an unknown that
+    /// prints as zero is the dangerous one, because zero is reassuring.
+    #[test]
+    fn a_count_omh_could_not_take_does_not_print_as_zero() {
+        let log = a_log();
+        assert!(
+            log.human(&out::Palette::plain()).contains("2 behind main"),
+            "a count omh could take is reported"
+        );
+
+        let mut log = a_log();
+        log.behind = None;
+        let printed = log.human(&out::Palette::plain());
+        assert!(
+            !printed.contains("behind"),
+            "an unanswered question is not a zero: {printed}"
+        );
+        assert_eq!(log.json()["behind"], json!(null));
+    }
+
+    /// One unit, and the boundaries where it changes.
+    #[test]
+    fn an_age_reads_as_one_unit() {
+        assert_eq!(ago(0), "0s");
+        assert_eq!(ago(59), "59s");
+        assert_eq!(ago(60), "1m");
+        assert_eq!(ago(60 * 60 - 1), "59m");
+        assert_eq!(ago(60 * 60), "1h");
+        // Hours as far as two days: 36h reads as yesterday evening, `1d` does
+        // not.
+        assert_eq!(ago(36 * 60 * 60), "36h");
+        assert_eq!(ago(48 * 60 * 60), "2d");
+    }
+
     use super::*;
     use crate::out::{emit, Format, Palette};
 

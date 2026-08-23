@@ -466,7 +466,9 @@ the hardening in step 6 of the order below, this work closes or narrows
    one is about what a host-side *read* may execute, this about what the sandbox
    may *write*. Verified inside a real container, which the host stand-in got
    right for the wrong reason — `Resource busy`, not `Read-only file system`.
-7. `omh sNN log`, and `diff` grows `-p` and a checkpoint argument.
+7. **7a landed (#54).** `omh sNN log` — the sandbox's commits, numbered from
+   the oldest, with the line where the next harvest starts. 7b is next: `diff`
+   grows `-p` and a checkpoint argument.
 8. **Landed (#53).** The selector: `sNN` in, three spellings out.
 9. `--keep [selection]`, and `--edit` for the todo.
 10. `omh sNN sync`, the conflict-marker guard on `commit`, and the one-shot
