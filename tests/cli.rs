@@ -564,6 +564,44 @@ impl Sandbox {
     }
 }
 
+/// Asking to see the agent's work before the agent has run is an ordinary
+/// thing to do, and the answer is *nothing yet* rather than a failure.
+///
+/// A session whose sandbox has never started has no repository to read at all:
+/// `checkpoints` would ask for the seed and get "no seed recorded", which is
+/// true and is not what the user asked. The reading itself is unit-tested
+/// against a real sandbox repository in `shadow.rs` — building one here would
+/// mean a fixture that reimplements `ensure`, and a fixture that reimplements
+/// the thing it tests proves whichever of the two is wrong.
+#[test]
+fn a_log_for_a_sandbox_that_never_ran_says_nothing_yet() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("in-progress.rs"), "fn main() {}").unwrap();
+
+    let out = sb.omh(&["s01", "log"]);
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let said = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        out.status.success(),
+        "there is nothing wrong with an empty sandbox: {said}"
+    );
+    assert!(
+        printed.contains("no checkpoints"),
+        "it says so plainly: {printed}"
+    );
+    // Zero, and correctly: the count is what `--keep` would sweep out of the
+    // *sandbox*, and there is no sandbox. The file sitting in the worktree is a
+    // fact about the session, which `omh s ls` and `omh s diff` answer — this
+    // line answers what the harvest is about to do, so it must not borrow a
+    // number measured somewhere else.
+    assert!(
+        printed.contains("uncommitted in the sandbox: 0 files"),
+        "nothing is staged for a harvest that has nothing to harvest: {printed}"
+    );
+}
+
 /// The session named first is the session acted on — not the one omh would
 /// have picked.
 ///

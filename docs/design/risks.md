@@ -52,11 +52,13 @@ inside a real container, which is `doctor`'s job.
 **2c. `omh s rm` destroys the agent's own commits.** *(Partly addressed: what
 has already been harvested is on the branch, and `--keep` is repeatable now, so
 the window is what the agent has done since the last landing rather than the
-whole session. Seeing them and refusing over them still needs `omh sNN log`.)* The worktree's content is
+whole session. `omh sNN log` (#54) shows them and counts them; refusing over
+them is step 12.)* The worktree's content is
 already on disk and the branch survives, but checkpoints the agent made and you
 did not harvest with `omh s commit --keep` go with the session — and after a
-`git reset --hard` in the sandbox, those were the only copies. Nothing counts
-them either, so the removal cannot mention what it is about to take. Closing it
+`git reset --hard` in the sandbox, those were the only copies. The count exists
+now, so the removal *could* mention what it is about to take — `rm` does not ask
+for it yet, and that is what is left. Closing it
 needs a way to see them and a way to refuse over them; both are designed in
 [Git](git.md).
 

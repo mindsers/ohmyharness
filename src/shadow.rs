@@ -27,6 +27,7 @@
 //! the host, at the moment work crosses back.
 
 use anyhow::{Context, Result};
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -131,6 +132,87 @@ pub struct Shadow {
     pub branch: String,
 }
 
+/// What a checkpoint touched, when git was willing to count it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Touched {
+    pub files: usize,
+    pub added: usize,
+    pub removed: usize,
+    /// Files git printed `-` for instead of a number.
+    ///
+    /// Two things reach this and neither is *nothing changed*: a binary file,
+    /// and a path the agent gave a `-diff` attribute — `info/attributes` lives
+    /// inside the mount and the read-only `config` does not cover it. Measured
+    /// 2026-08-23: with `* -diff` in place, a commit adding two lines prints
+    /// `-\t-\tc.txt`. Counted as files and never as zero lines, because a
+    /// blank churn column beside *1 file* is how a 200MB blob reads as a
+    /// mode-bit change.
+    pub uncounted: usize,
+}
+
+/// One commit the agent made inside the sandbox, as the user reads it.
+///
+/// `subject` is the agent's own words and is **not** sanitised here — the
+/// render boundary owns that, and a value sanitised twice is one nobody can
+/// match against git's own output when something goes wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Checkpoint {
+    /// 1 is the oldest. Stable as the agent commits more.
+    pub number: usize,
+    /// The sandbox-side commit id, which is not the id it will have on the
+    /// branch: `harvest` replants and stamps, and both rewrite it.
+    pub id: String,
+    /// The agent's subject line, raw.
+    pub subject: String,
+    /// Seconds between the commit and now, or `None` when omh could not read a
+    /// date from it. Rendered as a question mark rather than as *just now*: a
+    /// timestamp omh could not parse is the one case where the strongest
+    /// possible claim would be the fallback for having no information.
+    pub age: Option<u64>,
+    /// What it touched, or `None` for a merge.
+    ///
+    /// A merge has no diff of its own until you say which parent to compare
+    /// against, and omh does not choose one. Measured 2026-08-23: `git log
+    /// --numstat` prints the header for a merge and no numstat lines at all,
+    /// so counting the absence as zero renders a merge that brought in
+    /// hundreds of lines identically to an empty commit.
+    pub touched: Option<Touched>,
+    /// Already handed to the branch by a previous `--keep`.
+    pub landed: bool,
+}
+
+/// Everything one read of the sandbox's repository answers.
+///
+/// More than the list, because two of these states make the list *incomplete*
+/// and the list cannot say so about itself. Both are states `harvest` refuses
+/// over — a log that showed neither would let a user read a clean review and
+/// then be refused by `--keep` citing work they had never been shown.
+#[derive(Debug, Clone, Default)]
+pub struct Checkpoints {
+    pub commits: Vec<Checkpoint>,
+    /// Commits reachable from some ref but not from HEAD, and so invisible to
+    /// a read of `seed..HEAD`. `preflight`'s stranded check is the same
+    /// question, asked where it refuses rather than where it reports.
+    pub unreachable: usize,
+    /// The replay point names a commit this history no longer reaches.
+    ///
+    /// Then nothing can be marked as already handed over — not because nothing
+    /// was, but because omh cannot tell which. `rev-list seed..landed` still
+    /// *succeeds* in this state (measured: exit 0, the ids still resolve),
+    /// which is why this is asked separately rather than inferred from a
+    /// failure.
+    pub replay_point_lost: bool,
+    /// Files in the sandbox's worktree that no checkpoint holds.
+    ///
+    /// Measured the way `harvest` measures it — same gitdir, same
+    /// `status --porcelain`, no `-uall`, no rules pathspec — because the
+    /// number's whole job is to be the set `--keep` is about to sweep into
+    /// *Work in progress*. `Session::uncommitted` answers a different question
+    /// (the session worktree against the session *branch*) and would count
+    /// work the agent checkpointed an hour ago.
+    pub uncommitted: usize,
+}
+
 impl Shadow {
     pub fn new(shadow_dir: &Path, session_id: &str) -> Self {
         Self {
@@ -153,9 +235,16 @@ impl Shadow {
     pub fn ensure(&self, worktree: &Path, excluded: &[String]) -> Result<()> {
         // Both, not just the directory. Seven subprocess calls stand between
         // `git init` and a usable repository, and a launch killed anywhere in
-        // the middle leaves a directory that looks finished. The record is
-        // written last and only after the rename below, so its presence is what
-        // actually means "this one got there".
+        // the middle leaves a directory that looks finished.
+        //
+        // The pair is written seed-then-rename — see the note at the bottom of
+        // this function — so a launch killed between them leaves a seed naming
+        // a gitdir that is not there, and this condition rebuilds it. The
+        // reverse, a gitdir with no seed, is not something a launch produces;
+        // `reap` does, when `remove_dir_all` fails and the seed file goes
+        // anyway. An earlier version of this comment claimed the record was
+        // written last, contradicting the one four lines from the end, and
+        // `log_cmd` inherited the mistake.
         if self.gitdir.exists() && self.seed_record.exists() {
             // The repository is left exactly as it is — that is what makes
             // relaunching safe — but the exclude list is not part of "as it
@@ -391,7 +480,212 @@ impl Shadow {
         Ok(Some(landed.to_string()))
     }
 
-    /// Refuse to harvest from a repository whose history is not all reachable.
+    /// The sandbox's own commits, numbered, with what each one touched.
+    ///
+    /// **Numbered from the oldest**, so a number keeps meaning the same commit
+    /// as the agent adds more. The numbers are what `diff` and `--keep` will
+    /// take — neither does yet — and a selection typed against a list one
+    /// commit out of date would land a different set of commits than the one
+    /// on screen, silently.
+    ///
+    /// `--topo-order` is what makes that true, and it is not decoration.
+    /// Measured 2026-08-23 against git 2.55.0: `--reverse` alone orders by
+    /// commit date, so merging a side branch whose commits are older inserts
+    /// them into the *middle* of the list and everything after them shifts
+    /// down — `Add a` was 1 and became 2. With `--topo-order` the same merge
+    /// appends and 1 still names what it named.
+    ///
+    /// Read on the host, from a gitdir the agent can write. Everything here
+    /// goes through `git`, which is what carries `NEUTRALISED` and `GUEST_ENV`
+    /// — and for this command those are not about executing anything, they are
+    /// about being believed. The subject stays raw, to be sanitised at the
+    /// render boundary by whoever prints it.
+    pub fn checkpoints(&self, worktree: &Path) -> Result<Checkpoints> {
+        let seed = self.seed()?;
+        let mut out = Checkpoints {
+            // What `--keep` would sweep, measured where `--keep` measures it.
+            uncommitted: git(&self.gitdir, worktree, &["status", "--porcelain"])?
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count(),
+            // The same question `preflight` refuses over. Asked here so the
+            // answer arrives while the user is still reading, rather than as a
+            // refusal after they have decided the review is done.
+            unreachable: git(
+                &self.gitdir,
+                worktree,
+                &["rev-list", "--all", "--not", "HEAD"],
+            )?
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .count(),
+            ..Checkpoints::default()
+        };
+
+        // What the branch already has, in this repository's ids. Read from the
+        // replay point rather than compared against the branch, so the line
+        // drawn here is the line the next `--keep` will act on — asking the
+        // branch instead would answer with commits `stamp` rewrote, which this
+        // history cannot mention.
+        let handed: BTreeSet<String> = match self.landed()? {
+            // Ancestry first. `rev-list seed..landed` succeeds against a
+            // replay point the history no longer reaches (measured: exit 0,
+            // the ids still resolve), so without this the set simply fails to
+            // match anything and every checkpoint reads as new — and the log
+            // then offers a `--keep` that `harvest` refuses for this exact
+            // reason.
+            Some(landed) if self.reaches(worktree, &landed)? => git(
+                &self.gitdir,
+                worktree,
+                &["rev-list", &format!("{seed}..{landed}")],
+            )?
+            .lines()
+            .map(str::to_string)
+            .collect(),
+            Some(_) => {
+                out.replay_point_lost = true;
+                BTreeSet::new()
+            }
+            None => BTreeSet::new(),
+        };
+
+        // One call, not one per commit. `--numstat` rather than `--shortstat`
+        // because the totals are then arithmetic omh does rather than a
+        // sentence omh parses, and because `-` for an uncountable file is a
+        // distinction `--shortstat` has already thrown away by the time it
+        // reaches this process.
+        //
+        // The record separator leads each header and the subject comes last,
+        // so the agent's own words cannot shift the fields that follow them.
+        // Measured: git refuses to write a commit whose message holds a NUL
+        // (`error: a NUL byte in commit log message not allowed`), so the
+        // separator cannot appear inside the one field that is the agent's.
+        //
+        // `%ct` and not `%at`: the list is ordered by commit date, and
+        // `--amend`, `rebase` and `cherry-pick` — all ordinary agent moves —
+        // keep the author date while minting a new commit date. Author dates
+        // would run non-monotonically down a list the reader takes as
+        // chronological.
+        let raw = git(
+            &self.gitdir,
+            worktree,
+            &[
+                "log",
+                "--topo-order",
+                "--reverse",
+                "--format=%x00%H%x00%ct%x00%P%x00%s",
+                "--numstat",
+                &format!("{seed}..HEAD"),
+            ],
+        )?;
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .ok();
+        for line in raw.lines() {
+            if let Some(header) = line.strip_prefix('\0') {
+                let mut fields = header.splitn(4, '\0');
+                let id = fields.next().unwrap_or_default().to_string();
+                let at: Option<u64> = fields.next().and_then(|at| at.trim().parse().ok());
+                // A merge, by parent count. `%P` is space-separated, and the
+                // absence of numstat lines below is what has to be told apart
+                // from a commit that changed nothing.
+                let merge = fields
+                    .next()
+                    .is_some_and(|parents| parents.split_whitespace().count() > 1);
+                out.commits.push(Checkpoint {
+                    number: out.commits.len() + 1,
+                    landed: handed.contains(&id),
+                    id,
+                    subject: fields.next().unwrap_or_default().to_string(),
+                    // Saturating: a commit dated in the future is something an
+                    // agent can produce with one `GIT_COMMITTER_DATE`, and it
+                    // must read as *just now* rather than panicking on a
+                    // subtraction or reading as decades old. `None` is the
+                    // other answer — a date omh could not read at all, which
+                    // must not borrow the confidence of *just now*.
+                    age: match (now, at) {
+                        (Some(now), Some(at)) => Some(now.saturating_sub(at)),
+                        _ => None,
+                    },
+                    touched: (!merge).then(Touched::default),
+                });
+                continue;
+            }
+            let Some(Some(touched)) = out.commits.last_mut().map(|c| &mut c.touched) else {
+                continue;
+            };
+            let mut counts = line.split('\t');
+            let (Some(added), Some(removed)) = (counts.next(), counts.next()) else {
+                continue;
+            };
+            touched.files += 1;
+            // `-` is git's answer for a file it would not count, and it is not
+            // a zero. Both halves are checked rather than one: a line with one
+            // of each is not a shape git produces, and reading it as counted
+            // would put a number omh invented beside a file it did not measure.
+            match (added.parse::<usize>(), removed.parse::<usize>()) {
+                (Ok(added), Ok(removed)) => {
+                    touched.added += added;
+                    touched.removed += removed;
+                }
+                _ => touched.uncounted += 1,
+            }
+        }
+
+        // What git listed, against what this parser kept. The numbers are the
+        // interface — `diff N` and `--keep 1,3-4` take them — so a parser that
+        // silently dropped a record would mis-target a commit rather than fail.
+        // Nothing here asserts the format string and the parse still agree;
+        // this does, in the one place a mismatch is still cheap.
+        let counted: usize = git(
+            &self.gitdir,
+            worktree,
+            &["rev-list", "--count", &format!("{seed}..HEAD")],
+        )?
+        .trim()
+        .parse()
+        .unwrap_or(usize::MAX);
+        anyhow::ensure!(
+            counted == out.commits.len(),
+            "git listed {counted} commits in this sandbox and omh read {}. omh will not \
+             number a list it did not fully understand, because the numbers are what \
+             `--keep` takes. Read it directly:\n  git --git-dir={} log",
+            out.commits.len(),
+            self.gitdir.display()
+        );
+        Ok(out)
+    }
+
+    /// Whether `commit` is still in the history `HEAD` reaches.
+    ///
+    /// Its own helper because the answer *no* is not a failure and `git` here
+    /// treats every non-zero status as one: `merge-base --is-ancestor` says no
+    /// with exit 1 and says *I could not tell* with anything else, and
+    /// collapsing those is how a rewound session would report as a broken one.
+    fn reaches(&self, worktree: &Path, commit: &str) -> Result<bool> {
+        let out = Command::new("git")
+            .envs(GUEST_ENV)
+            .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
+            .arg("--git-dir")
+            .arg(&self.gitdir)
+            .arg("--work-tree")
+            .arg(worktree)
+            .args(["merge-base", "--is-ancestor", commit, "HEAD"])
+            .output()
+            .context("running git")?;
+        match out.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => anyhow::bail!(
+                "git merge-base --is-ancestor {commit} HEAD: {}",
+                crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
+            ),
+        }
+    }
+
+    /// Refuse to harvest from a repository whose history is not all reachable.    /// Refuse to harvest from a repository whose history is not all reachable.
     ///
     /// Three states make a harvest succeed while quietly dropping commits, and
     /// all three are ordinary things for an agent to leave behind. Every one is
@@ -1197,17 +1491,21 @@ const NO_PUSH: &str =
 /// Config keys that turn `git` into "run whatever this repository says".
 ///
 /// Every one of these is agent-writable — they live in `/omh/shadow/config`,
-/// which is a read-write mount because the agent commits through it. Today
-/// nothing host-side reads an *existing* shadow (`ensure` returns early, `reap`
-/// only unlinks), so none of them can fire. That is a property of the call
-/// sites, not of anything enforcing it.
+/// which is a read-write mount because the agent commits through it.
 ///
-/// It will stop being true: `Session::remove` already records that the refusal
-/// `rm` owes the agent's checkpoints "belongs with the harvest that gives them
-/// somewhere to go", and a harvest reads those commits **on the host, as the
-/// user**. Neutralised here rather than there, because the person writing the
-/// harvest will be reading a doc comment, and a doc comment is not a guard.
-const NEUTRALISED: [&str; 7] = [
+/// **These fire.** An earlier version of this comment said nothing host-side
+/// read an existing shadow, and that stopped being true twice: `harvest`
+/// fetches and replays those commits on the host as the user, and
+/// `checkpoints` reads the whole history on every `omh sNN log`. A reader who
+/// reached the old sentence first would have concluded the list was inert and
+/// could be relaxed.
+///
+/// Two of them are not about execution at all. `core.useReplaceRefs` and the
+/// `GIT_GRAFT_FILE` in `GUEST_ENV` are about the answer being *true*: both let
+/// the agent rewrite what a read prints without touching a commit, and the one
+/// command that exists to be believed about the agent's work is the one that
+/// reads this repository.
+const NEUTRALISED: [&str; 8] = [
     // `ensure` has carried this since the seed commit and said why: a global
     // `commit.gpgsign = true` fails with `gpg failed to sign the data`, over a
     // commit the user never made in a repository they cannot see. The harvest
@@ -1225,7 +1523,34 @@ const NEUTRALISED: [&str; 7] = [
     // name — this config lives in a read-write mount — so the key is closed
     // rather than left to depend on which verb a future reader picks.
     "diff.external=",
+    // A commit the agent replaced reads as whatever it replaced it with.
+    // Measured 2026-08-23 against git 2.55.0, in a gitdir the agent owns:
+    // `git replace -f <real> <forged>` and the log prints the forged subject
+    // and the forged (empty) numstat beside the *real* commit id, with no
+    // warning on either stream. `--no-replace-objects` and this key both stop
+    // it; the key is here because this list is the mechanism every host-side
+    // read already carries.
+    //
+    // This one is not about executing anything — it is about being believed.
+    // `omh sNN log` exists to tell you what the agent did.
+    "core.useReplaceRefs=false",
 ];
+
+/// What a read has to be told to ignore that no `-c` flag can reach.
+///
+/// `$GIT_DIR/info/grafts` rewrites ancestry from a file inside the mount, and
+/// **the config key does not turn it off**. Measured 2026-08-23 against git
+/// 2.55.0, with three commits hidden behind a graft: `-c core.graftsFile=` and
+/// `-c core.graftsFile=/nonexistent` both still printed the truncated history,
+/// and `--no-replace-objects` did not help either — grafts are not replace
+/// refs. `GIT_GRAFT_FILE` pointed away from the gitdir is what restored all
+/// three commits.
+///
+/// A review that has been shortened to one line, over an exit code of 0, is the
+/// worst answer this command can give: the user reads *little to review* and
+/// runs `rm`. git's only complaint is a deprecation hint on **stderr**, which
+/// `git` here discards whenever the status is zero.
+const GUEST_ENV: [(&str, &str); 1] = [("GIT_GRAFT_FILE", "/dev/null")];
 
 /// `git` in an ordinary repository — the user's checkout, or a worktree of it.
 ///
@@ -1277,6 +1602,7 @@ fn guarded(args: &[&str]) -> Vec<String> {
 fn git_in(at: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(at)
+        .envs(GUEST_ENV)
         .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
         .args(guarded(args))
         .output()
@@ -1293,6 +1619,7 @@ fn git_in(at: &Path, args: &[&str]) -> Result<String> {
 
 fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
+        .envs(GUEST_ENV)
         .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
         // Explicitly, because a child inherits omh's cwd and `add -A .` is
         // resolved against it: invoked from inside the session's worktree, git
@@ -1376,6 +1703,511 @@ mod tests {
             .output()
             .unwrap();
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Commit in the sandbox the way the agent does, and answer with its id.
+    fn checkpoint(s: &Shadow, wt: &Path, file: &str, body: &str, subject: &str) -> String {
+        std::fs::write(wt.join(file), body).unwrap();
+        git(&s.gitdir, wt, &["add", "-A", "."]).unwrap();
+        git(
+            &s.gitdir,
+            wt,
+            &["commit", "-q", "--no-verify", "-m", subject],
+        )
+        .unwrap();
+        git(&s.gitdir, wt, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    /// The numbers are the interface — `diff N` and `--keep 1,3-4` take them —
+    /// so they have to name the same commit tomorrow as today. Oldest first is
+    /// what makes that true: a new checkpoint appends, and nothing renumbers.
+    #[test]
+    fn checkpoints_are_numbered_from_the_oldest_and_never_renumber() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+        let before: Vec<usize> = s
+            .checkpoints(&wt)
+            .unwrap()
+            .commits
+            .iter()
+            .map(|c| c.number)
+            .collect();
+        let first_subject = s.checkpoints(&wt).unwrap().commits[0].subject.clone();
+
+        checkpoint(&s, &wt, "three.rs", "fn three() {}\n", "Add three");
+        let after = s.checkpoints(&wt).unwrap().commits;
+
+        assert_eq!(before, vec![1, 2], "two commits, numbered from the oldest");
+        assert_eq!(
+            after.iter().map(|c| c.number).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "a third appends rather than renumbering"
+        );
+        assert_eq!(
+            after[0].subject, first_subject,
+            "number 1 is still the same commit it was"
+        );
+        assert_eq!(after[0].subject, "Add one");
+        assert_eq!(after[2].subject, "Add three");
+    }
+
+    /// The seed is omh's commit, not the agent's, and it holds the whole
+    /// starting tree: counted as a checkpoint it would be number 1 in every
+    /// session, offering the user a review of their own files.
+    #[test]
+    fn the_seed_is_not_one_of_the_agents_checkpoints() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        assert!(
+            s.checkpoints(&wt).unwrap().commits.is_empty(),
+            "a sandbox that has committed nothing has nothing to show"
+        );
+
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        let one = s.checkpoints(&wt).unwrap().commits;
+        assert_eq!(
+            one.len(),
+            1,
+            "the agent's commit, and not the seed: {one:?}"
+        );
+    }
+
+    /// Which work is already the branch's, from the replay point — the same
+    /// record `--keep` replays from, so the line drawn here is the line the
+    /// next harvest will act on rather than a second opinion about it.
+    #[test]
+    fn checkpoints_say_which_have_already_been_handed_over() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        let handed = checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+        checkpoint(&s, &wt, "three.rs", "fn three() {}\n", "Add three");
+
+        assert!(
+            s.checkpoints(&wt)
+                .unwrap()
+                .commits
+                .iter()
+                .all(|c| !c.landed),
+            "nothing has been handed over yet"
+        );
+
+        std::fs::write(&s.landed_record, format!("{handed}\n")).unwrap();
+        let after = s.checkpoints(&wt).unwrap().commits;
+
+        assert_eq!(
+            after.iter().map(|c| c.landed).collect::<Vec<_>>(),
+            vec![true, true, false],
+            "the line falls after what the last harvest took: {after:?}"
+        );
+    }
+
+    /// What a checkpoint touched, so the log answers *is this worth reading*
+    /// without a second command.
+    #[test]
+    fn a_checkpoint_reports_what_it_touched() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        std::fs::write(wt.join("a.rs"), "one\ntwo\nthree\n").unwrap();
+        std::fs::write(wt.join("b.rs"), "one\n").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["commit", "-q", "--no-verify", "-m", "Add two files"],
+        )
+        .unwrap();
+        // …then change one of them, so added and removed are different numbers
+        // and neither can stand in for the other.
+        std::fs::write(wt.join("a.rs"), "one\nchanged\nthree\nfour\n").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["commit", "-q", "--no-verify", "-m", "Change a"],
+        )
+        .unwrap();
+
+        let all = s.checkpoints(&wt).unwrap().commits;
+        let touched = |c: &Checkpoint| {
+            let t = c.touched.clone().expect("not a merge");
+            (t.files, t.added, t.removed, t.uncounted)
+        };
+        assert_eq!(touched(&all[0]), (2, 4, 0, 0));
+        assert_eq!(touched(&all[1]), (1, 2, 1, 0));
+    }
+
+    /// The agent can rewrite what the log says without touching a commit.
+    ///
+    /// `git replace` swaps one object for another at read time, and the gitdir
+    /// is mounted read-write — the read-only `config` does not cover
+    /// `refs/replace/`. Measured 2026-08-23 against git 2.55.0: with a
+    /// replacement in place the log printed a forged subject and a forged
+    /// (empty) file list beside the **real** commit id, on stdout, with nothing
+    /// on stderr. The harvest fetches the real object, so `--keep` would land
+    /// something the review never showed.
+    ///
+    /// This is the one command whose whole purpose is to be believed.
+    #[test]
+    fn a_replaced_object_cannot_change_what_the_log_says() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        let seed = s.seed().unwrap();
+        let real = checkpoint(
+            &s,
+            &wt,
+            "creds.rs",
+            "const KEY: &str = \"…\";\n",
+            "real work",
+        );
+
+        // The agent forges an innocent-looking commit and points the real id at
+        // it. Plain `git`, not this module's helper: this is the sandbox
+        // acting, not omh.
+        let forged = Command::new("git")
+            .arg("--git-dir")
+            .arg(&s.gitdir)
+            .args([
+                "commit-tree",
+                &format!("{seed}^{{tree}}"),
+                "-p",
+                &seed,
+                "-m",
+                "tidy whitespace",
+            ])
+            .output()
+            .unwrap();
+        let forged = String::from_utf8_lossy(&forged.stdout).trim().to_string();
+        Command::new("git")
+            .arg("--git-dir")
+            .arg(&s.gitdir)
+            .args(["replace", "-f", &real, &forged])
+            .output()
+            .unwrap();
+
+        let commits = s.checkpoints(&wt).unwrap().commits;
+        assert_eq!(commits.len(), 1);
+        assert_eq!(
+            commits[0].subject, "real work",
+            "the log reports the commit, not what the agent replaced it with"
+        );
+        assert_eq!(
+            commits[0].touched.as_ref().map(|t| t.files),
+            Some(1),
+            "and what it really touched: {commits:?}"
+        );
+    }
+
+    /// `info/grafts` rewrites ancestry from a file inside the mount.
+    ///
+    /// Two commits vanish from the list and git says so only in a deprecation
+    /// hint on **stderr**, which `git` here discards on success. A review
+    /// silently shortened to one line, over an exit code of 0, is how a user
+    /// concludes there is little to review and runs `rm`.
+    ///
+    /// Measured 2026-08-23: neither `--no-replace-objects` nor
+    /// `-c core.graftsFile=` stops this — the config key is simply not
+    /// consulted. `GIT_GRAFT_FILE` pointed away from the gitdir is, which is
+    /// why `GUEST_ENV` exists at all and why this guard is not in
+    /// `NEUTRALISED` beside the others.
+    #[test]
+    fn a_graft_file_cannot_hide_commits_from_the_log() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        let seed = s.seed().unwrap();
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+        let head = checkpoint(&s, &wt, "three.rs", "fn three() {}\n", "Add three");
+
+        std::fs::create_dir_all(s.gitdir.join("info")).unwrap();
+        std::fs::write(s.gitdir.join("info/grafts"), format!("{head} {seed}\n")).unwrap();
+
+        let commits = s.checkpoints(&wt).unwrap().commits;
+        assert_eq!(
+            commits
+                .iter()
+                .map(|c| c.subject.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Add one", "Add two", "Add three"],
+            "every checkpoint is still there: {commits:?}"
+        );
+    }
+
+    /// A merge has no diff of its own, and *0 files* is a measurement.
+    ///
+    /// git prints the header for a merge and no numstat lines at all, so
+    /// counting the absence renders a merge that brought in a whole branch
+    /// exactly like an empty commit.
+    #[test]
+    fn a_merge_says_so_rather_than_reporting_that_it_touched_nothing() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        let seed = s.seed().unwrap();
+        checkpoint(&s, &wt, "main.rs", "fn main() {}\n", "On the branch");
+        git(&s.gitdir, &wt, &["checkout", "-q", "-b", "side", &seed]).unwrap();
+        checkpoint(&s, &wt, "side.rs", "fn side() {}\n", "On the side");
+        git(&s.gitdir, &wt, &["checkout", "-q", "-"]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["merge", "-q", "--no-ff", "side", "-m", "Merge the side"],
+        )
+        .unwrap();
+
+        let commits = s.checkpoints(&wt).unwrap().commits;
+        let merge = commits
+            .iter()
+            .find(|c| c.subject == "Merge the side")
+            .unwrap_or_else(|| panic!("the merge is a checkpoint too: {commits:?}"));
+        assert_eq!(merge.touched, None, "not measured, and not zero: {merge:?}");
+        assert!(
+            commits.iter().any(|c| c.touched.is_some()),
+            "the ordinary commits are still measured"
+        );
+    }
+
+    /// The numbers survive a merge, which is the case that broke them.
+    ///
+    /// Measured 2026-08-23: `--reverse` alone is commit-date order, so a side
+    /// branch whose commits are older is spliced into the middle of the list
+    /// and everything after it shifts down. The guard for the numbering
+    /// invariant only appended to a linear history and never saw this.
+    #[test]
+    fn a_merge_does_not_renumber_the_checkpoints_already_listed() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        let seed = s.seed().unwrap();
+
+        // Dated so the side branch is *older* than what follows it on the
+        // branch — the arrangement date order gets wrong.
+        let at = |when: &str, file: &str, subject: &str| {
+            std::fs::write(wt.join(file), format!("// {subject}\n")).unwrap();
+            git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+            let out = Command::new("git")
+                .envs(GUEST_ENV)
+                .arg("--git-dir")
+                .arg(&s.gitdir)
+                .arg("--work-tree")
+                .arg(&wt)
+                .env("GIT_AUTHOR_DATE", when)
+                .env("GIT_COMMITTER_DATE", when)
+                .args(["commit", "-q", "--no-verify", "-m", subject])
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{out:?}");
+        };
+        at("2026-08-20T11:00:00", "a.rs", "A");
+        at("2026-08-20T13:00:00", "b.rs", "B");
+        let before = s.checkpoints(&wt).unwrap().commits;
+
+        git(&s.gitdir, &wt, &["checkout", "-q", "-b", "side", &seed]).unwrap();
+        at("2026-08-20T12:00:00", "s.rs", "S, older than B");
+        git(&s.gitdir, &wt, &["checkout", "-q", "-"]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["merge", "-q", "--no-ff", "side", "-m", "M"],
+        )
+        .unwrap();
+        let after = s.checkpoints(&wt).unwrap().commits;
+
+        for was in &before {
+            let now = after
+                .iter()
+                .find(|c| c.id == was.id)
+                .unwrap_or_else(|| panic!("{} left the list entirely", was.subject));
+            assert_eq!(
+                now.number, was.number,
+                "{} was {} and is now {} — a selection typed before the merge would \
+                 land a different commit",
+                was.subject, was.number, now.number
+            );
+        }
+    }
+
+    /// A replay point the history no longer reaches is a question, not a list
+    /// of new work.
+    ///
+    /// `rev-list seed..landed` *succeeds* in this state — measured: exit 0, the
+    /// ids still resolve — so without asking about ancestry the set simply
+    /// matches nothing, every checkpoint reads as new, and the log offers a
+    /// `--keep` that `harvest` refuses for this exact reason.
+    #[test]
+    fn a_replay_point_the_history_lost_is_reported_rather_than_read_as_new_work() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        let seed = s.seed().unwrap();
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        let handed = checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+        std::fs::write(&s.landed_record, format!("{handed}\n")).unwrap();
+        assert!(
+            !s.checkpoints(&wt).unwrap().replay_point_lost,
+            "nothing is wrong yet"
+        );
+
+        // The agent rewinds below the replay point — one of the four commands
+        // this repository exists to give back.
+        git(&s.gitdir, &wt, &["reset", "-q", "--hard", &seed]).unwrap();
+        checkpoint(&s, &wt, "other.rs", "fn other() {}\n", "Different work");
+        let read = s.checkpoints(&wt).unwrap();
+
+        assert!(
+            read.replay_point_lost,
+            "omh cannot tell what the branch already has: {read:?}"
+        );
+        assert!(
+            read.commits.iter().all(|c| !c.landed),
+            "and marks nothing as handed over on a guess"
+        );
+    }
+
+    /// Work on a branch the sandbox wandered off is invisible to this read, and
+    /// `preflight` refuses to harvest over it.
+    ///
+    /// Reported rather than hidden, because the alternative is a user reading a
+    /// clean review and then being refused by `--keep` citing commits they have
+    /// never been shown.
+    #[test]
+    fn commits_this_read_cannot_reach_are_counted_and_said() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        assert_eq!(s.checkpoints(&wt).unwrap().unreachable, 0);
+
+        git(&s.gitdir, &wt, &["checkout", "-q", "-b", "spike"]).unwrap();
+        checkpoint(&s, &wt, "spike.rs", "fn spike() {}\n", "A spike");
+        checkpoint(&s, &wt, "spike2.rs", "fn more() {}\n", "More of it");
+        git(&s.gitdir, &wt, &["checkout", "-q", "-"]).unwrap();
+
+        let read = s.checkpoints(&wt).unwrap();
+        assert_eq!(
+            read.unreachable, 2,
+            "two commits are on no branch this read follows: {read:?}"
+        );
+        assert_eq!(read.commits.len(), 1, "and the list cannot show them");
+    }
+
+    /// Binary files count as files and never as zero lines.
+    ///
+    /// git answers `-` for a file it would not count, and a blank churn column
+    /// beside *1 file* is how a 200MB blob reads as a mode-bit change.
+    #[test]
+    fn a_file_git_would_not_count_is_not_counted_as_nothing() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        std::fs::write(wt.join("blob.bin"), [0u8, 1, 2, 0, 255]).unwrap();
+        std::fs::write(wt.join("text.rs"), "one\ntwo\n").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["commit", "-q", "--no-verify", "-m", "Both kinds"],
+        )
+        .unwrap();
+
+        let touched = s.checkpoints(&wt).unwrap().commits[0]
+            .touched
+            .clone()
+            .expect("not a merge");
+        assert_eq!(
+            (touched.files, touched.added, touched.uncounted),
+            (2, 2, 1),
+            "both files counted, the text lines counted, the blob's not invented: {touched:?}"
+        );
+    }
+
+    /// The age comes from a clock, and two answers it must never give are a
+    /// panic and a confident *just now*.
+    ///
+    /// `%ct` is the committer date, so this dates the commit rather than the
+    /// authorship a rebase would have carried over.
+    #[test]
+    fn a_checkpoint_dated_in_the_future_reads_as_just_now_rather_than_failing() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        checkpoint(&s, &wt, "now.rs", "fn now() {}\n", "Made now");
+
+        std::fs::write(wt.join("later.rs"), "fn later() {}\n").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        let out = Command::new("git")
+            .envs(GUEST_ENV)
+            .arg("--git-dir")
+            .arg(&s.gitdir)
+            .arg("--work-tree")
+            .arg(&wt)
+            .env("GIT_COMMITTER_DATE", "2099-01-01T00:00:00")
+            .args(["commit", "-q", "--no-verify", "-m", "From the future"])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+
+        // …and one carrying an old *author* date, which is what `rebase`,
+        // `cherry-pick` and `--amend` leave behind. The list is ordered by
+        // commit date, so an age read from the author date would run
+        // backwards down a list the reader takes as chronological — and this
+        // is the only arrangement that tells the two dates apart. The
+        // future-dated commit above cannot: setting the committer date alone
+        // leaves the author date at *now*, so both readings answer zero.
+        std::fs::write(wt.join("replayed.rs"), "fn replayed() {}\n").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        let out = Command::new("git")
+            .envs(GUEST_ENV)
+            .arg("--git-dir")
+            .arg(&s.gitdir)
+            .arg("--work-tree")
+            .arg(&wt)
+            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00")
+            .args([
+                "commit",
+                "-q",
+                "--no-verify",
+                "-m",
+                "Written long ago, committed now",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+
+        let commits = s.checkpoints(&wt).unwrap().commits;
+        assert_eq!(
+            commits[0].age.map(|age| age < 300),
+            Some(true),
+            "a commit made now is dated now: {:?}",
+            commits[0]
+        );
+        assert_eq!(
+            commits[1].age,
+            Some(0),
+            "and one dated in the future reads as just now: {:?}",
+            commits[1]
+        );
+        assert_eq!(
+            commits[2].age.map(|age| age < 300),
+            Some(true),
+            "and one written years ago but committed now is dated by the commit: {:?}",
+            commits[2]
+        );
     }
 
     /// The isolation the sandbox is *for*, asserted as an invariant rather than
