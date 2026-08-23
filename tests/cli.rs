@@ -212,6 +212,51 @@ impl Sandbox {
         assert!(out.status.success(), "git init failed");
     }
 
+    /// A sandbox repository holding one commit no branch has.
+    ///
+    /// Deliberately minimal, and **not** a re-run of `Shadow::ensure`: it needs
+    /// a seed record and a commit past it, which is all `unkept_work` reads.
+    /// Getting it wrong makes the test fail loudly — `rm` would succeed and the
+    /// assertion is that it refuses — rather than pass over a fixture that
+    /// proved nothing, which is the failure mode that kept shadows out of this
+    /// file until now.
+    fn sandbox_repo_with_unkept_work(&self, id: &str, worktree: &std::path::Path) {
+        let shadow = self
+            .home
+            .join(".omh/shadow")
+            .join(self.repo.file_name().unwrap());
+        std::fs::create_dir_all(&shadow).unwrap();
+        let gitdir = shadow.join(format!("{id}.git"));
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("--git-dir")
+                .arg(&gitdir)
+                .arg("--work-tree")
+                .arg(worktree)
+                .args(args)
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&gitdir)
+            .output()
+            .unwrap();
+        git(&["config", "user.email", "sandbox@omh.invalid"]);
+        git(&["config", "user.name", "omh sandbox"]);
+        git(&["commit", "-q", "--allow-empty", "--no-verify", "-m", "seed"]);
+        std::fs::write(
+            shadow.join(format!("{id}.seed")),
+            git(&["rev-parse", "HEAD"]),
+        )
+        .unwrap();
+        std::fs::write(worktree.join("agent.rs"), "fn agent() {}\n").unwrap();
+        git(&["add", "-A", "."]);
+        git(&["commit", "-q", "--no-verify", "-m", "the agent's own work"]);
+    }
+
     /// Where a branch points, for asserting that it did not move.
     fn head_of_branch(&self, branch: &str) -> String {
         let out = Command::new("git")
@@ -774,6 +819,72 @@ fn a_refused_selection_leaves_the_branch_where_it_was() {
         sb.head_of_branch("omh/s01"),
         before,
         "the branch never moved"
+    );
+}
+
+/// `rm` refuses over work that exists nowhere else, and `--force` is the way
+/// past.
+///
+/// End to end, because the guard's whole value is being *reached*: the
+/// decision is a table in `src/main.rs`, and this is the half that says `rm`
+/// asks it. Removing the call left that table green.
+#[test]
+fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+
+    let log = sb.fake_docker();
+    let run = sb
+        .home
+        .join(".omh/run")
+        .join(sb.repo.file_name().unwrap())
+        .join("s01");
+    std::fs::create_dir_all(&run).unwrap();
+    let gitdir = sb
+        .home
+        .join(".omh/shadow")
+        .join(sb.repo.file_name().unwrap())
+        .join("s01.git");
+
+    let out = sb.omh(&["s01", "rm"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "the agent's commit is on no branch: {said}"
+    );
+    assert!(
+        said.contains("s01 has 1 commit that no branch has"),
+        "it says what is at stake, in the singular: {said}"
+    );
+    assert!(said.contains("--force"), "and how to mean it: {said}");
+
+    // "Nothing was taken down" is about the things that go *first*. The
+    // worktree is removed last, so its survival is true of any ordering that
+    // fails anywhere — moving the guard below the container teardown would
+    // leave it standing and prove nothing.
+    assert!(
+        !sb.docker_calls(&log).iter().any(|c| c.starts_with("rm ")),
+        "the container was taken down on the way to refusing: {:?}",
+        sb.docker_calls(&log)
+    );
+    assert!(run.exists(), "so was the marker `s ls` reads");
+    assert!(gitdir.exists(), "and the repository the refusal is about");
+    assert!(worktree.exists());
+
+    let out = sb.omh(&["s01", "rm", "--force"]);
+    assert!(
+        out.status.success(),
+        "--force means it: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!worktree.exists(), "the session is gone");
+    // The repository is the thing the refusal was about, and the only test in
+    // the tree where `rm` runs with a real one on disk. Left behind, the next
+    // session issued this id adopts a dead session's history.
+    assert!(
+        !gitdir.exists(),
+        "…and so is the sandbox repository it was protecting"
     );
 }
 

@@ -49,18 +49,28 @@ untouched. Measured with `chflags uchg` standing in for a
 read-only bind mount — both make a rename-over fail — so the claim owes a check
 inside a real container, which is `doctor`'s job.
 
-**2c. `omh s rm` destroys the agent's own commits.** *(Partly addressed: what
+**2c. ~~`omh s rm` destroys the agent's own commits.~~** *(Closed in #58.
+`omh sNN rm` refuses over checkpoints no branch has, naming how many and what
+to do, before it takes anything down; `--force` is the way past. Everything
+below is what it was answering.)* *(Previously: partly addressed — what
 has already been harvested is on the branch, and `--keep` is repeatable now, so
 the window is what the agent has done since the last landing rather than the
 whole session. `omh sNN log` (#54) shows them and counts them; refusing over
 them is step 12.)* The worktree's content is
 already on disk and the branch survives, but checkpoints the agent made and you
 did not harvest with `omh s commit --keep` go with the session — and after a
-`git reset --hard` in the sandbox, those were the only copies. The count exists
-now, so the removal *could* mention what it is about to take — `rm` does not ask
-for it yet, and that is what is left. Closing it
-needs a way to see them and a way to refuse over them; both are designed in
-[Git](git.md).
+`git reset --hard` in the sandbox, those were the only copies. `rm` asks for the count now and stands on it — and the count is deliberately
+wider than the numbered list `log` prints. `seed..HEAD` cannot see work the
+agent threw away with `reset --hard`, which is the sentence above; measured,
+`--all --reflog --not <last handover>` can. It also catches a branch the
+sandbox wandered off, which `preflight` already refuses a *harvest* over while
+`rm` was dropping it for good.
+
+A sandbox that never ran removes quietly. One omh cannot read does not: that is
+a third answer rather than a quiet yes, because the states that produce it — a
+truncated replay record, a repository with no seed — are ones where the work is
+demonstrably still there and only its classification is missing. `--force`
+covers every refusal, so the door is never held shut; the user is asked once.
 
 **3. sshd is an attack surface pointed at yourself.** Loopback-only, per-repo
 keys, no password auth. All three are asserted by tests, because the failure

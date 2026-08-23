@@ -346,10 +346,14 @@ impl Session {
         // content is already in the worktree the line above discarded. That is
         // not true of the ones behind it: after a `git reset --hard` — one of
         // the four commands this whole feature exists to restore — the
-        // pre-rollback checkpoints live nowhere else, and this destroys them
-        // without a word. Acceptable only while nothing can harvest them; the
-        // refusal `rm` owes them belongs with the harvest that gives them
-        // somewhere to go.
+        // pre-rollback checkpoints live nowhere else.
+        //
+        // This still destroys them without a word, and that is now the *last*
+        // step of a command that refuses to reach it. `may_remove` (#58) counts
+        // what this repository holds that no branch has — `--all --reflog`, so
+        // a rollback is exactly the case it sees — and stops before anything
+        // is taken down unless the user said `--force`. The silence here is
+        // the silence of a decision already made upstairs.
         crate::shadow::Shadow::new(shadows, &self.id).reap();
         Ok(outcome)
     }
