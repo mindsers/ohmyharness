@@ -411,7 +411,15 @@ enum SessionsCmd {
     Ls,
     /// Remove a session — its container and its worktree. A branch holding
     /// commits is kept.
-    Rm,
+    Rm {
+        /// Remove it even though the sandbox holds work no branch has.
+        ///
+        /// The refusal without this is the whole point: those checkpoints
+        /// exist nowhere else, and `rm` is what deletes the repository holding
+        /// them. This says *I know, and I want them gone*.
+        #[arg(long)]
+        force: bool,
+    },
     /// Stop a sandbox. The worktree and branch survive.
     Down,
     /// What the agent has committed inside the sandbox, newest first.
@@ -688,11 +696,11 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 }
                 sessions_ls(&cwd, ctx)
             }
-            SessionsCmd::Rm => {
+            SessionsCmd::Rm { force } => {
                 let id = cli.session.as_deref().context(
                     "which session? name it first:\n  omh s01 rm\n  omh s ls   lists them",
                 )?;
-                rm(&cwd, id, ctx)
+                rm(&cwd, id, *force, ctx)
             }
             SessionsCmd::Down => down(&cwd, cli.session.as_deref(), ctx),
             SessionsCmd::Log => log_cmd(&cwd, cli.session.as_deref(), ctx),
@@ -5287,6 +5295,76 @@ fn every_check(from_the_sandbox: Vec<doctor::Outcome>) -> Result<Vec<doctor::Out
         .collect())
 }
 
+/// Whether this session may be removed, or what would be lost by doing it.
+///
+/// Separate from `rm` so the decision is assertable: `rm` takes a container
+/// down, and nothing that needs one can be reached by a test here. What is
+/// left in `rm` is the single call — its absence is a line missing from a
+/// diff rather than a behaviour hiding behind a runtime.
+fn may_remove(paths: &Paths, session: &Session, force: bool) -> Result<()> {
+    let Some(unkept) = unkept_work(paths, session) else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        force,
+        "{} has {unkept} that no branch has. Removing it deletes the only copy:\n  \
+         omh {} log                read what is there\n  \
+         omh {} commit --keep      put it on {}\n  \
+         omh {} rm --force         remove it anyway",
+        session.id,
+        session.id,
+        session.id,
+        session.branch.as_deref().unwrap_or("the branch"),
+        session.id
+    );
+    Ok(())
+}
+
+/// What a removal would destroy that exists nowhere else, said in words.
+///
+/// `None` when there is nothing to lose — which is the common case, and has to
+/// stay cheap and silent. A sandbox that never ran, a session whose work is
+/// all on the branch, or a shadow omh cannot read: none of those is a reason
+/// to stand between a user and `rm`.
+///
+/// **A read that fails is not a reason to refuse.** `rm` is how a user gets
+/// rid of a session that has gone wrong, and a broken sandbox is exactly when
+/// they reach for it — a refusal that fired because the repository is
+/// unreadable would be omh holding the door shut on the way out. The
+/// checkpoints are counted when they can be counted, and otherwise nothing is
+/// claimed.
+fn unkept_work(paths: &Paths, session: &Session) -> Option<String> {
+    let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
+    let read = shadow
+        .seed_record
+        .exists()
+        .then(|| shadow.checkpoints(&session.worktree).ok())
+        .flatten()?;
+
+    let checkpoints = read.commits.iter().filter(|c| !c.landed).count();
+    // Uncommitted work in the sandbox counts too. It is not a *checkpoint*, so
+    // `log` files it separately — but `rm` takes the worktree with everything
+    // else, and the question here is what disappears.
+    match (checkpoints, read.uncommitted) {
+        (0, 0) => None,
+        (0, files) => Some(format!("{files} uncommitted file{}", plural(files))),
+        (commits, 0) => Some(format!("{commits} checkpoint{}", plural(commits))),
+        (commits, files) => Some(format!(
+            "{commits} checkpoint{} and {files} uncommitted file{}",
+            plural(commits),
+            plural(files)
+        )),
+    }
+}
+
+/// The `s` on a count, in the one place that decides what that looks like.
+fn plural(n: usize) -> &'static str {
+    match n {
+        1 => "",
+        _ => "s",
+    }
+}
+
 /// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done.
 ///
 /// Deliberately not `session::pick`: that invents the *next* id when none
@@ -5518,10 +5596,21 @@ fn push(
     Ok(())
 }
 
-fn rm(cwd: &std::path::Path, id: &str, ctx: &out::Ctx) -> Result<()> {
+fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -> Result<()> {
     session::validate_id(id)?;
     let paths = Paths::discover(cwd)?;
     let session = Session::new(&paths.worktrees(), id.to_string());
+
+    // Before anything is taken down, because everything below this line is
+    // irreversible and the first of them is the container.
+    //
+    // The last piece of [risks](docs/design/risks.md) 2c. The branch survives a
+    // removal and the worktree's files were on disk until this ran — but the
+    // agent's own commits live only in the sandbox's repository, and `reap`
+    // deletes it. After a `reset --hard` in the sandbox those were the only
+    // copies there ever were. omh could not ask this question until `log`
+    // learned to count them.
+    may_remove(&paths, &session, force)?;
 
     // Drop the graph with the code it describes, while the container is still
     // around to do it. Otherwise the index outlives the worktree forever.
@@ -6143,6 +6232,97 @@ mod tests {
                 .unwrap_err()
                 .contains("cannot be used with"),
             "and squashing is the other way to land work, not a modifier of this one"
+        );
+    }
+
+    /// A session holding work no branch has is not removed by accident.
+    ///
+    /// The last piece of [risks](../docs/design/risks.md) 2c. The branch
+    /// survives a removal and the worktree's files were on disk until it ran,
+    /// but the agent's own commits live only in the sandbox's repository and
+    /// `reap` deletes it — after a `reset --hard` in the sandbox those were the
+    /// only copies there ever were. omh could not ask this until `log` learned
+    /// to count them.
+    #[test]
+    fn a_session_holding_unkept_work_is_not_removed_without_being_asked() {
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+
+        let err = may_remove(&paths, &session, false)
+            .expect_err("two checkpoints are on no branch anywhere");
+        let said = err.to_string();
+        assert!(
+            said.contains("2 checkpoints"),
+            "it says how much is at stake: {said}"
+        );
+        assert!(
+            said.contains("--keep") && said.contains("log"),
+            "and the two ways to look at it or keep it: {said}"
+        );
+        assert!(
+            said.contains("--force"),
+            "and the way past, since a user may well mean it: {said}"
+        );
+        assert!(
+            may_remove(&paths, &session, true).is_ok(),
+            "`--force` is that way past"
+        );
+
+        // Everything handed over: nothing to warn about. The record is what
+        // `log`'s divider reads, so this is the same question from the same
+        // source rather than a second opinion.
+        let head = Command::new("git")
+            .arg("--git-dir")
+            .arg(&shadow.gitdir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        std::fs::write(
+            &shadow.landed_record,
+            String::from_utf8_lossy(&head.stdout).trim(),
+        )
+        .unwrap();
+        assert!(
+            may_remove(&paths, &session, false).is_ok(),
+            "a session whose work is all on the branch removes quietly"
+        );
+    }
+
+    /// Uncommitted work counts, and a sandbox that never ran does not.
+    #[test]
+    fn what_a_removal_would_cost_is_counted_only_when_there_is_something_to_count() {
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+        let landed = Command::new("git")
+            .arg("--git-dir")
+            .arg(&shadow.gitdir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap();
+        std::fs::write(
+            &shadow.landed_record,
+            String::from_utf8_lossy(&landed.stdout).trim(),
+        )
+        .unwrap();
+        assert_eq!(unkept_work(&paths, &session), None, "nothing outstanding");
+
+        // The agent keeps working without committing. `log` files that
+        // separately from checkpoints; `rm` takes it either way.
+        std::fs::write(session.worktree.join("in-flight.rs"), "fn later() {}\n").unwrap();
+        assert_eq!(
+            unkept_work(&paths, &session),
+            Some("1 uncommitted file".to_string()),
+            "singular, and named for what it is"
+        );
+
+        // A session whose sandbox never ran has nothing to lose and must not
+        // be made harder to remove — nor must one whose repository omh cannot
+        // read, which is exactly when a user reaches for `rm`.
+        let never_ran = Session::new(&paths.worktrees().join("s02"), "s02".to_string());
+        assert_eq!(unkept_work(&paths, &never_ran), None);
+        std::fs::remove_dir_all(&shadow.gitdir).unwrap();
+        assert_eq!(
+            unkept_work(&paths, &session),
+            None,
+            "a shadow omh cannot read is not a reason to hold the door shut"
         );
     }
 

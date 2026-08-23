@@ -257,8 +257,9 @@ omh s commit [-m …]   commit that work onto the session branch
 omh s commit --keep [n,m-o] [--edit]   keep the agent's own commits
 omh s push [name]     push it to origin under a name a reviewer can read
 omh s down            stop the container, keep the worktree and branch
-omh s rm              remove the session — its container, its worktree, its staging,
-                       and the repository the sandbox had
+omh s rm [--force]    remove the session — its container, its worktree, its staging,
+                       and the repository the sandbox had. Refuses over work
+                       no branch has.
 ```
 
 **The session goes first, and everything after it is what you would have typed
@@ -396,6 +397,31 @@ line — and replaying it would apply the same patch a second time.
 `--edit` is the only form that needs a terminal, and it says so when there
 isn't one. Without that check, git runs the unedited list, exits 0, and omh
 reports a curation that never happened.
+
+### `omh sNN rm` — and what it refuses to take with it
+
+The session's branch survives a removal and its files were on disk until it
+ran. The agent's own commits are the exception: they live only in the sandbox's
+repository, and `rm` deletes that. After a `git reset --hard` in the sandbox
+they were the only copies there ever were.
+
+So `rm` counts them first, and says so rather than asking:
+
+```console
+$ omh s01 rm
+omh: s01 has 2 checkpoints that no branch has. Removing it deletes the only copy:
+  omh s01 log                read what is there
+  omh s01 commit --keep      put it on omh/s01
+  omh s01 rm --force         remove it anyway
+```
+
+Nothing is taken down before that refusal. `--force` is the way past, and it
+means what it says.
+
+The check is narrow on purpose. A sandbox that never ran, work already on the
+branch, and a repository omh cannot read all remove quietly — `rm` is what you
+reach for when a session has gone wrong, and a refusal that fired because the
+sandbox is broken would be omh holding the door shut on the way out.
 
 ### Getting work out of a session
 
