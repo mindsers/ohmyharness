@@ -2521,15 +2521,26 @@ fn a_build_asks_docker_to_remove_the_tags_it_replaced() {
         &["omh/base:held"],
     );
 
-    // Asked, not assumed. This has failed twice on CI with an empty removal
-    // list, which is what a build that never ran looks like from here — and the
+    // Asked, not assumed. This has failed on CI with an empty removal list,
+    // which is what a build that never ran looks like from here — and the
     // discarded status meant the message said nothing about why. Every
     // neighbouring test in this file already checks it.
+    //
+    // Both streams and the code, because the first version of this printed
+    // stderr alone and the next failure put nothing there but progress lines:
+    // a refusal with no reason, which is the state this whole file exists to
+    // stop omh from producing. It has since failed on the linux runner three
+    // times across three branches — including before any of the work that was
+    // in flight when it first appeared — and no run has yet said why.
     let init = sb.omh(&["init"]);
     assert!(
         init.status.success(),
-        "init failed, so no build ran and no reap followed it:\n{}",
-        String::from_utf8_lossy(&init.stderr)
+        "init failed ({}), so no build ran and no reap followed it\n\
+         --- stderr ---\n{}\n--- stdout ---\n{}\n--- docker was asked ---\n{}",
+        init.status,
+        String::from_utf8_lossy(&init.stderr),
+        String::from_utf8_lossy(&init.stdout),
+        sb.docker_calls(&log).join("\n")
     );
 
     let removals: Vec<String> = sb
