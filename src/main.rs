@@ -744,10 +744,14 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             } => commit(
                 &cwd,
                 cli.session.as_deref(),
-                message.as_deref(),
+                match keep.as_deref() {
+                    Some(selection) => Landing::Keep {
+                        selection,
+                        edit: *edit,
+                    },
+                    None => Landing::Squash(message.as_deref()),
+                },
                 *skip_carried,
-                keep.as_deref(),
-                *edit,
                 *force,
                 ctx,
             ),
@@ -5666,13 +5670,33 @@ fn existing_session(paths: &Paths, explicit: Option<&str>) -> Result<Session> {
     Ok(session)
 }
 
+/// The two ways to land a session's work, as one value.
+///
+/// They are mutually exclusive and clap already enforces that — this is what
+/// stops the *rest* of the code from having to know. As four loose parameters
+/// (`message`, `keep`, `edit`, and their combinations) a caller could pass a
+/// message and a selection together, and what happened then was decided by
+/// which `if` came first. The commit body says out loud why doing both is
+/// wrong: the squash lands first and git's patch-id then drops every replanted
+/// commit as already applied, so the granular history disappears with nothing
+/// said. A pair that cannot be constructed cannot do that.
+enum Landing<'a> {
+    /// One commit of the files as they stand. `None` opens the editor.
+    Squash(Option<&'a str>),
+    /// The agent's own commits, replanted.
+    Keep {
+        /// Empty means everything since the last handover.
+        selection: &'a str,
+        /// The todo, in the user's editor.
+        edit: bool,
+    },
+}
+
 fn commit(
     cwd: &std::path::Path,
     id: Option<&str>,
-    message: Option<&str>,
+    landing: Landing,
     skip_carried: bool,
-    keep: Option<&str>,
-    edit: bool,
     force: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
@@ -5690,85 +5714,92 @@ fn commit(
     // first, and git's patch-id then drops every replanted commit as already
     // applied — the granular history disappears with nothing said, which is the
     // whole thing `--keep` exists to deliver.
-    if let Some(selection) = keep {
-        let branch = session
-            .branch
-            .as_deref()
-            .context("a scratch session has no branch to commit to")?;
-        let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
-        let carried = config::policy_list(&paths, "carry_in");
-        let keep = what_to_keep(
-            &shadow,
-            &session,
-            selection,
-            edit,
-            std::io::IsTerminal::is_terminal(&std::io::stdin()),
-            &|| shadow::git_supports("cherry-pick", "--empty"),
-        )?;
-        let named = match &keep {
-            shadow::Keep::These(ids) => Some(ids.len()),
-            _ => None,
-        };
-        let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, keep)?;
-        // Named four, landed three. git drops a commit whose patch is already
-        // on the branch — measured, it says `patch contents already upstream`
-        // on stderr and exits 0, and the helper that runs it keeps only stdout
-        // on success. Without this the user reads `kept 3` after asking for
-        // four and is left to wonder which one, or whether they miscounted.
-        if let Some(named) = named.filter(|named| *named > landed) {
-            ctx.warn(&format!(
-                "you named {named} checkpoint{}, and {landed} reached {branch} — git drops a \
+    // The `--keep` arm returns rather than yielding a message: it is a whole
+    // command, and the squash below is the other one. Written as a match so
+    // adding a third way to land is a compile error here rather than a
+    // fall-through into the squash.
+    let message = match landing {
+        Landing::Squash(message) => message,
+        Landing::Keep { selection, edit } => {
+            let branch = session
+                .branch
+                .as_deref()
+                .context("a scratch session has no branch to commit to")?;
+            let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
+            let carried = config::policy_list(&paths, "carry_in");
+            let keep = what_to_keep(
+                &shadow,
+                &session,
+                selection,
+                edit,
+                std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                &|| shadow::git_supports("cherry-pick", "--empty"),
+            )?;
+            let named = match &keep {
+                shadow::Keep::These(ids) => Some(ids.len()),
+                _ => None,
+            };
+            let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, keep)?;
+            // Named four, landed three. git drops a commit whose patch is already
+            // on the branch — measured, it says `patch contents already upstream`
+            // on stderr and exits 0, and the helper that runs it keeps only stdout
+            // on success. Without this the user reads `kept 3` after asking for
+            // four and is left to wonder which one, or whether they miscounted.
+            if let Some(named) = named.filter(|named| *named > landed) {
+                ctx.warn(&format!(
+                    "you named {named} checkpoint{}, and {landed} reached {branch} — git drops a \
                  commit whose changes are already there. `omh {} log` shows what is left",
-                if named == 1 { "" } else { "s" },
-                session.id
-            ));
-        }
-        let n = session.commits(&paths.repo, &base);
-        warn_uncounted(&n, ctx, &base);
-        ctx.say(
-            &report::Action::new(
-                "committed",
-                match landed {
-                    // Two ways to keep nothing, and they are different news. A
-                    // session that has never handed anything over has made no
-                    // commits; one that has is simply up to date, and telling
-                    // that user their agent "has made no commits" contradicts
-                    // the branch they are looking at.
-                    // Swallowed rather than propagated, because this only
-                    // chooses between two ways of saying nothing happened and
-                    // the harvest above already succeeded — failing here would
-                    // report a command that worked as a command that did not.
-                    //
-                    // `true` on error, and the direction matters. `landed`
-                    // fails only for a record that *exists* and could not be
-                    // read, so the session has handed something over before:
-                    // "nothing new" is then the true sentence and "has made no
-                    // commits" is a stronger claim than omh can make, about a
-                    // branch the user can see. An earlier version defaulted the
-                    // other way and called it the vaguer answer. It is not.
-                    0 if shadow.landed().map(|l| l.is_some()).unwrap_or(true) => format!(
-                        "nothing new to keep — everything {} has committed is already on \
+                    if named == 1 { "" } else { "s" },
+                    session.id
+                ));
+            }
+            let n = session.commits(&paths.repo, &base);
+            warn_uncounted(&n, ctx, &base);
+            ctx.say(
+                &report::Action::new(
+                    "committed",
+                    match landed {
+                        // Two ways to keep nothing, and they are different news. A
+                        // session that has never handed anything over has made no
+                        // commits; one that has is simply up to date, and telling
+                        // that user their agent "has made no commits" contradicts
+                        // the branch they are looking at.
+                        // Swallowed rather than propagated, because this only
+                        // chooses between two ways of saying nothing happened and
+                        // the harvest above already succeeded — failing here would
+                        // report a command that worked as a command that did not.
+                        //
+                        // `true` on error, and the direction matters. `landed`
+                        // fails only for a record that *exists* and could not be
+                        // read, so the session has handed something over before:
+                        // "nothing new" is then the true sentence and "has made no
+                        // commits" is a stronger claim than omh can make, about a
+                        // branch the user can see. An earlier version defaulted the
+                        // other way and called it the vaguer answer. It is not.
+                        0 if shadow.landed().map(|l| l.is_some()).unwrap_or(true) => format!(
+                            "nothing new to keep — everything {} has committed is already on \
                          the branch",
-                        session.label()
-                    ),
-                    0 => format!("nothing to keep — {} has made no commits", session.label()),
-                    _ => format!(
-                        "kept {landed} of {}'s own commits{}",
-                        session.label(),
-                        branch_tally(&n)
-                    ),
-                },
-            )
-            .data(serde_json::json!({
-                "session": session.id,
-                "branch": session.label(),
-                "kept": landed,
-                "commits": n.as_ref().ok(),
-                "base": base,
-            })),
-        );
-        return Ok(());
-    }
+                            session.label()
+                        ),
+                        0 => format!("nothing to keep — {} has made no commits", session.label()),
+                        _ => format!(
+                            "kept {landed} of {}'s own commits{}",
+                            session.label(),
+                            branch_tally(&n)
+                        ),
+                    },
+                )
+                .data(serde_json::json!({
+                    "session": session.id,
+                    "branch": session.label(),
+                    "kept": landed,
+                    "commits": n.as_ref().ok(),
+                    "base": base,
+                })),
+            );
+            return Ok(());
+        }
+    };
 
     // The same list the launcher copies from, so what `commit` refuses to
     // publish and what omh put there cannot disagree.
