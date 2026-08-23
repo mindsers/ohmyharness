@@ -614,8 +614,34 @@ impl Session {
     /// one on the host is what `remove` already handles; reporting
     /// that as a clean session is how work gets discarded.
     pub fn uncommitted(&self) -> Result<usize> {
+        Ok(self.changed()?.len())
+    }
+
+    /// The paths behind that count.
+    ///
+    /// The same `status --porcelain` the count runs, kept rather than
+    /// discarded: `s ls` asks this question once per session already, and two
+    /// sessions changing one file is the collision git will not mention until
+    /// a merge. Reading it a second time to answer that would be a subprocess
+    /// per session for something already on the floor.
+    ///
+    /// Porcelain v1 puts the path after a two-character status and a space.
+    /// A rename prints `R  old -> new`; the new name is the one that exists,
+    /// and it is what another session would collide with.
+    pub fn changed(&self) -> Result<Vec<String>> {
         let out = git_owned(&self.worktree, &status_args())?;
-        Ok(out.lines().filter(|l| !l.trim().is_empty()).count())
+        Ok(out
+            .lines()
+            .filter(|l| l.len() > 3)
+            .map(|line| line[3..].trim())
+            .map(|path| match path.split_once(" -> ") {
+                Some((_, to)) => to,
+                None => path,
+            })
+            // git quotes a path that needs it — `core.quotePath` — and the
+            // quotes are part of neither the name nor a useful comparison.
+            .map(|path| path.trim_matches('"').to_string())
+            .collect())
     }
 
     /// The branch on origin this session has already been pushed to.
@@ -1563,6 +1589,40 @@ mod tests {
         assert!(
             patch.contains("work.rs"),
             "and still says which file: {patch}"
+        );
+    }
+
+    /// What `changed` reports is the name that exists now.
+    ///
+    /// Porcelain prints a rename as `R  old -> new`, and the old name is not
+    /// something another session can collide with — it is not there. The
+    /// quoting matters for the same reason: `core.quotePath` wraps a path that
+    /// needs it, and `"src/x.rs"` and `src/x.rs` are the same file to a reader
+    /// and different strings to the grouping this feeds.
+    #[test]
+    fn a_renamed_file_is_reported_under_the_name_it_has_now() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("before.rs"), "fn work() {}\n").unwrap();
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-qm", "add it"]).unwrap();
+        git(&s.worktree, &["mv", "before.rs", "after.rs"]).unwrap();
+
+        let changed = s.changed().unwrap();
+        assert_eq!(
+            changed,
+            vec!["after.rs".to_string()],
+            "the name that is there, once"
+        );
+
+        // …and a path git quotes comes back unquoted, so two sessions naming
+        // one file name it the same way.
+        std::fs::write(s.worktree.join("a space.rs"), "fn spaced() {}\n").unwrap();
+        let changed = s.changed().unwrap();
+        assert!(
+            changed.contains(&"a space.rs".to_string()),
+            "quotes are git's rendering, not part of the name: {changed:?}"
         );
     }
 

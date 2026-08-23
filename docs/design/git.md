@@ -598,9 +598,11 @@ the hardening in step 6 of the order below, this work closes or narrows
     belongs here when `sync` ships and not before — a doctor that fails over a
     capability nothing calls is one people learn to ignore. Still open: that a
     read-only `config` really does refuse inside a real container.
-12. **Partly landed (#58): `rm` refuses** over checkpoints no branch has —
-    [risks](risks.md#security) 2c, closed. Still open: the dashboard learns
-    work, staleness and overlap;
+12. **Landed (#58, #59).** `rm` refuses over work no branch has —
+    [risks](risks.md#security) 2c, closed. `s ls` names files two sessions are
+    both changing, and reports sandbox repositories with no session left —
+    [risks](risks.md) 8c. The arrangement gained its two sentences. Still open:
+    the dashboard learning staleness, and
     `s ls` reports orphaned sandbox repositories; the arrangement gains its two
     sentences — no history here, and trunk may move under you.
 

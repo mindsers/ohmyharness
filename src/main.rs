@@ -1521,10 +1521,18 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
     let base = session::default_branch(&paths.repo);
 
+    // What each session is changing, kept rather than counted and dropped.
+    // `work_state` below asks git the same question; two sessions editing one
+    // file is a collision git will not mention until a merge, and the answer
+    // is already on the floor.
+    let mut changed: Vec<(String, Vec<String>)> = Vec::new();
     let sessions = session::list(&paths.worktrees())
         .into_iter()
         .map(|id| {
             let sess = Session::new(&paths.worktrees(), id.clone());
+            if let Ok(paths) = sess.changed() {
+                changed.push((id.clone(), paths));
+            }
             report::Session {
                 running: backend
                     .as_ref()
@@ -1541,12 +1549,14 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     ctx.say(&report::Sessions {
         sessions,
         leftovers: leftovers(&paths, backend.as_deref()),
+        overlaps: report::overlaps(&changed),
         base,
     });
     Ok(())
 }
 
-/// Session ids with a container or a run directory but no worktree.
+/// Session ids with a container, a run directory or a sandbox repository but
+/// no worktree.
 ///
 /// Invisible until now, and not merely untidy: an orphan container holds a
 /// session id, and the next session to take that id used to exec straight into
@@ -1559,13 +1569,28 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 /// and neither is a session anybody could resume or would want reported.
 fn leftovers(paths: &Paths, backend: Option<&dyn runtime::Runtime>) -> Vec<String> {
     let live = session::list(&paths.worktrees());
-    let mut found: Vec<String> = std::fs::read_dir(paths.runs())
+    // A sandbox repository with no worktree — [risks](docs/design/risks.md) 8c.
+    // The most valuable orphan of the three: a container is re-creatable and a
+    // run directory holds a timestamp, while this holds every commit the agent
+    // made and nothing points at it. `omh <id> rm` clears it, and since #58
+    // says what it would take with it first.
+    let mut found: Vec<String> = std::fs::read_dir(paths.shadows())
         .into_iter()
         .flatten()
         .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|id| idle::last_used(&paths.runs(), id).is_some())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.strip_suffix(".git").map(str::to_string)
+        })
         .collect();
+    found.extend(
+        std::fs::read_dir(paths.runs())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|id| idle::last_used(&paths.runs(), id).is_some()),
+    );
 
     if let Some(backend) = backend {
         let prefix = paths.container("");

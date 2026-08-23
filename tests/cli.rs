@@ -822,6 +822,72 @@ fn a_refused_selection_leaves_the_branch_where_it_was() {
     );
 }
 
+/// Two sessions changing one file are named together.
+///
+/// The collision git will not mention until a merge, said while both sessions
+/// are open and either could be redirected. End to end, because it is wiring:
+/// the paths come from a `status --porcelain` that `s ls` already ran for its
+/// uncommitted count and used to throw away, and the grouping is a table in
+/// `report.rs` that a unit test cannot connect to the sessions on disk.
+#[test]
+fn sessions_changing_the_same_file_are_named_together() {
+    let sb = sandbox();
+    let one = sb.session("s01");
+    let two = sb.session("s02");
+    for (worktree, extra) in [(&one, "only-in-s01.rs"), (&two, "only-in-s02.rs")] {
+        std::fs::write(worktree.join("shared.rs"), "fn shared() {}\n").unwrap();
+        std::fs::write(worktree.join(extra), "fn mine() {}\n").unwrap();
+    }
+
+    let printed = String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stdout).to_string();
+
+    assert!(
+        printed.contains("s01 and s02 both change shared.rs"),
+        "the file both are changing, and who: {printed}"
+    );
+    assert!(
+        !printed.contains("only-in-s01.rs"),
+        "and nothing about what only one of them touches: {printed}"
+    );
+    // Part of the answer rather than an aside: this is the most consequential
+    // line in a record of what is in flight, and stderr is not where a
+    // redirected listing keeps it.
+    assert!(
+        !String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stderr).contains("both change"),
+        "it is the answer, not a warning"
+    );
+}
+
+/// A sandbox repository with no session is reported, not left to rot.
+///
+/// [risks](../docs/design/risks.md) 8c. The most valuable of the three orphans
+/// `s ls` looks for: a container is re-creatable and a run directory holds a
+/// timestamp, while this holds every commit an agent made and nothing points
+/// at it.
+#[test]
+fn a_sandbox_repository_with_no_session_is_reported() {
+    let sb = sandbox();
+    sb.session("s01");
+    let orphan = sb
+        .home
+        .join(".omh/shadow")
+        .join(sb.repo.file_name().unwrap())
+        .join("s09.git");
+    std::fs::create_dir_all(&orphan).unwrap();
+
+    let out = sb.omh(&["s", "ls"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+
+    assert!(
+        said.contains("s09"),
+        "a repository nothing points at is named: {said}"
+    );
+    assert!(
+        !said.contains("s01"),
+        "and a session that is still here is not: {said}"
+    );
+}
+
 /// `rm` refuses over work that exists nowhere else, and `--force` is the way
 /// past.
 ///

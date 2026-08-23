@@ -549,13 +549,76 @@ pub struct Session {
     pub behind: Option<usize>,
 }
 
+/// Files more than one session is changing.
+///
+/// The collision git will not mention until a merge, said while both sessions
+/// are still open and either could be redirected. Two agents editing one file
+/// in two sandboxes is the ordinary shape of parallel work — it is not an
+/// error, and this does not say it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlap {
+    /// The sessions changing them, in the order `s ls` lists them.
+    pub sessions: Vec<String>,
+    pub paths: Vec<String>,
+}
+
+/// `s01 and s03`, `s01, s02 and s03` — a list as a person reads one.
+fn spoken(names: &[String]) -> String {
+    match names.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+/// Group the paths every pair-or-more of sessions share.
+///
+/// Grouped by *which* sessions rather than by path, so three files touched by
+/// the same two sessions are one line rather than three. That is the sentence
+/// a reader wants — "s01 and s03 both change these" — and it is also what
+/// keeps the section short on a repo where two agents are working through the
+/// same module.
+///
+/// Pure, and given the paths rather than reading git, so the grouping is a
+/// table. What produces the paths is one `status --porcelain` per session that
+/// `s ls` already runs for its uncommitted count and then throws away.
+pub fn overlaps(changed: &[(String, Vec<String>)]) -> Vec<Overlap> {
+    let mut who: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    for (id, paths) in changed {
+        for path in paths {
+            let sessions = who.entry(path.as_str()).or_default();
+            // A session that lists a path twice is not two sessions.
+            if !sessions.contains(&id.as_str()) {
+                sessions.push(id);
+            }
+        }
+    }
+
+    let mut grouped: std::collections::BTreeMap<Vec<&str>, Vec<&str>> = Default::default();
+    for (path, sessions) in who {
+        if sessions.len() > 1 {
+            grouped.entry(sessions).or_default().push(path);
+        }
+    }
+    grouped
+        .into_iter()
+        .map(|(sessions, paths)| Overlap {
+            sessions: sessions.into_iter().map(str::to_string).collect(),
+            paths: paths.into_iter().map(str::to_string).collect(),
+        })
+        .collect()
+}
+
 /// Every session in this checkout, and what earlier ones left behind.
 #[derive(Debug, Clone)]
 pub struct Sessions {
     pub sessions: Vec<Session>,
     pub base: String,
-    /// Session ids with a container or a run directory but no worktree.
+    /// Session ids with a container, a run directory or a sandbox repository
+    /// but no worktree.
     pub leftovers: Vec<String>,
+    /// Files more than one session is changing.
+    pub overlaps: Vec<Overlap>,
 }
 
 impl Report for Sessions {
@@ -588,7 +651,26 @@ impl Report for Sessions {
                 },
             ]);
         }
-        table.render(p)
+        let mut out = table.render(p);
+
+        // Part of the answer, not an aside. `omh s ls > sessions.txt` is a
+        // record of what is in flight, and two sessions editing one file is
+        // the most consequential thing in it — a warning would put it on
+        // stderr, where that file would not have it.
+        for overlap in &self.overlaps {
+            out.push_str(&format!(
+                "\n  {}\n",
+                p.paint(
+                    out::DIM,
+                    &format!(
+                        "{} both change {}",
+                        spoken(&overlap.sessions),
+                        overlap.paths.join(", ")
+                    )
+                )
+            ));
+        }
+        out
     }
 
     /// The leftovers, which are not what `omh s ls` was asked for.
@@ -627,6 +709,10 @@ impl Report for Sessions {
                 "behind": s.behind,
             })).collect::<Vec<_>>(),
             "leftovers": self.leftovers,
+            "overlaps": self.overlaps.iter().map(|o| json!({
+                "sessions": o.sessions,
+                "paths": o.paths,
+            })).collect::<Vec<_>>(),
         })
     }
 }
@@ -2074,6 +2160,61 @@ impl Report for Lint {
 
 #[cfg(test)]
 mod tests {
+    /// Two sessions changing one file is the collision git will not mention
+    /// until a merge.
+    #[test]
+    fn a_file_two_sessions_are_both_changing_is_named_with_both() {
+        let changed = |pairs: &[(&str, &[&str])]| -> Vec<(String, Vec<String>)> {
+            pairs
+                .iter()
+                .map(|(id, paths)| {
+                    (
+                        id.to_string(),
+                        paths.iter().map(|p| p.to_string()).collect(),
+                    )
+                })
+                .collect()
+        };
+
+        assert_eq!(
+            overlaps(&changed(&[
+                ("s01", &["src/render.rs", "src/base.rs", "only-mine.rs"]),
+                ("s02", &["elsewhere.rs"]),
+                ("s03", &["src/render.rs", "src/base.rs"]),
+            ])),
+            vec![Overlap {
+                sessions: vec!["s01".into(), "s03".into()],
+                paths: vec!["src/base.rs".into(), "src/render.rs".into()],
+            }],
+            "one line for the pair, not one per file — and nothing about the files \
+             only one session has"
+        );
+
+        assert!(
+            overlaps(&changed(&[("s01", &["a.rs"]), ("s02", &["b.rs"])])).is_empty(),
+            "sessions working on different things collide with nobody"
+        );
+        assert!(
+            overlaps(&changed(&[("s01", &["a.rs", "a.rs"])])).is_empty(),
+            "and a session is never in collision with itself"
+        );
+
+        // Three sessions on one file, and a different pair on another: two
+        // groups, each naming exactly who is in it.
+        let three = overlaps(&changed(&[
+            ("s01", &["shared.rs", "pair.rs"]),
+            ("s02", &["shared.rs"]),
+            ("s03", &["shared.rs", "pair.rs"]),
+        ]));
+        assert_eq!(three.len(), 2, "grouped by who, not by file: {three:?}");
+        assert!(three
+            .iter()
+            .any(|o| o.sessions.len() == 3 && o.paths == ["shared.rs"]));
+        assert!(three
+            .iter()
+            .any(|o| o.sessions == ["s01", "s03"] && o.paths == ["pair.rs"]));
+    }
+
     fn checkpoint(number: usize, subject: &str, landed: bool) -> crate::shadow::Checkpoint {
         crate::shadow::Checkpoint {
             number,
@@ -2536,6 +2677,7 @@ mod tests {
             sessions: rows,
             base: "main".into(),
             leftovers: vec![],
+            overlaps: vec![],
         }
     }
 

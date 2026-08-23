@@ -1722,7 +1722,10 @@ pub const ARRANGEMENT: &str = "This repository is the sandbox's own, and it is n
      There is nothing to push and no remote to push to, and adding one will not work either — \
      the config is not yours to write. That is the arrangement rather than a fault to repair. Say \
      so rather than offering to push, and do not offer to commit on the host — that is theirs to \
-     do.";
+     do.\n\n\
+     There is no history here — this starts at one commit holding the files as they were when the \
+     session opened, so `git log` and `git blame` have nothing older to tell you. And the branch \
+     it came from may move while you work, changing files under you; neither is a fault.";
 
 /// The seed commit's message, which is a delivery surface and not a label.
 ///

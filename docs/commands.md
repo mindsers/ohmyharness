@@ -288,9 +288,26 @@ than about one session — `omh s01 ls` says so instead of quietly listing them
 all. `down` with no session stops every sandbox, which is the one place acting
 on all of them is what you mean.
 
-`s ls` also names ids that have a container or a run directory but no worktree —
-sessions removed by a version of omh that only took half of one down. `omh
-sNN rm` clears them.
+`s ls` also names ids that have a container, a run directory or a **sandbox
+repository** but no worktree — sessions removed by a version of omh that only
+took half of one down. `omh sNN rm` clears them, and says what it would take
+with it first.
+
+And it names files more than one session is changing:
+
+```console
+$ omh s ls
+  s01  omh/s01  up       3 uncommitted  (2 behind main)
+  s03  omh/s03  stopped  1 uncommitted  (2 behind main)
+
+  s01 and s03 both change src/render.rs, src/base.rs
+```
+
+That is the collision git will not mention until a merge, said while both
+sessions are open and either could still be redirected. It costs nothing: the
+paths come from a `status` `s ls` was already running for the uncommitted
+count and throwing away. It is part of the answer rather than a warning, so a
+redirected listing keeps it.
 
 ### omh's flags come before the harness name
 
