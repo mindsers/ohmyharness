@@ -242,6 +242,8 @@ hint is a promise that the line can be pasted.
 
 ### `omh sNN diff` — a real patch, and one checkpoint
 
+**Landed in #55.**
+
 ```console
 $ omh s01 diff          # the summary it prints today
 $ omh s01 diff -p       # the patch, through your pager
@@ -256,6 +258,16 @@ that pattern. Under `--json` it never pages and the patch is a string field.
 A checkpoint argument is validated to be inside the session's own range before
 anything is printed. Not for safety: a command that will print any object in the
 store is a different command from one that shows you a checkpoint.
+
+The pager was the one place this could not simply hand the terminal to git.
+`core.pager` lives in a file the agent writes, and measured on a pty, git runs
+it — a `core.pager` of `sh -c "echo …; cat"` executed on a plain `git show`.
+`NEUTRALISED` already pins it to `cat`; the user's own pager is appended after
+that, and the last `-c` wins. The sandbox's is never consulted.
+
+`git show` prints the commit subject, and git quotes paths but not subjects, so
+the summary goes through `out::untrusted` on the way to a person and stays raw
+on the way to a program — the same split `log` makes, reached by a second route.
 
 ### `omh sNN commit --keep [selection]`
 
@@ -490,9 +502,9 @@ the hardening in step 6 of the order below, this work closes or narrows
    one is about what a host-side *read* may execute, this about what the sandbox
    may *write*. Verified inside a real container, which the host stand-in got
    right for the wrong reason — `Resource busy`, not `Read-only file system`.
-7. **7a landed (#54).** `omh sNN log` — the sandbox's commits, numbered from
-   the oldest, with the line where the next harvest starts. 7b is next: `diff`
-   grows `-p` and a checkpoint argument.
+7. **Landed.** `omh sNN log` (7a, #54) — the sandbox's commits, numbered from
+   the oldest, with the line where the next harvest starts — and `diff` grown
+   a `-p` and a checkpoint argument (7b, #55).
 8. **Landed (#53).** The selector: `sNN` in, three spellings out.
 9. `--keep [selection]`, and `--edit` for the todo.
 10. `omh sNN sync`, the conflict-marker guard on `commit`, and the one-shot

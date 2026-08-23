@@ -658,6 +658,67 @@ impl Shadow {
         Ok(out)
     }
 
+    /// One checkpoint, as a summary or as the patch.
+    ///
+    /// Takes the number the log printed rather than an object id, and resolves
+    /// it here — so a caller cannot reach a commit this session never showed.
+    /// Not for safety: the store is the agent's own and holds nothing the user
+    /// may not see. It is that a command which prints any object you name is a
+    /// different command from one that shows you a checkpoint, and the numbers
+    /// are the only handle the log ever offered.
+    pub fn show(
+        &self,
+        worktree: &Path,
+        number: usize,
+        what: crate::session::What,
+    ) -> Result<String> {
+        let id = self.checkpoint_id(worktree, number)?;
+        git(&self.gitdir, worktree, &["show", what.flag(), &id])
+    }
+
+    /// One checkpoint's patch, on the terminal, through the user's pager.
+    ///
+    /// The pager is the one place this cannot simply hand the terminal to git.
+    /// `core.pager` lives in a file the agent writes, and measured 2026-08-23
+    /// against git 2.55.0 on a pty, git runs it: a `core.pager` of
+    /// `sh -c "echo …; cat"` executed on a plain `git show`. `NEUTRALISED`
+    /// already pins it to `cat`, which would mean no paging at all — so the
+    /// user's own pager is appended after it, and the last `-c` wins
+    /// (measured). What is never consulted is the sandbox's.
+    pub fn stream_show(&self, worktree: &Path, number: usize) -> Result<()> {
+        let id = self.checkpoint_id(worktree, number)?;
+        let status = Command::new("git")
+            .envs(GUEST_ENV)
+            .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
+            .arg("-c")
+            .arg(format!("core.pager={}", user_pager()))
+            .arg("--git-dir")
+            .arg(&self.gitdir)
+            .arg("--work-tree")
+            .arg(worktree)
+            .args(guarded(&["show", "-p", &id]))
+            .status()
+            .context("running git show")?;
+        anyhow::ensure!(status.success(), "git show exited {status}");
+        Ok(())
+    }
+
+    /// The commit a number names, or a refusal that says what the numbers are.
+    fn checkpoint_id(&self, worktree: &Path, number: usize) -> Result<String> {
+        let read = self.checkpoints(worktree)?;
+        if let Some(found) = read.commits.iter().find(|c| c.number == number) {
+            return Ok(found.id.clone());
+        }
+        anyhow::bail!(
+            "there is no checkpoint {number} in this session. {}",
+            match read.commits.len() {
+                0 => "The agent has not committed anything here yet".to_string(),
+                1 => "There is one, numbered 1".to_string(),
+                n => format!("They are numbered 1 to {n}"),
+            }
+        )
+    }
+
     /// Whether `commit` is still in the history `HEAD` reaches.
     ///
     /// Its own helper because the answer *no* is not a failure and `git` here
@@ -1488,6 +1549,20 @@ const NO_PUSH: &str =
      your work reaches the outside through the host, where `omh s commit` puts it on the branch \
      and `omh s push` sends it. Say that rather than trying to push yourself.";
 
+/// The pager the *user* chose, read from their environment and never from the
+/// sandbox's config.
+///
+/// git's own resolution order is `GIT_PAGER`, then `core.pager`, then `PAGER`,
+/// then a built-in default — and the middle one is a file the agent owns. This
+/// skips it: whatever comes back is passed as a later `-c core.pager`, which
+/// beats the `cat` in `NEUTRALISED` and is in turn beaten by a `GIT_PAGER` the
+/// user exported, exactly as it would be anywhere else.
+fn user_pager() -> String {
+    std::env::var("GIT_PAGER")
+        .or_else(|_| std::env::var("PAGER"))
+        .unwrap_or_else(|_| "less".to_string())
+}
+
 /// Config keys that turn `git` into "run whatever this repository says".
 ///
 /// Every one of these is agent-writable — they live in `/omh/shadow/config`,
@@ -2207,6 +2282,118 @@ mod tests {
             Some(true),
             "and one written years ago but committed now is dated by the commit: {:?}",
             commits[2]
+        );
+    }
+
+    /// A number names one checkpoint, and the patch is that commit's.
+    #[test]
+    fn a_checkpoint_number_shows_that_checkpoints_own_patch() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        let second = checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+
+        let patch = s.show(&wt, 2, crate::session::What::Patch).unwrap();
+        assert!(
+            patch.contains("+fn two() {}") && !patch.contains("+fn one() {}"),
+            "checkpoint 2 is the second commit and nothing else: {patch}"
+        );
+
+        // Against git's own answer for that object, so the numbering and the
+        // patch cannot drift apart while both look plausible.
+        let theirs = Command::new("git")
+            .arg("--git-dir")
+            .arg(&s.gitdir)
+            .args(["show", "-p", &second])
+            .output()
+            .unwrap();
+        assert_eq!(
+            patch,
+            String::from_utf8_lossy(&theirs.stdout),
+            "the same commit git would show for that id"
+        );
+    }
+
+    /// A subject the agent chose cannot repaint a checkpoint review.
+    ///
+    /// `git show` prints the subject, and git quotes paths but not subjects —
+    /// measured during the log work and reaching omh by a second route here.
+    /// Asserted through the report, because that is where the rule lives:
+    /// sanitised for a person, raw for a program.
+    #[test]
+    fn a_subject_the_agent_wrote_cannot_repaint_a_checkpoint_review() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        checkpoint(
+            &s,
+            &wt,
+            "one.rs",
+            "fn one() {}\n",
+            "Fix \u{1b}[2K\rnothing at all",
+        );
+
+        let summary = s.show(&wt, 1, crate::session::What::Summary).unwrap();
+        let report = crate::report::Diff {
+            label: "s01 checkpoint 1".into(),
+            base: "its parent".into(),
+            summary,
+        };
+        use crate::out::Report;
+        let printed = report.human(&crate::out::Palette::plain());
+
+        assert!(
+            !printed.chars().any(|c| c.is_control() && c != '\n'),
+            "no control character survives into omh's own output: {printed:?}"
+        );
+        assert!(
+            printed.contains("nothing at all"),
+            "the words still arrive: {printed}"
+        );
+        assert!(
+            report.json()["summary"]
+                .as_str()
+                .is_some_and(|s| s.contains('\u{1b}')),
+            "and a program still gets what git said: {}",
+            report.json()
+        );
+    }
+
+    /// A number outside the range is refused, and the refusal says what the
+    /// numbers are.
+    ///
+    /// The list is the only place these numbers come from, so being told *no
+    /// checkpoint 9* without being told there are three is being told to go
+    /// and run the other command.
+    #[test]
+    fn a_checkpoint_number_the_session_does_not_have_is_refused() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        let empty = s
+            .show(&wt, 1, crate::session::What::Summary)
+            .expect_err("nothing has been committed here");
+        assert!(
+            empty.to_string().contains("not committed anything"),
+            "an empty sandbox says so rather than naming a range it does not have: {empty}"
+        );
+
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+        let err = s
+            .show(&wt, 9, crate::session::What::Summary)
+            .expect_err("there is no checkpoint 9");
+        assert!(
+            err.to_string().contains('9') && err.to_string().contains("1 to 2"),
+            "the refusal names both the number and the range: {err}"
+        );
+        // Zero is outside it too, and is what a reader who assumed the list was
+        // zero-based would type first.
+        assert!(
+            s.show(&wt, 0, crate::session::What::Summary).is_err(),
+            "the numbers start at 1"
         );
     }
 

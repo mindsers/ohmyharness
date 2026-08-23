@@ -245,7 +245,7 @@ Everything omh knows about: harnesses, editors, sessions and their state.
 ```
 omh s ls              sessions, their branches and state
 omh s log             what the agent has committed inside the sandbox
-omh s diff            what the agent changed
+omh s diff [n] [-p]   what changed — the session, or one checkpoint
 omh s commit [-m …]   commit that work onto the session branch
 omh s push [name]     push it to origin under a name a reviewer can read
 omh s down            stop the container, keep the worktree and branch
@@ -337,6 +337,30 @@ stderr and does not offer a harvest it knows would be refused.
 
 A session whose sandbox has never run says so and exits 0 — asking to see the
 agent's work before the agent has run is an ordinary thing to do.
+
+### `omh sNN diff` — the shape, the patch, or one checkpoint
+
+```console
+$ omh s01 diff          # what the session changed, as a summary
+$ omh s01 diff -p       # the patch, through your pager
+$ omh s01 diff 4        # one checkpoint, by its number in `omh s01 log`
+$ omh s01 diff 4 -p
+```
+
+`-p` hands the terminal to git, so it is git's own pager and git's own colours
+— the same arrangement `omh s commit` uses for your editor. Under `--json` it
+never pages: the patch is a field in the answer, because a pager between a
+script and the object it asked for is a hang with no error.
+
+The number is validated against the session's own list before anything is
+printed, and a number outside it is refused with the range. Not for safety —
+the sandbox's repository holds nothing you may not see — but because a command
+that prints any object you name is a different command from one that shows you
+a checkpoint.
+
+One thing worth knowing: your pager is read from your environment
+(`GIT_PAGER`, then `PAGER`), never from the sandbox's git config. That file is
+one the agent can write, and on a terminal git will run what it says.
 
 ### Getting work out of a session
 

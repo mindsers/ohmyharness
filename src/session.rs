@@ -89,6 +89,24 @@ pub struct Session {
     pub worktree: PathBuf,
 }
 
+/// Which of the two answers a review wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum What {
+    /// The shape of the change: which files, how much.
+    Summary,
+    /// The change itself.
+    Patch,
+}
+
+impl What {
+    pub(crate) fn flag(self) -> &'static str {
+        match self {
+            What::Summary => "--stat",
+            What::Patch => "-p",
+        }
+    }
+}
+
 impl Session {
     pub fn new(worktrees_dir: &Path, id: String) -> Self {
         Self {
@@ -355,7 +373,7 @@ impl Session {
     /// stages it — which is most of what there is to review. `add -A` against
     /// `GIT_INDEX_FILE` gets the whole worktree without touching the index the
     /// user's own git commands share.
-    pub fn diff(&self, base: &str) -> Result<String> {
+    pub fn diff(&self, base: &str, what: What) -> Result<String> {
         let branch = self
             .branch
             .as_deref()
@@ -425,8 +443,48 @@ impl Session {
         git_with_index(
             &self.worktree,
             index,
-            &["diff", "--cached", "--stat", merge_base],
+            // One list of arguments for both answers, so the summary a user
+            // reads before opening the patch describes the same diff the patch
+            // shows. Two call sites would be two chances to pass a different
+            // pathspec, and the summary is what they decide *on*.
+            &["diff", "--cached", what.flag(), merge_base],
         )
+    }
+
+    /// The patch, on the terminal, through the user's own pager.
+    ///
+    /// Inherited stdio rather than captured output: git then does its own
+    /// paging and colouring, which is the pattern `commit`'s editor path
+    /// already uses, and reimplementing either is how a diff ends up subtly
+    /// unlike every other diff the user reads.
+    ///
+    /// Nothing here reads the sandbox, so the pager is the user's own by
+    /// default — see `Shadow::stream_show` for the case where it is not.
+    pub fn stream_diff(&self, base: &str) -> Result<()> {
+        let branch = self
+            .branch
+            .as_deref()
+            .context("a scratch session has no branch")?;
+        let merge_base = git(&self.worktree, &["merge-base", base, branch])?;
+        let index = tempfile::NamedTempFile::new().context("staging a diff index")?;
+        let index = index.path();
+        git_with_index(&self.worktree, index, &["read-tree", "HEAD"])?;
+        git_with_index(&self.worktree, index, &["add", "-A", "."])?;
+        let unstage = unstage_rules_args();
+        let unstage: Vec<&str> = unstage.iter().map(String::as_str).collect();
+        git_with_index(&self.worktree, index, &unstage)?;
+
+        let status = Command::new("git")
+            .current_dir(&self.worktree)
+            .env("GIT_INDEX_FILE", index)
+            .args(["diff", "--cached", "-p", merge_base.trim()])
+            .status()
+            .context("running git diff")?;
+        // `git diff` exits 1 for "there were differences" only with
+        // `--exit-code`, which nothing here passes, so a non-zero status is a
+        // real failure and not the ordinary answer.
+        anyhow::ensure!(status.success(), "git diff exited {status}");
+        Ok(())
     }
 
     /// Stage the agent's work in the worktree and commit it onto the branch.
@@ -1109,7 +1167,7 @@ mod tests {
         std::fs::write(s.worktree.join("new.rs"), "fn main() {}").unwrap();
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "add"]).unwrap();
-        assert!(s.diff("main").unwrap().contains("new.rs"));
+        assert!(s.diff("main", What::Summary).unwrap().contains("new.rs"));
     }
 
     /// The agent never commits — it cannot, and after the shadow repo lands its
@@ -1125,7 +1183,7 @@ mod tests {
         s.ensure(&root, "main").unwrap();
         std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
 
-        let out = s.diff("main").unwrap();
+        let out = s.diff("main", What::Summary).unwrap();
         assert!(
             out.contains("agent.rs"),
             "uncommitted agent work must be reviewable: {out:?}"
@@ -1157,7 +1215,7 @@ mod tests {
         std::fs::write(s.worktree.join(rules), "").unwrap();
         std::fs::write(s.worktree.join("agent.rs"), "fn main() {}").unwrap();
 
-        let out = s.diff("main").unwrap();
+        let out = s.diff("main", What::Summary).unwrap();
         assert!(
             !out.contains(rules),
             "omh's own staging is not the agent's work: {out:?}"
@@ -1183,7 +1241,7 @@ mod tests {
         git(&root, &["add", "-A"]).unwrap();
         git(&root, &["commit", "-q", "-m", "trunk work"]).unwrap();
 
-        let out = s.diff("main").unwrap();
+        let out = s.diff("main", What::Summary).unwrap();
         assert!(out.contains("agent.rs"), "the session's own work: {out:?}");
         assert!(
             !out.contains("trunk.rs"),
@@ -1212,7 +1270,7 @@ mod tests {
             "checkout takes the committed work off disk — the premise of this test"
         );
 
-        let err = s.diff("main").unwrap_err().to_string();
+        let err = s.diff("main", What::Summary).unwrap_err().to_string();
         assert!(
             err.contains("omh/s01"),
             "the branch it should be on has to be named: {err}"
@@ -1252,7 +1310,7 @@ mod tests {
         std::fs::write(&exclude, "local.env\n").unwrap();
         std::fs::write(s.worktree.join("local.env"), "KEY=1\nKEY2=2\n").unwrap();
 
-        let out = s.diff("main").unwrap();
+        let out = s.diff("main", What::Summary).unwrap();
         assert!(
             !out.contains("deletion"),
             "a file present on disk must never be reported as deleted: {out:?}"
@@ -1463,6 +1521,35 @@ mod tests {
     /// The state that strands work is the one `s ls` cannot otherwise see: a
     /// session holding a day of uncommitted changes reads exactly like an
     /// untouched one. It must not count what omh itself put there, for the same
+    /// A summary says which files; a patch says what changed in them.
+    ///
+    /// Both are built from the same throwaway index, because the alternative
+    /// is two answers about one session that can disagree — and the summary
+    /// is what a user reads *before* deciding the patch is worth opening.
+    #[test]
+    fn a_patch_carries_the_lines_a_summary_only_counts() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn added() {}\n").unwrap();
+
+        let summary = s.diff("main", What::Summary).unwrap();
+        let patch = s.diff("main", What::Patch).unwrap();
+
+        assert!(
+            summary.contains("work.rs") && !summary.contains("fn added"),
+            "a summary counts lines rather than quoting them: {summary}"
+        );
+        assert!(
+            patch.contains("+fn added() {}"),
+            "the patch is the lines themselves: {patch}"
+        );
+        assert!(
+            patch.contains("work.rs"),
+            "and still says which file: {patch}"
+        );
+    }
+
     /// reason `commit` must not commit it.
     #[test]
     fn uncommitted_counts_the_agents_work_and_not_omhs_own() {
@@ -2034,7 +2121,7 @@ mod tests {
         git(&s.worktree, &["add", "-A"]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "work"]).unwrap();
 
-        let out = s.diff(&default_branch(&root)).unwrap();
+        let out = s.diff(&default_branch(&root), What::Summary).unwrap();
         assert!(out.contains("new.rs"), "got: {out}");
     }
 

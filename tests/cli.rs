@@ -602,6 +602,38 @@ fn a_log_for_a_sandbox_that_never_ran_says_nothing_yet() {
     );
 }
 
+/// `--json` never hands the terminal to a pager.
+///
+/// A script asking for a patch gets the patch as a field. Paging is for a
+/// person, and `less` between a program and the object it asked for is a hang
+/// with no error — the failure mode that has no output to diagnose it by.
+///
+/// Asserted through the binary rather than on the branch inside `diff`, because
+/// the branch is the thing that could be wrong: reading `ctx.format` is what
+/// makes it true, and a unit test of the two arms would agree with whichever
+/// one was written.
+#[test]
+fn a_patch_asked_for_by_a_program_is_a_field_and_not_a_pager() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("feature.rs"), "fn added() {}\n").unwrap();
+
+    let out = sb.omh(&["s01", "diff", "-p", "--json"]);
+    let printed = String::from_utf8_lossy(&out.stdout);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "the patch is an answer: {said}");
+
+    let v: serde_json::Value =
+        serde_json::from_str(&printed).unwrap_or_else(|e| panic!("not JSON: {e}: {printed}"));
+    assert_eq!(v["changed"], serde_json::json!(true));
+    assert!(
+        v["summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("+fn added() {}")),
+        "the patch itself, in a field: {v}"
+    );
+}
+
 /// The session named first is the session acted on — not the one omh would
 /// have picked.
 ///
@@ -650,9 +682,14 @@ fn the_spellings_the_prefix_replaced_are_refused() {
         let said = String::from_utf8_lossy(&out.stderr);
         // Refused *for naming it there*, not for some unrelated reason further
         // down — a test that only asks for a non-zero exit passes on the day
-        // the command breaks for a different cause entirely.
+        // the command breaks for a different cause entirely. The refusal has
+        // to quote the token, which is what makes it about that token; the
+        // wording differs by slot and is not the invariant. `diff` says
+        // *invalid value 's01' for '[CHECKPOINT]'* now that the slot takes a
+        // checkpoint number, which is a better answer than the one this used
+        // to pin.
         assert!(
-            !out.status.success() && said.contains("unexpected argument"),
+            !out.status.success() && said.contains("s01"),
             "`omh {}` names the session where it no longer goes: {said}",
             line.join(" ")
         );

@@ -357,24 +357,45 @@ impl Report for Log {
                 landed.join(", ")
             ));
         }
-        // `omh sNN diff <number>` belongs here and is not offered yet: `diff`
-        // does not take a number until the next step, and
-        // `the_session_lines_omh_prints_are_lines_omh_accepts` caught this line
-        // being written a step early — which is the whole reason that guard
-        // exists. It arrives with the argument it names.
+        // Written a step early once and caught by
+        // `the_session_lines_omh_prints_are_lines_omh_accepts`: `diff` did not
+        // take a number until the step after this one, and a hint is a promise
+        // that the line can be selected and pasted. It arrived with the
+        // argument it names.
         //
-        // Nor is `--keep` offered when omh already knows it would be refused. A
-        // hint is a promise that the line can be selected and pasted, and the
-        // states above are exactly the ones `harvest` stops on.
-        if self.pending() > 0 && !self.incomplete() {
-            let cmd = format!("omh {} commit --keep", self.id);
-            asides = asides.hint(format!(
-                "  {cmd}    bring the {} new one{} onto the branch",
-                self.pending(),
-                if self.pending() == 1 { "" } else { "s" }
+        // `--keep` is withheld for the same reason whenever omh already knows
+        // it would be refused — those states are exactly the ones `harvest`
+        // stops on.
+        let mut offered: Vec<(String, String)> = Vec::new();
+        if let Some(newest) = self.read.commits.last() {
+            offered.push((
+                format!("omh {} diff {}", self.id, newest.number),
+                "read that one".into(),
             ));
         }
-        asides
+        if self.pending() > 0 && !self.incomplete() {
+            offered.push((
+                format!("omh {} commit --keep", self.id),
+                format!(
+                    "bring the {} new one{} onto the branch",
+                    self.pending(),
+                    if self.pending() == 1 { "" } else { "s" }
+                ),
+            ));
+        }
+        // Padded to the widest command rather than by hand. Two hints written
+        // with counted spaces lined up until the session id changed width, and
+        // the promise a hint makes is easier to believe from a column that is
+        // actually a column.
+        let widest = offered
+            .iter()
+            .map(|(cmd, _)| out::display_width(cmd))
+            .max()
+            .unwrap_or(0);
+        offered.into_iter().fold(asides, |asides, (cmd, what)| {
+            let pad = " ".repeat(widest - out::display_width(&cmd) + 4);
+            asides.hint(format!("  {cmd}{pad}{what}"))
+        })
     }
 }
 
@@ -1689,6 +1710,19 @@ pub struct Diff {
 }
 
 impl Report for Diff {
+    /// Sanitised on the way out, because half of what is in here was written
+    /// inside the sandbox.
+    ///
+    /// A `--stat` carries paths, which git quotes by default, and — since
+    /// `diff <checkpoint>` — a **commit subject**, which git does not quote at
+    /// all. Measured: an ESC in a checkpoint's subject reached omh's own output
+    /// through this method. That is the same finding `log` acted on, arriving
+    /// by a second route.
+    ///
+    /// `json` stays raw for the reason it states there: a program is not a
+    /// terminal, and a replacement character is one it cannot match against
+    /// git's own output. So is the paged patch, which never reaches this — it
+    /// is git writing to the terminal, exactly as running git yourself would.
     fn human(&self, p: &out::Palette) -> String {
         if self.summary.trim().is_empty() {
             return format!(
@@ -1699,7 +1733,7 @@ impl Report for Diff {
                 )
             );
         }
-        self.summary.clone()
+        out::untrusted(&self.summary)
     }
 
     fn json(&self) -> serde_json::Value {
@@ -2154,11 +2188,12 @@ mod tests {
             hints.contains("omh s01 commit --keep"),
             "the harvest is offered: {hints}"
         );
-        // Not `omh s01 diff 4`: `diff` does not take a number yet, and a hint
-        // is a promise that the line can be pasted.
+        // …and the newest checkpoint, now that `diff` takes a number. Every
+        // line offered here is one `the_session_lines_omh_prints_are_lines_omh
+        // _accepts` reads out of the tree and parses.
         assert!(
-            !hints.contains("diff 4"),
-            "nothing is offered that omh would refuse: {hints}"
+            hints.contains("omh s01 diff 4"),
+            "the newest checkpoint is offered by number: {hints}"
         );
         assert!(
             !printed.contains("--keep"),
@@ -2241,9 +2276,11 @@ mod tests {
             !printed.contains("yours from here"),
             "and no line to draw, since everything is below it: {printed}"
         );
+        // The checkpoints are still readable — that is not what changed. What
+        // is gone is the offer to hand anything over.
         assert!(
-            log.asides().hints.is_empty(),
-            "nothing to offer: {:?}",
+            !log.asides().hints.join("\n").contains("--keep"),
+            "nothing left to bring onto the branch: {:?}",
             log.asides().hints
         );
         assert_eq!(log.json()["pending"], json!(0));
@@ -2364,8 +2401,8 @@ mod tests {
                 "{label} has to reach the reader: {warnings}"
             );
             assert!(
-                log.asides().hints.is_empty(),
-                "and --keep is not offered when omh knows it would be refused ({label}): {:?}",
+                !log.asides().hints.join("\n").contains("--keep"),
+                "--keep is not offered when omh knows it would be refused ({label}): {:?}",
                 log.asides().hints
             );
         }
