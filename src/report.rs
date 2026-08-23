@@ -313,7 +313,7 @@ impl Report for Sessions {
                 },
                 self.leftovers.join(", ")
             ))
-            .hint("  clear each with  omh s rm <id>")
+            .hint("  clear each with  omh <id> rm")
     }
 
     fn json(&self) -> serde_json::Value {
@@ -2159,12 +2159,12 @@ mod tests {
     #[test]
     fn a_suggested_command_survives_being_pasted() {
         let action = Action::new("x", "done")
-            .next("omh s rm s01")
+            .next("omh s01 rm")
             .note("teammates keep it until you commit the deletion");
 
         let hints = action.asides().hints;
         assert!(
-            hints.iter().any(|l| l.trim() == "omh s rm s01"),
+            hints.iter().any(|l| l.trim() == "omh s01 rm"),
             "the command is handed over verbatim — got {hints:?}"
         );
         let human = emit(&action, Format::Human, &Palette::plain());
@@ -2176,7 +2176,7 @@ mod tests {
         let machine = action.json();
         assert_eq!(
             machine["next"],
-            json!(["omh s rm s01"]),
+            json!(["omh s01 rm"]),
             "`next` is runnable commands and nothing else"
         );
         assert_eq!(

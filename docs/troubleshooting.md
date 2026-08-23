@@ -167,7 +167,7 @@ session after upgrading.
 ### `session s01 is running opencode and cannot be reused for this launch`
 
 The same mismatch, but something is live inside and restarting would kill it. Use
-`omh s down s01` if you want it gone, or `omh --new <harness>` to leave it alone
+`omh s01 down` if you want it gone, or `omh --new <harness>` to leave it alone
 and work somewhere else.
 
 If you believe nothing is running, look at the sockets: `docker exec
@@ -369,7 +369,7 @@ history with `omh s commit -m`. The branch is untouched either way.
 
 ```console
 $ omh s ls
-$ omh s down s01
+$ omh s01 down
 ```
 
 N sessions is N containers. `idle_timeout` stops unused ones; see

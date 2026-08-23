@@ -377,7 +377,7 @@ The review moment rides on something already happening rather than a ritual
 nobody performs:
 
 ```console
-$ omh s rm s03
+$ omh s03 rm
 removed s03 (2 commits, merged)
 3 notes recorded during this session — `omh memory` to review
 ```

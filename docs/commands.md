@@ -244,16 +244,39 @@ Everything omh knows about: harnesses, editors, sessions and their state.
 
 ```
 omh s ls              sessions, their branches and state
-omh s diff [id]       what the agent changed
+omh s diff            what the agent changed
 omh s commit [-m …]   commit that work onto the session branch
 omh s push [name]     push it to origin under a name a reviewer can read
-omh s down [id]       stop the container, keep the worktree and branch
-omh s rm <id>         remove the session — its container, its worktree, its staging,
+omh s down            stop the container, keep the worktree and branch
+omh s rm              remove the session — its container, its worktree, its staging,
                        and the repository the sandbox had
 ```
 
-`diff`, `commit` and `push` default to the most recent session; `-s` names
-another. `rm` takes an id, and `down` with none stops every session.
+**The session goes first, and everything after it is what you would have typed
+anyway.**
+
+```console
+$ omh s diff          # the session you were last in
+$ omh s01 diff        # that one
+$ omh s01 commit -m "Fix the tap guard"
+$ omh s01 rm
+$ omh s01 claude      # launch into it
+$ omh s01 attach zed
+```
+
+`s` is the sessions namespace scoped to the session you were last in; `sNN` is
+the same namespace scoped to that one, so `omh s01 diff` is exactly
+`omh sessions --session s01 diff`. When what follows is not a session verb the
+prefix still names the session and the command runs where it lives — which is
+what covers a launch, since `sessions` has no verb for starting a harness.
+
+`--session` still works, and is the only way to name a session whose id is not
+`sNN`. Naming it twice is refused rather than resolved.
+
+`ls` is the one verb the prefix cannot scope, because it is about the set rather
+than about one session — `omh s01 ls` says so instead of quietly listing them
+all. `down` with no session stops every sandbox, which is the one place acting
+on all of them is what you mean.
 
 `s ls` also names ids that have a container or a run directory but no worktree —
 sessions removed by a version of omh that only took half of one down. `omh s rm
@@ -388,7 +411,7 @@ unloseable, so the branch outlives the session that produced it, and `rm` tells
 you how to review or discard it:
 
 ```console
-$ omh s rm s01
+$ omh s01 rm
 removed session s01; branch omh/s01 kept (3 commits to review)
   git log main..omh/s01
   git branch -D omh/s01
@@ -410,7 +433,7 @@ irreversible and justified by one fact only, that it holds nothing, so anything
 short of that fact falls the other way:
 
 ```console
-$ omh s rm s01
+$ omh s01 rm
 removed session s01; branch omh/s01 kept — omh could not count it against main
   git log omh/s01
   git branch -D omh/s01

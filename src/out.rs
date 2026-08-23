@@ -391,7 +391,7 @@ pub trait Report {
     ///
     /// Defaulted, because most reports are all answer. The two that are not
     /// used to render these lines into [`human`](Self::human), which put them
-    /// on stdout: `omh s ls` wrote *clear each with omh s rm <id>* into any
+    /// on stdout: `omh s ls` wrote *clear each with omh <id> rm* into any
     /// file it was redirected into, and `omh s rm` wrote its two review
     /// commands into one.
     ///
