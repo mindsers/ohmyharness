@@ -418,9 +418,20 @@ enum SessionsCmd {
     Log,
     /// What a session changed, against its base branch.
     Diff {
+        /// One checkpoint, by its number in `omh sNN log`. Without one, the
+        /// whole session.
+        checkpoint: Option<usize>,
         /// Defaults to the repo's own default branch.
-        #[arg(long)]
+        ///
+        /// Refused alongside a checkpoint number, which is measured against its
+        /// own parent: accepting both would take the flag and silently diff
+        /// against something else, the same resolve-by-dropping-one this file
+        /// already refuses for `--new` and `--session`.
+        #[arg(long, conflicts_with = "checkpoint")]
         base: Option<String>,
+        /// The patch itself, through your pager, rather than a summary.
+        #[arg(long, short = 'p')]
+        patch: bool,
     },
     /// Commit a session's work onto its branch. Run on the host: the sandbox's
     /// git is its own repository and cannot reach yours, and the worktree omh
@@ -675,7 +686,18 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             }
             SessionsCmd::Down => down(&cwd, cli.session.as_deref(), ctx),
             SessionsCmd::Log => log_cmd(&cwd, cli.session.as_deref(), ctx),
-            SessionsCmd::Diff { base } => diff(&cwd, cli.session.as_deref(), base.as_deref(), ctx),
+            SessionsCmd::Diff {
+                checkpoint,
+                base,
+                patch,
+            } => diff(
+                &cwd,
+                cli.session.as_deref(),
+                *checkpoint,
+                base.as_deref(),
+                *patch,
+                ctx,
+            ),
             SessionsCmd::Commit {
                 message,
                 skip_carried,
@@ -5013,22 +5035,105 @@ fn log_report(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<report
     })
 }
 
-fn diff(cwd: &std::path::Path, id: Option<&str>, base: Option<&str>, ctx: &out::Ctx) -> Result<()> {
+fn diff(
+    cwd: &std::path::Path,
+    id: Option<&str>,
+    checkpoint: Option<usize>,
+    base: Option<&str>,
+    patch: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
-    let base = base
-        .map(str::to_string)
-        .unwrap_or_else(|| session::default_branch(&paths.repo));
-    let summary = session.diff(&base)?;
-    ctx.say(&report::Diff {
-        label: session.label().to_string(),
-        base,
-        summary,
-    });
-    Ok(())
+    let report = diff_report(&paths, &session, checkpoint, base, patch, ctx)?;
+
+    // Paging is for a person, and only when there is something to page. Under
+    // `--json` the patch is a field in the answer — a pager between a script
+    // and the object it asked for is a hang with no error — and an empty diff
+    // goes to `say` so the reader gets the sentence `Diff::human` exists to
+    // give them. Three states used to render as one blank screen: nothing
+    // changed, the worktree had left its branch, and the pager was broken.
+    let paged = patch && ctx.format == out::Format::Human && report.changed();
+    if !paged {
+        ctx.say(&report);
+        return Ok(());
+    }
+    // What the palette resolved, not what git guesses. `NO_COLOR=1` and
+    // `--color never` were both walked past by handing the terminal over —
+    // measured: git honours neither, and prints colour into a file under
+    // `--color always` because its own `auto` sees one.
+    let colour = match ctx.palette.is_plain() {
+        true => "never",
+        false => "always",
+    };
+    match checkpoint {
+        Some(number) => shadow::Shadow::new(&paths.shadows(), &session.id).stream_show(
+            &paths.repo,
+            &session.worktree,
+            number,
+            colour,
+        ),
+        None => session.stream_diff(&report.base, colour),
+    }
 }
 
-/// The session a command acts on when it acts on work already done.
+/// The answer, separated from the printing so it can be asserted.
+///
+/// The same split `log_report` makes, for the reason it records: with the
+/// wiring inline, hardcoding `What::Summary` at the call site left the whole
+/// suite green while `omh sNN diff` dumped a full patch to stdout.
+fn diff_report(
+    paths: &Paths,
+    session: &Session,
+    checkpoint: Option<usize>,
+    base: Option<&str>,
+    patch: bool,
+    ctx: &out::Ctx,
+) -> Result<report::Diff> {
+    let what = match patch {
+        true => session::What::Patch,
+        false => session::What::Summary,
+    };
+    let Some(number) = checkpoint else {
+        let base = base
+            .map(str::to_string)
+            .unwrap_or_else(|| session::default_branch(&paths.repo));
+        let body = session.diff(&base, what)?;
+        return Ok(report::Diff {
+            label: session.label().to_string(),
+            session: session.id.clone(),
+            checkpoint: None,
+            base,
+            what,
+            body,
+        });
+    };
+
+    let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
+    // The same triage `log_report` does, so two commands one word apart answer
+    // a never-launched session the same way. Without it, `omh sNN log` said
+    // *no checkpoints* and exited 0 while `omh sNN diff 1` quoted the path of
+    // a seed record at a user who has never heard of one.
+    anyhow::ensure!(
+        shadow.seed_record.exists() || shadow.gitdir.exists(),
+        "there is no checkpoint {number} in this session. The agent has not committed \
+         anything here yet — its sandbox has never run"
+    );
+    let _ = ctx;
+    Ok(report::Diff {
+        label: format!("{} checkpoint {number}", session.id),
+        session: session.id.clone(),
+        checkpoint: Some(number),
+        // A checkpoint is measured against its own parent, not against a
+        // branch — naming the base branch here would be naming something this
+        // diff was never taken against.
+        base: "its parent".to_string(),
+        what,
+        body: shadow.show(&session.worktree, number, what)?,
+    })
+}
+
+/// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done.
 ///
 /// Deliberately not `session::pick`: that invents the *next* id when none
 /// exists, which is right for a launch — it is about to create that worktree —
@@ -5621,10 +5726,19 @@ mod tests {
         );
     }
 
-    /// `{id}`, `{}`, `<id>`: whichever a message uses, a session id fills it.
+    /// `{id}`, `{}`, `<id>`: whichever a message uses, fill it.
+    ///
+    /// The first placeholder is the session — that is the shape of every line
+    /// this scan reads, since the session goes first. A later one is a value
+    /// the verb takes, and `1` is the fill because it is valid where a number
+    /// is required and harmless where a word is. Filling every slot with a
+    /// session id was the first version, and it turned the real hint
+    /// `omh {} diff {}` into `omh s01 diff s01` — refused for a reason that was
+    /// the test's own doing rather than the line's.
     fn regex_lite_fill(line: &str) -> String {
         let mut out = String::new();
         let mut rest = line;
+        let mut first = true;
         while let Some(open) = rest.find(['{', '<']) {
             let close = if rest.as_bytes()[open] == b'{' {
                 '}'
@@ -5635,7 +5749,8 @@ mod tests {
                 break;
             };
             out.push_str(&rest[..open]);
-            out.push_str("s01");
+            out.push_str(if first { "s01" } else { "1" });
+            first = false;
             rest = &rest[open + shut + 1..];
         }
         out.push_str(rest);

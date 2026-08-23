@@ -658,6 +658,95 @@ impl Shadow {
         Ok(out)
     }
 
+    /// One checkpoint, as a summary or as the patch.
+    ///
+    /// Takes the number the log printed rather than an object id, and resolves
+    /// it here — so a caller cannot reach a commit this session never showed.
+    /// Not for safety: the store is the agent's own and holds nothing the user
+    /// may not see. It is that a command which prints any object you name is a
+    /// different command from one that shows you a checkpoint, and the numbers
+    /// are the only handle the log ever offered.
+    pub fn show(
+        &self,
+        worktree: &Path,
+        number: usize,
+        what: crate::session::What,
+    ) -> Result<String> {
+        let id = self.checkpoint_id(worktree, number)?;
+        let args = show_args(what, &id, "auto");
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        git(&self.gitdir, worktree, &args)
+    }
+
+    /// One checkpoint's patch, on the terminal, through the user's pager.
+    ///
+    /// The pager is the one place this cannot simply hand the terminal to git,
+    /// and the reason is omh's own hardening rather than a live threat.
+    ///
+    /// What git does with a repository's `core.pager` is worth knowing:
+    /// measured 2026-08-23 on a pty, a value of `sh -c "echo …; cat"` executes
+    /// on a plain `git show`, and only on a tty. That is why `NEUTRALISED`
+    /// pins the key to `cat`. It is **not** why the sandbox's config is safe —
+    /// `write_config` rewrites that file to a ten-key allowlist on every
+    /// launch and `container::plan` mounts it read-only (#52), so a pager key
+    /// cannot survive there to begin with. Three layers, and this comment
+    /// claimed the outermost was the only one.
+    ///
+    /// The pin is what would leave `-p` unable to page at all, so the user's
+    /// own pager is appended after it and the last `-c` wins (measured).
+    ///
+    /// One thing this does *not* close: `pager.show` precedes `core.pager` in
+    /// git's own order, and it is not in `NEUTRALISED`. The allowlist and the
+    /// read-only mount are what make that unreachable, not this line.
+    pub fn stream_show(
+        &self,
+        repo: &Path,
+        worktree: &Path,
+        number: usize,
+        colour: &str,
+    ) -> Result<()> {
+        let id = self.checkpoint_id(worktree, number)?;
+        let args = show_args(crate::session::What::Patch, &id, colour);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let status = Command::new("git")
+            .envs(GUEST_ENV)
+            .current_dir(worktree)
+            .args(NEUTRALISED.iter().flat_map(|kv| ["-c", kv]))
+            .arg("-c")
+            .arg(format!("core.pager={}", user_pager(repo)))
+            .arg("--git-dir")
+            .arg(&self.gitdir)
+            .arg("--work-tree")
+            .arg(worktree)
+            .args(guarded(&args))
+            .status()
+            .context("running git show")?;
+        // Measured on a pty: a pager that quits early leaves git at 0, and a
+        // pager git could not execute leaves it at 128 — so this reports the
+        // second without misfiring on the first. What it cannot see is a pager
+        // whose *shell* started and then failed, which git reports as 0 with no
+        // patch; that is git's own behaviour and identical to running `git
+        // show` yourself.
+        anyhow::ensure!(status.success(), "git show exited {status}");
+        Ok(())
+    }
+
+    /// The commit a number names, or a refusal that says what the numbers are.
+    fn checkpoint_id(&self, worktree: &Path, number: usize) -> Result<String> {
+        let read = self.checkpoints(worktree)?;
+        if let Some(found) = read.commits.iter().find(|c| c.number == number) {
+            return Ok(found.id.clone());
+        }
+        anyhow::bail!(
+            "there is no checkpoint {number} in this session. {}",
+            match read.commits.len() {
+                0 => "The agent has not committed anything here yet".to_string(),
+                1 => "There is one, numbered 1".to_string(),
+                n => format!("They are numbered 1 to {n}"),
+            }
+        )
+    }
+
     /// Whether `commit` is still in the history `HEAD` reaches.
     ///
     /// Its own helper because the answer *no* is not a failure and `git` here
@@ -1488,10 +1577,72 @@ const NO_PUSH: &str =
      your work reaches the outside through the host, where `omh s commit` puts it on the branch \
      and `omh s push` sends it. Say that rather than trying to push yourself.";
 
+/// The pager the *user* chose, resolved by git in the user's own checkout.
+///
+/// git's own resolution order is `GIT_PAGER`, then `core.pager`, then `PAGER`,
+/// then a built-in default — and the middle one is a file the agent owns. This
+/// skips it: whatever comes back is passed as a later `-c core.pager`, which
+/// beats the `cat` in `NEUTRALISED` and is in turn beaten by a `GIT_PAGER` the
+/// user exported, exactly as it would be anywhere else.
+fn user_pager(repo: &Path) -> String {
+    // `git var` resolves the pager the way git resolves it — `GIT_PAGER`, then
+    // `core.pager`, then `PAGER`, then the pager git was built with — and run
+    // in the *user's own checkout* it reads the user's config and never the
+    // sandbox's. Hand-rolling that order skipped `core.pager` altogether, so a
+    // user whose pager is `delta` in `~/.gitconfig` got `delta` from
+    // `omh sNN diff -p` and bare `less` from `omh sNN diff <n> -p`: the same
+    // flag, two renderers, for no reason they could see.
+    Command::new("git")
+        .current_dir(repo)
+        .args(["var", "GIT_PAGER"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
+        .filter(|pager| !pager.is_empty())
+        .unwrap_or_else(|| "less".to_string())
+}
+
+/// What to ask git for, for one checkpoint.
+///
+/// `--first-parent` is what makes the two answers agree. Measured 2026-08-23
+/// against git 2.55.0: `show --stat` on a merge reports the files it brought
+/// in, and `show -p` on the same merge prints **nothing at all** — git's
+/// default `--cc` collapses a clean merge to an empty diff. So the summary
+/// promised a change and the patch showed none, one flag apart, for a commit
+/// shape `checkpoints` already models because the agent produces it. On an
+/// ordinary commit the flag changes neither answer (measured, both forms
+/// byte-identical), which is why it can be unconditional.
+///
+/// Built as a list rather than passed inline so the pager ordering below is
+/// something a test can read: the user's `-c core.pager` has to come *after*
+/// the one in `NEUTRALISED` or the sandbox's `cat` wins and nothing pages.
+fn show_args(what: crate::session::What, id: &str, colour: &str) -> Vec<String> {
+    [
+        "show",
+        what.flag(),
+        "--first-parent",
+        &format!("--color={colour}"),
+        id,
+    ]
+    .iter()
+    .map(|a| a.to_string())
+    .collect()
+}
+
 /// Config keys that turn `git` into "run whatever this repository says".
 ///
-/// Every one of these is agent-writable — they live in `/omh/shadow/config`,
-/// which is a read-write mount because the agent commits through it.
+/// The gitdir is a read-write mount because the agent commits through it, and
+/// the `config` inside it is **not**: `write_config` rewrites that file to a
+/// ten-key allowlist on every launch and `container::plan` mounts it read-only
+/// (#52). So these keys are omh's second line, not its first — an earlier
+/// version of this comment called them all agent-writable, which stopped being
+/// true when the mount landed and was still being quoted as a premise
+/// afterwards.
+///
+/// What the agent *can* still write is everything else in the gitdir:
+/// `refs/replace/`, `info/grafts`, `info/attributes`. Those are the ones with
+/// no config key at all, and they are handled beside this list.
 ///
 /// **These fire.** An earlier version of this comment said nothing host-side
 /// read an existing shadow, and that stopped being true twice: `harvest`
@@ -2207,6 +2358,236 @@ mod tests {
             Some(true),
             "and one written years ago but committed now is dated by the commit: {:?}",
             commits[2]
+        );
+    }
+
+    /// A number names one checkpoint, and the patch is that commit's.
+    #[test]
+    fn a_checkpoint_number_shows_that_checkpoints_own_patch() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        let second = checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+
+        let patch = s.show(&wt, 2, crate::session::What::Patch).unwrap();
+        assert!(
+            patch.contains("+fn two() {}") && !patch.contains("+fn one() {}"),
+            "checkpoint 2 is the second commit and nothing else: {patch}"
+        );
+
+        // Against git's own answer for that object, so the numbering and the
+        // patch cannot drift apart while both look plausible.
+        let theirs = Command::new("git")
+            .arg("--git-dir")
+            .arg(&s.gitdir)
+            .args(["show", "-p", &second])
+            .output()
+            .unwrap();
+        assert_eq!(
+            patch,
+            String::from_utf8_lossy(&theirs.stdout),
+            "the same commit git would show for that id"
+        );
+    }
+
+    /// A subject the agent chose cannot repaint a checkpoint review.
+    ///
+    /// `git show` prints the subject, and git quotes paths but not subjects —
+    /// measured during the log work and reaching omh by a second route here.
+    /// Asserted through the report, because that is where the rule lives:
+    /// sanitised for a person, raw for a program.
+    #[test]
+    fn a_subject_the_agent_wrote_cannot_repaint_a_checkpoint_review() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        checkpoint(
+            &s,
+            &wt,
+            "one.rs",
+            "fn one() {}\n",
+            "Fix \u{1b}[2K\rnothing at all",
+        );
+
+        let body = s.show(&wt, 1, crate::session::What::Summary).unwrap();
+        let report = crate::report::Diff {
+            label: "s01 checkpoint 1".into(),
+            session: "s01".into(),
+            checkpoint: Some(1),
+            base: "its parent".into(),
+            what: crate::session::What::Summary,
+            body,
+        };
+        use crate::out::Report;
+        let printed = report.human(&crate::out::Palette::plain());
+
+        assert!(
+            !printed.chars().any(|c| c.is_control() && c != '\n'),
+            "no control character survives into omh's own output: {printed:?}"
+        );
+        assert!(
+            printed.contains("nothing at all"),
+            "the words still arrive: {printed}"
+        );
+        assert!(
+            report.json()["summary"]
+                .as_str()
+                .is_some_and(|s| s.contains('\u{1b}')),
+            "and a program still gets what git said: {}",
+            report.json()
+        );
+    }
+
+    /// A merge's summary and its patch describe the same change.
+    ///
+    /// Measured 2026-08-23 against git 2.55.0: `show --stat` on a merge reports
+    /// the files it brought in, and `show -p` on the same merge prints
+    /// **nothing** — git's default `--cc` collapses a clean merge to an empty
+    /// diff. So `omh sNN diff 3` promised a change and `omh sNN diff 3 -p`, the
+    /// very next command, showed none. `--first-parent` makes them agree, and
+    /// changes neither answer on an ordinary commit.
+    #[test]
+    fn a_merges_summary_and_its_patch_do_not_contradict_each_other() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        let seed = s.seed().unwrap();
+        checkpoint(&s, &wt, "main.rs", "fn main() {}\n", "On the branch");
+        git(&s.gitdir, &wt, &["checkout", "-q", "-b", "side", &seed]).unwrap();
+        checkpoint(&s, &wt, "side.rs", "fn side() {}\n", "On the side");
+        git(&s.gitdir, &wt, &["checkout", "-q", "-"]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["merge", "-q", "--no-ff", "side", "-m", "Merge the side"],
+        )
+        .unwrap();
+        let merge = s
+            .checkpoints(&wt)
+            .unwrap()
+            .commits
+            .iter()
+            .find(|c| c.subject == "Merge the side")
+            .map(|c| c.number)
+            .expect("the merge is a checkpoint");
+
+        let summary = s.show(&wt, merge, crate::session::What::Summary).unwrap();
+        let patch = s.show(&wt, merge, crate::session::What::Patch).unwrap();
+
+        assert!(
+            summary.contains("side.rs"),
+            "the summary names what the merge brought in: {summary}"
+        );
+        assert!(
+            patch.contains("side.rs") && patch.contains("+fn side() {}"),
+            "and the patch shows it, rather than being empty: {patch}"
+        );
+    }
+
+    /// The user's pager is the last one named, so it is the one that runs.
+    ///
+    /// `NEUTRALISED` pins `core.pager` to `cat` so a host-side read never runs
+    /// what the sandbox's config says — measured on a pty, a `core.pager` of
+    /// `sh -c "echo …; cat"` executes on a plain `git show`. Appending the
+    /// user's after it is what leaves paging working, and the *order* is the
+    /// whole mechanism: put it first and `cat` wins and nothing ever pages.
+    ///
+    /// Asserted on the argument list rather than through a terminal, because
+    /// the invariant is an ordering and a captured-output test cannot see a
+    /// pager at all — git consults one only when stdout is a tty.
+    #[test]
+    fn the_pager_omh_names_last_is_the_users_own() {
+        let ours = NEUTRALISED
+            .iter()
+            .position(|kv| kv.starts_with("core.pager="))
+            .expect("the sandbox's pager is pinned");
+        assert_eq!(
+            NEUTRALISED[ours], "core.pager=cat",
+            "pinned to something that cannot run anything"
+        );
+
+        // The command is built the same way `stream_show` builds it.
+        let pinned: Vec<String> = NEUTRALISED
+            .iter()
+            .flat_map(|kv| ["-c".to_string(), kv.to_string()])
+            .collect();
+        let mine = format!("core.pager={}", user_pager(std::path::Path::new(".")));
+        let full: Vec<String> = pinned
+            .iter()
+            .cloned()
+            .chain(["-c".to_string(), mine.clone()])
+            .collect();
+
+        let at = |needle: &str| full.iter().position(|a| a == needle);
+        assert!(
+            at(&mine) > at("core.pager=cat"),
+            "the user's pager comes after the sandbox's, or the sandbox's wins: {full:?}"
+        );
+        assert!(!mine.ends_with('='), "and it names something: {mine}");
+    }
+
+    /// A checkpoint read carries every guard an ordinary read carries.
+    ///
+    /// `stream_show` builds its own invocation rather than going through
+    /// `git`, which is how a read ends up outside the list that makes reads
+    /// safe. Asserted on the arguments so the two cannot drift apart quietly.
+    #[test]
+    fn a_checkpoint_read_is_guarded_like_every_other_read() {
+        let args = show_args(crate::session::What::Patch, "abc123", "never");
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let guarded = guarded(&args);
+
+        assert_eq!(guarded.first().map(String::as_str), Some("show"));
+        assert!(
+            guarded.contains(&"--no-textconv".to_string())
+                && guarded.contains(&"--no-ext-diff".to_string()),
+            "the flags a read has to carry, after the verb: {guarded:?}"
+        );
+        assert!(
+            guarded.contains(&"--first-parent".to_string()),
+            "so a merge's patch is not empty: {guarded:?}"
+        );
+        assert!(
+            guarded.contains(&"--color=never".to_string()),
+            "and colour is omh's decision, not git's guess: {guarded:?}"
+        );
+    }
+
+    /// A number outside the range is refused, and the refusal says what the
+    /// numbers are.
+    ///
+    /// The list is the only place these numbers come from, so being told *no
+    /// checkpoint 9* without being told there are three is being told to go
+    /// and run the other command.
+    #[test]
+    fn a_checkpoint_number_the_session_does_not_have_is_refused() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        let empty = s
+            .show(&wt, 1, crate::session::What::Summary)
+            .expect_err("nothing has been committed here");
+        assert!(
+            empty.to_string().contains("not committed anything"),
+            "an empty sandbox says so rather than naming a range it does not have: {empty}"
+        );
+
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+        checkpoint(&s, &wt, "two.rs", "fn two() {}\n", "Add two");
+        let err = s
+            .show(&wt, 9, crate::session::What::Summary)
+            .expect_err("there is no checkpoint 9");
+        assert!(
+            err.to_string().contains('9') && err.to_string().contains("1 to 2"),
+            "the refusal names both the number and the range: {err}"
+        );
+        // Zero is outside it too, and is what a reader who assumed the list was
+        // zero-based would type first.
+        assert!(
+            s.show(&wt, 0, crate::session::What::Summary).is_err(),
+            "the numbers start at 1"
         );
     }
 

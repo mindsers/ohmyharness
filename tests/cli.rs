@@ -118,6 +118,14 @@ impl Sandbox {
                  \"image inspect\") exit 1 ;;\n\
                  \"image rm\") echo \"Untagged: $3\"; echo 'Deleted: sha256:00'; exit 0 ;;\n\
                  esac\n\
+                 # omh sends the Dockerfile on stdin (`-f -`) so nothing is\n\
+                 # written to disk. A shim that exits without reading it leaves\n\
+                 # omh writing into a pipe with no reader, and omh sets SIGPIPE\n\
+                 # to SIG_DFL on purpose — so it dies of signal 13, silently,\n\
+                 # whenever the Dockerfile loses the race with this exit. That\n\
+                 # is what failed this test on the linux runner three times\n\
+                 # across three branches, each time saying only `init failed`.\n\
+                 if [ \"$1\" = build ]; then cat > /dev/null; fi\n\
                  if [ \"$1\" = images ]; then cat {images}; fi\n\
                  if [ \"$1\" = ps ]; then cat {containers}; fi\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\nexit 0\n",
@@ -602,6 +610,219 @@ fn a_log_for_a_sandbox_that_never_ran_says_nothing_yet() {
     );
 }
 
+/// `--json` never hands the terminal to a pager, and says which of the two it
+/// gave you.
+///
+/// A script asking for a patch gets the patch as a field. Paging is for a
+/// person, and `less` between a program and the object it asked for is a hang
+/// with no error — the failure mode that has no output to diagnose it by.
+///
+/// The **key** is the other half. `Diff`'s own doc comment argued the field
+/// should be named for what it holds, because `jq -r .patch | git apply` on a
+/// `--stat` fails on every session that changed anything; `-p` then put a real
+/// patch under `summary`, which is that footgun with the labels swapped. One
+/// key or the other, never both, so a script can tell without sniffing for
+/// `@@`.
+///
+/// Asserted through the binary rather than on the branch inside `diff`,
+/// because the branch is the thing that could be wrong: a unit test of the two
+/// arms would agree with whichever one was written.
+#[test]
+fn a_patch_asked_for_by_a_program_is_a_field_named_for_what_it_holds() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("feature.rs"), "fn added() {}\n").unwrap();
+
+    let read = |args: &[&str]| -> serde_json::Value {
+        let out = sb.omh(args);
+        let printed = String::from_utf8_lossy(&out.stdout).to_string();
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        serde_json::from_str(&printed).unwrap_or_else(|e| panic!("not JSON: {e}: {printed}"))
+    };
+
+    let patch = read(&["s01", "diff", "-p", "--json"]);
+    assert_eq!(patch["changed"], serde_json::json!(true));
+    assert!(
+        patch["patch"]
+            .as_str()
+            .is_some_and(|s| s.contains("+fn added() {}")),
+        "the patch itself, under `patch`: {patch}"
+    );
+    assert!(
+        patch["summary"].is_null(),
+        "and not also under `summary`: {patch}"
+    );
+
+    let summary = read(&["s01", "diff", "--json"]);
+    assert!(
+        summary["summary"]
+            .as_str()
+            .is_some_and(|s| s.contains("feature.rs") && !s.contains("+fn added() {}")),
+        "a --stat, under `summary`: {summary}"
+    );
+    assert!(
+        summary["patch"].is_null(),
+        "nothing a script could hand to `git apply`: {summary}"
+    );
+    assert_eq!(
+        summary["session"],
+        serde_json::json!("s01"),
+        "the id, not a phrase: {summary}"
+    );
+}
+
+/// The flag is the only thing that decides which of the two you get.
+///
+/// End to end, because the wiring is what could be wrong: hardcoding
+/// `What::Patch` in `diff_report`'s `false` arm left the whole suite green
+/// while `omh sNN diff` dumped a full patch to stdout unbidden. Every existing
+/// test asserted the file was *named*, which a patch also does.
+///
+/// No pty is needed: git suppresses its pager when stdout is not a terminal,
+/// so the patch arrives captured.
+#[test]
+fn the_flag_is_what_decides_whether_a_diff_is_a_summary_or_a_patch() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("feature.rs"), "fn added() {}\n").unwrap();
+
+    let summary = String::from_utf8_lossy(&sb.omh(&["s01", "diff"]).stdout).to_string();
+    let patch = String::from_utf8_lossy(&sb.omh(&["s01", "diff", "-p"]).stdout).to_string();
+
+    assert!(
+        summary.contains("feature.rs") && !summary.contains("+fn added() {}"),
+        "without the flag, the shape of the change: {summary}"
+    );
+    assert!(
+        patch.contains("+fn added() {}"),
+        "with it, the change: {patch}"
+    );
+}
+
+/// An empty patch is a sentence, not a blank screen.
+///
+/// `Diff::human` exists partly to say *no changes on … (against …)*, because
+/// silence reads as breakage. Handing the terminal straight to git skipped it,
+/// and three quite different states then rendered identically: nothing
+/// changed, the worktree had left its branch, and the pager was broken. The
+/// first is the common one, so it is the one that made the other two look
+/// survivable.
+#[test]
+fn a_patch_with_nothing_in_it_says_so_rather_than_showing_a_blank_screen() {
+    let sb = sandbox();
+    sb.session("s01");
+
+    let out = sb.omh(&["s01", "diff", "-p"]);
+    let printed = String::from_utf8_lossy(&out.stdout);
+
+    assert!(out.status.success(), "an unchanged session is not an error");
+    assert!(
+        printed.contains("no changes"),
+        "the reader is told which comparison came up empty: {printed:?}"
+    );
+}
+
+/// Both routes to a patch refuse the same worktrees.
+///
+/// The paged path was written as a second copy of the unpaged one and dropped
+/// the guard against a worktree that left its branch — so `omh sNN diff`
+/// refused, naming the branch, and `omh sNN diff -p` printed an empty patch
+/// and exited 0, one flag apart. Four reviewers found it independently.
+///
+/// Asserted as an agreement rather than as a second copy of the guard's
+/// wording: what matters is that the two routes answer the same question about
+/// whether there is an answer at all, which survives a third route being added.
+#[test]
+fn a_worktree_that_left_its_branch_is_refused_whichever_way_you_ask() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("feature.rs"), "fn added() {}\n").unwrap();
+
+    let healthy: Vec<bool> = [vec!["s01", "diff"], vec!["s01", "diff", "-p"]]
+        .iter()
+        .map(|args| sb.omh(args).status.success())
+        .collect();
+    assert_eq!(healthy, vec![true, true], "both work on a healthy session");
+
+    // Look at something else for a moment, the way a person does.
+    let head = Command::new("git")
+        .arg("-C")
+        .arg(&worktree)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .unwrap();
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(&worktree)
+        .args(["checkout", "-q", "--detach", &head])
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "detaching the worktree: {out:?}");
+
+    for args in [vec!["s01", "diff"], vec!["s01", "diff", "-p"]] {
+        let out = sb.omh(&args);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "`omh {}` handed over a review from a worktree that left its branch",
+            args.join(" ")
+        );
+        assert!(
+            said.contains("omh/s01"),
+            "and the refusal names the branch: {said}"
+        );
+    }
+}
+
+/// `--base` alongside a checkpoint is refused rather than dropped.
+///
+/// A checkpoint is measured against its own parent, so a `--base` given with
+/// one can only be ignored — and `omh s01 diff 4 --base v1.2` silently
+/// answering about the parent is the resolve-by-quietly-dropping-one this
+/// codebase refuses for `--new` and `--session`.
+#[test]
+fn a_base_given_with_a_checkpoint_is_refused() {
+    let sb = sandbox();
+    sb.session("s01");
+
+    let out = sb.omh(&["s01", "diff", "4", "--base", "main"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && said.contains("--base"),
+        "the flag cannot be honoured here and is not silently dropped: {said}"
+    );
+}
+
+/// A never-launched sandbox answers `diff <n>` the way `log` answers.
+///
+/// `log` goes to some trouble to say *no checkpoints* and exit 0 for a session
+/// whose sandbox has never run. `diff 1` on the same session used to reach
+/// `seed()` and quote the path of a record the user has never heard of — two
+/// commands one word apart, one of them speaking about omh's internals.
+#[test]
+fn a_checkpoint_asked_for_before_the_sandbox_ran_says_so_plainly() {
+    let sb = sandbox();
+    sb.session("s01");
+
+    let out = sb.omh(&["s01", "diff", "1"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+
+    assert!(!out.status.success(), "there is no checkpoint 1: {said}");
+    assert!(
+        said.contains("has not committed anything"),
+        "and it says so in the words `log` uses: {said}"
+    );
+    assert!(
+        !said.contains("seed"),
+        "rather than naming a record the user has never heard of: {said}"
+    );
+}
+
 /// The session named first is the session acted on — not the one omh would
 /// have picked.
 ///
@@ -650,9 +871,14 @@ fn the_spellings_the_prefix_replaced_are_refused() {
         let said = String::from_utf8_lossy(&out.stderr);
         // Refused *for naming it there*, not for some unrelated reason further
         // down — a test that only asks for a non-zero exit passes on the day
-        // the command breaks for a different cause entirely.
+        // the command breaks for a different cause entirely. The refusal has
+        // to quote the token, which is what makes it about that token; the
+        // wording differs by slot and is not the invariant. `diff` says
+        // *invalid value 's01' for '[CHECKPOINT]'* now that the slot takes a
+        // checkpoint number, which is a better answer than the one this used
+        // to pin.
         assert!(
-            !out.status.success() && said.contains("unexpected argument"),
+            !out.status.success() && said.contains("'s01'"),
             "`omh {}` names the session where it no longer goes: {said}",
             line.join(" ")
         );
@@ -2303,15 +2529,26 @@ fn a_build_asks_docker_to_remove_the_tags_it_replaced() {
         &["omh/base:held"],
     );
 
-    // Asked, not assumed. This has failed twice on CI with an empty removal
-    // list, which is what a build that never ran looks like from here — and the
+    // Asked, not assumed. This has failed on CI with an empty removal list,
+    // which is what a build that never ran looks like from here — and the
     // discarded status meant the message said nothing about why. Every
     // neighbouring test in this file already checks it.
+    //
+    // Both streams and the code, because the first version of this printed
+    // stderr alone and the next failure put nothing there but progress lines:
+    // a refusal with no reason, which is the state this whole file exists to
+    // stop omh from producing. It has since failed on the linux runner three
+    // times across three branches — including before any of the work that was
+    // in flight when it first appeared — and no run has yet said why.
     let init = sb.omh(&["init"]);
     assert!(
         init.status.success(),
-        "init failed, so no build ran and no reap followed it:\n{}",
-        String::from_utf8_lossy(&init.stderr)
+        "init failed ({}), so no build ran and no reap followed it\n\
+         --- stderr ---\n{}\n--- stdout ---\n{}\n--- docker was asked ---\n{}",
+        init.status,
+        String::from_utf8_lossy(&init.stderr),
+        String::from_utf8_lossy(&init.stdout),
+        sb.docker_calls(&log).join("\n")
     );
 
     let removals: Vec<String> = sb
