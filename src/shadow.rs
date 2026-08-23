@@ -133,7 +133,7 @@ pub struct Shadow {
 }
 
 /// What a checkpoint touched, when git was willing to count it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Touched {
     pub files: usize,
     pub added: usize,
@@ -179,31 +179,6 @@ pub struct Checkpoint {
     pub touched: Option<Touched>,
     /// Already handed to the branch by a previous `--keep`.
     pub landed: bool,
-}
-
-impl Checkpoint {
-    /// The fields the parser fills in one place, so `..` can carry the rest.
-    fn blank() -> Self {
-        Self {
-            number: 0,
-            id: String::new(),
-            subject: String::new(),
-            age: None,
-            touched: None,
-            landed: false,
-        }
-    }
-}
-
-impl Default for Touched {
-    fn default() -> Self {
-        Self {
-            files: 0,
-            added: 0,
-            removed: 0,
-            uncounted: 0,
-        }
-    }
 }
 
 /// Everything one read of the sandbox's repository answers.
@@ -635,7 +610,6 @@ impl Shadow {
                         _ => None,
                     },
                     touched: (!merge).then(Touched::default),
-                    ..Checkpoint::blank()
                 });
                 continue;
             }
