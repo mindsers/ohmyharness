@@ -253,9 +253,14 @@ impl Session {
     /// The question `remove` needs answered: whether keeping the branch would
     /// preserve anything.
     ///
-    /// **An error is never zero** — the rule `uncommitted` states elsewhere in
-    /// this file, which this used to break with more at stake, because the
-    /// caller acts on the answer by deleting a branch.
+    /// **An error is never zero.** A git that would not answer is not a git
+    /// that answered *none*, and this used to break that with more at stake
+    /// than most, because the caller acts on the answer by deleting a branch.
+    ///
+    /// The rule was stated on `uncommitted` until #59 removed that method, at
+    /// which point this citation pointed at nothing — so it is stated here,
+    /// where it is relied on. `changed` carries it too: it returns the paths
+    /// or the failure, never an empty list standing in for both.
     ///
     /// `rev-list <base>..<branch>` fails whenever either end does not resolve.
     /// The base end is the reachable one for a live session: a repo that
@@ -603,22 +608,51 @@ impl Session {
         Ok(())
     }
 
-    /// Entries in the worktree's `git status`, committed to nothing.
+    /// The paths behind that count.
     ///
-    /// `-uall` because git collapses an untracked directory into one line, and
-    /// a session where the agent wrote a whole new module would otherwise read
-    /// as a single stray file — this is the number `s ls` is glanced at for.
+    /// The same `status` the count runs, kept rather than discarded: `s ls`
+    /// asks this question once per session already, and two sessions changing
+    /// one file is the collision git will not mention until a merge.
     ///
-    /// An error is never zero. The pointer these commands run through is the one
-    /// this module documents as leading nowhere inside the sandbox, and a stale
-    /// one on the host is what `remove` already handles; reporting
-    /// that as a clean session is how work gets discarded.
-    pub fn uncommitted(&self) -> Result<usize> {
+    /// **`-z`, so nothing has to be un-quoted.** The first version parsed the
+    /// human format and got three things wrong, all measured against git
+    /// 2.55.0: git C-quotes any path needing it, so `café.rs` arrived as
+    /// `caf\303\251.rs` and was printed at a user that way; `trim_matches('"')`
+    /// strips *every* leading and trailing quote, so a file named `lead"` came
+    /// back as `lead\`; and the ` -> ` split ran on every line rather than only
+    /// on renames, so an ordinary file named `a -> b.rs` was reported as
+    /// `b.rs` — a path that does not exist, and a collision with any session
+    /// genuinely touching `b.rs`.
+    ///
+    /// `-z` emits NUL-separated records and never quotes. A rename is two
+    /// records — the new name, then the old — so the old one is skipped by
+    /// looking at the status rather than at the path.
+    ///
+    /// **An error is never an empty list**, the rule `commits` relies on a few
+    /// hundred lines up: a git that would not answer is not a session that
+    /// changed nothing, and every caller here renders those differently.
+    pub fn changed(&self) -> Result<Vec<String>> {
         let out = git_owned(&self.worktree, &status_args())?;
-        Ok(out.lines().filter(|l| !l.trim().is_empty()).count())
+        let mut records = out.split('\0').filter(|r| !r.is_empty());
+        let mut changed = Vec::new();
+        while let Some(record) = records.next() {
+            // `XY ` then the path. Two ASCII status characters and a space, so
+            // byte 3 is always a character boundary.
+            let Some((status, path)) = record.split_at_checked(3) else {
+                continue;
+            };
+            // A rename or a copy carries the name it came from as the next
+            // record. That name is not on disk, so it is not something another
+            // session can be changing.
+            if status.contains('R') || status.contains('C') {
+                records.next();
+            }
+            changed.push(path.to_string());
+        }
+        Ok(changed)
     }
 
-    /// The branch on origin this session has already been pushed to.
+    /// The branch on origin this session has already been pushed to.    /// The branch on origin this session has already been pushed to.
     ///
     /// Read from `branch.<b>.remote`/`.merge` rather than `@{u}`, which resolves
     /// against **HEAD**: a detached worktree would report no upstream for a
@@ -768,7 +802,7 @@ fn unstage_rules_args() -> Vec<String> {
 }
 
 fn status_args() -> Vec<String> {
-    ["status", "--porcelain", "-uall", "--"]
+    ["status", "--porcelain", "-z", "-uall", "--"]
         .iter()
         .map(|s| s.to_string())
         .chain(rules_pathspec())
@@ -1566,6 +1600,60 @@ mod tests {
         );
     }
 
+    /// Every path `changed` reports is a name the worktree actually has.
+    ///
+    /// The contract, not the parser: a name omh cannot open is a name it must
+    /// not print, and `s ls` prints these at a user as the files two sessions
+    /// are both changing.
+    ///
+    /// The first version of this test used `a space.rs` — which git quotes,
+    /// but whose quoting is pure delimiter, so it passed while every escape
+    /// git actually writes went untested. These four names are the ones that
+    /// were wrong: an accent (octal-escaped), a literal ` -> ` (split as if it
+    /// were a rename), an embedded quote (over-trimmed), and a plain name to
+    /// prove the ordinary case still works.
+    #[test]
+    #[cfg(unix)]
+    fn changed_reports_the_names_the_worktree_actually_has() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let names = ["plain.rs", "été.rs", "a -> b.rs", "say\"hi.rs"];
+        for name in names {
+            std::fs::write(s.worktree.join(name), "fn f() {}\n").unwrap();
+        }
+
+        let mut got = s.changed().unwrap();
+        got.sort();
+        let mut want: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        want.sort();
+        assert_eq!(
+            got, want,
+            "a name omh cannot open is a name it must not print"
+        );
+    }
+
+    /// A rename reports the name that exists now, not the one it came from.
+    ///
+    /// The old name is not something another session can be changing — it is
+    /// not there.
+    #[test]
+    fn a_renamed_file_is_reported_under_the_name_it_has_now() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("before.rs"), "fn work() {}\n").unwrap();
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-qm", "add it"]).unwrap();
+        git(&s.worktree, &["mv", "before.rs", "after.rs"]).unwrap();
+
+        assert_eq!(
+            s.changed().unwrap(),
+            vec!["after.rs".to_string()],
+            "the name that is there, once"
+        );
+    }
+
     /// The state that strands work is the one `s ls` cannot otherwise see: a
     /// session holding a day of uncommitted changes reads exactly like an
     /// untouched one. It must not count what omh itself put there, for the same
@@ -1579,7 +1667,7 @@ mod tests {
         std::fs::write(s.worktree.join("CLAUDE.md"), "staged by omh").unwrap();
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
 
-        assert_eq!(s.uncommitted().unwrap(), 1);
+        assert_eq!(s.changed().unwrap().len(), 1);
     }
 
     #[test]
@@ -1588,7 +1676,7 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
 
-        assert_eq!(s.uncommitted().unwrap(), 0);
+        assert_eq!(s.changed().unwrap().len(), 0);
     }
 
     /// Before a push there is no upstream to measure against, which is a
@@ -1660,7 +1748,7 @@ mod tests {
         std::fs::write(s.worktree.join("CLAUDE.md"), "omh generated rules").unwrap();
 
         assert_eq!(
-            s.uncommitted().ok(),
+            s.changed().ok().map(|c| c.len()),
             Some(0),
             "omh's own staging is not work"
         );
@@ -1683,7 +1771,7 @@ mod tests {
             std::fs::write(s.worktree.join(format!("newmodule/f{i}.rs")), "fn f() {}").unwrap();
         }
 
-        assert_eq!(s.uncommitted().unwrap(), 12);
+        assert_eq!(s.changed().unwrap().len(), 12);
     }
 
     /// `carry_in` is documented as the only path by which a secret reaches the

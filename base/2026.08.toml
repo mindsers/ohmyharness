@@ -159,14 +159,14 @@ name    = "git-rules"
 kind    = "rules"
 feature = "git-notice"
 since   = "2026.08"
-because = "the sandbox has a repository of its own — its worktree's `.git` still points into the checkout omh never mounts, so omh mounts a gitdir it made instead. That gives the agent `status`, `diff`, `log`, `stash` and `reset --hard`, and puts a `.git` an editor attached over SSH can find. What the agent cannot work out on its own is whose repository it is: commits here are not the branch anyone reviews, and an agent that assumes otherwise reports work as delivered that nobody will ever see"
+because = "the sandbox has a repository of its own — its worktree's `.git` still points into the checkout omh never mounts, so omh mounts a gitdir it made instead. That gives the agent `status`, `diff`, `log`, `stash` and `reset --hard`, and puts a `.git` an editor attached over SSH can find. What the agent cannot work out on its own is whose repository it is: commits here are not the branch anyone reviews, and an agent that assumes otherwise reports work as delivered that nobody will ever see. Two more things it cannot work out: there is no history in that repository to read, and the branch it came from may move underneath it — both of which an agent otherwise reports as a broken checkout"
 remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
-  value = "721 B"
+  value = "993 B"
   how   = "the section as shipped, byte for byte, computed by `every_rules_section_costs_what_it_says`. It reads `shadow::ARRANGEMENT`, which the seed commit's message reads too, so the size is the same sentence a `git log` renders for free"
-  on    = "2026-08-19"
+  on    = "2026-08-23"
 
   [[entry.instead_of]]
   name = "the git-unavailable hook, which shipped until 2026.08"
