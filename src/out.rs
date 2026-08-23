@@ -229,6 +229,11 @@ impl Cell {
     /// column too, and passes or fails on the fixture's other fields — which
     /// is how a guard against *a count where there should be a question* came
     /// to depend on nobody putting a digit in a session id.
+    ///
+    /// `cfg(test)` because that is the whole of its purpose: nothing that
+    /// ships needs a cell's text back out, and in a binary crate `pub` does
+    /// not stop it being dead code.
+    #[cfg(test)]
     pub fn text(&self) -> &str {
         &self.text
     }
