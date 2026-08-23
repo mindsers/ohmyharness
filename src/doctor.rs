@@ -117,6 +117,80 @@ pub struct Outcome {
     pub detail: String,
 }
 
+/// What must be true of **the host's** git, which is where the harvest runs.
+///
+/// Every other check in this module runs inside the sandbox, because that is
+/// where the answers omh cannot see from outside live. These are the opposite
+/// case: `omh sNN commit --keep` fetches, replants and stamps on the host, as
+/// the user, with the user's git — so a git that cannot do what omh asks is
+/// invisible to a probe that runs in the container.
+///
+/// Capabilities rather than a version comparison. omh cannot check a version
+/// it cannot name, and the release that introduced `cherry-pick --empty=` was
+/// not verifiable when the dependency was added; asking the binary answers for
+/// whatever git is actually installed and keeps answering as git grows. The
+/// version is still reported, because it is the first thing anyone asks for in
+/// a bug report.
+///
+/// Only what omh uses **today**. `merge-tree --write-tree` belongs here when
+/// `sync` ships and not before: a doctor that fails over a capability nothing
+/// calls is one people learn to ignore.
+/// The one line here no test on a healthy machine can pin: this machine's git
+/// *has* `--empty`, so passing `true` in place of the probe agrees with the
+/// probe, and only a machine without it could tell them apart. Everything the
+/// answer feeds is a table below; this is the seam, and it is named rather
+/// than papered over.
+pub fn git_checks() -> Vec<Outcome> {
+    let version = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string());
+    git_checks_from(
+        version,
+        crate::shadow::git_supports("cherry-pick", "--empty"),
+    )
+}
+
+/// The report, given the answers — so both are assertable on a machine that
+/// can only give one of them.
+///
+/// Injected for the reason `plan_delivery` gives: the part that can be wrong
+/// silently is the decision, and the shelling-out part is the part that fails
+/// loudly. The first version of this probed inline and its test compared the
+/// result against the same call, which is a tautology — it passed against an
+/// `ok: true` hardcoded in place of the probe.
+fn git_checks_from(version: Option<String>, keeps_a_selection: bool) -> Vec<Outcome> {
+    let Some(version) = version else {
+        return vec![Outcome {
+            name: "git on the host".into(),
+            ok: false,
+            detail: "not installed, or not on PATH — every way work leaves a session \
+                     runs git here"
+                .into(),
+        }];
+    };
+
+    vec![
+        Outcome {
+            name: "git on the host".into(),
+            ok: true,
+            detail: version,
+        },
+        Outcome {
+            name: "keep a selection".into(),
+            ok: keeps_a_selection,
+            detail: match keeps_a_selection {
+                true => "`cherry-pick --empty` — `omh sNN commit --keep 1,3-4` works".into(),
+                false => "`cherry-pick` here has no `--empty`, so `--keep <selection>` \
+                          cannot run. `--keep` on its own is unaffected"
+                    .into(),
+            },
+        },
+    ]
+}
+
 /// What must be true of the memory server, given the base set declares one.
 ///
 /// Built from the declared command rather than from a literal, so a manifest
@@ -613,6 +687,57 @@ pub fn passed(outcomes: &[Outcome]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The host's git is checked, and reported by name.
+    ///
+    /// Every other check here runs in the sandbox; these run where the harvest
+    /// does. A version string is the first thing a bug report needs, and the
+    /// capability is the one `--keep <selection>` depends on.
+    #[test]
+    fn the_hosts_git_is_checked_where_the_harvest_runs() {
+        let named = |checks: &[Outcome], name: &str| {
+            checks
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap_or_else(|| panic!("no check named {name}: {checks:?}"))
+                .clone()
+        };
+
+        let able = git_checks_from(Some("git version 2.55.0".into()), true);
+        assert_eq!(
+            named(&able, "git on the host").detail,
+            "git version 2.55.0",
+            "the version is reported verbatim — it is the first thing a bug report needs"
+        );
+        assert!(named(&able, "keep a selection").ok);
+
+        // The answer this machine cannot give, which is the one that matters:
+        // the check has to go red and say what still works.
+        let old = git_checks_from(Some("git version 2.30.0".into()), false);
+        let selection = named(&old, "keep a selection");
+        assert!(!selection.ok, "a git without it fails the check");
+        assert!(
+            selection
+                .detail
+                .contains("`--keep` on its own is unaffected"),
+            "and says what the user can still do: {selection:?}"
+        );
+        assert!(
+            named(&old, "git on the host").ok,
+            "git being old is not git being absent"
+        );
+
+        // No git at all is one failure, not two, and it says why it matters.
+        let none = git_checks_from(None, false);
+        assert_eq!(none.len(), 1);
+        assert!(!none[0].ok && none[0].detail.contains("PATH"));
+
+        // …and the real thing is wired to the real probe.
+        assert_eq!(
+            named(&git_checks(), "keep a selection").ok,
+            crate::shadow::git_supports("cherry-pick", "--empty")
+        );
+    }
+
     use super::*;
     use crate::profile::Paths;
     use std::collections::BTreeMap;

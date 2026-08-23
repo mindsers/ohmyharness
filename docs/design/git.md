@@ -337,13 +337,17 @@ governs commits that *become* empty, and a commit that started empty is
 selection with a message that names no commit and blames a conflict that never
 happened, while `--keep` on the same history succeeds.
 
-**Open: the git floor.** `cherry-pick --empty=` is newer than everything else
-omh asks of git, and newer than the `≥ 2.38` this document names below for
-`merge-tree --write-tree`. The exact version was not measurable here — only
-2.55 was available — so it is written down rather than guessed at, and step 11
-(`omh doctor` learning git) is where it gets pinned. On a git without it, a
-selection fails after the fetch with a usage dump; `--keep` and `--keep --edit`
-are unaffected.
+**The git floor, closed in #57 without naming a version.** `cherry-pick
+--empty=` is newer than everything else omh asks of git, and the release that
+introduced it was not verifiable here. omh cannot check a version it cannot
+name — so it asks the binary instead: `git <verb> -h` lists the options that
+git has, needs no repository, and keeps answering as git grows. Measured, it
+exits 129 and prints to both streams, so the status is ignored on purpose.
+
+`omh doctor` reports it, and `--keep <selection>` refuses up front with the
+command that still works — rather than the usage dump git would produce after
+the fetch. `--keep` and `--keep --edit` ask nothing new of git and are
+unaffected.
 
 `--edit` is then the only path that needs a terminal, which is where the tty
 guard goes. That closes a measured hole: with stdin not a terminal, `rebase -i`
@@ -584,7 +588,11 @@ the hardening in step 6 of the order below, this work closes or narrows
    changed.
 10. `omh sNN sync`, the conflict-marker guard on `commit`, and the one-shot
     note the next launch delivers.
-11. `omh doctor` learns git: the version, `merge-tree --write-tree`, and that a
+11. **Partly landed (#57).** `omh doctor` learns git: the host's version and
+    whether it can take a `--keep` selection, asked of the binary rather than
+    compared against a version omh cannot name. `merge-tree --write-tree`
+    belongs here when `sync` ships and not before — a doctor that fails over a
+    capability nothing calls is one people learn to ignore. Still open: that a
     read-only `config` really does refuse inside a real container.
 12. The dashboard learns work, staleness and overlap; `rm` learns to refuse;
     `s ls` reports orphaned sandbox repositories; the arrangement gains its two

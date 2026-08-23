@@ -1778,6 +1778,49 @@ pub fn chosen(spec: &str, available: usize) -> Result<Vec<usize>> {
     Ok(out)
 }
 
+/// Whether a `git <verb> -h` listing names an option.
+///
+/// Pure, so the interesting half is a table rather than a fact about whichever
+/// git this machine has. Split from the running for the reason
+/// `memory::deliver::plan_delivery` gives for injecting `current_exe`: the
+/// part that can be wrong silently is the parse.
+///
+/// Matched as a whole word. `--empty` as a substring is also in `--empty-arg`
+/// and would be in any future option spelled that way, and an option omh
+/// believes in wrongly is worse than one it does not know about.
+pub(crate) fn lists_option(help: &str, option: &str) -> bool {
+    help.lines().map(str::trim).any(|line| {
+        line.strip_prefix(option)
+            .is_some_and(|rest| !rest.starts_with(|c: char| c.is_alphanumeric() || c == '-'))
+    })
+}
+
+/// Whether this git knows an option — asked of the binary, not inferred from a
+/// version number.
+///
+/// omh cannot check a version it cannot name. `cherry-pick --empty=` is newer
+/// than everything else omh asks of git and #56 made it a dependency of
+/// `--keep <selection>`, and the release that introduced it was not verifiable
+/// from here. Asking the binary needs no such table, answers for whatever git
+/// is actually on this machine, and keeps answering as git grows.
+///
+/// Measured 2026-08-23: `git <verb> -h` prints the option list on **stdout**,
+/// the first usage line on stderr, exits **129**, and needs no repository. So
+/// the status is ignored on purpose and both streams are read.
+pub fn git_supports(verb: &str, option: &str) -> bool {
+    Command::new("git")
+        .args([verb, "-h"])
+        .output()
+        .is_ok_and(|out| {
+            let said = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            lists_option(&said, option)
+        })
+}
+
 /// The pager the *user* chose, resolved by git in the user's own checkout.
 ///
 /// git's own resolution order is `GIT_PAGER`, then `core.pager`, then `PAGER`,
@@ -2790,6 +2833,48 @@ mod tests {
             s.show(&wt, 0, crate::session::What::Summary).is_err(),
             "the numbers start at 1"
         );
+    }
+
+    /// An option listing says what git can do, and omh reads it as a word.
+    #[test]
+    fn an_option_is_recognised_as_a_whole_word_or_not_at_all() {
+        let help = "usage: git cherry-pick [--edit] [-n]\n\
+                    \n\
+                    \x20   --empty (stop|drop|keep)\n\
+                    \x20                         how to handle commits that become empty\n\
+                    \x20   --[no-]allow-empty    preserve initially empty commits\n";
+
+        assert!(lists_option(help, "--empty"));
+        assert!(lists_option(help, "--[no-]allow-empty"));
+        assert!(
+            !lists_option(help, "--empty-tree"),
+            "an option git does not have is not found in one it does"
+        );
+        assert!(
+            !lists_option("usage: git cherry-pick [-n]\n", "--empty"),
+            "and a listing without it says so"
+        );
+        // The case the whole-word rule exists for: `--empty` must not be found
+        // inside `--empty-arg`, or omh passes a flag git will reject.
+        assert!(!lists_option(
+            "    --empty-arg <n>   something else\n",
+            "--empty"
+        ));
+    }
+
+    /// The real git on this machine, asked rather than assumed.
+    ///
+    /// A companion to the table above: it proves the two halves are wired
+    /// together and that `-h` really answers, which is the part a table cannot
+    /// say. Asserted against an option git has had for decades and one it will
+    /// never have, so it does not go red when git grows.
+    #[test]
+    fn git_answers_what_it_supports() {
+        assert!(
+            git_supports("cherry-pick", "-n"),
+            "git has had --no-commit forever"
+        );
+        assert!(!git_supports("cherry-pick", "--no-such-option-ever"));
     }
 
     /// `--keep 1,3-4` means those checkpoints, in that order.
