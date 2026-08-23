@@ -1476,15 +1476,19 @@ fn doctor_cmd(
     let out = Command::new(backend.program())
         .args(backend.args(&plan))
         .output()?;
-    let outcomes = doctor::parse(&String::from_utf8_lossy(&out.stdout));
+    let from_the_sandbox = doctor::parse(&String::from_utf8_lossy(&out.stdout));
     let _ = session.remove(&paths.repo, "", &paths.shadows()); // diagnostic: leave no session behind
-
-    if outcomes.is_empty() {
-        anyhow::bail!(
-            "the probe produced no output — the sandbox did not run it\n{}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
+                                                               // `with_context` would make the sandbox's stderr the *outer* error, so
+                                                               // `out::problem` would print it as omh's own headline and demote omh's
+                                                               // explanation to a cause — with an empty stderr rendering as a bare
+                                                               // `omh:` and nothing after it. The sentence omh wrote stays first, and
+                                                               // what the container said follows it, sanitised: it is not omh's text.
+    let outcomes = every_check(from_the_sandbox).map_err(|e| {
+        match crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim()) {
+            said if said.is_empty() => e,
+            said => anyhow::anyhow!("{e}\n{said}"),
+        }
+    })?;
 
     let report = report::Doctor {
         harness: name,
@@ -5165,6 +5169,7 @@ fn what_to_keep(
     selection: &str,
     edit: bool,
     terminal: bool,
+    keeps_a_selection: &dyn Fn() -> Result<bool>,
 ) -> Result<shadow::Keep> {
     // Before the terminal check, so a line that names the same thing twice is
     // told so rather than being told about a terminal it also lacks. The
@@ -5192,6 +5197,35 @@ fn what_to_keep(
     }
     if selection.is_empty() {
         return Ok(shadow::Keep::All);
+    }
+
+    // The one thing a selection needs that `--keep` alone does not, asked
+    // before anything is read. `cherry-pick --empty=` is newer than everything
+    // else omh asks of git — #56 made it a dependency without being able to
+    // name the release — and on a git without it the flagship command answers
+    // with a usage dump the user has no way to read as *your git is too old*.
+    // Asked here rather than at the call site, so `--keep` and `--keep --edit`
+    // — which need nothing new of git — do not fork one to throw the answer
+    // away. Both return above this line.
+    //
+    // Three answers. *Could not ask* is git's own failure and is reported as
+    // itself: the first version collapsed it into "no", so a user with no git
+    // on PATH was told their git was too old to name checkpoints, and the
+    // fallback omh recommended failed differently a second later.
+    match keeps_a_selection().with_context(|| {
+        format!(
+            "omh cannot tell whether this git can name checkpoints, so it will not guess. \
+             `omh {} commit --keep` takes them all and asks nothing new of git",
+            session.id
+        )
+    })? {
+        true => {}
+        false => anyhow::bail!(
+            "naming checkpoints needs a newer git than this one: `git cherry-pick` here has \
+             no `--empty`, which omh uses to drop a commit whose changes are already on the \
+             branch. `omh {} commit --keep` takes them all and works on any git omh supports",
+            session.id
+        ),
     }
 
     // Resolved against the session's own list, so a number means the commit it
@@ -5227,6 +5261,30 @@ fn what_to_keep(
         ids.push(checkpoint.id.clone());
     }
     Ok(shadow::Keep::These(ids))
+}
+
+/// What the sandbox answered, and what the host answered, in one list.
+///
+/// The order is the point. The emptiness check is how omh notices a sandbox
+/// that never ran the probe at all, and host checks always produce something —
+/// folded in first, they would answer *yes, something ran* on behalf of a
+/// container that did nothing, and `doctor` would pass on a probe that never
+/// executed.
+///
+/// The host's side is **not** a parameter, and that is the guard. As two
+/// arguments the order was a convention: swapping them, or passing an empty
+/// list, silenced the emptiness check or dropped git from the report entirely,
+/// and no test could reach either — `doctor_cmd` needs a container. Taken from
+/// `doctor::git_checks` here, none of those three mistakes compiles.
+fn every_check(from_the_sandbox: Vec<doctor::Outcome>) -> Result<Vec<doctor::Outcome>> {
+    anyhow::ensure!(
+        !from_the_sandbox.is_empty(),
+        "the probe produced no output — the sandbox did not run it"
+    );
+    Ok(from_the_sandbox
+        .into_iter()
+        .chain(doctor::git_checks())
+        .collect())
 }
 
 /// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done.
@@ -5288,6 +5346,7 @@ fn commit(
             selection,
             edit,
             std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            &|| shadow::git_supports("cherry-pick", "--empty"),
         )?;
         let named = match &keep {
             shadow::Keep::These(ids) => Some(ids.len()),
@@ -6087,6 +6146,99 @@ mod tests {
         );
     }
 
+    /// Naming checkpoints needs a git that can drop an already-applied
+    /// commit, and says so rather than handing over a usage dump.
+    ///
+    /// Injected, because this machine's git *has* the option: probed inline,
+    /// deleting the guard changed nothing any test could see.
+    #[test]
+    fn a_selection_on_a_git_that_cannot_do_it_says_which_command_still_works() {
+        let (_paths, session, shadow) = a_session_with_two_checkpoints();
+
+        let err = what_to_keep(&shadow, &session, "1", false, false, &|| Ok(false))
+            .expect_err("this git cannot take a selection");
+        assert!(
+            err.to_string().contains("--empty"),
+            "the refusal names what git is missing: {err}"
+        );
+        assert!(
+            err.to_string().contains("--keep"),
+            "and what still works without it: {err}"
+        );
+        assert!(
+            what_to_keep(&shadow, &session, "1", false, false, &|| Ok(true)).is_ok(),
+            "and a git that can, does"
+        );
+        // `--keep` on its own — and with `--edit` — asks nothing of git that
+        // omh has not always asked, so neither may be refused for this. They
+        // must not even ask: the probe forks a process, and returning `Err`
+        // from it here proves it was never called.
+        let never = || -> Result<bool> { panic!("`--keep` asked git a question it does not need") };
+        assert!(what_to_keep(&shadow, &session, "", false, false, &never).is_ok());
+        assert!(what_to_keep(&shadow, &session, "", true, true, &never).is_ok());
+
+        // The question comes before the list is read, so a number that is also
+        // wrong reports the git first — there is no point telling someone
+        // which checkpoint they meant on a git that cannot take any.
+        let err = what_to_keep(&shadow, &session, "9", false, false, &|| Ok(false))
+            .expect_err("this git cannot take a selection");
+        assert!(
+            err.to_string().contains("--empty"),
+            "the git is the answer, not the number: {err}"
+        );
+
+        // And *could not ask* is neither yes nor no.
+        let err = what_to_keep(&shadow, &session, "1", false, false, &|| {
+            Err(anyhow::anyhow!("no git on PATH"))
+        })
+        .expect_err("omh could not tell");
+        // Through `problem`, because that is how an error reaches a person:
+        // omh's sentence is the headline and git's reason is the cause under
+        // it. `to_string()` alone shows only the outer half and would pass for
+        // an error that had thrown git's words away.
+        let printed = out::problem(&out::Palette::plain(), &err);
+        assert!(
+            printed.contains("no git on PATH"),
+            "git's own reason reaches the user: {printed}"
+        );
+        assert!(
+            !printed.contains("newer git"),
+            "and omh does not invent a diagnosis it cannot support: {printed}"
+        );
+    }
+
+    /// The host's answers come after the sandbox's, so an empty probe is still
+    /// an empty probe.
+    ///
+    /// The host side is not a parameter, which is the real guard — as two
+    /// arguments, swapping them silenced the emptiness check and passing an
+    /// empty list dropped git from the report, and neither mistake could be
+    /// reached by a test, because `doctor_cmd` needs a container. Now neither
+    /// compiles. What is left to assert is the ordering and that the host's
+    /// row is actually there.
+    #[test]
+    fn host_checks_never_stand_in_for_a_probe_that_did_not_run() {
+        let sandbox = vec![doctor::Outcome {
+            name: "rules".into(),
+            ok: true,
+            detail: "reads".into(),
+        }];
+
+        let err = every_check(Vec::new()).expect_err("a sandbox that ran nothing is not a pass");
+        assert!(err.to_string().contains("did not run it"), "{err}");
+
+        let both = every_check(sandbox).unwrap();
+        assert_eq!(
+            both.first().map(|o| o.name.as_str()),
+            Some("rules"),
+            "the sandbox's answers first: {both:?}"
+        );
+        assert!(
+            both.iter().any(|o| o.name == "git on the host"),
+            "and the host's are appended: {both:?}"
+        );
+    }
+
     /// What `--keep` and `--edit` mean, as a table.
     ///
     /// The headline of this change is that `--keep` alone no longer opens an
@@ -6099,7 +6251,7 @@ mod tests {
         let (paths, session, shadow) = a_session_with_two_checkpoints();
 
         let keep = |selection: &str, edit: bool, terminal: bool| {
-            what_to_keep(&shadow, &session, selection, edit, terminal)
+            what_to_keep(&shadow, &session, selection, edit, terminal, &|| Ok(true))
         };
         let _ = &paths;
 
@@ -6167,8 +6319,15 @@ mod tests {
             .iter()
             .find(|c| c.touched.is_none())
             .expect("the merge is a checkpoint");
-        let err = what_to_keep(&shadow, &session, &merge.number.to_string(), false, false)
-            .expect_err("a merge cannot be picked on its own");
+        let err = what_to_keep(
+            &shadow,
+            &session,
+            &merge.number.to_string(),
+            false,
+            false,
+            &|| Ok(true),
+        )
+        .expect_err("a merge cannot be picked on its own");
         assert!(
             err.to_string().contains("merge") && !err.to_string().contains("-m option"),
             "refused in omh's words, not git's: {err}"
@@ -6191,7 +6350,7 @@ mod tests {
     fn a_number_the_session_does_not_have_is_refused_with_the_range() {
         let (_paths, session, shadow) = a_session_with_two_checkpoints();
         for spec in ["9", "0", "two", "4-2", "1,1"] {
-            let err = what_to_keep(&shadow, &session, spec, false, false)
+            let err = what_to_keep(&shadow, &session, spec, false, false, &|| Ok(true))
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -6318,14 +6477,14 @@ mod tests {
         // The first was handed over; the second was not.
         std::fs::write(&shadow.landed_record, format!("{}\n", ids[0])).unwrap();
 
-        let err = what_to_keep(&shadow, &session, "1", false, false)
+        let err = what_to_keep(&shadow, &session, "1", false, false, &|| Ok(true))
             .expect_err("checkpoint 1 is already on the branch");
         assert!(
             err.to_string().contains('1') && err.to_string().contains("already"),
             "the refusal names the number and says why: {err}"
         );
         assert!(
-            what_to_keep(&shadow, &session, "2", false, false).is_ok(),
+            what_to_keep(&shadow, &session, "2", false, false, &|| Ok(true)).is_ok(),
             "and the one that has not landed is still keepable"
         );
     }
