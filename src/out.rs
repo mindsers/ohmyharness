@@ -102,6 +102,15 @@ impl Palette {
         Self { styled: false }
     }
 
+    /// Whether anything omh prints through this will carry colour.
+    ///
+    /// Asked by the two commands that hand the terminal to git: git honours
+    /// neither `NO_COLOR` nor omh's `--color`, so the answer resolved here has
+    /// to be passed to it as `--color=<when>` or the user's flag does nothing.
+    pub fn is_plain(&self) -> bool {
+        !self.styled
+    }
+
     /// Wrap `text` in `style`, or hand it back untouched.
     ///
     /// The reset is `style`'s own, written as `{style:#}`, rather than a

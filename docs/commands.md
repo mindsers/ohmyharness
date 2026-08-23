@@ -358,9 +358,14 @@ the sandbox's repository holds nothing you may not see — but because a command
 that prints any object you name is a different command from one that shows you
 a checkpoint.
 
-One thing worth knowing: your pager is read from your environment
-(`GIT_PAGER`, then `PAGER`), never from the sandbox's git config. That file is
-one the agent can write, and on a terminal git will run what it says.
+Your pager is whatever git resolves in *your* checkout — `GIT_PAGER`, then your
+`core.pager`, then `PAGER` — so `delta` and friends work here as they do
+everywhere else. omh asks git for it rather than guessing at the order.
+
+The sandbox's own git config never gets a say. It cannot carry a pager anyway:
+omh rewrites that file to a ten-key allowlist on every launch and mounts it
+read-only. The reason omh has to name a pager at all is that same hardening —
+without it, a host-side read is pinned to no pager at all.
 
 ### Getting work out of a session
 

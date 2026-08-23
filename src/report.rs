@@ -1691,40 +1691,67 @@ impl Report for Why {
     }
 }
 
-/// A session's work against its base, as `git diff --stat` summarises it.
+/// A session's work against its base, or one checkpoint against its parent.
 ///
-/// **A summary, not a patch.** `Session::diff` runs `--stat`, so this is the
-/// file-and-line-count table and there is nothing here for `git apply` to
-/// consume. The field is named for what it holds: calling it `patch` invited
-/// `omh s diff --json | jq -r .patch | git apply`, which fails on every
-/// session that has changed anything.
+/// **The field is named for what it holds.** An earlier version of this always
+/// ran `--stat` and said so here, with the reason: calling the field `patch`
+/// invited `omh s diff --json | jq -r .patch | git apply`, which failed on
+/// every session that had changed anything. Then `-p` arrived and put a real
+/// patch in `summary`, which is the same footgun with the labels swapped — a
+/// script could not tell which of the two it had been given, and the comment
+/// arguing against that state was still sitting above the code producing it.
 ///
-/// It reaches stdout **unchanged and unstyled** either way — omh adds only the
-/// sentence for the empty case, because silence reads as breakage and the
-/// useful thing to say is which comparison came up empty.
+/// So the key follows the content: `summary` holds a `--stat`, `patch` holds a
+/// patch, and exactly one of them is present. `jq -r .patch | git apply` now
+/// works, for the same reason it used to fail.
+///
+/// The human rendering is sanitised — see [`human`](Diff::human) — and the
+/// JSON is not, which is the split this file makes everywhere for the reason
+/// `Log` states.
 #[derive(Debug, Clone)]
 pub struct Diff {
+    /// What to call it in a sentence: `omh/s01`, or `s01 checkpoint 4`.
     pub label: String,
+    /// The session id alone, so a script keying on it gets an id rather than a
+    /// phrase.
+    pub session: String,
+    pub checkpoint: Option<usize>,
     pub base: String,
-    pub summary: String,
+    pub what: crate::session::What,
+    /// The `--stat` or the patch, as `what` says.
+    pub body: String,
+}
+
+impl Diff {
+    /// Whether there is anything here to read.
+    ///
+    /// The paged path asks before handing the terminal to git: an empty patch
+    /// pages to a blank screen, which reads exactly like a broken pager and
+    /// exactly like the refusal a detached worktree used to skip. The sentence
+    /// below is the useful answer, and it only exists on the unpaged path.
+    pub fn changed(&self) -> bool {
+        !self.body.trim().is_empty()
+    }
 }
 
 impl Report for Diff {
-    /// Sanitised on the way out, because half of what is in here was written
-    /// inside the sandbox.
+    /// Sanitised on the way out, because all of this was written inside the
+    /// sandbox.
     ///
-    /// A `--stat` carries paths, which git quotes by default, and — since
-    /// `diff <checkpoint>` — a **commit subject**, which git does not quote at
-    /// all. Measured: an ESC in a checkpoint's subject reached omh's own output
-    /// through this method. That is the same finding `log` acted on, arriving
-    /// by a second route.
+    /// `git show` prints the whole commit header and body — **author name and
+    /// email, subject, and message** — and quotes none of it. Paths it does
+    /// quote, by `core.quotePath`'s default. Measured: an ESC in a checkpoint
+    /// subject reached omh's own output through this method. That is the same
+    /// finding `log` acted on, arriving by a second route.
     ///
-    /// `json` stays raw for the reason it states there: a program is not a
-    /// terminal, and a replacement character is one it cannot match against
-    /// git's own output. So is the paged patch, which never reaches this — it
-    /// is git writing to the terminal, exactly as running git yourself would.
+    /// A `--stat` survives this intact — measured: git's graph is spaces, `|`,
+    /// `+` and `-`, with no tab and no other control character, so the
+    /// alignment is byte-for-byte the same. A **patch** would not survive it,
+    /// and does not reach here: a patch for a person is always paged, which is
+    /// git writing to the terminal exactly as running git yourself would, and
+    /// the only unpaged patch is the one a program asked for.
     fn human(&self, p: &out::Palette) -> String {
-        if self.summary.trim().is_empty() {
+        if !self.changed() {
             return format!(
                 "{}\n",
                 p.paint(
@@ -1733,16 +1760,25 @@ impl Report for Diff {
                 )
             );
         }
-        out::untrusted(&self.summary)
+        out::untrusted(&self.body)
     }
 
     fn json(&self) -> serde_json::Value {
-        json!({
-            "session": self.label,
+        let mut v = json!({
+            "session": self.session,
+            "checkpoint": self.checkpoint,
             "base": self.base,
-            "changed": !self.summary.trim().is_empty(),
-            "summary": self.summary,
-        })
+            "changed": self.changed(),
+        });
+        // Raw, and under the key that says what it is. A program is not a
+        // terminal, and a subject with a replacement character in it is one it
+        // cannot match against git's own output.
+        let key = match self.what {
+            crate::session::What::Summary => "summary",
+            crate::session::What::Patch => "patch",
+        };
+        v[key] = json!(self.body);
+        v
     }
 }
 
@@ -2188,9 +2224,12 @@ mod tests {
             hints.contains("omh s01 commit --keep"),
             "the harvest is offered: {hints}"
         );
-        // …and the newest checkpoint, now that `diff` takes a number. Every
-        // line offered here is one `the_session_lines_omh_prints_are_lines_omh
-        // _accepts` reads out of the tree and parses.
+        // …and the newest checkpoint, now that `diff` takes a number. That one
+        // line is read out of the tree and parsed by
+        // `the_session_lines_omh_prints_are_lines_omh_accepts`; the `--keep`
+        // line above is not, because that scan skips anything ending in a flag
+        // and says why. Hence this assertion, which covers what the scan
+        // cannot.
         assert!(
             hints.contains("omh s01 diff 4"),
             "the newest checkpoint is offered by number: {hints}"

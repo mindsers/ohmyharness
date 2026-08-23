@@ -52,7 +52,7 @@ Four workflows, not a feature list.
 
 | I want to | today |
 |---|---|
-| **read the change** before landing it | `omh s diff` prints `--stat` only. The patch is in a worktree the docs tell you never to enter. |
+| ~~**read the change** before landing it~~ — landed (#54, #55) | `omh s diff` printed `--stat` only and the patch was in a worktree the docs tell you never to enter. `omh sNN log` numbers the agent's commits and `omh sNN diff [n] [-p]` reads one, or the session, as a patch. |
 | **know what the agent has been doing** | Its commits are invisible until `--keep` opens a `rebase -i` todo. `s ls` does not count them; `s rm` destroys them without saying they existed. |
 | ~~**land work in stages**~~ — landed (#50) | `--keep` replayed from the seed every time. Measured: a second run re-listed commits already on the branch, then died on `Could not apply`. It replays from what it last handed over now. |
 | **not fall behind trunk** | `s ls` reports `behind 12` and offers nothing. The session works against stale code until it is abandoned. |
@@ -259,15 +259,32 @@ A checkpoint argument is validated to be inside the session's own range before
 anything is printed. Not for safety: a command that will print any object in the
 store is a different command from one that shows you a checkpoint.
 
-The pager was the one place this could not simply hand the terminal to git.
-`core.pager` lives in a file the agent writes, and measured on a pty, git runs
-it — a `core.pager` of `sh -c "echo …; cat"` executed on a plain `git show`.
-`NEUTRALISED` already pins it to `cat`; the user's own pager is appended after
-that, and the last `-c` wins. The sandbox's is never consulted.
+The pager was the one place this could not simply hand the terminal to git —
+because of omh's own hardening, not a live threat. Measured on a pty, a
+repository's `core.pager` of `sh -c "echo …; cat"` executes on a plain
+`git show`, which is why `NEUTRALISED` pins the key to `cat`. The sandbox's
+config cannot carry one regardless: it is rewritten to a ten-key allowlist each
+launch and mounted read-only (#52). The pin is what would leave `-p` unable to
+page, so the user's pager — resolved by asking git in the user's own checkout,
+so their `core.pager` counts — is appended after it, and the last `-c` wins.
 
-`git show` prints the commit subject, and git quotes paths but not subjects, so
-the summary goes through `out::untrusted` on the way to a person and stays raw
-on the way to a program — the same split `log` makes, reached by a second route.
+A first draft of this called the sandbox's config "a file the agent writes" and
+built the mechanism on that premise. It was three layers out of date, and the
+review that caught it was reading omh's own mount code.
+
+`git show` prints the whole commit header — author, subject, body — and quotes
+none of it, while paths it does quote. So the summary goes through
+`out::untrusted` on the way to a person and stays raw on the way to a program,
+the same split `log` makes, reached by a second route. A `--stat` survives
+sanitising byte-for-byte (its graph has no control characters); a patch would
+not, and never reaches it — a patch for a person is always paged.
+
+Two answers must agree that used not to. `show --stat` on a merge reports the
+files it brought in and `show -p` on the same merge prints nothing at all,
+git's `--cc` collapsing a clean merge; `--first-parent` makes them agree and
+changes neither answer elsewhere. And the JSON key names the content —
+`summary` for a `--stat`, `patch` for a patch, never both — so
+`jq -r .patch | git apply` works for the reason it used to fail.
 
 ### `omh sNN commit --keep [selection]`
 
@@ -413,13 +430,18 @@ ship:
   repaints omh's own output, and `committed to main` is four words.
 
   Which text needs it was measured rather than guessed. git **quotes a path**
-  by default — `core.quotePath` renders an escape as a literal `\033` — so the
-  `--stat` summary `omh sNN diff` prints is already safe. git **does not quote
-  a subject**: `log --oneline` hands one back with its bytes intact. So the
-  sites are the four that carry git's stderr into an error, and the two in
-  `refuse_carried` that name the commit they found — which is the message
-  saying omh refused to publish a secret, and therefore the one worth forging.
-  `log`'s checkpoint subjects will need it for the same reason.
+  by default — `core.quotePath` renders an escape as a literal `\033` — so a
+  *path* is safe wherever it appears. git **does not quote a subject**:
+  `log --oneline` hands one back with its bytes intact. So the sites are the
+  four that carry git's stderr into an error, and the two in `refuse_carried`
+  that name the commit they found — which is the message saying omh refused to
+  publish a secret, and therefore the one worth forging.
+
+  That reasoning once ended "so the `--stat` summary is already safe", which
+  held only while a summary was nothing but paths. `log` (#54) prints subjects
+  and `diff <n>` (#55) prints a whole commit header — author, subject, body,
+  none of it quoted — so both sanitise at the render boundary. The rule was
+  right and the inventory of what a summary contains was what went stale.
 - **Name the gitdir explicitly and inherit no `GIT_*`.** Host-side calls rely on
   `current_dir` today, so an ambient `GIT_DIR` — omh run from inside a hook, or
   from `rebase --exec` — redirects them wholesale.

@@ -374,6 +374,60 @@ impl Session {
     /// `GIT_INDEX_FILE` gets the whole worktree without touching the index the
     /// user's own git commands share.
     pub fn diff(&self, base: &str, what: What) -> Result<String> {
+        self.reviewing(base, |worktree, index, merge_base| {
+            git_with_index(
+                worktree,
+                index,
+                &["diff", "--cached", what.flag(), merge_base],
+            )
+        })
+    }
+
+    /// The patch, on the terminal, through the user's own pager.
+    ///
+    /// Inherited stdio rather than captured output: git then does its own
+    /// paging and colouring, which is the pattern `commit`'s editor path
+    /// already uses, and reimplementing either is how a diff ends up subtly
+    /// unlike every other diff the user reads.
+    pub fn stream_diff(&self, base: &str, colour: &str) -> Result<()> {
+        self.reviewing(base, |worktree, index, merge_base| {
+            let status = Command::new("git")
+                .current_dir(worktree)
+                .env("GIT_INDEX_FILE", index)
+                .args([
+                    "diff",
+                    "--cached",
+                    "-p",
+                    &format!("--color={colour}"),
+                    merge_base,
+                ])
+                .status()
+                .context("running git diff")?;
+            // `git diff` exits 1 for "there were differences" only with
+            // `--exit-code`, which nothing here passes, so a non-zero status is
+            // a real failure and not the ordinary answer. Measured on a pty:
+            // a pager that quits early — `q` in less, or `| head` — still
+            // leaves git at 0, so this does not misfire on an ordinary read.
+            anyhow::ensure!(status.success(), "git diff exited {status}");
+            Ok(())
+        })
+    }
+
+    /// The index a review is taken from, and the point it is taken against.
+    ///
+    /// **One setup, not two.** A summary, a patch and a paged patch are three
+    /// answers to one question, and the first version of `-p` built its own
+    /// copy of this — seven steps, faithfully reproduced except for the guard
+    /// below, which it dropped. `omh sNN diff` then refused on a detached
+    /// worktree and `omh sNN diff -p` printed an empty patch and exited 0,
+    /// one flag apart. Four reviewers found it independently. Passing the
+    /// index to a closure is what makes the guard impossible to skip rather
+    /// than merely present in two places today.
+    fn reviewing<T>(
+        &self,
+        base: &str,
+        take: impl FnOnce(&Path, &Path, &str) -> Result<T>,
+    ) -> Result<T> {
         let branch = self
             .branch
             .as_deref()
@@ -440,51 +494,8 @@ impl Session {
         let unstage = unstage_rules_args();
         let unstage: Vec<&str> = unstage.iter().map(String::as_str).collect();
         git_with_index(&self.worktree, index, &unstage)?;
-        git_with_index(
-            &self.worktree,
-            index,
-            // One list of arguments for both answers, so the summary a user
-            // reads before opening the patch describes the same diff the patch
-            // shows. Two call sites would be two chances to pass a different
-            // pathspec, and the summary is what they decide *on*.
-            &["diff", "--cached", what.flag(), merge_base],
-        )
-    }
 
-    /// The patch, on the terminal, through the user's own pager.
-    ///
-    /// Inherited stdio rather than captured output: git then does its own
-    /// paging and colouring, which is the pattern `commit`'s editor path
-    /// already uses, and reimplementing either is how a diff ends up subtly
-    /// unlike every other diff the user reads.
-    ///
-    /// Nothing here reads the sandbox, so the pager is the user's own by
-    /// default — see `Shadow::stream_show` for the case where it is not.
-    pub fn stream_diff(&self, base: &str) -> Result<()> {
-        let branch = self
-            .branch
-            .as_deref()
-            .context("a scratch session has no branch")?;
-        let merge_base = git(&self.worktree, &["merge-base", base, branch])?;
-        let index = tempfile::NamedTempFile::new().context("staging a diff index")?;
-        let index = index.path();
-        git_with_index(&self.worktree, index, &["read-tree", "HEAD"])?;
-        git_with_index(&self.worktree, index, &["add", "-A", "."])?;
-        let unstage = unstage_rules_args();
-        let unstage: Vec<&str> = unstage.iter().map(String::as_str).collect();
-        git_with_index(&self.worktree, index, &unstage)?;
-
-        let status = Command::new("git")
-            .current_dir(&self.worktree)
-            .env("GIT_INDEX_FILE", index)
-            .args(["diff", "--cached", "-p", merge_base.trim()])
-            .status()
-            .context("running git diff")?;
-        // `git diff` exits 1 for "there were differences" only with
-        // `--exit-code`, which nothing here passes, so a non-zero status is a
-        // real failure and not the ordinary answer.
-        anyhow::ensure!(status.success(), "git diff exited {status}");
-        Ok(())
+        take(&self.worktree, index, merge_base)
     }
 
     /// Stage the agent's work in the worktree and commit it onto the branch.
@@ -1518,14 +1529,15 @@ mod tests {
 
     // ── what `s ls` reports about work in flight ────────────────────────────
 
-    /// The state that strands work is the one `s ls` cannot otherwise see: a
-    /// session holding a day of uncommitted changes reads exactly like an
-    /// untouched one. It must not count what omh itself put there, for the same
     /// A summary says which files; a patch says what changed in them.
     ///
-    /// Both are built from the same throwaway index, because the alternative
-    /// is two answers about one session that can disagree — and the summary
-    /// is what a user reads *before* deciding the patch is worth opening.
+    /// Both go through `reviewing`, so they are taken from one index against
+    /// one merge base — the alternative is two answers about one session that
+    /// can disagree, and the summary is what a user reads *before* deciding
+    /// the patch is worth opening. The paged patch goes through it too, which
+    /// is what `a_worktree_that_left_its_branch_is_refused_whichever_way_you_
+    /// ask` checks: this test cannot see that route, because it returns
+    /// nothing to assert on.
     #[test]
     fn a_patch_carries_the_lines_a_summary_only_counts() {
         let (d, root) = repo();
@@ -1550,6 +1562,9 @@ mod tests {
         );
     }
 
+    /// The state that strands work is the one `s ls` cannot otherwise see: a
+    /// session holding a day of uncommitted changes reads exactly like an
+    /// untouched one. It must not count what omh itself put there, for the same
     /// reason `commit` must not commit it.
     #[test]
     fn uncommitted_counts_the_agents_work_and_not_omhs_own() {
