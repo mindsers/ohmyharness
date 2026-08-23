@@ -5085,7 +5085,7 @@ fn sync(
         .unwrap_or_else(|| session::default_branch(&paths.repo));
 
     stop_before_syncing(&paths, &session, down, ctx)?;
-    ctx.say(&sync_session(&paths, &session, &base, ctx)?);
+    ctx.say(&sync_session(&paths, &session, &base)?);
     Ok(())
 }
 
@@ -5095,12 +5095,7 @@ fn sync(
 /// container runtime to decide whether the sandbox is up, and nothing that
 /// needs one is reachable from a test here. What is left outside is the
 /// refusal and the printing.
-fn sync_session(
-    paths: &Paths,
-    session: &Session,
-    base: &str,
-    ctx: &out::Ctx,
-) -> Result<report::Synced> {
+fn sync_session(paths: &Paths, session: &Session, base: &str) -> Result<report::Synced> {
     let branch = session
         .branch
         .as_deref()
@@ -5133,16 +5128,22 @@ fn sync_session(
     let moved = session.commits_between(&paths.repo, &was, &onto)?;
     // Deliberately not `?`. The sync is done — the tree is merged, the baseline
     // has moved and the shadow has its commit — and a note that could not be
-    // written is a worse outcome to report than to swallow: the user would read
-    // a failed command about work that landed. It is said rather than dropped,
-    // on stderr, where a warning goes.
-    if let Err(why) = shadow.leave_note(&shadow::note_for(base, moved, merged.conflicted.len())) {
-        ctx.warn(&format!(
-            "synced, but omh could not leave {} a note about it — the sandbox will find \
-             `base moved to {onto}` in its own log instead: {why}",
-            session.id
-        ));
-    }
+    // written is a worse outcome to report than to carry: the user would read a
+    // failed command about work that landed.
+    //
+    // Carried out on the report rather than printed here, which is three things
+    // at once. The failure becomes assertable, since nothing captures a write
+    // to stderr from inside a function; it reaches `--json`, which a bare
+    // `eprint` structurally never does; and this function goes back to being
+    // the part with no side effects, which is the only reason it is split out
+    // at all. The first draft printed it here and quietly broke that.
+    let note = shadow
+        .leave_note(&shadow::note_for(base, moved, merged.conflicted.len()))
+        // `{e:#}` and not `{e}`: `Display` on an `anyhow::Error` prints the
+        // outermost context only, so the reason — `Permission denied`, a full
+        // disk — is exactly the part that would be dropped.
+        .err()
+        .map(|why| format!("{why:#}"));
 
     Ok(report::Synced {
         id: session.id.clone(),
@@ -5151,6 +5152,7 @@ fn sync_session(
         onto,
         conflicted: merged.conflicted,
         checkpoint: checkpoint.is_some(),
+        note,
     })
 }
 
@@ -6657,6 +6659,48 @@ mod tests {
         );
     }
 
+    /// A sync that cannot leave its note is still a sync, and says which.
+    ///
+    /// The design decision the call site argues for, asserted rather than
+    /// commented: the merge has landed, the baseline has moved and the shadow
+    /// has its commit by the time the note is written, so failing here would
+    /// report finished work as a failed command. The other half — that the
+    /// user hears about it — is what carrying it on the report rather than
+    /// printing it inside makes checkable at all.
+    #[test]
+    fn a_sync_whose_note_cannot_be_written_still_succeeds_and_says_so() {
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+        let repo_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        repo_git(&["checkout", "-q", "main"]);
+        std::fs::write(paths.repo.join("from-trunk.rs"), "fn trunk() {}\n").unwrap();
+        repo_git(&["add", "-A"]);
+        repo_git(&["commit", "-qm", "trunk moved"]);
+
+        // A directory where the note goes. Contrived, and the reachable
+        // versions — a full disk, a permission the host process does not have
+        // — are not things a test can arrange on demand.
+        std::fs::create_dir(shadow::note_file(&shadow.gitdir)).unwrap();
+
+        let synced = sync_session(&paths, &session, "main").expect("the sync itself is fine");
+        assert_eq!(synced.moved, 1, "the work still arrived");
+        assert!(
+            session.worktree.join("from-trunk.rs").exists(),
+            "and is on disk, which is what a failed command would deny"
+        );
+        let why = synced.note.expect("the failure is carried, not swallowed");
+        assert!(
+            why.contains("omh-note"),
+            "naming the file it could not write: {why}"
+        );
+    }
+
     /// A sync brings trunk over, explains itself in the sandbox, and leaves
     /// the agent's work where a harvest can still take it.
     ///
@@ -6699,7 +6743,7 @@ mod tests {
         let onto = repo_git(&["rev-parse", "HEAD"]);
         let _ = on_session;
 
-        let synced = sync_session(&paths, &session, "main", &out::Ctx::plain()).unwrap();
+        let synced = sync_session(&paths, &session, "main").unwrap();
         assert_eq!(synced.moved, 1, "one commit arrived");
         assert!(synced.conflicted.is_empty(), "and it merged cleanly");
         assert!(synced.checkpoint, "the uncommitted work was checkpointed");
@@ -6739,6 +6783,10 @@ mod tests {
         assert!(
             note.contains("main moved 1 commit") && note.contains("git show HEAD"),
             "what moved, and where to read it: {note}"
+        );
+        assert_eq!(
+            synced.note, None,
+            "and nothing to report about leaving it: {synced:?}"
         );
 
         // 5. …and the agent's work is still there to be taken.

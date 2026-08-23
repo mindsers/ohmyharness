@@ -52,8 +52,10 @@ pub fn pointer_file() -> String {
 ///
 /// In the gitdir rather than under a mount of its own, and that is not
 /// laziness: this directory is already mounted, already writable — the agent
-/// commits into it — and git ignores a file it does not know. Measured:
-/// `status`, `log` and `fsck` say nothing about it and `gc` does not reap it.
+/// commits into it — and git ignores a file it does not know. Measured
+/// 2026-08-23 against git 2.55.0, in a `--separate-git-dir` layout because
+/// that is the shape the shadow has: `status`, `log` and `fsck` say nothing
+/// about it and `gc --prune=now` does not reap it.
 ///
 /// Writable is the requirement, not an accident. The hook that reads this
 /// **deletes it**, which is what makes the note one-shot; the read-only
@@ -65,17 +67,20 @@ pub const GUEST_NOTE: &str = "/omh/shadow/omh-note";
 
 /// The note's name inside the gitdir, host side.
 ///
-/// Derived from the guest path rather than written twice: the two must name
-/// one file, and a hook reading a path omh never writes fails by saying
-/// nothing at all.
+/// The two paths must name one file — a hook reading a path omh never writes
+/// fails by saying nothing at all, forever — and that correspondence is
+/// asserted rather than derived. Deriving it read better and hid a panic: the
+/// first version pulled the basename off `GUEST_NOTE` with an `expect`, and a
+/// panic is not an `Err`, so relocating the note under a mount of its own
+/// would have aborted at the very end of a *completed* sync — past the merge,
+/// past the baseline, past the commit — with a backtrace instead of a report.
+/// That is the one outcome the call site's own comment exists to prevent.
 pub fn note_file(gitdir: &std::path::Path) -> PathBuf {
-    gitdir.join(
-        GUEST_NOTE
-            .strip_prefix(GUEST_GITDIR)
-            .expect("the note lives in the gitdir")
-            .trim_start_matches('/'),
-    )
+    gitdir.join(NOTE_NAME)
 }
+
+/// The note's basename, shared by both ends so there is one name to change.
+const NOTE_NAME: &str = "omh-note";
 
 /// Where the `pre-push` hook lands inside the container.
 ///
@@ -909,18 +914,38 @@ impl Shadow {
 
     /// Leave a sentence the agent will be given when it next starts.
     ///
-    /// Overwrites rather than appends. Two syncs before a single start is one
-    /// situation with one useful sentence — the second one, which describes
-    /// where the tree now is; appending would deliver a stale paragraph above
-    /// a current one and leave the agent to work out which is which.
+    /// Overwrites rather than appends. Two syncs before a single start would
+    /// otherwise deliver a stale paragraph above a current one and leave the
+    /// agent to work out which describes the tree in front of it.
+    ///
+    /// The surviving note is not the whole truth in that case, and saying it
+    /// is would be the easy sentence to write here. `moved` is counted from
+    /// *this* sync's starting point, so a session that took three commits and
+    /// then one is told **one**; and `git show HEAD` reaches the second
+    /// `base moved to` commit, with the first at `HEAD~1` and nothing pointing
+    /// there. Both understate. Neither misleads about the tree the agent is
+    /// looking at, which is what the sentence is for — and `git log` in the
+    /// sandbox holds the rest, one command away.
     ///
     /// Best-effort by signature, and deliberately so at the call site: a note
     /// that could not be written is worth less than the sync that succeeded,
     /// and failing here would report a completed sync as a failed command.
     pub fn leave_note(&self, text: &str) -> Result<()> {
         let note = note_file(&self.gitdir);
-        std::fs::write(&note, format!("{}\n", text.trim_end()))
-            .with_context(|| format!("leaving a note at {}", note.display()))
+        // Written beside and renamed over, rather than written in place.
+        // `fs::write` truncates first, so a disk that fills mid-write leaves a
+        // *prefix* of the sentence on disk and returns an error — and the
+        // caller, told the note failed, would warn that the agent will find
+        // nothing, while the agent is handed half a sentence with the
+        // `git show HEAD` clause missing and no sign anything was lost. A
+        // rename either replaces the file or does not.
+        let part = self.gitdir.join(format!("{NOTE_NAME}.part"));
+        let write = std::fs::write(&part, format!("{}\n", text.trim_end()))
+            .and_then(|()| std::fs::rename(&part, &note));
+        if write.is_err() {
+            let _ = std::fs::remove_file(&part);
+        }
+        write.with_context(|| format!("leaving a note at {}", note.display()))
     }
 
     /// Whether `commit` is still in the history `HEAD` reaches.
@@ -1869,14 +1894,31 @@ pub const ARRANGEMENT: &str = "This repository is the sandbox's own, and it is n
 /// of it happened.
 ///
 /// A function of the three numbers so the wording is asserted rather than
-/// typed at the call site, and so the zero-conflict case cannot end up saying
-/// *0 files need resolving*.
+/// typed at the call site, and so neither zero can end up spelled as a count.
+///
+/// **Both** zeroes, and the second was missed on the first pass. *0 files need
+/// resolving* was designed out and *moved 0 commits* was left in — reachable
+/// from ordinary input, since `--base` is a user-supplied argument and
+/// `sync`'s only guard is that the two ends differ. Pointing an agent at
+/// `git show HEAD` under a sentence saying nothing arrived is worse than
+/// saying nothing at all.
 pub fn note_for(base: &str, moved: usize, conflicted: usize) -> String {
-    let arrived = format!(
-        "{base} moved {moved} commit{} under you while this session was stopped. \
-         `git show HEAD` is exactly what arrived.",
-        if moved == 1 { "" } else { "s" }
-    );
+    // `moved` counts `was..onto`, so zero with the two ends differing means
+    // `onto` is an ancestor: the base went backwards, to a commit this session
+    // already had. Rarer than a fast-forward and not an error — `omh sNN sync
+    // --base <an older tag>` is a thing somebody means.
+    let arrived = if moved == 0 {
+        format!(
+            "{base} moved backwards under you while this session was stopped — it now points \
+             at a commit this session already had. `git show HEAD` is exactly what changed."
+        )
+    } else {
+        format!(
+            "{base} moved {moved} commit{} under you while this session was stopped. \
+             `git show HEAD` is exactly what arrived.",
+            if moved == 1 { "" } else { "s" }
+        )
+    };
     match conflicted {
         0 => format!("{arrived} It merged cleanly — nothing needs deciding."),
         n => format!(
@@ -2372,7 +2414,6 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    /// Commit in the sandbox the way the agent does, and answer with its id.
     /// The note reads as English in every shape it has, and never claims a
     /// decision is waiting when none is.
     ///
@@ -2417,18 +2458,38 @@ mod tests {
             "one file *needs*, not *need*: {single}"
         );
 
-        for note in [&one, &many, &single] {
+        // The other zero, and the one this test did not have on the first
+        // pass. `--base` is a user-supplied argument, so a base that went
+        // backwards is ordinary input rather than a corrupted repository.
+        let back = note_for("release-1.0", 0, 0);
+        assert!(
+            !back.contains("0 commit"),
+            "a count of nothing is not a sentence: {back}"
+        );
+        assert!(
+            back.contains("moved backwards") && back.contains("release-1.0"),
+            "it says what actually happened, by name: {back}"
+        );
+        assert!(
+            back.contains("what changed") && !back.contains("what arrived"),
+            "and does not claim something arrived when the base went back: {back}"
+        );
+
+        for note in [&one, &many, &single, &back] {
             assert!(
                 note.contains("git show HEAD"),
                 "every shape says where to read it: {note}"
             );
-            // The manifest claims 234 B for the widest shape here. Slack for a
-            // long branch name and a three-digit count, and no more: this is a
-            // sentence, and the entry beside it in the base set is a paragraph
-            // for a reason.
+            // A ceiling, not the cost — the manifest's figure is asserted
+            // byte for byte by `the_notes_declared_cost_matches_the_sentence_it_ships`
+            // against one named shape, which is the only way a number about an
+            // unbounded string can be checked at all. What this catches is the
+            // sentence turning into a paragraph, which is a different mistake
+            // and the one this arrives in the middle of somebody's context to
+            // make.
             assert!(
                 note.len() < 320,
-                "the note has grown past what the manifest costs it at: {} B",
+                "the note has grown from a sentence into a paragraph: {} B",
                 note.len()
             );
             // A run of spaces is a line continuation whose indentation shipped
@@ -2437,6 +2498,7 @@ mod tests {
         }
     }
 
+    /// Commit in the sandbox the way the agent does, and answer with its id.
     fn checkpoint(s: &Shadow, wt: &Path, file: &str, body: &str, subject: &str) -> String {
         std::fs::write(wt.join(file), body).unwrap();
         git(&s.gitdir, wt, &["add", "-A", "."]).unwrap();
@@ -2450,6 +2512,72 @@ mod tests {
             .unwrap()
             .trim()
             .to_string()
+    }
+
+    /// Two syncs before one start leave one sentence, not two stacked.
+    ///
+    /// The contract `leave_note`'s own comment argues for, asserted because
+    /// switching the write to an append keeps every other test green and the
+    /// agent gets a stale paragraph above a current one — with no way to tell
+    /// which of the two describes the tree in front of it.
+    #[test]
+    fn a_second_sync_replaces_the_note_rather_than_stacking_on_it() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        s.leave_note(&note_for("main", 3, 0)).unwrap();
+        s.leave_note(&note_for("main", 1, 2)).unwrap();
+
+        let left = std::fs::read_to_string(note_file(&s.gitdir)).unwrap();
+        assert!(
+            left.contains("moved 1 commit") && !left.contains("moved 3 commits"),
+            "the second note is the one that is there: {left}"
+        );
+        assert_eq!(left.lines().count(), 1, "one sentence, not two: {left}");
+        // Nothing left beside it either — the write goes through a temporary
+        // so a half-written note can never be delivered as a whole one, and a
+        // temporary that outlived its rename would be a file `git status`
+        // inside the sandbox starts reporting.
+        let strays: Vec<_> = std::fs::read_dir(&s.gitdir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.contains("omh-note") && n != "omh-note")
+            .collect();
+        assert!(strays.is_empty(), "no scaffolding left behind: {strays:?}");
+    }
+
+    /// A note that cannot be written does not fail the sync, and does not
+    /// leave a fragment behind claiming to be one.
+    ///
+    /// Both halves matter and the second is why the write goes through a
+    /// rename. `fs::write` truncates first, so a disk that fills mid-sentence
+    /// leaves a prefix on disk *and* returns an error — and the caller, told
+    /// the note failed, warns that the agent will find nothing while the agent
+    /// is handed half a sentence with the `git show HEAD` clause missing.
+    #[test]
+    fn a_note_that_cannot_be_written_leaves_nothing_claiming_to_be_one() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        // A directory where the note goes: the rename cannot replace it, which
+        // is a write failure omh can produce on demand.
+        std::fs::create_dir(note_file(&s.gitdir)).unwrap();
+        let why = s.leave_note(&note_for("main", 3, 0)).unwrap_err();
+        assert!(
+            format!("{why:#}").contains("omh-note"),
+            "the failure names the file: {why:#}"
+        );
+        let strays: Vec<_> = std::fs::read_dir(&s.gitdir)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .filter(|n| n.contains("omh-note") && n != "omh-note")
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "and the half-written one is cleaned up rather than left to be read: {strays:?}"
+        );
     }
 
     /// The numbers are the interface — `diff N` and `--keep 1,3-4` take them —

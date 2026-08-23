@@ -179,12 +179,19 @@ still answers, from the `rejected` table — *should omh stop the agent running
 git?* is a question someone rediscovers, and the answer changed rather than
 having been wrong the first time.
 
-`git-note` is the one hook whose cost is not paid per context rebuild. Every
-other `SessionStart` hook injects on every resume and every compact; this one
-captures a file omh leaves after `omh sNN sync`, and the capture *removes* it —
-so it speaks once and then is silent, and on a start that follows no sync it
-never speaks at all. That is why an event describing something that happened
-once can afford to live at an event that repeats.
+`git-note` is the one `SessionStart` hook whose cost is not paid per context
+rebuild. The only other one, `graph-orient`, injects on every resume and every
+compact; this one captures a file omh leaves after `omh sNN sync`, and the
+capture *removes* it — so it speaks once and then is silent, and on a start
+that follows no sync it never speaks at all. That is how an event describing
+something that happened once can afford to live at a moment that repeats.
+
+It is also the entry with the widest gap between harnesses. Claude Code
+delivers it; opencode maps no `session-start` at all, and omp has the moment but
+no advisory channel there, so on both the sentence is never delivered. Both say
+so by name at launch. The `base moved to <sha>` commit `sync` writes is still in
+the sandbox's own log either way — what is lost is the prompt to go and read
+it.
 
 What is left is a set where every hook advises, and `graph-first` states the
 rule: *a nudge, not a wall — a hook that blocks correct work gets disabled.* The
@@ -207,12 +214,16 @@ runs is worse than one that refuses to start — and a repo that could replace
 MCP servers are pure data and live entirely in the manifest. Hook **commands**
 stay in `src/base.rs`: they are intricate shell that interpolates `GRAPH_BIN`
 and `$OMH_GRAPH_PROJECT`, and flattening them into TOML would break that
-compile-time coupling. Rules **bodies** stay there for the same reason —
-`memory-rules` interpolates the guest note path, `git-note` interpolates
-`shadow::GUEST_NOTE` so the hook reads the path omh writes, and `git-rules`
-reads `shadow::ARRANGEMENT`, which the sandbox's seed commit reads too — and two
-copies of the same sentence drift, with the one that drifts never being the one
-you are reading.
+compile-time coupling. `git-note` is the same argument in a second shape: it
+interpolates `shadow::GUEST_NOTE`, so the path the hook reads is the one
+`shadow::note_file` writes rather than a second copy of it — and a hook reading
+a path omh never writes fails by saying nothing at all, forever.
+
+Rules **bodies** stay there for the same reason — `memory-rules` interpolates
+`memory::GUEST_LOCAL_NOTES`, which is the notes store and a different thing
+despite the name, and `git-rules` reads `shadow::ARRANGEMENT`, which the
+sandbox's seed commit reads too — and two copies of the same sentence drift,
+with the one that drifts never being the one you are reading.
 
 So the manifest carries *curation metadata* while the code carries the thing
 itself — two sources describing one base set, which can drift. A test

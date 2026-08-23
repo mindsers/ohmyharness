@@ -96,7 +96,8 @@ If doctor passes, check whether the capability was dropped at launch:
 
 ```console
 $ omh opencode
-omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool),
+omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment),
+     graph-first (no `search` tool),
      graph-orient (no `session-start` moment),
      graph-read (no way to inject text before a tool runs)
 ```
