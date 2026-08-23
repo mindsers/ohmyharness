@@ -298,7 +298,10 @@ $ omh s01 commit --keep 1,3-4    # these, in this order
 $ omh s01 commit --keep --edit   # the todo, for people who want it
 ```
 
-**Landed in #56, with one mechanism changed.** `--keep` and `--keep --edit` are
+**Landed in #56, with one mechanism changed — reviewed and kept.** The two were
+measured against the same history and are user-visibly identical, including that
+both refuse a selected merge; see
+[decisions](decisions.md#deviations-from-a-written-design-ratified). `--keep` and `--keep --edit` are
 a rebase, as designed. A *selection* is `cherry-pick`, which is not what this
 said.
 
