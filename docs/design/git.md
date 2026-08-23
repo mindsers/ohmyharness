@@ -53,7 +53,7 @@ Four workflows, not a feature list.
 | I want to | today |
 |---|---|
 | ~~**read the change** before landing it~~ — landed (#54, #55) | `omh s diff` printed `--stat` only and the patch was in a worktree the docs tell you never to enter. `omh sNN log` numbers the agent's commits and `omh sNN diff [n] [-p]` reads one, or the session, as a patch. |
-| **know what the agent has been doing** | Its commits are invisible until `--keep` opens a `rebase -i` todo. `s ls` does not count them; `s rm` destroys them without saying they existed. |
+| **know what the agent has been doing** | Its commits were invisible until `--keep` opened a `rebase -i` todo. `s ls` does not count them; `s rm` destroys them without saying they existed. |
 | ~~**land work in stages**~~ — landed (#50) | `--keep` replayed from the seed every time. Measured: a second run re-listed commits already on the branch, then died on `Could not apply`. It replays from what it last handed over now. |
 | **not fall behind trunk** | `s ls` reports `behind 12` and offers nothing. The session works against stale code until it is abandoned. |
 
@@ -288,8 +288,8 @@ changes neither answer elsewhere. And the JSON key names the content —
 
 ### `omh sNN commit --keep [selection]`
 
-The flagship feature currently requires knowing `pick`/`squash`/`drop`, that
-reordering can conflict, and how to abort a rebase. Under the layering rule that
+The flagship feature required knowing `pick`/`squash`/`drop`, that reordering
+can conflict, and how to abort a rebase. Under the layering rule that
 is backwards. `log` numbers the checkpoints, and you name what you want:
 
 ```console
@@ -320,8 +320,27 @@ the unedited list. Both selection tests failed exactly that way before the
 mechanism changed, which is how the limitation was found rather than argued.
 
 Rebase stays for everything else: `All` and `Edit` mean "the whole range, in
-order", and a merge inside that range replays under rebase while `cherry-pick`
-would have to be told which parent to follow.
+order". A merge inside that range is where the two differ, and an earlier draft
+of this had it backwards: measured, plain `rebase --onto` **flattens** a merge —
+it is discarded and both sides are linearised, no flag, no warning — while
+`cherry-pick` refuses outright. Linearising without asking is the friendlier
+failure for a whole-range replay; refusing is the right one for a selection, so
+a selected merge is turned away before anything runs.
+
+Two flags rather than one: `--empty=drop --allow-empty`. Measured — `--empty`
+governs commits that *become* empty, and a commit that started empty is
+`--allow-empty`'s business. Without the second, an agent's `git commit
+--allow-empty` marker (the hazard `stamp` records having met once) aborts a
+selection with a message that names no commit and blames a conflict that never
+happened, while `--keep` on the same history succeeds.
+
+**Open: the git floor.** `cherry-pick --empty=` is newer than everything else
+omh asks of git, and newer than the `≥ 2.38` this document names below for
+`merge-tree --write-tree`. The exact version was not measurable here — only
+2.55 was available — so it is written down rather than guessed at, and step 11
+(`omh doctor` learning git) is where it gets pinned. On a git without it, a
+selection fails after the fetch with a usage dump; `--keep` and `--keep --edit`
+are unaffected.
 
 `--edit` is then the only path that needs a terminal, which is where the tty
 guard goes. That closes a measured hole: with stdin not a terminal, `rebase -i`

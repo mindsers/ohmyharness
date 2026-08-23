@@ -44,8 +44,8 @@ branch. You never go near the worktree directory itself.
 
 The agent gets git too — its own repository, holding one commit and none of your
 history, so `stash` and `reset --hard` are its to use. `omh s commit --keep`
-brings its commits onto your branch with the messages it wrote, after you
-curate them.
+brings its commits onto your branch with the messages it wrote — all of them in
+order, or the ones you name: `omh s01 commit --keep 1,3-4`.
 
 **Your setup, in any harness.** Rules, skills, MCP servers, commands, subagents
 and hooks are declared once and rendered into whatever shape each harness reads.

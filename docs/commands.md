@@ -452,9 +452,10 @@ branch — see [Sessions](sessions.md#the-agent-has-git-and-it-is-not-yours).
 $ omh s commit --keep
 ```
 
-It opens the list first, as `git rebase -i` does, so you reorder, reword and
-drop before anything lands. What you keep arrives with the messages the agent
-wrote — which is the point, because it wrote them while it still had the context
+On its own it takes every checkpoint since the last handover, in order, and
+opens nothing. `--keep 1,3-4` takes those, in that order; `--keep --edit` opens
+the list, as `git rebase -i` does, so you reorder, reword and drop by hand.
+What you keep arrives with the messages the agent wrote — which is the point, because it wrote them while it still had the context
 you would be reconstructing from a diff.
 
 `--skip-carried` has no meaning here and is ignored: `--keep` refuses a carried

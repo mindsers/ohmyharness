@@ -744,28 +744,29 @@ fn edit_without_a_terminal_refuses_rather_than_pretending_to_curate() {
     );
 }
 
-/// A selection is refused before anything moves.
+/// A selection is refused before the branch moves.
 ///
-/// `harvest` promises the branch is untouched when a replant fails, and the
-/// cheapest way to keep that promise is not to have started: a number outside
-/// the range is a typo, not a failure to recover from.
+/// The refusals themselves are asserted in `src/main.rs`, against a session
+/// with a real sandbox behind it — an earlier version of this test lived here
+/// alone and proved nothing: `sb.session()` builds a worktree and no sandbox
+/// repository, so `9`, `0`, `two` and `4-2` all died identically inside
+/// `seed()`, about a record the user has never heard of. Gutting the parser
+/// left it green.
+///
+/// What is left here is the half that needs the whole binary: whatever the
+/// refusal says, the branch is where it was.
 #[test]
-fn a_selection_that_names_nothing_real_is_refused_before_the_branch_moves() {
+fn a_refused_selection_leaves_the_branch_where_it_was() {
     let sb = sandbox();
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("work.rs"), "fn work() {}\n").unwrap();
     let before = sb.head_of_branch("omh/s01");
 
-    for (selection, why) in [
-        ("9", "there is no ninth checkpoint"),
-        ("0", "the numbers start at 1"),
-        ("two", "not a number at all"),
-        ("4-2", "backwards"),
-    ] {
+    for selection in ["9", "0", "two", "4-2"] {
         let out = sb.omh(&["s01", "commit", "--keep", selection]);
         assert!(
             !out.status.success(),
-            "`--keep {selection}` ({why}) was accepted: {}",
+            "`--keep {selection}` was accepted: {}",
             String::from_utf8_lossy(&out.stdout)
         );
     }
@@ -776,7 +777,7 @@ fn a_selection_that_names_nothing_real_is_refused_before_the_branch_moves() {
     );
 }
 
-/// An empty patch is a sentence, not a blank screen.
+/// An empty patch is a sentence, not a blank screen./// An empty patch is a sentence, not a blank screen.
 ///
 /// `Diff::human` exists partly to say *no changes on … (against …)*, because
 /// silence reads as breakage. Handing the terminal straight to git skipped it,
