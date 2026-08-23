@@ -414,7 +414,7 @@ enum SessionsCmd {
     /// What the agent has committed inside the sandbox, newest first.
     ///
     /// Numbered, so nothing here asks for an object id: the numbers are what
-    /// `diff` and `--keep` take.
+    /// `diff` and `--keep` will take.
     Log,
     /// What a session changed, against its base branch.
     Diff {
@@ -4930,22 +4930,70 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 fn log_cmd(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
+    ctx.say(&log_report(&paths, &session, ctx)?);
+    Ok(())
+}
+
+/// The decision, separated from the printing so it can be asserted.
+///
+/// Split out because nothing reached the wiring otherwise: with the whole
+/// command ending in `ctx.say`, replacing the read below with an empty list
+/// left the entire suite green — `omh sNN log` would have reported *no
+/// checkpoints* for every session on earth, with the shadow tests passing
+/// (they call `checkpoints` directly) and the report tests passing (they build
+/// the value by hand). `the_resolution_is_read_and_written_in_the_committed_
+/// layer` in this file already argues the general case: a correct reader called
+/// with the wrong argument is the same bug with a passing guard in front of it.
+fn log_report(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<report::Log> {
     let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
 
-    // A session whose sandbox has never run has no repository to read, and that
-    // is *no checkpoints* rather than a failure — asking to see the agent's
-    // work before the agent has run is an ordinary thing to do. Checked on the
-    // seed record, which `ensure` writes last: a gitdir alone is what a launch
-    // killed halfway through leaves behind.
-    let checkpoints = match shadow.seed_record.exists() {
-        true => shadow.checkpoints(&session.worktree)?,
-        false => Vec::new(),
+    // Three states, and only one of them is *nothing to show*.
+    //
+    // `Path::exists` was the first version of this and it answers `false` for
+    // every failure, not only for absence — a root-owned `~/.omh`, an
+    // unmounted volume, a stale handle — and each of those would have printed
+    // *the agent has not committed anything* over an exit code of 0, about a
+    // session whose repository omh could not open. `landed` in `shadow.rs`
+    // states the rule this now follows and was written for this exact reason:
+    // cannot tell must not spell the same as clean.
+    //
+    // The pairing with the gitdir is the part worth reading twice. `ensure`
+    // writes the seed record and *then* renames the gitdir into place, so a
+    // launch killed in between leaves a seed with no repository — the harmless
+    // way round, rebuilt by the next launch. The reverse, a repository with no
+    // seed, is what `reap` leaves when `remove_dir_all` fails on a live mount
+    // and the seed file goes anyway. That one holds every checkpoint the agent
+    // made and no way to say where they started, and it must not be reported
+    // as an empty session: the user's next move would be `rm`.
+    let read = match std::fs::metadata(&shadow.seed_record) {
+        Ok(_) => shadow.checkpoints(&session.worktree)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !shadow.gitdir.exists() => {
+            shadow::Checkpoints::default()
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+            "{} has a sandbox repository at {} and no record of where it started. omh \
+             cannot tell you what the agent committed, and `omh {} rm` would remove the \
+             repository. Read it directly first:\n  git --git-dir={} log",
+            session.id,
+            shadow.gitdir.display(),
+            session.id,
+            shadow.gitdir.display()
+        ),
+        Err(e) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "reading where {} started, at {}",
+                    session.id,
+                    shadow.seed_record.display()
+                )
+            })
+        }
     };
 
     let base = session::default_branch(&paths.repo);
     // Three answers, and the report renders each differently. A count omh could
-    // not take must not print as zero — `0 behind main` is reassurance, and the
-    // reason it could not be taken is worth saying out loud rather than
+    // not take must not print as zero — `0 behind main` is reassurance — and
+    // the reason it could not be taken is worth saying out loud rather than
     // becoming an absence.
     let behind = match session.behind(&paths.repo, &base) {
         Ok(behind) => Some(behind),
@@ -4957,14 +5005,12 @@ fn log_cmd(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()
         }
     };
 
-    ctx.say(&report::Log {
+    Ok(report::Log {
         id: session.id.clone(),
-        checkpoints,
-        uncommitted: session.uncommitted()?,
+        read,
         behind,
         base,
-    });
-    Ok(())
+    })
 }
 
 fn diff(cwd: &std::path::Path, id: Option<&str>, base: Option<&str>, ctx: &out::Ctx) -> Result<()> {
@@ -5661,6 +5707,135 @@ mod tests {
             the_one_session(prefix, parsed.session).unwrap(),
             Some("s01".to_string()),
             "the harness keeps its own flags and the session stays the prefix's"
+        );
+    }
+
+    /// The log reports the session it was asked about, from that session's own
+    /// sandbox repository.
+    ///
+    /// Nothing reached this wiring before it was split out of `log_cmd`:
+    /// replacing the read with an empty list left the whole suite green, and
+    /// `omh sNN log` would have answered *the agent has not committed
+    /// anything* for every session on earth. The shadow tests call
+    /// `checkpoints` directly and the report tests build the value by hand, so
+    /// both halves stayed correct while nothing joined them.
+    ///
+    /// Two sessions with different work in them, because with one the wiring
+    /// cannot be wrong in a way this notices.
+    #[test]
+    fn the_log_reads_the_named_sessions_own_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(args)
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "root"]);
+        std::fs::create_dir_all(paths.shadows()).unwrap();
+
+        let mut sessions = Vec::new();
+        for (id, subject) in [("s01", "Only in s01"), ("s02", "Only in s02")] {
+            let session = Session::new(&paths.worktrees().join(id), id.to_string());
+            session.ensure(&paths.repo, "main").unwrap();
+            let shadow = shadow::Shadow::new(&paths.shadows(), id);
+            shadow.ensure(&session.worktree, &[]).unwrap();
+            std::fs::write(session.worktree.join("work.rs"), format!("// {subject}\n")).unwrap();
+            // Through the sandbox's own repository, the way the agent commits.
+            for args in [
+                vec!["add", "-A", "."],
+                vec!["commit", "-q", "--no-verify", "-m", subject],
+            ] {
+                let out = Command::new("git")
+                    .arg("--git-dir")
+                    .arg(&shadow.gitdir)
+                    .arg("--work-tree")
+                    .arg(&session.worktree)
+                    .args(&args)
+                    .output()
+                    .unwrap();
+                assert!(out.status.success(), "{args:?}: {out:?}");
+            }
+            sessions.push(session);
+        }
+
+        for (session, mine, theirs) in [
+            (&sessions[0], "Only in s01", "Only in s02"),
+            (&sessions[1], "Only in s02", "Only in s01"),
+        ] {
+            let log = log_report(&paths, session, &out::Ctx::plain()).unwrap();
+            let subjects: Vec<&str> = log
+                .read
+                .commits
+                .iter()
+                .map(|c| c.subject.as_str())
+                .collect();
+            assert!(
+                subjects.contains(&mine) && !subjects.contains(&theirs),
+                "{}'s log is {}'s work: {subjects:?}",
+                session.id,
+                session.id
+            );
+        }
+    }
+
+    /// A session whose sandbox never ran is *nothing yet*; one whose
+    /// repository is there without a record of where it started is not.
+    ///
+    /// `reap` leaves the second behind when `remove_dir_all` fails on a live
+    /// mount and the seed file goes anyway — a repository holding every
+    /// checkpoint the agent made, and no way to say where they began. Reported
+    /// as an empty session, the user's next move is `rm`.
+    #[test]
+    fn a_sandbox_repository_with_no_record_of_its_start_is_not_an_empty_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["commit", "-q", "--allow-empty", "-m", "root"],
+        ] {
+            Command::new("git")
+                .current_dir(&paths.repo)
+                .args(&args)
+                .output()
+                .unwrap();
+        }
+        std::fs::create_dir_all(paths.shadows()).unwrap();
+        let session = Session::new(&paths.worktrees().join("s01"), "s01".to_string());
+        session.ensure(&paths.repo, "main").unwrap();
+
+        // Never launched: no repository, no record.
+        let log = log_report(&paths, &session, &out::Ctx::plain()).unwrap();
+        assert!(
+            log.read.commits.is_empty(),
+            "asking before the agent has run is an ordinary thing to do"
+        );
+
+        // Launched, then half-reaped.
+        let shadow = shadow::Shadow::new(&paths.shadows(), "s01");
+        shadow.ensure(&session.worktree, &[]).unwrap();
+        std::fs::remove_file(&shadow.seed_record).unwrap();
+        let err = log_report(&paths, &session, &out::Ctx::plain())
+            .expect_err("a repository omh cannot place is not an empty session");
+        assert!(
+            err.to_string().contains("rm"),
+            "and the refusal warns about the move that would destroy it: {err}"
         );
     }
 

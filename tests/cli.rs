@@ -591,9 +591,14 @@ fn a_log_for_a_sandbox_that_never_ran_says_nothing_yet() {
         printed.contains("no checkpoints"),
         "it says so plainly: {printed}"
     );
+    // Zero, and correctly: the count is what `--keep` would sweep out of the
+    // *sandbox*, and there is no sandbox. The file sitting in the worktree is a
+    // fact about the session, which `omh s ls` and `omh s diff` answer — this
+    // line answers what the harvest is about to do, so it must not borrow a
+    // number measured somewhere else.
     assert!(
-        printed.contains("uncommitted in the session: 1 file"),
-        "and the work that is there is still reported: {printed}"
+        printed.contains("uncommitted in the sandbox: 0 files"),
+        "nothing is staged for a harvest that has nothing to harvest: {printed}"
     );
 }
 

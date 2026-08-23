@@ -131,11 +131,10 @@ impl Report for Action {
 /// The command that changes how a session feels: until it existed you could
 /// not tell the agent had been committing at all, and `--keep` opening a rebase
 /// todo was the first sight of it.
+#[derive(Debug)]
 pub struct Log {
     pub id: String,
-    pub checkpoints: Vec<crate::shadow::Checkpoint>,
-    /// Files changed in the worktree that no checkpoint holds yet.
-    pub uncommitted: usize,
+    pub read: crate::shadow::Checkpoints,
     /// How far the session's branch trails the base, or `None` when omh could
     /// not tell — which is not the same as zero and does not print as it.
     pub behind: Option<usize>,
@@ -145,7 +144,32 @@ pub struct Log {
 impl Log {
     /// Checkpoints the next `--keep` would take.
     fn pending(&self) -> usize {
-        self.checkpoints.iter().filter(|c| !c.landed).count()
+        self.read.commits.iter().filter(|c| !c.landed).count()
+    }
+
+    /// Whether one line can say which work is already the branch's.
+    ///
+    /// It can when the landed checkpoints are the oldest ones and nothing else
+    /// — the shape a session has when `--keep` has simply been run once. A
+    /// merge breaks it: `landed` means *ancestor of the replay point*, not
+    /// *older*, so a landed commit can sit above an unlanded one. Then a
+    /// divider does not merely fall in an awkward place, it **labels rows as
+    /// already on the branch that are not** — about work `omh sNN rm` would
+    /// destroy. So it is not drawn, and the numbers are named instead.
+    fn cleanly_split(&self) -> bool {
+        let pending = self.pending();
+        self.read.commits[..self.read.commits.len() - pending]
+            .iter()
+            .all(|c| c.landed)
+    }
+
+    /// States in which the list is not the whole story.
+    ///
+    /// Both are states `harvest` refuses over. A log that showed neither would
+    /// let a user read a clean review and then be refused by `--keep` citing
+    /// work they were never shown.
+    fn incomplete(&self) -> bool {
+        self.read.unreachable > 0 || self.read.replay_point_lost
     }
 }
 
@@ -168,7 +192,7 @@ fn ago(seconds: u64) -> String {
 
 impl Report for Log {
     fn human(&self, p: &out::Palette) -> String {
-        let total = self.checkpoints.len();
+        let total = self.read.commits.len();
         let pending = self.pending();
         let mut head = format!(
             "{} · {total} checkpoint{}",
@@ -178,16 +202,19 @@ impl Report for Log {
         if pending > 0 {
             head.push_str(&format!(", {pending} not yours yet"));
         }
-        // Only when omh could take the count. `None` is *could not tell*, and
-        // the one rendering it must never have is `0 behind`, which reads as
-        // reassurance.
-        if let Some(behind) = self.behind.filter(|b| *b > 0) {
-            head.push_str(&format!(" · {behind} behind {}", self.base));
+        // Three answers, three renderings. Silence for zero and silence for
+        // *could not tell* would be the same rendering, which is the rule this
+        // file states at the top: the empty string meaning both **clean** and
+        // **omh could not tell** is the pair it is most dangerous to confuse.
+        match self.behind {
+            Some(0) => {}
+            Some(behind) => head.push_str(&format!(" · {behind} behind {}", self.base)),
+            None => head.push_str(&format!(" · how far behind {} is unknown", self.base)),
         }
         let mut s = out::heading(p, &head);
         s.push('\n');
 
-        if self.checkpoints.is_empty() {
+        if self.read.commits.is_empty() {
             s.push_str(&out::nothing(
                 p,
                 "no checkpoints — the agent has not committed anything in this session",
@@ -195,41 +222,36 @@ impl Report for Log {
         } else {
             // Right-aligned against the widest number, so the column reads as a
             // column of numbers rather than of text that happens to be digits.
-            let width = self.checkpoints.len().to_string().len();
+            let width = total.to_string().len();
             let mut table = Table::new();
             // Newest first: the checkpoint you want is nearly always the one
             // that just happened. The *numbers* still count from the oldest —
-            // they are what `diff` and `--keep` take, and they have to mean the
-            // same thing tomorrow.
-            for c in self.checkpoints.iter().rev() {
+            // they are what `diff` and `--keep` will take, and they have to
+            // mean the same thing tomorrow.
+            for c in self.read.commits.iter().rev() {
+                let (files, churn) = match &c.touched {
+                    // A merge is not measured, and *0 files* is a measurement.
+                    None => ("merge".to_string(), String::new()),
+                    Some(t) => (
+                        format!("{} file{}", t.files, if t.files == 1 { "" } else { "s" }),
+                        churn(t),
+                    ),
+                };
                 table = table.row(vec![
                     Cell::styled(format!("{:>width$}", c.number), out::NAME),
-                    Cell::styled(ago(c.age), out::DIM),
+                    // `?` rather than a guess. A date omh could not read must
+                    // not borrow the confidence of *just now*.
+                    Cell::styled(c.age.map_or("?".into(), ago), out::DIM),
                     // The agent's words, and the only untrusted value on the
                     // line — see `out::untrusted`.
                     Cell::plain(out::untrusted(&c.subject)),
-                    Cell::styled(
-                        format!("{} file{}", c.files, if c.files == 1 { "" } else { "s" }),
-                        out::DIM,
-                    ),
-                    Cell::styled(churn(c.added, c.removed), out::DIM),
+                    Cell::styled(files, out::DIM),
+                    Cell::styled(churn, out::DIM),
                 ]);
             }
             let rendered = table.render(p);
             let mut lines: Vec<String> = rendered.lines().map(str::to_string).collect();
-            // Drawn where the first already-handed-over row actually falls,
-            // rather than counting `pending` rows down. The two agree for the
-            // linear history a session normally has, and a history with a merge
-            // in it does not: `landed` means *ancestor of the replay point*,
-            // which a commit newer by date can fail to be. Counting would put
-            // the line at a row chosen by arithmetic that stopped being true.
-            //
-            // The line is still one line, so an interleaved history can leave a
-            // not-yours commit below it. The header's count comes from
-            // `pending` and stays exact either way — the number is what the
-            // user acts on, and it is the one that must not drift.
-            let first_landed = self.checkpoints.iter().rev().position(|c| c.landed);
-            if let Some(at) = first_landed.filter(|at| *at > 0) {
+            if pending > 0 && pending < total && self.cleanly_split() {
                 let widest = lines
                     .iter()
                     .map(|l| out::display_width(l))
@@ -243,7 +265,10 @@ impl Report for Log {
                 let dashes = widest.saturating_sub(label.chars().count() + 2).max(4);
                 let left = "─".repeat(dashes / 2);
                 let right = "─".repeat(dashes - dashes / 2);
-                lines.insert(at, p.paint(out::DIM, &format!("  {left}{label}{right}")));
+                lines.insert(
+                    pending,
+                    p.paint(out::DIM, &format!("  {left}{label}{right}")),
+                );
             }
             s.push_str(&lines.join("\n"));
             s.push('\n');
@@ -258,9 +283,9 @@ impl Report for Log {
             p.paint(
                 out::DIM,
                 &format!(
-                    "uncommitted in the session: {} file{}",
-                    self.uncommitted,
-                    if self.uncommitted == 1 { "" } else { "s" }
+                    "uncommitted in the sandbox: {} file{}",
+                    self.read.uncommitted,
+                    if self.read.uncommitted == 1 { "" } else { "s" }
                 )
             )
         ));
@@ -272,9 +297,11 @@ impl Report for Log {
             "session": self.id,
             "base": self.base,
             "behind": self.behind,
-            "uncommitted": self.uncommitted,
+            "uncommitted": self.read.uncommitted,
+            "unreachable": self.read.unreachable,
+            "replay_point_lost": self.read.replay_point_lost,
             "pending": self.pending(),
-            "checkpoints": self.checkpoints.iter().rev().map(|c| json!({
+            "checkpoints": self.read.commits.iter().rev().map(|c| json!({
                 "number": c.number,
                 "id": c.id,
                 // Raw here: a program reading this is not a terminal, and a
@@ -282,46 +309,72 @@ impl Report for Log {
                 // match against git's own output.
                 "subject": c.subject,
                 "age_seconds": c.age,
-                "files": c.files,
-                "added": c.added,
-                "removed": c.removed,
+                "merge": c.touched.is_none(),
+                "files": c.touched.as_ref().map(|t| t.files),
+                "added": c.touched.as_ref().map(|t| t.added),
+                "removed": c.touched.as_ref().map(|t| t.removed),
+                "uncounted": c.touched.as_ref().map(|t| t.uncounted),
                 "landed": c.landed,
             })).collect::<Vec<_>>(),
         })
     }
 
     fn asides(&self) -> out::Asides {
+        let mut asides = out::Asides::default();
+        if self.read.unreachable > 0 {
+            asides = asides.warn(format!(
+                "{} commit{} in this sandbox are on no branch it can reach, and are not \
+                 listed above. `omh {} commit --keep` refuses until they are:\n  \
+                 git --git-dir=<the sandbox repo> log --all --not HEAD",
+                self.read.unreachable,
+                if self.read.unreachable == 1 {
+                    " "
+                } else {
+                    "s "
+                },
+                self.id
+            ));
+        }
+        if self.read.replay_point_lost {
+            asides = asides.warn(format!(
+                "the last handover is no longer in this history — something rewound below \
+                 it — so omh cannot tell which of these the branch already has. `omh {} \
+                 commit --keep` refuses until that is resolved",
+                self.id
+            ));
+        }
+        if !self.cleanly_split() {
+            let landed: Vec<String> = self
+                .read
+                .commits
+                .iter()
+                .filter(|c| c.landed)
+                .map(|c| c.number.to_string())
+                .collect();
+            asides = asides.warn(format!(
+                "no single line divides this list: {} already on the branch. Everything \
+                 else is new",
+                landed.join(", ")
+            ));
+        }
         // `omh sNN diff <number>` belongs here and is not offered yet: `diff`
         // does not take a number until the next step, and
         // `the_session_lines_omh_prints_are_lines_omh_accepts` caught this line
         // being written a step early — which is the whole reason that guard
         // exists. It arrives with the argument it names.
-        let mut offered: Vec<(String, String)> = Vec::new();
-        if self.pending() > 0 {
-            offered.push((
-                format!("omh {} commit --keep", self.id),
-                format!(
-                    "bring the {} new one{} onto the branch",
-                    self.pending(),
-                    if self.pending() == 1 { "" } else { "s" }
-                ),
+        //
+        // Nor is `--keep` offered when omh already knows it would be refused. A
+        // hint is a promise that the line can be selected and pasted, and the
+        // states above are exactly the ones `harvest` stops on.
+        if self.pending() > 0 && !self.incomplete() {
+            let cmd = format!("omh {} commit --keep", self.id);
+            asides = asides.hint(format!(
+                "  {cmd}    bring the {} new one{} onto the branch",
+                self.pending(),
+                if self.pending() == 1 { "" } else { "s" }
             ));
         }
-        // Padded to the widest command rather than by hand. Two hints written
-        // with counted spaces lined up until the session id changed width, and
-        // the promise a hint makes — that the line can be selected and pasted —
-        // is easier to believe from a column that is actually a column.
-        let widest = offered
-            .iter()
-            .map(|(cmd, _)| out::display_width(cmd))
-            .max()
-            .unwrap_or(0);
-        offered
-            .into_iter()
-            .fold(out::Asides::default(), |asides, (cmd, what)| {
-                let pad = " ".repeat(widest - out::display_width(&cmd) + 4);
-                asides.hint(format!("  {cmd}{pad}{what}"))
-            })
+        asides
     }
 }
 
@@ -330,12 +383,21 @@ impl Report for Log {
 /// A checkpoint that only adds lines reads `+48`, not `+48 −0`: the zero is
 /// noise in a column scanned for size, and every added-only commit would carry
 /// one.
-fn churn(added: usize, removed: usize) -> String {
-    match (added, removed) {
+///
+/// `·N` is files git would not count lines for — never a blank, which is what
+/// *changed nothing* looks like. A 200MB blob and a mode-bit change are not
+/// the same event.
+fn churn(t: &crate::shadow::Touched) -> String {
+    let counted = match (t.added, t.removed) {
         (0, 0) => String::new(),
         (a, 0) => format!("+{a}"),
         (0, r) => format!("−{r}"),
         (a, r) => format!("+{a} −{r}"),
+    };
+    match (counted.is_empty(), t.uncounted) {
+        (_, 0) => counted,
+        (true, n) => format!("·{n}"),
+        (false, n) => format!("{counted} ·{n}"),
     }
 }
 
@@ -1947,10 +2009,13 @@ mod tests {
             number,
             id: format!("{number:0>7}c"),
             subject: subject.to_string(),
-            age: number as u64 * 600,
-            files: number,
-            added: number * 10,
-            removed: number,
+            age: Some(number as u64 * 600),
+            touched: Some(crate::shadow::Touched {
+                files: number,
+                added: number * 10,
+                removed: number,
+                uncounted: 0,
+            }),
             landed,
         }
     }
@@ -1958,13 +2023,16 @@ mod tests {
     fn a_log() -> Log {
         Log {
             id: "s01".into(),
-            checkpoints: vec![
-                checkpoint(1, "Rename shadow to sandbox repo", true),
-                checkpoint(2, "Fix typo", true),
-                checkpoint(3, "Add the failing test first", false),
-                checkpoint(4, "Extract the tap guard", false),
-            ],
-            uncommitted: 2,
+            read: crate::shadow::Checkpoints {
+                commits: vec![
+                    checkpoint(1, "Rename shadow to sandbox repo", true),
+                    checkpoint(2, "Fix typo", true),
+                    checkpoint(3, "Add the failing test first", false),
+                    checkpoint(4, "Extract the tap guard", false),
+                ],
+                uncommitted: 2,
+                ..Default::default()
+            },
             behind: Some(2),
             base: "main".into(),
         }
@@ -2010,8 +2078,8 @@ mod tests {
     fn the_count_is_exact_even_where_one_line_cannot_say_it() {
         let mut log = a_log();
         // oldest → newest: landed, not, landed, not
-        log.checkpoints[1].landed = false;
-        log.checkpoints[2].landed = true;
+        log.read.commits[1].landed = false;
+        log.read.commits[2].landed = true;
         let printed = log.human(&out::Palette::plain());
 
         assert!(
@@ -2026,7 +2094,7 @@ mod tests {
     #[test]
     fn a_log_with_nothing_handed_over_yet_has_no_line_to_draw() {
         let mut log = a_log();
-        log.checkpoints.iter_mut().for_each(|c| c.landed = false);
+        log.read.commits.iter_mut().for_each(|c| c.landed = false);
         let printed = log.human(&out::Palette::plain());
         assert!(
             !printed.contains("yours from here"),
@@ -2044,11 +2112,13 @@ mod tests {
     #[test]
     fn a_subject_the_agent_wrote_cannot_repaint_the_log() {
         let mut log = a_log();
-        log.checkpoints[3].subject = "Fix \u{1b}[2K\u{1b}[31mnothing at all".into();
+        // Every control character, not only ESC: `\r` repaints a line just as
+        // well, and `untrusted` maps the whole class rather than one member.
+        log.read.commits[3].subject = "Fix \u{1b}[2K\rand \u{8}nothing at all".into();
         let printed = log.human(&out::Palette::plain());
         assert!(
-            !printed.contains('\u{1b}'),
-            "no escape survives into omh's own output: {printed:?}"
+            !printed.chars().any(|c| c.is_control() && c != '\n'),
+            "no control character survives into omh's own output: {printed:?}"
         );
         assert!(
             printed.contains("nothing at all"),
@@ -2062,8 +2132,8 @@ mod tests {
     #[test]
     fn a_sandbox_that_has_committed_nothing_says_so() {
         let mut log = a_log();
-        log.checkpoints.clear();
-        log.uncommitted = 3;
+        log.read.commits.clear();
+        log.read.uncommitted = 3;
         let printed = log.human(&out::Palette::plain());
         assert!(printed.contains("no checkpoints"), "it says so: {printed}");
         assert!(
@@ -2116,25 +2186,242 @@ mod tests {
         assert_eq!(v["behind"], json!(2));
     }
 
-    /// `behind` has three answers and one of them is *omh could not tell*. The
-    /// enum note at the top of this file is about exactly this: an unknown that
-    /// prints as zero is the dangerous one, because zero is reassuring.
+    /// `behind` has three answers and one of them is *omh could not tell*.
+    ///
+    /// The enum note at the top of this file is about exactly this. The first
+    /// version of this test asserted that the word *behind* was absent when
+    /// omh could not count — which `Some(0)` also satisfies, so it passed while
+    /// the two answers rendered identically. The invariant is that they differ,
+    /// and it has to be written as a comparison to say so.
     #[test]
     fn a_count_omh_could_not_take_does_not_print_as_zero() {
-        let log = a_log();
+        let render = |behind| {
+            let mut log = a_log();
+            log.behind = behind;
+            log.human(&out::Palette::plain())
+        };
+
         assert!(
-            log.human(&out::Palette::plain()).contains("2 behind main"),
+            render(Some(2)).contains("2 behind main"),
             "a count omh could take is reported"
         );
-
-        let mut log = a_log();
-        log.behind = None;
-        let printed = log.human(&out::Palette::plain());
-        assert!(
-            !printed.contains("behind"),
-            "an unanswered question is not a zero: {printed}"
+        assert_ne!(
+            render(None),
+            render(Some(0)),
+            "an unanswered question and a zero are the two answers it is most \
+             dangerous to confuse"
         );
-        assert_eq!(log.json()["behind"], json!(null));
+        assert!(
+            !render(Some(0)).contains("behind"),
+            "nothing to say when the session is level with its base"
+        );
+        assert_eq!(a_log().json()["behind"], json!(2));
+        let mut unknown = a_log();
+        unknown.behind = None;
+        assert_eq!(unknown.json()["behind"], json!(null));
+    }
+
+    /// A session with everything already handed over.
+    ///
+    /// The mirror of the all-new case, and three separate `> 0` guards live
+    /// here: the header would read *0 not yours yet*, a divider would be
+    /// inserted above the whole table claiming everything below it is the
+    /// branch's, and the aside would offer to bring *0 new ones* over.
+    #[test]
+    fn a_session_with_nothing_left_to_hand_over_offers_nothing() {
+        let mut log = a_log();
+        log.read.commits.iter_mut().for_each(|c| c.landed = true);
+        let printed = log.human(&out::Palette::plain());
+
+        assert!(
+            !printed.contains("not yours yet"),
+            "there is no work the branch has not seen: {printed}"
+        );
+        assert!(
+            !printed.contains("yours from here"),
+            "and no line to draw, since everything is below it: {printed}"
+        );
+        assert!(
+            log.asides().hints.is_empty(),
+            "nothing to offer: {:?}",
+            log.asides().hints
+        );
+        assert_eq!(log.json()["pending"], json!(0));
+    }
+
+    /// When one line would mislabel, no line is drawn and the numbers are
+    /// named instead.
+    ///
+    /// Below the divider is *labelled* `yours from here`. Under an interleaved
+    /// history those rows are affirmatively wrong — the reader is told work is
+    /// already on the branch when it is not, about commits `omh sNN rm` would
+    /// destroy. An ordering imperfection would be tolerable; a wrong label is
+    /// not.
+    #[test]
+    fn a_history_one_line_cannot_divide_gets_no_line() {
+        let mut log = a_log();
+        // oldest → newest: landed, not, landed, not
+        log.read.commits[1].landed = false;
+        log.read.commits[2].landed = true;
+        let printed = log.human(&out::Palette::plain());
+        let warnings = log.asides().warnings.join("\n");
+
+        assert!(
+            !printed.contains("yours from here"),
+            "no line can say this: {printed}"
+        );
+        assert!(
+            warnings.contains('1') && warnings.contains('3'),
+            "so the numbers already on the branch are named: {warnings}"
+        );
+        assert!(
+            printed.contains("2 not yours yet"),
+            "and the count stays exact: {printed}"
+        );
+    }
+
+    /// A merge reports as a merge, and an uncountable file as uncounted.
+    ///
+    /// Both are *omh did not measure this*, and the rendering they must never
+    /// share is the one that means *nothing changed*.
+    #[test]
+    fn what_omh_did_not_measure_never_renders_as_nothing() {
+        let mut log = a_log();
+        log.read.commits[3].touched = None;
+        log.read.commits[2].touched = Some(crate::shadow::Touched {
+            files: 2,
+            added: 0,
+            removed: 0,
+            uncounted: 2,
+        });
+        let printed = log.human(&out::Palette::plain());
+        let line = |needle: &str| {
+            printed
+                .lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no row for {needle}: {printed}"))
+                .to_string()
+        };
+
+        assert!(
+            line("Extract the tap guard").contains("merge"),
+            "a merge says so rather than reporting 0 files: {}",
+            line("Extract the tap guard")
+        );
+        assert!(
+            !line("Extract the tap guard").contains("0 file"),
+            "and never claims a measurement it did not take"
+        );
+        assert!(
+            line("Add the failing test first").contains('·'),
+            "two files git would not count are marked, not blank: {}",
+            line("Add the failing test first")
+        );
+        assert_eq!(log.json()["checkpoints"][0]["merge"], json!(true));
+        assert_eq!(log.json()["checkpoints"][0]["files"], json!(null));
+        assert_eq!(log.json()["checkpoints"][1]["uncounted"], json!(2));
+    }
+
+    /// A date omh could not read is a question mark, not *just now*.
+    #[test]
+    fn a_checkpoint_omh_could_not_date_does_not_read_as_just_committed() {
+        let mut log = a_log();
+        log.read.commits[3].age = None;
+        let printed = log.human(&out::Palette::plain());
+        let row = printed
+            .lines()
+            .find(|l| l.contains("Extract the tap guard"))
+            .unwrap();
+
+        assert!(row.contains('?'), "the age is unknown and says so: {row}");
+        assert!(
+            !row.contains("0s"),
+            "not the strongest possible claim as a fallback for having none: {row}"
+        );
+        assert_eq!(log.json()["checkpoints"][0]["age_seconds"], json!(null));
+    }
+
+    /// Two states make the list incomplete, and both are refusals waiting to
+    /// happen. Neither may be offered a `--keep` — a hint is a promise the
+    /// line can be pasted.
+    #[test]
+    fn work_the_log_cannot_show_is_said_and_the_harvest_is_not_offered() {
+        for (label, wreck) in [
+            (
+                "commits on a branch it wandered off",
+                (|log: &mut Log| log.read.unreachable = 3) as fn(&mut Log),
+            ),
+            ("a lost replay point", |log: &mut Log| {
+                log.read.replay_point_lost = true
+            }),
+        ] {
+            let mut log = a_log();
+            wreck(&mut log);
+            let warnings = log.asides().warnings.join("\n");
+
+            assert!(
+                !warnings.is_empty(),
+                "{label} has to reach the reader: {warnings}"
+            );
+            assert!(
+                log.asides().hints.is_empty(),
+                "and --keep is not offered when omh knows it would be refused ({label}): {:?}",
+                log.asides().hints
+            );
+        }
+        assert_eq!(a_log().json()["unreachable"], json!(0));
+        assert_eq!(a_log().json()["replay_point_lost"], json!(false));
+    }
+
+    /// The JSON is a contract, and the fields nobody asserts are the ones that
+    /// drift.
+    #[test]
+    fn the_json_carries_every_field_a_script_reads() {
+        let mut log = a_log();
+        log.read.commits[3].subject = "Fix \u{1b}[31m things".into();
+        let v = log.json();
+        let newest = &v["checkpoints"][0];
+
+        assert_eq!(v["session"], json!("s01"));
+        assert_eq!(v["base"], json!("main"));
+        assert_eq!(v["uncommitted"], json!(2));
+        assert_eq!(newest["number"], json!(4));
+        assert_eq!(newest["files"], json!(4));
+        assert_eq!(newest["added"], json!(40), "added is not removed");
+        assert_eq!(newest["removed"], json!(4), "and removed is not added");
+        assert_eq!(newest["age_seconds"], json!(2400));
+        assert!(newest["id"].as_str().is_some_and(|id| !id.is_empty()));
+        // Deliberately raw, and the asymmetry with `human` is the point: a
+        // program is not a terminal, and a subject with a replacement
+        // character in it is one it cannot match against git's own output.
+        assert!(
+            newest["subject"].as_str().unwrap().contains('\u{1b}'),
+            "the escape survives into JSON: {newest}"
+        );
+    }
+
+    /// Each arm of the churn column, including the two that only a real
+    /// history reaches.
+    #[test]
+    fn churn_drops_the_half_that_is_zero_and_never_blanks_the_uncounted() {
+        let t = |added, removed, uncounted| {
+            churn(&crate::shadow::Touched {
+                files: 1,
+                added,
+                removed,
+                uncounted,
+            })
+        };
+        assert_eq!(t(48, 12, 0), "+48 −12");
+        assert_eq!(t(48, 0, 0), "+48", "no +48 −0 in a column scanned for size");
+        assert_eq!(t(0, 12, 0), "−12");
+        assert_eq!(t(0, 0, 0), "", "git measured, and nothing changed");
+        assert_eq!(
+            t(0, 0, 2),
+            "·2",
+            "git would not measure — not the same, not blank"
+        );
+        assert_eq!(t(48, 12, 1), "+48 −12 ·1");
     }
 
     /// One unit, and the boundaries where it changes.
@@ -2149,6 +2436,10 @@ mod tests {
         // not.
         assert_eq!(ago(36 * 60 * 60), "36h");
         assert_eq!(ago(48 * 60 * 60), "2d");
+        // Away from the boundary too: `s / (23 * 60 * 60)` also yields 2 for
+        // the line above, so the divisor is only pinned by a day that is not
+        // adjacent to the switch.
+        assert_eq!(ago(9 * 24 * 60 * 60), "9d");
     }
 
     use super::*;

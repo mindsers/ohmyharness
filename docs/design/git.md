@@ -194,27 +194,51 @@ detail and the commands worth running next.
 
 ### `omh sNN log` — make the invisible visible
 
-Reads the shadow gitdir on the host. This is the command that changes how a
-session feels: today you cannot tell that the agent has been committing at all.
+**Landed in #54.** Reads the sandbox's gitdir on the host. This is the command
+that changes how a session feels: before it, you could not tell that the agent
+had been committing at all.
 
 ```
 s01 · 4 checkpoints, 2 not yours yet · 2 behind main
 
-  4  12m   Extract the tap guard into its own function     3 files  +48 −12
-  3  38m   Add the failing test first                      1 file   +23
-  ─────────────── yours from here ───────────────────────────────────────
-  2   1h   Fix typo                                        1 file   +1 −1
-  1   1h   Rename shadow → sandbox repo                   12 files  +90 −90
+  4  12m  Extract the tap guard into its own function  3 files   +48 −12
+  3  38m  Add the failing test first                   1 file    +23
+  ────────────────────────── yours from here ───────────────────────────
+  2  1h   Fix typo                                     1 file    +1 −1
+  1  1h   Rename shadow to sandbox repo                12 files  +90 −90
 
-  uncommitted in the session: 2 files  +11 −3
+  uncommitted in the sandbox: 2 files
 
-  omh s01 diff 4          read one
-  omh s01 commit --keep   bring the 2 new ones onto the branch
+  omh s01 commit --keep    bring the 2 new ones onto the branch
 ```
 
-Numbered, so there is no object id to copy and no ref to name. The uncommitted
-line matters as much as the checkpoints: it is the work `--keep` would sweep
-into "Work in progress", shown before that happens rather than after.
+Numbered, so there is no object id to copy and no ref to name — and numbered
+from the *oldest*, so a number keeps meaning the same commit as the agent
+commits more. `--topo-order` is what makes that true; measured, plain
+`--reverse` splices a merged side branch into the middle of the list and
+renumbers everything after it.
+
+The uncommitted line matters as much as the checkpoints: it is the work
+`--keep` would sweep into "Work in progress", shown before that happens rather
+than after. Measured in the sandbox, where `--keep` measures it —
+`Session::uncommitted` answers a different question and would count work the
+agent checkpointed an hour ago.
+
+Two answers are *omh did not measure this*, and neither may render as zero: a
+merge, which has no diff of its own until you name a parent, and a file git
+will not count lines for. They read `merge` and `·N`.
+
+The read carries `NEUTRALISED` and `GUEST_ENV`, and for this command those are
+not about executing anything — they are about being believed. Measured against
+git 2.55.0 in a gitdir the agent owns: one `git replace` prints a forged subject
+and a forged file list beside the real commit id, and one line in `info/grafts`
+cuts the list to its newest entry with nothing but a deprecation hint on stderr.
+The config key for grafts does not close them; `GIT_GRAFT_FILE` does.
+
+Two states make the list incomplete, and both are ones `harvest` refuses over:
+commits on a branch the sandbox wandered off, and a replay point the history no
+longer reaches. The log reports both and withholds the `--keep` hint, because a
+hint is a promise that the line can be pasted.
 
 ### `omh sNN diff` — a real patch, and one checkpoint
 

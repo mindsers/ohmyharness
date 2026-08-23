@@ -258,7 +258,7 @@ anyway.**
 
 ```console
 $ omh s diff          # the session you were last in
-$ omh s01 log         # that one
+$ omh s01 diff        # that one
 $ omh s01 commit -m "Fix the tap guard"
 $ omh s01 rm
 $ omh s01 claude      # launch into it
@@ -281,7 +281,7 @@ on all of them is what you mean.
 
 `s ls` also names ids that have a container or a run directory but no worktree —
 sessions removed by a version of omh that only took half of one down. `omh
-<id> rm` clears them.
+sNN rm` clears them.
 
 ### omh's flags come before the harness name
 
@@ -308,23 +308,32 @@ opened a rebase todo, which is late to find out there are eleven of them.
 $ omh s01 log
 s01 · 4 checkpoints, 2 not yours yet · 2 behind main
 
-  4  12m  Extract the tap guard into its own function  3 files  +48 −12
-  3  38m  Add the failing test first                   1 file   +23
-  ────────────────────────── yours from here ──────────────────────────
-  2   1h  Fix typo                                     1 file   +1 −1
-  1   1h  Rename shadow to sandbox repo               12 files  +90 −90
+  4  12m  Extract the tap guard into its own function  3 files   +48 −12
+  3  38m  Add the failing test first                   1 file    +23
+  ────────────────────────── yours from here ───────────────────────────
+  2  1h   Fix typo                                     1 file    +1 −1
+  1  1h   Rename shadow to sandbox repo                12 files  +90 −90
 
-  uncommitted in the session: 2 files
+  uncommitted in the sandbox: 2 files
 ```
 
 **Numbered from the oldest**, so a number keeps meaning the same commit as the
-agent commits more — and they are what `omh s01 commit --keep` takes. Above the
-line is work your branch has never seen; below it is what a previous `--keep`
-already handed over.
+agent commits more — and they are what `omh s01 commit --keep` will take. Above
+the line is work your branch has never seen; below it is what a previous
+`--keep` already handed over.
 
-The uncommitted line matters as much as the checkpoints: that is the work
-`--keep` would sweep into a *Work in progress* commit, shown before it happens
-rather than after.
+The uncommitted line is measured in the sandbox, where `--keep` measures it:
+that is the work about to be swept into a *Work in progress* commit, shown
+before it happens rather than after.
+
+Two things are said rather than shown. A merge reads `merge` instead of a file
+count, because git has no diff for one until you name a parent and *0 files* is
+a measurement. Files git will not count lines for — binary, or anything the
+agent marked `-diff` — read `·N`, never a blank.
+
+And when the sandbox is in a state `--keep` would refuse — commits on a branch
+it wandered off, or a rewind below the last handover — the log says so on
+stderr and does not offer a harvest it knows would be refused.
 
 A session whose sandbox has never run says so and exits 0 — asking to see the
 agent's work before the agent has run is an ordinary thing to do.
