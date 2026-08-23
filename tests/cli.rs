@@ -212,6 +212,17 @@ impl Sandbox {
         assert!(out.status.success(), "git init failed");
     }
 
+    /// Where a branch points, for asserting that it did not move.
+    fn head_of_branch(&self, branch: &str) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&self.repo)
+            .args(["rev-parse", branch])
+            .output()
+            .expect("git must be installed to run this test");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     fn team_store(&self) -> PathBuf {
         self.repo.join(".omh/notes")
     }
@@ -700,6 +711,68 @@ fn the_flag_is_what_decides_whether_a_diff_is_a_summary_or_a_patch() {
     assert!(
         patch.contains("+fn added() {}"),
         "with it, the change: {patch}"
+    );
+}
+
+/// `--edit` without a terminal refuses rather than reporting a curation that
+/// never happened.
+///
+/// Measured before this landed: with stdin not a terminal, `rebase -i` runs
+/// the **unedited** todo, exits 0, and omh reports the work as curated. So the
+/// flag that opens an editor is the one that has to ask whether there is
+/// anywhere to draw — and it is now the only path that needs one, which is
+/// what makes a single guard enough.
+///
+/// A test process has no tty, so this is the ordinary case here rather than a
+/// contrived one.
+#[test]
+fn edit_without_a_terminal_refuses_rather_than_pretending_to_curate() {
+    let sb = sandbox();
+    sb.session("s01");
+
+    let out = sb.omh(&["s01", "commit", "--keep", "--edit"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+
+    assert!(!out.status.success(), "there is nowhere to draw: {said}");
+    assert!(
+        said.contains("no terminal"),
+        "and it says why, rather than reporting a curation: {said}"
+    );
+    assert!(
+        said.contains("--keep 1,3-4") || said.contains("Drop `--edit`"),
+        "with something to do instead: {said}"
+    );
+}
+
+/// A selection is refused before anything moves.
+///
+/// `harvest` promises the branch is untouched when a replant fails, and the
+/// cheapest way to keep that promise is not to have started: a number outside
+/// the range is a typo, not a failure to recover from.
+#[test]
+fn a_selection_that_names_nothing_real_is_refused_before_the_branch_moves() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("work.rs"), "fn work() {}\n").unwrap();
+    let before = sb.head_of_branch("omh/s01");
+
+    for (selection, why) in [
+        ("9", "there is no ninth checkpoint"),
+        ("0", "the numbers start at 1"),
+        ("two", "not a number at all"),
+        ("4-2", "backwards"),
+    ] {
+        let out = sb.omh(&["s01", "commit", "--keep", selection]);
+        assert!(
+            !out.status.success(),
+            "`--keep {selection}` ({why}) was accepted: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    assert_eq!(
+        sb.head_of_branch("omh/s01"),
+        before,
+        "the branch never moved"
     );
 }
 
