@@ -140,6 +140,7 @@ pub fn git_checks() -> Vec<Outcome> {
         Ok(version) => git_checks_from(
             version,
             crate::shadow::git_supports("cherry-pick", "--empty"),
+            crate::shadow::git_supports("merge-tree", "--write-tree"),
         ),
         Err(why) => vec![Outcome {
             name: "git on the host".into(),
@@ -182,15 +183,21 @@ fn version_of(asked: std::io::Result<std::process::Output>) -> Result<String, St
 /// `ok: true` hardcoded in place of the probe.
 ///
 /// **One outcome, and it fails only when git cannot be used at all.** The
-/// capability rides in the detail rather than as a second red line, because
-/// the argument for leaving `merge-tree` out of this applies here too: a
-/// `doctor` that goes red over something the user never calls is one they stop
-/// running. A user who never names checkpoints is not broken, and `doctor`'s
-/// exit code is what `troubleshooting.md` tells them means *the adapter is
-/// wrong*.
+/// capabilities ride in the detail rather than as red lines: a `doctor` that
+/// goes red over something the user never calls is one they stop running. A
+/// user who never names checkpoints and never syncs is not broken, and
+/// `doctor`'s exit code is what `troubleshooting.md` tells them means *the
+/// adapter is wrong*.
+///
+/// Two capabilities rather than one because they fail apart. `--keep 1,3` and
+/// `sync` are different commands on different gits — `cherry-pick --empty`
+/// arrived in 2.34 and `merge-tree --write-tree` in 2.38 — so a single line
+/// saying *git is too old* would send a user with 2.35 looking for a problem
+/// with a command that works.
 fn git_checks_from(
     version: String,
     keeps_a_selection: Result<bool, anyhow::Error>,
+    merges_on_the_host: Result<bool, anyhow::Error>,
 ) -> Vec<Outcome> {
     let selections = match keeps_a_selection {
         Ok(true) => "takes a `--keep` selection".to_string(),
@@ -202,14 +209,25 @@ fn git_checks_from(
         // version set.
         Err(e) => format!("omh could not tell whether `--keep <selection>` works here: {e}"),
     };
+    // Named for what the user loses, not for the flag. `sync` merges on the
+    // host precisely so no commit from the checkout enters the sandbox; there
+    // is no fallback that keeps that property, so a git without it means the
+    // command is unavailable rather than slower.
+    let syncs = match merges_on_the_host {
+        Ok(true) => "syncs".to_string(),
+        Ok(false) => {
+            "no `merge-tree --write-tree` (git 2.38), so `omh sNN sync` cannot run here".to_string()
+        }
+        Err(e) => format!("omh could not tell whether `sync` works here: {e}"),
+    };
     vec![Outcome {
         name: "git on the host".into(),
         ok: true,
-        detail: format!("{version} — {selections}"),
+        detail: format!("{version} — {selections}; {syncs}"),
     }]
 }
 
-/// What must be true of the memory server, given the base set declares one./// What must be true of the memory server, given the base set declares one.
+/// What must be true of the memory server, given the base set declares one.
 ///
 /// Built from the declared command rather than from a literal, so a manifest
 /// that changes what it launches changes what gets probed.
@@ -748,10 +766,13 @@ mod tests {
     /// when git cannot be used at all.
     ///
     /// Every other check in this module runs inside the sandbox; this one runs
-    /// where `--keep` does. The capability rides in the detail rather than as
-    /// a second red line: a `doctor` that goes red over something the user
-    /// never calls is one they stop running, which is the same argument that
-    /// kept `merge-tree` out of here.
+    /// where `--keep` and `sync` do. The capabilities ride in the detail
+    /// rather than as red lines: a `doctor` that goes red over something the
+    /// user never calls is one they stop running.
+    ///
+    /// The two capabilities are asserted apart because they fail apart — the
+    /// gits that can do one and not the other are three minor versions wide,
+    /// and a report that folded them together would name the wrong command.
     #[test]
     fn the_hosts_git_is_reported_and_only_a_missing_git_fails() {
         let only = |checks: Vec<Outcome>| {
@@ -759,7 +780,11 @@ mod tests {
             checks.into_iter().next().unwrap()
         };
 
-        let able = only(git_checks_from("git version 2.55.0".into(), Ok(true)));
+        let able = only(git_checks_from(
+            "git version 2.55.0".into(),
+            Ok(true),
+            Ok(true),
+        ));
         assert!(able.ok);
         assert!(
             able.detail.starts_with("git version 2.55.0"),
@@ -769,10 +794,18 @@ mod tests {
             able.detail.contains("--keep"),
             "and what it means for the command: {able:?}"
         );
+        assert!(
+            able.detail.contains("syncs"),
+            "and for the other command: {able:?}"
+        );
 
         // A git too old for selections is still a working git. The user who
         // never names checkpoints must not be told their adapter is broken.
-        let old = only(git_checks_from("git version 2.30.0".into(), Ok(false)));
+        let old = only(git_checks_from(
+            "git version 2.30.0".into(),
+            Ok(false),
+            Ok(false),
+        ));
         assert!(old.ok, "an old git is not a failed check: {old:?}");
         // A run of spaces means a line continuation left its indentation in
         // the string. `cargo fmt` joins those lines, so the padding ships —
@@ -785,9 +818,28 @@ mod tests {
         }
         assert!(old.detail.contains("--empty") && old.detail.contains("--keep"));
 
+        // The middle ground, and the reason these are two answers: git 2.35
+        // takes a `--keep` selection and cannot sync. One line for both would
+        // send this user to read about the command that works.
+        let between = only(git_checks_from(
+            "git version 2.35.0".into(),
+            Ok(true),
+            Ok(false),
+        ));
+        assert!(
+            between.detail.contains("takes a `--keep` selection")
+                && between.detail.contains("sync` cannot run"),
+            "each command gets its own verdict: {between:?}"
+        );
+        assert!(
+            !between.detail.contains("  "),
+            "the detail carries a fold's indentation: {between:?}"
+        );
+
         // Could not ask is its own answer, and it carries git's reason.
         let unsure = only(git_checks_from(
             "git version 2.55.0".into(),
+            Err(anyhow::anyhow!("bad config line 2 in .git/config")),
             Err(anyhow::anyhow!("bad config line 2 in .git/config")),
         ));
         assert!(
@@ -795,8 +847,16 @@ mod tests {
             "git's own words reach the user: {unsure:?}"
         );
         assert!(
-            !unsure.detail.contains("no `cherry-pick --empty`"),
-            "and omh does not turn *could not tell* into a verdict: {unsure:?}"
+            !unsure.detail.contains("no `cherry-pick --empty`")
+                && !unsure.detail.contains("cannot run here"),
+            "and omh does not turn *could not tell* into a verdict, for either \
+             command: {unsure:?}"
+        );
+        assert_eq!(
+            unsure.detail.matches("bad config line 2").count(),
+            2,
+            "both say why they could not tell, rather than one inheriting the \
+             other's excuse: {unsure:?}"
         );
 
         // The real thing, against the real git: a version, read from stdout

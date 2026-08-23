@@ -423,6 +423,18 @@ enum SessionsCmd {
     },
     /// Stop a sandbox. The worktree and branch survive.
     Down,
+    /// Bring the session up to date with its base branch.
+    ///
+    /// The merge happens on the host, in your repository, and the sandbox only
+    /// ever receives files — no commit of yours may enter it.
+    Sync {
+        /// Merge against this instead of the repo's default branch.
+        #[arg(long)]
+        base: Option<String>,
+        /// Stop the sandbox first, rather than refusing because it is up.
+        #[arg(long)]
+        down: bool,
+    },
     /// What the agent has committed inside the sandbox, newest first.
     ///
     /// Numbered, so nothing here asks for an object id: the numbers are what
@@ -467,6 +479,9 @@ enum SessionsCmd {
         /// reword and drop by hand.
         #[arg(long, requires = "keep", conflicts_with = "message")]
         edit: bool,
+        /// Commit even with conflict markers still in the files.
+        #[arg(long)]
+        force: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
     Push {
@@ -704,6 +719,9 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 rm(&cwd, id, *force, ctx)
             }
             SessionsCmd::Down => down(&cwd, cli.session.as_deref(), ctx),
+            SessionsCmd::Sync { base, down } => {
+                sync(&cwd, cli.session.as_deref(), base.as_deref(), *down, ctx)
+            }
             SessionsCmd::Log => log_cmd(&cwd, cli.session.as_deref(), ctx),
             SessionsCmd::Diff {
                 checkpoint,
@@ -722,13 +740,19 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 skip_carried,
                 keep,
                 edit,
+                force,
             } => commit(
                 &cwd,
                 cli.session.as_deref(),
-                message.as_deref(),
+                match keep.as_deref() {
+                    Some(selection) => Landing::Keep {
+                        selection,
+                        edit: *edit,
+                    },
+                    None => Landing::Squash(message.as_deref()),
+                },
                 *skip_carried,
-                keep.as_deref(),
-                *edit,
+                *force,
                 ctx,
             ),
             SessionsCmd::Push { name, pr } => {
@@ -5031,6 +5055,123 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     Ok(())
 }
 
+/// Bring a session up to date with its base, without letting a commit of
+/// yours into the sandbox.
+///
+/// The order is the design, and every step of it is recoverable from the one
+/// before:
+///
+/// 1. **Checkpoint** in the sandbox, so `omh sNN log` shows the point this can
+///    be undone from and `git checkout` inside reaches it.
+/// 2. **Take the session's tree** from the same throwaway index a review uses.
+/// 3. **Merge on the host**, which writes a tree and touches nothing.
+/// 4. **Materialise** it into the worktree.
+/// 5. **Move the baseline**, replaying the branch's own commits first.
+/// 6. **Record it in the sandbox** as a commit the agent can read.
+///
+/// Nothing is written anywhere until the merge has succeeded, so a failure in
+/// steps 1-3 leaves the session exactly as it was.
+fn sync(
+    cwd: &std::path::Path,
+    id: Option<&str>,
+    base: Option<&str>,
+    down: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let session = existing_session(&paths, id)?;
+    let base = base
+        .map(str::to_string)
+        .unwrap_or_else(|| session::default_branch(&paths.repo));
+
+    stop_before_syncing(&paths, &session, down, ctx)?;
+    ctx.say(&sync_session(&paths, &session, &base)?);
+    Ok(())
+}
+
+/// The sync itself, once it is known to be safe to run.
+///
+/// Split from `sync` so it can be asserted: the command around it needs a
+/// container runtime to decide whether the sandbox is up, and nothing that
+/// needs one is reachable from a test here. What is left outside is the
+/// refusal and the printing.
+fn sync_session(paths: &Paths, session: &Session, base: &str) -> Result<report::Synced> {
+    let branch = session
+        .branch
+        .as_deref()
+        .context("a scratch session has no base to move")?;
+    let was = session::head_of(&paths.repo, branch)?;
+    let onto = session::head_of(&paths.repo, base)?;
+    anyhow::ensure!(
+        was != onto,
+        "{} is already on {base}. Nothing to bring over",
+        session.id
+    );
+
+    let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
+    let checkpoint = shadow.checkpoint(&session.worktree, "Before omh brought the base forward")?;
+
+    // Named, so the conflict markers the agent opens say which side is which.
+    // Measured: `merge-tree` labels each side with the string it was handed,
+    // so a bare tree renders as forty hex characters in the middle of somebody's
+    // source file.
+    let ours = format!("refs/{}", session.id);
+    let tree = session.tree(base)?;
+    session::name_tree(&paths.repo, &ours, &tree)?;
+    let merged = session::merge_three(&paths.repo, &was, base, &session.id);
+    let _ = session::unname_tree(&paths.repo, &ours);
+    let merged = merged?;
+
+    session.materialise(&merged.tree)?;
+    session.move_baseline(&paths.repo, &onto, &was)?;
+    shadow.record_base_moved(&session.worktree, &onto, &merged.conflicted)?;
+
+    Ok(report::Synced {
+        id: session.id.clone(),
+        moved: session.commits_between(&paths.repo, &was, &onto)?,
+        base: base.to_string(),
+        onto,
+        conflicted: merged.conflicted,
+        checkpoint: checkpoint.is_some(),
+    })
+}
+
+/// A sync needs the sandbox stopped, and says why rather than assuming.
+///
+/// Not about the files — the checkpoint makes an overwrite recoverable. It is
+/// about the agent's **context**: what it believes the tree contains lives in
+/// its conversation, not on disk, and no checkpoint reaches that. It would then
+/// edit a version that no longer exists, or write a whole file back from stale
+/// content, and trunk's changes vanish inside a plausible-looking patch nobody
+/// notices until review.
+///
+/// Stopping is the fix rather than the price: the harness restarts and reads
+/// the tree as it now is. Whether an agent mid-turn may be interrupted is a
+/// judgement only the user can make, which is why `--down` exists and why the
+/// default is to refuse.
+fn stop_before_syncing(paths: &Paths, session: &Session, down: bool, ctx: &out::Ctx) -> Result<()> {
+    let Ok(backend) = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))
+    else {
+        return Ok(());
+    };
+    let name = paths.container(&session.id);
+    if !image::container_running(backend.program(), &name) {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        down,
+        "{id} is running, and a sync moves files underneath it. What the agent believes \
+         the tree holds is in its conversation rather than on disk, so it would keep \
+         editing a version that no longer exists:\n  \
+         omh {id} down          stop it, then sync\n  \
+         omh {id} sync --down   both, if the turn is safe to interrupt",
+        id = session.id
+    );
+    ctx.progress(&format!("stopping {} first", session.id));
+    image::container_remove(backend.program(), &name)?;
+    Ok(())
+}
+
 /// The sandbox's own history, read from the host.
 ///
 /// `log_cmd` rather than `log`, because `log` is what a reader of this file
@@ -5357,6 +5498,43 @@ fn every_check(from_the_sandbox: Vec<doctor::Outcome>) -> Result<Vec<doctor::Out
         .collect())
 }
 
+/// Whether a commit may go ahead over what `git diff --check` found.
+///
+/// Both ways of committing refuse, because both would land the markers: `-m`
+/// stages the files as they are, and `--keep` replants commits the agent made
+/// on top of them. A conflict half-resolved compiles in neither case, and the
+/// person who finds out is whoever reviews the branch.
+///
+/// The lines are a parameter rather than something read here, so every branch
+/// of this is a table test — and so that the caller cannot ask git twice.
+///
+/// `--force` exists because a conflict marker at the start of a line is not
+/// always a conflict: a test fixture holds them on purpose, and this very
+/// repository has files that would trip it. Refusing something a user can
+/// mean is a nuisance; refusing it with no way past is a bug.
+fn may_commit(id: &str, unresolved: &[String], force: bool) -> Result<()> {
+    if unresolved.is_empty() || force {
+        return Ok(());
+    }
+    // Enough to act on without becoming the output itself. A whole-file
+    // conflict is one marker per hunk and there can be hundreds; the count is
+    // the scale and the first lines are where to start.
+    let shown: Vec<&str> = unresolved.iter().take(5).map(String::as_str).collect();
+    let rest = unresolved.len().saturating_sub(shown.len());
+    anyhow::bail!(
+        "{id} still has {n} conflict marker{s} in its files:\n  {lines}{more}\n\
+         Resolve them first, or:\n  \
+         omh {id} commit --keep --force   commit them anyway",
+        n = unresolved.len(),
+        s = if unresolved.len() == 1 { "" } else { "s" },
+        lines = shown.join("\n  "),
+        more = match rest {
+            0 => String::new(),
+            n => format!("\n  …and {n} more"),
+        }
+    );
+}
+
 /// Whether this session may be removed, or what stands in the way.
 ///
 /// Separate from `rm` so the decision is assertable: `rm` takes a container
@@ -5467,7 +5645,7 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
-/// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done./// The session a command acts on when it acts on work already done.
+/// The session a command acts on when it acts on work already done.
 ///
 /// Deliberately not `session::pick`: that invents the *next* id when none
 /// exists, which is right for a launch — it is about to create that worktree —
@@ -5492,17 +5670,40 @@ fn existing_session(paths: &Paths, explicit: Option<&str>) -> Result<Session> {
     Ok(session)
 }
 
+/// The two ways to land a session's work, as one value.
+///
+/// They are mutually exclusive and clap already enforces that — this is what
+/// stops the *rest* of the code from having to know. As four loose parameters
+/// (`message`, `keep`, `edit`, and their combinations) a caller could pass a
+/// message and a selection together, and what happened then was decided by
+/// which `if` came first. The commit body says out loud why doing both is
+/// wrong: the squash lands first and git's patch-id then drops every replanted
+/// commit as already applied, so the granular history disappears with nothing
+/// said. A pair that cannot be constructed cannot do that.
+enum Landing<'a> {
+    /// One commit of the files as they stand. `None` opens the editor.
+    Squash(Option<&'a str>),
+    /// The agent's own commits, replanted.
+    Keep {
+        /// Empty means everything since the last handover.
+        selection: &'a str,
+        /// The todo, in the user's editor.
+        edit: bool,
+    },
+}
+
 fn commit(
     cwd: &std::path::Path,
     id: Option<&str>,
-    message: Option<&str>,
+    landing: Landing,
     skip_carried: bool,
-    keep: Option<&str>,
-    edit: bool,
+    force: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
+    let base = session::default_branch(&paths.repo);
+    may_commit(&session.id, &session.unresolved(&base)?, force)?;
 
     // Two ways to land the same work, and the user picks which at the moment
     // they land it. `-m` squashes the files into one commit of their own and
@@ -5513,86 +5714,92 @@ fn commit(
     // first, and git's patch-id then drops every replanted commit as already
     // applied — the granular history disappears with nothing said, which is the
     // whole thing `--keep` exists to deliver.
-    if let Some(selection) = keep {
-        let branch = session
-            .branch
-            .as_deref()
-            .context("a scratch session has no branch to commit to")?;
-        let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
-        let carried = config::policy_list(&paths, "carry_in");
-        let keep = what_to_keep(
-            &shadow,
-            &session,
-            selection,
-            edit,
-            std::io::IsTerminal::is_terminal(&std::io::stdin()),
-            &|| shadow::git_supports("cherry-pick", "--empty"),
-        )?;
-        let named = match &keep {
-            shadow::Keep::These(ids) => Some(ids.len()),
-            _ => None,
-        };
-        let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, keep)?;
-        // Named four, landed three. git drops a commit whose patch is already
-        // on the branch — measured, it says `patch contents already upstream`
-        // on stderr and exits 0, and the helper that runs it keeps only stdout
-        // on success. Without this the user reads `kept 3` after asking for
-        // four and is left to wonder which one, or whether they miscounted.
-        if let Some(named) = named.filter(|named| *named > landed) {
-            ctx.warn(&format!(
-                "you named {named} checkpoint{}, and {landed} reached {branch} — git drops a \
+    // The `--keep` arm returns rather than yielding a message: it is a whole
+    // command, and the squash below is the other one. Written as a match so
+    // adding a third way to land is a compile error here rather than a
+    // fall-through into the squash.
+    let message = match landing {
+        Landing::Squash(message) => message,
+        Landing::Keep { selection, edit } => {
+            let branch = session
+                .branch
+                .as_deref()
+                .context("a scratch session has no branch to commit to")?;
+            let shadow = crate::shadow::Shadow::new(&paths.shadows(), &session.id);
+            let carried = config::policy_list(&paths, "carry_in");
+            let keep = what_to_keep(
+                &shadow,
+                &session,
+                selection,
+                edit,
+                std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                &|| shadow::git_supports("cherry-pick", "--empty"),
+            )?;
+            let named = match &keep {
+                shadow::Keep::These(ids) => Some(ids.len()),
+                _ => None,
+            };
+            let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, keep)?;
+            // Named four, landed three. git drops a commit whose patch is already
+            // on the branch — measured, it says `patch contents already upstream`
+            // on stderr and exits 0, and the helper that runs it keeps only stdout
+            // on success. Without this the user reads `kept 3` after asking for
+            // four and is left to wonder which one, or whether they miscounted.
+            if let Some(named) = named.filter(|named| *named > landed) {
+                ctx.warn(&format!(
+                    "you named {named} checkpoint{}, and {landed} reached {branch} — git drops a \
                  commit whose changes are already there. `omh {} log` shows what is left",
-                if named == 1 { "" } else { "s" },
-                session.id
-            ));
-        }
-        let base = session::default_branch(&paths.repo);
-        let n = session.commits(&paths.repo, &base);
-        warn_uncounted(&n, ctx, &base);
-        ctx.say(
-            &report::Action::new(
-                "committed",
-                match landed {
-                    // Two ways to keep nothing, and they are different news. A
-                    // session that has never handed anything over has made no
-                    // commits; one that has is simply up to date, and telling
-                    // that user their agent "has made no commits" contradicts
-                    // the branch they are looking at.
-                    // Swallowed rather than propagated, because this only
-                    // chooses between two ways of saying nothing happened and
-                    // the harvest above already succeeded — failing here would
-                    // report a command that worked as a command that did not.
-                    //
-                    // `true` on error, and the direction matters. `landed`
-                    // fails only for a record that *exists* and could not be
-                    // read, so the session has handed something over before:
-                    // "nothing new" is then the true sentence and "has made no
-                    // commits" is a stronger claim than omh can make, about a
-                    // branch the user can see. An earlier version defaulted the
-                    // other way and called it the vaguer answer. It is not.
-                    0 if shadow.landed().map(|l| l.is_some()).unwrap_or(true) => format!(
-                        "nothing new to keep — everything {} has committed is already on \
+                    if named == 1 { "" } else { "s" },
+                    session.id
+                ));
+            }
+            let n = session.commits(&paths.repo, &base);
+            warn_uncounted(&n, ctx, &base);
+            ctx.say(
+                &report::Action::new(
+                    "committed",
+                    match landed {
+                        // Two ways to keep nothing, and they are different news. A
+                        // session that has never handed anything over has made no
+                        // commits; one that has is simply up to date, and telling
+                        // that user their agent "has made no commits" contradicts
+                        // the branch they are looking at.
+                        // Swallowed rather than propagated, because this only
+                        // chooses between two ways of saying nothing happened and
+                        // the harvest above already succeeded — failing here would
+                        // report a command that worked as a command that did not.
+                        //
+                        // `true` on error, and the direction matters. `landed`
+                        // fails only for a record that *exists* and could not be
+                        // read, so the session has handed something over before:
+                        // "nothing new" is then the true sentence and "has made no
+                        // commits" is a stronger claim than omh can make, about a
+                        // branch the user can see. An earlier version defaulted the
+                        // other way and called it the vaguer answer. It is not.
+                        0 if shadow.landed().map(|l| l.is_some()).unwrap_or(true) => format!(
+                            "nothing new to keep — everything {} has committed is already on \
                          the branch",
-                        session.label()
-                    ),
-                    0 => format!("nothing to keep — {} has made no commits", session.label()),
-                    _ => format!(
-                        "kept {landed} of {}'s own commits{}",
-                        session.label(),
-                        branch_tally(&n)
-                    ),
-                },
-            )
-            .data(serde_json::json!({
-                "session": session.id,
-                "branch": session.label(),
-                "kept": landed,
-                "commits": n.as_ref().ok(),
-                "base": base,
-            })),
-        );
-        return Ok(());
-    }
+                            session.label()
+                        ),
+                        0 => format!("nothing to keep — {} has made no commits", session.label()),
+                        _ => format!(
+                            "kept {landed} of {}'s own commits{}",
+                            session.label(),
+                            branch_tally(&n)
+                        ),
+                    },
+                )
+                .data(serde_json::json!({
+                    "session": session.id,
+                    "branch": session.label(),
+                    "kept": landed,
+                    "commits": n.as_ref().ok(),
+                    "base": base,
+                })),
+            );
+            return Ok(());
+        }
+    };
 
     // The same list the launcher copies from, so what `commit` refuses to
     // publish and what omh put there cannot disagree.
@@ -6015,6 +6222,58 @@ mod tests {
     /// is the path a typed line takes — checking it against `Cli` alone would
     /// call `omh s01 diff` a failure and `omh s diff s01` a success, both
     /// backwards.
+    /// No doc comment has been spliced onto itself.
+    ///
+    /// A specific accident with a specific cause: these files are edited by
+    /// matching an anchor and inserting before it, and an anchor chosen
+    /// without reading the line above it lands the new text *inside* the
+    /// previous item's doc block, and the sentence that was there ends up
+    /// carrying a second doc marker partway along. It compiles, it renders as
+    /// one run-on sentence, and it reads as deliberate.
+    ///
+    /// It shipped five times before anything looked for it, across four files
+    /// and four separate changes. Nothing else in the suite can see it: the
+    /// text is a comment, so no behaviour changes and no assertion fails.
+    ///
+    /// A doc comment that quotes the shape trips this — the first draft of
+    /// this one did. Reword it; the check has no way to tell an example from
+    /// the thing, and the thing is worth more than the example.
+    ///
+    /// It does not catch every splice, and this test was itself installed by
+    /// one it cannot see: the insertion walked back over the *next* test's
+    /// `#[test]` and left it stranded above this one. That shape is a
+    /// duplicated attribute, which clippy already refuses — so the two
+    /// together cover the accident, and only the comment half needed
+    /// something new.
+    #[test]
+    fn no_doc_comment_was_spliced_onto_itself() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut checked = 0;
+        let mut doubled = Vec::new();
+        for dir in ["src", "tests"] {
+            for file in std::fs::read_dir(root.join(dir)).unwrap() {
+                let file = file.unwrap().path();
+                if file.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                checked += 1;
+                for (n, line) in std::fs::read_to_string(&file).unwrap().lines().enumerate() {
+                    // Two on one line. A doc comment is the whole line by
+                    // construction, so a second one is always a splice — and
+                    // `///` inside a string or a URL is a different shape
+                    // (`http://`), which has two slashes and not three.
+                    if line.matches("///").count() > 1 {
+                        doubled.push(format!("{}:{}: {}", file.display(), n + 1, line.trim()));
+                    }
+                }
+            }
+        }
+        assert!(checked > 1, "the scan found no sources to read");
+        assert!(
+            doubled.is_empty(),
+            "doc comments spliced together: {doubled:#?}"
+        );
+    }
     #[test]
     fn the_session_lines_omh_prints_are_lines_omh_accepts() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -6334,6 +6593,146 @@ mod tests {
                 .unwrap_err()
                 .contains("cannot be used with"),
             "and squashing is the other way to land work, not a modifier of this one"
+        );
+    }
+
+    /// A commit refuses over markers a sync left behind, says where they are,
+    /// and can be meant anyway.
+    #[test]
+    fn a_commit_will_not_land_an_unresolved_conflict_unless_it_is_meant() {
+        let none: Vec<String> = vec![];
+        assert!(
+            may_commit("s01", &none, false).is_ok(),
+            "a clean tree commits"
+        );
+
+        let one = vec!["src/tap.rs:12: leftover conflict marker".to_string()];
+        let said = may_commit("s01", &one, false).unwrap_err().to_string();
+        assert!(
+            said.contains("src/tap.rs:12"),
+            "it says where, so the user is not sent hunting: {said}"
+        );
+        assert!(
+            said.contains("1 conflict marker in"),
+            "and one is not `1 conflict markers`: {said}"
+        );
+        assert!(
+            said.contains("--force"),
+            "and the way past is in the refusal: {said}"
+        );
+        assert!(may_commit("s01", &one, true).is_ok(), "`--force` means it");
+
+        // A whole-file conflict is one line per hunk. The refusal has to stay
+        // readable at that size, or the way past scrolls off the screen.
+        let many: Vec<String> = (1..=40)
+            .map(|n| format!("src/big.rs:{n}: leftover conflict marker"))
+            .collect();
+        let said = may_commit("s01", &many, false).unwrap_err().to_string();
+        assert_eq!(
+            said.matches("leftover conflict marker").count(),
+            5,
+            "five lines, not forty: {said}"
+        );
+        assert!(
+            said.contains("40 conflict markers") && said.contains("…and 35 more"),
+            "and the count is still the whole truth: {said}"
+        );
+    }
+
+    /// A sync brings trunk over, explains itself in the sandbox, and leaves
+    /// the agent's work where a harvest can still take it.
+    ///
+    /// The whole mechanism end to end, because every part of it is only worth
+    /// anything in combination: a merged file the agent never asked for, a
+    /// commit that says what moved, a baseline that makes `diff` mean the
+    /// agent's work again — and the checkpoint that makes all of it
+    /// recoverable.
+    ///
+    /// The last assertion is the one that decides a design question. The spec
+    /// says to advance the replay point past the commit omh writes, so a
+    /// harvest never replays trunk's changes as the agent's. That cannot be
+    /// done with a single ancestor pointer without also marking the checkpoint
+    /// *below* it as handed over — and that checkpoint is the agent's own
+    /// uncommitted work. So the replay point stays where it was, and this
+    /// asserts what the spec was protecting: after a sync, `--keep` puts the
+    /// agent's work on the branch and does not land trunk's twice.
+    #[test]
+    fn a_sync_brings_trunk_over_and_leaves_the_agents_work_harvestable() {
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+        let repo_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        // The agent leaves something uncommitted, so the checkpoint has work.
+        std::fs::write(session.worktree.join("in-flight.rs"), "fn later() {}\n").unwrap();
+
+        // Trunk moves: one file the session never touched.
+        let on_session = repo_git(&["rev-parse", "HEAD"]);
+        repo_git(&["checkout", "-q", "main"]);
+        std::fs::write(paths.repo.join("from-trunk.rs"), "fn trunk() {}\n").unwrap();
+        repo_git(&["add", "-A"]);
+        repo_git(&["commit", "-qm", "trunk moved"]);
+        let onto = repo_git(&["rev-parse", "HEAD"]);
+        let _ = on_session;
+
+        let synced = sync_session(&paths, &session, "main").unwrap();
+        assert_eq!(synced.moved, 1, "one commit arrived");
+        assert!(synced.conflicted.is_empty(), "and it merged cleanly");
+        assert!(synced.checkpoint, "the uncommitted work was checkpointed");
+
+        // 1. The file trunk added is in the session now.
+        assert!(
+            session.worktree.join("from-trunk.rs").exists(),
+            "trunk's file reached the session"
+        );
+        // 2. The branch sits on the new base.
+        assert_eq!(
+            repo_git(&["rev-parse", "omh/s01"]),
+            onto,
+            "the baseline moved, so `diff` measures the agent's work and not trunk's"
+        );
+        // 3. The sandbox can read what happened.
+        let sandbox_log = shadow.checkpoints(&session.worktree).unwrap();
+        let subjects: Vec<&str> = sandbox_log
+            .commits
+            .iter()
+            .map(|c| c.subject.as_str())
+            .collect();
+        assert!(
+            subjects.iter().any(|s| s.starts_with("base moved to")),
+            "a commit the agent can read: {subjects:?}"
+        );
+        assert!(
+            subjects.iter().any(|s| s.contains("Before omh brought")),
+            "and the point it can be undone from: {subjects:?}"
+        );
+
+        // 4. …and the agent's work is still there to be taken.
+        let landed = shadow
+            .harvest(
+                &paths.repo,
+                &session.worktree,
+                "omh/s01",
+                &[],
+                shadow::Keep::All,
+            )
+            .unwrap();
+        let on_branch = repo_git(&["log", "--format=%s", &format!("{onto}..omh/s01")]);
+        assert!(landed > 0, "the harvest took something: {on_branch}");
+        assert!(
+            on_branch.contains("one") && on_branch.contains("two"),
+            "the agent's own commits reached the branch: {on_branch}"
+        );
+        assert_eq!(
+            on_branch.matches("base moved to").count(),
+            0,
+            "and trunk's changes did not arrive a second time as the agent's: {on_branch}"
         );
     }
 

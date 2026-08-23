@@ -255,6 +255,7 @@ omh s log             what the agent has committed inside the sandbox
 omh s diff [n] [-p]   what changed — the session, or one checkpoint
 omh s commit [-m …]   commit that work onto the session branch
 omh s commit --keep [n,m-o] [--edit]   keep the agent's own commits
+omh s sync [--down]   bring trunk into the session, merged on the host
 omh s push [name]     push it to origin under a name a reviewer can read
 omh s down            stop the container, keep the worktree and branch
 omh s rm [--force]    remove the session — its container, its worktree, its staging,
@@ -419,6 +420,68 @@ line — and replaying it would apply the same patch a second time.
 `--edit` is the only form that needs a terminal, and it says so when there
 isn't one. Without that check, git runs the unedited list, exits 0, and omh
 reports a curation that never happened.
+
+### `omh sNN sync` — trunk moved, and the session catches up
+
+```console
+$ omh s01 sync
+s01 · 3 commits from main
+
+  1 file needs resolving:
+    src/tap.rs
+
+  omh s01 log             the checkpoint this can be undone from
+  omh s01 claude          the markers are in the sandbox, where fixing them cannot hurt you
+```
+
+Your checkout's commits never enter the sandbox's repository. The merge runs
+**on the host**, in your repository, and the session receives files — so the
+isolation the sandbox exists for survives a sync.
+
+What the agent finds when it starts again:
+
+- a commit saying `base moved to <sha>`, so `git show HEAD` is exactly what
+  arrived and nothing else;
+- conflicted files sitting in the worktree with their markers, uncommitted, so
+  `git status` inside the sandbox is the to-do list — and `git checkout --
+  <path>` takes the pre-sync version of one back;
+- a checkpoint written just before the sync, so `omh s01 log` shows the point
+  the whole thing can be undone from.
+
+The conflict markers read `<<<<<<< main` and `>>>>>>> s01`, which is to say
+they name the sides rather than two object ids.
+
+**It refuses while the sandbox is up**, and `--down` stops it first. Not about
+the files — the checkpoint makes an overwrite recoverable. It is about what the
+agent *believes* the tree contains, which lives in its conversation and not on
+disk: left running, it edits a version that no longer exists and trunk's changes
+disappear inside a plausible patch. Stopping is the fix, not the price; the
+harness restarts and reads the tree as it now is.
+
+`omh s01 diff` still shows the agent's work after a sync, not trunk's — the
+session's baseline moves with it.
+
+Needs git 2.38 on the host. `omh doctor` says so if yours is older.
+
+### `omh sNN commit` will not land a conflict
+
+```console
+$ omh s01 commit -m "Resolve the merge"
+omh: s01 still has 3 conflict markers in its files:
+  src/tap.rs:41: leftover conflict marker
+  src/tap.rs:43: leftover conflict marker
+  src/tap.rs:47: leftover conflict marker
+Resolve them first, or:
+  omh s01 commit --keep --force   commit them anyway
+```
+
+Both ways of committing refuse, because both would land them: `-m` stages the
+files as they are and `--keep` replants the agent's commits on top of them. A
+file the agent created and never added counts — that is the one `-m` would
+sweep up.
+
+`--force` is there because a conflict marker at the start of a line is not
+always a conflict. A test fixture holds them on purpose.
 
 ### `omh sNN rm` — and what it refuses to take with it
 

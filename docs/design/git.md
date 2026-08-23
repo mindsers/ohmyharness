@@ -368,6 +368,9 @@ patch twice.
 
 ### `omh sNN sync` — trunk moves, and nobody's work is at risk
 
+*Landed (#60). Three claims below were wrong when written and are corrected in
+place, each against a measurement.*
+
 The constraint is absolute and is what shapes the mechanism: **no commit from
 your checkout may enter the sandbox's repository.** So the merge happens on the
 host, in your repository, and the sandbox only ever receives files.
@@ -387,24 +390,56 @@ host, in your repository, and the sandbox only ever receives files.
    base in a scratch worktree first, the shape `harvest` already uses, and a
    conflict there refuses, because those commits are yours.
 6. **Record it in the shadow** as an omh-authored commit — *"base moved to
-   `<sha>`"*, the sha as text and never as an object — and advance the replay
-   point past it, so the harvest never replays trunk's changes as the agent's.
-   Cleanly merged paths only; the conflicted ones stay uncommitted, for the
-   reason below.
+   `<sha>`"*, the sha as text and never as an object. Cleanly merged paths
+   only; the conflicted ones stay uncommitted, for the reason below.
+
+   **The replay point does not move, and this paragraph used to say it did.**
+   The idea was that advancing it past omh's commit stops a harvest replaying
+   trunk's changes as the agent's. It does — and it also marks the step-1
+   checkpoint as handed over, because the replay point is one ancestor pointer
+   and everything below it is "already taken". That checkpoint holds the
+   agent's pre-sync work. Built as written, a sync followed by `--keep`
+   harvests *nothing*: measured, not reasoned — the test asserts the harvest
+   lands the agent's commits and does not land trunk's, and advancing the
+   pointer makes it fail on the first half. What the step was protecting is
+   true anyway: `cherry-pick` drops a commit whose changes are already on the
+   branch, so trunk's changes cannot arrive twice.
 7. **Guard the exit.** `commit` refuses while `git diff --check` reports
-   leftover conflict markers, naming the files. Measured: `--check` recognises
-   exactly the markers `merge-tree` writes, so nothing here needs a parser.
+   leftover conflict markers, naming file and line, and `--force` is how you
+   mean it anyway (a fixture holding markers on purpose is a real thing — this
+   repository has some).
+
+   Two measurements shaped it. `--check` reports **whitespace errors too, by
+   echoing the offending line of the file** — so an agent that writes
+   `\t…: leftover conflict marker` on an oddly indented line makes git print
+   something indistinguishable from git finding a conflict, and omh refuses a
+   commit over a comment. Turning every whitespace check off with one `-c
+   core.whitespace=-…` leaves only git's own lines, and the repository cannot
+   turn them back on (last `-c` wins). Second, `--check` diffs what git
+   **tracks**: a marker in a file the agent never added is invisible to it, and
+   `commit -m` is a `git add -A`. So the check runs against the throwaway
+   review index, where the tree a commit would make is already staged.
 
 The payoff is worth being loud about: **a conflict is text, and text crosses the
 boundary safely.** The agent resolves trunk conflicts with the whole tree in
 front of it, in a repository where it cannot hurt you. That is a capability the
 isolation *creates* rather than costs.
 
-Two honest rough edges. `merge-tree` labels conflict hunks with the object ids
-it was handed — `<<<<<<< 4822532db…`, measured — which reads badly for whoever
-fixes it; relabelling needs measuring rather than asserting. And it wants git
-≥ 2.38; a scratch-worktree merge is the fallback and `omh doctor` is where the
-version check belongs.
+Both rough edges this section listed turned out better than predicted.
+
+The labels are **not** object ids. Measured: `merge-tree` labels each side with
+*the string it was handed*, so the ids only appeared because the draft handed it
+ids. Naming the session's tree under `refs/s01` first — a ref git's own DWIM
+resolves back to `s01` — makes the markers read `<<<<<<< main` / `>>>>>>> s01`,
+which is what anyone resolving a conflict expects to see. The ref is deleted
+immediately after; the merge needs it only for the label.
+
+The version floor is real — `--write-tree` wants git ≥ 2.38 — and there is no
+fallback. A scratch-worktree merge would put a commit from your checkout into
+the sandbox's repository, which is the one thing this section opens by
+forbidding, so a git too old means the command is unavailable rather than
+slower. `omh doctor` says so by name, separately from the `--keep <selection>`
+floor (2.34), because a user on 2.35 has one of the two.
 
 #### Sync requires the sandbox stopped
 
@@ -590,14 +625,21 @@ the hardening in step 6 of the order below, this work closes or narrows
    selection is a `cherry-pick` rather than the generated rebase todo this
    design called for — see the section above for what was measured and why it
    changed.
-10. `omh sNN sync`, the conflict-marker guard on `commit`, and the one-shot
-    note the next launch delivers.
-11. **Partly landed (#57).** `omh doctor` learns git: the host's version and
-    whether it can take a `--keep` selection, asked of the binary rather than
-    compared against a version omh cannot name. `merge-tree --write-tree`
-    belongs here when `sync` ships and not before — a doctor that fails over a
-    capability nothing calls is one people learn to ignore. Still open: that a
-    read-only `config` really does refuse inside a real container.
+10. **Landed (#60).** `omh sNN sync` and the conflict-marker guard on
+    `commit`. Three of this section's claims were wrong and are corrected above
+    where they were made: the replay point must *not* advance, the conflict
+    labels are readable, and `diff --check` needed two measurements rather than
+    the "nothing here needs a parser" it was given. Still open: the one-shot
+    note the next launch delivers, which is a base-set hook and a separate
+    change.
+11. **Landed (#57, #60).** `omh doctor` learns git: the host's version, whether
+    it can take a `--keep` selection, and — since `sync` now ships — whether it
+    can merge on the host, asked of the binary rather than compared against a
+    version omh cannot name. The two capabilities are reported apart because
+    their version floors are three minor versions apart. Neither turns the
+    check red: a doctor that fails over a capability nothing calls is one
+    people learn to ignore. Still open: that a read-only `config` really does
+    refuse inside a real container.
 12. **Landed (#58, #59).** `rm` refuses over work no branch has —
     [risks](risks.md#security) 2c, closed. `s ls` names files two sessions are
     both changing, and reports sandbox repositories with no session left —
