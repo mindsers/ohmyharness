@@ -6191,8 +6191,6 @@ mod tests {
     /// is the path a typed line takes — checking it against `Cli` alone would
     /// call `omh s01 diff` a failure and `omh s diff s01` a success, both
     /// backwards.
-    #[test]
-
     /// No doc comment has been spliced onto itself.
     ///
     /// A specific accident with a specific cause: these files are edited by
@@ -6209,6 +6207,13 @@ mod tests {
     /// A doc comment that quotes the shape trips this — the first draft of
     /// this one did. Reword it; the check has no way to tell an example from
     /// the thing, and the thing is worth more than the example.
+    ///
+    /// It does not catch every splice, and this test was itself installed by
+    /// one it cannot see: the insertion walked back over the *next* test's
+    /// `#[test]` and left it stranded above this one. That shape is a
+    /// duplicated attribute, which clippy already refuses — so the two
+    /// together cover the accident, and only the comment half needed
+    /// something new.
     #[test]
     fn no_doc_comment_was_spliced_onto_itself() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -6238,6 +6243,7 @@ mod tests {
             "doc comments spliced together: {doubled:#?}"
         );
     }
+    #[test]
     fn the_session_lines_omh_prints_are_lines_omh_accepts() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut checked = 0;
