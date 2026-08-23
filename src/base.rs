@@ -507,6 +507,26 @@ pub fn project_name(repo: &str, session: &str) -> String {
     format!("{repo}-{session}")
 }
 
+/// Read a note and take it away in one command.
+///
+/// The order is the mechanism. `cat` first, so a note that exists is delivered
+/// before anything can go wrong with removing it, and `rm` only on the strength
+/// of a `cat` that worked.
+///
+/// The trailing `|| true` is not decoration. Without it the common case — no
+/// note, which is every start that does not follow a sync — is a `cat` of a
+/// file that is not there, and the whole command exits 1. This module already
+/// states the rule (*"a hook has to degrade to a no-op rather than to an
+/// error"*) and the first draft of this broke it anyway; the test runs the
+/// command against a missing file and reads the exit status, which is how.
+///
+/// A function of the path rather than a literal, so the test can point it at a
+/// real file and run it twice. Asserting that a string contains `rm` would
+/// pass for a command that removes the wrong file, or removes it first.
+fn note_capture(path: &str) -> String {
+    format!("cat {path} 2>/dev/null && rm -f {path} || true")
+}
+
 /// The grep nudge, in the three literal pieces `$p` is spliced between.
 ///
 /// Kept as data rather than one string so its cost can be **computed** instead
@@ -601,6 +621,30 @@ pub fn hooks() -> Vec<Hook> {
                          rather than exploring by hand:\n${}",
                         crate::hook::CAPTURE_VAR
                     ),
+                },
+            },
+        },
+        Hook {
+            name: "git-note",
+            // What the agent cannot work out for itself: that the tree changed
+            // while it was stopped. Everything else about a sync is already
+            // legible from inside — `git show HEAD` is what arrived and `git
+            // status` names what needs deciding — but only to an agent that
+            // knows to look, and nothing about resuming a session suggests it.
+            //
+            // Silent on every ordinary start, which is what makes it affordable
+            // at an event that re-fires on resume and compact: `when` is the
+            // capture coming back with something in it, and the capture is the
+            // note's own removal. No note, no injection, no cost beyond a
+            // `cat` of a file that is not there.
+            hook: Canonical {
+                on: Event::SessionStart,
+                stack: None,
+                tools: vec![],
+                when: Some(format!("[ -n \"${}\" ]", crate::hook::CAPTURE_VAR)),
+                action: Action::Inject {
+                    capture: Some(note_capture(crate::shadow::GUEST_NOTE)),
+                    text: format!("${}", crate::hook::CAPTURE_VAR),
                 },
             },
         },
@@ -1923,6 +1967,13 @@ command = "c"
     /// It used to be two of five, the second being `git-unavailable` — a
     /// `refuse`, which opencode *can* express. Retiring that hook took the only
     /// wall in the set with it, so what crosses now is narrower.
+    ///
+    /// `git-note` is on the list for the same reason and with more lost than
+    /// the others: on opencode an agent comes back from a sync with no
+    /// sentence saying so. That is a gap in the harness rather than in the
+    /// note — the commit `sync` writes is still there to be read — and being
+    /// named is the whole point, because the alternative is a feature that
+    /// silently does nothing on one harness.
     #[test]
     fn omhs_hooks_translate_to_opencode_or_are_named() {
         let adapter = crate::adapter::Adapter::find(Path::new(ADAPTERS), "opencode").unwrap();
@@ -1954,7 +2005,7 @@ command = "c"
         let named: Vec<&str> = doc.dropped.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(
             named,
-            vec!["graph-first", "graph-orient", "graph-read"],
+            vec!["git-note", "graph-first", "graph-orient", "graph-read"],
             "the advisory ones are dropped by name, never downgraded to a wall"
         );
         assert!(
@@ -2411,6 +2462,64 @@ command = "c"
         let cmd = rendered("graph-read").command;
         assert!(cmd.contains("file_path"), "must inspect the target: {cmd}");
         assert!(cmd.contains("wc -c"), "and its size: {cmd}");
+    }
+
+    /// The note omh leaves after a sync reaches the agent once, and an
+    /// ordinary start says nothing.
+    ///
+    /// Run rather than read. `SessionStart` re-fires on resume and on compact,
+    /// so *once* is a property of the shell omh writes and not of the event —
+    /// a capture that only `cat`s delivers the same paragraph at every context
+    /// rebuild, for the rest of the session, describing a sync that happened
+    /// hours ago. Asserting the string contains `rm` would pass for a command
+    /// that removes the wrong file or runs it in the wrong order, so this
+    /// executes the real thing twice against a real file.
+    #[test]
+    fn the_note_after_a_sync_is_delivered_once_and_then_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let note = dir.path().join("omh-note");
+        let capture = note_capture(&note.display().to_string());
+        let run = || {
+            let out = std::process::Command::new("sh")
+                .args(["-c", &capture])
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "the capture must degrade to a no-op, never to an error: {out:?}"
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+
+        assert_eq!(run(), "", "no note, nothing said — and no error either");
+
+        std::fs::write(&note, "main moved 3 commits under s01.\n").unwrap();
+        assert_eq!(
+            run(),
+            "main moved 3 commits under s01.",
+            "the note omh left, verbatim"
+        );
+        assert_eq!(run(), "", "and it is not said a second time");
+        assert!(!note.exists(), "the file is gone, not merely unread");
+    }
+
+    /// The hook reads the path omh writes.
+    ///
+    /// The same failure `the_staged_rules_name_the_path_the_store_is_mounted_at`
+    /// exists for: omh writes on the host and the hook reads inside the
+    /// container, so a note left at a host path is delivered to nobody, in
+    /// silence, forever.
+    #[test]
+    fn the_hook_reads_the_note_where_the_container_can_see_it() {
+        let cmd = rendered("git-note").command;
+        assert!(
+            cmd.contains(crate::shadow::GUEST_NOTE),
+            "the guest path, not the host's: {cmd}"
+        );
+        assert!(
+            crate::shadow::GUEST_NOTE.starts_with(crate::shadow::GUEST_GITDIR),
+            "and it lives in the one directory omh already mounts"
+        );
     }
 
     /// Orientation the agent gets once, instead of discovering it by reading

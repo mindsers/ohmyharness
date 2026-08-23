@@ -48,6 +48,35 @@ pub fn pointer_file() -> String {
     format!("gitdir: {GUEST_GITDIR}\n")
 }
 
+/// Where omh leaves a sentence for the agent to find at its next start.
+///
+/// In the gitdir rather than under a mount of its own, and that is not
+/// laziness: this directory is already mounted, already writable — the agent
+/// commits into it — and git ignores a file it does not know. Measured:
+/// `status`, `log` and `fsck` say nothing about it and `gc` does not reap it.
+///
+/// Writable is the requirement, not an accident. The hook that reads this
+/// **deletes it**, which is what makes the note one-shot; the read-only
+/// treatment `config` and the push hook get would leave the same paragraph
+/// arriving at every context rebuild for the rest of the session. Nothing here
+/// is a control — an agent that deletes its own note has only skipped its own
+/// news.
+pub const GUEST_NOTE: &str = "/omh/shadow/omh-note";
+
+/// The note's name inside the gitdir, host side.
+///
+/// Derived from the guest path rather than written twice: the two must name
+/// one file, and a hook reading a path omh never writes fails by saying
+/// nothing at all.
+pub fn note_file(gitdir: &std::path::Path) -> PathBuf {
+    gitdir.join(
+        GUEST_NOTE
+            .strip_prefix(GUEST_GITDIR)
+            .expect("the note lives in the gitdir")
+            .trim_start_matches('/'),
+    )
+}
+
 /// Where the `pre-push` hook lands inside the container.
 ///
 /// Mounted read-only rather than written into the gitdir, so the agent cannot
@@ -876,6 +905,22 @@ impl Shadow {
             ],
         )?;
         Ok(())
+    }
+
+    /// Leave a sentence the agent will be given when it next starts.
+    ///
+    /// Overwrites rather than appends. Two syncs before a single start is one
+    /// situation with one useful sentence — the second one, which describes
+    /// where the tree now is; appending would deliver a stale paragraph above
+    /// a current one and leave the agent to work out which is which.
+    ///
+    /// Best-effort by signature, and deliberately so at the call site: a note
+    /// that could not be written is worth less than the sync that succeeded,
+    /// and failing here would report a completed sync as a failed command.
+    pub fn leave_note(&self, text: &str) -> Result<()> {
+        let note = note_file(&self.gitdir);
+        std::fs::write(&note, format!("{}\n", text.trim_end()))
+            .with_context(|| format!("leaving a note at {}", note.display()))
     }
 
     /// Whether `commit` is still in the history `HEAD` reaches.
@@ -1814,6 +1859,35 @@ pub const ARRANGEMENT: &str = "This repository is the sandbox's own, and it is n
      session opened, so `git log` and `git blame` have nothing older to tell you. And the branch \
      it came from may move while you work, changing files under you; neither is a fault.";
 
+/// The sentence left for the agent after a sync.
+///
+/// Three facts and where to look for each, in that order: what changed, how to
+/// read it, and what is left to do. Deliberately short — it arrives at the top
+/// of a rebuilt context, competing with everything the session is actually
+/// about, and it is orientation rather than instruction. Everything it points
+/// at is already in the repository; what the agent cannot work out is that any
+/// of it happened.
+///
+/// A function of the three numbers so the wording is asserted rather than
+/// typed at the call site, and so the zero-conflict case cannot end up saying
+/// *0 files need resolving*.
+pub fn note_for(base: &str, moved: usize, conflicted: usize) -> String {
+    let arrived = format!(
+        "{base} moved {moved} commit{} under you while this session was stopped. \
+         `git show HEAD` is exactly what arrived.",
+        if moved == 1 { "" } else { "s" }
+    );
+    match conflicted {
+        0 => format!("{arrived} It merged cleanly — nothing needs deciding."),
+        n => format!(
+            "{arrived} {n} file{} still need{} resolving: `git status` names them, and \
+             `git checkout -- <path>` takes back the version from before the merge.",
+            if n == 1 { "" } else { "s" },
+            if n == 1 { "s" } else { "" }
+        ),
+    }
+}
+
 /// The seed commit's message, which is a delivery surface and not a label.
 ///
 /// Every `git log`, `git show` and editor timeline renders it, at the moment
@@ -2299,6 +2373,70 @@ mod tests {
     }
 
     /// Commit in the sandbox the way the agent does, and answer with its id.
+    /// The note reads as English in every shape it has, and never claims a
+    /// decision is waiting when none is.
+    ///
+    /// A count is the whole content of this sentence, so a count rendered
+    /// wrong is the sentence rendered wrong — and *0 files need resolving* at
+    /// the top of a rebuilt context sends an agent looking through a clean
+    /// tree for a conflict.
+    ///
+    /// Its size is asserted too. It arrives where the session's own subject
+    /// matter is competing for room, and the manifest claims a figure for it;
+    /// a sentence that grows into a paragraph should break the claim rather
+    /// than quietly cost more.
+    #[test]
+    fn the_note_says_what_arrived_and_what_is_left_in_the_words_for_it() {
+        let one = note_for("main", 1, 0);
+        assert!(
+            one.contains("moved 1 commit under"),
+            "one commit, not `1 commits`: {one}"
+        );
+        assert!(
+            one.contains("nothing needs deciding"),
+            "and nothing is waiting: {one}"
+        );
+        assert!(
+            !one.contains("resolving"),
+            "a clean merge does not mention resolving anything: {one}"
+        );
+
+        let many = note_for("develop", 12, 2);
+        assert!(
+            many.contains("develop moved 12 commits"),
+            "the branch by name — a session's base is not always `main`: {many}"
+        );
+        assert!(
+            many.contains("2 files still need resolving"),
+            "and what is left, in the plural: {many}"
+        );
+
+        let single = note_for("main", 3, 1);
+        assert!(
+            single.contains("1 file still needs resolving"),
+            "one file *needs*, not *need*: {single}"
+        );
+
+        for note in [&one, &many, &single] {
+            assert!(
+                note.contains("git show HEAD"),
+                "every shape says where to read it: {note}"
+            );
+            // The manifest claims 234 B for the widest shape here. Slack for a
+            // long branch name and a three-digit count, and no more: this is a
+            // sentence, and the entry beside it in the base set is a paragraph
+            // for a reason.
+            assert!(
+                note.len() < 320,
+                "the note has grown past what the manifest costs it at: {} B",
+                note.len()
+            );
+            // A run of spaces is a line continuation whose indentation shipped
+            // — the same accident `git_checks_from` carries a guard for.
+            assert!(!note.contains("  "), "a fold's indentation shipped: {note}");
+        }
+    }
+
     fn checkpoint(s: &Shadow, wt: &Path, file: &str, body: &str, subject: &str) -> String {
         std::fs::write(wt.join(file), body).unwrap();
         git(&s.gitdir, wt, &["add", "-A", "."]).unwrap();

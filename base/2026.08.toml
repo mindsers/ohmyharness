@@ -176,6 +176,28 @@ remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/s
   name = "a hook refusing `git push` alone"
   why  = "it would not contain anything, and nothing here does. The sandbox has `curl` and unrestricted egress, so a push was never the narrow way out — what a wall in front of it buys is orientation, not containment. git's own `pre-push` inside the shadow already provides that, in omh's words, on the path git itself walks the agent down: the error for a repository with no remote suggests `git remote add`. Measured 2026-08-19 against a reachable remote, every direction — the hook fires ahead of the transfer and the remote stays at zero commits; `git push --no-verify` and `git -c core.hooksPath=… push` both go straight past it and land one; and deleting the hook file worked until omh started mounting it read-only, which closes that third path and neither of the first two. A shell pattern would fare no better and would have to recognise a push across every shape an agent emits, which is how this set's pattern for matching `git` at all shipped broken once"
 
+[[entry]]
+name    = "git-note"
+kind    = "hook"
+feature = "git-notice"
+since   = "2026.08"
+because = "`omh sNN sync` changes the sandbox's files while the agent is stopped, and an agent that comes back to a tree it did not write has no way to find that out. Everything about the sync is already legible from inside — `git show HEAD` is what arrived, `git status` names what is left — but only to somebody who knows to look, and nothing about resuming a session suggests it. Without this the agent's first act is to re-derive a tree it thinks it knows, which is the silent-wrong-work case: it edits from what it remembers and trunk's changes disappear inside a plausible patch"
+remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml, which turns off the git rules with it"
+
+  [[entry.measured]]
+  what  = "once, after a sync — and nothing at all otherwise"
+  value = "234 B"
+  how   = "`shadow::note_for` at its widest shape, computed by `the_note_says_what_arrived_and_what_is_left_in_the_words_for_it`, which fails if the sentence grows. On any other start the capture reads a file that is not there, `when` is false and nothing is injected — so unlike every other SessionStart hook this one is not paid per context rebuild"
+  on    = "2026-08-23"
+
+  [[entry.instead_of]]
+  name = "saying it in the rules section, which every turn pays for"
+  why  = "the rules are the arrangement — permanently true things about whose repository this is. A sync is an event, and an event described in permanent prose is either absent when it happens or wrong for the rest of the session. The hook fires on the one start that follows a sync and is silent on every other"
+
+  [[entry.instead_of]]
+  name = "leaving the agent to find the `base moved to <sha>` commit itself"
+  why  = "that commit is written either way and is the fuller answer — this only says to go and read it. An agent resuming a session has no reason to run `git log` before it starts working, and by the time it does it has already formed a plan around a tree that moved"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Considered and rejected.
 #

@@ -5085,7 +5085,7 @@ fn sync(
         .unwrap_or_else(|| session::default_branch(&paths.repo));
 
     stop_before_syncing(&paths, &session, down, ctx)?;
-    ctx.say(&sync_session(&paths, &session, &base)?);
+    ctx.say(&sync_session(&paths, &session, &base, ctx)?);
     Ok(())
 }
 
@@ -5095,7 +5095,12 @@ fn sync(
 /// container runtime to decide whether the sandbox is up, and nothing that
 /// needs one is reachable from a test here. What is left outside is the
 /// refusal and the printing.
-fn sync_session(paths: &Paths, session: &Session, base: &str) -> Result<report::Synced> {
+fn sync_session(
+    paths: &Paths,
+    session: &Session,
+    base: &str,
+    ctx: &out::Ctx,
+) -> Result<report::Synced> {
     let branch = session
         .branch
         .as_deref()
@@ -5125,10 +5130,23 @@ fn sync_session(paths: &Paths, session: &Session, base: &str) -> Result<report::
     session.materialise(&merged.tree)?;
     session.move_baseline(&paths.repo, &onto, &was)?;
     shadow.record_base_moved(&session.worktree, &onto, &merged.conflicted)?;
+    let moved = session.commits_between(&paths.repo, &was, &onto)?;
+    // Deliberately not `?`. The sync is done — the tree is merged, the baseline
+    // has moved and the shadow has its commit — and a note that could not be
+    // written is a worse outcome to report than to swallow: the user would read
+    // a failed command about work that landed. It is said rather than dropped,
+    // on stderr, where a warning goes.
+    if let Err(why) = shadow.leave_note(&shadow::note_for(base, moved, merged.conflicted.len())) {
+        ctx.warn(&format!(
+            "synced, but omh could not leave {} a note about it — the sandbox will find \
+             `base moved to {onto}` in its own log instead: {why}",
+            session.id
+        ));
+    }
 
     Ok(report::Synced {
         id: session.id.clone(),
-        moved: session.commits_between(&paths.repo, &was, &onto)?,
+        moved,
         base: base.to_string(),
         onto,
         conflicted: merged.conflicted,
@@ -6681,7 +6699,7 @@ mod tests {
         let onto = repo_git(&["rev-parse", "HEAD"]);
         let _ = on_session;
 
-        let synced = sync_session(&paths, &session, "main").unwrap();
+        let synced = sync_session(&paths, &session, "main", &out::Ctx::plain()).unwrap();
         assert_eq!(synced.moved, 1, "one commit arrived");
         assert!(synced.conflicted.is_empty(), "and it merged cleanly");
         assert!(synced.checkpoint, "the uncommitted work was checkpointed");
@@ -6713,7 +6731,17 @@ mod tests {
             "and the point it can be undone from: {subjects:?}"
         );
 
-        // 4. …and the agent's work is still there to be taken.
+        // 4. The sentence the agent is given when it starts again — at the
+        //    host path that is the mount's other end, since a note written
+        //    anywhere else is delivered to nobody, in silence, forever.
+        let note = std::fs::read_to_string(shadow::note_file(&shadow.gitdir))
+            .expect("a note was left where the hook reads");
+        assert!(
+            note.contains("main moved 1 commit") && note.contains("git show HEAD"),
+            "what moved, and where to read it: {note}"
+        );
+
+        // 5. …and the agent's work is still there to be taken.
         let landed = shadow
             .harvest(
                 &paths.repo,

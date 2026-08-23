@@ -446,7 +446,9 @@ What the agent finds when it starts again:
   `git status` inside the sandbox is the to-do list — and `git checkout --
   <path>` takes the pre-sync version of one back;
 - a checkpoint written just before the sync, so `omh s01 log` shows the point
-  the whole thing can be undone from.
+  the whole thing can be undone from;
+- and one sentence at its next start saying the tree moved — delivered once,
+  not at every context rebuild.
 
 The conflict markers read `<<<<<<< main` and `>>>>>>> s01`, which is to say
 they name the sides rather than two object ids.

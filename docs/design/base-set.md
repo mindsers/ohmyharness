@@ -179,6 +179,13 @@ still answers, from the `rejected` table — *should omh stop the agent running
 git?* is a question someone rediscovers, and the answer changed rather than
 having been wrong the first time.
 
+`git-note` is the one hook whose cost is not paid per context rebuild. Every
+other `SessionStart` hook injects on every resume and every compact; this one
+captures a file omh leaves after `omh sNN sync`, and the capture *removes* it —
+so it speaks once and then is silent, and on a start that follows no sync it
+never speaks at all. That is why an event describing something that happened
+once can afford to live at an event that repeats.
+
 What is left is a set where every hook advises, and `graph-first` states the
 rule: *a nudge, not a wall — a hook that blocks correct work gets disabled.* The
 distinction became load-bearing when a second harness arrived, because advising
@@ -201,8 +208,9 @@ MCP servers are pure data and live entirely in the manifest. Hook **commands**
 stay in `src/base.rs`: they are intricate shell that interpolates `GRAPH_BIN`
 and `$OMH_GRAPH_PROJECT`, and flattening them into TOML would break that
 compile-time coupling. Rules **bodies** stay there for the same reason —
-`memory-rules` interpolates the guest note path and `git-rules` reads
-`shadow::ARRANGEMENT`, which the sandbox's seed commit reads too — and two
+`memory-rules` interpolates the guest note path, `git-note` interpolates
+`shadow::GUEST_NOTE` so the hook reads the path omh writes, and `git-rules`
+reads `shadow::ARRANGEMENT`, which the sandbox's seed commit reads too — and two
 copies of the same sentence drift, with the one that drifts never being the one
 you are reading.
 

@@ -625,13 +625,12 @@ the hardening in step 6 of the order below, this work closes or narrows
    selection is a `cherry-pick` rather than the generated rebase todo this
    design called for — see the section above for what was measured and why it
    changed.
-10. **Landed (#60).** `omh sNN sync` and the conflict-marker guard on
-    `commit`. Three of this section's claims were wrong and are corrected above
-    where they were made: the replay point must *not* advance, the conflict
-    labels are readable, and `diff --check` needed two measurements rather than
-    the "nothing here needs a parser" it was given. Still open: the one-shot
-    note the next launch delivers, which is a base-set hook and a separate
-    change.
+10. **Landed (#60, #61).** `omh sNN sync` and the conflict-marker guard on
+    `commit`, then the one-shot note the next launch delivers (#61). Three of
+    this section's claims were wrong and are corrected above where they were
+    made: the replay point must *not* advance, the conflict labels are
+    readable, and `diff --check` needed two measurements rather than the
+    "nothing here needs a parser" it was given.
 11. **Landed (#57, #60).** `omh doctor` learns git: the host's version, whether
     it can take a `--keep` selection, and — since `sync` now ships — whether it
     can merge on the host, asked of the binary rather than compared against a
