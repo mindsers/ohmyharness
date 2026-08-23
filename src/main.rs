@@ -6242,6 +6242,66 @@ mod tests {
     /// is the path a typed line takes — checking it against `Cli` alone would
     /// call `omh s01 diff` a failure and `omh s diff s01` a success, both
     /// backwards.
+    /// No attribute has been separated from the item it applies to.
+    ///
+    /// The other half of the same accident, and the half that keeps happening:
+    /// inserting before an anchor without reading what precedes it walks back
+    /// over the *next* item's `#[test]` and strands it above the new one. The
+    /// stranded attribute then applies to whatever the insertion brought, and
+    /// the test it came from silently stops being a test — which is how a
+    /// helper it alone called became dead code and took the lint run down.
+    ///
+    /// Three times in two changes. Clippy refuses `duplicated attribute`, but
+    /// clippy does not run on this machine — a 1.81 shim against a 1.85 crate
+    /// — so CI is the only place it is caught, one push and four minutes
+    /// later. This is the same guard, here.
+    ///
+    /// `#[test]` only, deliberately. Derives, `cfg` and `allow` legitimately
+    /// stack and sit above doc comments in this tree; a test attribute never
+    /// does.
+    #[test]
+    fn no_test_attribute_was_stranded_from_its_function() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut stranded = Vec::new();
+        let mut checked = 0;
+        for dir in ["src", "tests"] {
+            for file in std::fs::read_dir(root.join(dir)).unwrap() {
+                let file = file.unwrap().path();
+                if file.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                checked += 1;
+                let body = std::fs::read_to_string(&file).unwrap();
+                let lines: Vec<&str> = body.lines().collect();
+                for (n, line) in lines.iter().enumerate() {
+                    if line.trim() != "#[test]" {
+                        continue;
+                    }
+                    // What may follow: the function, or more attributes
+                    // (`#[should_panic]`, `#[ignore]`). Anything else — a doc
+                    // comment, a blank line, another `#[test]` — means this one
+                    // is no longer attached to what it was written for.
+                    let next = lines.get(n + 1).map(|l| l.trim()).unwrap_or("");
+                    let attached = next.starts_with("fn ")
+                        || next.starts_with("async fn ")
+                        || (next.starts_with("#[") && next != "#[test]");
+                    if !attached {
+                        stranded.push(format!(
+                            "{}:{}: followed by `{next}`",
+                            file.display(),
+                            n + 1
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(checked > 1, "the scan found no sources to read");
+        assert!(
+            stranded.is_empty(),
+            "`#[test]` separated from its function: {stranded:#?}"
+        );
+    }
+
     /// No doc comment has been spliced onto itself.
     ///
     /// A specific accident with a specific cause: these files are edited by

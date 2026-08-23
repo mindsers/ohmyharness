@@ -1437,7 +1437,6 @@ mod tests {
     /// agree. This is the only measurement in the base set that can be checked
     /// in-process; the rest need a container, and are the reason `omh doctor`
     /// exists for adapter claims.
-    #[test]
     /// The manifest's figure for the note is the note's actual size.
     ///
     /// The third entry in this file to need this test and the second to ship
@@ -1477,6 +1476,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn the_grep_nudges_declared_cost_matches_the_string_it_ships() {
         // A representative session project name — `repo-sNN`, and it appears
         // twice in the nudge, so the length is not incidental.
