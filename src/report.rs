@@ -720,6 +720,29 @@ pub fn overlaps(changed: &[(String, Vec<String>)]) -> Vec<Overlap> {
         .collect()
 }
 
+/// How far a session trails its base, as one cell — three answers, three
+/// renderings.
+///
+/// Shared by the dashboard and by one session's own row, because they had
+/// drifted into two copies of the same `match` and only one of them would ever
+/// have been fixed. Both were wrong the same way: `Some(0) | None` rendered an
+/// empty cell, so *up to date* and *omh could not count* were the same sight
+/// on the surface where a user picks which session to open.
+///
+/// That pair is the one this file's own rule names as most dangerous to
+/// confuse, and `log` carries a paragraph about it. A stale session that looks
+/// current is how work gets done against code that moved.
+///
+/// `WARN` for the unanswered one, matching what the work column does with the
+/// same uncertainty: it is not a worse number, it is the absence of one.
+fn behind_cell(behind: Option<usize>, base: &str) -> Cell {
+    match behind {
+        Some(0) => Cell::plain(""),
+        Some(n) => Cell::styled(format!("({n} behind {base})"), out::DIM),
+        None => Cell::styled(format!("(how far behind {base}?)"), out::WARN),
+    }
+}
+
 /// Every session in this checkout, and what earlier ones left behind.
 #[derive(Debug, Clone)]
 pub struct Sessions {
@@ -763,10 +786,7 @@ impl Report for Sessions {
                     Some(work) => Cell::styled(work.human(), work.style()),
                     None => Cell::plain(""),
                 },
-                match s.behind {
-                    Some(0) | None => Cell::plain(""),
-                    Some(n) => Cell::styled(format!("({n} behind {})", self.base), out::DIM),
-                },
+                behind_cell(s.behind, &self.base),
             ]);
         }
         let mut out = table.render(p);
@@ -822,10 +842,40 @@ impl Report for Sessions {
     /// `docs/commands.md` promises they stay out of. They are still in `json`
     /// as `leftovers`, where a script wanted them all along.
     fn asides(&self) -> out::Asides {
-        if self.leftovers.is_empty() {
-            return out::Asides::default();
+        let mut asides = out::Asides::default();
+
+        // The number was in this table long before there was anything to do
+        // about it. `sync` is that thing, and a dashboard that reports a
+        // problem it can now name the answer to and does not is worse than one
+        // that never had the answer.
+        //
+        // `Some(n)` with `n > 0` only. A zero has nothing to do and a `None`
+        // is a question omh failed to answer — advising a merge on the
+        // strength of a count that could not be taken is advice built on a
+        // guess, and that row is already saying in the table that something is
+        // wrong with reading it.
+        let stale: Vec<&Session> = self
+            .sessions
+            .iter()
+            .filter(|s| s.behind.is_some_and(|n| n > 0))
+            .collect();
+        for s in &stale {
+            asides = asides.hint(format!(
+                "  omh {} sync{:width$}  bring {} in, merged on the host",
+                s.id,
+                "",
+                self.base,
+                // Aligned against the longest id present rather than a fixed
+                // pad: session ids are `sNN` today and the selector accepts
+                // any name a worktree can carry.
+                width = 1 + stale.iter().map(|s| s.id.len()).max().unwrap_or(0) - s.id.len()
+            ));
         }
-        out::Asides::default()
+
+        if self.leftovers.is_empty() {
+            return asides;
+        }
+        asides
             .warn(format!(
                 "{} removed but left something behind: {}",
                 if self.leftovers.len() == 1 {
@@ -941,10 +991,7 @@ impl Report for Inventory {
                 t = t.row(vec![
                     Cell::styled(&sess.id, out::NAME),
                     Cell::plain(&sess.label),
-                    match sess.behind {
-                        Some(0) | None => Cell::plain(""),
-                        Some(n) => Cell::styled(format!("({n} behind {})", self.base), out::DIM),
-                    },
+                    behind_cell(sess.behind, &self.base),
                 ]);
             }
             s.push_str(&t.render(p));
@@ -2962,6 +3009,106 @@ mod tests {
             overlaps: vec![],
             unreadable: vec![],
         }
+    }
+
+    /// A session that has fallen behind is told what to do about it — and
+    /// only when doing it would change something.
+    ///
+    /// `behind 12` was reported and unactionable for the whole life of this
+    /// command: the number was right there and the only thing a user could do
+    /// with it was worry. `omh sNN sync` is the answer now, and a dashboard
+    /// that names the problem without naming the answer is the state this
+    /// phase set out to leave.
+    ///
+    /// Named per session rather than as one sentence, because which session
+    /// is the decision — and silent when every session is current, since a
+    /// suggestion that is always there is one nobody reads.
+    #[test]
+    fn a_session_behind_its_base_is_told_what_to_do_about_it() {
+        let behind = |id: &str, n: Option<usize>| {
+            let mut row = session(id, Work::Clean);
+            row.behind = n;
+            row
+        };
+
+        let current = sessions(vec![behind("s01", Some(0))]);
+        assert!(
+            !current.asides().hints.join(" ").contains("sync"),
+            "nothing to say when nothing is behind: {:?}",
+            current.asides()
+        );
+
+        let stale = sessions(vec![
+            behind("s01", Some(0)),
+            behind("s02", Some(12)),
+            behind("s03", Some(3)),
+        ]);
+        let said = stale.asides().hints.join("\n");
+        assert!(
+            said.contains("omh s02 sync") && said.contains("omh s03 sync"),
+            "each one that is behind, by name: {said}"
+        );
+        assert!(
+            !said.contains("omh s01 sync"),
+            "and not the one that is current: {said}"
+        );
+
+        // *Could not tell* is not *behind*. Suggesting a sync over a question
+        // omh failed to answer is advice built on a guess — and the same
+        // session is already saying, in the table, that something is wrong
+        // with reading it.
+        let unknown = sessions(vec![behind("s01", None)]);
+        assert!(
+            !unknown.asides().hints.join(" ").contains("sync"),
+            "an unanswered count is not a reason to act: {:?}",
+            unknown.asides()
+        );
+    }
+
+    /// The dashboard has the same three answers about `behind` as `log` does,
+    /// and had been rendering two of them the same.
+    ///
+    /// `Some(0) | None => Cell::plain("")` — an empty cell for *up to date*
+    /// and an empty cell for *omh could not count*. This file states the rule
+    /// at the top and `log` carries a paragraph about it; the dashboard is
+    /// where a user actually decides which session to open, and it was the one
+    /// surface answering the question wrong.
+    ///
+    /// A stale session that looks current is how work gets done against code
+    /// that moved — which is the failure this whole phase exists to close.
+    #[test]
+    fn the_dashboard_does_not_render_an_unanswered_count_as_up_to_date() {
+        let render = |behind| {
+            let mut row = session("s01", Work::Clean);
+            row.behind = behind;
+            sessions(vec![row]).human(&out::Palette::plain())
+        };
+
+        assert!(
+            render(Some(12)).contains("12 behind main"),
+            "a count omh could take is reported: {}",
+            render(Some(12))
+        );
+        assert_ne!(
+            render(None),
+            render(Some(0)),
+            "an unanswered question and a zero are the two answers it is most \
+             dangerous to confuse — the dashboard is where that decision is made"
+        );
+        // Not `!contains("behind main")` — the honest rendering says *how far
+        // behind main?* and contains it. What must not happen is a **number**
+        // in front of it, which is the shape a reader acts on.
+        let unknown = render(None);
+        assert!(
+            !unknown
+                .split_whitespace()
+                .any(|word| word.trim_matches('(').parse::<usize>().is_ok()),
+            "*could not tell* is not dressed up as a count: {unknown}"
+        );
+        assert!(
+            unknown.contains("how far behind main"),
+            "and it does ask the question rather than going quiet: {unknown}"
+        );
     }
 
     /// **A session omh cannot read is never rendered as clean**, in either

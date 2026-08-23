@@ -290,6 +290,25 @@ than about one session — `omh s01 ls` says so instead of quietly listing them
 all. `down` with no session stops every sandbox, which is the one place acting
 on all of them is what you mean.
 
+**A session that has fallen behind is told what to do about it.** The number
+was there long before there was anything to do with it; `sync` is that thing.
+
+```console
+$ omh s ls
+  s01  omh/s01  stopped
+  s02  omh/s02  stopped  3 uncommitted  (12 behind main)
+  s03  omh/s03  stopped                 (how far behind main?)
+
+  omh s02 sync   bring main in, merged on the host
+```
+
+Offered for the sessions it applies to and no others — a suggestion under every
+row is one nobody reads. A session omh could not measure is not one of them: it
+renders `(how far behind main?)` rather than an empty cell, because *up to
+date* and *omh could not count* must never look the same on the surface where
+you pick which session to open, and a merge advised off a count that failed is
+advice built on a guess.
+
 `s ls` also names ids that have a container, a run directory or a **sandbox
 repository** but no worktree — sessions removed by a version of omh that only
 took half of one down. `omh sNN rm` clears them, and says what it would take
