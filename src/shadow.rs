@@ -1824,7 +1824,7 @@ pub(crate) fn options_in(help: &str) -> BTreeSet<String> {
                 .split([' ', '='])
                 .next()
                 .unwrap_or_default()
-                .trim_end_matches(|c| c == '[' || c == '<' || c == '(');
+                .trim_end_matches(['[', '<', '(']);
             if token.len() < 2 || !token.starts_with('-') {
                 continue;
             }
