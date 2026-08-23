@@ -296,18 +296,25 @@ was there long before there was anything to do with it; `sync` is that thing.
 ```console
 $ omh s ls
   s01  omh/s01  stopped
-  s02  omh/s02  stopped  3 uncommitted  (12 behind main)
+  s02  omh/s02  up       3 uncommitted  (12 behind main)
   s03  omh/s03  stopped                 (how far behind main?)
-
-  omh s02 sync   bring main in, merged on the host
+omh: omh could not measure s03 against main — it may be working against code that moved, and `sync` is not offered over a count that failed
+  omh s02 sync --down  bring main in, stopping the sandbox first
+  omh s03 log   says why the count could not be taken
 ```
 
 Offered for the sessions it applies to and no others — a suggestion under every
-row is one nobody reads. A session omh could not measure is not one of them: it
-renders `(how far behind main?)` rather than an empty cell, because *up to
-date* and *omh could not count* must never look the same on the surface where
-you pick which session to open, and a merge advised off a count that failed is
-advice built on a guess.
+row is one nobody reads — and in the spelling that works on the session as it
+stands. `sync` refuses while a sandbox is up and names `--down` itself, so the
+bare form under a row marked `up` would be a line that fails when pasted.
+
+**A count omh could not take is not a count of zero.** `s03` renders `(how far
+behind main?)` rather than an empty cell, because *up to date* and *omh could
+not count* must never look the same on the surface where you pick which session
+to open. It is not offered a sync — a merge advised off a count that failed is
+advice built on a guess — but it is not passed over in silence either: beside
+rows that each carry a next step, saying nothing reads as *this one is fine*.
+`omh s03 log` prints the reason git gave.
 
 `s ls` also names ids that have a container, a run directory or a **sandbox
 repository** but no worktree — sessions removed by a version of omh that only

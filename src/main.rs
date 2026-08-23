@@ -1580,7 +1580,21 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     &base,
                     touched.as_ref().ok().map(Vec::len),
                 )),
-                behind: sess.behind(&paths.repo, &base).ok(),
+                // Not `.ok()`. The dashboard renders a failed count as a
+                // question rather than as zero, which is only half the rule —
+                // the other half is that the reason exists and git already
+                // said it. `changed()` ten lines up pushes to `unreadable` for
+                // the same class of failure, and `log` prints git's own words;
+                // this was the one that threw them away.
+                behind: match sess.behind(&paths.repo, &base) {
+                    Ok(n) => Some(n),
+                    Err(e) => {
+                        ctx.warn(&format!(
+                            "could not tell how far behind {base} {id} is: {e:#}"
+                        ));
+                        None
+                    }
+                },
                 id,
             }
         })
@@ -5045,7 +5059,18 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     // asked* — `Work::Clean` would be a claim, and a false one.
                     work: None,
                     running: false,
-                    behind: sess.behind(&paths.repo, &base).ok(),
+                    // Silently `.ok()` until #62 put a yellow question in
+                    // this column: a surface that asks *how far behind?* and
+                    // cannot say why is worse than one that never asked.
+                    behind: match sess.behind(&paths.repo, &base) {
+                        Ok(n) => Some(n),
+                        Err(e) => {
+                            ctx.warn(&format!(
+                                "could not tell how far behind {base} {id} is: {e:#}"
+                            ));
+                            None
+                        }
+                    },
                     id,
                 }
             })
