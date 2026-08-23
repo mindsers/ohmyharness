@@ -204,7 +204,7 @@ feature = "codegraph"
 | Feature | What it is | Removed by |
 |---|---|---|
 | `codegraph` | the MCP server, plus `graph-orient`, `graph-first`, `graph-read`, `graph-refresh` | `omh config mcp rm codegraph` — takes all five |
-| `git-notice` | the rules section telling the agent whose repository the sandbox's git is | nothing to uninstall; `[omh]` or not at all |
+| `git-notice` | the rules section telling the agent whose repository the sandbox's git is, plus `git-note` — the hook that tells it a sync moved its tree | nothing to uninstall; `[omh]` or not at all |
 | `memory` | the MCP server, plus the note-taking rules section | `omh config mcp rm memory` |
 
 **A feature is not a group of hooks. It is a group of entries across kinds** — a

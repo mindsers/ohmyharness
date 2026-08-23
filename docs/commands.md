@@ -122,7 +122,8 @@ launch rather than silently dropped:
 
 ```console
 $ omh opencode
-omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool),
+omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment),
+     graph-first (no `search` tool),
      graph-orient (no `session-start` moment),
      graph-read (no way to inject text before a tool runs)
 ```
@@ -446,7 +447,11 @@ What the agent finds when it starts again:
   `git status` inside the sandbox is the to-do list — and `git checkout --
   <path>` takes the pre-sync version of one back;
 - a checkpoint written just before the sync, so `omh s01 log` shows the point
-  the whole thing can be undone from.
+  the whole thing can be undone from;
+- and, on Claude Code, one sentence at its next start saying the tree moved —
+  delivered once, not at every context rebuild. opencode and omp have no way to
+  say anything at that moment; they name what they dropped when the session
+  launches, and the commit above is still there to be read.
 
 The conflict markers read `<<<<<<< main` and `>>>>>>> s01`, which is to say
 they name the sides rather than two object ids.

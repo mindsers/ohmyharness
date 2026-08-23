@@ -2843,16 +2843,22 @@ mod tests {
                 "{harness} gives up no whole capability"
             );
         }
-        // opencode still gives up three *hooks*, which is the finer grain
+        // opencode still gives up four *hooks*, which is the finer grain
         // `dropped_hooks` exists for and a different statement: the capability
-        // arrives, and three of the things in it cannot be said here.
+        // arrives, and four of the things in it cannot be said here. Every one
+        // is an advisory injection, which is the shape opencode has no channel
+        // for — including `git-note`, so on this harness an agent comes back
+        // from a sync with no sentence about it.
         let oc = plan_for(&fx, "opencode");
         let named: Vec<&str> = oc.dropped_hooks.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(named, ["graph-first", "graph-orient", "graph-read"]);
+        assert_eq!(
+            named,
+            ["git-note", "graph-first", "graph-orient", "graph-read"]
+        );
         let msg = oc.degradation().expect("and they are said out loud");
         assert!(msg.contains("graph-read"), "by name: {msg}");
 
-        // omp gives up the same three, and for reasons that are its own rather
+        // omp gives up the same four, and for reasons that are its own rather
         // than opencode's: it *has* a `session-start` moment, so `graph-orient`
         // is dropped for having no advisory channel there rather than for the
         // moment being absent. Pinned here because nothing else asserts which
@@ -2860,7 +2866,10 @@ mod tests {
         // stayed green everywhere else.
         let omp = plan_for(&fx, "omp");
         let named: Vec<&str> = omp.dropped_hooks.iter().map(|d| d.name.as_str()).collect();
-        assert_eq!(named, ["graph-first", "graph-orient", "graph-read"]);
+        assert_eq!(
+            named,
+            ["git-note", "graph-first", "graph-orient", "graph-read"]
+        );
         assert!(
             omp.dropped_hooks
                 .iter()

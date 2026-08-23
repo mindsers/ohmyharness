@@ -139,6 +139,13 @@ pub struct Synced {
     pub conflicted: Vec<String>,
     /// Whether there was uncommitted work to checkpoint first.
     pub checkpoint: bool,
+    /// Why the agent will not be told about this at its next start, if it
+    /// will not be.
+    ///
+    /// `None` is the ordinary answer. A `Some` is not a failed sync — the sync
+    /// is done by the time this is known — but the user has to hear it, because
+    /// the thing they were promised silently did not happen.
+    pub note: Option<String>,
 }
 
 impl Report for Synced {
@@ -192,11 +199,22 @@ impl Report for Synced {
             "moved": self.moved,
             "conflicted": self.conflicted,
             "checkpointed": self.checkpoint,
+            "noted": self.note.is_none(),
         })
     }
 
     fn asides(&self) -> out::Asides {
         let mut asides = out::Asides::default();
+        if let Some(why) = &self.note {
+            // A warning rather than a hint, and it says what to do instead: the
+            // commit is on disk either way, so nothing is lost that cannot be
+            // read — only the sentence that would have said to go and read it.
+            asides = asides.warn(format!(
+                "the sandbox will not be told this happened — omh could not leave the note \
+                 ({}). It will find `base moved to {}` in its own log: {why}",
+                self.id, self.onto
+            ));
+        }
         if self.checkpoint {
             asides = asides.hint(format!(
                 "  omh {} log             the checkpoint this can be undone from",
@@ -2301,6 +2319,7 @@ mod tests {
             moved,
             conflicted,
             checkpoint: true,
+            note: None,
         };
         let p = crate::out::Palette::plain();
 
@@ -2334,6 +2353,31 @@ mod tests {
             two.contains("a.rs") && two.contains("b.rs"),
             "every one named — a count is not something you can act on: {two}"
         );
+
+        // A sync that could not leave its note is still a sync that happened.
+        // The user hears about it once, as a warning, and `--json` carries the
+        // same fact as a field — a bare `eprint` reaches neither a script nor
+        // a test, which is why this is on the report at all.
+        let quiet = super::Synced {
+            note: Some("Permission denied (os error 13)".into()),
+            ..synced(vec![], 2)
+        };
+        assert!(
+            quiet.human(&p).contains("2 commits from main"),
+            "the sync is reported as the success it was: {}",
+            quiet.human(&p)
+        );
+        let said = quiet.asides().warnings.join(" ");
+        assert!(
+            said.contains("Permission denied"),
+            "with the reason, not just the fact: {said}"
+        );
+        assert!(
+            said.contains("base moved to"),
+            "and what the agent will find instead: {said}"
+        );
+        assert_eq!(quiet.json()["noted"], serde_json::json!(false));
+        assert_eq!(synced(vec![], 2).json()["noted"], serde_json::json!(true));
     }
 
     /// Three sessions and two files are one sentence a person can read.

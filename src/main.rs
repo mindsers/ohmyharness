@@ -5125,14 +5125,34 @@ fn sync_session(paths: &Paths, session: &Session, base: &str) -> Result<report::
     session.materialise(&merged.tree)?;
     session.move_baseline(&paths.repo, &onto, &was)?;
     shadow.record_base_moved(&session.worktree, &onto, &merged.conflicted)?;
+    let moved = session.commits_between(&paths.repo, &was, &onto)?;
+    // Deliberately not `?`. The sync is done — the tree is merged, the baseline
+    // has moved and the shadow has its commit — and a note that could not be
+    // written is a worse outcome to report than to carry: the user would read a
+    // failed command about work that landed.
+    //
+    // Carried out on the report rather than printed here, which is three things
+    // at once. The failure becomes assertable, since nothing captures a write
+    // to stderr from inside a function; it reaches `--json`, which a bare
+    // `eprint` structurally never does; and this function goes back to being
+    // the part with no side effects, which is the only reason it is split out
+    // at all. The first draft printed it here and quietly broke that.
+    let note = shadow
+        .leave_note(&shadow::note_for(base, moved, merged.conflicted.len()))
+        // `{e:#}` and not `{e}`: `Display` on an `anyhow::Error` prints the
+        // outermost context only, so the reason — `Permission denied`, a full
+        // disk — is exactly the part that would be dropped.
+        .err()
+        .map(|why| format!("{why:#}"));
 
     Ok(report::Synced {
         id: session.id.clone(),
-        moved: session.commits_between(&paths.repo, &was, &onto)?,
+        moved,
         base: base.to_string(),
         onto,
         conflicted: merged.conflicted,
         checkpoint: checkpoint.is_some(),
+        note,
     })
 }
 
@@ -6222,6 +6242,66 @@ mod tests {
     /// is the path a typed line takes — checking it against `Cli` alone would
     /// call `omh s01 diff` a failure and `omh s diff s01` a success, both
     /// backwards.
+    /// No attribute has been separated from the item it applies to.
+    ///
+    /// The other half of the same accident, and the half that keeps happening:
+    /// inserting before an anchor without reading what precedes it walks back
+    /// over the *next* item's `#[test]` and strands it above the new one. The
+    /// stranded attribute then applies to whatever the insertion brought, and
+    /// the test it came from silently stops being a test — which is how a
+    /// helper it alone called became dead code and took the lint run down.
+    ///
+    /// Three times in two changes. Clippy refuses `duplicated attribute`, but
+    /// clippy does not run on this machine — a 1.81 shim against a 1.85 crate
+    /// — so CI is the only place it is caught, one push and four minutes
+    /// later. This is the same guard, here.
+    ///
+    /// `#[test]` only, deliberately. Derives, `cfg` and `allow` legitimately
+    /// stack and sit above doc comments in this tree; a test attribute never
+    /// does.
+    #[test]
+    fn no_test_attribute_was_stranded_from_its_function() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut stranded = Vec::new();
+        let mut checked = 0;
+        for dir in ["src", "tests"] {
+            for file in std::fs::read_dir(root.join(dir)).unwrap() {
+                let file = file.unwrap().path();
+                if file.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                checked += 1;
+                let body = std::fs::read_to_string(&file).unwrap();
+                let lines: Vec<&str> = body.lines().collect();
+                for (n, line) in lines.iter().enumerate() {
+                    if line.trim() != "#[test]" {
+                        continue;
+                    }
+                    // What may follow: the function, or more attributes
+                    // (`#[should_panic]`, `#[ignore]`). Anything else — a doc
+                    // comment, a blank line, another `#[test]` — means this one
+                    // is no longer attached to what it was written for.
+                    let next = lines.get(n + 1).map(|l| l.trim()).unwrap_or("");
+                    let attached = next.starts_with("fn ")
+                        || next.starts_with("async fn ")
+                        || (next.starts_with("#[") && next != "#[test]");
+                    if !attached {
+                        stranded.push(format!(
+                            "{}:{}: followed by `{next}`",
+                            file.display(),
+                            n + 1
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(checked > 1, "the scan found no sources to read");
+        assert!(
+            stranded.is_empty(),
+            "`#[test]` separated from its function: {stranded:#?}"
+        );
+    }
+
     /// No doc comment has been spliced onto itself.
     ///
     /// A specific accident with a specific cause: these files are edited by
@@ -6639,6 +6719,48 @@ mod tests {
         );
     }
 
+    /// A sync that cannot leave its note is still a sync, and says which.
+    ///
+    /// The design decision the call site argues for, asserted rather than
+    /// commented: the merge has landed, the baseline has moved and the shadow
+    /// has its commit by the time the note is written, so failing here would
+    /// report finished work as a failed command. The other half — that the
+    /// user hears about it — is what carrying it on the report rather than
+    /// printing it inside makes checkable at all.
+    #[test]
+    fn a_sync_whose_note_cannot_be_written_still_succeeds_and_says_so() {
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+        let repo_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        repo_git(&["checkout", "-q", "main"]);
+        std::fs::write(paths.repo.join("from-trunk.rs"), "fn trunk() {}\n").unwrap();
+        repo_git(&["add", "-A"]);
+        repo_git(&["commit", "-qm", "trunk moved"]);
+
+        // A directory where the note goes. Contrived, and the reachable
+        // versions — a full disk, a permission the host process does not have
+        // — are not things a test can arrange on demand.
+        std::fs::create_dir(shadow::note_file(&shadow.gitdir)).unwrap();
+
+        let synced = sync_session(&paths, &session, "main").expect("the sync itself is fine");
+        assert_eq!(synced.moved, 1, "the work still arrived");
+        assert!(
+            session.worktree.join("from-trunk.rs").exists(),
+            "and is on disk, which is what a failed command would deny"
+        );
+        let why = synced.note.expect("the failure is carried, not swallowed");
+        assert!(
+            why.contains("omh-note"),
+            "naming the file it could not write: {why}"
+        );
+    }
+
     /// A sync brings trunk over, explains itself in the sandbox, and leaves
     /// the agent's work where a harvest can still take it.
     ///
@@ -6713,7 +6835,21 @@ mod tests {
             "and the point it can be undone from: {subjects:?}"
         );
 
-        // 4. …and the agent's work is still there to be taken.
+        // 4. The sentence the agent is given when it starts again — at the
+        //    host path that is the mount's other end, since a note written
+        //    anywhere else is delivered to nobody, in silence, forever.
+        let note = std::fs::read_to_string(shadow::note_file(&shadow.gitdir))
+            .expect("a note was left where the hook reads");
+        assert!(
+            note.contains("main moved 1 commit") && note.contains("git show HEAD"),
+            "what moved, and where to read it: {note}"
+        );
+        assert_eq!(
+            synced.note, None,
+            "and nothing to report about leaving it: {synced:?}"
+        );
+
+        // 5. …and the agent's work is still there to be taken.
         let landed = shadow
             .harvest(
                 &paths.repo,

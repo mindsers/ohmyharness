@@ -131,7 +131,9 @@ new base into the session *on the host* and writes the resulting files in, so
 the sandbox receives a tree and never a commit of yours — the rule above holds
 through a sync. The agent finds a commit saying `base moved to <sha>` and, if
 anything conflicted, the files sitting there with their markers for it to
-resolve. It refuses while the sandbox is running, because what the agent
+resolve — and, at its next start, one sentence saying so, delivered once and
+then gone. That last part is Claude Code only; opencode and omp cannot speak at
+a session's start, and say so when they launch. It refuses while the sandbox is running, because what the agent
 believes the tree holds is in its conversation and no file on disk reaches
 that.
 
