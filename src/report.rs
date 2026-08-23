@@ -124,6 +124,99 @@ impl Report for Action {
     }
 }
 
+// ── omh sNN sync ────────────────────────────────────────────────────────────
+
+/// What a sync brought over, and what it could not settle.
+#[derive(Debug, Clone)]
+pub struct Synced {
+    pub id: String,
+    pub base: String,
+    /// Where the base now is.
+    pub onto: String,
+    /// How many commits arrived on it.
+    pub moved: usize,
+    /// Paths that need a decision, with markers in them.
+    pub conflicted: Vec<String>,
+    /// Whether there was uncommitted work to checkpoint first.
+    pub checkpoint: bool,
+}
+
+impl Report for Synced {
+    fn human(&self, p: &out::Palette) -> String {
+        let mut s = out::heading(
+            p,
+            &format!(
+                "{} · {} commit{} from {}",
+                self.id,
+                self.moved,
+                if self.moved == 1 { "" } else { "s" },
+                self.base
+            ),
+        );
+        s.push('\n');
+
+        if self.conflicted.is_empty() {
+            s.push_str(&out::nothing(p, "merged cleanly — nothing needs deciding"));
+            return s;
+        }
+        // Named, every one, because each is a decision somebody has to make and
+        // a count is not something you can act on.
+        s.push_str(&format!(
+            "  {}\n",
+            p.paint(
+                out::WARN,
+                &format!(
+                    "{} file{} resolving:",
+                    self.conflicted.len(),
+                    if self.conflicted.len() == 1 {
+                        " needs"
+                    } else {
+                        "s need"
+                    }
+                )
+            )
+        ));
+        for path in &self.conflicted {
+            // The agent chose these names; git quotes what it must, and this
+            // does not trust that.
+            s.push_str(&format!("    {}\n", out::untrusted(path)));
+        }
+        s
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "session": self.id,
+            "base": self.base,
+            "onto": self.onto,
+            "moved": self.moved,
+            "conflicted": self.conflicted,
+            "checkpointed": self.checkpoint,
+        })
+    }
+
+    fn asides(&self) -> out::Asides {
+        let mut asides = out::Asides::default();
+        if self.checkpoint {
+            asides = asides.hint(format!(
+                "  omh {} log             the checkpoint this can be undone from",
+                self.id
+            ));
+        }
+        if !self.conflicted.is_empty() {
+            // The agent is the one holding the whole tree, and the sandbox is
+            // where a conflict is safe to be wrong in. Say that rather than
+            // leaving the user to open the files themselves.
+            asides = asides.hint(format!(
+                "  omh {} claude          the markers are in the sandbox, where fixing \
+                 them cannot hurt you",
+                self.id
+            ));
+        }
+        asides
+    }
+}
+
 // ── omh sNN log ─────────────────────────────────────────────────────────────
 
 /// What the agent has committed inside the sandbox, and where the line is.
@@ -2192,6 +2285,57 @@ impl Report for Lint {
 
 #[cfg(test)]
 mod tests {
+    /// A sync names every file that needs a decision, and counts them in a
+    /// sentence rather than in a template.
+    ///
+    /// The count is not decoration: a clean sync and a sync with one conflict
+    /// are the same command with opposite next steps. And `1 file need
+    /// resolving` shipped in the first draft of this — caught by printing the
+    /// thing rather than by reading the code that builds it.
+    #[test]
+    fn a_sync_names_what_needs_deciding_and_says_so_in_english() {
+        let synced = |conflicted: Vec<String>, moved: usize| super::Synced {
+            id: "s01".into(),
+            base: "main".into(),
+            onto: "abc1234".into(),
+            moved,
+            conflicted,
+            checkpoint: true,
+        };
+        let p = crate::out::Palette::plain();
+
+        let clean = synced(vec![], 3).human(&p);
+        assert!(
+            clean.contains("3 commits from main"),
+            "what arrived, and from where: {clean}"
+        );
+        assert!(
+            clean.contains("nothing needs deciding"),
+            "and that there is nothing to do: {clean}"
+        );
+
+        let one = synced(vec!["src/tap.rs".into()], 1).human(&p);
+        assert!(
+            one.contains("1 commit from main"),
+            "one commit, not `1 commits`: {one}"
+        );
+        assert!(
+            one.contains("1 file needs resolving"),
+            "and one file needs it, rather than need it: {one}"
+        );
+        assert!(one.contains("src/tap.rs"), "named: {one}");
+
+        let two = synced(vec!["a.rs".into(), "b.rs".into()], 2).human(&p);
+        assert!(
+            two.contains("2 files need resolving"),
+            "and two of them need it: {two}"
+        );
+        assert!(
+            two.contains("a.rs") && two.contains("b.rs"),
+            "every one named — a count is not something you can act on: {two}"
+        );
+    }
+
     /// Three sessions and two files are one sentence a person can read.
     ///
     /// Both separators are the identity with two sessions and one path, which

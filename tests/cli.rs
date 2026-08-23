@@ -1019,7 +1019,7 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
     );
 }
 
-/// An empty patch is a sentence, not a blank screen./// An empty patch is a sentence, not a blank screen.
+/// An empty patch is a sentence, not a blank screen.
 ///
 /// `Diff::human` exists partly to say *no changes on … (against …)*, because
 /// silence reads as breakage. Handing the terminal straight to git skipped it,
@@ -1233,6 +1233,36 @@ fn work_committed_from_the_host_is_what_diff_then_reports() {
 
     let printed = String::from_utf8_lossy(&sb.omh(&["s01", "diff"]).stdout).to_string();
     assert!(printed.contains("feature.rs"), "got: {printed}");
+}
+
+/// The refusal is wired to the command, not just to a function that could
+/// refuse.
+///
+/// The unit test decides *what* to say about markers; this asserts the command
+/// asks at all. Worth its own case because the failure mode is a deleted line
+/// rather than a wrong answer: `commit` would keep passing every other test
+/// and quietly land a half-resolved merge on the branch.
+#[test]
+fn a_commit_over_conflict_markers_is_refused_by_the_command_itself() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    std::fs::write(
+        worktree.join("tap.rs"),
+        "<<<<<<< main\nfn ours() {}\n=======\nfn theirs() {}\n>>>>>>> s01\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["s01", "commit", "-m", "Add the tap"]);
+    assert!(!out.status.success(), "a half-resolved merge does not land");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("tap.rs:1"), "and it says where: {err}");
+
+    let out = sb.omh(&["s01", "commit", "-m", "Add the tap", "--force"]);
+    assert!(
+        out.status.success(),
+        "and the user can still mean it: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 /// `--keep` is the harvest, and it says so rather than pretending it committed.

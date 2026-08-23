@@ -791,6 +791,93 @@ impl Shadow {
         ))
     }
 
+    /// Commit the worktree as it stands, so a sync has a point to undo from.
+    ///
+    /// Runs **before** anything is written, and it is the reason a sync can be
+    /// recovered from at all: `omh sNN log` then shows the state the session
+    /// was in, and `git checkout <that>` inside the sandbox takes it back.
+    ///
+    /// Answers `None` when there was nothing to commit, which is the ordinary
+    /// case for a session whose agent has just committed its work — that is not
+    /// a failure and must not read as one.
+    pub fn checkpoint(&self, worktree: &Path, why: &str) -> Result<Option<String>> {
+        if git(&self.gitdir, worktree, &["status", "--porcelain"])?
+            .trim()
+            .is_empty()
+        {
+            return Ok(None);
+        }
+        git(&self.gitdir, worktree, &["add", "-A", "."])?;
+        git(
+            &self.gitdir,
+            worktree,
+            &["commit", "-q", "--no-verify", "-m", why],
+        )?;
+        Ok(Some(
+            git(&self.gitdir, worktree, &["rev-parse", "HEAD"])?
+                .trim()
+                .to_string(),
+        ))
+    }
+
+    /// Record what moved underneath the agent, as a commit it can read.
+    ///
+    /// The point of writing anything into the sandbox's repository rather than
+    /// only rewriting files: `git show HEAD` is then exactly what changed and
+    /// nothing else. Files appearing with no explanation is the confusing
+    /// version of a sync; a commit is the legible one.
+    ///
+    /// **Conflicted paths are left out on purpose.** They stay in the worktree
+    /// with their markers, uncommitted, so the sandbox's own `git status` is
+    /// the to-do list and `git checkout -- <path>` takes the pre-sync side
+    /// back. Committing them would bury the one thing the agent has to act on.
+    ///
+    /// The base's id goes in the message as **text**, never as a parent: no
+    /// commit from the user's checkout may enter this repository, and a sha in
+    /// a subject is a string that happens to look like one.
+    pub fn record_base_moved(
+        &self,
+        worktree: &Path,
+        onto: &str,
+        conflicted: &[String],
+    ) -> Result<()> {
+        let mut add: Vec<&str> = vec!["add", "-A", "."];
+        // `:(exclude)` rather than adding everything and unstaging: an
+        // unstage would have to name paths git quotes, and the pathspec does
+        // not.
+        let keep_out: Vec<String> = conflicted
+            .iter()
+            .map(|path| format!(":(exclude){path}"))
+            .collect();
+        add.extend(keep_out.iter().map(String::as_str));
+        git(&self.gitdir, worktree, &add)?;
+
+        let message = match conflicted.len() {
+            0 => format!("base moved to {onto}"),
+            n => format!(
+                "base moved to {onto}\n\n{n} file{} need resolving; `git status` names them.\n\
+                 `git checkout -- <path>` takes back the version from before this.",
+                if n == 1 { "" } else { "s" }
+            ),
+        };
+        // `--allow-empty`, because trunk moving without touching anything this
+        // session has is an ordinary outcome and the commit is the *record*.
+        // An agent that finds no commit concludes nothing moved.
+        git(
+            &self.gitdir,
+            worktree,
+            &[
+                "commit",
+                "-q",
+                "--no-verify",
+                "--allow-empty",
+                "-m",
+                &message,
+            ],
+        )?;
+        Ok(())
+    }
+
     /// Whether `commit` is still in the history `HEAD` reaches.
     ///
     /// Its own helper because the answer *no* is not a failure and `git` here
@@ -818,7 +905,7 @@ impl Shadow {
         }
     }
 
-    /// Refuse to harvest from a repository whose history is not all reachable.    /// Refuse to harvest from a repository whose history is not all reachable.
+    /// Refuse to harvest from a repository whose history is not all reachable.
     ///
     /// Three states make a harvest succeed while quietly dropping commits, and
     /// all three are ordinary things for an agent to leave behind. Every one is

@@ -123,8 +123,17 @@ keeps — so you can read it from the host if you want to:
 $ git --git-dir=~/.omh/shadow/myrepo/s01.git log --oneline
 ```
 
-Reading it is the only way to see those commits today. [Git](design/git.md)
-designs the commands that make it unnecessary.
+Reading it directly is no longer necessary: `omh s01 log` numbers those commits
+and `omh s01 diff 4 -p` reads one. [Git](design/git.md) is the design.
+
+**Trunk can still reach it, one direction only.** `omh s01 sync` merges the
+new base into the session *on the host* and writes the resulting files in, so
+the sandbox receives a tree and never a commit of yours — the rule above holds
+through a sync. The agent finds a commit saying `base moved to <sha>` and, if
+anything conflicted, the files sitting there with their markers for it to
+resolve. It refuses while the sandbox is running, because what the agent
+believes the tree holds is in its conversation and no file on disk reaches
+that.
 
 **Its commits are not yours until you ask for them.** `omh s commit` squashes the
 files into one commit of your own and never looks at that repository;

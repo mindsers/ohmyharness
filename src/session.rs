@@ -89,6 +89,112 @@ pub struct Session {
     pub worktree: PathBuf,
 }
 
+/// Where a ref points, as a commit id.
+pub fn head_of(repo: &Path, what: &str) -> Result<String> {
+    Ok(git(repo, &["rev-parse", what])?.trim().to_string())
+}
+
+/// Point a ref at a tree, so a merge can label it with something readable.
+///
+/// `refs/<id>` rather than a namespace of omh's, because the name ends up
+/// **inside somebody's source file**: measured, `merge-tree` labels each side
+/// of a conflict with the string it was handed, so `refs/omh/sync/s01` would
+/// put omh's plumbing in the marker an agent opens. `s01` is a session, which
+/// is a word the user already has.
+///
+/// A ref pointing straight at a tree is unusual and git accepts it — measured,
+/// including that the short name resolves. It is removed as soon as the merge
+/// returns, and force-removed before the next one, the shape `harvest` uses
+/// for its own scratch ref.
+pub fn name_tree(repo: &Path, name: &str, tree: &str) -> Result<()> {
+    let _ = git(repo, &["update-ref", "-d", name]);
+    git(repo, &["update-ref", name, tree]).map(|_| ())
+}
+
+pub fn unname_tree(repo: &Path, name: &str) -> Result<()> {
+    git(repo, &["update-ref", "-d", name]).map(|_| ())
+}
+
+/// What a three-way merge produced, and what it could not settle.
+///
+/// A tree either way: `merge-tree` writes one even when it conflicts, with the
+/// markers already in the conflicted files. That is the whole reason this
+/// mechanism works — a conflict is *text*, and text crosses into the sandbox
+/// safely where a commit never could.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub tree: String,
+    /// Paths git could not merge, in the order it reported them.
+    pub conflicted: Vec<String>,
+}
+
+/// Merge three trees in the user's own repository, touching nothing.
+///
+/// Measured 2026-08-23 against git 2.55.0, with a dirty worktree, to check the
+/// claim this design rests on: `merge-tree --write-tree` writes the merged tree
+/// into the object store and leaves the worktree, the index and every ref
+/// exactly as they were. Clean merges exit 0 and print the tree; a conflict
+/// exits 1 and prints the tree, then the conflicted stages, then messages.
+/// Both are answers, so the status distinguishes them rather than failing.
+///
+/// **The labels are the argument strings.** Measured: passing the branch name
+/// gives `<<<<<<< main`, and passing a bare tree gives its object id. The
+/// design expected to be stuck with ids on both sides; naming the session's
+/// side costs one scratch ref, and the marker an agent opens then reads
+/// `>>>>>>> s01` instead of forty hex characters.
+///
+/// `-z` for the paths, for the reason `Session::changed` gives: git quotes a
+/// path that needs it, and a name omh cannot open is a name it must not print.
+pub fn merge_three(repo: &Path, base: &str, theirs: &str, ours: &str) -> Result<Merged> {
+    let out = Command::new("git")
+        .current_dir(repo)
+        .args([
+            "merge-tree",
+            "--write-tree",
+            "-z",
+            "--merge-base",
+            base,
+            theirs,
+            ours,
+        ])
+        .output()
+        .context("running git merge-tree")?;
+    // Not `success()`: exit 1 is a conflict, which is an answer. Anything else
+    // — a git too old for `--write-tree`, an unreadable object — is not.
+    let code = out.status.code();
+    anyhow::ensure!(
+        code == Some(0) || code == Some(1),
+        "git merge-tree: {}",
+        crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
+    );
+
+    let said = String::from_utf8_lossy(&out.stdout);
+    let mut records = said.split('\0');
+    let tree = records
+        .next()
+        .map(str::trim)
+        .filter(|tree| !tree.is_empty())
+        .context("git merge-tree wrote no tree")?
+        .to_string();
+
+    // Then one record per conflicted stage — `<mode> <oid> <stage>\t<path>` —
+    // until an empty one. Three stages name the same path, so the same path
+    // arrives up to three times.
+    let mut conflicted: Vec<String> = Vec::new();
+    for record in records {
+        if record.is_empty() {
+            break;
+        }
+        let Some((_, path)) = record.split_once('\t') else {
+            continue;
+        };
+        if !conflicted.iter().any(|seen| seen == path) {
+            conflicted.push(path.to_string());
+        }
+    }
+    Ok(Merged { tree, conflicted })
+}
+
 /// Which of the two answers a review wants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum What {
@@ -392,6 +498,146 @@ impl Session {
         })
     }
 
+    /// How many commits one point is ahead of another.
+    ///
+    /// For saying *trunk moved 12 commits*, which is the number a person wants
+    /// before they read anything else.
+    pub fn commits_between(&self, repo: &Path, from: &str, to: &str) -> Result<usize> {
+        git(repo, &["rev-list", "--count", &format!("{from}..{to}")])?
+            .trim()
+            .parse()
+            .with_context(|| format!("counting what arrived between {from} and {to}"))
+    }
+
+    /// The session's files as a tree object, ready to be merged against.
+    ///
+    /// Built from the same throwaway index a review is, so what `sync` merges
+    /// is what `diff` would have shown — omh's own mounted paths out, the
+    /// agent's work in. Nothing is committed and no ref moves; a tree is just
+    /// bytes in the object store until something points at it.
+    pub fn tree(&self, base: &str) -> Result<String> {
+        self.reviewing(base, |worktree, index, _| {
+            Ok(git_with_index(worktree, index, &["write-tree"])?
+                .trim()
+                .to_string())
+        })
+    }
+
+    /// Put a merged tree's files in the worktree, leaving omh's own alone.
+    ///
+    /// Through a throwaway index again, so the session's real index is the
+    /// baseline step's business and nothing here half-moves it. `checkout-index
+    /// -f -a` writes every path the tree holds.
+    ///
+    /// `STAGED_RULES` are omh's, not the project's: `reviewing` unstages them
+    /// so they never reach the tree from the session's side, but trunk may
+    /// carry a real `AGENTS.md` of its own — and the session's copy is a
+    /// placeholder omh mounts over on the next launch. Writing trunk's file
+    /// there would put the project's rules where omh is about to mount, and
+    /// the agent would read whichever won.
+    pub fn materialise(&self, tree: &str) -> Result<()> {
+        let index = tempfile::NamedTempFile::new().context("staging a merge index")?;
+        let index = index.path();
+        git_with_index(&self.worktree, index, &["read-tree", tree])?;
+        let unstage = unstage_rules_args();
+        let unstage: Vec<&str> = unstage.iter().map(String::as_str).collect();
+        git_with_index(&self.worktree, index, &unstage)?;
+        git_with_index(&self.worktree, index, &["checkout-index", "-f", "-a"])?;
+        Ok(())
+    }
+
+    /// Move what `diff` measures against, so a sync does not read as the
+    /// agent's work.
+    ///
+    /// Without this the session's branch still points at the old trunk, and
+    /// every review from here on shows trunk's changes as though the agent had
+    /// made them — which is the same lie a harvest would then replay onto the
+    /// branch.
+    ///
+    /// `--create-reflog` and an expected old value, because this is a ref move
+    /// on the user's own branch: if anything else moved it since the sync
+    /// began, omh refuses rather than winning the race. Commits the branch
+    /// already carries are the user's, so they are replayed onto the new base
+    /// first, in a scratch worktree — and a conflict there refuses, since
+    /// resolving someone's committed work is not omh's to do.
+    pub fn move_baseline(&self, repo: &Path, onto: &str, was: &str) -> Result<()> {
+        let branch = self
+            .branch
+            .as_deref()
+            .context("a scratch session has no branch to move")?;
+
+        // Commits the branch already carries are the user's — `omh sNN commit`
+        // put them there. Pointing the branch at the new base would delete
+        // them, so they are replayed onto it first and a conflict refuses:
+        // resolving someone's committed work is not omh's to do, and the
+        // sandbox's files are not at risk either way because nothing has been
+        // written yet when this runs.
+        let mine = git(repo, &["rev-list", "--count", &format!("{was}..{branch}")])?
+            .trim()
+            .parse::<usize>()
+            .with_context(|| format!("counting what {branch} carries beyond its base"))?;
+        let tip = match mine {
+            0 => onto.to_string(),
+            _ => {
+                let common = git(repo, &["rev-parse", "--git-common-dir"])?;
+                let scratch = repo
+                    .join(common.trim())
+                    .join(format!("omh-sync-{}", self.id));
+                let _ = git(
+                    repo,
+                    &["worktree", "remove", "--force", &scratch.to_string_lossy()],
+                );
+                git(
+                    repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "--detach",
+                        &scratch.to_string_lossy(),
+                        branch,
+                    ],
+                )?;
+                let replayed = git(&scratch, &["rebase", "-q", "--onto", onto, was])
+                    .and_then(|_| git(&scratch, &["rev-parse", "HEAD"]))
+                    .map(|tip| tip.trim().to_string())
+                    .with_context(|| {
+                        format!(
+                            "{branch} carries {mine} commit{} of your own and they do not \
+                             replay onto the new base cleanly. Nothing was changed — resolve \
+                             it yourself with `git -C {} rebase --onto {onto} {was} {branch}`",
+                            if mine == 1 { "" } else { "s" },
+                            repo.display()
+                        )
+                    });
+                let _ = git(
+                    repo,
+                    &["worktree", "remove", "--force", &scratch.to_string_lossy()],
+                );
+                replayed?
+            }
+        };
+
+        git(
+            repo,
+            &[
+                "update-ref",
+                "--create-reflog",
+                &format!("refs/heads/{branch}"),
+                &tip,
+                was,
+            ],
+        )
+        .with_context(|| {
+            format!("{branch} moved while omh was syncing — nothing was changed on it")
+        })?;
+        // The worktree's files are already the merged ones; this makes the
+        // index agree with the branch it now sits on, so `status` shows the
+        // conflicts and nothing else.
+        git(&self.worktree, &["reset", "-q", "--mixed"])?;
+        Ok(())
+    }
+
     /// The patch, on the terminal, through the user's own pager.
     ///
     /// Inherited stdio rather than captured output: git then does its own
@@ -652,7 +898,7 @@ impl Session {
         Ok(changed)
     }
 
-    /// The branch on origin this session has already been pushed to.    /// The branch on origin this session has already been pushed to.
+    /// The branch on origin this session has already been pushed to.
     ///
     /// Read from `branch.<b>.remote`/`.merge` rather than `@{u}`, which resolves
     /// against **HEAD**: a detached worktree would report no upstream for a
@@ -966,6 +1212,84 @@ pub fn list(worktrees_dir: &Path) -> Vec<String> {
 }
 
 /// `git` for the callers that build their arguments dynamically.
+/// Every whitespace check `diff --check` runs alongside the marker check,
+/// turned off.
+///
+/// Not tidiness — correctness. `--check` reports whitespace errors too, and a
+/// whitespace error is reported by **echoing the offending line of the file**.
+/// Measured: a file containing `\t…: leftover conflict marker` with a space
+/// before that tab comes back as `+ \tsecrets.rs:1: leftover conflict marker`,
+/// which is to say the agent can write a line that reads exactly like git
+/// finding a conflict and omh would refuse a commit that has nothing wrong with
+/// it. Filtering the echo back out means guessing which lines are git's, and a
+/// path may begin with `+`.
+///
+/// With the checks off there is no echo to tell apart: every line `--check`
+/// prints is git's own, and exit 2 means markers and nothing else. A repo that
+/// turns them all on cannot undo this — measured, the last `-c` wins.
+const NO_WHITESPACE_CHECKS: &str = "core.whitespace=-trailing-space,-space-before-tab,\
+                                    -indent-with-non-tab,-tab-in-indent,-blank-at-eof,\
+                                    -cr-at-eol";
+
+impl Session {
+    /// The lines git reports for conflict markers still in the session's files.
+    ///
+    /// Against `HEAD`, not the index: measured, a bare `diff --check` compares
+    /// the worktree to the index and says nothing at all about a marker the
+    /// agent has already `git add`ed — which is the state a resolve-then-stage
+    /// half-finished leaves behind, and precisely when the guard is needed.
+    ///
+    /// Whole lines rather than parsed paths. Each is `path:line: leftover
+    /// conflict marker`, so a path holding a colon has no unambiguous reading —
+    /// and the line is the better thing to show anyway, since it names where.
+    ///
+    /// Through the review index, not the worktree, and that is the whole
+    /// mechanism rather than a convenience. Measured: `--check` diffs what git
+    /// **tracks**, so a file the agent created and never added is invisible to
+    /// it — and `commit -m` is a `git add -A`, which is exactly how such a file
+    /// reaches the branch. A guard blind to new files would have refused the
+    /// conflicts git already knew about and waved through the ones it did not.
+    ///
+    /// Staging into the throwaway index answers for the tree a commit would
+    /// actually make, new files included, without touching the index the user's
+    /// own git shares. It also inherits the unstage list, so omh's mounted
+    /// scaffolding is out of the answer for the same reason it is out of a
+    /// review.
+    pub fn unresolved(&self, base: &str) -> Result<Vec<String>> {
+        let out = self.reviewing(base, |worktree, index, _| {
+            Command::new("git")
+                .current_dir(worktree)
+                .env("GIT_INDEX_FILE", index)
+                .args(["-c", NO_WHITESPACE_CHECKS])
+                // The worktree holds agent-authored files and an
+                // agent-authored `.gitattributes`; a diff is a thing git can be
+                // told to run a program for.
+                .args([
+                    "diff",
+                    "--no-textconv",
+                    "--no-ext-diff",
+                    "--check",
+                    "--cached",
+                    "HEAD",
+                ])
+                .output()
+                .context("running git")
+        })?;
+        match out.status.code() {
+            // 2 is `--check`'s answer, not its failure.
+            Some(0) | Some(2) => Ok(String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| crate::out::untrusted(line))
+                .collect()),
+            _ => anyhow::bail!(
+                "git diff --check: {}",
+                crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
+            ),
+        }
+    }
+}
+
 fn git_owned(cwd: &Path, args: &[String]) -> Result<String> {
     let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
     git(cwd, &borrowed)
@@ -1029,6 +1353,79 @@ mod tests {
             git(&root, &args).unwrap();
         }
         (dir, root)
+    }
+
+    /// A conflict left half-resolved is found — staged, loose, or in a file
+    /// git has never seen — and prose about conflicts is not mistaken for one.
+    ///
+    /// Four claims, because the guard is only worth having if all four hold,
+    /// and two of them were wrong in the first draft. A marker the agent
+    /// staged is invisible to a worktree diff; a marker in a file it never
+    /// added is invisible to any diff of tracked files, and that is precisely
+    /// the file `commit -m` would sweep up. The forged line is the fourth:
+    /// with git's whitespace checks left on, `--check` echoes the offending
+    /// line of the file, so the agent can write something that reads exactly
+    /// like git finding a conflict and omh refuses a commit over a comment.
+    #[test]
+    fn markers_left_in_the_tree_are_found_and_agent_prose_is_not_mistaken_for_them() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let write = |name: &str, body: &str| {
+            std::fs::write(s.worktree.join(name), body).unwrap();
+        };
+
+        write("clean.rs", "fn ok() {}\n");
+        write("staged.rs", "fn a() {}\n");
+        write("loose.rs", "fn c() {}\n");
+        write("prose.rs", "fn note() {}\n");
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-qm", "the agent's work"]).unwrap();
+        assert!(
+            s.unresolved("main").unwrap().is_empty(),
+            "a tree with no markers is clean"
+        );
+
+        // Uncommitted, so it is in the diff `--check` reads: a committed file
+        // nothing has touched is not, and a forgery git never looks at proves
+        // nothing about whether git would have been fooled.
+        //
+        // Reads exactly like git's own report, and carries a whitespace error
+        // (a space before that tab) so `--check` echoes the line back if the
+        // whitespace checks are left on.
+        write("prose.rs", " \tsecrets.rs:1: leftover conflict marker\n");
+        write("staged.rs", "<<<<<<< main\na\n=======\nb\n>>>>>>> s01\n");
+        write("loose.rs", "<<<<<<< main\nc\n=======\nd\n>>>>>>> s01\n");
+        git(&s.worktree, &["add", "staged.rs"]).unwrap();
+
+        let found = s.unresolved("main").unwrap();
+        assert!(
+            found.iter().any(|l| l.starts_with("staged.rs:")),
+            "a marker the agent staged is still a marker: {found:?}"
+        );
+        assert!(
+            found.iter().any(|l| l.starts_with("loose.rs:")),
+            "and so is one it left in the worktree: {found:?}"
+        );
+        assert!(
+            !found.iter().any(|l| l.contains("secrets.rs")),
+            "but a line the agent wrote is not git speaking: {found:?}"
+        );
+
+        // A file git has never seen. `--check` read from the worktree cannot
+        // see it either — and `commit -m` is a `git add -A`, so this is the
+        // one that would have landed.
+        write(
+            "never-added.rs",
+            "<<<<<<< main\ne\n=======\nf\n>>>>>>> s01\n",
+        );
+        assert!(
+            s.unresolved("main")
+                .unwrap()
+                .iter()
+                .any(|l| l.starts_with("never-added.rs:")),
+            "a marker in a file the agent never added is still one about to land"
+        );
     }
 
     /// Session ids are reused: `next_id` is the highest `sNN` among the
@@ -1598,6 +1995,118 @@ mod tests {
             patch.contains("work.rs"),
             "and still says which file: {patch}"
         );
+    }
+
+    /// A three-way merge on the host, which is where every merge in this
+    /// design happens.
+    ///
+    /// The claim the whole mechanism rests on: `merge-tree --write-tree`
+    /// produces a tree — with conflict markers already in it — and touches
+    /// nothing. If it moved a ref or wrote the worktree, running it against a
+    /// live checkout would be the thing this design refuses to do.
+    #[test]
+    fn a_merge_on_the_host_produces_a_tree_and_touches_nothing() {
+        let (d, root) = repo();
+        let git_in = |args: &[&str]| git(&root, args).unwrap();
+        let write = |name: &str, body: &str| {
+            std::fs::write(root.join(name), body).unwrap();
+        };
+
+        write("shared.rs", "one\ntwo\nthree\n");
+        git_in(&["add", "-A"]);
+        git_in(&["commit", "-qm", "base"]);
+        let base = git_in(&["rev-parse", "HEAD"]).trim().to_string();
+
+        // Trunk moves.
+        write("shared.rs", "ONE\ntwo\nthree\n");
+        write("from-trunk.rs", "fn trunk() {}\n");
+        git_in(&["add", "-A"]);
+        git_in(&["commit", "-qm", "trunk moved"]);
+        let trunk = git_in(&["rev-parse", "HEAD"]).trim().to_string();
+
+        // The session changed a different line, from the same base.
+        git_in(&["checkout", "-q", "-b", "session", &base]);
+        write("shared.rs", "one\ntwo\nTHREE\n");
+        git_in(&["add", "-A"]);
+        git_in(&["commit", "-qm", "agent work"]);
+        let clean = git_in(&["rev-parse", "HEAD"]).trim().to_string();
+
+        // Something to notice if the merge writes to the checkout.
+        write("untracked.rs", "not committed\n");
+        let before = (
+            git_in(&["status", "--porcelain"]),
+            git_in(&["rev-parse", "HEAD"]),
+        );
+
+        let merged = merge_three(&root, &base, &trunk, &clean).unwrap();
+        assert!(
+            merged.conflicted.is_empty(),
+            "different lines merge cleanly: {merged:?}"
+        );
+        let shared = git_in(&["cat-file", "-p", &format!("{}:shared.rs", merged.tree)]);
+        assert_eq!(
+            shared, "ONE\ntwo\nTHREE\n",
+            "both sides are in the merged tree"
+        );
+        assert!(
+            !git_in(&["cat-file", "-p", &format!("{}:from-trunk.rs", merged.tree)]).is_empty(),
+            "including what trunk added"
+        );
+
+        assert_eq!(
+            before,
+            (
+                git_in(&["status", "--porcelain"]),
+                git_in(&["rev-parse", "HEAD"])
+            ),
+            "the merge wrote a tree and nothing else — not the worktree, not HEAD"
+        );
+        let _ = d;
+    }
+
+    /// A conflict is an answer, and it arrives as text.
+    ///
+    /// The tree is written either way, with the markers already in it, which
+    /// is what lets a conflict cross into the sandbox for the agent to resolve.
+    /// The labels are the arguments: a branch name on one side reads as the
+    /// branch, and naming the other side is worth a scratch ref.
+    #[test]
+    fn a_conflict_comes_back_as_a_tree_with_markers_and_the_paths_that_need_a_decision() {
+        let (d, root) = repo();
+        let git_in = |args: &[&str]| git(&root, args).unwrap();
+        std::fs::write(root.join("shared.rs"), "one\ntwo\n").unwrap();
+        git_in(&["add", "-A"]);
+        git_in(&["commit", "-qm", "base"]);
+        let base = git_in(&["rev-parse", "HEAD"]).trim().to_string();
+
+        std::fs::write(root.join("shared.rs"), "TRUNK\ntwo\n").unwrap();
+        git_in(&["add", "-A"]);
+        git_in(&["commit", "-qm", "trunk"]);
+
+        git_in(&["checkout", "-q", "-b", "session", &base]);
+        std::fs::write(root.join("shared.rs"), "AGENT\ntwo\n").unwrap();
+        git_in(&["add", "-A"]);
+        git_in(&["commit", "-qm", "agent"]);
+        // A ref so the marker names the session rather than an object id.
+        git_in(&["update-ref", "refs/s01", "session^{tree}"]);
+
+        let merged = merge_three(&root, &base, "main", "s01").unwrap();
+        assert_eq!(
+            merged.conflicted,
+            vec!["shared.rs".to_string()],
+            "named once, though git reports three stages for it"
+        );
+
+        let body = git_in(&["cat-file", "-p", &format!("{}:shared.rs", merged.tree)]);
+        assert!(
+            body.contains("<<<<<<< main") && body.contains(">>>>>>> s01"),
+            "both sides are labelled with what they are: {body}"
+        );
+        assert!(
+            body.contains("TRUNK") && body.contains("AGENT"),
+            "and both versions are there to choose between: {body}"
+        );
+        let _ = d;
     }
 
     /// Every path `changed` reports is a name the worktree actually has.
