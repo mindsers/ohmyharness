@@ -412,11 +412,12 @@ enum SessionsCmd {
     /// Remove a session — its container and its worktree. A branch holding
     /// commits is kept.
     Rm {
-        /// Remove it even though the sandbox holds work no branch has.
+        /// Remove it even though the sandbox holds work no branch has — or
+        /// omh could not tell whether it does.
         ///
-        /// The refusal without this is the whole point: those checkpoints
-        /// exist nowhere else, and `rm` is what deletes the repository holding
-        /// them. This says *I know, and I want them gone*.
+        /// The refusal without this is the whole point: those commits and
+        /// those edits exist nowhere else, and `rm` is what deletes the
+        /// repository holding them. This says *I know, and I want them gone*.
         #[arg(long)]
         force: bool,
     },
@@ -5295,62 +5296,102 @@ fn every_check(from_the_sandbox: Vec<doctor::Outcome>) -> Result<Vec<doctor::Out
         .collect())
 }
 
-/// Whether this session may be removed, or what would be lost by doing it.
+/// Whether this session may be removed, or what stands in the way.
 ///
 /// Separate from `rm` so the decision is assertable: `rm` takes a container
 /// down, and nothing that needs one can be reached by a test here. What is
 /// left in `rm` is the single call — its absence is a line missing from a
 /// diff rather than a behaviour hiding behind a runtime.
 fn may_remove(paths: &Paths, session: &Session, force: bool) -> Result<()> {
-    let Some(unkept) = unkept_work(paths, session) else {
-        return Ok(());
+    let branch = format!("omh/{}", session.id);
+    let (what, whether) = match at_stake(paths, session) {
+        AtStake::Nothing => return Ok(()),
+        AtStake::Work(what) => (what, "that no branch has"),
+        // Could not tell, which is not the same as nothing to lose. A user is
+        // asked once and `--force` is right there; the alternative is deleting
+        // the only copy of work omh could not count, in silence.
+        AtStake::Unknown(why) => (why, "and omh cannot say what that removes"),
     };
     anyhow::ensure!(
         force,
-        "{} has {unkept} that no branch has. Removing it deletes the only copy:\n  \
-         omh {} log                read what is there\n  \
-         omh {} commit --keep      put it on {}\n  \
-         omh {} rm --force         remove it anyway",
-        session.id,
-        session.id,
-        session.id,
-        session.branch.as_deref().unwrap_or("the branch"),
-        session.id
+        "{id} has {what} {whether}. Removing it deletes the only copy:\n  \
+         omh {id} log                 read what is there\n  \
+         omh {id} commit --keep       put it on {branch}\n  \
+         omh {id} commit -m \"…\"       or take the files as they stand\n  \
+         omh {id} rm --force          remove it anyway",
+        id = session.id
     );
     Ok(())
 }
 
-/// What a removal would destroy that exists nowhere else, said in words.
+/// What a removal would destroy that exists nowhere else.
 ///
-/// `None` when there is nothing to lose — which is the common case, and has to
-/// stay cheap and silent. A sandbox that never ran, a session whose work is
-/// all on the branch, or a shadow omh cannot read: none of those is a reason
-/// to stand between a user and `rm`.
-///
-/// **A read that fails is not a reason to refuse.** `rm` is how a user gets
-/// rid of a session that has gone wrong, and a broken sandbox is exactly when
-/// they reach for it — a refusal that fired because the repository is
-/// unreadable would be omh holding the door shut on the way out. The
-/// checkpoints are counted when they can be counted, and otherwise nothing is
-/// claimed.
-fn unkept_work(paths: &Paths, session: &Session) -> Option<String> {
-    let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
-    let read = shadow
-        .seed_record
-        .exists()
-        .then(|| shadow.checkpoints(&session.worktree).ok())
-        .flatten()?;
+/// Three answers, because two would make *omh could not tell* spell the same
+/// as *there is nothing here* — in the one command where that spelling is
+/// unrecoverable. `Shadow::landed` states the rule one layer down and the
+/// first version of this discarded it: `.exists()` and `.ok()` turned a
+/// permissions error, a truncated replay record and a repository with no seed
+/// into "go ahead and delete".
+#[derive(Debug)]
+enum AtStake {
+    /// No sandbox was ever built here.
+    Nothing,
+    /// This much, counted.
+    Work(String),
+    /// A repository is there and omh could not read it. Why, in git's words.
+    Unknown(String),
+}
 
-    let checkpoints = read.commits.iter().filter(|c| !c.landed).count();
-    // Uncommitted work in the sandbox counts too. It is not a *checkpoint*, so
-    // `log` files it separately — but `rm` takes the worktree with everything
-    // else, and the question here is what disappears.
-    match (checkpoints, read.uncommitted) {
-        (0, 0) => None,
-        (0, files) => Some(format!("{files} uncommitted file{}", plural(files))),
-        (commits, 0) => Some(format!("{commits} checkpoint{}", plural(commits))),
-        (commits, files) => Some(format!(
-            "{commits} checkpoint{} and {files} uncommitted file{}",
+/// What the seed record alone settles, if anything.
+///
+/// The same triage `log_cmd` does, and for the same reason — `Path::exists`
+/// answers `false` for every failure, not only for absence, so an unreadable
+/// `~/.omh` read as *nothing to lose*. The one difference is what the third
+/// arm does: `log` cannot show you the repository and says so; `rm` would
+/// delete it, so it asks first.
+///
+/// Over the metadata result rather than the path, so all four answers are a
+/// table. The permission arm cannot be produced by a test that might run as
+/// root — `chmod 000` does not stop uid 0 — which is exactly the arm that
+/// silently deleted a sandbox before this.
+fn from_the_seed_record(
+    metadata: std::io::Result<()>,
+    gitdir_exists: bool,
+    shadow: &shadow::Shadow,
+) -> Option<AtStake> {
+    match metadata {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound && !gitdir_exists => {
+            Some(AtStake::Nothing)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Some(AtStake::Unknown(format!(
+            "a sandbox repository at {} and no record of where it started",
+            shadow.gitdir.display()
+        ))),
+        Err(e) => Some(AtStake::Unknown(format!(
+            "a sandbox omh could not read at {}: {e}",
+            shadow.seed_record.display()
+        ))),
+    }
+}
+
+fn at_stake(paths: &Paths, session: &Session) -> AtStake {
+    let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
+    if let Some(answer) = from_the_seed_record(
+        std::fs::metadata(&shadow.seed_record).map(|_| ()),
+        shadow.gitdir.exists(),
+        &shadow,
+    ) {
+        return answer;
+    }
+
+    match shadow.unkept(&session.worktree) {
+        Err(e) => AtStake::Unknown(format!("a sandbox omh could not read: {e}")),
+        Ok((0, 0)) => AtStake::Nothing,
+        Ok((0, files)) => AtStake::Work(format!("{files} uncommitted path{}", plural(files))),
+        Ok((commits, 0)) => AtStake::Work(format!("{commits} commit{}", plural(commits))),
+        Ok((commits, files)) => AtStake::Work(format!(
+            "{commits} commit{} and {files} uncommitted path{}",
             plural(commits),
             plural(files)
         )),
@@ -6240,36 +6281,46 @@ mod tests {
     /// The last piece of [risks](../docs/design/risks.md) 2c. The branch
     /// survives a removal and the worktree's files were on disk until it ran,
     /// but the agent's own commits live only in the sandbox's repository and
-    /// `reap` deletes it — after a `reset --hard` in the sandbox those were the
-    /// only copies there ever were. omh could not ask this until `log` learned
-    /// to count them.
+    /// `reap` deletes it. omh could not ask this until `log` learned to count.
     #[test]
     fn a_session_holding_unkept_work_is_not_removed_without_being_asked() {
         let (paths, session, shadow) = a_session_with_two_checkpoints();
 
-        let err = may_remove(&paths, &session, false)
-            .expect_err("two checkpoints are on no branch anywhere");
+        let err =
+            may_remove(&paths, &session, false).expect_err("two commits are on no branch anywhere");
         let said = err.to_string();
         assert!(
-            said.contains("2 checkpoints"),
-            "it says how much is at stake: {said}"
+            said.contains("s01 has 2 commits that no branch has"),
+            "it says how much is at stake, and agrees with itself about the number: {said}"
+        );
+        // Every line offered is a command, and every one names this session —
+        // a refusal that walks the user to `--force` by elimination is worse
+        // than no refusal.
+        for line in said
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        {
+            assert!(
+                line.starts_with("omh s01 "),
+                "a line the user cannot paste: {line}"
+            );
+        }
+        assert!(
+            said.contains("--keep") && said.contains("commit -m") && said.contains("--force"),
+            "put it on the branch, take the files as they stand, or mean it: {said}"
         );
         assert!(
-            said.contains("--keep") && said.contains("log"),
-            "and the two ways to look at it or keep it: {said}"
-        );
-        assert!(
-            said.contains("--force"),
-            "and the way past, since a user may well mean it: {said}"
+            said.contains("omh/s01"),
+            "and names the branch it would go on: {said}"
         );
         assert!(
             may_remove(&paths, &session, true).is_ok(),
-            "`--force` is that way past"
+            "`--force` means it"
         );
 
-        // Everything handed over: nothing to warn about. The record is what
-        // `log`'s divider reads, so this is the same question from the same
-        // source rather than a second opinion.
+        // Everything handed over: nothing to warn about.
         let head = Command::new("git")
             .arg("--git-dir")
             .arg(&shadow.gitdir)
@@ -6287,9 +6338,182 @@ mod tests {
         );
     }
 
-    /// Uncommitted work counts, and a sandbox that never ran does not.
+    /// Work the agent threw away is still work only this repository has.
+    ///
+    /// `reset --hard` is one of the four commands the sandbox's own git exists
+    /// to give back, and the first version of this guard was blind to it:
+    /// `seed..HEAD` counts 0 afterwards, so `rm` removed three commits without
+    /// a word — the exact scenario `risks.md` cites as the reason the guard
+    /// exists. Measured: `--all --reflog` still finds them.
+    ///
+    /// The same read covers a side branch the agent wandered off, which
+    /// `preflight` refuses a *harvest* over while `rm` was dropping it for
+    /// good.
     #[test]
-    fn what_a_removal_would_cost_is_counted_only_when_there_is_something_to_count() {
+    fn work_the_sandbox_can_still_reach_counts_however_the_agent_left_it() {
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+        let sandbox_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .arg("--git-dir")
+                .arg(&shadow.gitdir)
+                .arg("--work-tree")
+                .arg(&session.worktree)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let seed = shadow.seed().unwrap();
+
+        // The agent throws its own work away.
+        sandbox_git(&["reset", "-q", "--hard", &seed]);
+        assert!(
+            shadow
+                .checkpoints(&session.worktree)
+                .unwrap()
+                .commits
+                .is_empty(),
+            "the numbered list cannot see them — that is why this guard reads wider"
+        );
+        let err = may_remove(&paths, &session, false)
+            .expect_err("two commits are still in there and on no branch");
+        assert!(err.to_string().contains("2 commits"), "{err}");
+
+        // …and when the replay point no longer reaches, the count widens back
+        // to the seed rather than trusting a record the history has left
+        // behind. Narrower would mean counting from a commit this repository
+        // cannot place, which is how work goes missing from a number someone
+        // is about to act on.
+        std::fs::write(&shadow.landed_record, "0".repeat(40)).unwrap();
+        let err = may_remove(&paths, &session, false)
+            .expect_err("a record naming nothing this repository has is not an answer");
+        assert!(
+            err.to_string().contains("cannot say what that removes"),
+            "omh says it cannot tell rather than counting from a point it cannot place: {err}"
+        );
+        std::fs::remove_file(&shadow.landed_record).unwrap();
+
+        // …and the same for a branch it wandered off.
+        sandbox_git(&["checkout", "-q", "-b", "spike"]);
+        std::fs::write(session.worktree.join("spike.rs"), "fn spike() {}\n").unwrap();
+        sandbox_git(&["add", "-A", "."]);
+        sandbox_git(&["commit", "-q", "--no-verify", "-m", "a spike"]);
+        sandbox_git(&["checkout", "-q", "-"]);
+        let err = may_remove(&paths, &session, false).expect_err("three now");
+        assert!(err.to_string().contains("3 commits"), "{err}");
+    }
+
+    /// What the seed record alone settles — including the arm a filesystem
+    /// test cannot reach.
+    ///
+    /// `chmod 000` does not stop uid 0, so a permissions arm asserted through
+    /// a real file passes vacuously wherever the suite runs as root. It is
+    /// also the arm that silently deleted a sandbox: `Path::exists` answers
+    /// `false` for a permissions error exactly as it does for absence.
+    #[test]
+    fn what_the_seed_record_settles_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let shadow = shadow::Shadow::new(dir.path(), "s01");
+        let missing = || std::io::Error::new(std::io::ErrorKind::NotFound, "no such file");
+
+        assert!(
+            from_the_seed_record(Ok(()), true, &shadow).is_none(),
+            "a record omh can read settles nothing on its own — the repository decides"
+        );
+        assert!(
+            matches!(
+                from_the_seed_record(Err(missing()), false, &shadow),
+                Some(AtStake::Nothing)
+            ),
+            "no record and no repository: nothing ever ran here"
+        );
+        // What `reap` leaves when `remove_dir_all` fails on a live mount and
+        // the seed file goes anyway. `log` refuses to show this one.
+        assert!(
+            matches!(
+                from_the_seed_record(Err(missing()), true, &shadow),
+                Some(AtStake::Unknown(_))
+            ),
+            "a repository with no record of its start is not an empty session"
+        );
+        // The arm that mattered.
+        let denied = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        match from_the_seed_record(Err(denied), true, &shadow) {
+            Some(AtStake::Unknown(why)) => assert!(
+                why.contains("denied"),
+                "the reason reaches the user rather than being read as absence: {why}"
+            ),
+            other => panic!("a record omh could not read is not an empty session: {other:?}"),
+        }
+    }
+
+    /// A sandbox omh cannot read is asked about, not assumed empty.
+    ///
+    /// Three states, each of which the first version deleted in silence. The
+    /// test it replaces asserted the opposite — it took the one harmless
+    /// member of the class (the repository is *gone*, so nothing is left to
+    /// lose) and generalised it to the whole class, which locked the collapse
+    /// in.
+    #[test]
+    fn a_sandbox_omh_cannot_read_is_asked_about_rather_than_assumed_empty() {
+        let refused = |paths: &Paths, session: &Session, why: &str| {
+            let err = may_remove(paths, session, false)
+                .unwrap_or_else(|_| panic!("{why} — omh cannot tell, so it asks"));
+            let _ = err;
+        };
+        let _ = refused;
+
+        // A truncated replay record. `landed` bails on it deliberately: the
+        // write truncates before it writes, so a process killed in that window
+        // leaves zero bytes — and the session has demonstrably been harvested,
+        // so the repository demonstrably holds commits.
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+        std::fs::write(&shadow.landed_record, "").unwrap();
+        let err = may_remove(&paths, &session, false)
+            .expect_err("omh cannot tell what landed — that is a reason to ask");
+        assert!(
+            err.to_string().contains("cannot say what that removes"),
+            "it says it cannot tell, rather than naming a count it does not have: {err}"
+        );
+        assert!(
+            may_remove(&paths, &session, true).is_ok(),
+            "and `--force` is still the way past, so nobody is trapped"
+        );
+
+        // A repository with no record of where it started — what `reap` leaves
+        // when `remove_dir_all` fails on a live mount and the seed file goes
+        // anyway. `log` refuses to *show* this one; `rm` would have deleted it.
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+        std::fs::remove_file(&shadow.seed_record).unwrap();
+        assert!(
+            may_remove(&paths, &session, false).is_err(),
+            "a repository omh cannot place is not an empty session"
+        );
+
+        // Gone entirely: nothing is left to lose, and `rm` must not stand in
+        // the way of clearing up.
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+        std::fs::remove_dir_all(&shadow.gitdir).unwrap();
+        std::fs::remove_file(&shadow.seed_record).unwrap();
+        assert!(
+            may_remove(&paths, &session, false).is_ok(),
+            "nothing there is nothing to lose"
+        );
+
+        // And a session whose sandbox never ran at all.
+        let never_ran = Session::new(&paths.worktrees().join("s02"), "s02".to_string());
+        assert!(may_remove(&paths, &never_ran, false).is_ok());
+    }
+
+    /// The count says what it counted, and says it in the singular when there
+    /// is one of it.
+    ///
+    /// Asserted on the value rather than the sentence: `contains("1 commit")`
+    /// is satisfied by `"1 commits"`, so a hardcoded plural survives every
+    /// string assertion in this file.
+    #[test]
+    fn one_of_a_thing_is_said_in_the_singular() {
         let (paths, session, shadow) = a_session_with_two_checkpoints();
         let landed = Command::new("git")
             .arg("--git-dir")
@@ -6302,27 +6526,28 @@ mod tests {
             String::from_utf8_lossy(&landed.stdout).trim(),
         )
         .unwrap();
-        assert_eq!(unkept_work(&paths, &session), None, "nothing outstanding");
 
-        // The agent keeps working without committing. `log` files that
-        // separately from checkpoints; `rm` takes it either way.
         std::fs::write(session.worktree.join("in-flight.rs"), "fn later() {}\n").unwrap();
-        assert_eq!(
-            unkept_work(&paths, &session),
-            Some("1 uncommitted file".to_string()),
-            "singular, and named for what it is"
+        assert!(
+            matches!(at_stake(&paths, &session), AtStake::Work(what) if what == "1 uncommitted path"),
+            "one path, said once"
         );
 
-        // A session whose sandbox never ran has nothing to lose and must not
-        // be made harder to remove — nor must one whose repository omh cannot
-        // read, which is exactly when a user reaches for `rm`.
-        let never_ran = Session::new(&paths.worktrees().join("s02"), "s02".to_string());
-        assert_eq!(unkept_work(&paths, &never_ran), None);
-        std::fs::remove_dir_all(&shadow.gitdir).unwrap();
-        assert_eq!(
-            unkept_work(&paths, &session),
-            None,
-            "a shadow omh cannot read is not a reason to hold the door shut"
+        let sandbox_git = |args: &[&str]| {
+            Command::new("git")
+                .arg("--git-dir")
+                .arg(&shadow.gitdir)
+                .arg("--work-tree")
+                .arg(&session.worktree)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        sandbox_git(&["add", "-A", "."]);
+        sandbox_git(&["commit", "-q", "--no-verify", "-m", "one more"]);
+        assert!(
+            matches!(at_stake(&paths, &session), AtStake::Work(what) if what == "1 commit"),
+            "and one commit, said once"
         );
     }
 

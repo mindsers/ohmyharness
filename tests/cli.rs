@@ -834,6 +834,19 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
     let worktree = sb.session("s01");
     sb.sandbox_repo_with_unkept_work("s01", &worktree);
 
+    let log = sb.fake_docker();
+    let run = sb
+        .home
+        .join(".omh/run")
+        .join(sb.repo.file_name().unwrap())
+        .join("s01");
+    std::fs::create_dir_all(&run).unwrap();
+    let gitdir = sb
+        .home
+        .join(".omh/shadow")
+        .join(sb.repo.file_name().unwrap())
+        .join("s01.git");
+
     let out = sb.omh(&["s01", "rm"]);
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -841,13 +854,23 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
         "the agent's commit is on no branch: {said}"
     );
     assert!(
-        said.contains("1 checkpoint") && said.contains("--force"),
-        "it says what is at stake and how to mean it: {said}"
+        said.contains("s01 has 1 commit that no branch has"),
+        "it says what is at stake, in the singular: {said}"
     );
+    assert!(said.contains("--force"), "and how to mean it: {said}");
+
+    // "Nothing was taken down" is about the things that go *first*. The
+    // worktree is removed last, so its survival is true of any ordering that
+    // fails anywhere — moving the guard below the container teardown would
+    // leave it standing and prove nothing.
     assert!(
-        worktree.exists(),
-        "and nothing was taken down on the way to refusing"
+        !sb.docker_calls(&log).iter().any(|c| c.starts_with("rm ")),
+        "the container was taken down on the way to refusing: {:?}",
+        sb.docker_calls(&log)
     );
+    assert!(run.exists(), "so was the marker `s ls` reads");
+    assert!(gitdir.exists(), "and the repository the refusal is about");
+    assert!(worktree.exists());
 
     let out = sb.omh(&["s01", "rm", "--force"]);
     assert!(
@@ -855,7 +878,14 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
         "--force means it: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    assert!(!worktree.exists(), "and the session is gone");
+    assert!(!worktree.exists(), "the session is gone");
+    // The repository is the thing the refusal was about, and the only test in
+    // the tree where `rm` runs with a real one on disk. Left behind, the next
+    // session issued this id adopts a dead session's history.
+    assert!(
+        !gitdir.exists(),
+        "…and so is the sandbox repository it was protecting"
+    );
 }
 
 /// An empty patch is a sentence, not a blank screen./// An empty patch is a sentence, not a blank screen.

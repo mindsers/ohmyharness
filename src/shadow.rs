@@ -747,6 +747,50 @@ impl Shadow {
         )
     }
 
+    /// Everything this repository holds that no branch has, counted wide.
+    ///
+    /// A different question from `checkpoints`, and deliberately a blunter
+    /// one. `log` numbers what the user can act on — `seed..HEAD`, in order.
+    /// `rm` is about to delete the repository, so what matters is whether
+    /// **anything** in it exists nowhere else, however the agent left it.
+    ///
+    /// `--all --reflog` is the difference, and it is not defensive padding.
+    /// Measured 2026-08-23: after a `reset --hard` back to the seed — one of
+    /// the four commands this whole feature exists to give the agent —
+    /// `seed..HEAD` counts 0 and `--all --not HEAD` counts 0, while three
+    /// commits are still in the repository and on no branch anywhere.
+    /// `--all --reflog --not <from>` counts all three. It also catches the
+    /// side branch the agent wandered off, which `preflight` already refuses a
+    /// harvest over.
+    ///
+    /// Counted from the last handover when there is one that still resolves,
+    /// and from the seed otherwise: a replay point the history no longer
+    /// reaches means omh cannot tell what was handed over, and counting from
+    /// the seed over-counts rather than under-counts. For a question asked
+    /// before an irreversible act, that is the direction to be wrong in.
+    pub fn unkept(&self, worktree: &Path) -> Result<(usize, usize)> {
+        // The last handover, or the seed when there has not been one. A record
+        // that no longer names anything this repository has makes the count
+        // below fail, which is *omh cannot tell* — the answer the caller
+        // refuses over. An earlier version asked `reaches` first and fell back
+        // to the seed; that arm could not be made to change any answer, and an
+        // untestable branch guarding a case another line already handles is
+        // one more thing to be wrong about.
+        let from = match self.landed()? {
+            Some(landed) => landed,
+            None => self.seed()?,
+        };
+        let lines = |out: String| out.lines().filter(|l| !l.trim().is_empty()).count();
+        Ok((
+            lines(git(
+                &self.gitdir,
+                worktree,
+                &["rev-list", "--all", "--reflog", "--not", &from],
+            )?),
+            lines(git(&self.gitdir, worktree, &["status", "--porcelain"])?),
+        ))
+    }
+
     /// Whether `commit` is still in the history `HEAD` reaches.
     ///
     /// Its own helper because the answer *no* is not a failure and `git` here

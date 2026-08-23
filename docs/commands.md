@@ -409,19 +409,27 @@ So `rm` counts them first, and says so rather than asking:
 
 ```console
 $ omh s01 rm
-omh: s01 has 2 checkpoints that no branch has. Removing it deletes the only copy:
-  omh s01 log                read what is there
-  omh s01 commit --keep      put it on omh/s01
-  omh s01 rm --force         remove it anyway
+omh: s01 has 2 commits that no branch has. Removing it deletes the only copy:
+  omh s01 log                 read what is there
+  omh s01 commit --keep       put it on omh/s01
+  omh s01 commit -m "…"       or take the files as they stand
+  omh s01 rm --force          remove it anyway
 ```
 
-Nothing is taken down before that refusal. `--force` is the way past, and it
-means what it says.
+Nothing is taken down before that refusal — not the container, not the marker
+`omh s ls` reads, not the repository the refusal is about. `--force` is the way
+past, and it means what it says.
 
-The check is narrow on purpose. A sandbox that never ran, work already on the
-branch, and a repository omh cannot read all remove quietly — `rm` is what you
-reach for when a session has gone wrong, and a refusal that fired because the
-sandbox is broken would be omh holding the door shut on the way out.
+**The count is wider than the one `omh s01 log` prints**, on purpose. `log`
+numbers what you can act on; this asks whether anything in that repository
+exists nowhere else, however the agent left it. Work thrown away with
+`reset --hard` is still in there, and so is a branch the agent wandered off —
+neither appears in the numbered list, and both are gone once the repository is.
+
+A sandbox that never ran removes quietly. One omh **cannot read** does not:
+that is a third answer, not a quiet yes, and it is the state a half-finished
+removal leaves behind. `--force` covers it too, so nobody is stuck — they are
+asked once.
 
 ### Getting work out of a session
 
