@@ -1228,6 +1228,18 @@ mod tests {
             body.contains("nothing to push"),
             "and be told the one thing it cannot do here: {body}"
         );
+        // …and the two things it otherwise reports as a broken checkout. The
+        // size guard next door measures these bytes and cannot read them: 272
+        // bytes of anything else passes it, and its own advice — *re-measure
+        // rather than trimming the prose to fit* — makes deleting them go
+        // green by design.
+        for fact in ["no history", "may move"] {
+            assert!(
+                body.contains(fact),
+                "an agent told neither reports the sandbox as broken: `{fact}` missing from \
+                 {body}"
+            );
+        }
     }
 
     fn section_body(name: &str) -> String {

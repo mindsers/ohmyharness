@@ -300,14 +300,19 @@ $ omh s ls
   s01  omh/s01  up       3 uncommitted  (2 behind main)
   s03  omh/s03  stopped  1 uncommitted  (2 behind main)
 
-  s01 and s03 both change src/render.rs, src/base.rs
+  s01 and s03 both change src/base.rs, src/render.rs
 ```
 
 That is the collision git will not mention until a merge, said while both
 sessions are open and either could still be redirected. It costs nothing: the
-paths come from a `status` `s ls` was already running for the uncommitted
-count and throwing away. It is part of the answer rather than a warning, so a
+paths and the uncommitted count are one `status` per session, asked once — read
+separately they were two subprocesses and, worse, two snapshots of a worktree
+an agent is writing into. It is part of the answer rather than a warning, so a
 redirected listing keeps it.
+
+A session omh cannot read says so. Absence from that section otherwise means
+*collides with nobody*, and an empty section is how "no collisions" is
+rendered — so a partial answer would be indistinguishable from a clean one.
 
 ### omh's flags come before the harness name
 

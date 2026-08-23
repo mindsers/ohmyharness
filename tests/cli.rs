@@ -856,6 +856,53 @@ fn sessions_changing_the_same_file_are_named_together() {
         !String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stderr).contains("both change"),
         "it is the answer, not a warning"
     );
+
+    // The document says what the sentence says. `--json` is the scripting
+    // contract, and deleting the field entirely left every other assertion
+    // here green.
+    let doc: serde_json::Value =
+        serde_json::from_slice(&sb.omh(&["s", "ls", "--json"]).stdout).unwrap();
+    assert_eq!(
+        doc["overlaps"],
+        serde_json::json!([{"sessions": ["s01", "s02"], "paths": ["shared.rs"]}]),
+        "one answer, two renderings: {doc}"
+    );
+    assert_eq!(doc["unreadable"], serde_json::json!([]));
+}
+
+/// A session omh cannot read is said so, because its absence from the overlap
+/// section otherwise means it collides with nobody.
+///
+/// A stale `.git` pointer is the real case — `work_state`'s own comment names
+/// it, "a checkout moves" — and the listing renders that as `?` in one column
+/// while the section below quietly computes over a subset. No overlap line is
+/// exactly how "no collisions" looks.
+#[test]
+fn a_session_omh_cannot_read_is_named_rather_than_left_out() {
+    let sb = sandbox();
+    let one = sb.session("s01");
+    let two = sb.session("s02");
+    std::fs::write(one.join("shared.rs"), "fn shared() {}\n").unwrap();
+    std::fs::write(two.join("shared.rs"), "fn shared() {}\n").unwrap();
+    // s02's worktree loses its way back to the repository.
+    std::fs::write(two.join(".git"), "gitdir: /nowhere-at-all\n").unwrap();
+
+    let out = sb.omh(&["s", "ls"]);
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(
+        printed.contains("could not read what s02 is changing"),
+        "the session omh could not read is named: {printed}"
+    );
+    assert!(
+        printed.contains("incomplete"),
+        "and what that means for the rest: {printed}"
+    );
+    // …and the collision it would have been part of is not asserted as absent.
+    assert!(
+        !printed.contains("s01 and s02 both change"),
+        "omh does not invent a collision it could not check: {printed}"
+    );
 }
 
 /// A sandbox repository with no session is reported, not left to rot.
@@ -867,7 +914,11 @@ fn sessions_changing_the_same_file_are_named_together() {
 #[test]
 fn a_sandbox_repository_with_no_session_is_reported() {
     let sb = sandbox();
-    sb.session("s01");
+    let worktree = sb.session("s01");
+    // s01 gets a real repository too, so the live-session filter has something
+    // to filter. Without it this test passed with the filter deleted: `s01`
+    // had no shadow, so it was never in the list to be removed from.
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
     let orphan = sb
         .home
         .join(".omh/shadow")
@@ -884,7 +935,21 @@ fn a_sandbox_repository_with_no_session_is_reported() {
     );
     assert!(
         !said.contains("s01"),
-        "and a session that is still here is not: {said}"
+        "and a session that is still here is not — every live session has a \
+         repository, so this filter is the only thing between a healthy checkout \
+         and being told to `rm` all of it: {said}"
+    );
+
+    // The hint is only worth printing if it works. `--force` because the
+    // orphan holds a commit, which is #58 doing its job.
+    assert!(
+        sb.omh(&["s09", "rm", "--force"]).status.success(),
+        "the hint `s ls` prints has to be a command that clears it"
+    );
+    assert!(!orphan.exists(), "and it did");
+    assert!(
+        !String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stderr).contains("s09"),
+        "so a second listing no longer names it"
     );
 }
 

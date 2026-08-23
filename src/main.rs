@@ -1521,17 +1521,28 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
     let base = session::default_branch(&paths.repo);
 
-    // What each session is changing, kept rather than counted and dropped.
-    // `work_state` below asks git the same question; two sessions editing one
-    // file is a collision git will not mention until a merge, and the answer
-    // is already on the floor.
+    // What each session is changing, asked **once** and used twice. The count
+    // `work_state` renders and the paths the overlap section names are the
+    // same answer: read separately they were two subprocesses per session and,
+    // worse, two snapshots — a live agent writes between them, so one listing
+    // could report `0 uncommitted` beside a collision on a file that session
+    // had just stashed.
     let mut changed: Vec<(String, Vec<String>)> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
     let sessions = session::list(&paths.worktrees())
         .into_iter()
         .map(|id| {
             let sess = Session::new(&paths.worktrees(), id.clone());
-            if let Ok(paths) = sess.changed() {
-                changed.push((id.clone(), paths));
+            let touched = sess.changed();
+            match &touched {
+                Ok(touched) => changed.push((id.clone(), touched.clone())),
+                // Carried, not dropped. A session omh cannot read contributes
+                // no paths, so it silently belongs to no collision — and *no
+                // overlap line* is exactly how "no collisions" is rendered.
+                // `work_state` renders the same failure as `Work::Unknown` one
+                // column over; the two must not disagree about whether it is
+                // worth mentioning.
+                Err(_) => unreadable.push(id.clone()),
             }
             report::Session {
                 running: backend
@@ -1539,7 +1550,12 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     .map(|b| image::container_running(b.program(), &paths.container(&id)))
                     .unwrap_or(false),
                 label: sess.label().to_string(),
-                work: Some(work_state(&sess, &paths.repo, &base)),
+                work: Some(work_state(
+                    &sess,
+                    &paths.repo,
+                    &base,
+                    touched.as_ref().ok().map(Vec::len),
+                )),
                 behind: sess.behind(&paths.repo, &base).ok(),
                 id,
             }
@@ -1548,8 +1564,9 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 
     ctx.say(&report::Sessions {
         sessions,
-        leftovers: leftovers(&paths, backend.as_deref()),
+        leftovers: leftovers(&paths, backend.as_deref(), ctx),
         overlaps: report::overlaps(&changed),
+        unreadable,
         base,
     });
     Ok(())
@@ -1567,22 +1584,34 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 /// A run directory counts only when it carries the marker `idle::touch` writes.
 /// `omh doctor` and `omh auth` stage into the same tree under their own names,
 /// and neither is a session anybody could resume or would want reported.
-fn leftovers(paths: &Paths, backend: Option<&dyn runtime::Runtime>) -> Vec<String> {
+fn leftovers(paths: &Paths, backend: Option<&dyn runtime::Runtime>, ctx: &out::Ctx) -> Vec<String> {
     let live = session::list(&paths.worktrees());
     // A sandbox repository with no worktree — [risks](docs/design/risks.md) 8c.
     // The most valuable orphan of the three: a container is re-creatable and a
     // run directory holds a timestamp, while this holds every commit the agent
     // made and nothing points at it. `omh <id> rm` clears it, and since #58
     // says what it would take with it first.
-    let mut found: Vec<String> = std::fs::read_dir(paths.shadows())
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            name.strip_suffix(".git").map(str::to_string)
-        })
-        .collect();
+    // `NotFound` is the ordinary "no sandbox has ever been built here". Any
+    // other failure is omh being unable to look, and an empty `leftovers`
+    // prints *nothing at all* — byte for byte what a clean checkout prints. Of
+    // the three orphans this hunts, the repository is the one that holds work.
+    let mut found: Vec<String> = match std::fs::read_dir(paths.shadows()) {
+        Ok(entries) => entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.strip_suffix(".git").map(str::to_string)
+            })
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            ctx.warn(&format!(
+                "omh could not read {}, so orphaned sandbox repositories went unchecked: {e}",
+                paths.shadows().display()
+            ));
+            Vec::new()
+        }
+    };
     found.extend(
         std::fs::read_dir(paths.runs())
             .into_iter()
@@ -1618,7 +1647,12 @@ fn leftovers(paths: &Paths, backend: Option<&dyn runtime::Runtime>) -> Vec<Strin
 /// Ordered most-actionable first, and deliberately one answer rather than a
 /// tally: `s ls` is read at a glance, and a session with uncommitted work needs
 /// committing whatever else is also true of it.
-fn work_state(session: &Session, repo: &std::path::Path, base: &str) -> report::Work {
+fn work_state(
+    session: &Session,
+    repo: &std::path::Path,
+    base: &str,
+    uncommitted: Option<usize>,
+) -> report::Work {
     use report::Work;
 
     // A git that cannot answer is never rendered as an answer. Every accessor
@@ -1626,8 +1660,10 @@ fn work_state(session: &Session, repo: &std::path::Path, base: &str) -> report::
     // checkout moves and is already handled as a real case by `Session::remove`
     // — and a blank column reads as "nothing here" for a session that may be
     // holding a day of work the user is about to `s rm`.
-    let (uncommitted, unpushed) = match (session.uncommitted(), session.unpushed()) {
-        (Ok(uncommitted), Ok(unpushed)) => (uncommitted, unpushed),
+    // The count comes from the caller, which already asked. `None` is the same
+    // failure this used to discover for itself.
+    let (uncommitted, unpushed) = match (uncommitted, session.unpushed()) {
+        (Some(uncommitted), Ok(unpushed)) => (uncommitted, unpushed),
         _ => return Work::Unknown,
     };
 

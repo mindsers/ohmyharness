@@ -619,6 +619,13 @@ pub struct Sessions {
     pub leftovers: Vec<String>,
     /// Files more than one session is changing.
     pub overlaps: Vec<Overlap>,
+    /// Sessions omh could not read, and so could not include above.
+    ///
+    /// Not the same as a session that collides with nobody, which is what an
+    /// absence from `overlaps` otherwise means — and the whole section renders
+    /// as nothing at all when it is empty, so a partial answer would be
+    /// indistinguishable from a clean one.
+    pub unreadable: Vec<String>,
 }
 
 impl Report for Sessions {
@@ -661,11 +668,35 @@ impl Report for Sessions {
             out.push_str(&format!(
                 "\n  {}\n",
                 p.paint(
-                    out::DIM,
+                    // Not `DIM`. This is the line the section exists for, and
+                    // the column beside it renders *omh could not tell* in
+                    // `WARN` — de-emphasising the collision while highlighting
+                    // the uncertainty says the wrong thing about which matters.
+                    out::HEAD,
                     &format!(
                         "{} both change {}",
                         spoken(&overlap.sessions),
                         overlap.paths.join(", ")
+                    )
+                )
+            ));
+        }
+        // Said whether or not there are collisions above: with none, an
+        // unreadable session is the only reason the section is empty, and that
+        // is precisely when the silence would be read as "nothing collides".
+        if !self.unreadable.is_empty() {
+            out.push_str(&format!(
+                "\n  {}\n",
+                p.paint(
+                    out::WARN,
+                    &format!(
+                        "omh could not read what {} {} changing, so anything above may be \
+                         incomplete",
+                        spoken(&self.unreadable),
+                        match self.unreadable.len() {
+                            1 => "is",
+                            _ => "are",
+                        }
                     )
                 )
             ));
@@ -713,6 +744,7 @@ impl Report for Sessions {
                 "sessions": o.sessions,
                 "paths": o.paths,
             })).collect::<Vec<_>>(),
+            "unreadable": self.unreadable,
         })
     }
 }
@@ -2160,6 +2192,57 @@ impl Report for Lint {
 
 #[cfg(test)]
 mod tests {
+    /// Three sessions and two files are one sentence a person can read.
+    ///
+    /// Both separators are the identity with two sessions and one path, which
+    /// is what the end-to-end test has — so `s01, s02 and s03` and
+    /// `src/base.rs, src/render.rs`, the whole reason `spoken` exists, were
+    /// asserted nowhere. This renders rather than groups.
+    #[test]
+    fn three_sessions_and_two_files_read_as_one_sentence() {
+        let mut listing = sessions(vec![session("s01", Work::Uncommitted(1))]);
+        listing.overlaps = vec![Overlap {
+            sessions: vec!["s01".into(), "s02".into(), "s03".into()],
+            paths: vec!["src/base.rs".into(), "src/render.rs".into()],
+        }];
+
+        let said = listing.human(&out::Palette::plain());
+        assert!(
+            said.contains("s01, s02 and s03 both change src/base.rs, src/render.rs"),
+            "a list as a person reads one: {said}"
+        );
+    }
+
+    /// A session omh could not read is said, because its absence from the
+    /// section above means the opposite.
+    #[test]
+    fn a_session_omh_could_not_read_is_not_a_session_that_collides_with_nobody() {
+        let mut listing = sessions(vec![session("s01", Work::Unknown)]);
+        listing.unreadable = vec!["s02".into()];
+
+        let said = listing.human(&out::Palette::plain());
+        assert!(
+            said.contains("could not read what s02 is changing"),
+            "named, and in the singular: {said}"
+        );
+        assert!(
+            said.contains("incomplete"),
+            "and what that means for the lines above it: {said}"
+        );
+        assert_eq!(
+            listing.json()["unreadable"],
+            json!(["s02"]),
+            "a script reading `overlaps: []` has to be able to tell a partial \
+             answer from a clean one"
+        );
+
+        // …and nothing is said when there is nothing to say.
+        let quiet = sessions(vec![session("s01", Work::Uncommitted(1))]);
+        assert!(!quiet
+            .human(&out::Palette::plain())
+            .contains("could not read"));
+    }
+
     /// Two sessions changing one file is the collision git will not mention
     /// until a merge.
     #[test]
@@ -2213,6 +2296,17 @@ mod tests {
         assert!(three
             .iter()
             .any(|o| o.sessions == ["s01", "s03"] && o.paths == ["pair.rs"]));
+
+        // One pair is one line whatever order the sessions arrive in, and the
+        // order kept is `s ls`'s. The grouping key is the session list, so a
+        // pair that varied would split into two lines about the same two
+        // sessions.
+        let reversed = overlaps(&changed(&[
+            ("s03", &["x.rs", "y.rs"]),
+            ("s01", &["y.rs", "x.rs"]),
+        ]));
+        assert_eq!(reversed.len(), 1, "one pair, one line: {reversed:?}");
+        assert_eq!(reversed[0].sessions, ["s03", "s01"], "in listing order");
     }
 
     fn checkpoint(number: usize, subject: &str, landed: bool) -> crate::shadow::Checkpoint {
@@ -2678,6 +2772,7 @@ mod tests {
             base: "main".into(),
             leftovers: vec![],
             overlaps: vec![],
+            unreadable: vec![],
         }
     }
 

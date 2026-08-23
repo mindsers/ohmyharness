@@ -602,9 +602,7 @@ the hardening in step 6 of the order below, this work closes or narrows
     [risks](risks.md#security) 2c, closed. `s ls` names files two sessions are
     both changing, and reports sandbox repositories with no session left —
     [risks](risks.md) 8c. The arrangement gained its two sentences. Still open:
-    the dashboard learning staleness, and
-    `s ls` reports orphaned sandbox repositories; the arrangement gains its two
-    sentences — no history here, and trunk may move under you.
+    the dashboard learning staleness.
 
 Steps 1–6 are repair and hardening, and can land in any order. Steps 7–12 are
 the loop, and each is useful on the day it ships.

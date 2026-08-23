@@ -619,32 +619,45 @@ impl Session {
 
     /// The paths behind that count.
     ///
-    /// The same `status --porcelain` the count runs, kept rather than
-    /// discarded: `s ls` asks this question once per session already, and two
-    /// sessions changing one file is the collision git will not mention until
-    /// a merge. Reading it a second time to answer that would be a subprocess
-    /// per session for something already on the floor.
+    /// The same `status` the count runs, kept rather than discarded: `s ls`
+    /// asks this question once per session already, and two sessions changing
+    /// one file is the collision git will not mention until a merge.
     ///
-    /// Porcelain v1 puts the path after a two-character status and a space.
-    /// A rename prints `R  old -> new`; the new name is the one that exists,
-    /// and it is what another session would collide with.
+    /// **`-z`, so nothing has to be un-quoted.** The first version parsed the
+    /// human format and got three things wrong, all measured against git
+    /// 2.55.0: git C-quotes any path needing it, so `café.rs` arrived as
+    /// `caf\303\251.rs` and was printed at a user that way; `trim_matches('"')`
+    /// strips *every* leading and trailing quote, so a file named `lead"` came
+    /// back as `lead\`; and the ` -> ` split ran on every line rather than only
+    /// on renames, so an ordinary file named `a -> b.rs` was reported as
+    /// `b.rs` — a path that does not exist, and a collision with any session
+    /// genuinely touching `b.rs`.
+    ///
+    /// `-z` emits NUL-separated records and never quotes. A rename is two
+    /// records — the new name, then the old — so the old one is skipped by
+    /// looking at the status rather than at the path.
     pub fn changed(&self) -> Result<Vec<String>> {
         let out = git_owned(&self.worktree, &status_args())?;
-        Ok(out
-            .lines()
-            .filter(|l| l.len() > 3)
-            .map(|line| line[3..].trim())
-            .map(|path| match path.split_once(" -> ") {
-                Some((_, to)) => to,
-                None => path,
-            })
-            // git quotes a path that needs it — `core.quotePath` — and the
-            // quotes are part of neither the name nor a useful comparison.
-            .map(|path| path.trim_matches('"').to_string())
-            .collect())
+        let mut records = out.split('\0').filter(|r| !r.is_empty());
+        let mut changed = Vec::new();
+        while let Some(record) = records.next() {
+            // `XY ` then the path. Two ASCII status characters and a space, so
+            // byte 3 is always a character boundary.
+            let Some((status, path)) = record.split_at_checked(3) else {
+                continue;
+            };
+            // A rename or a copy carries the name it came from as the next
+            // record. That name is not on disk, so it is not something another
+            // session can be changing.
+            if status.contains('R') || status.contains('C') {
+                records.next();
+            }
+            changed.push(path.to_string());
+        }
+        Ok(changed)
     }
 
-    /// The branch on origin this session has already been pushed to.
+    /// The branch on origin this session has already been pushed to.    /// The branch on origin this session has already been pushed to.
     ///
     /// Read from `branch.<b>.remote`/`.merge` rather than `@{u}`, which resolves
     /// against **HEAD**: a detached worktree would report no upstream for a
@@ -794,7 +807,7 @@ fn unstage_rules_args() -> Vec<String> {
 }
 
 fn status_args() -> Vec<String> {
-    ["status", "--porcelain", "-uall", "--"]
+    ["status", "--porcelain", "-z", "-uall", "--"]
         .iter()
         .map(|s| s.to_string())
         .chain(rules_pathspec())
@@ -1592,13 +1605,43 @@ mod tests {
         );
     }
 
-    /// What `changed` reports is the name that exists now.
+    /// Every path `changed` reports is a name the worktree actually has.
     ///
-    /// Porcelain prints a rename as `R  old -> new`, and the old name is not
-    /// something another session can collide with — it is not there. The
-    /// quoting matters for the same reason: `core.quotePath` wraps a path that
-    /// needs it, and `"src/x.rs"` and `src/x.rs` are the same file to a reader
-    /// and different strings to the grouping this feeds.
+    /// The contract, not the parser: a name omh cannot open is a name it must
+    /// not print, and `s ls` prints these at a user as the files two sessions
+    /// are both changing.
+    ///
+    /// The first version of this test used `a space.rs` — which git quotes,
+    /// but whose quoting is pure delimiter, so it passed while every escape
+    /// git actually writes went untested. These four names are the ones that
+    /// were wrong: an accent (octal-escaped), a literal ` -> ` (split as if it
+    /// were a rename), an embedded quote (over-trimmed), and a plain name to
+    /// prove the ordinary case still works.
+    #[test]
+    #[cfg(unix)]
+    fn changed_reports_the_names_the_worktree_actually_has() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let names = ["plain.rs", "été.rs", "a -> b.rs", "say\"hi.rs"];
+        for name in names {
+            std::fs::write(s.worktree.join(name), "fn f() {}\n").unwrap();
+        }
+
+        let mut got = s.changed().unwrap();
+        got.sort();
+        let mut want: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+        want.sort();
+        assert_eq!(
+            got, want,
+            "a name omh cannot open is a name it must not print"
+        );
+    }
+
+    /// A rename reports the name that exists now, not the one it came from.
+    ///
+    /// The old name is not something another session can be changing — it is
+    /// not there.
     #[test]
     fn a_renamed_file_is_reported_under_the_name_it_has_now() {
         let (d, root) = repo();
@@ -1609,20 +1652,10 @@ mod tests {
         git(&s.worktree, &["commit", "-qm", "add it"]).unwrap();
         git(&s.worktree, &["mv", "before.rs", "after.rs"]).unwrap();
 
-        let changed = s.changed().unwrap();
         assert_eq!(
-            changed,
+            s.changed().unwrap(),
             vec!["after.rs".to_string()],
             "the name that is there, once"
-        );
-
-        // …and a path git quotes comes back unquoted, so two sessions naming
-        // one file name it the same way.
-        std::fs::write(s.worktree.join("a space.rs"), "fn spaced() {}\n").unwrap();
-        let changed = s.changed().unwrap();
-        assert!(
-            changed.contains(&"a space.rs".to_string()),
-            "quotes are git's rendering, not part of the name: {changed:?}"
         );
     }
 
