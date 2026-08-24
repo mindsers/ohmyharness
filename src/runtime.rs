@@ -40,15 +40,28 @@ pub trait Runtime: std::fmt::Debug {
     /// Run something inside an already-running session.
     fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String>;
 
-    /// Ask whether one session's container is running, by name.
+    /// List the names of every container that is running.
     ///
-    /// On the trait because the answer has to distinguish *not running* from
-    /// *could not ask*, and how a runtime spells that is the runtime's
-    /// business. What every implementation owes the caller is the contract
-    /// `image::running_from` reads: **exit zero and name the container when it
-    /// is up, exit zero and say nothing when it is not, and exit non-zero only
-    /// when the question could not be answered.**
-    fn running_args(&self, name: &str) -> Vec<String>;
+    /// On the trait because how a runtime spells this is its business, and the
+    /// contract is the one `image::running_from` reads: **exit zero and print
+    /// one name per line, or exit non-zero because the question could not be
+    /// answered.** Nothing else.
+    ///
+    /// It lists rather than asks about one, and that is the correction rather
+    /// than the design. Asking about one meant handing the name to
+    /// `--filter name=`, which is a *regex* — measured, not assumed: docker
+    /// permits `.` in a container name and `Paths::container` builds one from
+    /// the checkout's directory basename unsanitised, so a repo in `~/src/
+    /// omh.rs` probes with `^omh-omh.rs-s01$` and matches `omh-omhXrs-s01`
+    /// too. Worse, a filter that does not parse as a regex exits **0 with
+    /// nothing on stdout** — indistinguishable from *not running*, which is
+    /// the collapse this whole type exists to remove, reintroduced by the
+    /// probe meant to fix it.
+    ///
+    /// Escaping the name would close both, and would leave the correctness of
+    /// every future call resting on somebody remembering to escape. Listing
+    /// and comparing in Rust has no pattern language in it at all.
+    fn running_args(&self) -> Vec<String>;
 
     /// Run something inside the session that must outlive the caller.
     ///
@@ -75,16 +88,13 @@ impl Runtime for Docker {
         "docker"
     }
 
-    /// Measured against docker 29.7.2 — every state, including the one that
-    /// matters. `^name$` is not decoration: `--filter name=` is a substring
-    /// match, so an unanchored `omh-repo-s1` also matches `omh-repo-s10`.
-    fn running_args(&self, name: &str) -> Vec<String> {
-        vec![
-            "ps".into(),
-            "-q".into(),
-            "--filter".into(),
-            format!("name=^{name}$"),
-        ]
+    /// Measured 2026-08-24 against docker 29.7.2. `ps` without `-a` is the
+    /// running set,
+    /// which is the question; `{{.Names}}` is one name per line, and a docker
+    /// container name cannot contain a newline — the legal charset is
+    /// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, which docker enforces at creation.
+    fn running_args(&self) -> Vec<String> {
+        vec!["ps".into(), "--format".into(), "{{.Names}}".into()]
     }
     fn program(&self) -> &'static str {
         "docker"
@@ -215,16 +225,22 @@ impl Runtime for Sbx {
 
     /// PROVISIONAL, like everything else here — sbx is not installed on the
     /// machine this was written on, so the docker spelling is assumed rather
-    /// than measured. If sbx does not honour the trait's contract the failure
-    /// is the safe direction: an unrecognised flag exits non-zero, which reads
-    /// as *could not tell* and makes `sync` refuse rather than proceed.
-    fn running_args(&self, name: &str) -> Vec<String> {
-        vec![
-            "ps".into(),
-            "-q".into(),
-            "--filter".into(),
-            format!("name=^{name}$"),
-        ]
+    /// than measured.
+    ///
+    /// An earlier draft claimed the failure direction is safe, which is true
+    /// of exactly one failure: an unrecognised flag exits non-zero and reads
+    /// as *could not tell*. The others are not safe and the claim should not
+    /// have been made. If sbx exits 0 while naming containers some other way,
+    /// every sandbox reads as **not running** — the original bug, on the
+    /// backend `select` prefers. If it prints a header, every sandbox reads as
+    /// running and `sync` is wedged.
+    ///
+    /// Left as the docker spelling rather than made to refuse outright,
+    /// because refusing would take sbx from *unverified* to *unusable*. What
+    /// closes it is measuring against a real sbx, and `omh doctor` is where
+    /// that check belongs once there is one to measure.
+    fn running_args(&self) -> Vec<String> {
+        vec!["ps".into(), "--format".into(), "{{.Names}}".into()]
     }
     fn program(&self) -> &'static str {
         "sbx"

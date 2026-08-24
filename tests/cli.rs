@@ -68,13 +68,17 @@ impl Sandbox {
     /// box that has one this shim would never be consulted and the test would
     /// pass by not looking.
     ///
-    /// The `ps` handler honours `--filter name=`, because omh's *"is this one
-    /// container up"* probe is a filtered `ps` and a shim that answers for
-    /// every name would say a session is running whenever any session is.
-    /// Unfiltered `ps -a` still lists everything — that is the leftover scan,
-    /// which wants the whole set. Writing `docker-refuses` into the bin
-    /// directory makes the shim exit non-zero, which is how a runtime that
-    /// cannot be reached is reachable from a test at all.
+    /// `ps` lists the `containers` file, which is what omh's probe reads: it
+    /// asks for the running set and compares names itself, so the shim has no
+    /// pattern to honour. An earlier version of this tried to emulate
+    /// `--filter name=` and got the containment backwards — it tested whether
+    /// the container name was a substring of the argv, so a shim asked about
+    /// `omh-repo-s10` reported `omh-repo-s1` as running. Nothing in the tree
+    /// needs that emulation now.
+    ///
+    /// Writing `docker-refuses` into the bin directory makes the shim exit
+    /// non-zero, which is how a runtime that cannot be reached is reachable
+    /// from a test at all.
     fn fake_docker(&self) -> PathBuf {
         let log = self.bin.join("docker.log");
         let shim = self.bin.join("docker");
@@ -84,13 +88,7 @@ impl Sandbox {
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
                  [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\n\
-                 if [ \"$1\" = ps ]; then\n\
-                 case \"$*\" in\n\
-                 *--filter*) while read -r c; do case \"$*\" in *\"$c\"*) echo \"$c\" ;; esac; \
-                 done < {containers} 2>/dev/null ;;\n\
-                 *) cat {containers} 2>/dev/null ;;\n\
-                 esac\n\
-                 fi\nexit 0\n",
+                 if [ \"$1\" = ps ]; then cat {containers} 2>/dev/null; fi\nexit 0\n",
                 log = log.display(),
                 refuses = self.bin.join("docker-refuses").display(),
                 containers = self.bin.join("containers").display()
@@ -143,13 +141,7 @@ impl Sandbox {
                  # across three branches, each time saying only `init failed`.\n\
                  if [ \"$1\" = build ]; then cat > /dev/null; fi\n\
                  if [ \"$1\" = images ]; then cat {images}; fi\n\
-                 if [ \"$1\" = ps ]; then\n\
-                 case \"$*\" in\n\
-                 *--filter*) while read -r c; do case \"$*\" in *\"$c\"*) echo \"$c\" ;; esac; \
-                 done < {containers} 2>/dev/null ;;\n\
-                 *) cat {containers} ;;\n\
-                 esac\n\
-                 fi\n\
+                 if [ \"$1\" = ps ]; then cat {containers}; fi\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\nexit 0\n",
                 log = log.display(),
                 images = images.display(),
@@ -2283,9 +2275,24 @@ fn a_runtime_that_cannot_be_reached_is_not_reported_as_a_stopped_sandbox() {
 
     let out = sb.omh(&["s", "ls"]);
     let printed = String::from_utf8_lossy(&out.stdout);
+    // Anchored on the row being there at all. `Sessions::human` renders an
+    // empty list as `no sessions`, which contains neither `stopped` nor `s01`
+    // — so the absence assertion below passed on a listing with nothing in it.
+    assert!(printed.contains("s01"), "the session is listed: {printed}");
     assert!(
         !printed.contains("stopped"),
         "a question omh could not answer is not an answer: {printed}"
+    );
+    assert!(
+        printed.contains("up?"),
+        "it is rendered as the question it is: {printed}"
+    );
+    // The reason, which the first version of this built, carried through two
+    // layers and dropped — while the docs promised it was here.
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("could not tell whether s01's sandbox is running"),
+        "and the reason reaches stderr: {err}"
     );
 
     // The JSON has no second signal — `--json` returns before asides — so the
@@ -2293,10 +2300,27 @@ fn a_runtime_that_cannot_be_reached_is_not_reported_as_a_stopped_sandbox() {
     let json = sb.omh(&["s", "ls", "--json"]);
     let doc: serde_json::Value =
         serde_json::from_slice(&json.stdout).expect("s ls --json is a document");
+    // `serde_json` indexing returns `Null` for a missing key, a non-array and
+    // an out-of-range index alike, so `doc["sessions"][0]["running"]` was
+    // `Null` for an empty document too. The length and the id anchor it.
+    assert_eq!(
+        doc["sessions"].as_array().map(Vec::len),
+        Some(1),
+        "one session in the document: {doc}"
+    );
+    assert_eq!(
+        doc["sessions"][0]["id"],
+        serde_json::json!("s01"),
+        "and it is s01: {doc}"
+    );
     assert_eq!(
         doc["sessions"][0]["running"],
         serde_json::Value::Null,
         "and a script is not told `false`: {doc}"
+    );
+    assert!(
+        doc["sessions"][0]["running_unknown"].is_string(),
+        "with the reason beside it, since `--json` never sees the warning: {doc}"
     );
 
     // The one that matters. A sync here would land files under an agent that
@@ -2305,8 +2329,50 @@ fn a_runtime_that_cannot_be_reached_is_not_reported_as_a_stopped_sandbox() {
     assert!(!sync.status.success(), "sync does not proceed on a guess");
     let err = String::from_utf8_lossy(&sync.stderr);
     assert!(
-        err.contains("could not tell whether the sandbox is running"),
+        err.contains("could not tell whether s01 is running"),
         "and says why it stopped: {err}"
+    );
+}
+
+/// `down` over an unreachable runtime reports the session it could not ask
+/// about, rather than leaving a hole where the row should be.
+///
+/// The hole was the point: skipping the push meant `omh down` printed
+/// **`no sessions`** on stdout — the answer channel — and `"sessions": []` in
+/// JSON, over a daemon it never reached. A missing row is worse than a wrong
+/// one; a script iterating the list sees nothing at all and no error.
+#[test]
+fn down_over_an_unreachable_runtime_still_names_the_session() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.session("s01");
+    std::fs::write(sb.bin.join("docker-refuses"), "").unwrap();
+
+    let out = sb.omh(&["s01", "down", "--json"]);
+    assert!(!out.status.success(), "it is a failure, and exits like one");
+
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("down --json is a document");
+    assert_eq!(
+        doc["sessions"].as_array().map(Vec::len),
+        Some(1),
+        "the session is in the document: {doc}"
+    );
+    assert_eq!(doc["sessions"][0]["session"], serde_json::json!("s01"));
+    assert_eq!(
+        doc["sessions"][0]["stopped"],
+        serde_json::Value::Null,
+        "`null`, not `false` — omh never asked it to stop: {doc}"
+    );
+    assert!(
+        doc["sessions"][0]["why"].is_string(),
+        "with the runtime's reason beside it: {doc}"
+    );
+
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("could not be asked") && !err.contains("would not stop"),
+        "and it does not claim the container refused to stop: {err}"
     );
 }
 

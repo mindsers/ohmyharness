@@ -948,6 +948,7 @@ fn session_up(
     let name = paths.container(&session.id);
     let running = must_know(
         image::container_running(backend.as_ref(), &name),
+        &session.id,
         "start or reuse it",
     )?;
 
@@ -1235,7 +1236,8 @@ fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool, ctx: &out::Ctx) -
     if stop {
         if !must_know(
             image::container_running(backend.as_ref(), &container),
-            "stop the graph",
+            "the graph",
+            "stop it",
         )? {
             ctx.say(
                 &report::Action::new("graph-not-running", "the graph is not running")
@@ -1254,7 +1256,8 @@ fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool, ctx: &out::Ctx) -
     let port = base::ui_port(&container);
     if !must_know(
         image::container_running(backend.as_ref(), &container),
-        "start the graph",
+        "the graph",
+        "start it",
     )? {
         // A stopped container of the same name blocks `run --name`.
         let _ = image::container_remove(backend.program(), &container);
@@ -1329,15 +1332,11 @@ fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
 
     let running: Vec<(String, Option<std::time::SystemTime>)> = session::list(&paths.worktrees())
         .into_iter()
-        // Not `must_know` — this runs on a timer with nobody to tell, and the
-        // safe direction is the opposite one. *Could not tell* keeps a session
-        // out of the reaping list: leaving a sandbox up costs a container, and
-        // stopping a live one on a guess costs somebody's turn.
         .filter(|id| {
-            matches!(
-                image::container_running(backend.as_ref(), &paths.container(id)),
-                image::Running::Yes
-            )
+            reapable(&image::container_running(
+                backend.as_ref(),
+                &paths.container(id),
+            ))
         })
         .map(|id| {
             let last = idle::last_used(&paths.runs(), &id);
@@ -1366,41 +1365,57 @@ fn down(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()> {
     // and one `say` per session is one JSON document per session.
     let mut sessions = Vec::new();
     let mut stuck = 0usize;
+    let mut unasked = 0usize;
     for i in &ids {
         let name = paths.container(i);
         match image::container_running(backend.as_ref(), &name) {
             image::Running::No => {
-                sessions.push((i.clone(), false));
+                sessions.push((i.clone(), report::Stopped::WasNotRunning));
                 continue;
             }
-            // Counted with the ones that would not stop, not with the ones
-            // that were already down. `down` reporting *nothing was running*
-            // over a runtime it could not reach is the same false all-clear
-            // this change is about, and the exit code has to agree with it.
+            // A row in the report, not a warning and a gap. Skipping the push
+            // meant `down` over an unreachable daemon printed `no sessions` on
+            // **stdout** and `"sessions": []` in JSON — a false all-clear on
+            // the answer channel, which is the thing this whole change is
+            // about, one report struct over.
+            //
+            // Counted apart from `stuck` too: omh never asked this one to
+            // stop, so *would not stop* is a claim it cannot make.
             image::Running::Unknown(why) => {
-                stuck += 1;
-                ctx.warn(&format!("omh could not tell whether {i} is running: {why}"));
+                unasked += 1;
+                ctx.warn(&format!("could not tell whether {i} is running: {why}"));
+                sessions.push((i.clone(), report::Stopped::CouldNotTell(why)));
                 continue;
             }
             image::Running::Yes => {}
         }
         match image::container_remove(backend.program(), &name) {
-            Ok(()) => sessions.push((i.clone(), true)),
+            Ok(()) => sessions.push((i.clone(), report::Stopped::Yes)),
             // Reported and carried on rather than returned: one container that
             // will not go must not hide the ones that did. It still decides
             // the exit code below — a caller whose JSON says nothing stopped
             // needs the status to agree.
             Err(e) => {
                 stuck += 1;
-                ctx.warn(&format!("{i} is still running: {e}"));
+                ctx.warn(&format!("{i} is still running: {e:#}"));
             }
         }
     }
     ctx.say(&report::Down { sessions });
+    // Both are failures and they are different sentences. The old text called
+    // a session omh never asked about one that "would not stop".
     anyhow::ensure!(
-        stuck == 0,
-        "{stuck} session{} would not stop",
-        if stuck == 1 { "" } else { "s" }
+        stuck == 0 && unasked == 0,
+        "{}",
+        [
+            (stuck, "would not stop"),
+            (unasked, "could not be asked — the runtime did not answer"),
+        ]
+        .iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, what)| format!("{n} session{} {what}", if *n == 1 { "" } else { "s" }))
+        .collect::<Vec<_>>()
+        .join("; ")
     );
     Ok(())
 }
@@ -1572,7 +1587,16 @@ fn doctor_cmd(
 
 fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
+    // Said once, about the machine, rather than once per row. The `running`
+    // column renders a `None` as an absence — nobody asked — and *why* nobody
+    // asked is one fact, not N.
+    let backend = match runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)) {
+        Ok(backend) => Some(backend),
+        Err(e) => {
+            ctx.warn(&format!("omh cannot say which sandboxes are up: {e:#}"));
+            None
+        }
+    };
     let base = session::default_branch(&paths.repo);
 
     // What each session is changing, asked **once** and used twice. The count
@@ -1604,9 +1628,20 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // tell*. The same two-level shape `work` uses one column over,
                 // and for the same reason it gives: the mistake becomes
                 // unspellable rather than merely absent.
-                running: backend
-                    .as_ref()
-                    .map(|b| image::container_running(b.as_ref(), &paths.container(&id))),
+                running: backend.as_ref().map(|b| {
+                    let asked = image::container_running(b.as_ref(), &paths.container(&id));
+                    // Say why, which the first version of this did not — it
+                    // built the reason, carried it through two layers and
+                    // dropped it, while both docs promised it reached stderr.
+                    // The same defect as the `.ok()` thirteen lines below,
+                    // introduced in the change that fixed that one.
+                    if let image::Running::Unknown(why) = &asked {
+                        ctx.warn(&format!(
+                            "could not tell whether {id}'s sandbox is running: {why}"
+                        ));
+                    }
+                    asked
+                }),
                 label: sess.label().to_string(),
                 work: Some(work_state(
                     &sess,
@@ -5233,10 +5268,25 @@ fn sync_session(paths: &Paths, session: &Session, base: &str) -> Result<report::
 /// judgement only the user can make, which is why `--down` exists and why the
 /// default is to refuse.
 fn stop_before_syncing(paths: &Paths, session: &Session, down: bool, ctx: &out::Ctx) -> Result<()> {
-    let Ok(backend) = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))
-    else {
-        return Ok(());
-    };
+    // Not a silent `return Ok(())`, which is what this was — and it sat one
+    // line above the fix below, reaching the same outcome by a shorter path.
+    // `runtime::installed` is itself `.unwrap_or(false)` over a `sh -c command
+    // -v`, so a machine under fork pressure answers *no runtime installed*
+    // when it means *could not ask*, and the sync then went ahead over a live
+    // agent with nothing said at all.
+    //
+    // Refusing over a genuinely runtime-less machine is the cost, and it is
+    // small: no runtime means no sandbox, so the session is not running, but a
+    // sync is also not something that machine was going to do usefully. The
+    // message says which it is and `--down` is not the way past — the way past
+    // is a runtime.
+    let backend = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))
+        .with_context(|| {
+            format!(
+                "omh cannot tell whether {}'s sandbox is running, so it will not sync over it",
+                session.id
+            )
+        })?;
     let name = paths.container(&session.id);
     // The reason this whole class was worth fixing. `.unwrap_or(false)` here
     // meant an unreachable runtime read as *nothing is running*, and a sync
@@ -5245,6 +5295,7 @@ fn stop_before_syncing(paths: &Paths, session: &Session, down: bool, ctx: &out::
     // discuss.
     if !must_know(
         image::container_running(backend.as_ref(), &name),
+        &session.id,
         "sync over it",
     )? {
         return Ok(());
@@ -5626,6 +5677,21 @@ fn may_commit(id: &str, unresolved: &[String], force: bool) -> Result<()> {
     );
 }
 
+/// Whether the reaper may consider stopping this session.
+///
+/// The one place the safe direction is inverted, and a named function rather
+/// than a `matches!` in a filter so that it can be asserted at all — the
+/// mutation that matters (`Unknown` becoming reapable) left the whole suite
+/// green while this was inline.
+///
+/// Not `must_know`, because this runs on a timer with nobody to refuse to.
+/// *Could not tell* keeps a session **out** of the list: leaving a sandbox up
+/// costs a container, and stopping a live one on a guess costs somebody's
+/// turn.
+fn reapable(running: &image::Running) -> bool {
+    matches!(running, image::Running::Yes)
+}
+
 /// *Could not tell* at a point where omh is about to act on the answer.
 ///
 /// Not a `no`, and at a decision point not a `yes` either — so it is a
@@ -5633,14 +5699,17 @@ fn may_commit(id: &str, unresolved: &[String], force: bool) -> Result<()> {
 /// create, enter, stop or overwrite a container on the strength of the answer,
 /// and each of those is worse done blind than not done.
 ///
-/// The alternative that shipped for a year was `.unwrap_or(false)`, which is
-/// how a Docker daemon that is down made every sandbox look stopped.
-fn must_know(running: image::Running, doing: &str) -> Result<bool> {
+/// The alternative it replaces was `.unwrap_or(false)`, which is how a Docker
+/// daemon that is down made every sandbox look stopped. An earlier draft of
+/// this sentence said it "shipped for a year"; the repository is nineteen days
+/// old. Nobody would have checked that, which is the reason to say the
+/// checkable thing instead: it was there from the first commit, 2026-08-05.
+fn must_know(running: image::Running, what: &str, doing: &str) -> Result<bool> {
     match running {
         image::Running::Yes => Ok(true),
         image::Running::No => Ok(false),
         image::Running::Unknown(why) => anyhow::bail!(
-            "omh could not tell whether the sandbox is running, so it will not {doing}: {why}"
+            "omh could not tell whether {what} is running, so it will not {doing}: {why}"
         ),
     }
 }
@@ -6043,14 +6112,24 @@ fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -> Result<()
     // for every command from then on. Nothing else ever removes it.
     if let Ok(backend) = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)) {
         let name = paths.container(id);
-        // Best-effort already — `let _` below says so. *Could not tell* joins
-        // *not running*: the graph entry is dropped on the next launch that
-        // reuses the id, and failing a removal over a tidy-up nobody asked
-        // for would be the tail wagging the dog.
-        if matches!(
-            image::container_running(backend.as_ref(), &name),
-            image::Running::Yes
-        ) {
+        // Best-effort already — `let _` below says so — and *could not tell*
+        // joins *not running* because the exec would fail against a runtime
+        // that will not answer anyway. Failing a removal over a tidy-up nobody
+        // asked for would be the tail wagging the dog.
+        //
+        // An earlier version of this comment claimed the graph entry is
+        // dropped on the next launch that reuses the id. It is not:
+        // `drop_graph_command` has exactly one caller, this one. What is
+        // skipped here is skipped for good, so it is said rather than
+        // swallowed.
+        let up = image::container_running(backend.as_ref(), &name);
+        if let image::Running::Unknown(why) = &up {
+            ctx.warn(&format!(
+                "could not tell whether {id}'s sandbox was up, so its graph entry \
+                 was left behind: {why}"
+            ));
+        }
+        if matches!(up, image::Running::Yes) {
             let project = base::project_name(&paths.repo_name(), id);
             let _ = Command::new(backend.program())
                 .args(backend.exec_args(&name, &base::drop_graph_command(&project), false))
@@ -6353,9 +6432,12 @@ mod tests {
     /// — so CI is the only place it is caught, one push and four minutes
     /// later. This is the same guard, here.
     ///
-    /// `#[test]` only, deliberately. Derives, `cfg` and `allow` legitimately
-    /// stack and sit above doc comments in this tree; a test attribute never
-    /// does.
+    /// Two shapes: a `#[test]` that no longer sits on a function, and **any**
+    /// attribute that sits above a doc comment. The second was added after the
+    /// first failed to catch the same mistake made to a `#[derive(…)]` — this
+    /// paragraph used to say derives "legitimately stack and sit above doc
+    /// comments in this tree", which was asserted rather than checked. There
+    /// were zero such instances; a doc comment always comes first here.
     #[test]
     fn no_test_attribute_was_stranded_from_its_function() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -6387,6 +6469,25 @@ mod tests {
                             "{}:{}: followed by `{next}`",
                             file.display(),
                             n + 1
+                        ));
+                    }
+                }
+                // Any attribute above a doc comment — the same accident
+                // wearing a different hat. An insertion before an anchor
+                // swallowed `report::Down`'s `#[derive(…)]` and left it
+                // heading the new block, after the `#[test]` half of this was
+                // already written, so the rule is the general one now.
+                for (n, line) in lines.iter().enumerate() {
+                    if line.trim().starts_with("#[")
+                        && lines
+                            .get(n + 1)
+                            .is_some_and(|l| l.trim().starts_with("///"))
+                    {
+                        stranded.push(format!(
+                            "{}:{}: `{}` sits above a doc comment",
+                            file.display(),
+                            n + 1,
+                            line.trim()
                         ));
                     }
                 }
@@ -6825,11 +6926,12 @@ mod tests {
     /// an unreachable runtime used to answer *nothing is running*.
     #[test]
     fn a_container_question_omh_could_not_answer_stops_the_command() {
-        assert!(must_know(image::Running::Yes, "sync over it").unwrap());
-        assert!(!must_know(image::Running::No, "sync over it").unwrap());
+        assert!(must_know(image::Running::Yes, "s01", "sync over it").unwrap());
+        assert!(!must_know(image::Running::No, "s01", "sync over it").unwrap());
 
         let refused = must_know(
             image::Running::Unknown("daemon not reachable".into()),
+            "s01",
             "sync over it",
         )
         .unwrap_err()
@@ -6841,6 +6943,43 @@ mod tests {
         assert!(
             refused.contains("daemon not reachable"),
             "and the runtime's reason, which is the only actionable part: {refused}"
+        );
+        // The subject is a parameter because two of the callers are `graph`,
+        // which asks about a per-repo UI container and not a session. The
+        // sentence used to say "the sandbox" for those, sending the reader to
+        // look at sessions.
+        assert!(
+            refused.contains("s01") && !refused.contains("the sandbox"),
+            "and names what it asked about: {refused}"
+        );
+        let graph = must_know(
+            image::Running::Unknown("daemon not reachable".into()),
+            "the graph",
+            "stop it",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(graph.contains("the graph is running"), "got: {graph}");
+    }
+
+    /// The reaper's inverted safe direction, which is the one place *could not
+    /// tell* must not lead to a refusal — there is nobody to refuse to.
+    ///
+    /// A named predicate rather than a `matches!` inside a filter, because the
+    /// mutation that matters — `Unknown` becoming reapable, so a flapping
+    /// daemon stops live agents' sandboxes on a guess — left the whole suite
+    /// green while it was inline.
+    #[test]
+    fn a_session_omh_cannot_ask_about_is_never_reaped() {
+        assert!(reapable(&image::Running::Yes), "a live one may be reaped");
+        assert!(
+            !reapable(&image::Running::No),
+            "one already down has nothing to reap"
+        );
+        assert!(
+            !reapable(&image::Running::Unknown("daemon down".into())),
+            "and one omh could not ask about is left alone — stopping a live \
+             session on a guess costs somebody's turn"
         );
     }
 

@@ -672,52 +672,92 @@ pub enum Running {
     Yes,
     No,
     /// The runtime could not be asked, and why. Never *no*.
+    ///
+    /// The payload is always through `out::untrusted` and never empty — both
+    /// are `running_from`'s doing, and it is the only thing that builds one.
+    /// Callers repeat it into a terminal without sanitising again, so a second
+    /// construction site would have to keep that promise.
     Unknown(String),
 }
 
 /// Is this container up, given what the runtime said when asked?
 ///
-/// Over the process result rather than the process, so all four states are a
+/// Over the process result rather than the process, so all the states are a
 /// table — the shape `doctor::version_of` uses, for the reason it records:
 /// while this was one `.unwrap_or(false)`, no test could reach any state but
-/// the first.
+/// the first. Measured 2026-08-24 against docker 29.7.2.
 ///
-/// **The mechanism is the exit status, not the text.** Measured against docker
-/// 29.7.2: `ps -q --filter name=^<name>$` exits 0 with the id when the
-/// container is running, exits 0 with nothing when it is stopped *or does not
-/// exist*, and exits non-zero only when the daemon could not be reached. The
-/// obvious probe — `inspect -f {{.State.Running}}` — cannot do this: a missing
-/// container and an unreachable daemon both exit 1 with empty stdout, and the
-/// only thing separating them is English on stderr.
+/// **The mechanism is the exit status, and the name is compared here rather
+/// than passed to the runtime as a pattern.** Measured 2026-08-24 against
+/// docker 29.7.2:
 ///
-/// A stopped container and one that was never built are deliberately the same
-/// answer. Neither is running, and no caller here wants them apart.
-pub fn running_from(asked: std::io::Result<std::process::Output>) -> Running {
+/// | container state | `ps --format {{.Names}}` | answer |
+/// |---|---|---|
+/// | running | lists it | `Yes` |
+/// | paused | lists it | `Yes` |
+/// | restarting | lists it | `Yes` |
+/// | created, never started | absent | `No` |
+/// | exited | absent | `No` |
+/// | no such container | absent | `No` |
+/// | daemon unreachable | exit 1 | `Unknown` |
+///
+/// `paused` and `restarting` answering `Yes` is deliberate and matches what
+/// the old probe did: both hold a tree omh must not write under. `created`
+/// answering `No` matches it too — nothing is running in a container that was
+/// never started.
+///
+/// Two things this deliberately does **not** do. It does not ask the runtime
+/// about one container: `--filter name=` is a *regex*, docker permits `.` in a
+/// name, and `Paths::container` builds one from the checkout's directory
+/// basename unsanitised — so a repo in `~/src/omh.rs` would probe with
+/// `^omh-omh.rs-s01$` and match `omh-omhXrs-s01` as well. And a filter that
+/// does not parse exits **0 with empty stdout**, which reads as *not running*:
+/// the collapse this type exists to remove, reintroduced by the probe meant to
+/// fix it. Comparing here has no pattern language in it.
+///
+/// It also does not fuse *stopped* with *never built* by accident — that is on
+/// purpose. Neither is running and no caller wants them apart.
+pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) -> Running {
     let out = match asked {
         Ok(out) => out,
         // The program is on `PATH` — `runtime::installed` said so before any
         // of this — so a spawn that fails is a fork failure or a binary that
         // vanished mid-run, and either way omh has no answer.
-        Err(e) => return Running::Unknown(format!("could not run the container runtime: {e}")),
+        Err(e) => {
+            return Running::Unknown(crate::out::untrusted(&format!(
+                "could not run the container runtime: {e}"
+            )))
+        }
     };
     if !out.status.success() {
         let said = crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim());
         return Running::Unknown(match said.is_empty() {
             // A non-zero exit with nothing said. Still not *no*.
-            true => format!("the container runtime exited {}", out.status),
+            //
+            // `status.code()` rather than the `Display` of `ExitStatus`, which
+            // renders "exit status: 1" and made the line read "the container
+            // runtime exited exit status: 1".
+            true => match out.status.code() {
+                Some(code) => format!("the container runtime exited {code}"),
+                None => "the container runtime was killed by a signal".into(),
+            },
             false => said,
         });
     }
-    match String::from_utf8_lossy(&out.stdout).trim().is_empty() {
-        true => Running::No,
-        false => Running::Yes,
+    match String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .any(|listed| listed.trim() == name)
+    {
+        true => Running::Yes,
+        false => Running::No,
     }
 }
 
 pub fn container_running(backend: &dyn crate::runtime::Runtime, name: &str) -> Running {
     running_from(
+        name,
         std::process::Command::new(backend.program())
-            .args(backend.running_args(name))
+            .args(backend.running_args())
             .output(),
     )
 }
@@ -858,19 +898,41 @@ mod tests {
     #[test]
     fn a_runtime_that_will_not_answer_is_not_a_container_that_is_stopped() {
         assert_eq!(
-            running_from(output(0, "078e9e0e533c\n", "")),
+            running_from(
+                "omh-repo-s01",
+                output(0, "omh-repo-s01\nomh-repo-s02\n", "")
+            ),
             Running::Yes,
-            "an id on stdout is the container"
+            "listed among the running ones"
         );
         assert_eq!(
-            running_from(output(0, "", "")),
+            running_from("omh-repo-s01", output(0, "omh-repo-s02\n", "")),
             Running::No,
-            "nothing on stdout, asked and answered: it is not running"
+            "a listing that does not name it is an answer, and the answer is no"
+        );
+        assert_eq!(
+            running_from("omh-repo-s01", output(0, "", "")),
+            Running::No,
+            "nothing running at all, asked and answered"
+        );
+
+        // The comparison is exact, which is the whole reason it happens here
+        // rather than in a `--filter` the runtime parses as a regex.
+        assert_eq!(
+            running_from("omh-repo-s1", output(0, "omh-repo-s10\n", "")),
+            Running::No,
+            "a longer name that starts the same way is a different container"
+        );
+        assert_eq!(
+            running_from("omh-omh.rs-s01", output(0, "omh-omhXrs-s01\n", "")),
+            Running::No,
+            "and a `.` in a repo name is a character, not a wildcard — which is \
+             what `--filter name=^…$` made it"
         );
 
         // The one that matters. Both halves: not `No`, and carrying why.
         let daemon_down = "failed to connect to the docker API at unix:///var/run/docker.sock";
-        let unknown = running_from(output(1, "", daemon_down));
+        let unknown = running_from("omh-repo-s01", output(1, "", daemon_down));
         assert_ne!(unknown, Running::No, "a failed question is not a `no`");
         assert!(
             matches!(&unknown, Running::Unknown(why) if why.contains("docker API")),
@@ -880,16 +942,27 @@ mod tests {
         // A non-zero exit that says nothing is still not a `no`. The tempting
         // reading — no error text, so nothing was wrong — is how this class of
         // bug is reintroduced.
+        let quiet = running_from("omh-repo-s01", output(1, "", ""));
         assert!(
-            matches!(running_from(output(1, "", "")), Running::Unknown(_)),
+            matches!(&quiet, Running::Unknown(_)),
             "silence on stderr does not make a failure into an answer"
+        );
+        // And it says something rather than an empty reason, which reaches the
+        // user as a sentence ending in a colon.
+        assert!(
+            matches!(&quiet, Running::Unknown(why) if why.contains('1')),
+            "the exit status stands in for the words it did not say: {quiet:?}"
+        );
+        assert!(
+            !format!("{quiet:?}").contains("exit status"),
+            "and not `exited exit status: 1`: {quiet:?}"
         );
 
         // The runtime is on `PATH` before any of this — a spawn that fails
         // anyway is a machine in trouble, not a container that is stopped.
         assert!(
             matches!(
-                running_from(Err(std::io::Error::other("fork failed"))),
+                running_from("omh-repo-s01", Err(std::io::Error::other("fork failed"))),
                 Running::Unknown(_)
             ),
             "and neither does a spawn that never ran"
@@ -904,7 +977,7 @@ mod tests {
     #[test]
     fn the_runtimes_own_words_are_sanitised_before_they_are_repeated() {
         let sneaky = "cannot connect\u{1b}[2J to the daemon";
-        let Running::Unknown(why) = running_from(output(1, "", sneaky)) else {
+        let Running::Unknown(why) = running_from("omh-repo-s01", output(1, "", sneaky)) else {
             panic!("a failed probe is Unknown");
         };
         assert!(
@@ -914,21 +987,41 @@ mod tests {
         assert!(why.contains("cannot connect"), "the words survive: {why:?}");
     }
 
-    /// The probe asks about one container, not about one whose name starts the
-    /// same way.
+    /// Every backend asks the same question the same way: list what is
+    /// running, one name per line, and fail loudly rather than quietly.
     ///
-    /// `--filter name=` is a substring match. Measured: unanchored, a filter
-    /// for `omh-repo-s1` also matches `omh-repo-s10` — so `omh s1 down` would
-    /// read as running because `s10` is, and `sync` would refuse over the
-    /// wrong session.
+    /// Both implementations, because `select` prefers `sbx` under `auto` — so
+    /// the unmeasured backend is the *default* one, and a third arriving with
+    /// its own spelling is how the contract rots. This asserts the shape they
+    /// share; what neither this nor any test can assert is that sbx's `ps`
+    /// behaves as assumed, which `runtime.rs` says out loud.
     #[test]
-    fn the_probe_is_anchored_to_the_whole_container_name() {
+    fn every_backend_asks_for_the_running_set_and_names_it() {
         use crate::runtime::Runtime;
-        let args = crate::runtime::Docker.running_args("omh-repo-s1");
-        assert!(
-            args.iter().any(|a| a == "name=^omh-repo-s1$"),
-            "anchored at both ends: {args:?}"
-        );
+        for backend in [
+            &crate::runtime::Docker as &dyn Runtime,
+            &crate::runtime::Sbx as &dyn Runtime,
+        ] {
+            let args = backend.running_args();
+            assert!(
+                args.first().is_some_and(|a| a == "ps"),
+                "{}: the running set: {args:?}",
+                backend.name()
+            );
+            assert!(
+                !args.iter().any(|a| a == "-a"),
+                "{}: running, not every container ever created: {args:?}",
+                backend.name()
+            );
+            // No container name anywhere in the argv. Handing one to the
+            // runtime is what made it a pattern, and `.` in a repo directory
+            // name is legal in a container name and a regex wildcard.
+            assert!(
+                !args.iter().any(|a| a.contains("filter") || a.contains('^')),
+                "{}: nothing the runtime will read as a pattern: {args:?}",
+                backend.name()
+            );
+        }
     }
 
     /// omh tags an image by hashing its recipe, so a recipe change builds a new
