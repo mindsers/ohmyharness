@@ -162,21 +162,29 @@ plan. On an older version, launching a second time is the workaround.
 ### `omh could not tell whether s01's sandbox is still usable`
 
 Before reusing a running sandbox, omh runs one command inside it — that command
-answers both *can this be entered* and *what is running in it*. When the
-command fails, there are two very different reasons and omh will not guess
-between them.
+answers both *can this be entered* and *what is running in it*. It acts on the
+answer only when docker names the failure, and refuses otherwise.
 
-One is fatal and recoverable: the worktree the container is bound to was
-replaced under it, so no `exec` will ever work again and the container has to
-go. omh recognises that one by the message docker gives it (the next section)
-and replaces the sandbox itself.
+Two failures it acts on. The worktree the container is bound to was deleted, or
+deleted and recreated, so no `exec` will ever work again (the next section) —
+the container has to go. Or the container is not there at all: removed, or
+exited while omh was looking. Both mean nothing is alive inside to lose, so omh
+replaces the sandbox and the launch carries on.
 
-Anything else — the daemon restarting mid-launch, the container exiting between
-two calls, a fork that failed — is a question omh cannot answer, and the cost
-of answering it wrongly is a `docker rm -f` on a container with an agent
-working inside. So it stops and shows you what the runtime said. Start the
-runtime, or run the launch again; if the sandbox really is the broken kind,
-`omh sNN rm` clears it.
+Anything else — the daemon restarting mid-launch, an image with no shell, a
+fork that failed — is a question omh cannot answer, and the cost of answering
+it wrongly is a `docker rm -f` on a container with an agent working inside. So
+it stops and shows you what the runtime said, along with two ways on:
+
+- run the launch again, which is enough if the runtime has come back;
+- `omh sNN down`, which stops the container without needing to enter it, so the
+  next launch builds a fresh one.
+
+`omh sNN rm` is **not** the way out here, though an earlier version of this page
+said so. It deletes the worktree as well as the container, and when omh cannot
+read the sandbox it refuses outright rather than guessing what would be lost —
+so following that advice gets a second refusal, and the only way past it
+deletes work.
 
 ### `current working directory is outside of container mount namespace root`
 
