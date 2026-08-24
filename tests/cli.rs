@@ -965,7 +965,7 @@ fn a_refused_selection_leaves_the_branch_where_it_was() {
 ///
 /// The collision git will not mention until a merge, said while both sessions
 /// are open and either could be redirected. End to end, because it is wiring:
-/// the paths come from a `status --porcelain` that `s ls` already ran for its
+/// the paths come from a `status --porcelain` that `omh s` already ran for its
 /// uncommitted count and used to throw away, and the grouping is a table in
 /// `report.rs` that a unit test cannot connect to the sessions on disk.
 #[test]
@@ -1057,7 +1057,7 @@ fn a_session_omh_cannot_read_is_named_rather_than_left_out() {
 /// A sandbox repository with no session is reported, not left to rot.
 ///
 /// [risks](../docs/design/risks.md) 8c. The most valuable of the three orphans
-/// `s ls` looks for: a container is re-creatable and a run directory holds a
+/// `omh s` looks for: a container is re-creatable and a run directory holds a
 /// timestamp, while this holds every commit an agent made and nothing points
 /// at it.
 #[test]
@@ -1093,7 +1093,7 @@ fn a_sandbox_repository_with_no_session_is_reported() {
     // orphan holds a commit, which is #58 doing its job.
     assert!(
         sb.omh(&["s09", "rm", "--force"]).status.success(),
-        "the hint `s ls` prints has to be a command that clears it"
+        "the hint `omh s` prints has to be a command that clears it"
     );
     assert!(!orphan.exists(), "and it did");
     assert!(
@@ -1148,7 +1148,7 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
         "the container was taken down on the way to refusing: {:?}",
         sb.docker_calls(&log)
     );
-    assert!(run.exists(), "so was the marker `s ls` reads");
+    assert!(run.exists(), "so was the marker `omh s` reads");
     assert!(gitdir.exists(), "and the repository the refusal is about");
     assert!(worktree.exists());
 
@@ -1528,7 +1528,7 @@ fn a_session_that_has_committed_but_never_pushed_is_not_reported_as_clean() {
     assert!(printed.contains("to push"), "got: {printed}");
 }
 
-/// `s ls` is where every one of these measurements is actually read, and the
+/// `omh s` is where every one of these measurements is actually read, and the
 /// rendering is the part no unit test reaches. Each state is one the loop sits
 /// in, not one it passes through, so a blank column is a wrong answer rather
 /// than a missing one.
@@ -2402,6 +2402,10 @@ fn a_session_named_on_its_own_is_that_session_alone() {
         "and only about s01 — a focus that quietly widens is the thing the \
          selector exists to remove: {printed}"
     );
+    // The invariant is not *no other id ever appears*: an unreadable session
+    // is named in a focused view on purpose, because it is why the overlap
+    // answer may be short a line. What must not appear is another session's
+    // row, and that is what this fixture — two readable sessions — pins.
 
     // …and the unfocused command still answers about all of them.
     let all = String::from_utf8_lossy(&sb.omh(&["s"]).stdout).to_string();
@@ -2427,7 +2431,176 @@ fn a_session_named_on_its_own_is_that_session_alone() {
     // An id nothing created fails the way it fails for every other verb,
     // rather than listing nothing and looking like an answer.
     let missing = sb.omh(&["s99"]);
+    let err = String::from_utf8_lossy(&missing.stderr).to_string();
     assert!(!missing.status.success(), "an unknown session is an error");
+    // Checking only the exit code would accept a clap error, a panic, or a
+    // failure from any layer at all — the comment in `sessions_ls` claims it
+    // fails *the way every other verb fails*, so the message is the claim.
+    assert!(
+        err.contains("s99") && err.contains("omh s"),
+        "the refusal names the id and where the real ones are listed: {err}"
+    );
+}
+
+/// The focused listing's `--json` is one session, and says which.
+///
+/// `--json` is the scripting contract and returns before the asides, so the
+/// document is the whole of what a script gets. The human filter and the JSON
+/// filter share one binding today, which means a focus-drop mutation dies on
+/// the human assertion — but that shared binding is an implementation detail,
+/// and the contract should be pinned where it is read.
+#[test]
+fn the_focused_listing_is_one_session_in_the_document_too() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.session("s01");
+    sb.session("s02");
+
+    let out = sb.omh(&["s01", "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`omh s01 --json` is a document");
+    let sessions = doc["sessions"].as_array().expect("sessions is an array");
+    assert_eq!(sessions.len(), 1, "one session was asked for: {doc}");
+    assert_eq!(sessions[0]["id"], "s01", "and it is the one named: {doc}");
+}
+
+/// A verb that was retired is refused by name, and never becomes another
+/// command.
+///
+/// The `ls` verb was the documented spelling until 2026.08, so it is in muscle
+/// memory and in scripts. Retiring it left two ways to get this wrong, and
+/// only one of them is harmless.
+///
+/// Typing it bare is: clap rejects an unknown subcommand. `omh s01 ls` is
+/// not. With no `ls` under `sessions` the sessions reading fails to parse,
+/// the as-written reading `omh ls` parses as the **top-level inventory**, and
+/// `session_prefix`'s fallback hands that reading the launch because it is
+/// not a `Cmd::Run`. `Cmd::Ls` never reads `cli.session`, so the session is
+/// dropped in silence and every session is listed — which is verbatim the
+/// harm the refusal removed in #67 existed to prevent: *"it would list every
+/// session and look like it had listed one."*
+///
+/// So the verb survives as a tombstone rather than as a hole. Deleting it
+/// from the parser did not make the line unspellable, only unrefusable.
+#[test]
+fn the_retired_listing_verb_is_refused_by_name_rather_than_widening() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.session("s01");
+    sb.session("s02");
+
+    // The scoped spelling must not quietly become the wide one.
+    let scoped = sb.omh(&["s01", "ls"]);
+    let out = String::from_utf8_lossy(&scoped.stdout).to_string();
+    let err = String::from_utf8_lossy(&scoped.stderr).to_string();
+    assert!(
+        !scoped.status.success(),
+        "a retired verb is refused, not answered: {out}"
+    );
+    assert!(
+        !out.contains("s02"),
+        "and refusing means it never listed every session on the way: {out}"
+    );
+    assert!(
+        err.contains("is the listing"),
+        "the refusal names what replaced the verb: {err}"
+    );
+
+    // …and neither does the spelling people actually have in their fingers.
+    let bare = sb.omh(&["s", "ls"]); // types the retired verb on purpose
+    let err = String::from_utf8_lossy(&bare.stderr).to_string();
+    assert!(!bare.status.success(), "the retired verb is not a command");
+    assert!(
+        err.contains("is the listing"),
+        "a verb retired in favour of its own noun is one word away from what \
+         the user meant, so the error says the word rather than leaving them \
+         to read a usage line: {err}"
+    );
+}
+
+/// A session omh said exists and then cannot find is an error, not `no
+/// sessions`.
+///
+/// The focused listing checks the id up front, through the same
+/// `existing_session` every other verb uses, and then filters the rows it
+/// built independently. The two disagree about what a session *is*:
+/// `existing_session` asks whether the path exists, `session::list` asks
+/// whether it is a directory. Anything that is one and not the other — a
+/// stray file, and a worktree removed between the check and the read, which
+/// is a wide window full of subprocesses — passes the first and vanishes at
+/// the second.
+///
+/// What the user then sees is `no sessions` on stdout with exit 0, which is
+/// the same byte-for-byte answer a clean checkout gives. A question omh could
+/// not answer must not render like an answer, least of all like the answer
+/// *nothing is here*.
+#[test]
+fn a_session_that_vanishes_between_the_check_and_the_read_is_not_no_sessions() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let worktree = sb.session("s01");
+
+    // A plain file where a worktree would be: `exists()` says yes, `is_dir()`
+    // says no. The race has the same shape and is not reproducible on demand.
+    let stray = worktree.parent().unwrap().join("s02");
+    std::fs::write(&stray, "").unwrap();
+
+    let out = sb.omh(&["s02"]);
+    let printed = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !printed.contains("no sessions"),
+        "omh looked, disagreed with itself, and reported an empty world: {printed}"
+    );
+    assert!(
+        !out.status.success(),
+        "and it exits non-zero, so a script cannot read the disagreement as \
+         an answer: {printed}"
+    );
+
+    // The unfocused listing is unaffected — s01 is still there to report.
+    let all = String::from_utf8_lossy(&sb.omh(&["s"]).stdout).to_string();
+    assert!(all.contains("s01"), "`omh s` still answers: {all}");
+}
+
+/// `--session` is the same selector as the `sNN` prefix, including the
+/// checking.
+///
+/// The prefix can only ever produce `s\d+`, so every assertion written
+/// against it leaves `validate_id` — a path-traversal guard — unreached.
+/// `--session` is the spelling that carries an arbitrary string into a path
+/// join, and it had no test at all.
+#[test]
+fn the_long_spelling_of_the_selector_scopes_and_checks_the_same() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.session("s01");
+    sb.session("s02");
+
+    let long = String::from_utf8_lossy(&sb.omh(&["s", "--session", "s01"]).stdout).to_string();
+    let prefix = String::from_utf8_lossy(&sb.omh(&["s01"]).stdout).to_string();
+    assert_eq!(
+        long, prefix,
+        "`omh s --session s01` and `omh s01` are one command spelled two ways"
+    );
+
+    // A name that is not a session id is refused rather than joined into a
+    // path and listed as nothing.
+    let traversal = sb.omh(&["s", "--session", "../../etc"]);
+    let err = String::from_utf8_lossy(&traversal.stderr).to_string();
+    assert!(
+        !traversal.status.success(),
+        "a selector that is not an id is refused: {}",
+        String::from_utf8_lossy(&traversal.stdout)
+    );
+    // Refused for being a path, not for naming nothing. Both refuse here, so
+    // only the message distinguishes them — and dropping `validate_id` would
+    // leave the traversal to be judged by whether the joined path happens to
+    // exist, which is a different question with the same answer today.
+    assert!(
+        err.contains("not a path"),
+        "the refusal is about the shape of the name, not about what it \
+         happens to point at: {err}"
+    );
 }
 
 /// A launch whose probe cannot be read does not destroy the running sandbox.
@@ -2527,7 +2700,7 @@ fn a_runtime_that_cannot_be_reached_is_not_reported_as_a_stopped_sandbox() {
     // field is the whole of what a script gets.
     let json = sb.omh(&["s", "--json"]);
     let doc: serde_json::Value =
-        serde_json::from_slice(&json.stdout).expect("s ls --json is a document");
+        serde_json::from_slice(&json.stdout).expect("`omh s --json` is a document");
     // `serde_json` indexing returns `Null` for a missing key, a non-array and
     // an out-of-range index alike, so `doc["sessions"][0]["running"]` was
     // `Null` for an empty document too. The length and the id anchor it.
@@ -2616,7 +2789,7 @@ fn the_listing_names_what_removed_sessions_left_behind() {
     std::fs::create_dir_all(sb.home.join(".omh/run/repo/doctor")).unwrap();
 
     let out = sb.omh(&["s"]);
-    // On **stderr**: a leftover is something wrong, not what `s ls` was asked
+    // On **stderr**: a leftover is something wrong, not what `omh s` was asked
     // for, and `omh s > sessions.txt` must not collect it.
     let printed = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -2630,6 +2803,40 @@ fn the_listing_names_what_removed_sessions_left_behind() {
     assert!(
         !printed.contains("doctor"),
         "scratch staging is not a removed session: {printed}"
+    );
+}
+
+/// A focused listing does not report other sessions' leftovers.
+///
+/// A leftover is an id with a container or a run directory and **no
+/// worktree**, so the focused id can never be one: `existing_session` proved
+/// it has a worktree before the sweep runs. The overlap section earns its
+/// place in a focused view because a collision is a fact about two sessions;
+/// a leftover is a fact about neither, and it is guaranteed — not merely
+/// likely — to be about somebody else. `omh s` is where orphans belong.
+#[test]
+fn a_focused_listing_leaves_other_sessions_leftovers_to_the_wide_one() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.session("s01");
+    std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
+    let launched = sb.home.join(".omh/run/repo/s02");
+    std::fs::create_dir_all(&launched).unwrap();
+    std::fs::write(launched.join("last-used"), "").unwrap();
+
+    let focused = sb.omh(&["s01"]);
+    let aside = String::from_utf8_lossy(&focused.stderr).to_string();
+    assert!(
+        !aside.contains("s02") && !aside.contains("s03"),
+        "asked about s01, told about s02 and s03: {aside}"
+    );
+
+    // …and the wide listing still reports them, so this narrowed the view
+    // rather than dropping the fact.
+    let wide = String::from_utf8_lossy(&sb.omh(&["s"]).stderr).to_string();
+    assert!(
+        wide.contains("s02") && wide.contains("s03"),
+        "`omh s` is still where leftovers are named: {wide}"
     );
 }
 
@@ -3205,7 +3412,7 @@ fn every_json_answer_is_one_document_and_not_several() {
         vec!["--json", "use", "skills", "beta"],
         vec!["--json", "unuse", "skills", "beta"],
         vec!["--json", "repo", "disable", "codegraph"],
-        vec!["--json", "s", "ls"],
+        vec!["--json", "s"],
         vec!["--json", "memory", "ls"],
     ] {
         let out = sb.omh(&args);

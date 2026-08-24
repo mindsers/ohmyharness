@@ -53,9 +53,9 @@ Four workflows, not a feature list.
 | I want to | today |
 |---|---|
 | ~~**read the change** before landing it~~ — landed (#54, #55) | `omh s diff` printed `--stat` only and the patch was in a worktree the docs tell you never to enter. `omh sNN log` numbers the agent's commits and `omh sNN diff [n] [-p]` reads one, or the session, as a patch. |
-| **know what the agent has been doing** | Its commits were invisible until `--keep` opened a `rebase -i` todo. `s ls` does not count them; `s rm` destroys them without saying they existed. |
+| **know what the agent has been doing** | Its commits were invisible until `--keep` opened a `rebase -i` todo. `omh s` does not count them; `s rm` destroys them without saying they existed. |
 | ~~**land work in stages**~~ — landed (#50) | `--keep` replayed from the seed every time. Measured: a second run re-listed commits already on the branch, then died on `Could not apply`. It replays from what it last handed over now. |
-| ~~**not fall behind trunk**~~ — landed (#60, #62) | `s ls` reported `behind 12` and offered nothing. `omh sNN sync` is the answer and the dashboard names it, per session, for the sessions it actually applies to. |
+| ~~**not fall behind trunk**~~ — landed (#60, #62) | `omh s` reported `behind 12` and offered nothing. `omh sNN sync` is the answer and the dashboard names it, per session, for the sessions it actually applies to. |
 
 Everything else about the git story holds up. The worktree boundary, the
 shadow's isolation, refuse-never-strip, fetch-before-replant: those were probed
@@ -75,7 +75,7 @@ It buys questions nothing else can answer:
   `src/render.rs` is a conflict git will only mention at merge time, once both
   are branches and both are expensive to abandon
 
-Overlap costs nothing to compute. `s ls` already runs `status --porcelain -uall`
+Overlap costs nothing to compute. `omh s` already runs `status --porcelain -uall`
 per session for its uncommitted count; the paths are in output it currently
 parses and throws away.
 
@@ -144,8 +144,10 @@ Two rules make the parse unambiguous:
   that no bundled definition shadows a command already exist; `validate_id`
   joins them, or `--session diff` creates a session you can never address
 
-`omh s01 ls` is the one nonsense combination. It errors — *"`ls` lists every
-session; drop the `s01`"* — rather than ignoring the scope.
+`omh s01 ls` names a verb retired in 2026.08. It errors — *"there is no `ls`
+verb any more"* — rather than ignoring the scope, which is what it would do if
+the verb were merely absent: the line would fall through to the top-level
+`omh ls` and list every session.
 
 ## The replay point
 
@@ -197,7 +199,7 @@ sessions.txt` is a record of what is in flight and advice is not part of that
 record. *Up to date* is an empty cell rather than those words; what changed is
 that the cell it used to share with *omh could not count* is no longer shared.
 
-`omh s` survives as an alias.
+`omh s` remains the short spelling of `omh sessions`.
 
 **The suggestion landed (#62), and with it the fix behind it.** The column had
 been rendering *up to date* and *omh could not count* as the same empty cell —
@@ -219,17 +221,24 @@ has always handled by printing git's own words. Both call sites say why now.
 
 **`omh s01` on its own is this row — landed (#67), by giving something up.**
 
-It was an error for as long as `ls` existed, and the conflict was real rather
-than an oversight. `omh s` required a verb, and step 8 refused `omh s01 ls` by
-name — *"`ls` lists every session; drop the `s01`"* — because the selector's
-rule is that a leading `sNN` scopes what follows, and *list every session, but
-one* is not a thing. So the only spelling that could have meant this row was
-the one spelling forbidden.
+It was an error for as long as `omh s` required a verb. Step 8 refused
+`omh s01 ls` by name — *"`ls` lists every session; drop the `s01`"* — and the
+reason recorded at the time was an implementation one rather than a semantic
+one: the listing took no session argument, so honouring the scope was not
+possible, and ignoring it would have listed every session while looking like it
+had listed one.
 
-What broke it open was deleting the verb rather than adding a rule. With no
-`ls`, `omh s01 ls` cannot be typed, the refusal has nothing to refuse, and the
-no-verb case is free: `omh s` is the listing, `omh s01` is the listing scoped
-to one session. That is the selector's own rule reaching the last place it had
+What opened it is the listing learning a scope. Once it can be narrowed, *list
+every session, but one* stops being nonsense — it is this row — and the no-verb
+case is free: `omh s` is the listing, `omh s01` is the listing scoped to one
+session.
+
+Retiring `ls` followed, so that one thing has one spelling; it is not what made
+the row possible, and deleting it outright turned out to be the wrong shape.
+`omh s01 ls` stayed typeable and stopped being refusable, falling through to the
+top-level `omh ls` with the session silently dropped — the very harm step 8's
+refusal was written against. The verb is kept as a hidden tombstone that refuses
+by name. That is the selector's own rule reaching the last place it had
 not, rather than a special case — which is also why `omh s01` is that row and
 not a menu of verbs. The user named a session; answering with a list of things
 they could have typed instead discards what they said.
@@ -697,7 +706,7 @@ the hardening in step 6 of the order below, this work closes or narrows
 | | evidence |
 |---|---|
 | **Landed in #46.** `rm` deleted a branch holding unreviewed commits. `Session::commits` reads a git *failure* as `0`, and `remove` turns `0` into `branch -D`. A base that resolves only as `origin/<name>` — `default_branch` verifies no local ref — makes `rev-list` fail. | `removed session s01; branch omh/s01 dropped (no commits)`, with one commit on it. Contradicts the invariant [commands.md](../commands.md) states outright. |
-| **Landed.** `worktree add -b` was silently overridden when the base existed only on the remote: git's DWIM won and checked out trunk itself. Every review path then refused, and `s ls` reported a branch that was never created. | `git worktree add -b omh/s02 ../wt2 main` → `Preparing worktree (new branch 'main')`. `--no-guess-remote` does not help; resolving the base to a commit first does. One cause, two symptoms: with only a remote-tracking *ref* and no remote configured, the same base instead fails outright with `invalid reference: main`. |
+| **Landed.** `worktree add -b` was silently overridden when the base existed only on the remote: git's DWIM won and checked out trunk itself. Every review path then refused, and `omh s` reported a branch that was never created. | `git worktree add -b omh/s02 ../wt2 main` → `Preparing worktree (new branch 'main')`. `--no-guess-remote` does not help; resolving the base to a commit first does. One cause, two symptoms: with only a remote-tracking *ref* and no remote configured, the same base instead fails outright with `invalid reference: main`. |
 | **Landed.** The carried-secret scan over messages read a pattern, not a literal — and which pattern language depends on the reader's `grep.patternType`. | Measured across all three settings: `*` in a secret is missed by every one, `+` by `extended` and `perl` (the `basic` default finds it), and `[` is fatal everywhere, taking `--keep` down for the session. `-F` matches the bytes regardless. The first measurement of this used a `+` and was taken on a machine configured `perl` — the defect is real, the example was the author's dotfiles. |
 | **Landed (#50).** `--keep` was not idempotent — the replay point is the fix. | The second run listed commits already on the branch in the todo, then `Could not apply 8eac520`. |
 | **`rebase -i` without a terminal** keeps everything and reports a curation that never happened. Fixed by `--keep [selection]`; the tty guard moves to `--edit`. | With stdin from `/dev/null` the rebase runs the unedited todo, exits 0, and omh would report `kept 2`. |
@@ -743,13 +752,13 @@ the hardening in step 6 of the order below, this work closes or narrows
     people learn to ignore. Still open: that a read-only `config` really does
     refuse inside a real container.
 12. **Landed (#58, #59, #62).** `rm` refuses over work no branch has —
-    [risks](risks.md#security) 2c, closed. `s ls` names files two sessions are
+    [risks](risks.md#security) 2c, closed. `omh s` names files two sessions are
     both changing, and reports sandbox repositories with no session left —
     [risks](risks.md) 8c. The arrangement gained its two sentences. The
     dashboard learned staleness in #62 — `behind N` had been a number with
     nothing to do about it since the command existed, and `sync` is the thing
-    to do. Still open: `omh s01` alone as one session's row, which needs the
-    tension with step 8's refusal settled first.
+    to do. `omh s01` alone became that row in #67, which retired the `ls`
+    verb to a tombstone that refuses rather than deleting it — see step 8.
 
 Steps 1–6 are repair and hardening, and can land in any order. Steps 7–12 are
 the loop, and each is useful on the day it ships.

@@ -244,12 +244,12 @@ answered.
 ## Lifecycle
 
 ```console
-$ omh s                # sessions, branches, state
+$ omh s                   # sessions, branches, state
 $ omh s01 down            # stop the container, keep worktree and branch
 $ omh s01 rm              # remove the session — branch survives
 ```
 
-`s ls` reports state as English for you and as fields for a script: `omh s
+`omh s` reports state as English for you and as fields for a script: `omh s
 --json` gives each session's `running`, `behind` and `work.state` without
 anyone parsing the table — see [what every command
 prints](commands.md#what-every-command-prints).

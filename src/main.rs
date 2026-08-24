@@ -191,8 +191,10 @@ fn session_prefix(argv: Vec<String>) -> (Option<String>, Vec<String>) {
             Cmd::Run(harness) => !harness.first().is_some_and(|name| is_a_session_verb(name)),
             _ => true,
         },
-        // Neither reads: the sessions error is the useful one. Bare `omh s01`
-        // becomes `omh s`, whose error names the verbs.
+        // Neither reads: the sessions error is the useful one, since a
+        // leading `sNN` says the sessions grammar is what was meant. (Bare
+        // `omh s01` was this arm's worked example until `omh s` alone became
+        // the listing; it now parses, and is decided above.)
         (Err(_), Err(_)) => false,
     };
     (
@@ -411,15 +413,24 @@ enum McpCmd {
 /// The verbs. **No `ls`** — `omh s` with no verb at all is the listing, and
 /// `omh s01` is that listing scoped to one session.
 ///
-/// `ls` was a verb until 2026.08, and removing it settles a conflict rather
-/// than trading one spelling for another. The selector's rule is that a
-/// leading `sNN` scopes whatever follows, so `omh s01 ls` could only have
-/// meant *list every session, but one* — which is not a thing — and it was
-/// refused by name. That refusal was the only thing standing between the
-/// prefix and the no-verb case, and with `ls` gone there is nothing to refuse:
-/// the combination cannot be typed.
+/// `ls` was a verb until 2026.08. What made the scoped row possible is
+/// `sessions_ls` learning a scope; retiring the verb is a separate and
+/// smaller call, so that one thing has one spelling rather than two.
+///
+/// It survives below as a hidden tombstone rather than being deleted
+/// outright, because deleting it did not make `omh s01 ls` unspellable — only
+/// unrefusable. With no `ls` under `sessions`, that line fails the sessions
+/// reading and parses as the **top-level** `omh ls`, which never reads
+/// `cli.session`: the scope vanishes and every session is listed, looking
+/// like it had listed one. Kept here, the sessions reading parses again and
+/// wins, so the line is refused by name — and the spelling everyone still has
+/// in their fingers gets somewhere to point.
 #[derive(Subcommand)]
 enum SessionsCmd {
+    /// Retired in 2026.08. Kept so that typing it says so — see above, and
+    /// `the_retired_listing_verb_is_refused_by_name_rather_than_widening`.
+    #[command(hide = true)]
+    Ls,
     /// Remove a session — its container and its worktree. A branch holding
     /// commits is kept.
     Rm {
@@ -730,6 +741,12 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 )?;
                 rm(&cwd, id, *force, ctx)
             }
+            // Refused rather than aliased to the listing. The verb is gone,
+            // and a spelling that silently keeps working is a spelling
+            // nobody stops typing.
+            SessionsCmd::Ls => anyhow::bail!(
+                "there is no `ls` verb any more:\n  omh s      is the listing\n  omh s01    is one row of it"
+            ),
             SessionsCmd::Down => down(&cwd, cli.session.as_deref(), ctx),
             SessionsCmd::Sync { base, down } => {
                 sync(&cwd, cli.session.as_deref(), base.as_deref(), *down, ctx)
@@ -1707,22 +1724,50 @@ fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::Ctx) -> Res
     let overlaps = report::overlaps(&changed);
     let (sessions, overlaps) = match only {
         None => (sessions, overlaps),
-        Some(id) => (
-            sessions.into_iter().filter(|s| s.id == id).collect(),
-            // Kept when they name this session, dropped otherwise — a
-            // collision between two other sessions is not this one's business,
-            // and one involving it is the most useful line on the screen.
-            overlaps
-                .into_iter()
-                .filter(|o| o.sessions.iter().any(|s| s == id))
-                .collect(),
-        ),
+        Some(id) => {
+            let rows: Vec<_> = sessions.into_iter().filter(|s| s.id == id).collect();
+            // `existing_session` said this id was there, and the filter says
+            // it is not. The two ask different questions — one whether the
+            // path exists, the other whether it is a directory — and between
+            // them sit every subprocess this function runs, so a worktree
+            // removed in another terminal lands here too. Rendering it would
+            // print `no sessions`: exit 0, and byte-identical to a clean
+            // checkout. Refusing says which of the two we could not reconcile.
+            anyhow::ensure!(
+                !rows.is_empty(),
+                "{id} was there when omh looked and is not there now — \
+                 removed while this ran? `omh s` lists what is left"
+            );
+            (
+                rows,
+                // Kept when they name this session, dropped otherwise — a
+                // collision between two other sessions is not this one's
+                // business, and one involving it is the most useful line on
+                // the screen.
+                overlaps
+                    .into_iter()
+                    .filter(|o| o.sessions.iter().any(|s| s == id))
+                    .collect(),
+            )
+        }
     };
 
     ctx.say(&report::Sessions {
         sessions,
-        leftovers: leftovers(&paths, backend.as_deref(), ctx),
+        // Not swept when one session was asked for. A leftover is an id with
+        // no worktree, and the focused id was proved to have one, so a
+        // focused sweep can only ever turn up other people's — guaranteed
+        // off-topic rather than merely usually. The overlap section is the
+        // opposite case and stays: a collision *is* a fact about this
+        // session. Skipping it also saves the sweep's `ps` and its walks.
+        leftovers: match only {
+            None => leftovers(&paths, backend.as_deref(), ctx),
+            Some(_) => Vec::new(),
+        },
         overlaps,
+        // Deliberately *not* narrowed. A session omh could not read is why
+        // the overlap answer above may be short a line, and that is a fact
+        // about the focused session even though the id named is not.
         unreadable,
         base,
     });
@@ -1802,7 +1847,7 @@ fn leftovers(paths: &Paths, backend: Option<&dyn runtime::Runtime>, ctx: &out::C
 /// Where a session is in the cycle, phrased as the next thing to do about it.
 ///
 /// Ordered most-actionable first, and deliberately one answer rather than a
-/// tally: `s ls` is read at a glance, and a session with uncommitted work needs
+/// tally: `omh s` is read at a glance, and a session with uncommitted work needs
 /// committing whatever else is also true of it.
 fn work_state(
     session: &Session,
@@ -6325,7 +6370,7 @@ fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -> Result<()
     // The third thing a session owns. Staging is re-rendered on every launch so
     // leaving it costs nothing that breaks — but the `last-used` marker beside
     // it is what says a session ran here, and a marker with no session behind it
-    // is how `s ls` learns to report a leftover that is not there any more.
+    // is how `omh s` learns to report a leftover that is not there any more.
     let _ = std::fs::remove_dir_all(paths.runs().join(id));
 
     // The branch is reported honestly rather than always claimed as kept: one
@@ -6695,6 +6740,13 @@ mod tests {
     /// Docs are included because nothing else reads them for command
     /// spellings: `tests/docs.rs` checks links, anchors and reachability.
     ///
+    /// The whole tree is walked rather than an allowlist of directories. The
+    /// first version read `src`, `tests` and `docs`, and stayed green while
+    /// `README.md` — the front page, and the file most people read first —
+    /// still printed the retired verb. An allowlist is the same shape of
+    /// mistake as keying on the current vocabulary: both go quiet about the
+    /// place nobody thought of.
+    ///
     /// It cannot tell *offering* a spelling from *saying it is gone*, so prose
     /// explaining the removal has to name the verb rather than the whole
     /// invocation — "there is no `ls` verb", not the line somebody used to
@@ -6712,34 +6764,67 @@ mod tests {
         // `docs`, and it rewrote this very constant, turning the guard into
         // one that matched every file in the tree. A guard against a spelling
         // cannot spell it.
-        let gone: [String; 2] = [format!("omh s {}", "ls"), format!("omh sessions {}", "ls")];
+        // Both the written spelling and the argv form the tests use. The ~15
+        // call sites the sweep rewrote were argv, so the shape most likely to
+        // be left behind was the one a prose-only needle cannot see — and one
+        // was: the JSON guard went on invoking a line that no longer parsed,
+        // and passed, because its empty stdout read as nothing to say.
+        const ON_PURPOSE: &str = "types the retired verb on purpose";
+        let gone: [String; 4] = [
+            format!("omh s {}", "ls"),
+            format!("omh sessions {}", "ls"),
+            format!("{:?}, {:?}", "s", "ls"), // types the retired verb on purpose
+            format!("{:?}, {:?}", "sessions", "ls"), // types the retired verb on purpose
+        ];
         let mut found = Vec::new();
-        let mut checked = 0;
-        for dir in ["src", "tests", "docs"] {
-            let mut stack = vec![root.join(dir)];
-            while let Some(at) = stack.pop() {
-                for entry in std::fs::read_dir(&at).unwrap().flatten() {
-                    let path = entry.path();
-                    if path.is_dir() {
+        let mut read = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    // Build output and git's own storage are not ours to read,
+                    // and `target` alone is large enough to matter.
+                    if !matches!(
+                        path.file_name().and_then(|n| n.to_str()),
+                        Some("target") | Some(".git")
+                    ) {
                         stack.push(path);
+                    }
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs" && e != "md") {
+                    continue;
+                }
+                let body = std::fs::read_to_string(&path).unwrap();
+                read.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
+                for (n, line) in body.lines().enumerate() {
+                    // Declared, not inferred. Two lines have to type the verb
+                    // to do their job — the needles just above, and the test
+                    // that checks typing it is refused — and a scan that tried
+                    // to work out which those were would be a scan that let
+                    // the next one through. Saying so on the line is cheap and
+                    // greppable; guessing is neither.
+                    if line.contains(ON_PURPOSE) {
                         continue;
                     }
-                    if path.extension().is_none_or(|e| e != "rs" && e != "md") {
-                        continue;
-                    }
-                    checked += 1;
-                    let body = std::fs::read_to_string(&path).unwrap();
-                    for (n, line) in body.lines().enumerate() {
-                        for spelling in &gone {
-                            if line.contains(spelling.as_str()) {
-                                found.push(format!("{}:{}", path.display(), n + 1));
-                            }
+                    for spelling in &gone {
+                        if line.contains(spelling.as_str()) {
+                            found.push(format!("{}:{}", path.display(), n + 1));
                         }
                     }
                 }
             }
         }
-        assert!(checked > 10, "the scan found nothing to read");
+        // Named files rather than a count. A count cannot tell a walk that
+        // stopped early from one that read everything, and reading everything
+        // is the only claim this guard makes that is worth anything.
+        for must in ["README.md", "src/main.rs", "docs/commands.md"] {
+            assert!(
+                read.iter().any(|p| p == std::path::Path::new(must)),
+                "the scan never read {must}, so its silence says nothing"
+            );
+        }
         assert!(
             found.is_empty(),
             "these still offer a command omh no longer accepts: {found:#?}"
@@ -6845,7 +6930,7 @@ mod tests {
                     let rest = &raw[at + "omh ".len()..];
                     // A printed line ends where the message resumes: a newline
                     // escape, the end of the literal, backticked prose, the
-                    // separator `s ls` uses, or the column padding that lines
+                    // separator `omh s` uses, or the column padding that lines
                     // an explanation up beside it.
                     let end = ["\\n", "\"", "`", "·", "  ", ","]
                         .iter()
@@ -6930,7 +7015,7 @@ mod tests {
             vec!["s", "diff"],
             vec!["init"],
             vec!["claude"],
-            vec!["sessions", "ls"],
+            vec!["sessions", "log"],
             // a harness whose name merely starts with s
             vec!["sourcegraph"],
         ] {

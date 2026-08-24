@@ -176,14 +176,14 @@ them — it replays from what it last handed over now, and refuses rather than
 guessing when the sandbox has rewound below that point.
 
 **8c. ~~An orphaned sandbox repository is adopted by the next session that
-takes its id.~~** *(Closed in #59: `s ls` looks at them now, beside the
+takes its id.~~** *(Closed in #59: `omh s` looks at them now, beside the
 containers and run directories it already reported. `omh <id> rm` clears one,
 and since #58 says what it would take with it first.)* Ids are the highest `sNN` plus one, so they come back around, and
 `omh s rm` deletes the repository with the session precisely to stop this. A
-worktree removed outside omh — which `s ls` already expects, since it reports
+worktree removed outside omh — which `omh s` already expects, since it reports
 what a hand `git worktree remove` strands — leaves the gitdir and its seed
 behind, and the next session with that id opens on the previous one's history,
-against a seed naming a tree it never had. `s ls` looked at containers and run
+against a seed naming a tree it never had. `omh s` looked at containers and run
 directories and not at these — the most valuable of the three, since a
 container is re-creatable and a run directory holds a timestamp, while this
 holds every commit an agent made.

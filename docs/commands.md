@@ -9,7 +9,7 @@ omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
-omh sessions|log|diff|commit|push|down|rm  s  omh s01 log, omh s01 diff
+omh sessions [log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 log
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
 omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
@@ -68,15 +68,20 @@ $ omh s --json
 {
   "base": "main",
   "leftovers": [],
+  "overlaps": [],
   "sessions": [
     {
       "behind": 1,
       "id": "s01",
       "label": "omh/s01",
       "running": false,
-      "work": { "state": "unknown" }
+      "running_unknown": null,
+      "work": {
+        "state": "unknown"
+      }
     }
-  ]
+  ],
+  "unreadable": []
 }
 ```
 
@@ -287,10 +292,14 @@ The collision survives the focus, because it is a fact about s01 — a collision
 between two *other* sessions does not follow you in. Every session is still
 read either way; that is what makes the line sayable at all.
 
-There is no `ls` verb. It was one until 2026.08, and it went so that `omh s01`
-could mean this: the prefix scopes whatever follows it, so `omh s01 ls` could
-only have meant *list every session, but one*, and omh refused it by name.
-Removing the verb removed the conflict.
+There is no `ls` verb. It was one until 2026.08, and what made this row
+possible is the listing learning a scope; retiring the verb is the smaller and
+separate call, so that one thing has one spelling rather than two.
+
+Typing it still says so. Removing it from the parser did not make `omh s01 ls`
+unspellable, only unrefusable — with no `ls` under `sessions` that line parses
+as the *top-level* `omh ls`, which ignores the session and lists all of them.
+So the verb is kept as a tombstone that refuses by name and points here.
 
 **The session goes first, and everything after it is what you would have typed
 anyway.**
@@ -313,10 +322,8 @@ what covers a launch, since `sessions` has no verb for starting a harness.
 `--session` still works, and is the only way to name a session whose id is not
 `sNN`. Naming it twice is refused rather than resolved.
 
-`ls` is the one verb the prefix cannot scope, because it is about the set rather
-than about one session — `omh s01 ls` says so instead of quietly listing them
-all. `down` with no session stops every sandbox, which is the one place acting
-on all of them is what you mean.
+`down` with no session stops every sandbox, which is the one place acting on
+all of them is what you mean.
 
 **A session that has fallen behind is told what to do about it.** The number
 was there long before there was anything to do with it; `sync` is that thing.
@@ -382,7 +389,7 @@ advice built on a guess — but it is not passed over in silence either: beside
 rows that each carry a next step, saying nothing reads as *this one is fine*.
 `omh s03 log` prints the reason git gave.
 
-`s ls` also names ids that have a container, a run directory or a **sandbox
+`omh s` also names ids that have a container, a run directory or a **sandbox
 repository** but no worktree — sessions removed by a version of omh that only
 took half of one down. `omh sNN rm` clears them, and says what it would take
 with it first.

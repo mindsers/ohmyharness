@@ -856,7 +856,7 @@ impl Session {
 
     /// The paths behind that count.
     ///
-    /// The same `status` the count runs, kept rather than discarded: `s ls`
+    /// The same `status` the count runs, kept rather than discarded: `omh s`
     /// asks this question once per session already, and two sessions changing
     /// one file is the collision git will not mention until a merge.
     ///
@@ -983,7 +983,7 @@ impl Session {
             })?,
         };
 
-        // No `-u` here. Recording the upstream is what makes `s ls` report the
+        // No `-u` here. Recording the upstream is what makes `omh s` report the
         // branch as published, and doing it in the same breath as the push means
         // a push that never reached origin still leaves that claim behind, with
         // nothing to roll it back. Set it below, once there is something true to
@@ -1962,7 +1962,7 @@ mod tests {
         );
     }
 
-    // ── what `s ls` reports about work in flight ────────────────────────────
+    // ── what `omh s` reports about work in flight ────────────────────────────
 
     /// A summary says which files; a patch says what changed in them.
     ///
@@ -2112,7 +2112,7 @@ mod tests {
     /// Every path `changed` reports is a name the worktree actually has.
     ///
     /// The contract, not the parser: a name omh cannot open is a name it must
-    /// not print, and `s ls` prints these at a user as the files two sessions
+    /// not print, and `omh s` prints these at a user as the files two sessions
     /// are both changing.
     ///
     /// The first version of this test used `a space.rs` — which git quotes,
@@ -2163,7 +2163,7 @@ mod tests {
         );
     }
 
-    /// The state that strands work is the one `s ls` cannot otherwise see: a
+    /// The state that strands work is the one `omh s` cannot otherwise see: a
     /// session holding a day of uncommitted changes reads exactly like an
     /// untouched one. It must not count what omh itself put there, for the same
     /// reason `commit` must not commit it.
@@ -2242,7 +2242,7 @@ mod tests {
 
     /// The same overwrite, in a session where the agent did nothing. Left
     /// counted, omh's own clobbering is the entire diff — so `commit` reports
-    /// success for work that does not exist, and `s ls` reads `1 uncommitted`
+    /// success for work that does not exist, and `omh s` reads `1 uncommitted`
     /// for a session nobody has touched.
     #[test]
     fn a_session_holding_only_omhs_overwrite_has_nothing_to_commit() {
@@ -2269,7 +2269,7 @@ mod tests {
 
     /// `git status --porcelain` collapses an untracked directory into one entry,
     /// so a session where the agent wrote a whole new module reads as a single
-    /// stray file — and this is the number `s ls` is designed to be glanced at.
+    /// stray file — and this is the number `omh s` is designed to be glanced at.
     #[test]
     fn a_new_directory_counts_once_per_file_not_once() {
         let (d, root) = repo();
@@ -2437,7 +2437,7 @@ mod tests {
 
     /// The read-back is a detector with no undo. Recording the upstream in the
     /// same breath as the push leaves that record behind when the push did not
-    /// reach origin — and `s ls` then reports the branch as published while the
+    /// reach origin — and `omh s` then reports the branch as published while the
     /// remote holds nothing, which is the `e0a41b8` state the guard exists to
     /// prevent, reproduced by the guard itself.
     #[test]
@@ -2837,7 +2837,7 @@ mod tests {
     /// agent away from.
     ///
     /// Nothing then works: `diff`, `commit` and `--keep` all refuse a worktree
-    /// that is not on its branch, and `s ls` reports a branch that was never
+    /// that is not on its branch, and `omh s` reports a branch that was never
     /// created. `--no-guess-remote` does not help; a resolved commit does.
     #[test]
     fn a_session_lands_on_its_own_branch_when_the_base_is_only_on_the_remote() {
