@@ -936,21 +936,6 @@ pub fn container_probe(program: &str, args: &[String]) -> Probe {
     probe_from(std::process::Command::new(program).args(args).output())
 }
 
-/// omh's own records from the label map docker reports.
-///
-/// Separated from everybody else's because a base image sets labels too, and a
-/// whole-map comparison would call `maintainer` drift. Anything unreadable —
-/// including the bare `null` docker prints for a container with no labels at
-/// all, which is every session started before omh stamped them — comes back
-/// empty, and the caller reads empty as "cannot be verified".
-pub fn omh_labels(json: &str) -> std::collections::BTreeMap<String, String> {
-    serde_json::from_str::<std::collections::BTreeMap<String, String>>(json)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(k, _)| k.starts_with("omh."))
-        .collect()
-}
-
 /// What the running container says it was built from.
 /// What omh stamped on a container, or why it could not be read.
 ///
@@ -2213,7 +2198,13 @@ mod tests {
     /// map would report drift for `maintainer` or anything a base image sets.
     #[test]
     fn only_omhs_own_records_are_read_back() {
-        let got = omh_labels(r#"{"omh.image":"omh/claude:ab","maintainer":"nodejs"}"#);
+        let Stamp::Read(got) = stamp_from(output(
+            0,
+            r#"{"omh.image":"omh/claude:ab","maintainer":"nodejs"}"#,
+            "",
+        )) else {
+            panic!("a readable stamp is read");
+        };
         assert_eq!(got.len(), 1);
         assert_eq!(got.get("omh.image").unwrap(), "omh/claude:ab");
     }
@@ -2223,25 +2214,47 @@ mod tests {
     /// that as a parse error would be indistinguishable from a broken daemon.
     #[test]
     fn a_container_with_no_labels_reads_as_none_rather_than_an_error() {
-        assert!(omh_labels("null").is_empty());
-        assert!(omh_labels("{}").is_empty());
+        for said in ["null", "{}"] {
+            assert_eq!(
+                stamp_from(output(0, said, "")),
+                Stamp::Read(Default::default()),
+                "`{said}` is a container with nothing stamped on it"
+            );
+        }
     }
 
-    /// An answer omh cannot parse is an answer it cannot verify, and the caller
-    /// treats "nothing recorded" as drift — which restarts the container. That
-    /// is the safe direction: the alternative is trusting a container on the
-    /// strength of output nobody understood.
+    /// An answer omh cannot parse is an answer it cannot verify — and until
+    /// this test's own rationale was rewritten, that meant *restart the
+    /// container*.
+    ///
+    /// It used to read: "the caller treats *nothing recorded* as drift — which
+    /// restarts the container. That is the safe direction." It is not the safe
+    /// direction. A restart is `docker rm -f` on a container that may have an
+    /// agent working inside it, chosen on the strength of output nobody
+    /// understood, and `drift` announced it as *"it predates this check"* —
+    /// a reason omh invented. Refusing is the safe direction.
     #[test]
-    fn an_unreadable_answer_is_not_mistaken_for_a_match() {
-        assert!(omh_labels("").is_empty());
-        assert!(omh_labels("<html>error</html>").is_empty());
+    fn an_unreadable_answer_is_not_mistaken_for_a_container_with_no_labels() {
+        for said in ["", "<html>error</html>"] {
+            let answered = stamp_from(output(0, said, ""));
+            assert!(
+                matches!(&answered, Stamp::Unknown(_)),
+                "`{said}` is not a container that predates the check: {answered:?}"
+            );
+        }
     }
 
     /// Values carry newlines — the mount list is one per line — and they have
     /// to survive the round trip or every launch reads as drift.
     #[test]
     fn a_multi_line_value_survives_the_round_trip() {
-        let got = omh_labels(r#"{"omh.mounts":"ro /a -> /b\nrw /c -> /d"}"#);
+        let Stamp::Read(got) = stamp_from(output(
+            0,
+            r#"{"omh.mounts":"ro /a -> /b\nrw /c -> /d"}"#,
+            "",
+        )) else {
+            panic!("a readable stamp is read");
+        };
         assert_eq!(got.get("omh.mounts").unwrap().lines().count(), 2);
     }
 }
