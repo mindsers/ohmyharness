@@ -541,10 +541,27 @@ fn churn(t: &crate::shadow::Touched) -> String {
 /// is asked about *every* session — and saying each one separately emits a
 /// JSON document per session, which is a parse error for the caller and
 /// nothing at all for the exit code.
+/// What happened to one session when `down` reached it.
+///
+/// Three outcomes rather than a `bool`, and the `bool` was the same collapse
+/// this file's `running` column had: a session omh could not ask about was
+/// warned on stderr and then left out of the report entirely, so `omh down`
+/// printed **`no sessions`** — on stdout, the answer channel — over a daemon
+/// it never reached, and `--json` returned `"sessions": []`. A missing row is
+/// worse than a wrong one: a script iterating the list sees nothing at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stopped {
+    /// It was up, and is not now.
+    Yes,
+    /// It was already down.
+    WasNotRunning,
+    /// omh could not tell, so it did not try. Carries the runtime's reason.
+    CouldNotTell(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct Down {
-    /// `(id, was it running and is it now stopped)`.
-    pub sessions: Vec<(String, bool)>,
+    pub sessions: Vec<(String, Stopped)>,
 }
 
 impl Report for Down {
@@ -556,10 +573,12 @@ impl Report for Down {
         for (id, stopped) in &self.sessions {
             t = t.row(vec![
                 Cell::styled(id, out::NAME),
-                if *stopped {
-                    Cell::plain("stopped; worktree and branch survive")
-                } else {
-                    Cell::styled("was not running", out::DIM)
+                match stopped {
+                    Stopped::Yes => Cell::plain("stopped; worktree and branch survive"),
+                    Stopped::WasNotRunning => Cell::styled("was not running", out::DIM),
+                    Stopped::CouldNotTell(_) => {
+                        Cell::styled("omh could not tell — left alone", out::WARN)
+                    }
                 },
             ]);
         }
@@ -571,7 +590,20 @@ impl Report for Down {
             "action": "sessions-down",
             "sessions": self.sessions.iter().map(|(id, stopped)| json!({
                 "session": id,
-                "stopped": stopped,
+                // `null` rather than `false` for the one omh could not ask
+                // about, with the reason beside it — the same three-valued
+                // shape `s ls` gives `running`, for the same reason: a script
+                // reading `stopped == false` over an unreachable runtime got a
+                // fiction, and before that got no row at all.
+                "stopped": match stopped {
+                    Stopped::Yes => serde_json::Value::Bool(true),
+                    Stopped::WasNotRunning => serde_json::Value::Bool(false),
+                    Stopped::CouldNotTell(_) => serde_json::Value::Null,
+                },
+                "why": match stopped {
+                    Stopped::CouldNotTell(why) => serde_json::Value::String(why.clone()),
+                    _ => serde_json::Value::Null,
+                },
             })).collect::<Vec<_>>(),
         })
     }
@@ -636,7 +668,13 @@ impl Work {
 pub struct Session {
     pub id: String,
     pub label: String,
-    pub running: bool,
+    /// Whether the sandbox is up. `None` means no runtime was found, so
+    /// nobody asked; `Some(Running::Unknown)` means omh asked and the runtime
+    /// would not answer.
+    ///
+    /// A bare `bool` until #63, which made a Docker daemon that is down render
+    /// every live sandbox as `stopped` — in both formats, with nothing said.
+    pub running: Option<crate::image::Running>,
     /// **`None` means nobody asked**, which is not `Some(Work::Clean)`.
     ///
     /// `omh ls` is the wide view and does not spend a git subprocess per
@@ -725,6 +763,37 @@ pub fn overlaps(changed: &[(String, Vec<String>)]) -> Vec<Overlap> {
         .collect()
 }
 
+/// Whether the sandbox is up, as one cell — four answers, four renderings.
+///
+/// The column beside `behind`, with the same rule and the same history: a
+/// `bool` rendered *stopped* for a container that was not running and for a
+/// runtime that would not say, so a Docker daemon that is down showed every
+/// live sandbox as stopped.
+///
+/// *Nobody asked* and *asked and could not tell* are kept apart too. They lead
+/// different places — no runtime at all is a machine that cannot run sessions,
+/// and a runtime that will not answer is one that usually can.
+fn running_cell(running: &Option<crate::image::Running>) -> Cell {
+    use crate::image::Running;
+    match running {
+        Some(Running::Yes) => Cell::styled("up", out::OK),
+        Some(Running::No) => Cell::styled("stopped", out::DIM),
+        Some(Running::Unknown(_)) => Cell::styled("up?", out::WARN),
+        // An absence, because nobody asked — the treatment `work` gives the
+        // same state, and for the same reason.
+        //
+        // This said `no runtime`: a statement about the machine that only one
+        // of this field's two producers had established. `omh ls` sets `None`
+        // because asking costs a subprocess per session, on a machine that may
+        // well have docker, and it was harmless only because that listing
+        // never renders this column — one line from being false, which is
+        // precisely what the `work` field's doc warns about. The machine-level
+        // fact is now said once, by the caller that knows it, rather than
+        // inferred here once per row.
+        None => Cell::plain(""),
+    }
+}
+
 /// How far a session trails its base, as one cell — three answers, three
 /// renderings.
 ///
@@ -790,11 +859,7 @@ impl Report for Sessions {
             table = table.row(vec![
                 Cell::styled(&s.id, out::NAME),
                 Cell::plain(&s.label),
-                if s.running {
-                    Cell::styled("up", out::OK)
-                } else {
-                    Cell::styled("stopped", out::DIM)
-                },
+                running_cell(&s.running),
                 match &s.work {
                     Some(work) => Cell::styled(work.human(), work.style()),
                     None => Cell::plain(""),
@@ -868,10 +933,15 @@ impl Report for Sessions {
         // strength of a count that could not be taken is advice built on a
         // guess, and that row is already saying in the table that something is
         // wrong with reading it.
+        // Not offered to a session omh could not ask about either: `sync`
+        // refuses on *could not tell* whatever spelling it is given, so every
+        // form of the suggestion is a line that fails when pasted. That row's
+        // route is the runtime, and the warning below names it.
         let stale: Vec<&Session> = self
             .sessions
             .iter()
             .filter(|s| s.behind.is_some_and(|n| n > 0))
+            .filter(|s| !matches!(s.running, Some(crate::image::Running::Unknown(_))))
             .collect();
         // The spelling that works for the session as it stands. `sync` refuses
         // on a running sandbox and names `--down` itself — so advising the bare
@@ -881,9 +951,21 @@ impl Report for Sessions {
         let offered: Vec<(String, &Session)> = stale
             .iter()
             .map(|s| {
+                // `--down` for a sandbox that is up, because `sync` refuses on
+                // a running session and the bare form would fail when pasted.
+                //
+                // A sandbox omh could not ask about gets neither spelling.
+                // `--down` was offered at first, on the reasoning that it is
+                // right either way — but `sync` refuses on *could not tell*
+                // before it ever looks at `--down`, so that was a
+                // paste-and-fail line in the one case the branch exists to
+                // prevent. The route for that row is below, with the count it
+                // could not take.
                 let cmd = match s.running {
-                    true => format!("omh {} sync --down", out::untrusted(&s.id)),
-                    false => format!("omh {} sync", out::untrusted(&s.id)),
+                    Some(crate::image::Running::Yes) => {
+                        format!("omh {} sync --down", out::untrusted(&s.id))
+                    }
+                    _ => format!("omh {} sync", out::untrusted(&s.id)),
                 };
                 (cmd, *s)
             })
@@ -903,8 +985,8 @@ impl Report for Sessions {
                 "  {cmd}{pad}bring {} in{}",
                 self.base,
                 match s.running {
-                    true => ", stopping the sandbox first",
-                    false => ", merged on the host",
+                    Some(crate::image::Running::Yes) => ", stopping the sandbox first",
+                    _ => ", merged on the host",
                 }
             ));
         }
@@ -958,7 +1040,26 @@ impl Report for Sessions {
             "sessions": self.sessions.iter().map(|s| json!({
                 "id": s.id,
                 "label": s.label,
-                "running": s.running,
+                // Three values, not two: `true`, `false`, and `null` for a
+                // question omh could not answer. A script reading `running ==
+                // false` over an unreachable runtime got a fiction.
+                "running": match &s.running {
+                    Some(crate::image::Running::Yes) => serde_json::Value::Bool(true),
+                    Some(crate::image::Running::No) => serde_json::Value::Bool(false),
+                    Some(crate::image::Running::Unknown(_)) | None => serde_json::Value::Null,
+                },
+                // The reason, where the human table has a warning and a script
+                // has nothing else — `--json` returns before asides, so this
+                // field is the whole of what a caller gets. `null` here with
+                // `running: null` above is *nobody asked*; a string is *asked
+                // and the runtime would not say*, which the first version of
+                // this rendered identically.
+                "running_unknown": match &s.running {
+                    Some(crate::image::Running::Unknown(why)) => {
+                        serde_json::Value::String(why.clone())
+                    }
+                    _ => serde_json::Value::Null,
+                },
                 // `null` where nobody asked. A caller can tell that apart from
                 // every answer, which is the whole reason for the `Option`.
                 "work": s.work.as_ref().map(Work::json),
@@ -3059,7 +3160,7 @@ mod tests {
         Session {
             id: id.into(),
             label: "claude".into(),
-            running: false,
+            running: Some(crate::image::Running::No),
             work: Some(work),
             behind: Some(0),
         }
@@ -3147,6 +3248,94 @@ mod tests {
         }
     }
 
+    /// The `running` column has four answers and renders four ways.
+    ///
+    /// The same rule as `behind` one column over, arrived at the same way: a
+    /// `bool` meant *stopped* covered both a container that is down and a
+    /// runtime that would not say, so a Docker daemon that is not running
+    /// showed every live sandbox as stopped — in the human table and in JSON,
+    /// with nothing on stderr.
+    ///
+    /// *Nobody asked* is kept apart from *asked and could not tell* because
+    /// they lead different places: no runtime at all is a machine that cannot
+    /// run sessions, and a runtime that will not answer is one that usually
+    /// can.
+    #[test]
+    fn a_runtime_that_would_not_answer_is_not_rendered_as_a_stopped_sandbox() {
+        use crate::image::Running;
+        let render = |running| {
+            let mut row = session("s01", Work::Clean);
+            row.running = running;
+            sessions(vec![row]).human(&out::Palette::plain())
+        };
+
+        assert!(render(Some(Running::Yes)).contains("up"));
+        assert!(render(Some(Running::No)).contains("stopped"));
+        for (a, b, what) in [
+            (
+                Some(Running::Unknown("daemon down".into())),
+                Some(Running::No),
+                "a runtime that would not answer is not a stopped sandbox",
+            ),
+            (
+                Some(Running::Yes),
+                Some(Running::Unknown("daemon down".into())),
+                "and it is not a sandbox omh confirmed was up either — `up?` \
+                 contains `up`, so asserting on that substring cannot tell them apart",
+            ),
+            (
+                None,
+                Some(Running::Unknown("daemon down".into())),
+                "a question nobody asked is not a question that went unanswered",
+            ),
+        ] {
+            assert_ne!(render(a), render(b), "{what}");
+        }
+    }
+
+    /// JSON keeps the same three answers, where getting it wrong is worst.
+    ///
+    /// A script reading `running == false` over an unreachable runtime got a
+    /// fiction, and `--json` returns before asides, so there was no second
+    /// signal anywhere in the document.
+    #[test]
+    fn a_sandbox_omh_could_not_ask_about_is_null_and_not_false() {
+        use crate::image::Running;
+        let field = |running| {
+            let mut row = session("s01", Work::Clean);
+            row.running = running;
+            sessions(vec![row]).json()["sessions"][0]["running"].clone()
+        };
+
+        assert_eq!(field(Some(Running::Yes)), json!(true));
+        assert_eq!(field(Some(Running::No)), json!(false));
+        assert_eq!(
+            field(Some(Running::Unknown("daemon down".into()))),
+            serde_json::Value::Null,
+            "a question omh could not answer is not a `false`"
+        );
+        assert_eq!(field(None), serde_json::Value::Null);
+
+        // …and the two nulls are told apart by the field beside them, which is
+        // the only place a script can learn *why*: `--json` returns before
+        // asides, so the warning the human gets never reaches it.
+        let why = |running| {
+            let mut row = session("s01", Work::Clean);
+            row.running = running;
+            sessions(vec![row]).json()["sessions"][0]["running_unknown"].clone()
+        };
+        assert_eq!(
+            why(Some(Running::Unknown("daemon down".into()))),
+            json!("daemon down"),
+            "the runtime's reason reaches a script"
+        );
+        assert_eq!(
+            why(None),
+            serde_json::Value::Null,
+            "and nobody-asked carries no reason, because there is none"
+        );
+    }
+
     /// A running session is offered the spelling that works on it.
     ///
     /// `sync` refuses while the sandbox is up and names `--down` itself, so
@@ -3159,7 +3348,10 @@ mod tests {
         let running = |up: bool| {
             let mut row = session("s01", Work::Clean);
             row.behind = Some(4);
-            row.running = up;
+            row.running = Some(match up {
+                true => crate::image::Running::Yes,
+                false => crate::image::Running::No,
+            });
             sessions(vec![row]).asides().hints.join("\n")
         };
 

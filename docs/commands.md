@@ -295,18 +295,56 @@ was there long before there was anything to do with it; `sync` is that thing.
 
 ```console
 $ omh s ls
-  s01  omh/s01  stopped
-  s02  omh/s02  up       3 uncommitted  (12 behind main)
+  s01  omh/s01  up
+  s02  omh/s02  stopped  3 uncommitted  (12 behind main)
   s03  omh/s03  stopped                 (how far behind main?)
 omh: omh could not measure s03 against main — it may be working against code that moved, and `sync` is not offered over a count that failed
-  omh s02 sync --down  bring main in, stopping the sandbox first
+  omh s02 sync  bring main in, merged on the host
   omh s03 log   says why the count could not be taken
+```
+
+`up?` does not appear beside `up` in a real listing — every row is answered by
+the same daemon in the same run, so when one row cannot be answered they all
+look like this:
+
+```console
+$ omh s ls
+omh: could not tell whether s01's sandbox is running: cannot connect to the Docker daemon
+omh: could not tell whether s02's sandbox is running: cannot connect to the Docker daemon
+  s01  omh/s01  up?
+  s02  omh/s02  up?  3 uncommitted  (12 behind main)
 ```
 
 Offered for the sessions it applies to and no others — a suggestion under every
 row is one nobody reads — and in the spelling that works on the session as it
 stands. `sync` refuses while a sandbox is up and names `--down` itself, so the
 bare form under a row marked `up` would be a line that fails when pasted.
+
+**And a container omh could not ask about is not a container that is stopped.**
+The state column has four answers, not two:
+
+| | |
+|---|---|
+| `up` | the sandbox is running — or paused, or restarting, which are the same thing for anything omh would do to it |
+| `stopped` | it is not, or was never built |
+| `up?` | omh asked and the runtime would not answer. The reason is on stderr |
+| *(empty)* | nobody asked — no container runtime on this machine, said once above the table |
+
+`up?` is not cosmetic. Every command that acts on a container asks this
+question first, and a Docker daemon that is down used to answer *not running*
+— so `omh sNN sync` believed there was nothing to stop and would have written
+over the files of a live agent.
+
+What each command does with `up?` differs, because the safe direction does:
+
+- `sync`, `graph` and a launch **refuse**, naming what the runtime said.
+- `down` leaves that session alone and says so, as a row rather than a gap —
+  it exits non-zero, and reports *could not be asked* rather than *would not
+  stop*, which is a claim omh cannot make about a container it never tried.
+- `rm` removes the session anyway and warns that the code graph's entry for it
+  was left behind.
+- the idle reaper goes the other way on purpose: a session it cannot ask about
+  is never stopped for being idle.
 
 **A count omh could not take is not a count of zero.** `s03` renders `(how far
 behind main?)` rather than an empty cell, because *up to date* and *omh could

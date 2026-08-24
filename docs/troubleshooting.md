@@ -114,6 +114,32 @@ The token was written somewhere that does not persist. `omh doctor` names it:
 
 Background in [Accounts](accounts.md#mount-the-directory-never-the-token-file).
 
+### `up?` in `omh s ls`, or `omh could not tell whether the sandbox is running`
+
+The container runtime is installed — omh checked before it asked — but it would
+not answer. Almost always the daemon is not running: start Docker Desktop, or
+`systemctl start docker`. `omh s ls` prints the runtime's own message above the
+table, one line per session, and that message is the part worth reading.
+
+**Nothing acts on the answer while it is unknown**, but what *that* means
+differs by command, because the safe direction does:
+
+- `sync`, `graph` and a launch **refuse**, naming what the runtime said.
+- `down` leaves the session alone, reports it as a row rather than omitting it,
+  and exits non-zero. It says *could not be asked*, not *would not stop* — omh
+  never tried, so it cannot claim the container refused.
+- `rm` removes the session anyway, and warns that the code graph's entry for it
+  was left behind. Nothing else ever drops that entry.
+- the idle reaper goes the other way on purpose: a session it cannot ask about
+  is never stopped for being idle. Leaving a sandbox up costs a container;
+  stopping a live one on a guess costs somebody's turn.
+
+The refusals earn their keep. omh used to read *the runtime would not answer*
+as *the container is not running*, so with the daemon down `omh s ls` showed
+live sandboxes as `stopped` — and `omh sNN sync` believed there was nothing to
+stop, which would have written trunk's files over the work of an agent
+mid-turn.
+
 ### `network omh-<repo> not found`
 
 The plan named a per-project network that was never created. A plan must be
