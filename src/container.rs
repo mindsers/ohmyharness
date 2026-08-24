@@ -65,17 +65,24 @@ pub enum Reuse {
 /// It also kills whatever is running inside, so a session with a live harness is
 /// reported rather than replaced. That is the same refusal-to-guess `idle`
 /// makes: the cost of being wrong is an agent stopped mid-task.
+/// A container that cannot be entered, or is not there to enter.
+///
+/// Its own constructor rather than a `false` first argument to `reuse`, which
+/// made three of that function's four parameters meaningless and the state
+/// `reuse(false, real_stamp, plan, &["claude"])` — a live harness discarded
+/// and the container restarted anyway — something a caller could spell.
+///
+/// The wording lives beside the variant it fills rather than two files from
+/// it, which is where the caller had to keep it.
+pub fn not_enterable() -> Reuse {
+    Reuse::Restart(vec!["it can no longer reach its worktree".into()])
+}
+
 pub fn reuse(
-    enterable: bool,
     stamp: &std::collections::BTreeMap<String, String>,
     plan: &Plan,
     live: &[String],
 ) -> Reuse {
-    // Nothing to compare and nothing to save: a container that refuses every
-    // exec cannot be holding usable work, and cannot be asked what it holds.
-    if !enterable {
-        return Reuse::Restart(vec!["it can no longer reach its worktree".into()]);
-    }
     let changed = drift(&plan.labels(), stamp);
     if changed.is_empty() {
         return Reuse::Attach;
@@ -3458,20 +3465,27 @@ mod tests {
     fn a_container_matching_the_plan_is_handed_straight_back() {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
-        assert!(matches!(reuse(true, &stamp_of(&p), &p, &[]), Reuse::Attach));
+        assert!(matches!(reuse(&stamp_of(&p), &p, &[]), Reuse::Attach));
     }
 
     /// The first bug: `omh s rm` deleted the worktree and left the container
     /// up, and every exec afterwards died on a mount pointing at a directory
     /// that no longer existed. Nothing to compare — it simply cannot be used.
+    ///
+    /// A constructor rather than `reuse(false, …)`, which took three arguments
+    /// it then ignored and let a caller spell `reuse(false, stamp, plan,
+    /// &["claude"])` — a live harness discarded and the container replaced
+    /// anyway, which is the outcome `Blocked` exists to prevent.
     #[test]
     fn a_container_that_cannot_be_entered_is_replaced_whatever_it_says() {
-        let fx = fixture();
-        let p = plan_for(&fx, "claude");
-        assert!(matches!(
-            reuse(false, &stamp_of(&p), &p, &[]),
-            Reuse::Restart(_)
-        ));
+        assert!(matches!(not_enterable(), Reuse::Restart(_)));
+        let Reuse::Restart(why) = not_enterable() else {
+            panic!("not enterable is a restart");
+        };
+        assert!(
+            why.iter().any(|w| w.contains("worktree")),
+            "and says why, in the words the user reads: {why:?}"
+        );
     }
 
     /// The second: `omh opencode` against a session started by `omh claude`.
@@ -3480,7 +3494,7 @@ mod tests {
         let fx = fixture();
         let want = plan_for(&fx, "opencode");
         let have = stamp_of(&plan_for(&fx, "claude"));
-        let Reuse::Restart(why) = reuse(true, &have, &want, &[]) else {
+        let Reuse::Restart(why) = reuse(&have, &want, &[]) else {
             panic!("a harness switch needs a new container");
         };
         assert!(
@@ -3497,8 +3511,7 @@ mod tests {
         let fx = fixture();
         let want = plan_for(&fx, "opencode");
         let have = stamp_of(&plan_for(&fx, "claude"));
-        let Reuse::Blocked { live, changed } = reuse(true, &have, &want, &["claude".to_string()])
-        else {
+        let Reuse::Blocked { live, changed } = reuse(&have, &want, &["claude".to_string()]) else {
             panic!("a live harness must block the restart, not be run over");
         };
         assert_eq!(live, vec!["claude"]);
@@ -3516,7 +3529,7 @@ mod tests {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
         assert!(matches!(
-            reuse(true, &stamp_of(&p), &p, &["claude".to_string()]),
+            reuse(&stamp_of(&p), &p, &["claude".to_string()]),
             Reuse::Attach
         ));
     }

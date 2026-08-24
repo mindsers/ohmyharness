@@ -730,19 +730,11 @@ pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) ->
         }
     };
     if !out.status.success() {
-        let said = crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim());
-        return Running::Unknown(match said.is_empty() {
-            // A non-zero exit with nothing said. Still not *no*.
-            //
-            // `status.code()` rather than the `Display` of `ExitStatus`, which
-            // renders "exit status: 1" and made the line read "the container
-            // runtime exited exit status: 1".
-            true => match out.status.code() {
-                Some(code) => format!("the container runtime exited {code}"),
-                None => "the container runtime was killed by a signal".into(),
-            },
-            false => said,
-        });
+        // A non-zero exit is never a *no*, whatever it did or did not say.
+        return Running::Unknown(unreadable(
+            &String::from_utf8_lossy(&out.stderr),
+            &out.status,
+        ));
     }
     match String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -762,60 +754,260 @@ pub fn container_running(backend: &dyn crate::runtime::Runtime, name: &str) -> R
     )
 }
 
-/// Can the session still be entered — not just "is it up"?
+/// Why omh has no answer, said the same way wherever that happens.
 ///
-/// Running is not enough to reuse one. The directory `/work` is bound to can be
-/// deleted while the container stays up (`git worktree remove` by hand is the
-/// remaining way; `omh s rm` did it too until it learned to take the container
-/// with it). Recreating that directory gives it a new inode the live mount does
-/// not follow, and every `docker exec` from then on dies with
+/// One function because `Running::Unknown` and `Probe::Unknown` make the same
+/// promise — sanitised, never empty, repeated into a terminal without being
+/// sanitised again — and it was a copy of the same ladder in both. Two copies
+/// of a promise is one more than can be kept.
 ///
-///   current working directory is outside of container mount namespace root
-///   -- possible container breakout detected
-///
-/// which no amount of relaunching clears, because a running container is never
-/// replaced. `args` is the backend's own exec line, so the probe enters exactly
-/// where a harness would — the workdir is the part that fails.
-///
-/// Unit tests cannot assert this: the fact being checked belongs to docker, not
-/// to omh. Verified by hand against a container in that state.
-///
-/// Returns the command's stdout, so one exec answers both questions the
-/// launcher has — whether the container can be entered, and what is running
-/// inside it. They are wanted together and they are the same probe.
-pub fn container_probe(program: &str, args: &[String]) -> Option<String> {
-    std::process::Command::new(program)
-        .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+/// The empty case is not hypothetical tidiness: a non-zero exit with nothing
+/// said produced `…so it will not sync over it: `, a sentence ending in a
+/// colon. And it is the exit **code**, not the `Display` of `ExitStatus`,
+/// which renders `exit status: 1` and read as "the container runtime exited
+/// exit status: 1".
+fn unreadable(said: &str, status: &std::process::ExitStatus) -> String {
+    let said = crate::out::untrusted(said.trim());
+    match said.is_empty() {
+        false => said,
+        true => match status.code() {
+            Some(code) => format!("the container runtime exited {code}"),
+            None => "the container runtime was killed by a signal".into(),
+        },
+    }
 }
 
-/// omh's own records from the label map docker reports.
+/// What the one exec `reuse_decision` runs came back as.
 ///
-/// Separated from everybody else's because a base image sets labels too, and a
-/// whole-map comparison would call `maintainer` drift. Anything unreadable —
-/// including the bare `null` docker prints for a container with no labels at
-/// all, which is every session started before omh stamped them — comes back
-/// empty, and the caller reads empty as "cannot be verified".
-pub fn omh_labels(json: &str) -> std::collections::BTreeMap<String, String> {
-    serde_json::from_str::<std::collections::BTreeMap<String, String>>(json)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(k, _)| k.starts_with("omh."))
-        .collect()
+/// `Option<String>` here was the same collapse `Running` replaced, on the
+/// decision with the most to lose: `None` meant *the container cannot reach
+/// its worktree*, *the daemon died between the two calls*, *the container
+/// stopped*, *the image has no shell*, and *the fork failed* — and `reuse`
+/// turns the first into `Restart`, which `session_up` acts on with `rm -f`.
+/// On a container it confirmed was running three lines earlier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// The exec worked. Carries what it printed, which may be empty.
+    ///
+    /// The one payload here written by the **sandbox** rather than by the
+    /// runtime, so it is sanitised on the way out: these are filenames from a
+    /// directory the agent can write to, and they reach a terminal through
+    /// `Reuse::Blocked` — the message whose whole job is telling somebody
+    /// their work is safe.
+    Listed(String),
+    /// The mount-namespace failure, by its own signature: the worktree the
+    /// container is bound to was replaced under it, and no `exec` will ever
+    /// work again. Replacing it is the only remedy.
+    NotEnterable,
+    /// The container is not there to enter — removed or exited between the
+    /// two calls omh makes.
+    ///
+    /// Kept apart from `Unknown` because the safe direction is the opposite
+    /// one: nothing is alive inside a container that is gone, so replacing it
+    /// costs nothing and the launch carries on. Folding it into `Unknown`
+    /// turned the most ordinary race in the launch path — an agent that
+    /// finishes between *is it running* and *can it be entered* — into a
+    /// failed command the user had to run twice.
+    Gone,
+    /// Something else went wrong, and why. Never *not enterable*.
+    ///
+    /// The payload is always through `out::untrusted` and never empty, both of
+    /// which are `probe_from`'s doing. Callers repeat it into a terminal
+    /// without sanitising again.
+    Unknown(String),
+}
+
+/// The one failure a container cannot recover from, spelled the way docker
+/// spells it.
+///
+/// Matched on the message rather than on the exit code, and that is a
+/// measurement rather than a preference — an earlier draft of this said the
+/// opposite, having failed to produce a second 128.
+///
+/// It failed because both attempts were *daemon-level* errors, which never
+/// reach the OCI runtime and so cannot land on 128 by construction. Reaching
+/// past that boundary takes seconds: `docker exec -w /loop` where `/loop` is a
+/// symlink to itself gives exit 128 with `chdir to cwd ("/loop") … too many
+/// levels of symbolic links`, on stdout, sharing the `OCI runtime exec
+/// failed:` prefix and sharing nothing else.
+///
+/// And 128 is not the category the draft called it. Measured 2026-08-24
+/// against docker 29.7.2: docker maps a start failure that reads as ENOENT to
+/// **127** and one that reads as EACCES to **126**; 128 is what is left when
+/// neither matches. A residue, which two unrelated failures share.
+const BROKEN_MOUNT: &str = "container mount namespace root";
+
+/// What docker prefixes an error it produced itself, on stdout.
+///
+/// The scan for `BROKEN_MOUNT` is restricted to bytes with this prefix, plus
+/// stderr. Without it the search covers stdout, which on a partial `ls` is
+/// written by the **agent** — and a match there is a `docker rm -f`.
+const RUNTIME_ERROR: &str = "OCI runtime exec failed";
+
+/// What docker says when the daemon answered but the container could not be
+/// used — as opposed to the daemon not answering at all.
+///
+/// Measured 2026-08-24 against docker 29.7.2: a container that was removed
+/// says `Error response from daemon: No such container: …`, one that exited
+/// says `Error response from daemon: container … is not running`, and a daemon
+/// that cannot be reached says `failed to connect to the docker API at …`.
+/// The prefix is the mechanism rather than the two messages: if the daemon
+/// answered, the problem is the container, and replacing a container with
+/// nothing alive in it is free.
+const DAEMON_ANSWERED: &str = "Error response from daemon";
+
+/// The command the probe runs, and the only one `probe_from` is written to
+/// read.
+///
+/// Here rather than at the call site because the two are one mechanism: what
+/// `probe_from` may conclude from a non-zero exit depends entirely on this
+/// command being unable to fail on its own. `[ -d ] || exit 0` is what makes
+/// that true — an absent socket directory is the ordinary case for a session
+/// whose harness has never run, and it exits 0 with nothing rather than
+/// failing.
+///
+/// It replaces `ls … 2>/dev/null || true`, which swallowed *every* `ls`
+/// failure into an empty listing. An empty listing means *no harness is live*,
+/// which is the input that makes `reuse` choose `Restart` over `Blocked` — so
+/// a directory that could not be read read as "nothing to lose" and the
+/// container was destroyed with an agent inside. The polarity is opposite to
+/// the bug this type fixes and the cost is the same.
+pub fn probe_command() -> Vec<String> {
+    vec![
+        "sh".into(),
+        "-c".into(),
+        format!(
+            "[ -d {dir} ] || exit 0; ls -1 {dir}",
+            dir = crate::persist::SOCKET_DIR
+        ),
+    ]
+}
+
+/// Read the probe's result, keeping the failures that mean different things
+/// apart.
+///
+/// Over the process result rather than the process, so all of it is a table.
+///
+/// Measured 2026-08-24 against docker 29.7.2, through `/bin/sh` rather than
+/// the interactive shell — zsh's MULTIOS has made this exact measurement wrong
+/// in this project before. Deleting the bind-mount source is enough on its own
+/// — recreating it produces byte-identical output, so *replaced* is one route
+/// in rather than the trigger:
+///
+/// | what happened | exit | where it said so |
+/// |---|---|---|
+/// | the exec worked | 0 | the listing, on stdout |
+/// | the worktree was replaced under it | 128 | `OCI runtime exec failed: …` on **stdout** |
+/// | the image has no such binary | 127 | `OCI runtime exec failed: …` on **stdout** |
+/// | the container was removed | 1 | `Error response from daemon: No such container` |
+/// | the container had exited | 1 | `Error response from daemon: container … is not running` |
+/// | the daemon could not be reached | 1 | `failed to connect to the docker API at …` |
+pub fn probe_from(asked: std::io::Result<std::process::Output>) -> Probe {
+    let out = match asked {
+        Ok(out) => out,
+        Err(e) => {
+            return Probe::Unknown(crate::out::untrusted(&format!(
+                "could not run the container runtime: {e}"
+            )))
+        }
+    };
+    if out.status.success() {
+        return Probe::Listed(crate::out::untrusted(&String::from_utf8_lossy(&out.stdout)));
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    // Only the bytes docker wrote. Stdout is the agent's on a listing that
+    // began before something went wrong, and every conclusion below is one the
+    // agent must not be able to reach for itself.
+    let runtime_said = match stdout.contains(RUNTIME_ERROR) {
+        true => format!("{stdout}{stderr}"),
+        false => stderr.into_owned(),
+    };
+    if runtime_said.contains(BROKEN_MOUNT) {
+        return Probe::NotEnterable;
+    }
+    if runtime_said.contains(DAEMON_ANSWERED) {
+        return Probe::Gone;
+    }
+    Probe::Unknown(unreadable(&runtime_said, &out.status))
+}
+
+pub fn container_probe(program: &str, args: &[String]) -> Probe {
+    probe_from(std::process::Command::new(program).args(args).output())
 }
 
 /// What the running container says it was built from.
-pub fn container_stamp(program: &str, name: &str) -> std::collections::BTreeMap<String, String> {
-    std::process::Command::new(program)
-        .args(["inspect", "-f", "{{json .Config.Labels}}", name])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| omh_labels(&String::from_utf8_lossy(&o.stdout)))
-        .unwrap_or_default()
+/// What omh stamped on a container, or why it could not be read.
+///
+/// The third answer is not decoration. This was
+/// `.ok().filter(success).unwrap_or_default()`, and an empty map is not a
+/// neutral value here — `container::drift` reads one as a confident claim,
+/// *"it predates this check, so nothing about it can be verified"*, which
+/// `reuse` turns into `Restart` and `session_up` into `rm -f`.
+///
+/// So a daemon that restarted between the probe and this call destroyed a
+/// container that had just been confirmed alive **and** enterable, and told
+/// the user a fabricated reason for it. That is worse than the silence it
+/// replaced: it is confident enough that nobody goes looking for a daemon
+/// problem. The identical chain this module's `Probe` was written to close,
+/// entered one line further down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stamp {
+    /// Read, and here is what it says. Empty means the container carries no
+    /// omh labels — genuinely older than the check.
+    Read(std::collections::BTreeMap<String, String>),
+    /// The runtime would not say, and why.
+    Unknown(String),
+}
+
+pub fn container_stamp(program: &str, name: &str) -> Stamp {
+    stamp_from(
+        std::process::Command::new(program)
+            .args(["inspect", "-f", "{{json .Config.Labels}}", name])
+            .output(),
+    )
+}
+
+/// Read the stamp, given what the runtime said.
+///
+/// `omh_labels` swallows a parse failure into an empty map, which used to mean
+/// unparseable JSON also read as *predates this check*. A `docker inspect`
+/// that exits 0 and prints something this cannot parse is the runtime
+/// answering in a shape omh does not know, which is not the same as a
+/// container with no labels — so the emptiness has to be decided here, where
+/// the difference is still visible.
+pub fn stamp_from(asked: std::io::Result<std::process::Output>) -> Stamp {
+    let out = match asked {
+        Ok(out) => out,
+        Err(e) => {
+            return Stamp::Unknown(crate::out::untrusted(&format!(
+                "could not run the container runtime: {e}"
+            )))
+        }
+    };
+    if !out.status.success() {
+        return Stamp::Unknown(unreadable(
+            &String::from_utf8_lossy(&out.stderr),
+            &out.status,
+        ));
+    }
+    let said = String::from_utf8_lossy(&out.stdout);
+    // `null` is what docker prints for a container with no labels at all, and
+    // it is the one non-map answer that means something. Anything else that
+    // will not parse is the runtime speaking a shape omh does not know.
+    if said.trim() == "null" {
+        return Stamp::Read(Default::default());
+    }
+    match serde_json::from_str::<std::collections::BTreeMap<String, String>>(said.trim()) {
+        Ok(all) => Stamp::Read(
+            all.into_iter()
+                .filter(|(k, _)| k.starts_with("omh."))
+                .collect(),
+        ),
+        Err(e) => Stamp::Unknown(crate::out::untrusted(&format!(
+            "the container runtime answered with something omh could not read: {e}"
+        ))),
+    }
 }
 
 /// Stopped-but-present containers block `run --name`, so clear them first.
@@ -882,6 +1074,221 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         })
+    }
+
+    /// A probe that failed some other way is never read as *this container
+    /// cannot reach its worktree* — and the two failures that mean *nothing is
+    /// alive in there* are not read as refusals.
+    ///
+    /// The first is the worst outcome in the program: `reuse` turns *not
+    /// enterable* into `Restart`, and `session_up` acts on a `Restart` with
+    /// `docker rm -f` — on a container confirmed running earlier in the same
+    /// function. Every non-namespace exec failure destroyed an agent mid-turn,
+    /// and under `--json` said nothing, because the only notice was
+    /// `ctx.progress`.
+    ///
+    /// The second is milder and was introduced by fixing the first: folding
+    /// *the container is gone* into the refusal turned the ordinary race — a
+    /// sandbox whose process exits between *is it running* and *can it be
+    /// entered* — from something that healed itself into a command the user
+    /// had to run twice.
+    ///
+    /// Every row below is a transcript measured 2026-08-24 against docker
+    /// 29.7.2 through `/bin/sh`, except the one marked as a shape.
+    #[test]
+    fn a_probe_that_failed_some_other_way_does_not_read_as_a_broken_worktree() {
+        let namespace = "OCI runtime exec failed: exec failed: unable to start container \
+             process: current working directory is outside of container mount namespace \
+             root -- possible container breakout detected";
+
+        assert_eq!(
+            probe_from(output(0, "agent.sock\n", "")),
+            Probe::Listed("agent.sock\n".into()),
+            "a healthy exec answers with what it listed"
+        );
+        assert_eq!(
+            probe_from(output(0, "", "")),
+            Probe::Listed(String::new()),
+            "including an empty listing — the socket directory is not there yet"
+        );
+        // The sandbox writes those filenames, and they reach a terminal
+        // through `Reuse::Blocked` — the message whose job is saying the work
+        // is safe.
+        let Probe::Listed(listed) = probe_from(output(0, "s01-\u{1b}[2Jclaude\n", "")) else {
+            panic!("a successful exec is a listing");
+        };
+        assert!(
+            !listed.contains('\u{1b}'),
+            "and nothing in it repaints the terminal: {listed:?}"
+        );
+
+        // At three exit codes, because the code is the part that must not be
+        // load-bearing, and on both streams, because which one docker picks is
+        // not a thing to depend on.
+        for (code, stdout, stderr, what) in [
+            (
+                128,
+                namespace,
+                "",
+                "the measured signature, on the stream docker used",
+            ),
+            (
+                1,
+                "",
+                namespace,
+                "the same message on stderr, should docker move it",
+            ),
+            (
+                127,
+                namespace,
+                "",
+                "and at a code omh has no reason to expect",
+            ),
+        ] {
+            assert_eq!(
+                probe_from(output(code, stdout, stderr)),
+                Probe::NotEnterable,
+                "{what}"
+            );
+        }
+
+        // Nothing alive to lose. Both measured; both used to be refusals.
+        for (stderr, what) in [
+            (
+                "Error response from daemon: No such container: omh-repo-s01",
+                "a container removed between the two calls",
+            ),
+            (
+                "Error response from daemon: container 1794fad25dec is not running",
+                "and one that exited between them",
+            ),
+        ] {
+            assert_eq!(probe_from(output(1, "", stderr)), Probe::Gone, "{what}");
+        }
+
+        // Everything else. The first two would read as the fatal case if the
+        // exit code decided instead of the message.
+        for (code, stdout, stderr, what) in [
+            (
+                128,
+                "OCI runtime exec failed: exec failed: unable to start container process: \
+                 chdir to cwd (\"/loop\") set in config.json failed: too many levels of \
+                 symbolic links",
+                "",
+                "a second 128 — measured, so matching the code is provably not enough",
+            ),
+            (
+                127,
+                "OCI runtime exec failed: exec failed: unable to start container process: \
+                 exec: \"sh\": executable file not found in $PATH",
+                "",
+                "an image with no shell, sharing the prefix and nothing else",
+            ),
+            (
+                1,
+                "",
+                "failed to connect to the docker API at unix:///var/run/docker.sock; check \
+                 if the path is correct and if the daemon is running",
+                "a daemon that could not be reached at all",
+            ),
+            // A shape rather than a transcript: omh has not produced one.
+            (137, "", "", "an exec that exited 137 saying nothing"),
+            // The one the agent could reach for. Stdout on a failure is the
+            // sandbox's — a listing that began before something went wrong —
+            // and the signature is only docker's when it carries docker's
+            // prefix. Without the scoping, a file named after the failure
+            // steers omh into `rm -f` on the container that named it.
+            (
+                137,
+                "s01-current working directory is outside of container mount namespace root\n",
+                "",
+                "a filename the agent chose, which is not docker speaking",
+            ),
+        ] {
+            let answered = probe_from(output(code, stdout, stderr));
+            assert!(
+                matches!(&answered, Probe::Unknown(_)),
+                "{what}: {answered:?}"
+            );
+        }
+
+        // The payload, which nothing used to look at — so dropping
+        // `out::untrusted` from it passed, on a string that goes verbatim into
+        // a `bail!` and out to a terminal.
+        let Probe::Unknown(why) = probe_from(output(1, "", "cannot \u{1b}[2J connect")) else {
+            panic!("an unrecognised failure has no answer");
+        };
+        assert!(!why.contains('\u{1b}'), "sanitised: {why:?}");
+        assert!(why.contains("cannot"), "and the words survive: {why:?}");
+
+        let Probe::Unknown(quiet) = probe_from(output(137, "", "")) else {
+            panic!("a silent failure still has no answer");
+        };
+        assert!(
+            quiet.contains("137"),
+            "a failure that said nothing still says something: {quiet:?}"
+        );
+        assert!(
+            !quiet.contains("exit status"),
+            "and not `exited exit status: 137`: {quiet:?}"
+        );
+
+        assert!(
+            matches!(
+                probe_from(Err(std::io::Error::other("fork failed"))),
+                Probe::Unknown(_)
+            ),
+            "and neither does a probe that never ran"
+        );
+    }
+
+    /// The stamp has the same three answers, for the same reason.
+    ///
+    /// An unreadable stamp was `unwrap_or_default()` into an empty map, and
+    /// `container::drift` reads an empty map as *it predates this check, so
+    /// nothing about it can be verified* — a `Restart`, which is `rm -f`. The
+    /// same chain `Probe` closes, entered one line further down, with a
+    /// fabricated reason attached to it.
+    #[test]
+    fn a_stamp_omh_could_not_read_is_not_a_container_that_predates_the_check() {
+        let labels = r#"{"omh.harness":"claude","maintainer":"alpine"}"#;
+        let Stamp::Read(read) = stamp_from(output(0, labels, "")) else {
+            panic!("a readable stamp is read");
+        };
+        assert_eq!(read.get("omh.harness").map(String::as_str), Some("claude"));
+        assert!(
+            !read.contains_key("maintainer"),
+            "and everybody else's labels stay out of it: {read:?}"
+        );
+
+        // The one empty answer that means something: docker prints `null` for
+        // a container carrying no labels, which really does predate the check.
+        assert_eq!(
+            stamp_from(output(0, "null\n", "")),
+            Stamp::Read(Default::default()),
+            "a container with no labels is read, and read as empty"
+        );
+
+        for (code, stdout, stderr, what) in [
+            (
+                1,
+                "",
+                "failed to connect to the docker API",
+                "a daemon that would not answer",
+            ),
+            (
+                0,
+                "not json at all",
+                "",
+                "an answer in a shape omh does not know",
+            ),
+        ] {
+            let answered = stamp_from(output(code, stdout, stderr));
+            assert!(
+                matches!(&answered, Stamp::Unknown(_)),
+                "{what} is not a container that predates the check: {answered:?}"
+            );
+        }
     }
 
     /// A runtime that would not answer is never read as *not running*.
@@ -1791,7 +2198,13 @@ mod tests {
     /// map would report drift for `maintainer` or anything a base image sets.
     #[test]
     fn only_omhs_own_records_are_read_back() {
-        let got = omh_labels(r#"{"omh.image":"omh/claude:ab","maintainer":"nodejs"}"#);
+        let Stamp::Read(got) = stamp_from(output(
+            0,
+            r#"{"omh.image":"omh/claude:ab","maintainer":"nodejs"}"#,
+            "",
+        )) else {
+            panic!("a readable stamp is read");
+        };
         assert_eq!(got.len(), 1);
         assert_eq!(got.get("omh.image").unwrap(), "omh/claude:ab");
     }
@@ -1801,25 +2214,47 @@ mod tests {
     /// that as a parse error would be indistinguishable from a broken daemon.
     #[test]
     fn a_container_with_no_labels_reads_as_none_rather_than_an_error() {
-        assert!(omh_labels("null").is_empty());
-        assert!(omh_labels("{}").is_empty());
+        for said in ["null", "{}"] {
+            assert_eq!(
+                stamp_from(output(0, said, "")),
+                Stamp::Read(Default::default()),
+                "`{said}` is a container with nothing stamped on it"
+            );
+        }
     }
 
-    /// An answer omh cannot parse is an answer it cannot verify, and the caller
-    /// treats "nothing recorded" as drift — which restarts the container. That
-    /// is the safe direction: the alternative is trusting a container on the
-    /// strength of output nobody understood.
+    /// An answer omh cannot parse is an answer it cannot verify — and until
+    /// this test's own rationale was rewritten, that meant *restart the
+    /// container*.
+    ///
+    /// It used to read: "the caller treats *nothing recorded* as drift — which
+    /// restarts the container. That is the safe direction." It is not the safe
+    /// direction. A restart is `docker rm -f` on a container that may have an
+    /// agent working inside it, chosen on the strength of output nobody
+    /// understood, and `drift` announced it as *"it predates this check"* —
+    /// a reason omh invented. Refusing is the safe direction.
     #[test]
-    fn an_unreadable_answer_is_not_mistaken_for_a_match() {
-        assert!(omh_labels("").is_empty());
-        assert!(omh_labels("<html>error</html>").is_empty());
+    fn an_unreadable_answer_is_not_mistaken_for_a_container_with_no_labels() {
+        for said in ["", "<html>error</html>"] {
+            let answered = stamp_from(output(0, said, ""));
+            assert!(
+                matches!(&answered, Stamp::Unknown(_)),
+                "`{said}` is not a container that predates the check: {answered:?}"
+            );
+        }
     }
 
     /// Values carry newlines — the mount list is one per line — and they have
     /// to survive the round trip or every launch reads as drift.
     #[test]
     fn a_multi_line_value_survives_the_round_trip() {
-        let got = omh_labels(r#"{"omh.mounts":"ro /a -> /b\nrw /c -> /d"}"#);
+        let Stamp::Read(got) = stamp_from(output(
+            0,
+            r#"{"omh.mounts":"ro /a -> /b\nrw /c -> /d"}"#,
+            "",
+        )) else {
+            panic!("a readable stamp is read");
+        };
         assert_eq!(got.get("omh.mounts").unwrap().lines().count(), 2);
     }
 }

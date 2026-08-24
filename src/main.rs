@@ -898,34 +898,70 @@ fn unknown_tool(paths: &Paths, name: &str, original: anyhow::Error) -> anyhow::E
 /// inside it are the same question asked of the same command — and a container
 /// that refuses the exec cannot answer the second, which is why an unreadable
 /// probe short-circuits to "replace it" rather than to "nothing is running".
+///
+/// It short-circuits there only for the failure that means it, though. Every
+/// other way the exec can fail is a question omh cannot answer, and answering
+/// it wrongly costs an agent its turn — so those refuse.
 fn reuse_decision(
     backend: &dyn runtime::Runtime,
     name: &str,
     plan: &container::Plan,
     session: &Session,
-) -> container::Reuse {
+) -> Result<container::Reuse> {
     // `|| true` so an absent socket directory is an empty listing rather than a
     // failed exec — the failure this reads is the mount namespace one, and
     // conflating the two would replace every container that has never run a
     // harness.
-    let probe = backend.exec_args(
-        name,
-        &[
-            "sh".into(),
-            "-c".into(),
-            format!("ls -1 {} 2>/dev/null || true", persist::SOCKET_DIR),
-        ],
-        false,
-    );
-    let Some(listing) = image::container_probe(backend.program(), &probe) else {
-        return container::reuse(false, &Default::default(), plan, &[]);
+    let probe = backend.exec_args(name, &image::probe_command(), false);
+    let listing = match image::container_probe(backend.program(), &probe) {
+        image::Probe::Listed(listing) => listing,
+        // Both mean *replace it*, and for opposite reasons: one cannot be
+        // entered ever again, the other is not there to enter. Neither has
+        // anything alive inside to lose, which is the only question that
+        // matters before an `rm -f`.
+        //
+        // `Gone` was folded into the refusal below at first. That turned the
+        // most ordinary race in the launch path — the sandbox's process
+        // exiting between *is it running* and *can it be entered* — from a
+        // thing that healed itself into a command the user had to run twice.
+        image::Probe::NotEnterable => return Ok(container::not_enterable()),
+        image::Probe::Gone => return Ok(container::not_enterable()),
+        // Refused rather than guessed, and this is the whole point of the
+        // type. `Restart` here means `rm -f` on a container that is running,
+        // and *the daemon blinked* is not a reason to destroy somebody's turn.
+        // Attaching on the guess is no better: if the container really is the
+        // broken one, every command in it fails with this same message.
+        //
+        // The user is the one who can tell the difference — the message says
+        // which failure it was, and `omh sNN rm` is there if it is the fatal
+        // kind and omh could not see it.
+        image::Probe::Unknown(why) => anyhow::bail!(
+            "omh could not tell whether {id}'s sandbox is still usable, so it will neither \
+             attach to it nor replace it: {why}\n  \
+             omh {id} claude        try again — a runtime that has come back will answer\n  \
+             omh {id} down          stop it, and the next launch builds a fresh one",
+            id = session.id
+        ),
     };
-    container::reuse(
-        true,
-        &image::container_stamp(backend.program(), name),
+    // Refused for the same reason the probe is: `drift` reads an unreadable
+    // stamp as *nothing about it can be verified*, which is a `Restart`, which
+    // is `rm -f` on a container two lines above this one confirmed was alive
+    // and enterable.
+    let stamp = match image::container_stamp(backend.program(), name) {
+        image::Stamp::Read(stamp) => stamp,
+        image::Stamp::Unknown(why) => anyhow::bail!(
+            "omh could not read what {id}'s sandbox was built from, so it will neither \
+             attach to it nor replace it: {why}\n  \
+             omh {id} claude        try again — a runtime that has come back will answer\n  \
+             omh {id} down          stop it, and the next launch builds a fresh one",
+            id = session.id
+        ),
+    };
+    Ok(container::reuse(
+        &stamp,
         plan,
         &persist::live(&session.id, &listing),
-    )
+    ))
 }
 
 /// Bring a session's sandbox up if it is not already. A session is a *running
@@ -989,7 +1025,7 @@ fn session_up(
     // from the same one. Cheap — `ensure` above is a path check once the binary
     // is cached, and the staging the plan performs happens every launch anyway.
     if running {
-        match reuse_decision(backend.as_ref(), &name, &plan, session) {
+        match reuse_decision(backend.as_ref(), &name, &plan, session)? {
             container::Reuse::Attach => return Ok((backend, name)),
             container::Reuse::Blocked { live, changed } => anyhow::bail!(
                 "session {id} is running {} and cannot be reused for this launch \
@@ -1001,12 +1037,33 @@ fn session_up(
                 id = session.id,
             ),
             container::Reuse::Restart(why) => {
-                ctx.progress(&format!(
+                // `warn`, not `progress`. This destroys a running container,
+                // and `progress` is suppressed entirely under `--json` — so
+                // the one destructive act in a launch was the one a script
+                // could not see.
+                //
+                // An earlier draft justified that by "every other outcome of
+                // this match reaches both formats: `Attach` returns, `Blocked`
+                // bails", and neither half survives checking. `Attach` reaches
+                // *neither* format — it returns silently and the next thing
+                // said is `announce`, which is gated on `Format::Human`.
+                // `Blocked` bails, which a script sees as exit 1 and prose on
+                // stderr rather than as a field. The argument for `warn` does
+                // not need them: a destructive act should be visible wherever
+                // omh can speak at all.
+                ctx.warn(&format!(
                     "restarting the sandbox for {} — {}",
                     session.label(),
                     why.join(", ")
                 ));
-                let _ = image::container_remove(backend.program(), &name);
+                // `?`, not `let _`. `container_remove` bails with docker's
+                // own stderr and its comment explains why — and both callers
+                // threw that away. The launch then failed further down against
+                // the same sick daemon, and the user read `the container name
+                // is already in use` with nothing connecting it to the restart
+                // they were just told about.
+                image::container_remove(backend.program(), &name)
+                    .with_context(|| format!("replacing the sandbox for {}", session.id))?;
             }
         }
     }
@@ -6137,7 +6194,19 @@ fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -> Result<()
         }
         // Best-effort: a container that was never started has nothing to
         // remove, and that must not stop the worktree from going.
-        let _ = image::container_remove(backend.program(), &name);
+        // Warned rather than swallowed, and the line above already warns
+        // about the weaker failure — not being able to *tell* whether it was
+        // up. A removal that fails leaves a live container bound to a worktree
+        // this function is about to delete, which manufactures exactly the
+        // unenterable state `Probe::NotEnterable` exists for. This function's
+        // own doc names `omh s rm` as the historical cause of it.
+        if let Err(e) = image::container_remove(backend.program(), &name) {
+            ctx.warn(&format!(
+                "{id}'s container would not stop, and its worktree is going: it is left \
+                 running against a directory that will not be there. `docker rm -f {name}` \
+                 clears it — {e:#}"
+            ));
+        }
     }
 
     // The third thing a session owns. Staging is re-rendered on every launch so
