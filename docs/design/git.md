@@ -55,7 +55,7 @@ Four workflows, not a feature list.
 | ~~**read the change** before landing it~~ — landed (#54, #55) | `omh s diff` printed `--stat` only and the patch was in a worktree the docs tell you never to enter. `omh sNN log` numbers the agent's commits and `omh sNN diff [n] [-p]` reads one, or the session, as a patch. |
 | **know what the agent has been doing** | Its commits were invisible until `--keep` opened a `rebase -i` todo. `s ls` does not count them; `s rm` destroys them without saying they existed. |
 | ~~**land work in stages**~~ — landed (#50) | `--keep` replayed from the seed every time. Measured: a second run re-listed commits already on the branch, then died on `Could not apply`. It replays from what it last handed over now. |
-| **not fall behind trunk** | `s ls` reports `behind 12` and offers nothing. The session works against stale code until it is abandoned. |
+| ~~**not fall behind trunk**~~ — landed (#60, #62) | `s ls` reported `behind 12` and offered nothing. `omh sNN sync` is the answer and the dashboard names it, per session, for the sessions it actually applies to. |
 
 Everything else about the git story holds up. The worktree boundary, the
 shadow's isolation, refuse-never-strip, fetch-before-replant: those were probed
@@ -189,8 +189,39 @@ base main · 3 sessions
   omh s01 sync     omh s03 sync
 ```
 
-`omh s ls` survives as an alias. `omh s01` on its own is the same row with
-detail and the commands worth running next.
+That last line is a sketch and the shipped shape differs from it in three ways
+worth knowing, since the rest of this section is written as though it were the
+implementation: the suggestions are one per session rather than side by side,
+each carries what it does, and they are **asides on stderr** — `omh s ls >
+sessions.txt` is a record of what is in flight and advice is not part of that
+record. *Up to date* is an empty cell rather than those words; what changed is
+that the cell it used to share with *omh could not count* is no longer shared.
+
+`omh s ls` survives as an alias.
+
+**The suggestion landed (#62), and with it the fix behind it.** The column had
+been rendering *up to date* and *omh could not count* as the same empty cell —
+the pair this design's own report rules call the most dangerous to confuse, on
+the surface where a user picks which session to open. A stale session that
+looks current is how work gets done against code that moved, which is the
+failure this whole phase exists to close. Unknown now says so, in `WARN`, and
+never carries a number; and the suggestion is offered only for a count omh
+actually took, because advising a merge off a question that failed is advice
+built on a guess. That row is given `omh sNN log` instead, which prints the
+reason — silence beside rows that each carry a next step reads as *this one is
+fine*, which is the same collapse moved one layer out.
+
+The count itself was being manufactured the way this section warns against.
+`sessions_ls` took it with `.ok()`, so *git would not answer* arrived as an
+absence with the answer discarded — in a function that ten lines earlier routes
+the identical failure from `changed()` into a reported list, and which `log`
+has always handled by printing git's own words. Both call sites say why now.
+
+**`omh s01` on its own is not this row with detail**, and saying it was would
+be tidier than it is true. It is an error: `omh s` requires a verb, and step 8
+deliberately refuses `omh s01 ls` — *"`ls` lists every session; drop the
+`s01`"* — so the two ideas are in tension rather than merely unbuilt. Whichever
+wins, one of them has to be given up first.
 
 ### `omh sNN log` — make the invisible visible
 
@@ -639,11 +670,14 @@ the hardening in step 6 of the order below, this work closes or narrows
     check red: a doctor that fails over a capability nothing calls is one
     people learn to ignore. Still open: that a read-only `config` really does
     refuse inside a real container.
-12. **Landed (#58, #59).** `rm` refuses over work no branch has —
+12. **Landed (#58, #59, #62).** `rm` refuses over work no branch has —
     [risks](risks.md#security) 2c, closed. `s ls` names files two sessions are
     both changing, and reports sandbox repositories with no session left —
-    [risks](risks.md) 8c. The arrangement gained its two sentences. Still open:
-    the dashboard learning staleness.
+    [risks](risks.md) 8c. The arrangement gained its two sentences. The
+    dashboard learned staleness in #62 — `behind N` had been a number with
+    nothing to do about it since the command existed, and `sync` is the thing
+    to do. Still open: `omh s01` alone as one session's row, which needs the
+    tension with step 8's refusal settled first.
 
 Steps 1–6 are repair and hardening, and can land in any order. Steps 7–12 are
 the loop, and each is useful on the day it ships.

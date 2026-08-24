@@ -654,8 +654,13 @@ pub struct Session {
     /// answer and carries *cannot tell* one level in, as `Work::Unknown`. This
     /// column is always asked for, so it needs two states rather than three,
     /// and `None` is the failure — a base that does not resolve in this
-    /// checkout. The table renders `None` and `Some(0)` alike, because a glance
-    /// column has nowhere to put a question; JSON says `null` rather than a
+    /// checkout, a branch deleted by hand, a worktree whose `.git` no longer
+    /// leads anywhere.
+    ///
+    /// This used to say the table renders `None` and `Some(0)` alike "because
+    /// a glance column has nowhere to put a question", which is how the defect
+    /// came to be written down as the design. It has somewhere: `behind_cell`
+    /// asks the question out loud. JSON has always said `null` rather than a
     /// number nobody took.
     pub behind: Option<usize>,
 }
@@ -720,6 +725,37 @@ pub fn overlaps(changed: &[(String, Vec<String>)]) -> Vec<Overlap> {
         .collect()
 }
 
+/// How far a session trails its base, as one cell — three answers, three
+/// renderings.
+///
+/// Shared by `omh s ls` and by the session list in `omh ls`. Both were wrong
+/// the same way — `Some(0) | None` rendered an empty cell, so *up to date* and
+/// *omh could not count* were the same sight on the two surfaces where a user
+/// picks which session to open.
+///
+/// They were never one thing that drifted, which an earlier draft of this
+/// claimed: #35 wrote both copies in the same commit, and #46 changed both in
+/// lockstep. The argument for sharing them is the ordinary one — two copies is
+/// one more than can be checked — not a history of them coming apart.
+///
+/// `Log` keeps a third rendering of the same three answers, deliberately: it
+/// builds a fragment of a heading rather than a `Cell`, and it was the copy
+/// that was already right.
+///
+/// That pair is the one this file's own rule names as most dangerous to
+/// confuse, and `log` carries a paragraph about it. A stale session that looks
+/// current is how work gets done against code that moved.
+///
+/// `WARN` for the unanswered one, matching what the work column does with the
+/// same uncertainty: it is not a worse number, it is the absence of one.
+fn behind_cell(behind: Option<usize>, base: &str) -> Cell {
+    match behind {
+        Some(0) => Cell::plain(""),
+        Some(n) => Cell::styled(format!("({n} behind {base})"), out::DIM),
+        None => Cell::styled(format!("(how far behind {base}?)"), out::WARN),
+    }
+}
+
 /// Every session in this checkout, and what earlier ones left behind.
 #[derive(Debug, Clone)]
 pub struct Sessions {
@@ -763,10 +799,7 @@ impl Report for Sessions {
                     Some(work) => Cell::styled(work.human(), work.style()),
                     None => Cell::plain(""),
                 },
-                match s.behind {
-                    Some(0) | None => Cell::plain(""),
-                    Some(n) => Cell::styled(format!("({n} behind {})", self.base), out::DIM),
-                },
+                behind_cell(s.behind, &self.base),
             ]);
         }
         let mut out = table.render(p);
@@ -815,17 +848,98 @@ impl Report for Sessions {
         out
     }
 
-    /// The leftovers, which are not what `omh s ls` was asked for.
+    /// What to do next, and what omh could not answer — neither of which is what
+    /// `omh s ls` was asked for.
     ///
     /// Both lines used to be appended to the table above, so
     /// `omh s ls > sessions.txt` wrote them into the file — the exact case
     /// `docs/commands.md` promises they stay out of. They are still in `json`
     /// as `leftovers`, where a script wanted them all along.
     fn asides(&self) -> out::Asides {
-        if self.leftovers.is_empty() {
-            return out::Asides::default();
+        let mut asides = out::Asides::default();
+
+        // The number was in this table long before there was anything to do
+        // about it. `sync` is that thing, and a dashboard that reports a
+        // problem it can now name the answer to and does not is worse than one
+        // that never had the answer.
+        //
+        // `Some(n)` with `n > 0` only. A zero has nothing to do and a `None`
+        // is a question omh failed to answer — advising a merge on the
+        // strength of a count that could not be taken is advice built on a
+        // guess, and that row is already saying in the table that something is
+        // wrong with reading it.
+        let stale: Vec<&Session> = self
+            .sessions
+            .iter()
+            .filter(|s| s.behind.is_some_and(|n| n > 0))
+            .collect();
+        // The spelling that works for the session as it stands. `sync` refuses
+        // on a running sandbox and names `--down` itself — so advising the bare
+        // form for a row the table is printing `up` beside is advice that exits
+        // non-zero when pasted, on the most common input this exists for: an
+        // agent that has been running a while against trunk that moved.
+        let offered: Vec<(String, &Session)> = stale
+            .iter()
+            .map(|s| {
+                let cmd = match s.running {
+                    true => format!("omh {} sync --down", out::untrusted(&s.id)),
+                    false => format!("omh {} sync", out::untrusted(&s.id)),
+                };
+                (cmd, *s)
+            })
+            .collect();
+        // `display_width`, not `len`. The comment that used to sit here
+        // justified the variable pad by ids that are not `sNN` — which is
+        // exactly the case where counting bytes shears the column, and this
+        // module says so where the function is defined.
+        let widest = offered
+            .iter()
+            .map(|(cmd, _)| out::display_width(cmd))
+            .max()
+            .unwrap_or(0);
+        for (cmd, s) in &offered {
+            let pad = " ".repeat(widest - out::display_width(cmd) + 2);
+            asides = asides.hint(format!(
+                "  {cmd}{pad}bring {} in{}",
+                self.base,
+                match s.running {
+                    true => ", stopping the sandbox first",
+                    false => ", merged on the host",
+                }
+            ));
         }
-        out::Asides::default()
+
+        // A row omh could not measure gets a route of its own rather than
+        // silence. Withholding `sync` from it is right — a merge advised off a
+        // count that failed is advice built on a guess — but silence next to
+        // rows that each carry a next step reads as *this one is fine*, which
+        // is the collapse this whole change is about, moved from the cell into
+        // the advice.
+        let unmeasured: Vec<&str> = self
+            .sessions
+            .iter()
+            .filter(|s| s.behind.is_none())
+            .map(|s| s.id.as_str())
+            .collect();
+        if let Some(first) = unmeasured.first() {
+            asides = asides
+                .warn(format!(
+                    "omh could not measure {} against {} — {} may be working against code that \
+                     moved, and `sync` is not offered over a count that failed",
+                    spoken(&unmeasured.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+                    self.base,
+                    if unmeasured.len() == 1 { "it" } else { "they" }
+                ))
+                .hint(format!(
+                    "  omh {} log   says why the count could not be taken",
+                    out::untrusted(first)
+                ));
+        }
+
+        if self.leftovers.is_empty() {
+            return asides;
+        }
+        asides
             .warn(format!(
                 "{} removed but left something behind: {}",
                 if self.leftovers.len() == 1 {
@@ -941,10 +1055,7 @@ impl Report for Inventory {
                 t = t.row(vec![
                     Cell::styled(&sess.id, out::NAME),
                     Cell::plain(&sess.label),
-                    match sess.behind {
-                        Some(0) | None => Cell::plain(""),
-                        Some(n) => Cell::styled(format!("({n} behind {})", self.base), out::DIM),
-                    },
+                    behind_cell(sess.behind, &self.base),
                 ]);
             }
             s.push_str(&t.render(p));
@@ -2961,6 +3072,276 @@ mod tests {
             leftovers: vec![],
             overlaps: vec![],
             unreadable: vec![],
+        }
+    }
+
+    /// A session that has fallen behind is told what to do about it — and
+    /// only when doing it would change something.
+    ///
+    /// `behind 12` was reported and unactionable for the whole life of this
+    /// command: the number was right there and the only thing a user could do
+    /// with it was worry. `omh sNN sync` is the answer now, and a dashboard
+    /// that names the problem without naming the answer is the state this
+    /// phase set out to leave.
+    ///
+    /// Named per session rather than as one sentence, because which session
+    /// is the decision — and silent when every session is current, since a
+    /// suggestion that is always there is one nobody reads.
+    #[test]
+    fn a_session_behind_its_base_is_told_what_to_do_about_it() {
+        let behind = |id: &str, n: Option<usize>| {
+            let mut row = session(id, Work::Clean);
+            row.behind = n;
+            row
+        };
+
+        let current = sessions(vec![behind("s01", Some(0))]);
+        assert!(
+            !current.asides().hints.join(" ").contains("sync"),
+            "nothing to say when nothing is behind: {:?}",
+            current.asides()
+        );
+
+        let stale = sessions(vec![
+            behind("s01", Some(0)),
+            behind("s02", Some(12)),
+            behind("s03", Some(3)),
+        ]);
+        let said = stale.asides().hints.join("\n");
+        assert!(
+            said.contains("omh s02 sync") && said.contains("omh s03 sync"),
+            "each one that is behind, by name: {said}"
+        );
+        assert!(
+            !said.contains("omh s01 sync"),
+            "and not the one that is current: {said}"
+        );
+
+        // *Could not tell* is not *behind*. Suggesting a sync over a question
+        // omh failed to answer is advice built on a guess.
+        let unknown = sessions(vec![behind("s01", None)]);
+        assert!(
+            !unknown.asides().hints.join(" ").contains("sync"),
+            "an unanswered count is not a reason to act: {:?}",
+            unknown.asides()
+        );
+        // But withholding the suggestion is not the same as saying nothing.
+        // Beside rows that each carry a next step, silence reads as *this one
+        // is fine* — which is this change's own defect, moved from the cell
+        // into the advice.
+        let said = format!("{:?}", unknown.asides());
+        assert!(
+            said.contains("could not measure") && said.contains("s01 log"),
+            "the row omh could not measure still gets a route: {said}"
+        );
+        // A run of spaces is a line continuation whose indentation shipped —
+        // `cargo fmt` joins the fold and the padding goes with it. It happened
+        // in this very sentence, and it is the same guard `git_checks_from`
+        // carries for the same reason.
+        //
+        // Warnings only. A hint is a command with its description aligned
+        // after it, so a run of spaces is what it is *for*; the prose beside
+        // it has no reason to hold one.
+        for line in &unknown.asides().warnings {
+            assert!(!line.contains("  "), "a fold's indentation shipped: {line}");
+        }
+    }
+
+    /// A running session is offered the spelling that works on it.
+    ///
+    /// `sync` refuses while the sandbox is up and names `--down` itself, so
+    /// the bare form is a line that exits non-zero when pasted — offered, in
+    /// the first version of this, on a row the table is printing `up` beside.
+    /// That is the most common input the feature exists for: an agent that has
+    /// been running a while against trunk that moved.
+    #[test]
+    fn a_running_session_is_told_the_form_of_sync_that_works_on_it() {
+        let running = |up: bool| {
+            let mut row = session("s01", Work::Clean);
+            row.behind = Some(4);
+            row.running = up;
+            sessions(vec![row]).asides().hints.join("\n")
+        };
+
+        assert!(
+            running(true).contains("omh s01 sync --down"),
+            "a running session is told to stop it first: {}",
+            running(true)
+        );
+        assert!(
+            !running(false).contains("--down"),
+            "and a stopped one is not told to stop something: {}",
+            running(false)
+        );
+    }
+
+    /// Every suggested command aligns on the same column, whatever the ids
+    /// are called.
+    ///
+    /// The pad was computed from `str::len` — bytes — under a comment
+    /// justifying it by ids that are not `sNN`, which is the one case where
+    /// bytes and columns disagree. `out::display_width` exists for this and
+    /// the module says so where it is defined.
+    #[test]
+    fn the_suggested_commands_line_up_for_ids_of_any_width() {
+        let row = |id: &str| {
+            let mut s = session(id, Work::Clean);
+            s.behind = Some(2);
+            s
+        };
+        let hints = sessions(vec![row("s01"), row("café"), row("a-long-one")])
+            .asides()
+            .hints;
+
+        let columns: Vec<usize> = hints
+            .iter()
+            .map(|h| out::display_width(h.split("bring").next().unwrap()))
+            .collect();
+        assert!(
+            columns.windows(2).all(|w| w[0] == w[1]),
+            "the description starts at one column: {hints:#?}"
+        );
+    }
+
+    /// The dashboard has the same three answers about `behind` as `log` does,
+    /// and had been rendering two of them the same.
+    ///
+    /// `Some(0) | None => Cell::plain("")` — an empty cell for *up to date*
+    /// and an empty cell for *omh could not count*. This file states the rule
+    /// at the top and `log` carries a paragraph about it; the dashboard is
+    /// where a user actually decides which session to open, and it was the one
+    /// surface answering the question wrong.
+    ///
+    /// A stale session that looks current is how work gets done against code
+    /// that moved — which is the failure this whole phase exists to close.
+    #[test]
+    fn the_dashboard_does_not_render_an_unanswered_count_as_up_to_date() {
+        let render = |behind| {
+            let mut row = session("s01", Work::Clean);
+            row.behind = behind;
+            sessions(vec![row]).human(&out::Palette::plain())
+        };
+
+        assert!(
+            render(Some(12)).contains("12 behind main"),
+            "a count omh could take is reported: {}",
+            render(Some(12))
+        );
+        assert_ne!(
+            render(None),
+            render(Some(0)),
+            "an unanswered question and a zero are the two answers it is most \
+             dangerous to confuse — the dashboard is where that decision is made"
+        );
+        // Not `!contains("behind main")` — the honest rendering says *how far
+        // behind main?* and contains it. What must not happen is a **number**
+        // in front of it, which is the shape a reader acts on.
+        //
+        // Asked of the cell rather than of the row. Scanning the whole line
+        // read the id, the label and the work column too, so it was green by
+        // the fixture's good luck: one `Work::Uncommitted(3)` beside it, or a
+        // session id with a digit in it, and this would have failed for a
+        // reason with nothing to do with the claim.
+        let unknown = behind_cell(None, "main");
+        let cell = unknown.text();
+        assert!(
+            !cell.split_whitespace().any(|word| word
+                .trim_matches(|c| c == '(' || c == ')')
+                .parse::<usize>()
+                .is_ok()),
+            "*could not tell* is not dressed up as a count: {cell}"
+        );
+        assert!(
+            cell.contains("how far behind main"),
+            "and it does ask the question rather than going quiet: {cell}"
+        );
+
+        // The base is a parameter and nothing proved it was read. Every
+        // fixture in this file says `main`, so three separate mutations —
+        // hardcoding the word in either arm of the cell, or in the hint —
+        // were unkillable.
+        assert!(
+            behind_cell(Some(4), "develop").text().contains("develop")
+                && behind_cell(None, "develop").text().contains("develop"),
+            "the base is read, not assumed"
+        );
+    }
+
+    /// `omh ls` renders the same column and had the same bug.
+    ///
+    /// The extraction's whole argument is that two copies is one more than can
+    /// be checked — and the first version of it checked one. Restoring the old
+    /// inline `match` in `Inventory` alone left the suite green, on a listing
+    /// that is also somewhere a user picks which session to open.
+    #[test]
+    fn the_wide_listing_answers_the_same_question_the_same_way() {
+        let render = |behind| {
+            let mut row = session("s01", Work::Clean);
+            row.behind = behind;
+            Inventory {
+                harnesses: vec![],
+                adapters_dir: "/adapters".into(),
+                editors: vec![],
+                sessions: vec![row],
+                base: "main".into(),
+            }
+            .human(&out::Palette::plain())
+        };
+
+        assert_ne!(
+            render(None),
+            render(Some(0)),
+            "the wide listing keeps the two apart too"
+        );
+        assert!(
+            render(Some(7)).contains("7 behind main"),
+            "and still reports a count it could take: {}",
+            render(Some(7))
+        );
+    }
+
+    /// The three answers survive into JSON, which is where getting it wrong
+    /// costs the most.
+    ///
+    /// A hint never reaches a script — `--json` returns before asides — so
+    /// this field is the *only* carrier of staleness there. `unwrap_or(0)` at
+    /// either call site is the original defect in the format with no second
+    /// signal, and it was green across the whole suite.
+    #[test]
+    fn a_count_omh_could_not_take_is_null_and_not_zero_in_both_listings() {
+        let row = |behind| {
+            let mut s = session("s01", Work::Clean);
+            s.behind = behind;
+            s
+        };
+        let wide = |behind| {
+            Inventory {
+                harnesses: vec![],
+                adapters_dir: "/adapters".into(),
+                editors: vec![],
+                sessions: vec![row(behind)],
+                base: "main".into(),
+            }
+            .json()["sessions"][0]["behind"]
+                .clone()
+        };
+
+        for (dashboard, listing, expected, what) in [
+            (
+                sessions(vec![row(None)]).json()["sessions"][0]["behind"].clone(),
+                wide(None),
+                serde_json::Value::Null,
+                "a count omh could not take is null",
+            ),
+            (
+                sessions(vec![row(Some(0))]).json()["sessions"][0]["behind"].clone(),
+                wide(Some(0)),
+                json!(0),
+                "and a zero is a zero",
+            ),
+        ] {
+            assert_eq!(dashboard, expected, "{what}, on the dashboard");
+            assert_eq!(listing, expected, "{what}, in the wide listing");
         }
     }
 
