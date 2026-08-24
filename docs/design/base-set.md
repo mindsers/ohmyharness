@@ -180,7 +180,7 @@ git?* is a question someone rediscovers, and the answer changed rather than
 having been wrong the first time.
 
 `git-turn` is the cheapest entry in the set to justify, and the reason is worth
-naming: it is a `run`, so it injects nothing. Its cost is 80ms and ~20 KB of
+naming: it is a `run`, so it injects nothing. Its cost is ~80ms and ~1.3 KB of
 somebody's disk per turn, not bytes of the agent's context — which is why it
 could be argued for in a paragraph where `git-note` had to be argued for by the
 byte. A `run` and an `inject` at the same moment are not the same kind of

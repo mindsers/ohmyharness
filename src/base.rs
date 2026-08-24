@@ -649,15 +649,17 @@ pub fn hooks() -> Vec<Hook> {
         },
         Hook {
             name: "git-turn",
-            // ~80ms and ~20 KB per turn on a 400-file worktree with one file
-            // changed, and nothing at all when the tree is unchanged —
-            // measured 2026-08-24. The sibling above it costs 0.14s, so this
+            // ~80ms and ~1.3 KB per turn on a 400-file worktree with one file
+            // changed; ~50ms and no disk when it is unchanged — measured
+            // 2026-08-24. The sibling above it costs 0.14s, so this
             // is in the range this set already accepts.
             //
             // What it buys is the thing `omh sNN log` cannot show today: an
             // agent that never runs `git commit` leaves no trace at all, and
             // most of them never do. This gives that session a timeline, and
-            // gives the agent a `reset --hard` target for every turn it took.
+            // gives it a tree to restore from for every turn it took —
+            // `git restore --source=refs/omh/turn~N`, never a `reset --hard`,
+            // which would move the branch onto omh's own commits.
             //
             // A `Run`, so it injects nothing: the cost is time and disk, not
             // context. That distinction is the reason this is affordable and

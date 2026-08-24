@@ -259,7 +259,7 @@ pub struct Log {
     /// the "yours from here" divider is an index into rendered rows, so an
     /// interleaved list would label rows as already on the branch that are
     /// not — the exact failure `cleanly_split` exists to prevent.
-    pub turns: Option<Vec<crate::shadow::Checkpoint>>,
+    pub turns: Option<Vec<crate::shadow::Turn>>,
 }
 
 impl Log {
@@ -319,7 +319,7 @@ impl Log {
     /// lists answer different questions. The agent's commits are what a
     /// harvest will take; these are what the tree looked like when each turn
     /// ended, and their numbers name nothing a command will accept.
-    fn turns_human(&self, p: &out::Palette, turns: &[crate::shadow::Checkpoint]) -> String {
+    fn turns_human(&self, p: &out::Palette, turns: &[crate::shadow::Turn]) -> String {
         let mut s = out::heading(
             p,
             &format!(
@@ -333,23 +333,29 @@ impl Log {
         if turns.is_empty() {
             s.push_str(&out::nothing(
                 p,
-                "no turns recorded — the sandbox has not finished one with anything changed",
+                "no turns recorded — nothing has been photographed in this sandbox yet",
             ));
             return s;
         }
-        let width = turns.len().to_string().len();
         let mut table = Table::new();
-        for c in turns.iter().rev() {
-            let (files, churn) = match &c.touched {
+        for t in turns {
+            let (files, churn) = match &t.touched {
                 None => ("merge".to_string(), String::new()),
-                Some(t) => (
-                    format!("{} file{}", t.files, if t.files == 1 { "" } else { "s" }),
-                    churn(t),
+                Some(c) => (
+                    format!("{} file{}", c.files, if c.files == 1 { "" } else { "s" }),
+                    churn(c),
                 ),
             };
             table = table.row(vec![
-                Cell::styled(format!("{:>width$}", c.number), out::NAME),
-                Cell::styled(c.age.map_or("?".into(), ago), out::DIM),
+                // The spelling that gets the tree back, not a number `--keep`
+                // would take.
+                Cell::styled(format!("~{}", t.back), out::NAME),
+                Cell::styled(t.age.map_or("?".into(), ago), out::DIM),
+                // Shown, and constant for omh's own snapshots — which is what
+                // makes anything the agent parked on this ref visible here.
+                // `risks.md` 5b claims this view is the display case for that
+                // hiding place, and without this column it was not.
+                Cell::plain(out::untrusted(&t.subject)),
                 Cell::styled(files, out::DIM),
                 Cell::styled(churn, out::DIM),
             ]);
@@ -473,15 +479,19 @@ impl Report for Log {
             "turns": self.turns.as_ref().map(|turns| {
                 turns
                     .iter()
-                    .rev()
-                    .map(|c| {
+                    .map(|t| {
                         json!({
-                            "number": c.number,
-                            "id": c.id,
-                            "age_seconds": c.age,
-                            "files": c.touched.as_ref().map(|t| t.files),
-                            "added": c.touched.as_ref().map(|t| t.added),
-                            "removed": c.touched.as_ref().map(|t| t.removed),
+                            // `back`, not `number` — the two lists used to
+                            // share a key name in one document, so a script
+                            // could take a turn's number and hand it to
+                            // `--keep`.
+                            "back": t.back,
+                            "ref": format!("{}~{}", crate::shadow::TURN_REF, t.back),
+                            "subject": t.subject,
+                            "age_seconds": t.age,
+                            "files": t.touched.as_ref().map(|c| c.files),
+                            "added": t.touched.as_ref().map(|c| c.added),
+                            "removed": t.touched.as_ref().map(|c| c.removed),
                         })
                     })
                     .collect::<Vec<_>>()
@@ -510,11 +520,15 @@ impl Report for Log {
     }
 
     fn asides(&self) -> out::Asides {
-        // The snapshot view offers nothing to run: its numbers name nothing a
-        // command takes, which is the point of keeping the two lists apart.
-        if self.turns.is_some() {
-            return out::Asides::default();
-        }
+        // The snapshot view offers no *hints* — it has no numbers a command
+        // takes, which is the point of keeping the lists apart. The warnings
+        // below are a different thing: `unreachable` and a lost replay point
+        // are facts about the session, and this file's own doc calls them
+        // "states `harvest` refuses over" precisely so a user cannot read a
+        // clean review and then be refused by `--keep` citing work they were
+        // never shown. Suppressing them for anyone who habitually types
+        // `--turns` was the same failure with a flag in front of it.
+        let hints_are_meaningless_here = self.turns.is_some();
         let mut asides = out::Asides::default();
         if self.read.unreachable > 0 {
             asides = asides.warn(format!(
@@ -562,6 +576,9 @@ impl Report for Log {
         // it would be refused — those states are exactly the ones `harvest`
         // stops on.
         let mut offered: Vec<(String, String)> = Vec::new();
+        if hints_are_meaningless_here {
+            return asides;
+        }
         if let Some(newest) = self.read.commits.last() {
             offered.push((
                 format!("omh {} diff {}", self.id, newest.number),
@@ -2689,9 +2706,8 @@ mod tests {
     /// little oddly.
     #[test]
     fn the_turn_view_never_borrows_the_numbers_that_land_work() {
-        let snapshot = |number: usize| crate::shadow::Checkpoint {
-            number,
-            id: format!("turn{number}"),
+        let snapshot = |back: usize| crate::shadow::Turn {
+            back,
             subject: "turn end".into(),
             age: Some(60),
             touched: Some(crate::shadow::Touched {
@@ -2700,16 +2716,27 @@ mod tests {
                 removed: 1,
                 uncounted: 0,
             }),
-            landed: false,
         };
         let mut log = a_log();
         let plain = out::Palette::plain();
         let commits = log.read.commits.clone();
 
-        log.turns = Some(vec![snapshot(1), snapshot(2)]);
+        log.turns = Some(vec![snapshot(0), snapshot(1)]);
         let printed = log.human(&plain);
 
         assert!(printed.contains("2 turns"), "the turn count: {printed}");
+        // The identifier is the ref spelling, not a number — so there is no
+        // number here for `--keep` to accept from the wrong list. `~0` is the
+        // newest, and it is the first row.
+        assert!(
+            printed.contains("~0") && printed.contains("~1"),
+            "each row is the spelling that gets that tree back: {printed}"
+        );
+        let rows: Vec<&str> = printed.lines().filter(|l| l.contains('~')).collect();
+        assert!(
+            rows.first().is_some_and(|r| r.contains("~0")),
+            "newest first: {rows:?}"
+        );
         for c in &commits {
             assert!(
                 !printed.contains(&c.subject),
@@ -2726,14 +2753,40 @@ mod tests {
         );
         assert!(
             log.asides().hints.is_empty(),
-            "nothing to offer: these numbers name nothing a command takes: {:?}",
+            "nothing to offer: there are no numbers here a command takes: {:?}",
             log.asides()
+        );
+        // …but the warnings are about the session, not about which list is
+        // being rendered. Suppressing them meant a user who habitually types
+        // `--turns` never learned their replay point was lost.
+        let mut lost = a_log();
+        lost.read.replay_point_lost = true;
+        lost.turns = Some(vec![snapshot(0)]);
+        assert!(
+            lost.asides()
+                .warnings
+                .iter()
+                .any(|w| w.contains("the last handover is no longer")),
+            "a session-level warning still reaches the turn view: {:?}",
+            lost.asides()
         );
 
         // The two lists reach JSON under different keys, so a script asking
         // for one can never be handed the other.
         let doc = log.json();
         assert_eq!(doc["turns"].as_array().map(Vec::len), Some(2));
+        // No `number` key on a turn — the two lists shared that name in one
+        // document, so a script could read a turn's number and hand it to
+        // `--keep`.
+        assert!(
+            doc["turns"][0]["number"].is_null(),
+            "a turn carries no number: {doc}"
+        );
+        assert_eq!(
+            doc["turns"][0]["ref"],
+            serde_json::json!("refs/omh/turn~0"),
+            "it carries the spelling that works instead: {doc}"
+        );
         assert_eq!(
             doc["checkpoints"].as_array().map(Vec::len),
             Some(commits.len()),

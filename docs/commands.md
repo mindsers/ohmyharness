@@ -446,27 +446,46 @@ of every turn, and this reads those:
 $ omh s01 log --turns
 s01 · 3 turns
 
-  3  4m   7 files  +220 −61
-  2  35m  1 file   +9
-  1  1h   3 files  +48 −12
+  ~0  4m   turn end  7 files  +220 −61
+  ~1  35m  turn end  1 file   +9
+  ~2  1h   turn end  3 files  +48 −12
 ```
 
 **These are omh's snapshots, not the agent's commits, and the two lists never
-mix.** The numbers here name nothing — `diff 2` and `--keep 1,3-4` take the
-numbers from `omh s01 log`, which is a different list. That is deliberate: a
-snapshot is a photograph of a tree, not work anybody chose to keep, and
-replanting one onto your branch as the agent's work would be a lie.
+mix.** There are no numbers here for `diff` or `--keep` to take — a row is
+identified by the ref that reaches it, `refs/omh/turn~0` being the newest.
+That is deliberate, and it is the second attempt: numbering them `3 / 2 / 1`
+meant `omh s01 commit --keep 2` quietly replanted the *agent's* checkpoint 2,
+a different list, with no error. A snapshot is a photograph of a tree, not
+work anybody chose to keep.
 
-What they are good for is the other direction. Inside the sandbox the agent can
-`git reset --hard refs/omh/turn~2` to get back to how things stood two turns
-ago — which is the one moment these earn their keep, when a turn threw away
-something worth having.
+The `turn end` column is omh's own subject on every genuine snapshot, so
+anything else appearing on that ref is visible as the row that reads
+differently.
+
+What they are good for is the other direction. Inside the sandbox, to get the
+files back to how they stood two snapshots ago:
+
+```console
+$ git restore --source=refs/omh/turn~2 -- .
+```
+
+**Not `git reset --hard refs/omh/turn~2`.** The snapshot chain has a root of
+its own — it is not built on the session's history — so resetting onto it moves
+the branch into omh's commits, and `omh s01 log` then numbers *those* as the
+agent's checkpoints. `omh s01 commit --keep` would replant them onto your
+branch as the agent's work, which is the one thing this separation exists to
+prevent. `restore` puts the files back and leaves the branch alone, which is
+what was wanted anyway.
+
+`~2` counts snapshots, not turns: a turn that changed nothing does not take
+one, so on a quiet session `~2` may be further back than two turns.
 
 They cost nothing in the agent's context: the hook that writes them injects no
-text. It skips a turn that changed nothing, so an idle session does not
-accumulate identical snapshots, and it touches neither `HEAD`, the index nor
-the worktree — after it runs, the agent's own `git status` says exactly what it
-said before.
+text. A turn that changed nothing writes no snapshot — though it still costs
+the time to find that out — and the hook touches neither `HEAD`, the index nor
+the worktree, so after it runs the agent's own `git status` says exactly what
+it said before.
 
 `omh sNN rm` mentions them when it removes a session, and never refuses over
 them: there is one for nearly every session that ever ran, and a refusal that

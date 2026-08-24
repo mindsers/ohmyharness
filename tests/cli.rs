@@ -664,6 +664,47 @@ fn omh_turn_hook_body(gitdir: &std::path::Path, worktree: &std::path::Path) -> S
     )
 }
 
+/// `omh sNN rm` names the snapshots it is about to delete.
+///
+/// The wiring, not the decision: `may_remove` decides and is unit-tested with
+/// a count handed to it, so nothing proved that `rm` asks for a real one.
+/// Replacing that call with a literal `0` left the whole suite green.
+#[test]
+fn rm_names_the_snapshots_it_takes_and_force_still_removes() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let gitdir = sb
+        .home
+        .join(".omh/shadow")
+        .join(sb.repo.file_name().unwrap())
+        .join("s01.git");
+
+    std::fs::write(worktree.join("in-flight.rs"), "fn later() {}\n").unwrap();
+    Command::new("sh")
+        .arg("-c")
+        .arg(omh_turn_hook_body(&gitdir, &worktree))
+        .output()
+        .expect("sh must be installed");
+
+    let refused = sb.omh(&["s01", "rm"]);
+    assert!(!refused.status.success(), "unharvested work still refuses");
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        said.contains("1 turn snapshot"),
+        "and the count is a real one, asked of the sandbox: {said}"
+    );
+    assert!(
+        said.contains("omh s01 log --turns"),
+        "with the command that reads them: {said}"
+    );
+
+    assert!(
+        sb.omh(&["s01", "rm", "--force"]).status.success(),
+        "and `--force` still means it"
+    );
+}
+
 /// `omh sNN log --turns` reads omh's own snapshots, and the default view does
 /// not show them.
 ///
@@ -703,6 +744,13 @@ fn log_turns_reads_the_snapshots_and_the_default_view_does_not() {
     let plain = sb.omh(&["s01", "log"]);
     let out = String::from_utf8_lossy(&plain.stdout);
     let err = String::from_utf8_lossy(&plain.stderr);
+    // Anchored: every assertion below is negative, and a `log` that exited 1
+    // with empty stdout would satisfy all of them.
+    assert!(plain.status.success(), "the default log works: {err}");
+    assert!(
+        out.contains("agent"),
+        "and lists the agent's own commit: {out}"
+    );
     assert!(
         !out.contains("turn end"),
         "omh's own snapshot is not in the agent's list: {out}"
