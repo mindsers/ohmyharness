@@ -2,6 +2,10 @@
 
 > Launch any coding harness, in a sandbox, with your setup already there.
 
+[![verify](https://github.com/mindsers/ohmyharness/actions/workflows/ci.yml/badge.svg)](https://github.com/mindsers/ohmyharness/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/mindsers/ohmyharness)](https://github.com/mindsers/ohmyharness/releases)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
 ```console
 $ omh init         # detects your stack, decides, reports. no questions.
 $ omh claude       # sandboxed, curated, your setup already inside
@@ -9,21 +13,19 @@ $ omh attach       # open that same session in your editor
 $ omh graph        # browse your codebase as a graph
 ```
 
-**Status: early.** `0.6.0`, one harness verified end to end. This release is
-the work loop: reading a session's work, landing it in stages, staying current
-with trunk, and reaching several sessions of one repo from one place — without
-typing `git` and without knowing that a session is a worktree. Useful today
-if you want a sandboxed agent with your config in it; not yet the finished
-distribution described in [the docs](docs/). See
-[What isn't done](#what-isnt-done) — it is a real list, not a modesty ritual.
+**Status: early.** `0.6.0`, one harness verified end to end. This release is the
+work loop: reading a session's work, landing it in stages and staying current
+with trunk, without typing `git`. Useful today if you want a sandboxed agent with
+your config in it; not yet the finished distribution [the docs](docs/) describe —
+[What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
 
 ---
 
 ## The problem
 
 A good agentic setup in 2026 is a pile of parts: a harness, rules, skills, MCP
-servers, a sandbox, a code index, hooks, credentials. Each is a rabbit hole.
-Most people stop at *"installed Claude Code, wrote a CLAUDE.md"* — not from
+servers, a sandbox, a code index, hooks, credentials. Each is a rabbit hole, so
+most people stop at *"installed Claude Code, wrote a CLAUDE.md"* — not from
 inability, but because assembling the rest is a research project nobody has
 budget for.
 
@@ -31,14 +33,14 @@ The ecosystem's answer has been catalogues: [23,600+ skills and 12,700+ MCP
 servers](https://claudemarketplaces.com/). That is a **problem statement**, not
 an opinion. Nobody can evaluate 23,600 of anything.
 
-omh is a **distribution**. Debian didn't write the kernel; oh-my-zsh didn't
-write zsh. Its genius was that installing it gave you a good shell *immediately*.
-The value is curation, integration, and defaults — and the metric is
-**decisions removed**, targeting zero.
+omh is a **distribution**. Debian didn't write the kernel; oh-my-zsh didn't write
+zsh — their genius was that installing them gave you a good system *immediately*.
+The value is curation, integration and defaults, and the metric is **decisions
+removed**, targeting zero.
 
 ## What you actually get
 
-Running `omh claude` instead of `claude` buys four things:
+Running `omh claude` instead of `claude` buys five things:
 
 **A sandbox that protects your repo, not just your host.** The agent works in a
 git worktree on its own branch. Your checkout is never mounted. Review with
@@ -52,7 +54,7 @@ order, or the ones you name: `omh s01 commit --keep 1,3-4`.
 
 **Several sessions, from one place.** `omh s` is every session with its state,
 how far behind trunk it has fallen, and the files two of them are both about to
-change — the collision you would otherwise find at merge time. `omh s01` is that
+change — the collision you would otherwise meet at merge time. `omh s01` is that
 same row, scoped to one.
 
 ```console
@@ -65,11 +67,10 @@ $ omh s
 
 `omh s01 sync` brings trunk in, merged on the host rather than inside the
 sandbox. A conflict still lands in the worktree with its markers — labelled
-`main` and `s01`, so it is obvious which side is yours — and `omh s commit`
-refuses to land a file that still holds them.
-
-An agent that commits nothing leaves a timeline anyway: omh photographs the
-worktree at the end of every turn, and `omh s01 log --turns` reads them back.
+`main` and `s01`, so which side is yours is obvious — and `omh s commit` refuses
+to land a file that still holds them. An agent that commits nothing leaves a
+timeline anyway: omh photographs the worktree at the end of every turn, and
+`omh s01 log --turns` reads them back.
 
 **Your setup, in any harness.** Rules, skills, MCP servers, commands, subagents
 and hooks are declared once and rendered into whatever shape each harness reads.
@@ -219,9 +220,9 @@ A repo holds configuration, and one kind of content:
 ```
 
 A project cannot declare a skill, an MCP server, a command or a subagent; it
-**names** ones from your catalogue. Hooks are the exception, because they are
-the one capability whose scope is genuinely the repo — `cargo test` here,
-`pnpm test` next door, one name and two bodies.
+**names** ones from your catalogue. Hooks are the exception, being the one
+capability whose scope is genuinely the repo — `cargo test` here, `pnpm test`
+next door, one name and two bodies.
 
 Naming them is one table, and one mechanism — an allowlist, so removing
 something is deleting its name:
@@ -235,32 +236,9 @@ mcp    = ["*"]                     # keep following the catalogue as it grows
 ```
 
 Absent means everything, so upgrading changes nothing and a new checkout is
-useful before it's configured. `omh init` writes it out expanded, because a list
-you curate by deleting lines beats a wildcard — and anything in your catalogue
-this repo hasn't taken gets named at launch, so nothing is off for an invisible
-reason.
-
-**Two scopes, so two commands.** `omh config` means you; `omh repo` means this
-checkout. They want opposite defaults, which is why one flag couldn't serve
-both: what a project *uses* is a fact about the project and lands in the
-committed file, while what it *overrides* holds `carry_in` paths and API keys
-and lands in the gitignored one.
-
-```console
-$ omh repo
-this repo  /Users/you/proj/.omh
-
-settings
-  carry_in         [".env.local"]     ← local (overrides shared)
-  idle_timeout     30m                ← personal
-
-omh's features
-  codegraph        off here
-
-using
-  skills           review-diff   (1 not selected: refactor)
-  mcp              everything
-```
+useful before it's configured. Two scopes, so two commands: `omh config` means
+you, `omh repo` means this checkout, and they want opposite defaults —
+[Configuration](docs/configuration.md#two-scopes-two-commands) has the rest.
 
 ### The base set is data too, and it has to justify itself
 
@@ -287,13 +265,10 @@ method, while `because` is a judgement you're free to reject.
 
 The four fields aren't a convention, they're a **test**: an entry that can't say
 what it costs, what it buys, what was considered instead and how to remove it
-fails the build. And `omh why` answers for things omh *rejected* too, so a
-candidate turned down over its licence doesn't get re-litigated every time
-someone rediscovers it.
-
-Ask about something you added and omh offers no rationale at all — it doesn't
-have one, and telling that apart from its own choices is the entire point. See
-[Commands](docs/commands.md#omh-why-thing).
+fails the build. `omh why` answers for things omh *rejected* too, so a candidate
+turned down over its licence isn't re-litigated every time someone rediscovers
+it — and it offers no rationale at all for something *you* added, because it has
+none. Telling those apart is the entire point.
 
 ### Adapters are data
 
@@ -312,12 +287,12 @@ render = "concat"
 [capabilities.mcp]
 path   = "/work/.mcp.json"
 render = "mcp-json"
-verify = "claude mcp list"
+verify = "claude mcp list"   # and how omh knows it worked
 ready  = "Connected"
 ```
 
 **An absent key means the harness cannot do that thing.** Degradation is a
-missing map entry, not special-case logic, and it is announced once:
+missing map entry rather than special-case logic, and it is announced once:
 
 ```console
 $ omh opencode
@@ -377,10 +352,10 @@ carry_in = [".env.local", "certs/"]
 An explicit allowlist, because **this is the only path by which a secret reaches
 the agent**. A listed path that doesn't exist is reported, not skipped.
 
-It is for files git does **not** track. A tracked path is already in the worktree,
-so listing one replaces the branch's copy with whatever your checkout holds right
-now — usually an uncommitted edit, on the one path a secret travels. omh says so
-at launch and does not copy it.
+It is for files git does **not** track. A tracked path is already in the
+worktree, so listing one would replace the branch's copy with whatever your
+checkout holds right now — usually an uncommitted edit, on the one path a secret
+travels. omh says so at launch and does not copy it.
 
 ## Verify it yourself
 
@@ -423,39 +398,33 @@ drops a session branch only when it has no commits.
 
 ## Contributing
 
-See [`CONTRIBUTING.md`](.github/CONTRIBUTING.md) for the full rules and the
-invariant list.
-
 ```console
 $ cargo test
 $ ./scripts/smoke.sh    # end-to-end walkthrough in a throwaway repo
 $ omh doctor            # the only thing that verifies an adapter
 ```
 
-**TDD, always** — write the failing test, watch it fail, then implement. For a
-bug fix the regression test must go red *before* the fix lands, and a green
-suite is not evidence on its own: reintroduce the bug and confirm the guarding
-test turns red, or the test is decoration.
-
-One caveat worth internalising before you trust anything here: adapters assert
-facts about **external software**. Almost every bug this project has shipped
-lived at that boundary, and none was catchable in-process. If you change an
-adapter, run `omh doctor`.
+Two rules do most of the work, and [`CONTRIBUTING.md`](.github/CONTRIBUTING.md)
+has the rest with the invariant list. **[TDD,
+always](.github/CONTRIBUTING.md#tdd-always)** — a green suite is not evidence on
+its own, so a bug fix's test goes red before the fix lands. And **adapters
+assert facts about external software**: almost every bug this project has
+shipped lived at that boundary and none was catchable in-process, so if you
+change an adapter, run `omh doctor`.
 
 ## Documentation
 
-Full docs live in [`docs/`](docs/README.md).
+Full docs live in [`docs/`](docs/README.md), which indexes them.
 
-| | |
-|---|---|
-| [Getting started](docs/getting-started.md) | install, `omh init`, your first session |
-| [Commands](docs/commands.md) · [Configuration](docs/configuration.md) | the surface, and the catalogue, settings and their layers |
-| [Sessions](docs/sessions.md) · [Accounts](docs/accounts.md) · [Editors](docs/editors.md) | how the sandbox, logins and IDE attach work |
-| [Code graph](docs/code-graph.md) · [Troubleshooting](docs/troubleshooting.md) | the graph and its hooks; `omh doctor` |
-| [Design](docs/README.md#understanding-omh) | the thesis, every decision with its reasoning, and an honest record of what verification cost |
+Start with [Getting started](docs/getting-started.md) — install to first session.
+[Commands](docs/commands.md) is the whole surface and what each one prints;
+[Configuration](docs/configuration.md), [Sessions](docs/sessions.md),
+[Accounts](docs/accounts.md) and [Editors](docs/editors.md) cover the parts in
+depth.
 
-Read the design pages before changing architecture — most of them record
-something that was tried and cost something.
+Read the [design pages](docs/README.md#understanding-omh) before changing
+architecture — most record something that was tried and cost something, and
+[Risks](docs/design/risks.md) states plainly what is still weak.
 
 ## Licence
 
