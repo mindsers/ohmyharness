@@ -908,60 +908,13 @@ fn reuse_decision(
     plan: &container::Plan,
     session: &Session,
 ) -> Result<container::Reuse> {
-    // `|| true` so an absent socket directory is an empty listing rather than a
-    // failed exec — the failure this reads is the mount namespace one, and
-    // conflating the two would replace every container that has never run a
-    // harness.
     let probe = backend.exec_args(name, &image::probe_command(), false);
-    let listing = match image::container_probe(backend.program(), &probe) {
-        image::Probe::Listed(listing) => listing,
-        // Both mean *replace it*, and for opposite reasons: one cannot be
-        // entered ever again, the other is not there to enter. Neither has
-        // anything alive inside to lose, which is the only question that
-        // matters before an `rm -f`.
-        //
-        // `Gone` was folded into the refusal below at first. That turned the
-        // most ordinary race in the launch path — the sandbox's process
-        // exiting between *is it running* and *can it be entered* — from a
-        // thing that healed itself into a command the user had to run twice.
-        image::Probe::NotEnterable => return Ok(container::not_enterable()),
-        image::Probe::Gone => return Ok(container::not_enterable()),
-        // Refused rather than guessed, and this is the whole point of the
-        // type. `Restart` here means `rm -f` on a container that is running,
-        // and *the daemon blinked* is not a reason to destroy somebody's turn.
-        // Attaching on the guess is no better: if the container really is the
-        // broken one, every command in it fails with this same message.
-        //
-        // The user is the one who can tell the difference — the message says
-        // which failure it was, and `omh sNN rm` is there if it is the fatal
-        // kind and omh could not see it.
-        image::Probe::Unknown(why) => anyhow::bail!(
-            "omh could not tell whether {id}'s sandbox is still usable, so it will neither \
-             attach to it nor replace it: {why}\n  \
-             omh {id} claude        try again — a runtime that has come back will answer\n  \
-             omh {id} down          stop it, and the next launch builds a fresh one",
-            id = session.id
-        ),
-    };
-    // Refused for the same reason the probe is: `drift` reads an unreadable
-    // stamp as *nothing about it can be verified*, which is a `Restart`, which
-    // is `rm -f` on a container two lines above this one confirmed was alive
-    // and enterable.
-    let stamp = match image::container_stamp(backend.program(), name) {
-        image::Stamp::Read(stamp) => stamp,
-        image::Stamp::Unknown(why) => anyhow::bail!(
-            "omh could not read what {id}'s sandbox was built from, so it will neither \
-             attach to it nor replace it: {why}\n  \
-             omh {id} claude        try again — a runtime that has come back will answer\n  \
-             omh {id} down          stop it, and the next launch builds a fresh one",
-            id = session.id
-        ),
-    };
-    Ok(container::reuse(
-        &stamp,
+    container::decide(
+        &session.id,
+        image::container_probe(backend.program(), &probe),
+        || image::container_stamp(backend.program(), name),
         plan,
-        &persist::live(&session.id, &listing),
-    ))
+    )
 }
 
 /// Bring a session's sandbox up if it is not already. A session is a *running

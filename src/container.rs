@@ -65,6 +65,71 @@ pub enum Reuse {
 /// It also kills whatever is running inside, so a session with a live harness is
 /// reported rather than replaced. That is the same refusal-to-guess `idle`
 /// makes: the cost of being wrong is an agent stopped mid-task.
+/// What to do with a running container, given what the two probes said.
+///
+/// The decision, split from the two subprocesses that feed it, so that all of
+/// it is a table. Everything destructive in a launch is downstream of this
+/// function and none of it was reachable from a test: every launch case in
+/// `tests/cli.rs` passes `--dry-run`, which returns before any of this, and
+/// there is no fake runtime in the tree. Three reviewers asked for the same
+/// thing and they were right — the guard belongs on the decision, not on the
+/// two parsers below it.
+///
+/// The mutation this exists to kill: point `Probe::Unknown` at
+/// `not_enterable()` instead of the refusal, and every test in the tree stayed
+/// green while `docker rm -f` came back for a container omh could not read.
+///
+/// `stamped` is a closure because reading the stamp is a second subprocess and
+/// only one branch needs it — and because a test then supplies it without a
+/// runtime, which is the whole point.
+pub fn decide(
+    id: &str,
+    probed: crate::image::Probe,
+    stamped: impl FnOnce() -> crate::image::Stamp,
+    plan: &Plan,
+) -> Result<Reuse> {
+    use crate::image::{Probe, Stamp};
+    let listing = match probed {
+        Probe::Listed(listing) => listing,
+        // Both mean *replace it*, for opposite reasons: one cannot be entered
+        // ever again, the other is not there to enter. Neither has anything
+        // alive inside to lose, which is the only question that matters before
+        // an `rm -f`.
+        //
+        // `Gone` was folded into the refusal below at first. That turned the
+        // most ordinary race in the launch path — the sandbox's process
+        // exiting between *is it running* and *can it be entered* — from
+        // something that healed itself into a command the user ran twice.
+        Probe::NotEnterable | Probe::Gone => return Ok(not_enterable()),
+        // Refused rather than guessed, and this is the whole point of the
+        // type. `Restart` means `rm -f` on a container confirmed running
+        // earlier in the launch, and *the daemon blinked* is not a reason to
+        // destroy somebody's turn. Attaching on the guess is no better — if
+        // the container really is the broken kind, every command in it fails
+        // the same way — but the user can tell the two apart from the message.
+        Probe::Unknown(why) => anyhow::bail!(
+            "omh could not tell whether {id}'s sandbox is still usable, so it will neither \
+             attach to it nor replace it: {why}\n  \
+             omh {id} claude        try again — a runtime that has come back will answer\n  \
+             omh {id} down          stop it, and the next launch builds a fresh one"
+        ),
+    };
+    // Refused for the same reason: `drift` reads an unreadable stamp as
+    // *nothing about it can be verified*, which is a `Restart`, which is
+    // `rm -f` on the container the probe just confirmed was alive and
+    // enterable — with a reason omh invented.
+    let stamp = match stamped() {
+        Stamp::Read(stamp) => stamp,
+        Stamp::Unknown(why) => anyhow::bail!(
+            "omh could not read what {id}'s sandbox was built from, so it will neither \
+             attach to it nor replace it: {why}\n  \
+             omh {id} claude        try again — a runtime that has come back will answer\n  \
+             omh {id} down          stop it, and the next launch builds a fresh one"
+        ),
+    };
+    Ok(reuse(&stamp, plan, &crate::persist::live(id, &listing)))
+}
+
 /// A container that cannot be entered, or is not there to enter.
 ///
 /// Its own constructor rather than a `false` first argument to `reuse`, which
@@ -3466,6 +3531,120 @@ mod tests {
         let fx = fixture();
         let p = plan_for(&fx, "claude");
         assert!(matches!(reuse(&stamp_of(&p), &p, &[]), Reuse::Attach));
+    }
+
+    /// Every branch of the one decision that can destroy a running container.
+    ///
+    /// This is the guard AGENTS.md asks for and the PR that introduced the
+    /// type did not have. Everything destructive in a launch is downstream of
+    /// `decide`, and none of it was reachable: `tests/cli.rs` launches with
+    /// `--dry-run`, which returns first, and there is no fake runtime. So the
+    /// parsers were tested and the thing they decide was not — three reviewers
+    /// said so independently, and the mutation they each named (point
+    /// `Probe::Unknown` at `not_enterable()`) left the whole tree green.
+    #[test]
+    fn nothing_a_probe_could_not_read_ends_in_a_container_being_destroyed() {
+        use crate::image::{Probe, Stamp};
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        let matching = || Stamp::Read(stamp_of(&p));
+        let unread = || panic!("the stamp is not read when the probe already decided");
+
+        // The two that mean *replace it*, and the one thing they have in
+        // common: nothing alive inside to lose. Neither reads the stamp.
+        for (probed, what) in [
+            (Probe::NotEnterable, "a worktree replaced under it"),
+            (Probe::Gone, "and a container that is not there at all"),
+        ] {
+            assert!(
+                matches!(
+                    decide("s01", probed, unread, &p).unwrap(),
+                    Reuse::Restart(_)
+                ),
+                "{what} is replaced"
+            );
+        }
+
+        // The refusal. Both halves matter: it does not restart, and it says
+        // what the runtime said.
+        let refused = decide(
+            "s01",
+            Probe::Unknown("daemon not reachable".into()),
+            unread,
+            &p,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("daemon not reachable"),
+            "the runtime's own words reach the user: {refused}"
+        );
+        assert!(
+            refused.contains("omh s01 down"),
+            "and a way on that works without entering it: {refused}"
+        );
+
+        // A stamp omh cannot read is the same refusal, one call later — the
+        // collapse that sat one line below the first fix.
+        let refused = decide(
+            "s01",
+            Probe::Listed(String::new()),
+            || Stamp::Unknown("answered with something omh could not read".into()),
+            &p,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("could not read what s01's sandbox was built from"),
+            "an unreadable stamp is not a container that predates the check: {refused}"
+        );
+
+        // And the ordinary path still works, both ways.
+        assert!(
+            matches!(
+                decide("s01", Probe::Listed(String::new()), matching, &p).unwrap(),
+                Reuse::Attach
+            ),
+            "a container matching the plan is handed back"
+        );
+        let stale = plan_for(&fx, "opencode");
+        assert!(
+            matches!(
+                decide("s01", Probe::Listed(String::new()), matching, &stale).unwrap(),
+                Reuse::Restart(_)
+            ),
+            "and one built for another harness is replaced"
+        );
+    }
+
+    /// A live harness is never replaced, whatever else has drifted — and the
+    /// listing that proves it is live comes from the probe.
+    ///
+    /// `Reuse::Blocked`'s own doc says the cost of being wrong is an agent
+    /// stopped mid-task. That guarantee is only as good as the listing
+    /// reaching this decision intact, which is why it is asserted here rather
+    /// than only in `reuse`.
+    #[test]
+    fn a_live_harness_blocks_the_replacement_it_would_otherwise_get() {
+        use crate::image::{Probe, Stamp};
+        let fx = fixture();
+        let built_as = plan_for(&fx, "claude");
+        let asked_for = plan_for(&fx, "opencode");
+        let stamp = || Stamp::Read(stamp_of(&built_as));
+
+        let live = crate::persist::socket("s01", "claude");
+        let listing = format!("{}\n", live.file_name().unwrap().to_string_lossy());
+
+        let Reuse::Blocked { live, changed } =
+            decide("s01", Probe::Listed(listing), stamp, &asked_for).unwrap()
+        else {
+            panic!("a session with a live harness is reported, not replaced");
+        };
+        assert_eq!(live, vec!["claude".to_string()]);
+        assert!(
+            !changed.is_empty(),
+            "and it says what it would have changed"
+        );
     }
 
     /// The first bug: `omh s rm` deleted the worktree and left the container
