@@ -179,6 +179,13 @@ still answers, from the `rejected` table — *should omh stop the agent running
 git?* is a question someone rediscovers, and the answer changed rather than
 having been wrong the first time.
 
+`git-turn` is the cheapest entry in the set to justify, and the reason is worth
+naming: it is a `run`, so it injects nothing. Its cost is 80ms and ~20 KB of
+somebody's disk per turn, not bytes of the agent's context — which is why it
+could be argued for in a paragraph where `git-note` had to be argued for by the
+byte. A `run` and an `inject` at the same moment are not the same kind of
+expense.
+
 `git-note` is the one `SessionStart` hook whose cost is not paid per context
 rebuild. The only other one, `graph-orient`, injects on every resume and every
 compact; this one captures a file omh leaves after `omh sNN sync`, and the

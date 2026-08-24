@@ -198,6 +198,28 @@ remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/s
   name = "leaving the agent to find the `base moved to <sha>` commit itself"
   why  = "that commit is written either way and is the fuller answer — this only says to go and read it. An agent resuming a session has no reason to run `git log` before it starts working, and by the time it does it has already formed a plan around a tree that moved"
 
+[[entry]]
+name    = "git-turn"
+kind    = "hook"
+feature = "git-notice"
+since   = "2026.08"
+because = "an agent that never runs `git commit` leaves no trace of a whole session, and most of them never do — so `omh sNN log` has nothing to show for the work it can plainly see in the diff. This photographs the tree at the end of each turn onto a side ref, which gives that session a timeline to read and gives the agent a `reset --hard` target for every turn it took. It touches neither HEAD, the index nor the worktree: after it runs, the agent's own `git status` says exactly what it said before, which is why it is a snapshot rather than a commit"
+remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml, which turns off the git rules and the sync note with it"
+
+  [[entry.measured]]
+  what  = "per turn, and nothing when the tree has not changed"
+  value = "80ms, ~20 KB"
+  how   = "the hook's own plumbing over a 400-file worktree with one file changed, 50 turns timed end to end; an unchanged tree is compared against the previous snapshot's and writes no commit at all. A `run` hook injects nothing, so none of this is context"
+  on    = "2026-08-24"
+
+  [[entry.instead_of]]
+  name = "committing onto the session's own branch"
+  why  = "the agent's `git status` would go clean at the end of every turn, so its next `git commit` would find nothing to commit — omh would be quietly doing the agent's work for it and breaking the workflow it is trying to record. A side ref leaves HEAD, the index and the worktree exactly as the agent left them"
+
+  [[entry.instead_of]]
+  name = "a ref under `refs/omh/*` matched by a glob"
+  why  = "the gitdir is a read-write mount, so every ref omh teaches its own guards to skip is a place an agent can put commits it would rather they did not see. One fixed name bounds that to a single ref, and `omh sNN log --turns` prints what is in it — the hiding place is also the display case"
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Considered and rejected.
 #

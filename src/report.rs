@@ -250,6 +250,16 @@ pub struct Log {
     /// not tell — which is not the same as zero and does not print as it.
     pub behind: Option<usize>,
     pub base: String,
+    /// omh's own snapshots of the tree, one per turn — `None` unless asked
+    /// for.
+    ///
+    /// Its own list, never merged into `read.commits`. Two reasons, both
+    /// load-bearing: `diff <n>` and `--keep 1,3-4` index that list by number,
+    /// so a snapshot in it would become selectable and then replayable; and
+    /// the "yours from here" divider is an index into rendered rows, so an
+    /// interleaved list would label rows as already on the branch that are
+    /// not — the exact failure `cleanly_split` exists to prevent.
+    pub turns: Option<Vec<crate::shadow::Checkpoint>>,
 }
 
 impl Log {
@@ -301,8 +311,59 @@ fn ago(seconds: u64) -> String {
     }
 }
 
+impl Log {
+    /// The snapshot view: omh's own commits, on their own, or a sentence
+    /// saying there are none.
+    ///
+    /// A whole separate rendering rather than an extra column, because the two
+    /// lists answer different questions. The agent's commits are what a
+    /// harvest will take; these are what the tree looked like when each turn
+    /// ended, and their numbers name nothing a command will accept.
+    fn turns_human(&self, p: &out::Palette, turns: &[crate::shadow::Checkpoint]) -> String {
+        let mut s = out::heading(
+            p,
+            &format!(
+                "{} · {} turn{}",
+                self.id,
+                turns.len(),
+                if turns.len() == 1 { "" } else { "s" }
+            ),
+        );
+        s.push('\n');
+        if turns.is_empty() {
+            s.push_str(&out::nothing(
+                p,
+                "no turns recorded — the sandbox has not finished one with anything changed",
+            ));
+            return s;
+        }
+        let width = turns.len().to_string().len();
+        let mut table = Table::new();
+        for c in turns.iter().rev() {
+            let (files, churn) = match &c.touched {
+                None => ("merge".to_string(), String::new()),
+                Some(t) => (
+                    format!("{} file{}", t.files, if t.files == 1 { "" } else { "s" }),
+                    churn(t),
+                ),
+            };
+            table = table.row(vec![
+                Cell::styled(format!("{:>width$}", c.number), out::NAME),
+                Cell::styled(c.age.map_or("?".into(), ago), out::DIM),
+                Cell::styled(files, out::DIM),
+                Cell::styled(churn, out::DIM),
+            ]);
+        }
+        s.push_str(&table.render(p));
+        s
+    }
+}
+
 impl Report for Log {
     fn human(&self, p: &out::Palette) -> String {
+        if let Some(turns) = &self.turns {
+            return self.turns_human(p, turns);
+        }
         let total = self.read.commits.len();
         let pending = self.pending();
         let mut head = format!(
@@ -404,9 +465,27 @@ impl Report for Log {
     }
 
     fn json(&self) -> serde_json::Value {
+        // The turns ride as their own key rather than replacing `checkpoints`,
+        // so a script asking for one shape never silently gets the other.
         json!({
             "session": self.id,
             "base": self.base,
+            "turns": self.turns.as_ref().map(|turns| {
+                turns
+                    .iter()
+                    .rev()
+                    .map(|c| {
+                        json!({
+                            "number": c.number,
+                            "id": c.id,
+                            "age_seconds": c.age,
+                            "files": c.touched.as_ref().map(|t| t.files),
+                            "added": c.touched.as_ref().map(|t| t.added),
+                            "removed": c.touched.as_ref().map(|t| t.removed),
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }),
             "behind": self.behind,
             "uncommitted": self.read.uncommitted,
             "unreachable": self.read.unreachable,
@@ -431,6 +510,11 @@ impl Report for Log {
     }
 
     fn asides(&self) -> out::Asides {
+        // The snapshot view offers nothing to run: its numbers name nothing a
+        // command takes, which is the point of keeping the two lists apart.
+        if self.turns.is_some() {
+            return out::Asides::default();
+        }
         let mut asides = out::Asides::default();
         if self.read.unreachable > 0 {
             asides = asides.warn(format!(
@@ -2592,6 +2676,76 @@ mod tests {
         assert_eq!(synced(vec![], 2).json()["noted"], serde_json::json!(true));
     }
 
+    /// `--turns` is its own view, and shares nothing with the numbered list.
+    ///
+    /// The separation is the whole design and it fails silently if it slips.
+    /// `diff <n>` and `--keep 1,3-4` index `read.commits` by number, so a
+    /// snapshot appended there becomes selectable and then replayable onto the
+    /// user's branch — omh's own commit, replanted as the agent's work. And
+    /// the divider is `lines.insert(pending, …)` over rendered rows, so an
+    /// interleaved list labels rows as already on the branch that are not.
+    ///
+    /// Neither failure shows up as an error. Both look like a log that reads a
+    /// little oddly.
+    #[test]
+    fn the_turn_view_never_borrows_the_numbers_that_land_work() {
+        let snapshot = |number: usize| crate::shadow::Checkpoint {
+            number,
+            id: format!("turn{number}"),
+            subject: "turn end".into(),
+            age: Some(60),
+            touched: Some(crate::shadow::Touched {
+                files: 2,
+                added: 8,
+                removed: 1,
+                uncounted: 0,
+            }),
+            landed: false,
+        };
+        let mut log = a_log();
+        let plain = out::Palette::plain();
+        let commits = log.read.commits.clone();
+
+        log.turns = Some(vec![snapshot(1), snapshot(2)]);
+        let printed = log.human(&plain);
+
+        assert!(printed.contains("2 turns"), "the turn count: {printed}");
+        for c in &commits {
+            assert!(
+                !printed.contains(&c.subject),
+                "and not one of the agent's own subjects: {printed}"
+            );
+        }
+        assert!(
+            !printed.contains("yours from here"),
+            "no divider, because nothing here is going anywhere: {printed}"
+        );
+        assert!(
+            !printed.contains("not yours yet"),
+            "and no pending count, which counts a different list: {printed}"
+        );
+        assert!(
+            log.asides().hints.is_empty(),
+            "nothing to offer: these numbers name nothing a command takes: {:?}",
+            log.asides()
+        );
+
+        // The two lists reach JSON under different keys, so a script asking
+        // for one can never be handed the other.
+        let doc = log.json();
+        assert_eq!(doc["turns"].as_array().map(Vec::len), Some(2));
+        assert_eq!(
+            doc["checkpoints"].as_array().map(Vec::len),
+            Some(commits.len()),
+            "and the agent's own list is untouched: {doc}"
+        );
+
+        // Without the flag nothing about turns appears at all.
+        log.turns = None;
+        assert_eq!(log.json()["turns"], serde_json::Value::Null);
+        assert!(log.human(&plain).contains("not yours yet"));
+    }
+
     /// Three sessions and two files are one sentence a person can read.
     ///
     /// Both separators are the identity with two sessions and one path, which
@@ -2727,6 +2881,7 @@ mod tests {
 
     fn a_log() -> Log {
         Log {
+            turns: None,
             id: "s01".into(),
             read: crate::shadow::Checkpoints {
                 commits: vec![

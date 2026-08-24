@@ -642,6 +642,77 @@ impl Sandbox {
     }
 }
 
+/// The shipped hook body, with the guest's paths swapped for a fixture's.
+///
+/// Written here rather than imported: this file drives the binary and cannot
+/// reach `shadow::turn_hook_command`. The unit test in `shadow.rs` runs the
+/// real function; this only gets a fixture a snapshot to look at.
+fn omh_turn_hook_body(gitdir: &std::path::Path, worktree: &std::path::Path) -> String {
+    let g = format!(
+        "git -C {w} --git-dir={g} --work-tree={w}",
+        w = worktree.display(),
+        g = gitdir.display()
+    );
+    format!(
+        "{{ i={i}; GIT_INDEX_FILE=$i {g} read-tree HEAD && GIT_INDEX_FILE=$i {g} add -A \
+         && t=$(GIT_INDEX_FILE=$i {g} write-tree) \
+         && p=$({g} rev-parse -q --verify refs/omh/turn || true) \
+         && if [ -n \"$p\" ] && [ \"$({g} rev-parse \"$p^{{tree}}\")\" = \"$t\" ]; then :; \
+         else c=$({g} commit-tree \"$t\" ${{p:+-p}} ${{p:+\"$p\"}} -m \"turn end\") \
+         && {g} update-ref refs/omh/turn \"$c\"; fi; }} >/dev/null 2>&1 || true",
+        i = gitdir.join("omh-turn.index").display()
+    )
+}
+
+/// `omh sNN log --turns` reads omh's own snapshots, and the default view does
+/// not show them.
+///
+/// End to end because the separation is the design: one parser, two views, two
+/// commands. The unit tests decide what each says; this decides that asking
+/// for one never hands you the other — and that a snapshot sitting in the
+/// sandbox does not make the ordinary `log` start warning about work on no
+/// branch, which is what all three ref-walking guards would have done.
+#[test]
+fn log_turns_reads_the_snapshots_and_the_default_view_does_not() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let gitdir = sb
+        .home
+        .join(".omh/shadow")
+        .join(sb.repo.file_name().unwrap())
+        .join("s01.git");
+
+    std::fs::write(worktree.join("in-flight.rs"), "fn later() {}\n").unwrap();
+    let ran = Command::new("sh")
+        .arg("-c")
+        .arg(omh_turn_hook_body(&gitdir, &worktree))
+        .output()
+        .expect("sh must be installed");
+    assert!(ran.status.success(), "the hook never fails a turn: {ran:?}");
+
+    let turns = sb.omh(&["s01", "log", "--turns"]);
+    let printed = String::from_utf8_lossy(&turns.stdout);
+    assert!(
+        printed.contains("1 turn"),
+        "the snapshot is there to read: {printed}"
+    );
+
+    // The default view is untouched, and — the part that matters — nothing
+    // warns. All three guards would have called this snapshot stranded work.
+    let plain = sb.omh(&["s01", "log"]);
+    let out = String::from_utf8_lossy(&plain.stdout);
+    let err = String::from_utf8_lossy(&plain.stderr);
+    assert!(
+        !out.contains("turn end"),
+        "omh's own snapshot is not in the agent's list: {out}"
+    );
+    assert!(
+        !err.contains("on no branch") && !out.contains("on no branch"),
+        "and nothing calls it work the agent stranded: {out}{err}"
+    );
+}
+
 /// Asking to see the agent's work before the agent has run is an ordinary
 /// thing to do, and the answer is *nothing yet* rather than a failure.
 ///

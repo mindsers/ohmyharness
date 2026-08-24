@@ -252,7 +252,8 @@ Everything omh knows about: harnesses, editors, sessions and their state.
 
 ```
 omh s ls              sessions, their branches and state
-omh s log             what the agent has committed inside the sandbox
+omh s log [--turns]   what the agent committed inside the sandbox, or what omh
+                       photographed at the end of each turn
 omh s diff [n] [-p]   what changed — the session, or one checkpoint
 omh s commit [-m …]   commit that work onto the session branch
 omh s commit --keep [n,m-o] [--edit]   keep the agent's own commits
@@ -434,6 +435,42 @@ stderr and does not offer a harvest it knows would be refused.
 
 A session whose sandbox has never run says so and exits 0 — asking to see the
 agent's work before the agent has run is an ordinary thing to do.
+
+### `omh sNN log --turns` — what the agent did, when it never committed
+
+Most agents never run `git commit`, so `omh s01 log` has nothing to show for a
+session you can plainly see changed things. omh photographs the tree at the end
+of every turn, and this reads those:
+
+```console
+$ omh s01 log --turns
+s01 · 3 turns
+
+  3  4m   7 files  +220 −61
+  2  35m  1 file   +9
+  1  1h   3 files  +48 −12
+```
+
+**These are omh's snapshots, not the agent's commits, and the two lists never
+mix.** The numbers here name nothing — `diff 2` and `--keep 1,3-4` take the
+numbers from `omh s01 log`, which is a different list. That is deliberate: a
+snapshot is a photograph of a tree, not work anybody chose to keep, and
+replanting one onto your branch as the agent's work would be a lie.
+
+What they are good for is the other direction. Inside the sandbox the agent can
+`git reset --hard refs/omh/turn~2` to get back to how things stood two turns
+ago — which is the one moment these earn their keep, when a turn threw away
+something worth having.
+
+They cost nothing in the agent's context: the hook that writes them injects no
+text. It skips a turn that changed nothing, so an idle session does not
+accumulate identical snapshots, and it touches neither `HEAD`, the index nor
+the worktree — after it runs, the agent's own `git status` says exactly what it
+said before.
+
+`omh sNN rm` mentions them when it removes a session, and never refuses over
+them: there is one for nearly every session that ever ran, and a refusal that
+fires almost always is one people answer with `--force` unread.
 
 ### `omh sNN diff` — the shape, the patch, or one checkpoint
 

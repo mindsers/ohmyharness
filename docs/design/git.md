@@ -520,6 +520,48 @@ repository at all rather than just rewriting files.
   one-shot, because `session-start` re-fires on resume and compact — a fact
   `base.rs` already records.
 
+### Per-turn snapshots — a timeline for an agent that never commits
+
+**Landed (#66).** A `turn-end` hook photographs the tree onto `refs/omh/turn`:
+throwaway index, `write-tree`, `commit-tree`, `update-ref`. Never the branch,
+so `--keep` still curates the agent's own commits and nothing else, and never
+`HEAD`, the index or the worktree — an agent whose working tree went clean at
+the end of every turn would find nothing to commit and would rightly conclude
+omh had eaten its work.
+
+It costs nothing in context: a `run` hook injects no text. Measured 2026-08-24
+it costs ~80ms and ~20 KB per turn on a 400-file worktree, and nothing at all
+when the tree has not changed — the new tree is compared against the previous
+snapshot's and an unchanged one writes no commit.
+
+**Three guards walk refs, and they did not all want the same fix.** A snapshot
+is by construction not an ancestor of HEAD, which is exactly the shape all
+three hunt:
+
+| | asks | what it does with a snapshot |
+|---|---|---|
+| `preflight` | would a harvest drop commits? | excluded — a snapshot is never replayed, so it is not one |
+| `checkpoints().unreachable` | the same, for `log` | excluded, for the same reason |
+| `unkept` → `at_stake` → `rm` | what would removing this destroy? | **counted**, because it is a real answer — but named rather than refused over |
+
+Left alone, each was permanently wrong in the direction that blocks: every
+`--keep` refusing and telling the user to delete omh's own commits, a warning
+on every `log`, and `rm` refusing for any session that ever had one dirty turn.
+That last one is why `rm` names them instead: a guard that fires almost always
+is answered with `--force` unread, and it still has the agent's own commits to
+protect.
+
+**What the exclusion costs, stated rather than discovered.** The gitdir is a
+read-write mount, so the agent can write `refs/omh/*` itself. Before this,
+doing so only made `preflight` noisier; an exclusion turns it into somewhere
+quiet. One fixed ref name bounds that to a single place, and `omh sNN log
+--turns` prints what is in it — the hiding place is also the display case.
+`--exclude` is a `rev-list` option and must sit after the subcommand and before
+the `--all` it applies to; it does not reach `--reflog`, which is safe here
+only because git writes no reflog for a ref outside `refs/heads`,
+`refs/remotes`, `refs/notes` and `HEAD`. Measured, not assumed — it is the fact
+the whole design rests on.
+
 ## Reading the sandbox from the host is a new trust boundary
 
 `log` and `diff` are the **first host-side reads of an agent-writable gitdir**.
@@ -715,11 +757,7 @@ reason.
 
 ## Not decided
 
-- **Per-turn checkpoints.** A `turn-end` hook committing the tree onto a side
-  ref — never the branch, so curation stays clean — would give `log` a timeline
-  even for agents that never commit, and give the agent a `reset --hard` target
-  for every turn. It costs a base-set entry and a commit per turn, so it is a
-  [base set](base-set.md) decision rather than a git one.
+- ~~**Per-turn checkpoints.**~~ Landed (#66) — see the section above.
 - **Naming sessions.** `omh s01 push <name>` refuses to invent a branch name,
   correctly. A session that carried a name from the start would answer that once
   instead of at the end — but `omh claude` asking a question at launch would
