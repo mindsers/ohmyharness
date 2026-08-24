@@ -648,6 +648,31 @@ pub fn hooks() -> Vec<Hook> {
             },
         },
         Hook {
+            name: "git-turn",
+            // ~80ms and ~1.3 KB per turn on a 400-file worktree with one file
+            // changed; ~50ms and no disk when it is unchanged — measured
+            // 2026-08-24. The sibling above it costs 0.14s, so this
+            // is in the range this set already accepts.
+            //
+            // What it buys is the thing `omh sNN log` cannot show today: an
+            // agent that never runs `git commit` leaves no trace at all, and
+            // most of them never do. This gives that session a timeline, and
+            // gives it a tree to restore from for every turn it took —
+            // `git restore --source=refs/omh/turn~N`, never a `reset --hard`,
+            // which would move the branch onto omh's own commits.
+            //
+            // A `Run`, so it injects nothing: the cost is time and disk, not
+            // context. That distinction is the reason this is affordable and
+            // `git-note` had to be argued for by the byte.
+            hook: Canonical {
+                on: Event::TurnEnd,
+                stack: None,
+                tools: vec![],
+                when: Some(crate::shadow::turn_hook_when()),
+                action: Action::Run(crate::shadow::turn_hook_for_the_sandbox()),
+            },
+        },
+        Hook {
             name: "git-note",
             // What the agent cannot work out for itself: that the tree changed
             // while it was stopped. Everything else about a sync is already

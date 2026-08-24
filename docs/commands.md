@@ -252,7 +252,8 @@ Everything omh knows about: harnesses, editors, sessions and their state.
 
 ```
 omh s ls              sessions, their branches and state
-omh s log             what the agent has committed inside the sandbox
+omh s log [--turns]   what the agent committed inside the sandbox, or what omh
+                       photographed at the end of each turn
 omh s diff [n] [-p]   what changed — the session, or one checkpoint
 omh s commit [-m …]   commit that work onto the session branch
 omh s commit --keep [n,m-o] [--edit]   keep the agent's own commits
@@ -434,6 +435,61 @@ stderr and does not offer a harvest it knows would be refused.
 
 A session whose sandbox has never run says so and exits 0 — asking to see the
 agent's work before the agent has run is an ordinary thing to do.
+
+### `omh sNN log --turns` — what the agent did, when it never committed
+
+Most agents never run `git commit`, so `omh s01 log` has nothing to show for a
+session you can plainly see changed things. omh photographs the tree at the end
+of every turn, and this reads those:
+
+```console
+$ omh s01 log --turns
+s01 · 3 turns
+
+  ~0  4m   turn end  7 files  +220 −61
+  ~1  35m  turn end  1 file   +9
+  ~2  1h   turn end  3 files  +48 −12
+```
+
+**These are omh's snapshots, not the agent's commits, and the two lists never
+mix.** There are no numbers here for `diff` or `--keep` to take — a row is
+identified by the ref that reaches it, `refs/omh/turn~0` being the newest.
+That is deliberate, and it is the second attempt: numbering them `3 / 2 / 1`
+meant `omh s01 commit --keep 2` quietly replanted the *agent's* checkpoint 2,
+a different list, with no error. A snapshot is a photograph of a tree, not
+work anybody chose to keep.
+
+The `turn end` column is omh's own subject on every genuine snapshot, so
+anything else appearing on that ref is visible as the row that reads
+differently.
+
+What they are good for is the other direction. Inside the sandbox, to get the
+files back to how they stood two snapshots ago:
+
+```console
+$ git restore --source=refs/omh/turn~2 -- .
+```
+
+**Not `git reset --hard refs/omh/turn~2`.** The snapshot chain has a root of
+its own — it is not built on the session's history — so resetting onto it moves
+the branch into omh's commits, and `omh s01 log` then numbers *those* as the
+agent's checkpoints. `omh s01 commit --keep` would replant them onto your
+branch as the agent's work, which is the one thing this separation exists to
+prevent. `restore` puts the files back and leaves the branch alone, which is
+what was wanted anyway.
+
+`~2` counts snapshots, not turns: a turn that changed nothing does not take
+one, so on a quiet session `~2` may be further back than two turns.
+
+They cost nothing in the agent's context: the hook that writes them injects no
+text. A turn that changed nothing writes no snapshot — though it still costs
+the time to find that out — and the hook touches neither `HEAD`, the index nor
+the worktree, so after it runs the agent's own `git status` says exactly what
+it said before.
+
+`omh sNN rm` mentions them when it removes a session, and never refuses over
+them: there is one for nearly every session that ever ran, and a refusal that
+fires almost always is one people answer with `--force` unread.
 
 ### `omh sNN diff` — the shape, the patch, or one checkpoint
 

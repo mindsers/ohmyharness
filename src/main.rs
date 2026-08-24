@@ -439,7 +439,15 @@ enum SessionsCmd {
     ///
     /// Numbered, so nothing here asks for an object id: the numbers are what
     /// `diff` and `--keep` will take.
-    Log,
+    Log {
+        /// omh's own snapshot of the tree at the end of each turn, instead of
+        /// the agent's commits.
+        ///
+        /// A separate list on purpose: these are never replanted by `--keep`,
+        /// so their numbers are not the ones `diff` and `--keep` take.
+        #[arg(long)]
+        turns: bool,
+    },
     /// What a session changed, against its base branch.
     Diff {
         /// One checkpoint, by its number in `omh sNN log`. Without one, the
@@ -722,7 +730,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             SessionsCmd::Sync { base, down } => {
                 sync(&cwd, cli.session.as_deref(), base.as_deref(), *down, ctx)
             }
-            SessionsCmd::Log => log_cmd(&cwd, cli.session.as_deref(), ctx),
+            SessionsCmd::Log { turns } => log_cmd(&cwd, cli.session.as_deref(), *turns, ctx),
             SessionsCmd::Diff {
                 checkpoint,
                 base,
@@ -5328,10 +5336,10 @@ fn stop_before_syncing(paths: &Paths, session: &Session, down: bool, ctx: &out::
 ///
 /// `log_cmd` rather than `log`, because `log` is what a reader of this file
 /// expects to be a logging helper.
-fn log_cmd(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()> {
+fn log_cmd(cwd: &std::path::Path, id: Option<&str>, turns: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
-    ctx.say(&log_report(&paths, &session, ctx)?);
+    ctx.say(&log_report(&paths, &session, turns, ctx)?);
     Ok(())
 }
 
@@ -5345,7 +5353,12 @@ fn log_cmd(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()
 /// the value by hand). `the_resolution_is_read_and_written_in_the_committed_
 /// layer` in this file already argues the general case: a correct reader called
 /// with the wrong argument is the same bug with a passing guard in front of it.
-fn log_report(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<report::Log> {
+fn log_report(
+    paths: &Paths,
+    session: &Session,
+    turns: bool,
+    ctx: &out::Ctx,
+) -> Result<report::Log> {
     let shadow = shadow::Shadow::new(&paths.shadows(), &session.id);
 
     // Three states, and only one of them is *nothing to show*.
@@ -5406,11 +5419,19 @@ fn log_report(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<report
         }
     };
 
+    // Read only when asked. It is a second `git log` over a ref most sessions
+    // do not have, and `omh sNN log` is a command people run often.
+    let turns = match turns {
+        false => None,
+        true => Some(shadow.turn_log(&session.worktree)?),
+    };
+
     Ok(report::Log {
         id: session.id.clone(),
         read,
         behind,
         base,
+        turns,
     })
 }
 
@@ -5730,10 +5751,95 @@ fn must_know(running: image::Running, what: &str, doing: &str) -> Result<bool> {
 /// down, and nothing that needs one can be reached by a test here. What is
 /// left in `rm` is the single call — its absence is a line missing from a
 /// diff rather than a behaviour hiding behind a runtime.
-fn may_remove(paths: &Paths, session: &Session, force: bool) -> Result<()> {
+/// What omh knows about a session's turn snapshots when it is asked to remove
+/// it.
+///
+/// Three answers rather than a count, for the reason `AtStake` next door has
+/// three: *could not tell* is not *none*, and this is the last thing in front
+/// of an irreversible delete. The first version of this was a `usize` reached
+/// through `.unwrap_or(0)`, so an unreadable sandbox removed itself in
+/// silence — no count, no warning, nothing to act on.
+#[derive(Debug)]
+enum Snapshots {
+    /// No `refs/omh/turn` here — this session has never finished a turn with
+    /// anything changed.
+    None,
+    Kept(usize),
+    /// omh asked and could not tell, and why.
+    Unreadable(String),
+}
+
+fn may_remove(
+    paths: &Paths,
+    session: &Session,
+    snapshots: Snapshots,
+    force: bool,
+) -> Result<Option<String>> {
     let branch = format!("omh/{}", session.id);
+    // Named, never the reason. A snapshot is a tree omh photographed at the
+    // end of a turn, not work the agent chose to keep — and there is one for
+    // nearly every session that ever ran, so refusing over them would make
+    // this guard fire almost always. A guard that fires almost always is one
+    // people learn to answer with `--force` without reading, which is exactly
+    // how it would stop protecting the commits it was built for.
+    //
+    // They are still worth a sentence, because they go too, and because the
+    // one time they matter is the one time the agent threw the tree away.
+    // Part of the sentence, not a line of its own: every line below the first
+    // is a command the user can paste, and there is a test that says so.
+    let also = match &snapshots {
+        Snapshots::None => String::new(),
+        Snapshots::Kept(n) => format!(", and {n} turn snapshot{} omh took", plural(*n)),
+        // Said as its own clause rather than folded into a number, because a
+        // count omh could not take is the one answer a user might want to go
+        // and look into before deleting.
+        Snapshots::Unreadable(why) => {
+            format!(", and omh could not tell how many turn snapshots go with it ({why})")
+        }
+    };
+    let snapshots = match snapshots {
+        Snapshots::Kept(n) => n,
+        // An unreadable count is *something* at stake, so the line that reads
+        // them is still offered — it is the command that would say what.
+        Snapshots::Unreadable(_) => usize::MAX,
+        Snapshots::None => 0,
+    };
+    // …and the way to read them is a command, so it goes where commands go.
+    // Padded to the column the other lines use — the test that reads these
+    // only checks each line is pasteable, so a misaligned one stays green.
+    let reading = match snapshots {
+        0 => String::new(),
+        _ => format!(
+            "\n  omh {} log --turns         read the snapshots",
+            session.id
+        ),
+    };
     let (what, whether) = match at_stake(paths, session) {
-        AtStake::Nothing => return Ok(()),
+        // Nothing the branch lacks. The snapshots still go, so they are still
+        // said — returned rather than printed, because this function's whole
+        // value is being a decision a table test can reach.
+        // Nothing of the agent's own at stake. The snapshots still go, so they
+        // are still said — returned rather than printed, because this
+        // function's whole value is being a decision a table test can reach.
+        AtStake::Nothing => {
+            return Ok(non_empty(match snapshots {
+                0 => String::new(),
+                usize::MAX => format!(
+                    "omh could not tell how many turn snapshots go with {id}{also_why}. \
+                     `omh {id} log --turns` would say",
+                    id = session.id,
+                    also_why = also
+                        .split_once('(')
+                        .map(|(_, w)| format!(" — {}", w.trim_end_matches(')')))
+                        .unwrap_or_default()
+                ),
+                n => format!(
+                    "{n} turn snapshot{} omh took go with {id}. `omh {id} log --turns` reads them",
+                    plural(n),
+                    id = session.id
+                ),
+            }))
+        }
         AtStake::Work(what) => (what, "that no branch has"),
         // Could not tell, which is not the same as nothing to lose. A user is
         // asked once and `--force` is right there; the alternative is deleting
@@ -5742,14 +5848,20 @@ fn may_remove(paths: &Paths, session: &Session, force: bool) -> Result<()> {
     };
     anyhow::ensure!(
         force,
-        "{id} has {what} {whether}. Removing it deletes the only copy:\n  \
+        "{id} has {what} {whether}{also}. Removing it deletes the only copy:\n  \
          omh {id} log                 read what is there\n  \
          omh {id} commit --keep       put it on {branch}\n  \
-         omh {id} commit -m \"…\"       or take the files as they stand\n  \
+         omh {id} commit -m \"…\"       or take the files as they stand{reading}\n  \
          omh {id} rm --force          remove it anyway",
         id = session.id
     );
-    Ok(())
+    Ok(None)
+}
+
+/// `None` for the empty string, so "nothing to add" is a state rather than a
+/// blank line somebody has to remember not to print.
+fn non_empty(s: String) -> Option<String> {
+    (!s.is_empty()).then_some(s)
 }
 
 /// What a removal would destroy that exists nowhere else.
@@ -6108,7 +6220,23 @@ fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -> Result<()
     // deletes it. After a `reset --hard` in the sandbox those were the only
     // copies there ever were. omh could not ask this question until `log`
     // learned to count them.
-    may_remove(&paths, &session, force)?;
+    // Not `.unwrap_or(0)`, and not `?` either. A count omh could not take is
+    // not a count of none — but it is also not a reason `--force` cannot get
+    // past, which is what `?` made it: an orphaned directory that is not a
+    // repository at all could no longer be cleaned up by the one command that
+    // exists to clean it up.
+    //
+    // So it joins `AtStake::Unknown`, which has had exactly this shape and
+    // exactly this escape since #58.
+    let snapshots =
+        match shadow::Shadow::new(&paths.shadows(), &session.id).turns(&session.worktree) {
+            Ok(None) => Snapshots::None,
+            Ok(Some(n)) => Snapshots::Kept(n),
+            Err(e) => Snapshots::Unreadable(format!("{e:#}")),
+        };
+    if let Some(note) = may_remove(&paths, &session, snapshots, force)? {
+        ctx.warn(note.trim());
+    }
 
     // Drop the graph with the code it describes, while the container is still
     // around to do it. Otherwise the index outlives the worktree forever.
@@ -6830,7 +6958,7 @@ mod tests {
             (&sessions[0], "Only in s01", "Only in s02"),
             (&sessions[1], "Only in s02", "Only in s01"),
         ] {
-            let log = log_report(&paths, session, &out::Ctx::plain()).unwrap();
+            let log = log_report(&paths, session, false, &out::Ctx::plain()).unwrap();
             let subjects: Vec<&str> = log
                 .read
                 .commits
@@ -7005,6 +7133,84 @@ mod tests {
         );
     }
 
+    /// Turn snapshots are named when a session is removed, and are never the
+    /// reason it is refused.
+    ///
+    /// The judgement this encodes, since it is not the only defensible one. A
+    /// snapshot is a tree omh photographed at the end of a turn, and there is
+    /// one for nearly every session that ever ran — so refusing over them
+    /// would make this guard fire almost always, and a guard that fires almost
+    /// always is answered with `--force` unread. That is how it would stop
+    /// protecting the agent's own commits, which is what it was built for.
+    ///
+    /// They are still said, because they do go, and because the one time they
+    /// matter is the one time the agent threw the tree away.
+    #[test]
+    fn a_removal_names_the_turn_snapshots_it_takes_without_refusing_over_them() {
+        let (paths, session, shadow) = a_session_with_two_checkpoints();
+
+        // Harvested first, so nothing of the agent's own is at stake — which
+        // is the branch this decision is really about, and the one `force:
+        // true` would have skipped straight past.
+        shadow
+            .harvest(
+                &paths.repo,
+                &session.worktree,
+                "omh/s01",
+                &[],
+                shadow::Keep::All,
+            )
+            .unwrap();
+
+        let note = may_remove(&paths, &session, Snapshots::Kept(12), false)
+            .expect("snapshots alone never stop a removal")
+            .expect("but they are said");
+        assert!(
+            note.contains("12 turn snapshots") && note.contains("log --turns"),
+            "named, with the way to read them: {note}"
+        );
+
+        assert_eq!(
+            may_remove(&paths, &session, Snapshots::None, false).unwrap(),
+            None,
+            "and a session that has none says nothing about them"
+        );
+
+        // With the agent's own commits at stake it still refuses — that is
+        // the guard this must not have weakened — and the snapshots ride along
+        // in the same message rather than displacing it.
+        let (paths, unkept, _shadow) = a_session_with_two_checkpoints();
+        let refused = may_remove(&paths, &unkept, Snapshots::Kept(3), false)
+            .expect_err("unharvested commits still refuse")
+            .to_string();
+        assert!(
+            refused.contains("commit --keep"),
+            "the refusal is unchanged: {refused}"
+        );
+        assert!(
+            refused.contains("and 3 turn snapshots"),
+            "and says what else goes: {refused}"
+        );
+        // The rule the rest of this message keeps: everything under the first
+        // line is a command, so the snapshots are mentioned in the sentence
+        // and the way to read them is offered as one.
+        assert!(
+            refused.contains("omh s01 log --turns"),
+            "with a command for it: {refused}"
+        );
+        for line in refused
+            .lines()
+            .skip(1)
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        {
+            assert!(
+                line.starts_with("omh s01 "),
+                "a line the user cannot paste: {line}"
+            );
+        }
+    }
+
     /// A sync that cannot leave its note is still a sync, and says which.
     ///
     /// The design decision the call site argues for, asserted rather than
@@ -7168,8 +7374,8 @@ mod tests {
     fn a_session_holding_unkept_work_is_not_removed_without_being_asked() {
         let (paths, session, shadow) = a_session_with_two_checkpoints();
 
-        let err =
-            may_remove(&paths, &session, false).expect_err("two commits are on no branch anywhere");
+        let err = may_remove(&paths, &session, Snapshots::None, false)
+            .expect_err("two commits are on no branch anywhere");
         let said = err.to_string();
         assert!(
             said.contains("s01 has 2 commits that no branch has"),
@@ -7198,7 +7404,7 @@ mod tests {
             "and names the branch it would go on: {said}"
         );
         assert!(
-            may_remove(&paths, &session, true).is_ok(),
+            may_remove(&paths, &session, Snapshots::None, true).is_ok(),
             "`--force` means it"
         );
 
@@ -7215,7 +7421,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            may_remove(&paths, &session, false).is_ok(),
+            may_remove(&paths, &session, Snapshots::None, false).is_ok(),
             "a session whose work is all on the branch removes quietly"
         );
     }
@@ -7258,7 +7464,7 @@ mod tests {
                 .is_empty(),
             "the numbered list cannot see them — that is why this guard reads wider"
         );
-        let err = may_remove(&paths, &session, false)
+        let err = may_remove(&paths, &session, Snapshots::None, false)
             .expect_err("two commits are still in there and on no branch");
         assert!(err.to_string().contains("2 commits"), "{err}");
 
@@ -7268,7 +7474,7 @@ mod tests {
         // cannot place, which is how work goes missing from a number someone
         // is about to act on.
         std::fs::write(&shadow.landed_record, "0".repeat(40)).unwrap();
-        let err = may_remove(&paths, &session, false)
+        let err = may_remove(&paths, &session, Snapshots::None, false)
             .expect_err("a record naming nothing this repository has is not an answer");
         assert!(
             err.to_string().contains("cannot say what that removes"),
@@ -7282,7 +7488,7 @@ mod tests {
         sandbox_git(&["add", "-A", "."]);
         sandbox_git(&["commit", "-q", "--no-verify", "-m", "a spike"]);
         sandbox_git(&["checkout", "-q", "-"]);
-        let err = may_remove(&paths, &session, false).expect_err("three now");
+        let err = may_remove(&paths, &session, Snapshots::None, false).expect_err("three now");
         assert!(err.to_string().contains("3 commits"), "{err}");
     }
 
@@ -7345,14 +7551,14 @@ mod tests {
         // so the repository demonstrably holds commits.
         let (paths, session, shadow) = a_session_with_two_checkpoints();
         std::fs::write(&shadow.landed_record, "").unwrap();
-        let err = may_remove(&paths, &session, false)
+        let err = may_remove(&paths, &session, Snapshots::None, false)
             .expect_err("omh cannot tell what landed — that is a reason to ask");
         assert!(
             err.to_string().contains("cannot say what that removes"),
             "it says it cannot tell, rather than naming a count it does not have: {err}"
         );
         assert!(
-            may_remove(&paths, &session, true).is_ok(),
+            may_remove(&paths, &session, Snapshots::None, true).is_ok(),
             "and `--force` is still the way past, so nobody is trapped"
         );
 
@@ -7362,7 +7568,7 @@ mod tests {
         let (paths, session, shadow) = a_session_with_two_checkpoints();
         std::fs::remove_file(&shadow.seed_record).unwrap();
         assert!(
-            may_remove(&paths, &session, false).is_err(),
+            may_remove(&paths, &session, Snapshots::None, false).is_err(),
             "a repository omh cannot place is not an empty session"
         );
 
@@ -7372,13 +7578,13 @@ mod tests {
         std::fs::remove_dir_all(&shadow.gitdir).unwrap();
         std::fs::remove_file(&shadow.seed_record).unwrap();
         assert!(
-            may_remove(&paths, &session, false).is_ok(),
+            may_remove(&paths, &session, Snapshots::None, false).is_ok(),
             "nothing there is nothing to lose"
         );
 
         // And a session whose sandbox never ran at all.
         let never_ran = Session::new(&paths.worktrees().join("s02"), "s02".to_string());
-        assert!(may_remove(&paths, &never_ran, false).is_ok());
+        assert!(may_remove(&paths, &never_ran, Snapshots::None, false).is_ok());
     }
 
     /// The count says what it counted, and says it in the singular when there
@@ -7801,7 +8007,7 @@ mod tests {
         session.ensure(&paths.repo, "main").unwrap();
 
         // Never launched: no repository, no record.
-        let log = log_report(&paths, &session, &out::Ctx::plain()).unwrap();
+        let log = log_report(&paths, &session, false, &out::Ctx::plain()).unwrap();
         assert!(
             log.read.commits.is_empty(),
             "asking before the agent has run is an ordinary thing to do"
@@ -7811,7 +8017,7 @@ mod tests {
         let shadow = shadow::Shadow::new(&paths.shadows(), "s01");
         shadow.ensure(&session.worktree, &[]).unwrap();
         std::fs::remove_file(&shadow.seed_record).unwrap();
-        let err = log_report(&paths, &session, &out::Ctx::plain())
+        let err = log_report(&paths, &session, false, &out::Ctx::plain())
             .expect_err("a repository omh cannot place is not an empty session");
         assert!(
             err.to_string().contains("rm"),

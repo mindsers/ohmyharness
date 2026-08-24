@@ -117,6 +117,32 @@ branch. The list is rewritten on every launch now, which touches no commit.
 **5. Egress is unrestricted.** The allowlist is designed and not wired. An agent
 in a session can reach the network freely.
 
+**5b. `refs/omh/turn` is a place the guards do not look.** The sandbox's gitdir
+is a read-write mount, and since 2026.08 three of omh's own queries skip that
+ref so per-turn snapshots are not mistaken for the agent's stranded work.
+Anything the agent writes there is skipped by all three, so an agent could park
+commits there and a harvest would drop them without the refusal that normally
+stops it.
+
+Bounded deliberately. It is one fixed ref rather than a glob, so there is
+exactly one such place; `omh sNN rm` names what would go, counting the ref
+directly through `Shadow::turns` rather than through the excluded queries; and
+`omh sNN log --turns` prints its contents **including each subject**, which is
+constant for omh's own snapshots — so anything else parked there is visible as
+the odd row. What an agent gains is the ability to lose its own work quietly,
+which is not a boundary it could not already cross with `git reset --hard`.
+
+An earlier version of this note said `unkept` still counts the ref. It does
+not — it carries the same exclusion as the other two. The mitigation is real
+but it runs through a different query, and saying so matters: a refactor of
+`Shadow::turns` that did not know it was load-bearing here would remove it.
+
+**One config line defeats the exclusion.** `core.logAllRefUpdates = always`
+makes git write a reflog for every ref under `refs/`, and `unkept`'s
+`--reflog` arm is not reachable by `--exclude`. The effect is noise rather than
+a breach — `rm` refuses for the rest of the session and only `--force` gets
+past — and `write_config` pins the key on every launch so it does not survive.
+
 ## Correctness
 
 **6. Adapter facts are unverified claims** about external software that ships

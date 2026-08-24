@@ -48,6 +48,200 @@ pub fn pointer_file() -> String {
     format!("gitdir: {GUEST_GITDIR}\n")
 }
 
+/// One snapshot of the tree, as `omh sNN log --turns` shows it.
+///
+/// Deliberately **not** a `Checkpoint`, and the missing field is the point.
+/// A `Checkpoint` carries a `number`, and that number is the handle
+/// `omh sNN diff <n>` and `--keep 1,3-4` take. Rendering snapshots with one
+/// meant `log --turns` printed `3 / 2 / 1` and `commit --keep 2` then
+/// replanted the *agent's* checkpoint 2 — a different list, no error, and the
+/// overlapping range is ordinary. The only mitigation was a sentence in the
+/// docs saying the numbers name nothing, which is the kind of guarantee this
+/// codebase does not accept.
+///
+/// So a snapshot has no number. What it has instead is the spelling that does
+/// work: `refs/omh/turn~N`, which is what the agent types to get the tree
+/// back, and which cannot be confused with anything `--keep` accepts.
+///
+/// `landed` is absent for the same reason — nothing replays a snapshot, so
+/// there is no such thing as one that has been handed over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Turn {
+    /// How far back from the tip: 0 is the newest.
+    pub back: usize,
+    /// The subject the hook wrote. Constant for omh's own snapshots, which is
+    /// exactly why it is shown — anything else on this ref was put there by
+    /// the agent.
+    pub subject: String,
+    pub age: Option<u64>,
+    pub touched: Option<Touched>,
+}
+
+/// Commits reachable from a ref but not from HEAD — the agent's stranded work.
+///
+/// Shared by `preflight`, which refuses a harvest over them, and by
+/// `checkpoints`, which says so while the user is still reading rather than
+/// after they have decided the review is done. One list because they are one
+/// question, and two copies of it drifted apart once already elsewhere in this
+/// tree.
+///
+/// The exclusion is the whole reason this is a function. `rev-list --all` is
+/// every ref under `refs/`, so omh's own turn snapshots — which are by
+/// construction not ancestors of HEAD — are exactly the shape this hunts. Left
+/// in, every `--keep` refuses forever and the refusal tells the user to delete
+/// omh's commits.
+///
+/// `--exclude` goes after the subcommand and **before** the `--all` it applies
+/// to — it is a `rev-list` option, and put in front of `rev-list` git rejects
+/// it outright. Measured 2026-08-24 against git 2.55.0: positioned right it
+/// takes the count from two to zero, and it does not reach `--reflog`, which
+/// is a separate arm of the query in `unkept`.
+fn stranded_args() -> Vec<String> {
+    vec![
+        "rev-list".into(),
+        format!("--exclude={TURN_REF}"),
+        "--all".into(),
+        "--not".into(),
+        "HEAD".into(),
+    ]
+}
+
+/// Where the sandbox records the tree at the end of each turn.
+///
+/// One fixed name, never a glob, and the difference matters. The gitdir is a
+/// read-write mount — the agent commits into it — so every ref omh teaches its
+/// own guards to skip is a place the agent can put commits it would rather
+/// those guards did not see. Today `refs/omh/*` does not exist, so writing
+/// there only makes `preflight` noisier; an exclusion turns it into somewhere
+/// quiet. A single name bounds that to one ref, and `omh sNN log --turns`
+/// prints what is in it, so the hiding place is also the display case.
+///
+/// Under `refs/omh/` rather than `refs/heads/` for two reasons that are both
+/// load-bearing. It stays off the branch, so `--keep` curates the agent's
+/// commits and not omh's. And measured 2026-08-24: git writes reflogs only for
+/// `refs/heads`, `refs/remotes`, `refs/notes` and `HEAD`, so a ref here has
+/// none — which is what keeps `unkept`'s `--reflog` arm from finding snapshots
+/// a second way, where `--exclude` could not have followed.
+pub const TURN_REF: &str = "refs/omh/turn";
+
+/// What the sandbox runs at the end of a turn to photograph the tree.
+///
+/// Here rather than in `base.rs` for the reason `probe_command` is here: the
+/// command and the thing that reads what it writes are one mechanism, and
+/// `TURN_REF`'s guarantees are only true if this is the shape that produced
+/// it.
+///
+/// **The index is `mktemp`, fresh every turn.** A fixed path inside the gitdir
+/// was three bugs at once, all of them silent. `read-tree` takes an
+/// `<index>.lock`, and git never clears a stale one — so a turn killed
+/// mid-hook disabled the feature for the rest of the session, with `--turns`
+/// showing a frozen timeline and no marker. Two turns at once contended on the
+/// same lock. And the file itself was ~32 KB living in the agent-writable
+/// mount for the life of the session, larger than everything the snapshots
+/// cost, and a directory the agent could create there killed the hook outright.
+///
+/// **`read-tree HEAD || read-tree --empty`**, because `read-tree` is only
+/// there to clear the leftover index and an unborn HEAD is an ordinary
+/// `git checkout --orphan` away. Without the fallback that agent gets no
+/// snapshots for the rest of the session and is told nothing.
+///
+/// The other three properties, each load-bearing:
+///
+/// - **HEAD, the index and the worktree are untouched.** Nothing here moves a
+///   branch or stages anything the agent can see. Verified: after a turn the
+///   agent's `git status` still lists its work as uncommitted, which is the
+///   whole reason this is not `git commit`.
+/// - **An unchanged tree writes nothing** — no commit, no ref move. It still
+///   costs the time, which the manifest says rather than claiming the turn is
+///   free.
+/// - **It cannot fail a turn.** Everything is redirected and closed with
+///   `|| true`. An earlier version of this paragraph credited
+///   `every_hook_runs_quietly_when_its_tool_says_nothing` with enforcing that;
+///   it does not — `when` is false on any host, so the body never runs there.
+///   `a_hook_that_cannot_do_its_job_still_ends_the_turn_quietly` is the one
+///   that actually runs it against a repository it cannot use.
+pub fn turn_hook_command(gitdir: &str, worktree: &str) -> String {
+    // Both paths named, not a bare `git -C` through the pointer file. Inside
+    // the sandbox the pointer resolves the gitdir either way, but naming both
+    // is what this design's own invariant asks of every git call omh makes,
+    // and it is what lets the shipped command run against a plain repository
+    // rather than only inside a container.
+    //
+    // Not merely tidiness: the shadow is `core.bare=false` with deliberately
+    // no `core.worktree`, so `add` with a gitdir and no worktree does not fail
+    // — it silently stages the current directory. Naming the worktree is what
+    // stops that, and an earlier draft of this comment had the failure mode
+    // backwards.
+    let g = &[
+        "git -C ",
+        worktree,
+        " --git-dir=",
+        gitdir,
+        " --work-tree=",
+        worktree,
+    ]
+    .concat();
+    [
+        "{ i=$(mktemp)",
+        "; GIT_INDEX_FILE=$i ",
+        g,
+        " read-tree HEAD",
+        " || GIT_INDEX_FILE=$i ",
+        g,
+        " read-tree --empty",
+        "; GIT_INDEX_FILE=$i ",
+        g,
+        " add -A",
+        " && t=$(GIT_INDEX_FILE=$i ",
+        g,
+        " write-tree)",
+        " && p=$(",
+        g,
+        " rev-parse -q --verify ",
+        TURN_REF,
+        " || true)",
+        " && if [ -n \"$p\" ] && [ \"$(",
+        g,
+        " rev-parse \"$p^{tree}\")\" = \"$t\" ]",
+        "; then :",
+        "; else c=$(",
+        g,
+        " commit-tree \"$t\" ${p:+-p} ${p:+\"$p\"} -m \"turn end\")",
+        " && ",
+        g,
+        " update-ref ",
+        TURN_REF,
+        " \"$c\"",
+        "; fi; rm -f \"$i\"; } >/dev/null 2>&1 || true",
+    ]
+    .concat()
+}
+
+/// The hook's own arguments, which are the guest's paths.
+///
+/// Split from the command so a test can run the **shipping** shell against a
+/// temporary repository rather than against a copy of it written out again.
+/// The first draft of that test re-implemented the plumbing in Rust, which is
+/// the trap this project keeps rediscovering: it proved the reimplementation
+/// worked, and would have passed against a hook that did nothing at all.
+pub fn turn_hook_for_the_sandbox() -> String {
+    // Through `container_workdir()` rather than a second literal — a test
+    // allows exactly one spelling of the guest workdir in the whole tree, and
+    // it found the const the moment it was added. It reads comments too, so
+    // this one does not quote the path either.
+    turn_hook_command(GUEST_GITDIR, crate::container_workdir())
+}
+
+/// The test that stops the hook from running anywhere it would be nonsense.
+///
+/// `/omh/shadow` exists only inside a sandbox, and the hook is rendered and
+/// executed on the host by the base-set suite — where `/work` is somebody's
+/// checkout and `git -C /work` would be a real command against a real
+/// repository.
+pub fn turn_hook_when() -> String {
+    format!("[ -d {GUEST_GITDIR} ]")
+}
+
 /// Where omh leaves a sentence for the agent to find at its next start.
 ///
 /// In the gitdir rather than under a mount of its own, and that is not
@@ -545,14 +739,10 @@ impl Shadow {
             // The same question `preflight` refuses over. Asked here so the
             // answer arrives while the user is still reading, rather than as a
             // refusal after they have decided the review is done.
-            unreachable: git(
-                &self.gitdir,
-                worktree,
-                &["rev-list", "--all", "--not", "HEAD"],
-            )?
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .count(),
+            unreachable: git_owned(&self.gitdir, worktree, &stranded_args())?
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .count(),
             ..Checkpoints::default()
         };
 
@@ -613,66 +803,8 @@ impl Shadow {
             ],
         )?;
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .ok();
-        for line in raw.lines() {
-            if let Some(header) = line.strip_prefix('\0') {
-                let mut fields = header.splitn(4, '\0');
-                let id = fields.next().unwrap_or_default().to_string();
-                let at: Option<u64> = fields.next().and_then(|at| at.trim().parse().ok());
-                // A merge, by parent count. `%P` is space-separated, and the
-                // absence of numstat lines below is what has to be told apart
-                // from a commit that changed nothing.
-                let merge = fields
-                    .next()
-                    .is_some_and(|parents| parents.split_whitespace().count() > 1);
-                out.commits.push(Checkpoint {
-                    number: out.commits.len() + 1,
-                    landed: handed.contains(&id),
-                    id,
-                    subject: fields.next().unwrap_or_default().to_string(),
-                    // Saturating: a commit dated in the future is something an
-                    // agent can produce with one `GIT_COMMITTER_DATE`, and it
-                    // must read as *just now* rather than panicking on a
-                    // subtraction or reading as decades old. `None` is the
-                    // other answer — a date omh could not read at all, which
-                    // must not borrow the confidence of *just now*.
-                    age: match (now, at) {
-                        (Some(now), Some(at)) => Some(now.saturating_sub(at)),
-                        _ => None,
-                    },
-                    touched: (!merge).then(Touched::default),
-                });
-                continue;
-            }
-            let Some(Some(touched)) = out.commits.last_mut().map(|c| &mut c.touched) else {
-                continue;
-            };
-            let mut counts = line.split('\t');
-            let (Some(added), Some(removed)) = (counts.next(), counts.next()) else {
-                continue;
-            };
-            touched.files += 1;
-            // `-` is git's answer for a file it would not count, and it is not
-            // a zero. Both halves are checked rather than one: a line with one
-            // of each is not a shape git produces, and reading it as counted
-            // would put a number omh invented beside a file it did not measure.
-            match (added.parse::<usize>(), removed.parse::<usize>()) {
-                (Ok(added), Ok(removed)) => {
-                    touched.added += added;
-                    touched.removed += removed;
-                }
-                _ => touched.uncounted += 1,
-            }
-        }
+        out.commits = parse_log(&raw, &handed);
 
-        // What git listed, against what this parser kept. The numbers are the
-        // interface — `diff N` and `--keep 1,3-4` take them — so a parser that
-        // silently dropped a record would mis-target a commit rather than fail.
-        // Nothing here asserts the format string and the parse still agree;
-        // this does, in the one place a mismatch is still cheap.
         let counted: usize = git(
             &self.gitdir,
             worktree,
@@ -781,6 +913,113 @@ impl Shadow {
         )
     }
 
+    /// The turn snapshots themselves, oldest first, for `omh sNN log --turns`.
+    ///
+    /// Read through the same parser as the agent's own commits, and returned
+    /// as its own list rather than merged into `Checkpoints::commits`. That
+    /// separation is load-bearing in three places: `diff <n>` and
+    /// `--keep 1,3-4` both index `commits` by number, so a snapshot appended
+    /// there would become selectable and then replayable; and the "yours from
+    /// here" divider is an index into rendered rows, so an interleaved list
+    /// would silently label rows as already on the branch.
+    ///
+    /// `landed` is meaningless here and is always false — nothing replays a
+    /// snapshot.
+    pub fn turn_log(&self, worktree: &Path) -> Result<Vec<Turn>> {
+        // `None` is *no ref*, which really is an empty list. A failure to read
+        // is not, and now propagates — it used to become this same empty
+        // vector, which `log --turns` renders as a sentence about what the
+        // agent did.
+        if self.turns(worktree)?.is_none() {
+            return Ok(Vec::new());
+        }
+        let raw = git(
+            &self.gitdir,
+            worktree,
+            &[
+                "log",
+                "--topo-order",
+                "--reverse",
+                "--format=%x00%H%x00%ct%x00%P%x00%s",
+                "--numstat",
+                TURN_REF,
+            ],
+        )?;
+        // Newest first, and numbered by distance from the tip rather than
+        // from the start — `refs/omh/turn~0` is the newest, which is the
+        // spelling that gets the tree back.
+        let read = parse_log(&raw, &BTreeSet::new());
+        let last = read.len().saturating_sub(1);
+        Ok(read
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| Turn {
+                back: last - i,
+                subject: c.subject,
+                age: c.age,
+                touched: c.touched,
+            })
+            .collect())
+    }
+
+    /// How many turn snapshots the sandbox is holding, or nothing if it has
+    /// never taken one.
+    ///
+    /// `Option`, not a bare count, and the difference is the one this project
+    /// has now removed three times — #46, #63, #64 — and reintroduced here.
+    /// The first draft returned `Ok(0)` for *every* failure: a gitdir that is
+    /// not there, a git that would not run, a ref pointing at a pruned object,
+    /// an unreadable object store, and stdout that would not parse. Its own
+    /// comment justified exactly one of those and applied it to all of them.
+    ///
+    /// What it cost is downstream. `turn_log` gated on the zero, so a sandbox
+    /// omh could not read printed *"no turns recorded — the sandbox has not
+    /// finished one with anything changed"*, which is a claim about the
+    /// agent's behaviour. And `may_remove` took it through `.unwrap_or(0)`, so
+    /// the last guard in front of an irreversible delete said nothing at all.
+    ///
+    /// **`for-each-ref`, not `rev-list --count`.** The two answers have to be
+    /// told apart by something other than the exit status, because `rev-list`
+    /// exits non-zero for a ref that is simply absent — the ordinary case —
+    /// and that is what made the collapse tempting. `for-each-ref` exits 0
+    /// either way and prints nothing when the ref is not there, so a non-zero
+    /// exit means the question could not be answered. The same shape as #63's
+    /// `ps --filter`, for the same reason.
+    /// How many turn snapshots the sandbox is holding.
+    ///
+    /// Its own reader, and its own count, because a snapshot answers a
+    /// different question from every other commit in here. It is not work the
+    /// agent chose to keep — it is a tree omh photographed at the end of a
+    /// turn, which is worth something precisely when the agent has since
+    /// thrown that tree away.
+    ///
+    /// So `rm` names them and does not refuse over them: refusing on every
+    /// session that ever had one dirty turn is how a guard teaches people to
+    /// type `--force` without reading, and that guard still has the agent's
+    /// own commits to protect.
+    pub fn turns(&self, worktree: &Path) -> Result<Option<usize>> {
+        if !self.gitdir.exists() {
+            return Ok(None);
+        }
+        // Through the module's own helper, so this read is `guarded()` like
+        // every other and its failure carries git's words.
+        let listed = git(
+            &self.gitdir,
+            worktree,
+            &["for-each-ref", "--format=%(refname)", TURN_REF],
+        )?;
+        if listed.trim().is_empty() {
+            return Ok(None);
+        }
+        let counted = git(&self.gitdir, worktree, &["rev-list", "--count", TURN_REF])?;
+        Ok(Some(counted.trim().parse().with_context(|| {
+            format!(
+                "counting turn snapshots, which answered `{}`",
+                counted.trim()
+            )
+        })?))
+    }
+
     /// Everything this repository holds that no branch has, counted wide.
     ///
     /// A different question from `checkpoints`, and deliberately a blunter
@@ -819,7 +1058,18 @@ impl Shadow {
             lines(git(
                 &self.gitdir,
                 worktree,
-                &["rev-list", "--all", "--reflog", "--not", &from],
+                &[
+                    "rev-list",
+                    // After the subcommand and before the `--all` it applies
+                    // to — it is a `rev-list` option, not a `git` one. It does
+                    // not reach `--reflog`, which is why the turn ref has to
+                    // be one git writes no reflog for. Measured 2026-08-24.
+                    &format!("--exclude={TURN_REF}"),
+                    "--all",
+                    "--reflog",
+                    "--not",
+                    &from,
+                ],
             )?),
             lines(git(&self.gitdir, worktree, &["status", "--porcelain"])?),
         ))
@@ -1032,11 +1282,7 @@ impl Shadow {
         // Stranded: anything reachable from a ref but not from HEAD. Catches
         // the branch an agent made and wandered off, which neither test above
         // sees.
-        let stranded = git(
-            &self.gitdir,
-            worktree,
-            &["rev-list", "--all", "--not", "HEAD"],
-        )?;
+        let stranded = git_owned(&self.gitdir, worktree, &stranded_args())?;
         let stranded: Vec<&str> = stranded.lines().take(3).collect();
         anyhow::ensure!(
             stranded.is_empty(),
@@ -1669,11 +1915,21 @@ impl Shadow {
         // rather than against this list. A git that starts recording something
         // new turns it red on the platform where that matters, which is the
         // only way a list like this stays true.
-        const KEEP: [&str; 10] = [
+        // `core.logallrefupdates` is deliberately **not** here, though it is
+        // one of git's own. Left alone it defaults to logging `refs/heads`,
+        // `refs/remotes`, `refs/notes` and `HEAD` — and `unkept`'s exclusion
+        // of the turn ref works only because a ref outside those gets no
+        // reflog. Set to `always`, git logs every ref under `refs/`, the
+        // `--reflog` arm sees the snapshots the `--exclude` cannot reach, and
+        // `omh sNN rm` refuses for the rest of the session.
+        //
+        // The agent can write this config, so keeping the key would keep the
+        // agent's value. Unsetting is safe — git falls back to exactly the
+        // default the design measured.
+        const KEEP: [&str; 9] = [
             "core.repositoryformatversion",
             "core.filemode",
             "core.bare",
-            "core.logallrefupdates",
             "core.worktree",
             "core.ignorecase",
             "core.precomposeunicode",
@@ -2326,6 +2582,99 @@ fn git_in(at: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Turn one `git log --numstat` run into checkpoints.
+///
+/// Extracted so the turn snapshots can be read by the same parser that reads
+/// the agent's own commits, rather than by a second one written to the same
+/// format string. Two parsers of one format is how the two drift, and the
+/// numstat handling here — a merge told apart from a commit that changed
+/// nothing, `-` told apart from zero — is the part that would be quietly
+/// wrong in the copy.
+///
+/// `handed` is empty for turn snapshots: `landed` means *already replayed onto
+/// the branch by `--keep`*, and a snapshot never is.
+/// No cross-check here, deliberately, and it belongs to the caller.
+///
+/// `checkpoints` reconciles this against `rev-list --count` and refuses a list
+/// it did not fully understand, because its numbers are what `diff <n>` and
+/// `--keep 1,3-4` take. `turn_log` does not need to: a snapshot has no number,
+/// so a record this dropped would be a missing row rather than a mis-targeted
+/// commit.
+///
+/// An earlier version moved that paragraph *into* this function, where it
+/// ended with the words "this does" directly above a bare `commits` — telling
+/// the next reader the parser self-checks, while the `ensure!` it described
+/// had stayed behind in the caller.
+fn parse_log(raw: &str, handed: &BTreeSet<String>) -> Vec<Checkpoint> {
+    let mut commits: Vec<Checkpoint> = Vec::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .ok();
+    for line in raw.lines() {
+        if let Some(header) = line.strip_prefix('\0') {
+            let mut fields = header.splitn(4, '\0');
+            let id = fields.next().unwrap_or_default().to_string();
+            let at: Option<u64> = fields.next().and_then(|at| at.trim().parse().ok());
+            // A merge, by parent count. `%P` is space-separated, and the
+            // absence of numstat lines below is what has to be told apart
+            // from a commit that changed nothing.
+            let merge = fields
+                .next()
+                .is_some_and(|parents| parents.split_whitespace().count() > 1);
+            commits.push(Checkpoint {
+                number: commits.len() + 1,
+                landed: handed.contains(&id),
+                id,
+                subject: fields.next().unwrap_or_default().to_string(),
+                // Saturating: a commit dated in the future is something an
+                // agent can produce with one `GIT_COMMITTER_DATE`, and it
+                // must read as *just now* rather than panicking on a
+                // subtraction or reading as decades old. `None` is the
+                // other answer — a date omh could not read at all, which
+                // must not borrow the confidence of *just now*.
+                age: match (now, at) {
+                    (Some(now), Some(at)) => Some(now.saturating_sub(at)),
+                    _ => None,
+                },
+                touched: (!merge).then(Touched::default),
+            });
+            continue;
+        }
+        let Some(Some(touched)) = commits.last_mut().map(|c| &mut c.touched) else {
+            continue;
+        };
+        let mut counts = line.split('\t');
+        let (Some(added), Some(removed)) = (counts.next(), counts.next()) else {
+            continue;
+        };
+        touched.files += 1;
+        // `-` is git's answer for a file it would not count, and it is not
+        // a zero. Both halves are checked rather than one: a line with one
+        // of each is not a shape git produces, and reading it as counted
+        // would put a number omh invented beside a file it did not measure.
+        match (added.parse::<usize>(), removed.parse::<usize>()) {
+            (Ok(added), Ok(removed)) => {
+                touched.added += added;
+                touched.removed += removed;
+            }
+            _ => touched.uncounted += 1,
+        }
+    }
+
+    commits
+}
+
+/// `git`, for a call whose arguments are built rather than written out.
+///
+/// The same shape `session.rs` keeps for the same reason: `--exclude=<ref>`
+/// has to be formatted, and a `Vec<String>` at one call site is not worth a
+/// second spelling of the whole helper.
+fn git_owned(gitdir: &Path, worktree: &Path, args: &[String]) -> Result<String> {
+    let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+    git(gitdir, worktree, &borrowed)
+}
+
 fn git(gitdir: &Path, worktree: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .envs(GUEST_ENV)
@@ -2499,6 +2848,29 @@ mod tests {
     }
 
     /// Commit in the sandbox the way the agent does, and answer with its id.
+    /// Run the **shipped** hook body against this fixture.
+    ///
+    /// The command itself, with the guest's two paths swapped for the
+    /// temporary ones — not a re-implementation of it. An earlier draft wrote
+    /// the plumbing out again in Rust and asserted on that, which proves the
+    /// copy works and would pass against a hook that did nothing.
+    fn turn_snapshot(s: &Shadow, wt: &Path) {
+        let body = turn_hook_command(s.gitdir.to_str().unwrap(), wt.to_str().unwrap());
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(&body)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .unwrap();
+        // Deliberately no assertion on the exit status or the streams. The
+        // body ends in `>/dev/null 2>&1 || true`, so success and silence are
+        // true by construction — an earlier version asserted both and was
+        // asserting nothing at all. What the hook did is asserted by the
+        // caller, against the repository.
+        let _ = out;
+    }
+
     fn checkpoint(s: &Shadow, wt: &Path, file: &str, body: &str, subject: &str) -> String {
         std::fs::write(wt.join(file), body).unwrap();
         git(&s.gitdir, wt, &["add", "-A", "."]).unwrap();
@@ -2577,6 +2949,269 @@ mod tests {
         assert!(
             strays.is_empty(),
             "and the half-written one is cleaned up rather than left to be read: {strays:?}"
+        );
+    }
+
+    /// The hook photographs the tree and changes nothing the agent can see.
+    ///
+    /// The four properties its doc claims, against the shipped command:
+    ///
+    /// - HEAD does not move, the index is untouched, and `git status` says
+    ///   afterwards exactly what it said before. This is the whole reason it
+    ///   is a snapshot and not a `git commit` — an agent whose working tree
+    ///   went clean at the end of every turn would find nothing to commit and
+    ///   would rightly conclude omh had eaten its work.
+    /// - a turn that changed nothing writes nothing, or an idle agent adds an
+    ///   identical commit for as long as the session lives.
+    /// - the snapshots chain, so the ref is a timeline rather than a single
+    ///   photograph.
+    #[test]
+    fn a_turn_photographs_the_tree_and_leaves_the_agents_own_state_alone() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        let head = |what: &str| git(&s.gitdir, &wt, &["rev-parse", what]).unwrap();
+        let status = || git(&s.gitdir, &wt, &["status", "--porcelain"]).unwrap();
+
+        assert_eq!(
+            s.turns(&wt).unwrap(),
+            None,
+            "a session that has never finished a turn has no ref, which is not \
+             the same answer as a count of none"
+        );
+
+        std::fs::write(wt.join("in-flight.rs"), "fn later() {}\n").unwrap();
+        let before = (head("HEAD"), status());
+
+        turn_snapshot(&s, &wt);
+        assert_eq!(
+            s.turns(&wt).unwrap(),
+            Some(1),
+            "a dirty turn is photographed"
+        );
+        assert_eq!(
+            (head("HEAD"), status()),
+            before,
+            "and HEAD and the working tree are exactly as the agent left them"
+        );
+
+        turn_snapshot(&s, &wt);
+        assert_eq!(
+            s.turns(&wt).unwrap(),
+            Some(1),
+            "a turn that changed nothing writes nothing"
+        );
+
+        std::fs::write(wt.join("in-flight.rs"), "fn later() { todo!() }\n").unwrap();
+        turn_snapshot(&s, &wt);
+        assert_eq!(
+            s.turns(&wt).unwrap(),
+            Some(2),
+            "and the next change is its own"
+        );
+
+        // A timeline, not one photograph: the newest snapshot reaches the
+        // first, which is what makes restoring an earlier turn's tree
+        // possible at all.
+        assert_eq!(
+            git(&s.gitdir, &wt, &["rev-list", "--count", TURN_REF])
+                .unwrap()
+                .trim(),
+            "2",
+            "the snapshots chain"
+        );
+        // A sandbox omh cannot read is not a sandbox with no snapshots. This
+        // is the arm `.unwrap_or(0)` used to swallow on the way to an
+        // irreversible delete.
+        let broken = Shadow::new(&shadow_dir, "s99");
+        std::fs::create_dir_all(&broken.gitdir).unwrap();
+        assert!(
+            broken.turns(&wt).is_err(),
+            "a directory that is not a repository has no answer, not zero"
+        );
+
+        // The shipped invocation stages into an index of its own, made fresh.
+        // The assertion this replaces looked for `i=/omh/shadow/index ` with a
+        // trailing space — a string no rendering could ever produce, since the
+        // path is always followed by `;`. It passed for every possible value
+        // of the index path, including the agent's own.
+        let shipped = turn_hook_for_the_sandbox();
+        assert!(
+            shipped.contains("i=$(mktemp)") && !shipped.contains("/omh/shadow/index"),
+            "a fresh index, never the agent's staging area: {shipped}"
+        );
+        assert!(
+            shipped.contains("rm -f \"$i\""),
+            "and it is cleaned up, so nothing accumulates in the mount: {shipped}"
+        );
+
+        // …and the agent's own work is still uncommitted, which is the state
+        // the snapshot exists to be a rollback from.
+        assert!(
+            status().contains("in-flight.rs"),
+            "the agent still has its work to commit: {}",
+            status()
+        );
+    }
+
+    /// An agent cannot make its own snapshots look like unharvested work.
+    ///
+    /// `unkept`'s exclusion reaches `--all` and not `--reflog`, which is safe
+    /// only because git writes no reflog for a ref outside `refs/heads`,
+    /// `refs/remotes`, `refs/notes` and `HEAD`. `core.logAllRefUpdates =
+    /// always` flips exactly that, and the config is the agent's to write — so
+    /// the whole design rested on a default the sandbox could change.
+    ///
+    /// Now the key is swept on every launch. This asserts the sweep, not the
+    /// git behaviour: with the value left in place, `unkept` finds the
+    /// snapshots through the reflog and `rm` refuses over omh's own commits
+    /// for the rest of the session.
+    #[test]
+    fn a_reflog_the_agent_turned_on_does_not_survive_the_next_launch() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+
+        git(
+            &s.gitdir,
+            &wt,
+            &["config", "core.logAllRefUpdates", "always"],
+        )
+        .unwrap();
+        assert_eq!(
+            git(
+                &s.gitdir,
+                &wt,
+                &["config", "--get", "core.logallrefupdates"]
+            )
+            .unwrap()
+            .trim(),
+            "always",
+            "the agent can set it"
+        );
+
+        s.ensure(&wt, &[]).unwrap();
+        let after = Command::new("git")
+            .arg("--git-dir")
+            .arg(&s.gitdir)
+            .args(["config", "--get", "core.logallrefupdates"])
+            .output()
+            .unwrap();
+        assert!(
+            !after.status.success(),
+            "and the next launch takes it away, so the default the exclusion \
+             relies on is the one in force: {after:?}"
+        );
+    }
+
+    /// A hook that cannot do its job still ends the turn quietly.
+    ///
+    /// The claim `turn_hook_command` makes and the one nothing was checking.
+    /// `every_hook_runs_quietly_when_its_tool_says_nothing` was credited with
+    /// it and does not do it: `when` renders as `[ -d /omh/shadow ] || exit 0`,
+    /// which is false on any host, so the body never executes there and the
+    /// test passes identically against a body of `exit 17`.
+    ///
+    /// Three ways for it to be unable to work, all reachable in a sandbox: a
+    /// gitdir that is not there, a worktree that is not there, and a HEAD that
+    /// has never been born — `git checkout --orphan` is an ordinary move, and
+    /// before the `read-tree --empty` fallback it silently ended snapshots for
+    /// the rest of the session.
+    #[test]
+    fn a_hook_that_cannot_do_its_job_still_ends_the_turn_quietly() {
+        let (_d, wt, shadow_dir) = fixture();
+        let run = |gitdir: &str, worktree: &str| {
+            let out = Command::new("sh")
+                .arg("-c")
+                .arg(turn_hook_command(gitdir, worktree))
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success() && out.stdout.is_empty() && out.stderr.is_empty(),
+                "a turn ends quietly whatever the hook found: {out:?}"
+            );
+        };
+
+        run("/nowhere/gitdir", "/nowhere/worktree");
+        run(shadow_dir.to_str().unwrap(), wt.to_str().unwrap());
+
+        // An unborn HEAD, which is what the agent leaves behind after
+        // `git checkout --orphan`. The snapshot must still be taken — the
+        // whole point is a rollback target for a turn that went wrong, and
+        // that is exactly the turn an orphan checkout produces.
+        let s = Shadow::new(&shadow_dir, "s02");
+        s.ensure(&wt, &[]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["checkout", "-q", "--orphan", "nothing-yet"],
+        )
+        .unwrap();
+        std::fs::write(wt.join("in-flight.rs"), "fn later() {}\n").unwrap();
+        turn_snapshot(&s, &wt);
+        assert_eq!(
+            s.turns(&wt).unwrap(),
+            Some(1),
+            "an unborn HEAD is still a tree worth photographing"
+        );
+    }
+
+    /// A turn snapshot is omh's own, and none of the three guards that walk
+    /// refs may mistake it for the agent's stranded work.
+    ///
+    /// Three queries see every ref in the sandbox, and a snapshot is by
+    /// construction not an ancestor of HEAD — which is exactly the shape all
+    /// three are hunting. Left alone they would each be permanently wrong, and
+    /// wrong in the direction that blocks:
+    ///
+    /// - `preflight` refuses every `--keep`, naming omh's own commits as work
+    ///   the agent stranded, and telling the user to go and delete them.
+    /// - `checkpoints().unreachable` prints that as a warning on every `log`,
+    ///   and `incomplete()` is true forever.
+    /// - `unkept` feeds `at_stake`, so `omh sNN rm` refuses even for a session
+    ///   whose work is entirely on the branch.
+    ///
+    /// The three do **not** get the same fix, which is why this asserts them
+    /// apart. The first two ask *would a harvest drop commits?* — a snapshot
+    /// is never replayed, so it is not one of those. The third asks *what
+    /// would removing this destroy?* — a snapshot is a real answer to that,
+    /// and it is counted, just not as the agent's own work.
+    #[test]
+    fn a_turn_snapshot_is_not_the_agents_stranded_work() {
+        let (_d, wt, shadow_dir) = fixture();
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[]).unwrap();
+        checkpoint(&s, &wt, "one.rs", "fn one() {}\n", "Add one");
+
+        // Clean before: nothing stranded, nothing unkept beyond the commit
+        // the agent just made.
+        s.preflight(&wt).expect("a plain session harvests");
+        let (unkept_before, _) = s.unkept(&wt).unwrap();
+
+        std::fs::write(wt.join("in-flight.rs"), "fn later() {}\n").unwrap();
+        turn_snapshot(&s, &wt);
+
+        s.preflight(&wt)
+            .expect("a snapshot is not a commit the harvest would drop");
+        assert_eq!(
+            s.checkpoints(&wt).unwrap().unreachable,
+            0,
+            "and `log` does not warn about it every time"
+        );
+
+        // Counted, because it is the only copy of a tree the agent may have
+        // since thrown away — that is the whole reason the hook exists.
+        let (unkept_after, _) = s.unkept(&wt).unwrap();
+        assert_eq!(
+            unkept_after, unkept_before,
+            "but it is not counted as the agent's own unharvested commits"
+        );
+        assert_eq!(
+            s.turns(&wt).unwrap(),
+            Some(1),
+            "it is counted as what it is, and separately"
         );
     }
 
