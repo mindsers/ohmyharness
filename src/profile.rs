@@ -123,7 +123,7 @@ impl Paths {
     }
 
     /// A throwaway working directory, deliberately outside `worktrees/` so a
-    /// login never appears in `omh s ls` as a session you could resume.
+    /// login never appears in `omh s` as a session you could resume.
     pub fn scratch(&self, name: &str) -> PathBuf {
         self.root.join("scratch").join(self.repo_id()).join(name)
     }
@@ -137,7 +137,7 @@ impl Paths {
     ///
     /// A tree of its own rather than a sibling of the worktree it serves:
     /// `session::list` reports every directory under `worktrees()` as a
-    /// session, so an `s01.git` beside `s01` would show up in `omh s ls` as a
+    /// session, so an `s01.git` beside `s01` would show up in `omh s` as a
     /// session you could resume.
     ///
     /// `next_id` would *not* be fooled — it parses the name after `s` as a
@@ -552,7 +552,7 @@ mod tests {
 
     /// The hazard `shadows()` was moved out of `worktrees()` to avoid:
     /// `session::list` reports every directory under `worktrees()` as a
-    /// session, so a gitdir living there shows up in `omh s ls` as one you
+    /// session, so a gitdir living there shows up in `omh s` as one you
     /// could resume.
     #[test]
     fn a_sandbox_repository_never_lives_where_sessions_are_counted() {

@@ -405,7 +405,7 @@ pub trait Report {
     /// for themselves.
     ///
     /// **The answer only.** A next step rendered here is on stdout by
-    /// construction, and `omh s ls > sessions.txt` then captures advice the
+    /// construction, and `omh s > sessions.txt` then captures advice the
     /// file was never meant to hold — see [`asides`](Self::asides).
     fn human(&self, p: &Palette) -> String;
 
@@ -416,7 +416,7 @@ pub trait Report {
     ///
     /// Defaulted, because most reports are all answer. The two that are not
     /// used to render these lines into [`human`](Self::human), which put them
-    /// on stdout: `omh s ls` wrote *clear each with omh <id> rm* into any
+    /// on stdout: `omh s` wrote *clear each with omh <id> rm* into any
     /// file it was redirected into, and `omh s rm` wrote its two review
     /// commands into one.
     ///

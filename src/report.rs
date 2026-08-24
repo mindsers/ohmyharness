@@ -693,7 +693,7 @@ impl Report for Down {
                 "session": id,
                 // `null` rather than `false` for the one omh could not ask
                 // about, with the reason beside it — the same three-valued
-                // shape `s ls` gives `running`, for the same reason: a script
+                // shape `omh s` gives `running`, for the same reason: a script
                 // reading `stopped == false` over an unreachable runtime got a
                 // fiction, and before that got no row at all.
                 "stopped": match stopped {
@@ -710,12 +710,12 @@ impl Report for Down {
     }
 }
 
-// ── omh s ls ────────────────────────────────────────────────────────────────
+// ── omh s ────────────────────────────────────────────────────────────────
 
 /// Where a session is in the cycle, as one answer.
 ///
 /// Ordered most-actionable first, and deliberately one answer rather than a
-/// tally: `s ls` is read at a glance, and a session with uncommitted work needs
+/// tally: `omh s` is read at a glance, and a session with uncommitted work needs
 /// committing whatever else is also true of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Work {
@@ -730,7 +730,7 @@ pub enum Work {
 }
 
 impl Work {
-    /// The column `omh s ls` has always printed. Wording preserved exactly:
+    /// The column `omh s` has always printed. Wording preserved exactly:
     /// people grep this, and `tests/cli.rs` pins all four forms.
     pub fn human(&self) -> String {
         match self {
@@ -764,7 +764,7 @@ impl Work {
     }
 }
 
-/// One session, as `omh s ls` sees it.
+/// One session, as `omh s` sees it.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
@@ -812,7 +812,7 @@ pub struct Session {
 /// error, and this does not say it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Overlap {
-    /// The sessions changing them, in the order `s ls` lists them.
+    /// The sessions changing them, in the order `omh s` lists them.
     pub sessions: Vec<String>,
     pub paths: Vec<String>,
 }
@@ -836,7 +836,7 @@ fn spoken(names: &[String]) -> String {
 ///
 /// Pure, and given the paths rather than reading git, so the grouping is a
 /// table. What produces the paths is one `status --porcelain` per session that
-/// `s ls` already runs for its uncommitted count and then throws away.
+/// `omh s` already runs for its uncommitted count and then throws away.
 pub fn overlaps(changed: &[(String, Vec<String>)]) -> Vec<Overlap> {
     let mut who: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
     for (id, paths) in changed {
@@ -898,7 +898,7 @@ fn running_cell(running: &Option<crate::image::Running>) -> Cell {
 /// How far a session trails its base, as one cell — three answers, three
 /// renderings.
 ///
-/// Shared by `omh s ls` and by the session list in `omh ls`. Both were wrong
+/// Shared by `omh s` and by the session list in `omh ls`. Both were wrong
 /// the same way — `Some(0) | None` rendered an empty cell, so *up to date* and
 /// *omh could not count* were the same sight on the two surfaces where a user
 /// picks which session to open.
@@ -970,7 +970,7 @@ impl Report for Sessions {
         }
         let mut out = table.render(p);
 
-        // Part of the answer, not an aside. `omh s ls > sessions.txt` is a
+        // Part of the answer, not an aside. `omh s > sessions.txt` is a
         // record of what is in flight, and two sessions editing one file is
         // the most consequential thing in it — a warning would put it on
         // stderr, where that file would not have it.
@@ -1015,10 +1015,10 @@ impl Report for Sessions {
     }
 
     /// What to do next, and what omh could not answer — neither of which is what
-    /// `omh s ls` was asked for.
+    /// `omh s` was asked for.
     ///
     /// Both lines used to be appended to the table above, so
-    /// `omh s ls > sessions.txt` wrote them into the file — the exact case
+    /// `omh s > sessions.txt` wrote them into the file — the exact case
     /// `docs/commands.md` promises they stay out of. They are still in `json`
     /// as `leftovers`, where a script wanted them all along.
     fn asides(&self) -> out::Asides {
@@ -2905,7 +2905,7 @@ mod tests {
             .any(|o| o.sessions == ["s01", "s03"] && o.paths == ["pair.rs"]));
 
         // One pair is one line whatever order the sessions arrive in, and the
-        // order kept is `s ls`'s. The grouping key is the session list, so a
+        // order kept is `omh s`'s. The grouping key is the session list, so a
         // pair that varied would split into two lines about the same two
         // sessions.
         let reversed = overlaps(&changed(&[

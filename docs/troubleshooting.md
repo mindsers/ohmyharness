@@ -114,11 +114,11 @@ The token was written somewhere that does not persist. `omh doctor` names it:
 
 Background in [Accounts](accounts.md#mount-the-directory-never-the-token-file).
 
-### `up?` in `omh s ls`, or `omh could not tell whether the sandbox is running`
+### `up?` in `omh s`, or `omh could not tell whether the sandbox is running`
 
 The container runtime is installed — omh checked before it asked — but it would
 not answer. Almost always the daemon is not running: start Docker Desktop, or
-`systemctl start docker`. `omh s ls` prints the runtime's own message above the
+`systemctl start docker`. `omh s` prints the runtime's own message above the
 table, one line per session, and that message is the part worth reading.
 
 **Nothing acts on the answer while it is unknown**, but what *that* means
@@ -135,7 +135,7 @@ differs by command, because the safe direction does:
   stopping a live one on a guess costs somebody's turn.
 
 The refusals earn their keep. omh used to read *the runtime would not answer*
-as *the container is not running*, so with the daemon down `omh s ls` showed
+as *the container is not running*, so with the daemon down `omh s` showed
 live sandboxes as `stopped` — and `omh sNN sync` believed there was nothing to
 stop, which would have written trunk's files over the work of an agent
 mid-turn.
@@ -422,7 +422,7 @@ history with `omh s commit -m`. The branch is untouched either way.
 ### Sessions are piling up
 
 ```console
-$ omh s ls
+$ omh s
 $ omh s01 down
 ```
 

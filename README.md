@@ -140,7 +140,7 @@ omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
-omh sessions ls|diff|commit|push|down|rm  s   omh s diff, omh s push fix/x
+omh sessions [log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 diff
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset] this checkout: what it uses and why
 omh use|unuse <capability> <name> omh use skills tdd, omh use --all

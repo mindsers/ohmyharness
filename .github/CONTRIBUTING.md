@@ -107,7 +107,7 @@ product, not fixing a test.
 | `s commit` stages before asking whether anything changed | `git diff` says nothing about untracked files, so a session whose only work is new files reads as clean |
 | `s push` never invents a branch name | `omh/s01` on origin outlives the session that would explain it |
 | `s push` reads the branch back from origin before passing | every local step can succeed while the remote stays untouched |
-| `s ls` never reports a session holding work as clean | the state that strands work is the one it exists to surface |
+| `omh s` never reports a session holding work as clean | the state that strands work is the one it exists to surface |
 | the git notice names what to run instead, not just what is missing | an agent told only that git is broken offers to commit work it has no way to commit |
 | `rm` drops a branch with no commits | it preserves nothing, and dead refs hide the live ones |
 | each MCP format emits its harness's real schema | a wrong shape means zero servers and no complaint |
