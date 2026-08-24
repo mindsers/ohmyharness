@@ -78,7 +78,10 @@ impl Sandbox {
     ///
     /// Writing `docker-refuses` into the bin directory makes the shim exit
     /// non-zero, which is how a runtime that cannot be reached is reachable
-    /// from a test at all.
+    /// from a test at all. `docker-exec-refuses` fails only `exec`, which is
+    /// the narrower thing the launch path needs: a runtime that answers *the
+    /// container is running* and then will not let omh in. Everything
+    /// destructive in a launch hangs off telling those two apart.
     fn fake_docker(&self) -> PathBuf {
         let log = self.bin.join("docker.log");
         let shim = self.bin.join("docker");
@@ -87,10 +90,13 @@ impl Sandbox {
             format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
                  [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
+                 if [ \"$1\" = exec ] && [ -f {exec_refuses} ]; then \
+                 cat {exec_refuses} >&2; exit 1; fi\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\n\
                  if [ \"$1\" = ps ]; then cat {containers} 2>/dev/null; fi\nexit 0\n",
                 log = log.display(),
                 refuses = self.bin.join("docker-refuses").display(),
+                exec_refuses = self.bin.join("docker-exec-refuses").display(),
                 containers = self.bin.join("containers").display()
             ),
         )
@@ -2258,6 +2264,62 @@ fn scoping_the_one_verb_that_lists_them_all_is_refused() {
     );
 }
 
+/// A launch whose probe cannot be read does not destroy the running sandbox.
+///
+/// The end-to-end half of the guard, and the one that is red on the commit
+/// before it: with the probe collapsed to *this container cannot reach its
+/// worktree*, omh reaches `docker rm -f` on a container it was told is
+/// running, and the agent inside loses its turn.
+///
+/// Asserted on the call log rather than on the message, because `rm -f` is the
+/// thing that costs somebody their work — a refusal that still removed the
+/// container would read correctly and be the whole bug.
+#[test]
+fn a_launch_that_cannot_read_the_probe_removes_nothing() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    sb.session("s01");
+    // Running, so the launch takes the reuse path rather than building.
+    std::fs::write(sb.bin.join("containers"), "omh-repo-s01\n").unwrap();
+    // …and then will not let omh in, for a reason that is neither of the two
+    // omh may act on: the daemon died between the two calls.
+    //
+    // The wording is docker 29.7.2's own, measured. An invented one — "Error
+    // response from daemon: dial unix … connection refused" — carries the
+    // prefix that means *the daemon answered*, so it read as `Probe::Gone` and
+    // the container was replaced. Which is the right behaviour for that
+    // sentence, and the wrong test.
+    std::fs::write(
+        sb.bin.join("docker-exec-refuses"),
+        "failed to connect to the docker API at unix:///var/run/docker.sock; check if \
+         the path is correct and if the daemon is running\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["s01", "claude"]);
+    assert!(
+        !out.status.success(),
+        "the launch stops rather than guessing"
+    );
+
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        said.contains("could not tell whether s01's sandbox is still usable"),
+        "and says so: {said}"
+    );
+    assert!(
+        said.contains("omh s01 down"),
+        "with a way on that does not need the container entered: {said}"
+    );
+
+    let asked = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !asked.lines().any(|line| line.starts_with("rm -f")),
+        "and nothing was removed — this is the half that costs work: {asked}"
+    );
+}
+
 /// A runtime omh cannot reach is never reported as a sandbox that is stopped.
 ///
 /// End to end, because the unit tests decide what each layer *says* and this
@@ -2472,11 +2534,23 @@ impl Sandbox {
     /// The shipped adapters, where `Paths::adapters()` looks. `init` would put
     /// them there and needs a container to finish.
     fn seed_adapters(&self) {
-        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters");
-        let dst = self.home.join(".omh/adapters");
-        std::fs::create_dir_all(&dst).unwrap();
-        for entry in std::fs::read_dir(src).unwrap().flatten() {
-            std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+        self.seed_catalogue(&["adapters"]);
+    }
+
+    /// The shipped catalogue, or the parts of it a test needs.
+    ///
+    /// `init` stages all of this and needs a container to finish, so a test
+    /// that drives a launch has to stand it up itself. Copied from the repo
+    /// rather than written inline: a fixture that invents an adapter is a
+    /// fixture that stops resembling the thing users get.
+    fn seed_catalogue(&self, kinds: &[&str]) {
+        for kind in kinds {
+            let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(kind);
+            let dst = self.home.join(".omh").join(kind);
+            std::fs::create_dir_all(&dst).unwrap();
+            for entry in std::fs::read_dir(src).unwrap().flatten() {
+                std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+            }
         }
     }
 
