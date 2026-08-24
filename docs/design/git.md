@@ -1,14 +1,19 @@
 # Git
 
-**Designed and not built.** The worktree model, the sandbox's own repository and
-`omh s commit --keep` ship today and are described in
-[Sessions](../sessions.md). This page is the design for what goes *around* them:
-the loop a developer works in, and the way several sandboxes of one repo are
-reached from one place. None of it exists yet.
+**Built, in 0.6.0.** This page is the design for what goes *around* the worktree
+model and the sandbox's own repository: the loop a developer works in, and the
+way several sandboxes of one repo are reached from one place. All twelve steps
+in [Order](#order) have landed — each names the pull request that did it, and
+the entries record what was measured or got corrected on the way rather than
+only what was intended.
 
-It also rests on defects in what does exist. Those are in
+One thing is still open, and it is named at step 11: that a read-only `config`
+really does refuse inside a real container. It needs docker rather than a unit
+test.
+
+It rested on defects in what already existed. Those are in
 [Foundations](#foundations), each measured against git 2.55.0 on 2026-08-21, and
-they land first.
+they landed first.
 
 ## Three layers, and only one is yours
 

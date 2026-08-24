@@ -2,8 +2,8 @@
 
 Ordered by what gates what, not by what is most fun.
 
-**These are milestones, not crate versions.** The crate is at `0.5.0` and
-milestone v0 is roughly what those releases contain. They are deliberately not
+**These are milestones, not crate versions.** The crate is at `0.6.0` and
+milestone v1.5 is roughly what that release contains. They are deliberately not
 kept in lockstep — v0 has spanned seven releases already: a milestone moves when
 a body of work lands, semver moves on every release, and calling the crate `1.0`
 would imply a stability this project has not earned — one verified harness, one
@@ -13,7 +13,9 @@ verified runtime.
 
 ✅ `omh init` that decides · ✅ images · ✅ sandbox + worktree · ✅ persistence ·
 ✅ `omh auth` · ✅ `omh attach` · ✅ `omh doctor` · ✅ `carry_in` ·
-✅ code graph · ✅ `omh graph` · ✅ stack hooks · ⬜ [memory](memory.md)
+✅ code graph · ✅ `omh graph` · ✅ stack hooks ·
+🔶 [memory](memory.md) — the store, retrieval, the team layer and staleness
+ship; hub pages do not
 
 **Success criterion:** `omh init && omh claude` is visibly better than raw
 `claude`, with zero questions asked.
@@ -57,31 +59,39 @@ for the base set to ever **shrink**. Arguments for adding are always available;
 *"this now costs 4.1 KB before you type anything, up from 2.3"* is the fact that
 forces the other conversation, and it is free to produce.
 
-## Next — the git repairs
+## The git repairs — done (#46–#52)
 
 Not a milestone. Four measured defects in the path that gets work out of a
-session, one of which deletes unreviewed commits — [risks](risks.md) 4b and 8b.
-They land before anything on this list continues, each with its failing test
-first, and they are the foundation the milestone below rests on.
+session, one of which deleted unreviewed commits — [risks](risks.md) 4b and 8b.
+They landed first, each with its failing test before the fix, because the
+milestone below rested on them.
 
-Two cheap hardenings ride along, because they are in the same files and the
-loop below makes them urgent: the sandbox's exclude list rewritten on every
-launch (4c), and its `config` mounted read-only (2b), which matters once omh
-reads that gitdir from the host.
+Both cheap hardenings rode along as planned: the sandbox's exclude list is
+rewritten on every launch (4c), and its `config` is mounted read-only (2b),
+which mattered once omh started reading that gitdir from the host.
 
-## v1.5 — the work loop
+## v1.5 — the work loop ✅ (0.6.0)
 
-[Git](git.md), designed and not built. The sandbox has a repository and the
-worktree boundary holds; what is missing is the loop around them — reading a
-session's work, landing it in stages, staying current with trunk, and reaching
-several sessions of one repo from one place.
+[Git](git.md), built. All twelve steps in that page's ledger landed across
+#53–#67, and the page names the pull request behind each one.
 
-Ordered here rather than later because it is the daily experience of using omh
-for real work, and because two of its four surfaces are corrections to things
-that already exist rather than new product.
+`omh sNN log` makes the sandbox's commits visible, `--turns` reads the
+end-of-turn snapshots omh takes for an agent that commits nothing, `diff` grew
+`-p` and checkpoint numbers, `--keep` takes the numbers `log` printed and is
+repeatable from a recorded replay point, `sync` brings trunk in merged on the
+host, `rm` refuses over work no branch has, and `omh s` became a dashboard —
+state, staleness, the files two sessions are both changing, and the sandbox
+repositories a removed session left behind. `omh s01` is that dashboard scoped
+to one session.
 
 **Success criterion:** a session's work can be read, curated and landed without
-typing `git` and without knowing that a session is a worktree.
+typing `git` and without knowing that a session is a worktree. **Met.**
+
+What this cost is worth reading before proposing the next one: a third of those
+pull requests were corrections to the ones before them, and the recurring defect
+was not a wrong answer but a confident one — a question omh could not answer
+rendering identically to an answer. [Git](git.md) records each, with the
+measurement that settled it.
 
 ## v2 — portability
 
