@@ -159,6 +159,25 @@ as intermittent: the first launch of a session died, the second found the
 leftover and worked. omh places those files itself now, before docker sees the
 plan. On an older version, launching a second time is the workaround.
 
+### `omh could not tell whether s01's sandbox is still usable`
+
+Before reusing a running sandbox, omh runs one command inside it — that command
+answers both *can this be entered* and *what is running in it*. When the
+command fails, there are two very different reasons and omh will not guess
+between them.
+
+One is fatal and recoverable: the worktree the container is bound to was
+replaced under it, so no `exec` will ever work again and the container has to
+go. omh recognises that one by the message docker gives it (the next section)
+and replaces the sandbox itself.
+
+Anything else — the daemon restarting mid-launch, the container exiting between
+two calls, a fork that failed — is a question omh cannot answer, and the cost
+of answering it wrongly is a `docker rm -f` on a container with an agent
+working inside. So it stops and shows you what the runtime said. Start the
+runtime, or run the launch again; if the sandbox really is the broken kind,
+`omh sNN rm` clears it.
+
 ### `current working directory is outside of container mount namespace root`
 
 Docker's full wording is `OCI runtime exec failed: ... -- possible container

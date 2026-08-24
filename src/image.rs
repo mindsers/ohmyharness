@@ -783,13 +783,85 @@ pub fn container_running(backend: &dyn crate::runtime::Runtime, name: &str) -> R
 /// Returns the command's stdout, so one exec answers both questions the
 /// launcher has — whether the container can be entered, and what is running
 /// inside it. They are wanted together and they are the same probe.
-pub fn container_probe(program: &str, args: &[String]) -> Option<String> {
-    std::process::Command::new(program)
-        .args(args)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+/// What the one exec `reuse_decision` runs came back as.
+///
+/// `Option<String>` here was the same collapse `Running` replaced, on the
+/// decision with the most to lose: `None` meant *the container cannot reach
+/// its worktree*, *the daemon died between the two calls*, *the container
+/// stopped*, *the image has no shell*, and *the fork failed* — and `reuse`
+/// turns the first into `Restart`, which `session_up` acts on with `rm -f`.
+/// On a container it confirmed was running three lines earlier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Probe {
+    /// The exec worked. Carries what it printed, which may be empty.
+    Listed(String),
+    /// The mount-namespace failure, by its own signature: the worktree the
+    /// container is bound to was replaced under it, and no `exec` will ever
+    /// work again. Replacing it is the only remedy.
+    NotEnterable,
+    /// Something else went wrong, and why. Never *not enterable*.
+    Unknown(String),
+}
+
+/// The one failure a container cannot recover from, spelled the way docker
+/// spells it.
+///
+/// Matched on the message rather than on the exit code, because the message is
+/// evidence of *this* failure and the code is a category: 128 is docker's
+/// generic *the exec could not be started*.
+///
+/// Said as a design preference rather than as a measurement, because it is
+/// one. Trying to produce a second 128 on this machine gave exit 1 for a
+/// stopped container and 1 for a missing one; no non-namespace 128 was
+/// reproduced. What is asserted instead is the rule — a 128 whose message is
+/// not this one has no answer — which is the behaviour worth having whether or
+/// not the input is reachable today.
+const BROKEN_MOUNT: &str = "container mount namespace root";
+
+/// Read the probe's result, keeping the one recoverable failure apart from
+/// every other kind.
+///
+/// Over the process result rather than the process, so all of it is a table.
+///
+/// Measured 2026-08-24 against docker 29.7.2 by deleting and recreating a
+/// bind-mount source under a live container: the failure exits **128** and
+/// writes its message to **stdout**, with stderr empty — verified through
+/// `/bin/sh`, because zsh's MULTIOS has made this exact measurement wrong in
+/// this project before. Both streams are searched anyway: which one docker
+/// picks is not a thing to depend on, and a message that moves would silently
+/// turn the recoverable case into the fatal one.
+pub fn probe_from(asked: std::io::Result<std::process::Output>) -> Probe {
+    let out = match asked {
+        Ok(out) => out,
+        Err(e) => {
+            return Probe::Unknown(crate::out::untrusted(&format!(
+                "could not run the container runtime: {e}"
+            )))
+        }
+    };
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    if out.status.success() {
+        return Probe::Listed(String::from_utf8_lossy(&out.stdout).into_owned());
+    }
+    if said.contains(BROKEN_MOUNT) {
+        return Probe::NotEnterable;
+    }
+    let said = crate::out::untrusted(said.trim());
+    Probe::Unknown(match said.is_empty() {
+        true => match out.status.code() {
+            Some(code) => format!("the container runtime exited {code}"),
+            None => "the container runtime was killed by a signal".into(),
+        },
+        false => said,
+    })
+}
+
+pub fn container_probe(program: &str, args: &[String]) -> Probe {
+    probe_from(std::process::Command::new(program).args(args).output())
 }
 
 /// omh's own records from the label map docker reports.
@@ -882,6 +954,95 @@ mod tests {
             stdout: stdout.as_bytes().to_vec(),
             stderr: stderr.as_bytes().to_vec(),
         })
+    }
+
+    /// A probe that failed for some other reason is never read as *this
+    /// container cannot reach its worktree*.
+    ///
+    /// The consequence of getting this wrong is the worst in the program:
+    /// `reuse` turns *not enterable* into `Restart`, and `session_up` acts on
+    /// a `Restart` with `docker rm -f` — on a container `must_know` confirmed
+    /// was running three lines earlier. So every non-zero exit that was not
+    /// the mount-namespace failure destroyed an agent mid-turn, and under
+    /// `--json` said nothing at all, because the only notice is `ctx.progress`.
+    ///
+    /// The signature is measured, not guessed. Reproduced 2026-08-24 against
+    /// docker 29.7.2 by deleting and recreating a bind-mount source under a
+    /// live container: exit **128**, and the message on **stdout** — checked
+    /// through `/bin/sh` rather than the interactive shell, because zsh's
+    /// MULTIOS has made this exact measurement wrong here before. A container
+    /// that is simply gone exits 1 with `No such container` on stderr.
+    #[test]
+    fn a_probe_that_failed_some_other_way_does_not_read_as_a_broken_worktree() {
+        let namespace = "OCI runtime exec failed: exec failed: unable to start container \
+             process: current working directory is outside of container mount namespace \
+             root -- possible container breakout detected";
+
+        assert_eq!(
+            probe_from(output(0, "agent.sock\n", "")),
+            Probe::Listed("agent.sock\n".into()),
+            "a healthy exec answers with what it listed"
+        );
+        assert_eq!(
+            probe_from(output(0, "", "")),
+            Probe::Listed(String::new()),
+            "including an empty listing — the `|| true` makes a missing socket \
+             directory an answer rather than a failure"
+        );
+        assert_eq!(
+            probe_from(output(128, namespace, "")),
+            Probe::NotEnterable,
+            "the failure this was written for, by its own signature"
+        );
+
+        // Everything else. Each of these used to mean *replace it*.
+        for (code, out, err, what) in [
+            (
+                1,
+                "",
+                "Error response from daemon: No such container: omh-repo-s01",
+                "a container that went away between the two calls",
+            ),
+            (
+                1,
+                "",
+                "Cannot connect to the Docker daemon",
+                "a daemon that died mid-launch",
+            ),
+            (
+                126,
+                "",
+                "exec: \"sh\": executable file not found in $PATH",
+                "an image with no shell",
+            ),
+            (137, "", "", "an exec the kernel killed"),
+            (
+                128,
+                "OCI runtime exec failed: exec failed: something else entirely",
+                "",
+                "and another OCI start failure sharing the exit code — the code \
+                 is a category, the message is the evidence",
+            ),
+        ] {
+            let answered = probe_from(output(code, out, err));
+            assert_ne!(
+                answered,
+                Probe::NotEnterable,
+                "{what} is not a worktree that went missing"
+            );
+            assert!(
+                matches!(&answered, Probe::Unknown(_)),
+                "{what} has no answer: {answered:?}"
+            );
+        }
+
+        assert!(
+            matches!(
+                probe_from(Err(std::io::Error::other("fork failed"))),
+                Probe::Unknown(_)
+            ),
+            "and neither does a probe that never ran"
+        );
     }
 
     /// A runtime that would not answer is never read as *not running*.

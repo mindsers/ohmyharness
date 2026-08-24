@@ -898,12 +898,16 @@ fn unknown_tool(paths: &Paths, name: &str, original: anyhow::Error) -> anyhow::E
 /// inside it are the same question asked of the same command — and a container
 /// that refuses the exec cannot answer the second, which is why an unreadable
 /// probe short-circuits to "replace it" rather than to "nothing is running".
+///
+/// It short-circuits there only for the failure that means it, though. Every
+/// other way the exec can fail is a question omh cannot answer, and answering
+/// it wrongly costs an agent its turn — so those refuse.
 fn reuse_decision(
     backend: &dyn runtime::Runtime,
     name: &str,
     plan: &container::Plan,
     session: &Session,
-) -> container::Reuse {
+) -> Result<container::Reuse> {
     // `|| true` so an absent socket directory is an empty listing rather than a
     // failed exec — the failure this reads is the mount namespace one, and
     // conflating the two would replace every container that has never run a
@@ -917,15 +921,32 @@ fn reuse_decision(
         ],
         false,
     );
-    let Some(listing) = image::container_probe(backend.program(), &probe) else {
-        return container::reuse(false, &Default::default(), plan, &[]);
+    let listing = match image::container_probe(backend.program(), &probe) {
+        image::Probe::Listed(listing) => listing,
+        image::Probe::NotEnterable => {
+            return Ok(container::reuse(false, &Default::default(), plan, &[]))
+        }
+        // Refused rather than guessed, and this is the whole point of the
+        // type. `Restart` here means `rm -f` on a container that is running,
+        // and *the daemon blinked* is not a reason to destroy somebody's turn.
+        // Attaching on the guess is no better: if the container really is the
+        // broken one, every command in it fails with this same message.
+        //
+        // The user is the one who can tell the difference — the message says
+        // which failure it was, and `omh sNN rm` is there if it is the fatal
+        // kind and omh could not see it.
+        image::Probe::Unknown(why) => anyhow::bail!(
+            "omh could not tell whether {}'s sandbox is still usable, so it will neither \
+             attach to it nor replace it: {why}",
+            session.id
+        ),
     };
-    container::reuse(
+    Ok(container::reuse(
         true,
         &image::container_stamp(backend.program(), name),
         plan,
         &persist::live(&session.id, &listing),
-    )
+    ))
 }
 
 /// Bring a session's sandbox up if it is not already. A session is a *running
@@ -989,7 +1010,7 @@ fn session_up(
     // from the same one. Cheap — `ensure` above is a path check once the binary
     // is cached, and the staging the plan performs happens every launch anyway.
     if running {
-        match reuse_decision(backend.as_ref(), &name, &plan, session) {
+        match reuse_decision(backend.as_ref(), &name, &plan, session)? {
             container::Reuse::Attach => return Ok((backend, name)),
             container::Reuse::Blocked { live, changed } => anyhow::bail!(
                 "session {id} is running {} and cannot be reused for this launch \
@@ -1001,7 +1022,12 @@ fn session_up(
                 id = session.id,
             ),
             container::Reuse::Restart(why) => {
-                ctx.progress(&format!(
+                // `warn`, not `progress`. This destroys a running container,
+                // and `progress` is suppressed entirely under `--json` — so
+                // the one destructive act in a launch was the one a script
+                // could not see. Every other outcome of this match reaches
+                // both formats: `Attach` returns, `Blocked` bails.
+                ctx.warn(&format!(
                     "restarting the sandbox for {} — {}",
                     session.label(),
                     why.join(", ")
