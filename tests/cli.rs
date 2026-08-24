@@ -67,17 +67,33 @@ impl Sandbox {
     /// Which runtime gets picked is pinned too: `auto` prefers `sbx`, so on a
     /// box that has one this shim would never be consulted and the test would
     /// pass by not looking.
+    ///
+    /// The `ps` handler honours `--filter name=`, because omh's *"is this one
+    /// container up"* probe is a filtered `ps` and a shim that answers for
+    /// every name would say a session is running whenever any session is.
+    /// Unfiltered `ps -a` still lists everything — that is the leftover scan,
+    /// which wants the whole set. Writing `docker-refuses` into the bin
+    /// directory makes the shim exit non-zero, which is how a runtime that
+    /// cannot be reached is reachable from a test at all.
     fn fake_docker(&self) -> PathBuf {
         let log = self.bin.join("docker.log");
         let shim = self.bin.join("docker");
         std::fs::write(
             &shim,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\n\
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\n\
+                 [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\n\
-                 if [ \"$1\" = ps ]; then cat {} 2>/dev/null; fi\nexit 0\n",
-                log.display(),
-                self.bin.join("containers").display()
+                 if [ \"$1\" = ps ]; then\n\
+                 case \"$*\" in\n\
+                 *--filter*) while read -r c; do case \"$*\" in *\"$c\"*) echo \"$c\" ;; esac; \
+                 done < {containers} 2>/dev/null ;;\n\
+                 *) cat {containers} 2>/dev/null ;;\n\
+                 esac\n\
+                 fi\nexit 0\n",
+                log = log.display(),
+                refuses = self.bin.join("docker-refuses").display(),
+                containers = self.bin.join("containers").display()
             ),
         )
         .unwrap();
@@ -127,7 +143,13 @@ impl Sandbox {
                  # across three branches, each time saying only `init failed`.\n\
                  if [ \"$1\" = build ]; then cat > /dev/null; fi\n\
                  if [ \"$1\" = images ]; then cat {images}; fi\n\
-                 if [ \"$1\" = ps ]; then cat {containers}; fi\n\
+                 if [ \"$1\" = ps ]; then\n\
+                 case \"$*\" in\n\
+                 *--filter*) while read -r c; do case \"$*\" in *\"$c\"*) echo \"$c\" ;; esac; \
+                 done < {containers} 2>/dev/null ;;\n\
+                 *) cat {containers} ;;\n\
+                 esac\n\
+                 fi\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\nexit 0\n",
                 log = log.display(),
                 images = images.display(),
@@ -2241,6 +2263,50 @@ fn scoping_the_one_verb_that_lists_them_all_is_refused() {
     assert!(
         said.contains("s01") && said.contains("omh s ls"),
         "and name both what it dropped and what to type: {said}"
+    );
+}
+
+/// A runtime omh cannot reach is never reported as a sandbox that is stopped.
+///
+/// End to end, because the unit tests decide what each layer *says* and this
+/// decides that the layers are wired to each other. The failure it guards is
+/// specific and was live: with the Docker daemon down, `omh s ls` printed
+/// `stopped` beside every session — in both formats, with nothing on stderr —
+/// and `omh sNN sync` read the same false all-clear and would have written
+/// over the files of a live agent.
+#[test]
+fn a_runtime_that_cannot_be_reached_is_not_reported_as_a_stopped_sandbox() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.session("s01");
+    std::fs::write(sb.bin.join("docker-refuses"), "").unwrap();
+
+    let out = sb.omh(&["s", "ls"]);
+    let printed = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !printed.contains("stopped"),
+        "a question omh could not answer is not an answer: {printed}"
+    );
+
+    // The JSON has no second signal — `--json` returns before asides — so the
+    // field is the whole of what a script gets.
+    let json = sb.omh(&["s", "ls", "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&json.stdout).expect("s ls --json is a document");
+    assert_eq!(
+        doc["sessions"][0]["running"],
+        serde_json::Value::Null,
+        "and a script is not told `false`: {doc}"
+    );
+
+    // The one that matters. A sync here would land files under an agent that
+    // may well be mid-turn.
+    let sync = sb.omh(&["s01", "sync"]);
+    assert!(!sync.status.success(), "sync does not proceed on a guess");
+    let err = String::from_utf8_lossy(&sync.stderr);
+    assert!(
+        err.contains("could not tell whether the sandbox is running"),
+        "and says why it stopped: {err}"
     );
 }
 

@@ -946,7 +946,10 @@ fn session_up(
 ) -> Result<(Box<dyn runtime::Runtime>, String)> {
     let backend = runtime::select(&runtime_preference(paths), &|p| runtime::installed(p))?;
     let name = paths.container(&session.id);
-    let running = image::container_running(backend.program(), &name);
+    let running = must_know(
+        image::container_running(backend.as_ref(), &name),
+        "start or reuse it",
+    )?;
 
     // Before planning, because the plan mounts the memory server only if a
     // binary exists. Degraded rather than fatal: a session without memory is
@@ -1230,7 +1233,10 @@ fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool, ctx: &out::Ctx) -
     let container = base::ui_container(&paths.repo_name());
 
     if stop {
-        if !image::container_running(backend.program(), &container) {
+        if !must_know(
+            image::container_running(backend.as_ref(), &container),
+            "stop the graph",
+        )? {
             ctx.say(
                 &report::Action::new("graph-not-running", "the graph is not running")
                     .data(serde_json::json!({ "running": false })),
@@ -1246,7 +1252,10 @@ fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool, ctx: &out::Ctx) -
     }
 
     let port = base::ui_port(&container);
-    if !image::container_running(backend.program(), &container) {
+    if !must_know(
+        image::container_running(backend.as_ref(), &container),
+        "start the graph",
+    )? {
         // A stopped container of the same name blocks `run --name`.
         let _ = image::container_remove(backend.program(), &container);
 
@@ -1320,7 +1329,16 @@ fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
 
     let running: Vec<(String, Option<std::time::SystemTime>)> = session::list(&paths.worktrees())
         .into_iter()
-        .filter(|id| image::container_running(backend.program(), &paths.container(id)))
+        // Not `must_know` — this runs on a timer with nobody to tell, and the
+        // safe direction is the opposite one. *Could not tell* keeps a session
+        // out of the reaping list: leaving a sandbox up costs a container, and
+        // stopping a live one on a guess costs somebody's turn.
+        .filter(|id| {
+            matches!(
+                image::container_running(backend.as_ref(), &paths.container(id)),
+                image::Running::Yes
+            )
+        })
         .map(|id| {
             let last = idle::last_used(&paths.runs(), &id);
             (id, last)
@@ -1350,9 +1368,21 @@ fn down(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()> {
     let mut stuck = 0usize;
     for i in &ids {
         let name = paths.container(i);
-        if !image::container_running(backend.program(), &name) {
-            sessions.push((i.clone(), false));
-            continue;
+        match image::container_running(backend.as_ref(), &name) {
+            image::Running::No => {
+                sessions.push((i.clone(), false));
+                continue;
+            }
+            // Counted with the ones that would not stop, not with the ones
+            // that were already down. `down` reporting *nothing was running*
+            // over a runtime it could not reach is the same false all-clear
+            // this change is about, and the exit code has to agree with it.
+            image::Running::Unknown(why) => {
+                stuck += 1;
+                ctx.warn(&format!("omh could not tell whether {i} is running: {why}"));
+                continue;
+            }
+            image::Running::Yes => {}
         }
         match image::container_remove(backend.program(), &name) {
             Ok(()) => sessions.push((i.clone(), true)),
@@ -1569,10 +1599,14 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 Err(_) => unreadable.push(id.clone()),
             }
             report::Session {
+                // `None` for *nobody asked*, which is what no backend at all
+                // means, and `Unknown` inside it for *asked and could not
+                // tell*. The same two-level shape `work` uses one column over,
+                // and for the same reason it gives: the mistake becomes
+                // unspellable rather than merely absent.
                 running: backend
                     .as_ref()
-                    .map(|b| image::container_running(b.program(), &paths.container(&id)))
-                    .unwrap_or(false),
+                    .map(|b| image::container_running(b.as_ref(), &paths.container(&id))),
                 label: sess.label().to_string(),
                 work: Some(work_state(
                     &sess,
@@ -5058,7 +5092,11 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     // column this listing does not print. `None` says *not
                     // asked* — `Work::Clean` would be a claim, and a false one.
                     work: None,
-                    running: false,
+                    // `None` for the same reason `work` is: this listing does
+                    // not print the column and asking would cost a subprocess
+                    // per session. `false` was a claim, and one omh had not
+                    // checked.
+                    running: None,
                     // Silently `.ok()` until #62 put a yellow question in
                     // this column: a surface that asks *how far behind?* and
                     // cannot say why is worse than one that never asked.
@@ -5200,7 +5238,15 @@ fn stop_before_syncing(paths: &Paths, session: &Session, down: bool, ctx: &out::
         return Ok(());
     };
     let name = paths.container(&session.id);
-    if !image::container_running(backend.program(), &name) {
+    // The reason this whole class was worth fixing. `.unwrap_or(false)` here
+    // meant an unreachable runtime read as *nothing is running*, and a sync
+    // then wrote over the files of a live agent — the outcome the paragraphs
+    // above call the worst available, reached by the one path they do not
+    // discuss.
+    if !must_know(
+        image::container_running(backend.as_ref(), &name),
+        "sync over it",
+    )? {
         return Ok(());
     }
     anyhow::ensure!(
@@ -5578,6 +5624,25 @@ fn may_commit(id: &str, unresolved: &[String], force: bool) -> Result<()> {
             n => format!("\n  …and {n} more"),
         }
     );
+}
+
+/// *Could not tell* at a point where omh is about to act on the answer.
+///
+/// Not a `no`, and at a decision point not a `yes` either — so it is a
+/// refusal, carrying the runtime's own words. Every caller of this is about to
+/// create, enter, stop or overwrite a container on the strength of the answer,
+/// and each of those is worse done blind than not done.
+///
+/// The alternative that shipped for a year was `.unwrap_or(false)`, which is
+/// how a Docker daemon that is down made every sandbox look stopped.
+fn must_know(running: image::Running, doing: &str) -> Result<bool> {
+    match running {
+        image::Running::Yes => Ok(true),
+        image::Running::No => Ok(false),
+        image::Running::Unknown(why) => anyhow::bail!(
+            "omh could not tell whether the sandbox is running, so it will not {doing}: {why}"
+        ),
+    }
 }
 
 /// Whether this session may be removed, or what stands in the way.
@@ -5978,7 +6043,14 @@ fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -> Result<()
     // for every command from then on. Nothing else ever removes it.
     if let Ok(backend) = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)) {
         let name = paths.container(id);
-        if image::container_running(backend.program(), &name) {
+        // Best-effort already — `let _` below says so. *Could not tell* joins
+        // *not running*: the graph entry is dropped on the next launch that
+        // reuses the id, and failing a removal over a tidy-up nobody asked
+        // for would be the tail wagging the dog.
+        if matches!(
+            image::container_running(backend.as_ref(), &name),
+            image::Running::Yes
+        ) {
             let project = base::project_name(&paths.repo_name(), id);
             let _ = Command::new(backend.program())
                 .args(backend.exec_args(&name, &base::drop_graph_command(&project), false))
@@ -6741,6 +6813,34 @@ mod tests {
         assert!(
             said.contains("40 conflict markers") && said.contains("…and 35 more"),
             "and the count is still the whole truth: {said}"
+        );
+    }
+
+    /// omh does not act on a container question it could not answer.
+    ///
+    /// The decision points all read the same way — start it, enter it, stop
+    /// it, sync over it — and each is worse done blind than not done. The one
+    /// that made this worth changing is `sync`: it asks whether the sandbox is
+    /// up to decide whether writing files would land under a live agent, and
+    /// an unreachable runtime used to answer *nothing is running*.
+    #[test]
+    fn a_container_question_omh_could_not_answer_stops_the_command() {
+        assert!(must_know(image::Running::Yes, "sync over it").unwrap());
+        assert!(!must_know(image::Running::No, "sync over it").unwrap());
+
+        let refused = must_know(
+            image::Running::Unknown("daemon not reachable".into()),
+            "sync over it",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refused.contains("sync over it"),
+            "it says what it declined to do: {refused}"
+        );
+        assert!(
+            refused.contains("daemon not reachable"),
+            "and the runtime's reason, which is the only actionable part: {refused}"
         );
     }
 

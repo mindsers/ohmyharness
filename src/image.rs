@@ -658,12 +658,68 @@ pub fn ensure_network(program: &str, name: &str) -> Result<()> {
 }
 
 /// Is the session container up right now?
-pub fn container_running(program: &str, name: &str) -> bool {
-    std::process::Command::new(program)
-        .args(["inspect", "-f", "{{.State.Running}}", name])
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
-        .unwrap_or(false)
+/// Whether the sandbox is up — with *omh could not tell* as its own answer.
+///
+/// A `bool` here was the same collapse the session dashboard carried in its
+/// `behind` column, with more at stake. `false` meant both *the container is
+/// not running* and *the runtime would not answer*, so a Docker daemon that is
+/// down rendered live sandboxes as `stopped` — and, far worse, told
+/// `stop_before_syncing` there was nothing to stop. A sync would then overwrite
+/// files under a live agent, which that function's own doc calls the worst
+/// outcome available.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Running {
+    Yes,
+    No,
+    /// The runtime could not be asked, and why. Never *no*.
+    Unknown(String),
+}
+
+/// Is this container up, given what the runtime said when asked?
+///
+/// Over the process result rather than the process, so all four states are a
+/// table — the shape `doctor::version_of` uses, for the reason it records:
+/// while this was one `.unwrap_or(false)`, no test could reach any state but
+/// the first.
+///
+/// **The mechanism is the exit status, not the text.** Measured against docker
+/// 29.7.2: `ps -q --filter name=^<name>$` exits 0 with the id when the
+/// container is running, exits 0 with nothing when it is stopped *or does not
+/// exist*, and exits non-zero only when the daemon could not be reached. The
+/// obvious probe — `inspect -f {{.State.Running}}` — cannot do this: a missing
+/// container and an unreachable daemon both exit 1 with empty stdout, and the
+/// only thing separating them is English on stderr.
+///
+/// A stopped container and one that was never built are deliberately the same
+/// answer. Neither is running, and no caller here wants them apart.
+pub fn running_from(asked: std::io::Result<std::process::Output>) -> Running {
+    let out = match asked {
+        Ok(out) => out,
+        // The program is on `PATH` — `runtime::installed` said so before any
+        // of this — so a spawn that fails is a fork failure or a binary that
+        // vanished mid-run, and either way omh has no answer.
+        Err(e) => return Running::Unknown(format!("could not run the container runtime: {e}")),
+    };
+    if !out.status.success() {
+        let said = crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim());
+        return Running::Unknown(match said.is_empty() {
+            // A non-zero exit with nothing said. Still not *no*.
+            true => format!("the container runtime exited {}", out.status),
+            false => said,
+        });
+    }
+    match String::from_utf8_lossy(&out.stdout).trim().is_empty() {
+        true => Running::No,
+        false => Running::Yes,
+    }
+}
+
+pub fn container_running(backend: &dyn crate::runtime::Runtime, name: &str) -> Running {
+    running_from(
+        std::process::Command::new(backend.program())
+            .args(backend.running_args(name))
+            .output(),
+    )
 }
 
 /// Can the session still be entered — not just "is it up"?
@@ -778,6 +834,102 @@ pub fn exists(program: &str, tag: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn output(code: i32, stdout: &str, stderr: &str) -> std::io::Result<std::process::Output> {
+        use std::os::unix::process::ExitStatusExt;
+        Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    /// A runtime that would not answer is never read as *not running*.
+    ///
+    /// The defect this replaces was one `.unwrap_or(false)`, and it had four
+    /// inputs of which no test could reach three. What it cost is not a
+    /// cosmetic column: `stop_before_syncing` asks this question to decide
+    /// whether a sync would overwrite the files of a live agent, and a Docker
+    /// daemon that is down answered *nothing is running*.
+    ///
+    /// The states are the ones measured against docker 29.7.2, not invented:
+    /// running prints an id, stopped and never-built print nothing, and only
+    /// an unreachable daemon exits non-zero.
+    #[test]
+    fn a_runtime_that_will_not_answer_is_not_a_container_that_is_stopped() {
+        assert_eq!(
+            running_from(output(0, "078e9e0e533c\n", "")),
+            Running::Yes,
+            "an id on stdout is the container"
+        );
+        assert_eq!(
+            running_from(output(0, "", "")),
+            Running::No,
+            "nothing on stdout, asked and answered: it is not running"
+        );
+
+        // The one that matters. Both halves: not `No`, and carrying why.
+        let daemon_down = "failed to connect to the docker API at unix:///var/run/docker.sock";
+        let unknown = running_from(output(1, "", daemon_down));
+        assert_ne!(unknown, Running::No, "a failed question is not a `no`");
+        assert!(
+            matches!(&unknown, Running::Unknown(why) if why.contains("docker API")),
+            "and it carries the runtime's own words: {unknown:?}"
+        );
+
+        // A non-zero exit that says nothing is still not a `no`. The tempting
+        // reading — no error text, so nothing was wrong — is how this class of
+        // bug is reintroduced.
+        assert!(
+            matches!(running_from(output(1, "", "")), Running::Unknown(_)),
+            "silence on stderr does not make a failure into an answer"
+        );
+
+        // The runtime is on `PATH` before any of this — a spawn that fails
+        // anyway is a machine in trouble, not a container that is stopped.
+        assert!(
+            matches!(
+                running_from(Err(std::io::Error::other("fork failed"))),
+                Running::Unknown(_)
+            ),
+            "and neither does a spawn that never ran"
+        );
+    }
+
+    /// Whatever the runtime says comes back through `untrusted`.
+    ///
+    /// This text reaches the terminal through a warning and through `sync`'s
+    /// refusal. A container name is chosen by omh, but the rest of that line
+    /// is the runtime's, and an image label or a mount path inside it is not.
+    #[test]
+    fn the_runtimes_own_words_are_sanitised_before_they_are_repeated() {
+        let sneaky = "cannot connect\u{1b}[2J to the daemon";
+        let Running::Unknown(why) = running_from(output(1, "", sneaky)) else {
+            panic!("a failed probe is Unknown");
+        };
+        assert!(
+            !why.contains('\u{1b}'),
+            "no escape reaches the terminal: {why:?}"
+        );
+        assert!(why.contains("cannot connect"), "the words survive: {why:?}");
+    }
+
+    /// The probe asks about one container, not about one whose name starts the
+    /// same way.
+    ///
+    /// `--filter name=` is a substring match. Measured: unanchored, a filter
+    /// for `omh-repo-s1` also matches `omh-repo-s10` — so `omh s1 down` would
+    /// read as running because `s10` is, and `sync` would refuse over the
+    /// wrong session.
+    #[test]
+    fn the_probe_is_anchored_to_the_whole_container_name() {
+        use crate::runtime::Runtime;
+        let args = crate::runtime::Docker.running_args("omh-repo-s1");
+        assert!(
+            args.iter().any(|a| a == "name=^omh-repo-s1$"),
+            "anchored at both ends: {args:?}"
+        );
+    }
 
     /// omh tags an image by hashing its recipe, so a recipe change builds a new
     /// tag and the old one of that kind is superseded the moment it does.

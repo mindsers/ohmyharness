@@ -636,7 +636,13 @@ impl Work {
 pub struct Session {
     pub id: String,
     pub label: String,
-    pub running: bool,
+    /// Whether the sandbox is up. `None` means no runtime was found, so
+    /// nobody asked; `Some(Running::Unknown)` means omh asked and the runtime
+    /// would not answer.
+    ///
+    /// A bare `bool` until #63, which made a Docker daemon that is down render
+    /// every live sandbox as `stopped` — in both formats, with nothing said.
+    pub running: Option<crate::image::Running>,
     /// **`None` means nobody asked**, which is not `Some(Work::Clean)`.
     ///
     /// `omh ls` is the wide view and does not spend a git subprocess per
@@ -725,6 +731,26 @@ pub fn overlaps(changed: &[(String, Vec<String>)]) -> Vec<Overlap> {
         .collect()
 }
 
+/// Whether the sandbox is up, as one cell — four answers, four renderings.
+///
+/// The column beside `behind`, with the same rule and the same history: a
+/// `bool` rendered *stopped* for a container that was not running and for a
+/// runtime that would not say, so a Docker daemon that is down showed every
+/// live sandbox as stopped.
+///
+/// *Nobody asked* and *asked and could not tell* are kept apart too. They lead
+/// different places — no runtime at all is a machine that cannot run sessions,
+/// and a runtime that will not answer is one that usually can.
+fn running_cell(running: &Option<crate::image::Running>) -> Cell {
+    use crate::image::Running;
+    match running {
+        Some(Running::Yes) => Cell::styled("up", out::OK),
+        Some(Running::No) => Cell::styled("stopped", out::DIM),
+        Some(Running::Unknown(_)) => Cell::styled("up?", out::WARN),
+        None => Cell::styled("no runtime", out::WARN),
+    }
+}
+
 /// How far a session trails its base, as one cell — three answers, three
 /// renderings.
 ///
@@ -790,11 +816,7 @@ impl Report for Sessions {
             table = table.row(vec![
                 Cell::styled(&s.id, out::NAME),
                 Cell::plain(&s.label),
-                if s.running {
-                    Cell::styled("up", out::OK)
-                } else {
-                    Cell::styled("stopped", out::DIM)
-                },
+                running_cell(&s.running),
                 match &s.work {
                     Some(work) => Cell::styled(work.human(), work.style()),
                     None => Cell::plain(""),
@@ -881,9 +903,15 @@ impl Report for Sessions {
         let offered: Vec<(String, &Session)> = stale
             .iter()
             .map(|s| {
+                // `--down` for a sandbox that is up, and for one omh could
+                // not ask about: `sync` refuses on a running session, and the
+                // form that stops it first is right either way. Suggesting the
+                // bare form on a guess is how the advice fails when pasted.
                 let cmd = match s.running {
-                    true => format!("omh {} sync --down", out::untrusted(&s.id)),
-                    false => format!("omh {} sync", out::untrusted(&s.id)),
+                    Some(crate::image::Running::No) | None => {
+                        format!("omh {} sync", out::untrusted(&s.id))
+                    }
+                    _ => format!("omh {} sync --down", out::untrusted(&s.id)),
                 };
                 (cmd, *s)
             })
@@ -903,8 +931,8 @@ impl Report for Sessions {
                 "  {cmd}{pad}bring {} in{}",
                 self.base,
                 match s.running {
-                    true => ", stopping the sandbox first",
-                    false => ", merged on the host",
+                    Some(crate::image::Running::No) | None => ", merged on the host",
+                    _ => ", stopping the sandbox first",
                 }
             ));
         }
@@ -958,7 +986,14 @@ impl Report for Sessions {
             "sessions": self.sessions.iter().map(|s| json!({
                 "id": s.id,
                 "label": s.label,
-                "running": s.running,
+                // Three values, not two: `true`, `false`, and `null` for a
+                // question omh could not answer. A script reading `running ==
+                // false` over an unreachable runtime got a fiction.
+                "running": match &s.running {
+                    Some(crate::image::Running::Yes) => serde_json::Value::Bool(true),
+                    Some(crate::image::Running::No) => serde_json::Value::Bool(false),
+                    _ => serde_json::Value::Null,
+                },
                 // `null` where nobody asked. A caller can tell that apart from
                 // every answer, which is the whole reason for the `Option`.
                 "work": s.work.as_ref().map(Work::json),
@@ -3059,7 +3094,7 @@ mod tests {
         Session {
             id: id.into(),
             label: "claude".into(),
-            running: false,
+            running: Some(crate::image::Running::No),
             work: Some(work),
             behind: Some(0),
         }
@@ -3147,6 +3182,74 @@ mod tests {
         }
     }
 
+    /// The `running` column has four answers and renders four ways.
+    ///
+    /// The same rule as `behind` one column over, arrived at the same way: a
+    /// `bool` meant *stopped* covered both a container that is down and a
+    /// runtime that would not say, so a Docker daemon that is not running
+    /// showed every live sandbox as stopped — in the human table and in JSON,
+    /// with nothing on stderr.
+    ///
+    /// *Nobody asked* is kept apart from *asked and could not tell* because
+    /// they lead different places: no runtime at all is a machine that cannot
+    /// run sessions, and a runtime that will not answer is one that usually
+    /// can.
+    #[test]
+    fn a_runtime_that_would_not_answer_is_not_rendered_as_a_stopped_sandbox() {
+        use crate::image::Running;
+        let render = |running| {
+            let mut row = session("s01", Work::Clean);
+            row.running = running;
+            sessions(vec![row]).human(&out::Palette::plain())
+        };
+
+        assert!(render(Some(Running::Yes)).contains("up"));
+        assert!(render(Some(Running::No)).contains("stopped"));
+        for (a, b, what) in [
+            (
+                Some(Running::Unknown("daemon down".into())),
+                Some(Running::No),
+                "a runtime that would not answer is not a stopped sandbox",
+            ),
+            (
+                None,
+                Some(Running::No),
+                "and neither is a machine with no runtime at all",
+            ),
+            (
+                None,
+                Some(Running::Unknown("daemon down".into())),
+                "nor are those two each other",
+            ),
+        ] {
+            assert_ne!(render(a), render(b), "{what}");
+        }
+    }
+
+    /// JSON keeps the same three answers, where getting it wrong is worst.
+    ///
+    /// A script reading `running == false` over an unreachable runtime got a
+    /// fiction, and `--json` returns before asides, so there was no second
+    /// signal anywhere in the document.
+    #[test]
+    fn a_sandbox_omh_could_not_ask_about_is_null_and_not_false() {
+        use crate::image::Running;
+        let field = |running| {
+            let mut row = session("s01", Work::Clean);
+            row.running = running;
+            sessions(vec![row]).json()["sessions"][0]["running"].clone()
+        };
+
+        assert_eq!(field(Some(Running::Yes)), json!(true));
+        assert_eq!(field(Some(Running::No)), json!(false));
+        assert_eq!(
+            field(Some(Running::Unknown("daemon down".into()))),
+            serde_json::Value::Null,
+            "a question omh could not answer is not a `false`"
+        );
+        assert_eq!(field(None), serde_json::Value::Null);
+    }
+
     /// A running session is offered the spelling that works on it.
     ///
     /// `sync` refuses while the sandbox is up and names `--down` itself, so
@@ -3159,7 +3262,10 @@ mod tests {
         let running = |up: bool| {
             let mut row = session("s01", Work::Clean);
             row.behind = Some(4);
-            row.running = up;
+            row.running = Some(match up {
+                true => crate::image::Running::Yes,
+                false => crate::image::Running::No,
+            });
             sessions(vec![row]).asides().hints.join("\n")
         };
 

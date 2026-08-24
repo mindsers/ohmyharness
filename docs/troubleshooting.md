@@ -114,6 +114,23 @@ The token was written somewhere that does not persist. `omh doctor` names it:
 
 Background in [Accounts](accounts.md#mount-the-directory-never-the-token-file).
 
+### `up?` in `omh s ls`, or `omh could not tell whether the sandbox is running`
+
+The container runtime is installed — omh checked before it asked — but it would
+not answer. Almost always the daemon is not running: start Docker Desktop, or
+`systemctl start docker`. The rest of the line is the runtime's own message,
+which is the part worth reading.
+
+**Nothing acts on that answer while it is unknown.** `sync`, `down`, `graph`
+and a launch all refuse rather than guess, and they refuse for a reason: until
+2026.08 omh read *the runtime would not answer* as *the container is not
+running*, so with the daemon down `omh s ls` showed live sandboxes as
+`stopped` — and `omh sNN sync` believed there was nothing to stop, which would
+have written trunk's files over the work of an agent mid-turn.
+
+The reaper is the one exception, and in the safe direction: a session it cannot
+ask about is never stopped for being idle.
+
 ### `network omh-<repo> not found`
 
 The plan named a per-project network that was never created. A plan must be

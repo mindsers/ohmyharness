@@ -295,11 +295,11 @@ was there long before there was anything to do with it; `sync` is that thing.
 
 ```console
 $ omh s ls
-  s01  omh/s01  stopped
-  s02  omh/s02  up       3 uncommitted  (12 behind main)
-  s03  omh/s03  stopped                 (how far behind main?)
+  s01  omh/s01  up
+  s02  omh/s02  stopped  3 uncommitted  (12 behind main)
+  s03  omh/s03  up?                     (how far behind main?)
 omh: omh could not measure s03 against main — it may be working against code that moved, and `sync` is not offered over a count that failed
-  omh s02 sync --down  bring main in, stopping the sandbox first
+  omh s02 sync  bring main in, merged on the host
   omh s03 log   says why the count could not be taken
 ```
 
@@ -307,6 +307,22 @@ Offered for the sessions it applies to and no others — a suggestion under ever
 row is one nobody reads — and in the spelling that works on the session as it
 stands. `sync` refuses while a sandbox is up and names `--down` itself, so the
 bare form under a row marked `up` would be a line that fails when pasted.
+
+**And a container omh could not ask about is not a container that is stopped.**
+The state column has four answers, not two:
+
+| | |
+|---|---|
+| `up` | the sandbox is running |
+| `stopped` | it is not |
+| `up?` | omh asked and the runtime would not answer — the reason is on stderr |
+| `no runtime` | there is no docker or sbx on this machine, so nobody asked |
+
+`up?` is not cosmetic. Every command that acts on a container asks this
+question first, and until 2026.08 a Docker daemon that was down answered *not
+running* — so `omh sNN sync` believed there was nothing to stop and would have
+written over the files of a live agent. Those commands refuse now, naming what
+the runtime said.
 
 **A count omh could not take is not a count of zero.** `s03` renders `(how far
 behind main?)` rather than an empty cell, because *up to date* and *omh could

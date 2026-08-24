@@ -40,6 +40,16 @@ pub trait Runtime: std::fmt::Debug {
     /// Run something inside an already-running session.
     fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String>;
 
+    /// Ask whether one session's container is running, by name.
+    ///
+    /// On the trait because the answer has to distinguish *not running* from
+    /// *could not ask*, and how a runtime spells that is the runtime's
+    /// business. What every implementation owes the caller is the contract
+    /// `image::running_from` reads: **exit zero and name the container when it
+    /// is up, exit zero and say nothing when it is not, and exit non-zero only
+    /// when the question could not be answered.**
+    fn running_args(&self, name: &str) -> Vec<String>;
+
     /// Run something inside the session that must outlive the caller.
     ///
     /// A process started by a `docker exec` we spawn and abandon dies with the
@@ -63,6 +73,18 @@ pub const NAMES: [&str; 2] = ["docker", "sbx"];
 impl Runtime for Docker {
     fn name(&self) -> &'static str {
         "docker"
+    }
+
+    /// Measured against docker 29.7.2 — every state, including the one that
+    /// matters. `^name$` is not decoration: `--filter name=` is a substring
+    /// match, so an unanchored `omh-repo-s1` also matches `omh-repo-s10`.
+    fn running_args(&self, name: &str) -> Vec<String> {
+        vec![
+            "ps".into(),
+            "-q".into(),
+            "--filter".into(),
+            format!("name=^{name}$"),
+        ]
     }
     fn program(&self) -> &'static str {
         "docker"
@@ -189,6 +211,20 @@ impl Runtime for Docker {
 impl Runtime for Sbx {
     fn name(&self) -> &'static str {
         "sbx"
+    }
+
+    /// PROVISIONAL, like everything else here — sbx is not installed on the
+    /// machine this was written on, so the docker spelling is assumed rather
+    /// than measured. If sbx does not honour the trait's contract the failure
+    /// is the safe direction: an unrecognised flag exits non-zero, which reads
+    /// as *could not tell* and makes `sync` refuse rather than proceed.
+    fn running_args(&self, name: &str) -> Vec<String> {
+        vec![
+            "ps".into(),
+            "-q".into(),
+            "--filter".into(),
+            format!("name=^{name}$"),
+        ]
     }
     fn program(&self) -> &'static str {
         "sbx"
