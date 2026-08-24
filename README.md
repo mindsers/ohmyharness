@@ -9,7 +9,10 @@ $ omh attach       # open that same session in your editor
 $ omh graph        # browse your codebase as a graph
 ```
 
-**Status: early.** `0.5.0`, one harness verified end to end. Useful today
+**Status: early.** `0.6.0`, one harness verified end to end. This release is
+the work loop: reading a session's work, landing it in stages, staying current
+with trunk, and reaching several sessions of one repo from one place — without
+typing `git` and without knowing that a session is a worktree. Useful today
 if you want a sandboxed agent with your config in it; not yet the finished
 distribution described in [the docs](docs/). See
 [What isn't done](#what-isnt-done) — it is a real list, not a modesty ritual.
@@ -46,6 +49,27 @@ The agent gets git too — its own repository, holding one commit and none of yo
 history, so `stash` and `reset --hard` are its to use. `omh s commit --keep`
 brings its commits onto your branch with the messages it wrote — all of them in
 order, or the ones you name: `omh s01 commit --keep 1,3-4`.
+
+**Several sessions, from one place.** `omh s` is every session with its state,
+how far behind trunk it has fallen, and the files two of them are both about to
+change — the collision you would otherwise find at merge time. `omh s01` is that
+same row, scoped to one.
+
+```console
+$ omh s
+  s01  omh/s01  stopped  2 uncommitted
+  s02  omh/s02  stopped  2 uncommitted
+
+  s01 and s02 both change shared.rs
+```
+
+`omh s01 sync` brings trunk in, merged on the host rather than inside the
+sandbox. A conflict still lands in the worktree with its markers — labelled
+`main` and `s01`, so it is obvious which side is yours — and `omh s commit`
+refuses to land a file that still holds them.
+
+An agent that commits nothing leaves a timeline anyway: omh photographs the
+worktree at the end of every turn, and `omh s01 log --turns` reads them back.
 
 **Your setup, in any harness.** Rules, skills, MCP servers, commands, subagents
 and hooks are declared once and rendered into whatever shape each harness reads.
@@ -114,7 +138,7 @@ omh init — decided, asked nothing
 
   omh why <name>  what it costs, what was considered instead, how to remove it
 
-not yet done: recall, cost accounting.
+not yet done: cost accounting.
 next: omh claude
 ```
 
@@ -385,7 +409,7 @@ whether anything reads it. That gap is what `doctor` closes.
 
 | | |
 |---|---|
-| **Memory** | the store and its guards are [built](docs/commands.md#omh-memory-); retrieval is not. A graph of linked notes the agent queries and grows, so what one session learned survives the session — today it can write and lint them, not yet recall them. |
+| **Memory** | mostly [built](docs/commands.md#omh-memory-) — the store, its schemas, retrieval, the team layer and `remember` / `recall` as MCP tools all ship. What remains is hub pages, whose lint needs a threshold the design refuses to let anyone guess. |
 | **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
 | **`omh eject`** | a credible exit: write out the raw per-harness config and step aside. |
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |

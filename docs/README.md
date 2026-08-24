@@ -3,10 +3,12 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.5.0` (milestone v0). One harness (`claude`) has been driven for real work;
-`opencode` passes `omh doctor` but has not. Docker is the only verified runtime.
-Several things described in the design pages are **designed and not built** —
-each says so at the top. See the [roadmap](design/roadmap.md).
+**Status: early.** `0.6.0`. This release is the [work loop](design/git.md) —
+reading a session's work, landing it in stages, staying current with trunk, and
+reaching several sessions of one repo from one place. One harness (`claude`) has
+been driven for real work; `opencode` passes `omh doctor` but has not. Docker is
+the only verified runtime. Several design pages describe work that is **partly
+built** — each says which parts, at the top. See the [roadmap](design/roadmap.md).
 
 ## Start here
 
@@ -40,8 +42,8 @@ change — most of them record something that was tried and cost something.
 | [The profile](design/profile.md) | partly built — rules composed with the repo's own, omh's hooks and sections generated from the base set; the catalogue and per-project selection are not |
 | [Adapters](design/adapters.md) | harnesses and editors as data, and how to add one |
 | [Adoption](design/adoption.md) | partly built — what `init` decides when it meets a repo, the toolchain probe, and what `omh import` still has to migrate |
-| [Git](design/git.md) | designed and not built — the loop around the sandbox's repository: reading a session's work, landing it in stages, staying current with trunk, and reaching several sessions from one place |
-| [Memory](design/memory.md) | the note graph, its guards, and the build order — the store, retrieval and the team layer are built; staleness is not |
+| [Git](design/git.md) | built in 0.6.0 — the loop around the sandbox's repository: reading a session's work, landing it in stages, staying current with trunk, and reaching several sessions from one place. Twelve steps, each naming the pull request that landed it |
+| [Memory](design/memory.md) | the note graph, its guards, and the build order — the store, retrieval, the team layer and staleness are built; hub pages are not |
 | [Memory: how the design got here](design/memory-rationale.md) | the survey, the benchmark that reversed six choices, and the alternatives not taken |
 | [Memory M0: running iwe](design/memory-m0.md) | the blocking spike, and the four claims the design rested on that did not survive it |
 | [Measuring retrieval](design/memory-benchmark.md) | the benchmark that decides retrieval questions, and why it cannot be tilted |

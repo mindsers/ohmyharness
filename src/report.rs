@@ -1865,6 +1865,14 @@ impl Report for Imported {
 
 // ── omh init ────────────────────────────────────────────────────────────────
 
+/// What omh has not built yet, printed on `init`'s last line.
+///
+/// A constant rather than a literal in the middle of `human` because it is a
+/// claim about the whole product that nothing else re-checks, and it is
+/// exactly the kind of line that gets typed once and left. It was: `recall`
+/// shipped with the memory server and this sentence went on calling it undone.
+const NOT_YET_DONE: &str = "not yet done: cost accounting.";
+
 /// Everything `omh init` decided, in the order somebody reads it.
 ///
 /// Assembled and reported once, rather than printed as it goes. The old
@@ -2048,10 +2056,7 @@ impl Report for Init {
                 "omh why <name>  what it costs, what was considered instead, how to remove it"
             )
         ));
-        s.push_str(&format!(
-            "\n{}\n",
-            p.paint(out::DIM, "not yet done: recall, cost accounting.")
-        ));
+        s.push_str(&format!("\n{}\n", p.paint(out::DIM, NOT_YET_DONE)));
         s.push_str(&format!("next: omh {}\n", self.next_command));
         s
     }
@@ -2616,6 +2621,29 @@ impl Report for Lint {
 
 #[cfg(test)]
 mod tests {
+    /// `init` does not call unfinished something the same screen installed.
+    ///
+    /// `omh init` prints the base set it just seeded — including *"memory —
+    /// what a session learned outlives it"*, which is the MCP server answering
+    /// `recall` and `remember` — and then printed *"not yet done: recall"* four
+    /// lines below it. A new user's first screen contradicted itself, and the
+    /// sentence was a literal buried in `human` that nothing read again.
+    ///
+    /// The tool names are the pair `doctor::memory_checks` expects the server
+    /// to speak, so this fails if the sentence ever re-names a shipped one.
+    #[test]
+    fn init_does_not_call_unfinished_a_capability_that_ships() {
+        for tool in ["recall", "remember"] {
+            assert!(
+                !super::NOT_YET_DONE.contains(tool),
+                "`{}` ships — the memory server answers it and `omh doctor` \
+                 checks that it does — but init still reports it as undone: {}",
+                tool,
+                super::NOT_YET_DONE
+            );
+        }
+    }
+
     /// A sync names every file that needs a decision, and counts them in a
     /// sentence rather than in a template.
     ///
