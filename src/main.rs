@@ -333,8 +333,11 @@ enum Cmd {
     /// Work with sessions.
     #[command(visible_alias = "s")]
     Sessions {
+        /// `None` is the listing itself — every session, or the one the prefix
+        /// named. Optional so that a bare noun is a question rather than a
+        /// clap error about a missing verb.
         #[command(subcommand)]
-        cmd: SessionsCmd,
+        cmd: Option<SessionsCmd>,
     },
     /// Your defaults and your catalogue, or change them.
     #[command(visible_alias = "c")]
@@ -405,10 +408,18 @@ enum McpCmd {
     },
 }
 
+/// The verbs. **No `ls`** — `omh s` with no verb at all is the listing, and
+/// `omh s01` is that listing scoped to one session.
+///
+/// `ls` was a verb until 2026.08, and removing it settles a conflict rather
+/// than trading one spelling for another. The selector's rule is that a
+/// leading `sNN` scopes whatever follows, so `omh s01 ls` could only have
+/// meant *list every session, but one* — which is not a thing — and it was
+/// refused by name. That refusal was the only thing standing between the
+/// prefix and the no-verb case, and with `ls` gone there is nothing to refuse:
+/// the combination cannot be typed.
 #[derive(Subcommand)]
 enum SessionsCmd {
-    /// Sessions, their branches, and how far they have drifted.
-    Ls,
     /// Remove a session — its container and its worktree. A branch holding
     /// commits is kept.
     Rm {
@@ -704,25 +715,18 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         Cmd::Graph { stop } => graph(&cwd, cli.session.as_deref(), *stop, ctx),
         Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx),
 
-        Cmd::Sessions { cmd } => match cmd {
+        // No verb: the listing. With a session named, the same listing scoped
+        // to it — the prefix means *this one* everywhere else, and this is the
+        // last place it did not.
+        Cmd::Sessions { cmd: None } => sessions_ls(&cwd, cli.session.as_deref(), ctx),
+        Cmd::Sessions { cmd: Some(cmd) } => match cmd {
             // One source for which session a command acts on, now that the
             // prefix and `--session` both land in `cli.session`. `rm` used to
             // require its own positional and `diff` accepted either, which is
             // how the same question came to have two answers.
-            // The one combination the prefix makes expressible and meaningless.
-            // Ignoring the scope would be worse than refusing it: `omh s01 ls`
-            // would list every session and look like it had listed one.
-            SessionsCmd::Ls => {
-                if let Some(id) = cli.session.as_deref() {
-                    anyhow::bail!(
-                        "`ls` lists every session; drop the `{id}`:\n  omh s ls\n  omh {id} diff                            acts on that one"
-                    );
-                }
-                sessions_ls(&cwd, ctx)
-            }
             SessionsCmd::Rm { force } => {
                 let id = cli.session.as_deref().context(
-                    "which session? name it first:\n  omh s01 rm\n  omh s ls   lists them",
+                    "which session? name it first:\n  omh s01 rm\n  omh s      lists them",
                 )?;
                 rm(&cwd, id, *force, ctx)
             }
@@ -1603,8 +1607,14 @@ fn doctor_cmd(
     Ok(())
 }
 
-fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
+fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
+    // Validated before anything is read, so an id nothing created fails the
+    // way it fails for every other verb rather than listing nothing and
+    // looking like an answer.
+    if let Some(id) = only {
+        existing_session(&paths, Some(id))?;
+    }
     // Said once, about the machine, rather than once per row. The `running`
     // column renders a `None` as an absence — nobody asked — and *why* nobody
     // asked is one fact, not N.
@@ -1625,7 +1635,7 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // had just stashed.
     let mut changed: Vec<(String, Vec<String>)> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
-    let sessions = session::list(&paths.worktrees())
+    let sessions: Vec<report::Session> = session::list(&paths.worktrees())
         .into_iter()
         .map(|id| {
             let sess = Session::new(&paths.worktrees(), id.clone());
@@ -1687,10 +1697,32 @@ fn sessions_ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         })
         .collect();
 
+    // Every session is read even when one is asked for, and that is not
+    // waste: a collision is a fact about *two* sessions, so the paths of the
+    // others are what make "s01 and s03 both change src/render.rs" sayable at
+    // all. What narrows is the display.
+    //
+    // (An earlier note claimed focusing would be cheaper. It is not, for this
+    // reason.)
+    let overlaps = report::overlaps(&changed);
+    let (sessions, overlaps) = match only {
+        None => (sessions, overlaps),
+        Some(id) => (
+            sessions.into_iter().filter(|s| s.id == id).collect(),
+            // Kept when they name this session, dropped otherwise — a
+            // collision between two other sessions is not this one's business,
+            // and one involving it is the most useful line on the screen.
+            overlaps
+                .into_iter()
+                .filter(|o| o.sessions.iter().any(|s| s == id))
+                .collect(),
+        ),
+    };
+
     ctx.say(&report::Sessions {
         sessions,
         leftovers: leftovers(&paths, backend.as_deref(), ctx),
-        overlaps: report::overlaps(&changed),
+        overlaps,
         unreadable,
         base,
     });
@@ -5140,7 +5172,7 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 report::Session {
                     label: sess.label().to_string(),
                     // `omh ls` is the wide view and does not ask git what state
-                    // the work is in; `omh s ls` is the command for that, and
+                    // the work is in; `omh s` is the command for that, and
                     // asking here would cost a subprocess per session for a
                     // column this listing does not print. `None` says *not
                     // asked* — `Work::Clean` would be a claim, and a false one.
@@ -5965,7 +5997,7 @@ fn existing_session(paths: &Paths, explicit: Option<&str>) -> Result<Session> {
     let session = Session::new(&paths.worktrees(), id);
     anyhow::ensure!(
         session.worktree.exists(),
-        "no session {} — `omh s ls` lists them",
+        "no session {} — `omh s` lists them",
         session.id
     );
     Ok(session)
@@ -6650,6 +6682,70 @@ mod tests {
         );
     }
 
+    /// No source or document still tells anyone to type a verb that is gone.
+    ///
+    /// `the_session_lines_omh_prints_are_lines_omh_accepts` cannot do this,
+    /// and the reason is worth writing down: it only checks a line whose
+    /// second word is a **known** session verb. Retiring `ls` therefore did
+    /// not make those lines fail — it quietly removed them from the scan, and
+    /// two user-facing messages went on naming a command that no longer
+    /// parses. A guard keyed on the current vocabulary cannot see a word
+    /// leaving it.
+    ///
+    /// Docs are included because nothing else reads them for command
+    /// spellings: `tests/docs.rs` checks links, anchors and reachability.
+    ///
+    /// It cannot tell *offering* a spelling from *saying it is gone*, so prose
+    /// explaining the removal has to name the verb rather than the whole
+    /// invocation — "there is no `ls` verb", not the line somebody used to
+    /// type. That is a real limitation and the cheaper side of it: a scan that
+    /// tried to judge intent would let the next one through.
+    #[test]
+    fn nothing_still_offers_a_verb_that_was_retired() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // Spellings omh used to accept and does not. `ls` became the absence
+        // of a verb in 2026.08 — `omh s` is the listing and `omh sNN` is one
+        // row of it.
+        //
+        // Assembled rather than written whole, and that is not decoration: the
+        // sweep that retired the verb was a search-and-replace over `src` and
+        // `docs`, and it rewrote this very constant, turning the guard into
+        // one that matched every file in the tree. A guard against a spelling
+        // cannot spell it.
+        let gone: [String; 2] = [format!("omh s {}", "ls"), format!("omh sessions {}", "ls")];
+        let mut found = Vec::new();
+        let mut checked = 0;
+        for dir in ["src", "tests", "docs"] {
+            let mut stack = vec![root.join(dir)];
+            while let Some(at) = stack.pop() {
+                for entry in std::fs::read_dir(&at).unwrap().flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                        continue;
+                    }
+                    if path.extension().is_none_or(|e| e != "rs" && e != "md") {
+                        continue;
+                    }
+                    checked += 1;
+                    let body = std::fs::read_to_string(&path).unwrap();
+                    for (n, line) in body.lines().enumerate() {
+                        for spelling in &gone {
+                            if line.contains(spelling.as_str()) {
+                                found.push(format!("{}:{}", path.display(), n + 1));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 10, "the scan found nothing to read");
+        assert!(
+            found.is_empty(),
+            "these still offer a command omh no longer accepts: {found:#?}"
+        );
+    }
+
     /// No doc comment has been spliced onto itself.
     ///
     /// A specific accident with a specific cause: these files are edited by
@@ -6988,7 +7084,7 @@ mod tests {
                 .collect();
             match Cli::try_parse_from(&argv).map(|cli| cli.cmd) {
                 Ok(Cmd::Sessions {
-                    cmd: SessionsCmd::Commit { keep, edit, .. },
+                    cmd: Some(SessionsCmd::Commit { keep, edit, .. }),
                 }) => Ok((keep, edit)),
                 Ok(_) => panic!("{args:?} did not parse as a commit"),
                 Err(e) => Err(e.to_string()),

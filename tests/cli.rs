@@ -796,7 +796,7 @@ fn a_log_for_a_sandbox_that_never_ran_says_nothing_yet() {
     );
     // Zero, and correctly: the count is what `--keep` would sweep out of the
     // *sandbox*, and there is no sandbox. The file sitting in the worktree is a
-    // fact about the session, which `omh s ls` and `omh s diff` answer — this
+    // fact about the session, which `omh s` and `omh s diff` answer — this
     // line answers what the harvest is about to do, so it must not borrow a
     // number measured somewhere else.
     assert!(
@@ -978,7 +978,7 @@ fn sessions_changing_the_same_file_are_named_together() {
         std::fs::write(worktree.join(extra), "fn mine() {}\n").unwrap();
     }
 
-    let printed = String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stdout).to_string();
+    let printed = String::from_utf8_lossy(&sb.omh(&["s"]).stdout).to_string();
 
     assert!(
         printed.contains("s01 and s02 both change shared.rs"),
@@ -988,19 +988,29 @@ fn sessions_changing_the_same_file_are_named_together() {
         !printed.contains("only-in-s01.rs"),
         "and nothing about what only one of them touches: {printed}"
     );
+
+    // A collision is a fact about *two* sessions, so it has to survive being
+    // asked about one of them — it is the most useful line on that screen.
+    // This is also why the focused view still reads every session: the other
+    // one's paths are what make the line sayable.
+    let focused = String::from_utf8_lossy(&sb.omh(&["s01"]).stdout).to_string();
+    assert!(
+        focused.contains("s01 and s02 both change shared.rs"),
+        "a collision involving s01 survives the focus: {focused}"
+    );
+
     // Part of the answer rather than an aside: this is the most consequential
     // line in a record of what is in flight, and stderr is not where a
     // redirected listing keeps it.
     assert!(
-        !String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stderr).contains("both change"),
+        !String::from_utf8_lossy(&sb.omh(&["s"]).stderr).contains("both change"),
         "it is the answer, not a warning"
     );
 
     // The document says what the sentence says. `--json` is the scripting
     // contract, and deleting the field entirely left every other assertion
     // here green.
-    let doc: serde_json::Value =
-        serde_json::from_slice(&sb.omh(&["s", "ls", "--json"]).stdout).unwrap();
+    let doc: serde_json::Value = serde_json::from_slice(&sb.omh(&["s", "--json"]).stdout).unwrap();
     assert_eq!(
         doc["overlaps"],
         serde_json::json!([{"sessions": ["s01", "s02"], "paths": ["shared.rs"]}]),
@@ -1026,7 +1036,7 @@ fn a_session_omh_cannot_read_is_named_rather_than_left_out() {
     // s02's worktree loses its way back to the repository.
     std::fs::write(two.join(".git"), "gitdir: /nowhere-at-all\n").unwrap();
 
-    let out = sb.omh(&["s", "ls"]);
+    let out = sb.omh(&["s"]);
     let printed = String::from_utf8_lossy(&out.stdout).to_string();
 
     assert!(
@@ -1065,7 +1075,7 @@ fn a_sandbox_repository_with_no_session_is_reported() {
         .join("s09.git");
     std::fs::create_dir_all(&orphan).unwrap();
 
-    let out = sb.omh(&["s", "ls"]);
+    let out = sb.omh(&["s"]);
     let said = String::from_utf8_lossy(&out.stderr);
 
     assert!(
@@ -1087,7 +1097,7 @@ fn a_sandbox_repository_with_no_session_is_reported() {
     );
     assert!(!orphan.exists(), "and it did");
     assert!(
-        !String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stderr).contains("s09"),
+        !String::from_utf8_lossy(&sb.omh(&["s"]).stderr).contains("s09"),
         "so a second listing no longer names it"
     );
 }
@@ -1513,7 +1523,7 @@ fn a_session_that_has_committed_but_never_pushed_is_not_reported_as_clean() {
         .status
         .success());
 
-    let printed = String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stdout).to_string();
+    let printed = String::from_utf8_lossy(&sb.omh(&["s"]).stdout).to_string();
 
     assert!(printed.contains("to push"), "got: {printed}");
 }
@@ -1523,10 +1533,10 @@ fn a_session_that_has_committed_but_never_pushed_is_not_reported_as_clean() {
 /// in, not one it passes through, so a blank column is a wrong answer rather
 /// than a missing one.
 #[test]
-fn s_ls_renders_each_state_a_session_can_sit_in() {
+fn the_listing_renders_each_state_a_session_can_sit_in() {
     let sb = sandbox();
     let worktree = sb.session("s01");
-    let ls = || String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stdout).to_string();
+    let ls = || String::from_utf8_lossy(&sb.omh(&["s"]).stdout).to_string();
 
     std::fs::write(worktree.join("a.rs"), "fn a() {}").unwrap();
     assert!(ls().contains("1 uncommitted"), "got: {}", ls());
@@ -1550,7 +1560,7 @@ fn a_session_omh_cannot_read_is_never_rendered_as_clean() {
     // Break the pointer the way a moved or re-cloned checkout would.
     std::fs::write(worktree.join(".git"), "gitdir: /nowhere/that/exists").unwrap();
 
-    let printed = String::from_utf8_lossy(&sb.omh(&["s", "ls"]).stdout).to_string();
+    let printed = String::from_utf8_lossy(&sb.omh(&["s"]).stdout).to_string();
 
     assert!(
         printed.contains("s01"),
@@ -2363,24 +2373,61 @@ fn removing_a_session_that_committed_keeps_the_branch_for_review() {
     );
 }
 
-/// `ls` is the one verb the prefix cannot scope, so it says so.
+/// `omh s01` is one row of the dashboard, not a refusal and not a menu.
 ///
-/// Every other session verb acts on one session; `ls` is about the set. Taking
-/// the prefix and ignoring it would list every session while looking like it
-/// had listed one, which is the kind of quiet wrongness this whole selector
-/// exists to remove.
+/// The prefix means *scope this to s01* for every other verb, so the no-verb
+/// case is that same rule reaching the last place it had not. It used to be a
+/// clap error, because `omh s` required a subcommand and `omh s01 ls` — the
+/// only spelling that could have meant this — was refused outright.
+///
+/// A verb list would have been the alternative and is the wrong answer: the
+/// user named a session, and replying with a menu throws that away.
 #[test]
-fn scoping_the_one_verb_that_lists_them_all_is_refused() {
+fn a_session_named_on_its_own_is_that_session_alone() {
     let sb = sandbox();
     let _log = sb.fake_docker();
+    sb.session("s01");
+    sb.session("s02");
 
-    let out = sb.omh(&["s01", "ls"]);
-    assert!(!out.status.success(), "it has to refuse, not quietly widen");
-    let said = String::from_utf8_lossy(&out.stderr);
+    let focused = sb.omh(&["s01"]);
+    let printed = String::from_utf8_lossy(&focused.stdout);
     assert!(
-        said.contains("s01") && said.contains("omh s ls"),
-        "and name both what it dropped and what to type: {said}"
+        focused.status.success(),
+        "a session named on its own is a question, not an error: {}",
+        String::from_utf8_lossy(&focused.stderr)
     );
+    assert!(printed.contains("s01"), "it is about s01: {printed}");
+    assert!(
+        !printed.contains("s02"),
+        "and only about s01 — a focus that quietly widens is the thing the \
+         selector exists to remove: {printed}"
+    );
+
+    // …and the unfocused command still answers about all of them.
+    let all = String::from_utf8_lossy(&sb.omh(&["s"]).stdout).to_string();
+    assert!(
+        all.contains("s01") && all.contains("s02"),
+        "`omh s` is still every session: {all}"
+    );
+
+    // A collision between two *other* sessions does not follow the focus in.
+    // The one involving s01 does — that half is asserted where the overlap
+    // section is tested, since it needs the fixture that produces one.
+    let three = sb.session("s03");
+    let four = sb.session("s04");
+    for worktree in [&three, &four] {
+        std::fs::write(worktree.join("elsewhere.rs"), "fn elsewhere() {}\n").unwrap();
+    }
+    let focused = String::from_utf8_lossy(&sb.omh(&["s01"]).stdout).to_string();
+    assert!(
+        !focused.contains("elsewhere.rs"),
+        "a collision between two other sessions is not s01's business: {focused}"
+    );
+
+    // An id nothing created fails the way it fails for every other verb,
+    // rather than listing nothing and looking like an answer.
+    let missing = sb.omh(&["s99"]);
+    assert!(!missing.status.success(), "an unknown session is an error");
 }
 
 /// A launch whose probe cannot be read does not destroy the running sandbox.
@@ -2443,7 +2490,7 @@ fn a_launch_that_cannot_read_the_probe_removes_nothing() {
 ///
 /// End to end, because the unit tests decide what each layer *says* and this
 /// decides that the layers are wired to each other. The failure it guards is
-/// specific and was live: with the Docker daemon down, `omh s ls` printed
+/// specific and was live: with the Docker daemon down, `omh s` printed
 /// `stopped` beside every session — in both formats, with nothing on stderr —
 /// and `omh sNN sync` read the same false all-clear and would have written
 /// over the files of a live agent.
@@ -2454,7 +2501,7 @@ fn a_runtime_that_cannot_be_reached_is_not_reported_as_a_stopped_sandbox() {
     sb.session("s01");
     std::fs::write(sb.bin.join("docker-refuses"), "").unwrap();
 
-    let out = sb.omh(&["s", "ls"]);
+    let out = sb.omh(&["s"]);
     let printed = String::from_utf8_lossy(&out.stdout);
     // Anchored on the row being there at all. `Sessions::human` renders an
     // empty list as `no sessions`, which contains neither `stopped` nor `s01`
@@ -2478,7 +2525,7 @@ fn a_runtime_that_cannot_be_reached_is_not_reported_as_a_stopped_sandbox() {
 
     // The JSON has no second signal — `--json` returns before asides — so the
     // field is the whole of what a script gets.
-    let json = sb.omh(&["s", "ls", "--json"]);
+    let json = sb.omh(&["s", "--json"]);
     let doc: serde_json::Value =
         serde_json::from_slice(&json.stdout).expect("s ls --json is a document");
     // `serde_json` indexing returns `Null` for a missing key, a non-array and
@@ -2558,7 +2605,7 @@ fn down_over_an_unreachable_runtime_still_names_the_session() {
 }
 
 #[test]
-fn s_ls_names_what_removed_sessions_left_behind() {
+fn the_listing_names_what_removed_sessions_left_behind() {
     let sb = sandbox();
     let _log = sb.fake_docker();
     std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
@@ -2568,9 +2615,9 @@ fn s_ls_names_what_removed_sessions_left_behind() {
     std::fs::write(launched.join("last-used"), "").unwrap();
     std::fs::create_dir_all(sb.home.join(".omh/run/repo/doctor")).unwrap();
 
-    let out = sb.omh(&["s", "ls"]);
+    let out = sb.omh(&["s"]);
     // On **stderr**: a leftover is something wrong, not what `s ls` was asked
-    // for, and `omh s ls > sessions.txt` must not collect it.
+    // for, and `omh s > sessions.txt` must not collect it.
     let printed = String::from_utf8_lossy(&out.stderr);
     assert!(
         printed.contains("s02"),
@@ -2593,12 +2640,12 @@ fn s_ls_names_what_removed_sessions_left_behind() {
 /// `omh s rm` hint were appended to the table, so both landed in the file. A
 /// prose rule nothing checks is a rule that drifts back — this is the check.
 #[test]
-fn a_redirected_s_ls_collects_the_sessions_and_nothing_else() {
+fn a_redirected_listing_collects_the_sessions_and_nothing_else() {
     let sb = sandbox();
     let _log = sb.fake_docker();
     std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
 
-    let out = sb.omh(&["s", "ls"]);
+    let out = sb.omh(&["s"]);
     let answer = String::from_utf8_lossy(&out.stdout);
     let aside = String::from_utf8_lossy(&out.stderr);
 
@@ -2627,7 +2674,7 @@ fn json_carries_leftovers_as_a_field_and_says_nothing_about_them() {
     let _log = sb.fake_docker();
     std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
 
-    let out = sb.omh(&["s", "ls", "--json"]);
+    let out = sb.omh(&["s", "--json"]);
     let doc: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("`--json` is one document");
 

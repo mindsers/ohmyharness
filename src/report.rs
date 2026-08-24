@@ -710,7 +710,7 @@ impl Report for Down {
     }
 }
 
-// ── omh s ls ────────────────────────────────────────────────────────────────
+// ── omh s ────────────────────────────────────────────────────────────────
 
 /// Where a session is in the cycle, as one answer.
 ///
@@ -730,7 +730,7 @@ pub enum Work {
 }
 
 impl Work {
-    /// The column `omh s ls` has always printed. Wording preserved exactly:
+    /// The column `omh s` has always printed. Wording preserved exactly:
     /// people grep this, and `tests/cli.rs` pins all four forms.
     pub fn human(&self) -> String {
         match self {
@@ -764,7 +764,7 @@ impl Work {
     }
 }
 
-/// One session, as `omh s ls` sees it.
+/// One session, as `omh s` sees it.
 #[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
@@ -898,7 +898,7 @@ fn running_cell(running: &Option<crate::image::Running>) -> Cell {
 /// How far a session trails its base, as one cell — three answers, three
 /// renderings.
 ///
-/// Shared by `omh s ls` and by the session list in `omh ls`. Both were wrong
+/// Shared by `omh s` and by the session list in `omh ls`. Both were wrong
 /// the same way — `Some(0) | None` rendered an empty cell, so *up to date* and
 /// *omh could not count* were the same sight on the two surfaces where a user
 /// picks which session to open.
@@ -970,7 +970,7 @@ impl Report for Sessions {
         }
         let mut out = table.render(p);
 
-        // Part of the answer, not an aside. `omh s ls > sessions.txt` is a
+        // Part of the answer, not an aside. `omh s > sessions.txt` is a
         // record of what is in flight, and two sessions editing one file is
         // the most consequential thing in it — a warning would put it on
         // stderr, where that file would not have it.
@@ -1015,10 +1015,10 @@ impl Report for Sessions {
     }
 
     /// What to do next, and what omh could not answer — neither of which is what
-    /// `omh s ls` was asked for.
+    /// `omh s` was asked for.
     ///
     /// Both lines used to be appended to the table above, so
-    /// `omh s ls > sessions.txt` wrote them into the file — the exact case
+    /// `omh s > sessions.txt` wrote them into the file — the exact case
     /// `docs/commands.md` promises they stay out of. They are still in `json`
     /// as `leftovers`, where a script wanted them all along.
     fn asides(&self) -> out::Asides {

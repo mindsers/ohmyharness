@@ -192,12 +192,12 @@ base main · 3 sessions
 That last line is a sketch and the shipped shape differs from it in three ways
 worth knowing, since the rest of this section is written as though it were the
 implementation: the suggestions are one per session rather than side by side,
-each carries what it does, and they are **asides on stderr** — `omh s ls >
+each carries what it does, and they are **asides on stderr** — `omh s >
 sessions.txt` is a record of what is in flight and advice is not part of that
 record. *Up to date* is an empty cell rather than those words; what changed is
 that the cell it used to share with *omh could not count* is no longer shared.
 
-`omh s ls` survives as an alias.
+`omh s` survives as an alias.
 
 **The suggestion landed (#62), and with it the fix behind it.** The column had
 been rendering *up to date* and *omh could not count* as the same empty cell —
@@ -217,11 +217,26 @@ absence with the answer discarded — in a function that ten lines earlier route
 the identical failure from `changed()` into a reported list, and which `log`
 has always handled by printing git's own words. Both call sites say why now.
 
-**`omh s01` on its own is not this row with detail**, and saying it was would
-be tidier than it is true. It is an error: `omh s` requires a verb, and step 8
-deliberately refuses `omh s01 ls` — *"`ls` lists every session; drop the
-`s01`"* — so the two ideas are in tension rather than merely unbuilt. Whichever
-wins, one of them has to be given up first.
+**`omh s01` on its own is this row — landed (#67), by giving something up.**
+
+It was an error for as long as `ls` existed, and the conflict was real rather
+than an oversight. `omh s` required a verb, and step 8 refused `omh s01 ls` by
+name — *"`ls` lists every session; drop the `s01`"* — because the selector's
+rule is that a leading `sNN` scopes what follows, and *list every session, but
+one* is not a thing. So the only spelling that could have meant this row was
+the one spelling forbidden.
+
+What broke it open was deleting the verb rather than adding a rule. With no
+`ls`, `omh s01 ls` cannot be typed, the refusal has nothing to refuse, and the
+no-verb case is free: `omh s` is the listing, `omh s01` is the listing scoped
+to one session. That is the selector's own rule reaching the last place it had
+not, rather than a special case — which is also why `omh s01` is that row and
+not a menu of verbs. The user named a session; answering with a list of things
+they could have typed instead discards what they said.
+
+Every session is still read when one is asked for, because a collision is a
+fact about two of them: *"s01 and s03 both change src/render.rs"* has to
+survive the focus, and it does.
 
 ### `omh sNN log` — make the invisible visible
 

@@ -3148,7 +3148,7 @@ mod tests {
         );
     }
 
-    /// A scratch directory must not live among the worktrees, or `omh s ls`
+    /// A scratch directory must not live among the worktrees, or `omh s`
     /// lists a login as if it were a session you could resume.
     #[test]
     fn scratch_sessions_are_not_listed_as_sessions() {

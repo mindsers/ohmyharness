@@ -9,7 +9,7 @@ omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
-omh sessions ls|log|diff|commit|push|down|rm  s  omh s01 log, omh s01 diff
+omh sessions|log|diff|commit|push|down|rm  s  omh s01 log, omh s01 diff
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
 omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
@@ -17,8 +17,9 @@ omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
 
 ## The shape of the CLI
 
-Noun-verb groups with single-letter aliases: `omh s ls`, `omh c mcp ls`,
-`omh d claude`.
+Noun-verb groups with single-letter aliases: `omh s log`, `omh c mcp ls`,
+`omh d claude`. The noun on its own is the listing — `omh s` is every session,
+and `omh s01` is that one.
 
 **A bare name is always a harness.** Editors live under `attach`, so `omh claude`
 and `omh attach zed` cannot be confused for one another — the bare slot means
@@ -47,7 +48,7 @@ presence alone is not the trigger, and an empty value is what a shell leaves
 behind when a wrapper script unsets a variable badly.
 
 **stdout is the answer; stderr is everything else.** What a command was asked
-for goes to stdout, so `omh s ls > sessions.txt` captures exactly that.
+for goes to stdout, so `omh s > sessions.txt` captures exactly that.
 Warnings, progress and next-step hints go to stderr, so they still reach you
 when stdout is redirected — and stay out of the file.
 
@@ -60,10 +61,10 @@ reader; the JSON field is the thing a script would otherwise have to parse it
 back out of:
 
 ```console
-$ omh s ls
+$ omh s
   s01  omh/s01  stopped  ?  (1 behind main)
 
-$ omh s ls --json
+$ omh s --json
 {
   "base": "main",
   "leftovers": [],
@@ -251,7 +252,8 @@ Everything omh knows about: harnesses, editors, sessions and their state.
 ## `omh sessions …` · `s`
 
 ```
-omh s ls              sessions, their branches and state
+omh s                 sessions, their branches and state
+omh s01               that one, with what to run next
 omh s log [--turns]   what the agent committed inside the sandbox, or what omh
                        photographed at the end of each turn
 omh s diff [n] [-p]   what changed — the session, or one checkpoint
@@ -264,6 +266,31 @@ omh s rm [--force]    remove the session — its container, its worktree, its st
                        and the repository the sandbox had. Refuses over work
                        no branch has.
 ```
+
+**The noun on its own is the listing, and a session on its own is one row of
+it.**
+
+```console
+$ omh s
+  s01  omh/s01  stopped  2 uncommitted
+  s02  omh/s02  stopped  2 uncommitted
+
+  s01 and s02 both change shared.rs
+
+$ omh s01
+  s01  omh/s01  stopped  2 uncommitted
+
+  s01 and s02 both change shared.rs
+```
+
+The collision survives the focus, because it is a fact about s01 — a collision
+between two *other* sessions does not follow you in. Every session is still
+read either way; that is what makes the line sayable at all.
+
+There is no `ls` verb. It was one until 2026.08, and it went so that `omh s01`
+could mean this: the prefix scopes whatever follows it, so `omh s01 ls` could
+only have meant *list every session, but one*, and omh refused it by name.
+Removing the verb removed the conflict.
 
 **The session goes first, and everything after it is what you would have typed
 anyway.**
@@ -295,7 +322,7 @@ on all of them is what you mean.
 was there long before there was anything to do with it; `sync` is that thing.
 
 ```console
-$ omh s ls
+$ omh s
   s01  omh/s01  up
   s02  omh/s02  stopped  3 uncommitted  (12 behind main)
   s03  omh/s03  stopped                 (how far behind main?)
@@ -309,7 +336,7 @@ the same daemon in the same run, so when one row cannot be answered they all
 look like this:
 
 ```console
-$ omh s ls
+$ omh s
 omh: could not tell whether s01's sandbox is running: cannot connect to the Docker daemon
 omh: could not tell whether s02's sandbox is running: cannot connect to the Docker daemon
   s01  omh/s01  up?
@@ -363,7 +390,7 @@ with it first.
 And it names files more than one session is changing:
 
 ```console
-$ omh s ls
+$ omh s
   s01  omh/s01  up       3 uncommitted  (2 behind main)
   s03  omh/s03  stopped  1 uncommitted  (2 behind main)
 
@@ -627,7 +654,7 @@ omh: s01 has 2 commits that no branch has. Removing it deletes the only copy:
 ```
 
 Nothing is taken down before that refusal — not the container, not the marker
-`omh s ls` reads, not the repository the refusal is about. `--force` is the way
+`omh s` reads, not the repository the refusal is about. `--force` is the way
 past, and it means what it says.
 
 **The count is wider than the one `omh s01 log` prints**, on purpose. `log`
