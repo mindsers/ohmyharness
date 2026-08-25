@@ -995,8 +995,8 @@ impl Plan {
     /// Everything here is fixed the moment `docker run` returns — no later
     /// `exec` can change the image, the mount set, the network or the
     /// environment. So a running container is the session you asked for only if
-    /// these still match, and until this existed nothing asked: `omh opencode`
-    /// against a session started by `omh claude` execed a binary that image does
+    /// these still match, and until this existed nothing asked: `omh s01 resume opencode`
+    /// against a session started by `omh new claude` execed a binary that image does
     /// not contain, and `--account work` on one started as `personal` went on
     /// quietly using `personal`.
     ///
@@ -1697,7 +1697,7 @@ mod tests {
     /// the sandbox had never heard of, and `git add -A` swept it in.
     ///
     /// Switching harness is the lever, because it is a first-class thing to do
-    /// here — one session, `omh opencode` then `omh claude` — and because it
+    /// here — one session, `omh new claude` then `omh s01 resume opencode` — and because it
     /// moves the mount set and nothing else. A first version varied `carry_in`,
     /// which reaches the list twice over, once as policy and once as the mount
     /// it produces: it passed with the mount half of the derivation disabled
@@ -3441,7 +3441,7 @@ mod tests {
 
     /// The bug this exists for: a container is a materialization of *one* plan,
     /// and `session_up` handed a running one back without ever asking which
-    /// plan that was. `omh opencode` against a session started by `omh claude`
+    /// plan that was. `omh s01 resume opencode` against a session started by `omh new claude`
     /// execed a binary the image does not contain — verified live — and
     /// `--account work` on a session started as `personal` silently went on
     /// using `personal`.
@@ -3667,7 +3667,7 @@ mod tests {
         );
     }
 
-    /// The second: `omh opencode` against a session started by `omh claude`.
+    /// The second: `omh s01 resume opencode` against a session started by `omh new claude`.
     #[test]
     fn a_container_built_for_another_harness_is_replaced() {
         let fx = fixture();

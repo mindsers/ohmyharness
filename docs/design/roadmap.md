@@ -17,7 +17,7 @@ verified runtime.
 🔶 [memory](memory.md) — the store, retrieval, the team layer and staleness
 ship; hub pages do not
 
-**Success criterion:** `omh init && omh claude` is visibly better than raw
+**Success criterion:** `omh init && omh new claude` is visibly better than raw
 `claude`, with zero questions asked.
 
 *Not in v0: further adapters, memory, breadth in the capability superset.*

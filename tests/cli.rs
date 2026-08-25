@@ -1636,7 +1636,7 @@ fn a_dry_run_discloses_the_repos_hooks_and_records_nothing() {
     )
     .unwrap();
 
-    let out = sb.omh(&["--dry-run", "claude"]);
+    let out = sb.omh(&["--dry-run", "new", "claude"]);
     let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
         said.contains("this repo's hooks") && said.contains("rust-test"),
@@ -1692,12 +1692,85 @@ fn a_new_launch_never_lands_in_a_session_that_already_exists() {
         "`new` landed in the session that was already there: {plan}"
     );
 
-    // …and the bare name still resumes it, because both spellings live side by
-    // side until the catch-all goes.
-    let resumed = String::from_utf8_lossy(&sb.omh(&["--dry-run", "claude"]).stdout).to_string();
+    // …and rejoining still lands in the one that was already there. The bare
+    // name used to be this half; it is not a launch any more, so the assertion
+    // moved onto the verb that replaced it.
+    let resumed =
+        String::from_utf8_lossy(&sb.omh(&["s01", "--dry-run", "resume", "claude"]).stdout)
+            .to_string();
     assert!(
         resumed.contains(&format!("/{already}")),
-        "the bare name still resumes the most recent: {resumed}"
+        "resume lands in the session it names: {resumed}"
+    );
+}
+
+/// Asking for a fresh session and naming one is refused, not resolved.
+///
+/// `omh s01 --new claude` said two contradictory things — *this exact session*
+/// and *one that does not exist yet* — and omh resolved it by returning `s01`
+/// and never looking at the flag. Exit 0, a plan, no warning.
+///
+/// `--new` carried `conflicts_with = "session"`, which never fired for the
+/// spelling people actually type: clap checks that against the `--session`
+/// flag, and the `sNN` prefix lands in `cli.session` after the parse.
+///
+/// The fix is deletion rather than another rule. `omh new` is the verb, it
+/// cannot be handed a session, and the flag that could is gone — so the
+/// contradiction has no spelling left.
+#[test]
+fn asking_for_a_fresh_session_while_naming_one_is_refused() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.session("s01");
+
+    let out = sb.omh(&["s01", "--new", "claude"]);
+    assert!(
+        !out.status.success(),
+        "omh answered a line that asked for two different sessions: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    // And the session it was pointed at is untouched — a refusal that had
+    // already launched would be worse than the silence it replaces.
+    assert!(
+        !sb.home.join(".omh/run/repo/s01/.harness").exists(),
+        "it launched anyway"
+    );
+}
+
+/// A bare word is not a harness any more.
+///
+/// A bare word was a launch because `Cmd::Run` swallowed any word omh did not
+/// recognise. That one arm is why `RESERVED` existed — nineteen names written
+/// out so an adapter could not shadow a command — and why `session_prefix` had
+/// to parse the line twice and arbitrate, which is how `omh s01 ls` once became
+/// `omh ls` with the session dropped.
+///
+/// `omh new claude` is the spelling now, and a word omh does not know is a
+/// mistake rather than a launch.
+#[test]
+fn a_bare_word_is_a_mistake_rather_than_a_launch() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.session("s01");
+
+    for word in ["claude", "clyde"] {
+        let out = sb.omh(&[word]);
+        assert!(
+            !out.status.success(),
+            "`omh {word}` is not a command: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+
+    // The verb still works, so this removed a spelling rather than the ability.
+    let out = sb.omh(&["--dry-run", "new", "claude"]);
+    assert!(
+        out.status.success(),
+        "`omh new claude` still launches: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -1722,7 +1795,7 @@ fn a_launch_records_the_harness_it_started_and_a_dry_run_does_not() {
     // The launch is allowed to fail after the write — what is under test
     // happened before it got there. Asserting the file rather than the exit
     // code is what makes that safe.
-    let _ = sb.omh(&["s01", "opencode"]);
+    let _ = sb.omh(&["s01", "resume", "opencode"]);
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap_or_default().trim(),
         "opencode",
@@ -1730,7 +1803,7 @@ fn a_launch_records_the_harness_it_started_and_a_dry_run_does_not() {
     );
 
     // A relaunch records what it launched, not what it launched last time.
-    let _ = sb.omh(&["s01", "claude"]);
+    let _ = sb.omh(&["s01", "resume", "claude"]);
     assert_eq!(
         std::fs::read_to_string(&marker).unwrap_or_default().trim(),
         "claude",
@@ -1742,7 +1815,7 @@ fn a_launch_records_the_harness_it_started_and_a_dry_run_does_not() {
     let _log2 = dry.fake_docker();
     dry.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
     dry.session("s01");
-    let _ = dry.omh(&["s01", "--dry-run", "opencode"]);
+    let _ = dry.omh(&["s01", "--dry-run", "resume", "opencode"]);
     assert!(
         !dry.home.join(".omh/run/repo/s01/.harness").exists(),
         "a dry run recorded a harness, so the next resume rejoins a session \
@@ -1776,7 +1849,7 @@ fn a_resumed_session_runs_the_harness_it_ran_before() {
 
     // Recorded by a real launch rather than by hand, so this test also fails
     // if the two halves ever disagree about where the marker lives.
-    let _ = sb.omh(&["s01", "opencode"]);
+    let _ = sb.omh(&["s01", "resume", "opencode"]);
 
     let out = sb.omh(&["s01", "resume", "--dry-run"]);
     let plan = String::from_utf8_lossy(&out.stdout).to_string();
@@ -1827,7 +1900,7 @@ fn a_session_omh_cannot_name_a_harness_for_is_refused_rather_than_guessed() {
     );
     assert!(err.contains("s01"), "the refusal names the session: {err}");
     assert!(
-        err.contains("s01 <harness>"),
+        err.contains("s01 resume <harness>"),
         "and offers a command that rejoins this session rather than leaving \
          it: {err}"
     );
@@ -1835,8 +1908,8 @@ fn a_session_omh_cannot_name_a_harness_for_is_refused_rather_than_guessed() {
 
 /// `--` is how a flag reaches the harness under `omh new`, and the only way.
 ///
-/// The bare-name form has to guess. `omh claude --json` might be omh's or
-/// claude's, and `passthrough` decides by refusing omh's long flags and
+/// The bare-name form had to guess: a `--json` after the harness might be omh's
+/// or the harness's, and `passthrough` decided by refusing omh's long flags and
 /// leaving shorts alone — a judgement about which mistake is likelier, which
 /// its own comment admits.
 ///
@@ -1920,7 +1993,7 @@ fn a_dry_run_names_the_catalogue_entries_this_repo_is_not_using() {
     std::fs::create_dir_all(sb.home.join(".omh/skills/refactor")).unwrap();
     std::fs::write(sb.home.join(".omh/skills/refactor/SKILL.md"), "x").unwrap();
 
-    let said = String::from_utf8_lossy(&sb.omh(&["--dry-run", "claude"]).stderr).to_string();
+    let said = String::from_utf8_lossy(&sb.omh(&["--dry-run", "new", "claude"]).stderr).to_string();
     assert!(
         said.contains("skills/refactor"),
         "a launch has to name what it is not doing: {said}"
@@ -3100,7 +3173,7 @@ fn a_launch_that_cannot_read_the_probe_removes_nothing() {
     )
     .unwrap();
 
-    let out = sb.omh(&["s01", "claude"]);
+    let out = sb.omh(&["s01", "resume", "claude"]);
     assert!(
         !out.status.success(),
         "the launch stops rather than guessing"

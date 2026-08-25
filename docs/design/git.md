@@ -804,7 +804,7 @@ reason.
 - ~~**Per-turn checkpoints.**~~ Landed (#66) — see the section above.
 - **Naming sessions.** `omh s01 push <name>` refuses to invent a branch name,
   correctly. A session that carried a name from the start would answer that once
-  instead of at the end — but `omh claude` asking a question at launch would
+  instead of at the end — but `omh new claude` asking a question at launch would
   cost the thing `init` exists to protect.
 
 ## What this changes in [Decisions](decisions.md), when it lands

@@ -226,7 +226,7 @@ impl Report for Synced {
             // where a conflict is safe to be wrong in. Say that rather than
             // leaving the user to open the files themselves.
             asides = asides.hint(format!(
-                "  omh {} claude          the markers are in the sandbox, where fixing \
+                "  omh {} resume          the markers are in the sandbox, where fixing \
                  them cannot hurt you",
                 self.id
             ));

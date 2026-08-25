@@ -22,7 +22,7 @@ Noun-verb groups with single-letter aliases: `omh s log`, `omh c mcp ls`,
 `omh d claude`. The noun on its own is the listing — `omh s` is every session,
 and `omh s01` is that one.
 
-**A bare name is always a harness.** Editors live under `attach`, so `omh claude`
+**A bare name is always a harness.** Editors live under `attach`, so `omh new claude`
 and `omh attach zed` cannot be confused for one another — the bare slot means
 exactly one thing.
 
@@ -96,9 +96,9 @@ this API printed `""` for both.
 `work` is `null` — not `unknown` — where nobody asked, so a caller can tell an
 unanswered question from an unanswerable one.
 
-Both flags are omh's own, so `omh claude --json` is **refused** rather than
+Both flags are omh's own, so `omh new claude --json` is **refused** rather than
 handed to the harness — see [omh's flags come before the harness
-name](#omhs-flags-come-before-the-harness-name). Use `omh claude -- --json` to
+name](#omhs-flags-come-before-the-harness-name). Use `omh new claude -- --json` to
 pass it on regardless.
 
 ---
@@ -110,25 +110,31 @@ Covered in [Getting started](getting-started.md#what-it-actually-did).
 
 Safe to re-run: it never overwrites files you have edited.
 
-## `omh <harness> [args…]`
+## `omh new <harness> [-- args…]`
 
-Runs a harness inside a session, creating one if needed. Arguments after the
-name are passed through to the harness untouched.
+Starts a session and runs a harness in it. Arguments for the harness go after
+`--`; everything before it is omh's.
 
 ```console
-$ omh claude
-$ omh claude --resume
-$ omh opencode
+$ omh new claude
+$ omh new opencode
+$ omh new claude -- --resume x
 ```
 
-Running it a second time **reattaches** rather than starting a second agent.
-Use `--new` to force a fresh session.
+`new` always starts a session that does not exist yet. To go back into one you
+already have, `omh sNN resume` rejoins it as the harness it ran, and
+`omh sNN resume <harness>` rejoins it as a different one.
+
+A bare harness name used to do both — start or reattach, depending on what was
+there. It is not a command any more: any word could be a harness, so no word
+could be a command, and `RESERVED` existed to keep nineteen names out of the
+way. Naming the verb costs one word and removes the whole class.
 
 If the harness cannot express part of your profile, that is announced once at
 launch rather than silently dropped:
 
 ```console
-$ omh opencode
+$ omh new opencode
 omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment),
      graph-first (no `search` tool),
      graph-orient (no `session-start` moment),
@@ -422,20 +428,20 @@ rendered — so a partial answer would be indistinguishable from a clean one.
 
 ### omh's flags come before the harness name
 
-Everything after a harness name is that harness's argv, so `omh claude
+Everything after a harness name is that harness's argv, so `omh new claude
 --dry-run` would hand omh's own flag to claude. It is refused rather than
 obeyed by the wrong side:
 
 ```console
-$ omh --dry-run claude     # omh's
-$ omh claude --resume x    # claude's
-$ omh claude -- --new      # claude's, even though omh has one too
+$ omh --dry-run new claude       # omh's
+$ omh new claude -- --resume x   # claude's
+$ omh new claude -- --json       # claude's, even though omh has one too
 ```
 
 Long forms only — `-s` and `-a` are left to the harness, which is likelier to
 want them.
 
-**`omh new` does not guess.** The bare name has to: `omh claude --json` could
+**`omh new` does not guess.** The bare name has to: `omh new claude --json` could
 be meant for either, and the rule above is a judgement about which mistake is
 likelier. Under `omh new` the separator decides instead — everything before
 `--` is omh's, everything after it is the harness's, and there is no third

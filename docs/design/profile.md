@@ -549,7 +549,7 @@ the launcher compares what `detect.rs` finds against what `<repo>/.omh/hooks/`
 holds, and says so:
 
 ```console
-$ omh claude
+$ omh new claude
 omh: node detected (package.json), no hook for it — omh init --hooks
 omh: rust-test runs `cargo test`, but no Cargo.toml is here any more
 ```
@@ -628,7 +628,7 @@ That has a failure mode and it needs its own guard: a catalogue entry added
 So the launcher reports it —
 
 ```console
-$ omh claude
+$ omh new claude
 omh: 2 catalogue entries are not selected here: skills/refactor, mcp/linear
 omh:   omh use skills refactor    ·    omh use --all
 ```
@@ -942,7 +942,7 @@ refuses a call** — but the field stays, because `refuse` is a thing users writ
 and three are named:
 
 ```console
-$ omh opencode
+$ omh new opencode
 omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool),
      graph-orient (no `session-start` moment),
      graph-read (no way to inject text before a tool runs)

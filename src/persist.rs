@@ -120,7 +120,8 @@ mod tests {
         assert_eq!(out[0], "dtach");
         assert!(
             out.contains(&"-A".to_string()),
-            "-A is what makes a second `omh claude` reattach instead of starting a second agent: {out:?}"
+            "-A is what makes a second launch into one session reattach \
+             instead of starting a second agent: {out:?}"
         );
         assert_eq!(out.last().unwrap(), "claude");
     }

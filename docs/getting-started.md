@@ -83,7 +83,7 @@ omh init — decided, asked nothing
   omh why <name>  what it costs, what was considered instead, how to remove it
 
 not yet done: recall, cost accounting.
-next: omh claude
+next: omh new claude
 ```
 
 The base set is [a versioned file](design/base-set.md), not something buried in
@@ -140,7 +140,7 @@ logins, and for why capture is keyed by harness rather than by provider.
 ## Run
 
 ```console
-$ omh claude
+$ omh new claude
 ```
 
 You now have a container holding a git worktree on its own branch, with your
@@ -159,8 +159,9 @@ Those run on the host, against the worktree you never have to visit. The agent
 cannot run them itself: the sandbox has a repository of its own but no way to
 reach yours, and it is told so rather than left to discover it.
 
-Closing your terminal does not kill the agent — running `omh claude` again
-reattaches to the session you left. See [Sessions](sessions.md).
+Closing your terminal does not kill the agent — `omh s01 resume` puts you back
+in the session you left, running the harness it ran. See
+[Sessions](sessions.md).
 
 ## Verify it worked
 

@@ -5618,7 +5618,7 @@ mod tests {
         );
     }
 
-    /// Relaunching into a running session is ordinary — `omh claude` twice, an
+    /// Relaunching into a running session is ordinary — resuming twice, an
     /// editor attaching alongside a terminal. Re-seeding there would throw away
     /// every checkpoint the agent had made, which is the one thing this whole
     /// repository exists to keep.

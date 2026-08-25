@@ -3084,7 +3084,7 @@ mod tests {
         assert_eq!(current(&wt).as_deref(), Some("s03"));
     }
 
-    /// Regression: every bare launch called `next_id`, so `omh claude` twice
+    /// Regression: every bare launch called `next_id`, so launching twice
     /// produced two sessions and you could never reattach to the agent you left
     /// running — which makes dtach persistence pointless.
     #[test]

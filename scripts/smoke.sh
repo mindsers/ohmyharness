@@ -64,7 +64,7 @@ cat <<'EOF'
 
 ── not covered (needs a container image, which does not exist yet)
    omh auth <harness>     credential capture   — unimplemented
-   omh claude             real launch          — fails: omh/claude:latest missing
+   omh new claude             real launch          — fails: omh/claude:latest missing
    omh code / fwd / down  session lifecycle    — not built
    omh doctor             adapter verification — not built
 

@@ -8,7 +8,7 @@
 
 ```console
 $ omh init         # detects your stack, decides, reports. no questions.
-$ omh claude       # sandboxed, curated, your setup already inside
+$ omh new claude       # sandboxed, curated, your setup already inside
 $ omh attach       # open that same session in your editor
 $ omh graph        # browse your codebase as a graph
 ```
@@ -40,7 +40,7 @@ removed**, targeting zero.
 
 ## What you actually get
 
-Running `omh claude` instead of `claude` buys five things:
+Running `omh new claude` instead of `claude` buys five things:
 
 **A sandbox that protects your repo, not just your host.** The agent works in a
 git worktree on its own branch. Your checkout is never mounted. Review with
@@ -140,7 +140,7 @@ omh init — decided, asked nothing
   omh why <name>  what it costs, what was considered instead, how to remove it
 
 not yet done: cost accounting.
-next: omh claude
+next: omh new claude
 ```
 
 `init` **decides and reports** — it never asks. Every question is hassle the tool
@@ -151,7 +151,7 @@ Then log in once and go:
 
 ```console
 $ omh auth claude personal    # runs the harness's own login, captures it
-$ omh claude                  # sandboxed, logged in, configured
+$ omh new claude                  # sandboxed, logged in, configured
 ```
 
 ## Commands
@@ -172,7 +172,7 @@ omh use|unuse <capability> <name> omh use skills tdd, omh use --all
 ```
 
 Noun-verb groups with single-letter aliases. A bare name is always a **harness**;
-editors live under `attach`, so `omh claude` and `omh attach zed` can't be
+editors live under `attach`, so `omh new claude` and `omh attach zed` can't be
 confused for each other.
 
 ## How it works
@@ -183,8 +183,8 @@ A session is a running container, a git worktree, and a branch — which many
 harnesses take turns inhabiting.
 
 ```
-       omh claude ──┐
-       omh opencode ┼── exec ──┐
+       omh new claude ──┐
+       omh new opencode ┼── exec ──┐
        omh attach ──┘  (ssh)   │
                                ▼
  ┌──────────────────────────────────────────────────────┐
@@ -197,7 +197,7 @@ harnesses take turns inhabiting.
 ```
 
 Harnesses run under `dtach`, so closing your terminal doesn't kill the agent —
-`omh claude` again reattaches to the one you left running.
+`omh s01 resume` puts you back in the one you left running.
 
 ### One catalogue, and it is personal
 
@@ -295,7 +295,7 @@ ready  = "Connected"
 missing map entry rather than special-case logic, and it is announced once:
 
 ```console
-$ omh opencode
+$ omh new opencode
 omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool),
      graph-orient (no `session-start` moment),
      graph-read (no way to inject text before a tool runs)

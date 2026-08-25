@@ -16,7 +16,7 @@ body:
       label: What happened
       description: What you ran, and what it did.
       placeholder: |
-        $ omh claude
+        $ omh new claude
         ...
     validations:
       required: true

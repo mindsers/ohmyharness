@@ -95,7 +95,7 @@ and [`docs/design/adapters.md`](design/adapters.md) covers how to fix it.
 If doctor passes, check whether the capability was dropped at launch:
 
 ```console
-$ omh opencode
+$ omh new opencode
 omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment),
      graph-first (no `search` tool),
      graph-orient (no `session-start` moment),
@@ -221,7 +221,7 @@ session after upgrading.
 ### `session s01 is running opencode and cannot be reused for this launch`
 
 The same mismatch, but something is live inside and restarting would kill it. Use
-`omh s01 down` if you want it gone, or `omh --new <harness>` to leave it alone
+`omh s01 down` if you want it gone, or `omh new <harness>` to leave it alone
 and work somewhere else.
 
 If you believe nothing is running, look at the sockets: `docker exec
@@ -229,10 +229,10 @@ omh-<repo>-s01 ls /omh/sock`. One per live harness, removed when it exits.
 
 ### `` `--dry-run` is omh's flag, not claude's ``
 
-Everything after a harness name is the harness's argv, so `omh claude --dry-run`
+Everything after a harness name is the harness's argv, so `omh new claude --dry-run`
 handed omh's flag to claude and launched for real. omh's own flags go first:
 `omh --dry-run claude`. If the harness genuinely has a flag of the same name,
-`omh claude -- --dry-run` passes it on.
+`omh new claude -- --dry-run` passes it on.
 
 Long forms only. `-s` and `-a` are left alone — plenty of harnesses use them, and
 refusing those would break launches that work.
@@ -285,7 +285,7 @@ Check the launch output. If it names the entry, this repo has a `[use]` list and
 that entry is not in it:
 
 ```console
-$ omh claude
+$ omh new claude
 omh: 1 catalogue entry is not selected here: skills/refactor
 omh:   omh use skills refactor    ·    omh use --all
 ```
