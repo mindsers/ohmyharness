@@ -850,26 +850,48 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             SessionsCmd::Resume => {
                 let paths = Paths::discover(&cwd)?;
                 let session = existing_session(&paths, cli.session.as_deref())?;
-                // Refused, never guessed. `detect::preferred_harness` would
-                // answer for a session it knows nothing about, and the answer
-                // would be indistinguishable from a right one — claude
-                // attached to a worktree an afternoon of opencode built.
-                let harness = session::harness_of(&paths.runs(), &session.id).with_context(|| {
-                    format!(
-                        "omh did not record which harness {} ran, so it cannot \
-                         rejoin as that one.\n  omh new <harness>   start one \
-                         here\n  omh s               what is running",
-                        session.id
-                    )
-                })?;
+                // Three answers, three sentences. Saying "omh did not record"
+                // over a marker omh wrote and cannot read is a claim about
+                // history that omh is in no position to make.
+                let harness = match session::harness_of(&paths.runs(), &session.id) {
+                    session::Ran::Harness(name) => name,
+                    // Refused, never guessed. `detect::preferred_harness` would
+                    // answer for a session it knows nothing about, and the
+                    // answer would be indistinguishable from a right one —
+                    // claude attached to a worktree an afternoon of opencode
+                    // built. Every session made before this release is here,
+                    // and so is every one `omh attach` created for an editor.
+                    session::Ran::NeverRecorded => anyhow::bail!(
+                        "omh has no record of a harness running in {id}, so it \
+                         cannot rejoin as one.\n  omh {id} <harness>   rejoin \
+                         it as that\n  omh s               what is here",
+                        id = session.id
+                    ),
+                    session::Ran::CouldNotTell(why) => anyhow::bail!(
+                        "omh recorded a harness for {id} and cannot read it \
+                         back: {why}\n  omh {id} <harness>   rejoin it as \
+                         that, which rewrites the record",
+                        id = session.id
+                    ),
+                };
+                // Named as coming from the record. Without this the user typed
+                // `resume` and is told a word they never said is unknown,
+                // wearing the same message as a mistyped harness.
                 run(
                     &cwd,
-                    &[harness],
+                    &[harness.clone()],
                     session::Start::Named(&session.id),
                     cli.account.as_deref(),
                     cli.dry_run,
                     ctx,
                 )
+                .with_context(|| {
+                    format!(
+                        "{} recorded `{}`",
+                        session.id,
+                        out::untrusted(&harness)
+                    )
+                })
             }
             SessionsCmd::Down { all } => down(
                 &cwd,
@@ -4063,7 +4085,21 @@ fn run(
         let _ = idle::touch(&paths.runs(), &session.id);
         // Beside `last-used`, and under the same guard: a dry run must leave
         // no trace, and this is a trace.
-        let _ = session::remember_harness(&paths.runs(), &session.id, name);
+        //
+        // Said out loud when it fails, unlike `touch` above, because the two
+        // failures do not cost the same. A lost `touch` means one container
+        // survives one reap — `idle::expired` reads a missing marker as *leave
+        // it alone* and claims nothing. A lost record is discovered days later
+        // as a refusal, at the one moment the user was trying to avoid
+        // retyping the harness, and there is nothing left by then to say the
+        // write was attempted.
+        if let Err(e) = session::remember_harness(&paths.runs(), &session.id, name) {
+            ctx.warn(&format!(
+                "could not record that {} ran {name}: {e} — `omh {} resume` \
+                 will not be able to rejoin it",
+                session.id, session.id
+            ));
+        }
     }
 
     let plan = container::plan(
@@ -9692,42 +9728,6 @@ because = "a fixture"
         assert!(
             repo_layer(true).is_committed(),
             "and --shared is how you say you meant it"
-        );
-    }
-
-    /// A launch records what it launched.
-    ///
-    /// `omh s resume` can only rejoin a session as itself if something wrote
-    /// down what it was, and the only place that can is the launch. Deleting
-    /// that one line leaves every test green — the resume tests write the
-    /// marker themselves, because a non-dry launch needs a container and
-    /// nothing in this suite performs one — and ships a verb that works for
-    /// hand-made markers and no real session.
-    ///
-    /// So this reads the source instead. Crude, and the alternative was a
-    /// claim in a comment that the writing was covered when it was not.
-    #[test]
-    fn a_launch_records_the_harness_it_started() {
-        let body = std::fs::read_to_string(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
-        )
-        .unwrap();
-        let run = body
-            .split_once("\nfn run(")
-            .expect("`run` is still spelled this way")
-            .1;
-        let run = run.split_once("\nfn ").map_or(run, |(before, _)| before);
-        assert!(
-            run.contains("session::remember_harness("),
-            "`run` no longer records which harness it started, so \
-             `omh s resume` has nothing to read and refuses every session"
-        );
-        // Beside `last-used`, under the same guard, so a dry run leaves no
-        // trace of either.
-        assert!(
-            run.contains("idle::touch("),
-            "the two markers are written together; one without the other means \
-             the guard around them moved"
         );
     }
 

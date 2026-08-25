@@ -1176,34 +1176,87 @@ pub fn pick(worktrees_dir: &Path, start: Start) -> String {
     }
 }
 
+/// Where a session records which harness it ran.
+///
+/// A leading dot, and not for tidiness: `Paths::staging` is
+/// `runs()/<session>/<harness>`, so this directory's other children are named
+/// after harnesses. `runs()/<id>/harness` and the staging directory of an
+/// adapter called `harness` would be the same path — a file where a directory
+/// is about to go. `last-used` has the same latent shape and has never been
+/// hit; there is no reason to add a second, likelier word to the collision.
+fn harness_marker(run_dir: &Path, session: &str) -> PathBuf {
+    run_dir.join(session).join(".harness")
+}
+
 /// Record which harness a session ran, so it can be rejoined as itself.
 ///
-/// Nothing else knows. `Session` is an id, a branch and a worktree; the
-/// container is `omh-<repo>-<id>` with no harness in the name; and the image
-/// tag lives on a container that `omh sNN down` removes. The session most
-/// worth rejoining — stopped, with an afternoon's work in it — is the one
-/// carrying the least evidence of what built it.
+/// The staging directory already carries the name — `runs()/<id>/<harness>`
+/// survives `down`, which removes the container and nothing else — so this is
+/// not the only trace. It is the only *unambiguous* one: a session that has run
+/// two harnesses has two staging directories and no way to say which was last,
+/// and staging is a side effect that nothing promises to keep. Neither is true
+/// of a marker written on purpose.
 ///
-/// Written beside `last-used` in the run directory, which means `omh sNN rm`
-/// takes it away with everything else, and a cleared run directory forgets it
-/// rather than remembering something stale.
+/// Nothing else knows at all. `Session` is an id, a branch and a worktree; the
+/// container is `omh-<repo>-<id>` with no harness in the name; and the image
+/// tag needs a container to inspect, which `omh sNN down` removes.
+///
+/// Written beside `last-used`, so `omh sNN rm` — which removes the whole run
+/// directory — takes it away with everything else.
 pub fn remember_harness(run_dir: &Path, session: &str, harness: &str) -> std::io::Result<()> {
-    let path = run_dir.join(session).join("harness");
+    let path = harness_marker(run_dir, session);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&path, harness)
 }
 
-/// The harness a session ran, if omh recorded one.
+/// What omh recorded about the harness a session ran.
 ///
-/// `None` covers three different situations on purpose — no run directory, no
-/// marker, an unreadable file — because the caller does the same thing with
-/// all of them: refuse, and say so. What it must not do is answer.
-pub fn harness_of(run_dir: &Path, session: &str) -> Option<String> {
-    let said = std::fs::read_to_string(run_dir.join(session).join("harness")).ok()?;
+/// Three answers, because *there is no record* and *omh could not read the
+/// record* are different news and the second is not the caller's fault. An
+/// `Option` here would render a failed read as a confident claim about
+/// history, which is the shape `image::Stamp` was introduced to stop one
+/// module over — its `Read` means "genuinely older than the check" and its
+/// `Unknown(String)` carries why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ran {
+    /// omh recorded this name.
+    Harness(String),
+    /// No run directory, or no marker in it. The honest reading of a session
+    /// older than this feature — and of one started by `omh attach`, which
+    /// makes a session for an editor and never runs a harness in it.
+    NeverRecorded,
+    /// The marker is there and omh could not read it, and why. A truncated
+    /// write, a directory where the file should be, bad permissions, invalid
+    /// UTF-8.
+    CouldNotTell(String),
+}
+
+/// The harness a session ran, as far as omh can tell.
+pub fn harness_of(run_dir: &Path, session: &str) -> Ran {
+    let path = harness_marker(run_dir, session);
+    let said = match std::fs::read_to_string(&path) {
+        Ok(said) => said,
+        // The one error that means *nothing was recorded* rather than *omh
+        // could not find out*. Every other kind is news.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ran::NeverRecorded,
+        Err(e) => return Ran::CouldNotTell(format!("{}: {e}", path.display())),
+    };
     let name = said.trim();
-    (!name.is_empty()).then(|| name.to_string())
+    if name.is_empty() {
+        // Not `NeverRecorded`: something wrote this and left nothing in it,
+        // which is damage rather than absence.
+        return Ran::CouldNotTell(format!("{} is empty", path.display()));
+    }
+    // omh wrote this, but a file on disk is not omh's word. The value becomes
+    // `argv[0]` of a launch and is joined into a path, and whatever it holds
+    // reaches the terminal in an error message — a marker carrying an ANSI
+    // escape printed one, before this check.
+    if name.contains(['/', '\\', '\n']) || name.chars().any(char::is_control) {
+        return Ran::CouldNotTell(format!("{} does not name a harness", path.display()));
+    }
+    Ran::Harness(name.to_string())
 }
 
 /// Which session a command is asking for.
@@ -3052,34 +3105,69 @@ mod tests {
         assert_eq!(pick(&wt, Start::Fresh), "s03");
     }
 
+    /// What was recorded reads back; what was not is not invented; and what
+    /// omh cannot read is neither.
+    ///
+    /// The third case is the one worth having a type for. A marker omh wrote
+    /// and cannot read back is not the same news as no marker, and reporting
+    /// it as "nothing was recorded" is a claim about history rather than about
+    /// a failed read.
+    #[test]
+    fn a_recorded_harness_reads_back_and_a_damaged_one_is_not_absence() {
+        let d = tempfile::tempdir().unwrap();
+        let runs = d.path();
+
+        assert_eq!(harness_of(runs, "s01"), Ran::NeverRecorded, "nothing yet");
+        remember_harness(runs, "s01", "opencode").unwrap();
+        assert_eq!(harness_of(runs, "s01"), Ran::Harness("opencode".into()));
+
+        // A relaunch records what it launched, not what it launched last time.
+        // `fs::write` truncates, and that is load-bearing: an append would
+        // resolve to `opencodeclaude` and resume as neither.
+        remember_harness(runs, "s01", "claude").unwrap();
+        assert_eq!(harness_of(runs, "s01"), Ran::Harness("claude".into()));
+
+        // A different session is a different answer.
+        assert_eq!(harness_of(runs, "s02"), Ran::NeverRecorded);
+
+        // Emptied by a truncated write: damage, not absence.
+        std::fs::write(harness_marker(runs, "s01"), "   \n").unwrap();
+        assert!(
+            matches!(harness_of(runs, "s01"), Ran::CouldNotTell(_)),
+            "an emptied marker is not a session that never ran one"
+        );
+
+        // Unreadable for any other reason. A directory where the file goes is
+        // the uid-independent way to say this — CI runs as root, where
+        // permissions prove nothing.
+        let d2 = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(harness_marker(d2.path(), "s03")).unwrap();
+        match harness_of(d2.path(), "s03") {
+            Ran::CouldNotTell(why) => assert!(
+                why.contains("s03"),
+                "the reason names the marker it could not read: {why}"
+            ),
+            other => panic!("a marker omh cannot read is not absence: {other:?}"),
+        }
+
+        // Content that is not a harness name never becomes one. It would
+        // otherwise be `argv[0]` of a launch, joined into a path, and printed
+        // raw in the error.
+        for junk in ["../claude", "cla\u{7}ude", "a/b"] {
+            std::fs::write(harness_marker(runs, "s01"), junk).unwrap();
+            assert!(
+                matches!(harness_of(runs, "s01"), Ran::CouldNotTell(_)),
+                "`{junk}` is not a harness name"
+            );
+        }
+    }
+
     /// Naming one gets that one, whether or not it is the current session.
     ///
     /// This used to end by asserting `pick(&wt, Some("s09"), true) == "s09"` —
     /// *"explicit beats --new"* — pinning which half of a contradiction won.
     /// `Start` has no way to say both, so there is no winner to assert and the
     /// line is gone rather than rewritten.
-    /// What was recorded reads back, and nothing else does.
-    #[test]
-    fn a_recorded_harness_reads_back_and_an_absent_one_is_not_invented() {
-        let d = tempfile::tempdir().unwrap();
-        let runs = d.path();
-
-        assert_eq!(harness_of(runs, "s01"), None, "nothing recorded yet");
-        remember_harness(runs, "s01", "opencode").unwrap();
-        assert_eq!(harness_of(runs, "s01"), Some("opencode".to_string()));
-
-        // A different session is a different answer, not the same one.
-        assert_eq!(harness_of(runs, "s02"), None);
-
-        // A marker somebody emptied is not a harness called "".
-        std::fs::write(runs.join("s01").join("harness"), "   \n").unwrap();
-        assert_eq!(
-            harness_of(runs, "s01"),
-            None,
-            "an empty marker is nothing recorded, not a nameless harness"
-        );
-    }
-
     #[test]
     fn an_explicit_id_always_wins() {
         let (_d, wt) = worktrees(&["s01", "s02"]);

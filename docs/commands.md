@@ -435,22 +435,6 @@ $ omh claude -- --new      # claude's, even though omh has one too
 Long forms only — `-s` and `-a` are left to the harness, which is likelier to
 want them.
 
-`omh sNN resume` rejoins a session as **the harness it ran before**, which omh
-records at launch beside the session's last-used marker. A session from before
-that recording existed — or one whose run directory was cleared — is refused
-rather than guessed at:
-
-```console
-$ omh s01 resume
-omh: omh did not record which harness s01 ran, so it cannot rejoin as that one.
-  omh new <harness>   start one here
-  omh s               what is running
-```
-
-Guessing would be easy and wrong. omh knows which harness this host prefers,
-and answering with it would attach claude to a worktree an afternoon of
-opencode built, with nothing on screen to say so.
-
 **`omh new` does not guess.** The bare name has to: `omh claude --json` could
 be meant for either, and the rule above is a judgement about which mistake is
 likelier. Under `omh new` the separator decides instead — everything before
@@ -468,6 +452,43 @@ That last line is the trade. The bare name forwards an unknown flag on the
 assumption it belongs to the harness; `omh new` refuses it, because a flag it
 cannot place is likelier to be a typo than a gift. Put it after `--` and it
 goes through untouched.
+
+### `omh sNN resume` — rejoin it as what it was
+
+`omh new` starts a session; `resume` rejoins one, running **the harness it ran
+before**. omh records that at launch, beside the session's last-used marker, and
+`omh sNN rm` takes it away with the rest of the run directory.
+
+The staging directory carries the name too — `run/<repo>/<id>/<harness>/`
+survives `down` — but a session that has run two harnesses has two of them and
+no way to say which was last, and staging is a side effect nothing promises to
+keep. The marker is the answer omh means.
+
+Three things can happen, and they are three different sentences:
+
+```console
+$ omh s02 resume
+opencode on omh/s02
+
+$ omh s01 resume
+omh: omh has no record of a harness running in s01, so it cannot rejoin as one.
+  omh s01 <harness>   rejoin it as that
+  omh s               what is here
+
+$ omh s03 resume
+omh: omh recorded a harness for s03 and cannot read it back: …/.harness is empty
+  omh s03 <harness>   rejoin it as that, which rewrites the record
+```
+
+The middle one covers a session older than this release, one whose run
+directory was cleared, and one `omh attach <editor>` created — attaching an
+editor makes a session without running a harness in it, so there is nothing to
+record. The last one is a marker omh wrote and cannot read now, which is
+different news and says so.
+
+**Guessing would be easy and wrong.** omh knows which harness this host
+prefers, and answering with it would attach claude to a worktree an afternoon
+of opencode built, with nothing on screen to say so.
 
 ### `omh sNN log` — what the agent has committed
 
