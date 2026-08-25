@@ -1937,6 +1937,47 @@ fn resuming_as_another_harness_records_it_only_if_it_launched() {
     );
 }
 
+/// Resuming as a *different* harness says that is what it is doing.
+///
+/// `resume` with a name is two operations wearing one word. With no name, or
+/// with the one already recorded, it rejoins a session as it was. With a
+/// different one it is a switch: an image is built per harness, so the sandbox
+/// stops and starts on the other image, and the record is rewritten so every
+/// later `resume` follows.
+///
+/// Both are wanted — switching harness inside one session is a feature, and
+/// the docs describe it. What is not wanted is doing the second while the word
+/// says the first. Said out loud, on stderr, so `omh s01 resume claude > log`
+/// still shows it.
+#[test]
+fn resuming_as_a_different_harness_says_it_is_a_switch() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.session("s01");
+    let _ = sb.omh(&["s01", "resume", "opencode"]);
+
+    // The same one again is a resume, and says nothing.
+    let same = sb.omh(&["s01", "--dry-run", "resume", "opencode"]);
+    let quiet = String::from_utf8_lossy(&same.stderr).to_string();
+    assert!(
+        !quiet.contains("was running"),
+        "rejoining as what it already ran is not a switch: {quiet}"
+    );
+
+    // A different one is.
+    let switched = sb.omh(&["s01", "--dry-run", "resume", "claude"]);
+    let said = String::from_utf8_lossy(&switched.stderr).to_string();
+    assert!(
+        said.contains("opencode") && said.contains("claude"),
+        "a switch has to name both ends of it: {said}"
+    );
+    assert!(
+        said.contains("was running"),
+        "and say the session is being changed rather than rejoined: {said}"
+    );
+}
+
 /// A session omh cannot name a harness for is refused, not guessed at.
 ///
 /// Every session made before this release is in that state, and so is one

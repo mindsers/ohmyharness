@@ -497,6 +497,18 @@ editor makes a session without running a harness in it, so there is nothing to
 record. The last one is a marker omh wrote and cannot read now, which is
 different news and says so.
 
+`omh sNN resume <harness>` names one instead. If it is the one already
+recorded, that is still a resume. If it is a different one it is a **switch** —
+an image is built per harness, so the sandbox stops and starts on the other
+one, and the record is rewritten so every later `resume` follows. omh says so
+rather than leaving you to notice:
+
+```console
+$ omh s01 resume claude
+omh: s01 was running omp; resuming as claude restarts its sandbox and records claude
+claude on omh/s01
+```
+
 **Guessing would be easy and wrong.** omh knows which harness this host
 prefers, and answering with it would attach claude to a worktree an afternoon
 of opencode built, with nothing on screen to say so.
