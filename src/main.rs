@@ -7079,7 +7079,7 @@ mod tests {
             // it. Read one line at a time, `omh s commit --keep` looks like
             // ``omh s commit \``, so the scan has to join what the compiler
             // joins before it reads anything.
-            let body = std::fs::read_to_string(&file).unwrap();
+            let body = std::fs::read_to_string(file).unwrap();
             let mut joined = String::new();
             let mut continued = false;
             for line in body.lines() {
