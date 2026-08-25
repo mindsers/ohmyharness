@@ -82,7 +82,7 @@ recipe changes had **never** shipped — adding `socat` silently did nothing.
 Harness layers now pin an exact base digest, so a recipe change actually
 propagates.
 
-`init` builds these, because init is not finished until `omh <harness>` works.
+`init` builds these, because init is not finished until `omh new <harness>` works.
 About 30 seconds on first run, cached after.
 
 ### A plan must be runnable, not merely well-formed

@@ -338,7 +338,7 @@ editable and reviewable in a way `"*"` is not — you curate by deleting lines.
 That has one failure mode, and it gets the treatment every silence in omh gets:
 
 ```console
-$ omh claude
+$ omh new claude
 omh: 1 catalogue entry is not selected here: skills/refactor
 omh:   omh use skills refactor    ·    omh use --all
 omh: warning: [use] names an entry nothing answers to: skills/reveiw-diff
@@ -717,7 +717,7 @@ carry_in = [".env.local", "certs/"]
 ```
 
 ```console
-$ omh claude
+$ omh new claude
 omh: carried .env.local
 omh: carried certs/
 omh: warning: carry_in lists .env.missing — not in this checkout
@@ -795,7 +795,7 @@ which file it read. Where both exist and differ, `AGENTS.md` wins and the other
 is reported rather than silently dropped:
 
 ```console
-$ omh claude
+$ omh new claude
 omh: composed CLAUDE.md — rename it to AGENTS.md
 ```
 

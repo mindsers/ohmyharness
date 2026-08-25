@@ -52,7 +52,7 @@ impl std::fmt::Display for Mode {
 
 /// Socket path *inside* the sandbox. Kept under `/omh` so it never collides
 /// with the workspace, and a pure function of its inputs so a second
-/// `omh <harness>` reattaches instead of starting a second agent.
+/// a second launch into one session reattaches instead of starting a second agent.
 pub fn socket(session: &str, harness: &str) -> PathBuf {
     PathBuf::from(format!("{SOCKET_DIR}/{session}-{harness}"))
 }
@@ -120,7 +120,8 @@ mod tests {
         assert_eq!(out[0], "dtach");
         assert!(
             out.contains(&"-A".to_string()),
-            "-A is what makes a second `omh claude` reattach instead of starting a second agent: {out:?}"
+            "-A is what makes a second launch into one session reattach \
+             instead of starting a second agent: {out:?}"
         );
         assert_eq!(out.last().unwrap(), "claude");
     }

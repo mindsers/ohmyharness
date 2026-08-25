@@ -83,7 +83,7 @@ omh init — decided, asked nothing
   omh why <name>  what it costs, what was considered instead, how to remove it
 
 not yet done: recall, cost accounting.
-next: omh claude
+next: omh new claude
 ```
 
 The base set is [a versioned file](design/base-set.md), not something buried in
@@ -120,7 +120,7 @@ into every session from the manifest. Your `AGENTS.md` or `CLAUDE.md` is read
 and composed with them — see [Configuration](configuration.md#keeping-the-agents-git-status-clean).
 
 Step 6 is the slow one — about 30 seconds the first time, cached afterwards.
-`init` is not finished until `omh <harness>` works, so it builds the image
+`init` is not finished until `omh new <harness>` works, so it builds the image
 rather than deferring it to your first launch.
 
 Step 3 reads your host only to learn which harness you *prefer*. The harness
@@ -140,7 +140,7 @@ logins, and for why capture is keyed by harness rather than by provider.
 ## Run
 
 ```console
-$ omh claude
+$ omh new claude
 ```
 
 You now have a container holding a git worktree on its own branch, with your
@@ -159,8 +159,9 @@ Those run on the host, against the worktree you never have to visit. The agent
 cannot run them itself: the sandbox has a repository of its own but no way to
 reach yours, and it is told so rather than left to discover it.
 
-Closing your terminal does not kill the agent — running `omh claude` again
-reattaches to the session you left. See [Sessions](sessions.md).
+Closing your terminal does not kill the agent — `omh s01 resume` puts you back
+in the session you left, running the harness it ran. See
+[Sessions](sessions.md).
 
 ## Verify it worked
 

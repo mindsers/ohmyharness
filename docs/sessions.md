@@ -4,8 +4,8 @@ A session is not a launch. It is a **running container, a git worktree, and a
 branch**, which many harnesses take turns inhabiting.
 
 ```
-       omh claude ──┐
-       omh opencode ┼── exec ──┐
+       omh new claude ──┐
+       omh new opencode ┼── exec ──┐
        omh attach ──┘  (ssh)   │
                                ▼
  ┌──────────────────────────────────────────────────────┐
@@ -21,17 +21,17 @@ branch**, which many harnesses take turns inhabiting.
 ```
 
 Making the session the unit of work — rather than the launch — is what keeps the
-index warm. `omh claude`, then `omh opencode` against the same session, and
-everything the graph learned is still there: the graph lives in a volume keyed by
+index warm. `omh new claude`, then `omh s01 resume opencode` against that same
+session, and everything the graph learned is still there: the graph lives in a volume keyed by
 repo, and the worktree and branch are on the host, so neither belongs to the
 container.
 
 **Switching harness is not free, though.** An image is built per harness, so a
-session started by `omh claude` is running the claude image and does not contain
+session started by `omh new claude` is running the claude image and does not contain
 `opencode` at all. Asking for the other one restarts the sandbox:
 
 ```console
-$ omh opencode
+$ omh s01 resume opencode
 omh: restarting the sandbox for omh/s01 — image (omh/claude:b4ed… → omh/opencode:1e1a…), mounts (6 added, 9 removed)
 ```
 
@@ -168,7 +168,7 @@ So omh stamps the plan onto the container as labels at launch, and compares
 before reusing one. If they disagree the container is replaced, naming what
 moved. Two real failures came from never asking:
 
-- `omh opencode` on a session started by `omh claude` execed a binary that image
+- `omh s01 resume opencode` on a session started by `omh new claude` execed a binary that image
   does not contain.
 - `--account work` on a session started as `personal` went on quietly using
   `personal` — the exact thing `omh auth` refuses to guess about elsewhere.
@@ -183,10 +183,10 @@ Replacing a container kills whatever is inside it, so a session with a live
 harness is reported instead:
 
 ```console
-$ omh claude
+$ omh s01 resume claude
 Error: session s01 is running opencode and cannot be reused for this launch (image (…))
   stop it with        omh s01 down
-  or start a fresh one  omh --new claude
+  or start a fresh one  omh new claude
 ```
 
 Liveness is read from the `dtach` sockets, which exist only while their harness
@@ -212,9 +212,9 @@ So every harness is wrapped:
 dtach -A /omh/sock/<session>-<harness>  <harness> [args…]
 ```
 
-Detaching is your terminal closing. Reattaching is running `omh <harness>` again
-— `-A` attaches to a live session or creates one, so a second invocation never
-starts a second agent. The socket path is a pure function of session and
+Detaching is your terminal closing. Reattaching is `omh sNN resume` — `-A`
+attaches to a live session or creates one, so a second invocation never starts a
+second agent. The socket path is a pure function of session and
 harness; anything variable in it would silently fork a duplicate.
 
 Some harnesses ship their own resume. Relying on that would be exactly the
@@ -259,7 +259,7 @@ N sessions means N containers, so this is not a nicety — see
 [risks](design/risks.md).
 
 Only the **container** stops; the worktree and branch survive, so
-`omh <harness>` resumes exactly where you left off. The clock measures when you
+`omh sNN resume` puts you back exactly where you left off. The clock measures when you
 last *launched into* or *attached to* a session, not the agent's own writes — a
 session left running after you walked away is what this exists to reap, and one
 where an agent is working unattended is one you started recently.

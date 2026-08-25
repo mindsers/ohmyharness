@@ -99,7 +99,7 @@ typed anyway.
 $ omh s               every session — the dashboard
 $ omh s01             that session — state, work, what is not yours yet
 $ omh s01 diff -p     act on it
-$ omh s01 claude      launch into it
+$ omh s01 resume      rejoin it
 ```
 
 `s` is the sessions namespace scoped to the current session; `sNN` is the same
@@ -112,7 +112,7 @@ omh s01 commit   ≡  omh sessions --session s01 commit
 
 One extension, and it is the only place the equivalence is not a pure alias:
 when what follows is not a session verb, the prefix still sets the session and
-the command runs where it lives — `omh s01 claude`, `omh s01 attach zed`,
+the command runs where it lives — `omh s01 attach zed`,
 `omh s01 graph`. Same rule, and it covers the launch, which `sessions` has no
 verb for.
 
@@ -804,7 +804,7 @@ reason.
 - ~~**Per-turn checkpoints.**~~ Landed (#66) — see the section above.
 - **Naming sessions.** `omh s01 push <name>` refuses to invent a branch name,
   correctly. A session that carried a name from the start would answer that once
-  instead of at the end — but `omh claude` asking a question at launch would
+  instead of at the end — but `omh new claude` asking a question at launch would
   cost the thing `init` exists to protect.
 
 ## What this changes in [Decisions](decisions.md), when it lands

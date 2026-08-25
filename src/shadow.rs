@@ -1603,7 +1603,7 @@ impl Shadow {
         // `cherry-pick <a> <b>` **is** "these commits, in this order", which is
         // what a selection means. It needs no editor, so no `sh -c`, no
         // quoting, no second entry point into omh, and no `hide = true`
-        // subcommand that `RESERVED` then has to know about.
+        // subcommand for the command list to know about.
         //
         // The first attempt failed in a way worth recording: `current_exe()`
         // inside a unit test is the *test harness*, so git delivered the todo
@@ -5618,7 +5618,7 @@ mod tests {
         );
     }
 
-    /// Relaunching into a running session is ordinary — `omh claude` twice, an
+    /// Relaunching into a running session is ordinary — resuming twice, an
     /// editor attaching alongside a terminal. Re-seeding there would throw away
     /// every checkpoint the agent had made, which is the one thing this whole
     /// repository exists to keep.
