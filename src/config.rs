@@ -1456,7 +1456,7 @@ mod tests {
     }
 
     /// Re-importing the same config must be a no-op, not a duplicate or a churn
-    /// of the file — otherwise `omh mcp import` is unsafe to re-run.
+    /// of the file — otherwise `omh config mcp import` is unsafe to re-run.
     #[test]
     fn importing_twice_changes_nothing() {
         let (_d, paths) = fixture();
