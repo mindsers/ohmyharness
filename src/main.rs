@@ -879,7 +879,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 // wearing the same message as a mistyped harness.
                 run(
                     &cwd,
-                    &[harness.clone()],
+                    std::slice::from_ref(&harness),
                     session::Start::Named(&session.id),
                     cli.account.as_deref(),
                     cli.dry_run,
