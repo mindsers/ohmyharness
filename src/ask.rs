@@ -187,6 +187,25 @@ pub fn what_tests_it(input: &mut dyn BufRead, out: &mut dyn Write) -> Result<Opt
     }))
 }
 
+/// A yes, and nothing else is one.
+///
+/// Built on `prompt`, and it inherits the rule this module is built around:
+/// **silence declines, and a closed pipe declines too.** `prompt` cannot tell
+/// those apart and does not need to — here they agree. Enter is what somebody
+/// gives when they do not know or are holding the key down, and a script or a
+/// CI runner never gives anything at all. Both have to mean no, because the
+/// thing on the other side of this is destructive.
+///
+/// Deliberately not a `[y/N]` that accepts `n`, `no`, or anything else as a
+/// distinct answer: there is one way to say yes and everything else is not it.
+pub fn confirm(question: &str, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<bool> {
+    let said = prompt(&format!("{question} (y/N)"), input, out)?;
+    Ok(matches!(
+        said.as_deref().map(str::trim),
+        Some("y") | Some("Y") | Some("yes")
+    ))
+}
+
 /// One line, trimmed. `None` for an empty answer **and** for a closed pipe, and
 /// the caller must treat the second as a reason to stop asking.
 fn prompt(question: &str, input: &mut dyn BufRead, out: &mut dyn Write) -> Result<Option<String>> {
@@ -203,6 +222,47 @@ fn prompt(question: &str, input: &mut dyn BufRead, out: &mut dyn Write) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn answered(typed: &str) -> bool {
+        let mut out = Vec::new();
+        confirm("stop everything?", &mut typed.as_bytes(), &mut out).unwrap()
+    }
+
+    /// Only a yes is a yes.
+    ///
+    /// The CLI test for `omh s down` cannot reach this: there, stdin is closed
+    /// and the caller short-circuits on the terminal check before `confirm`
+    /// runs. So the rule this module is built on — silence declines — was
+    /// asserted by nothing until here, and inverting it passed the suite.
+    #[test]
+    fn silence_and_a_closed_pipe_both_decline() {
+        assert!(!answered(""), "a closed pipe is not consent");
+        assert!(!answered("\n"), "and neither is Enter");
+        assert!(!answered("   \n"), "nor a line somebody rested on the bar");
+        assert!(!answered("n\n"));
+        assert!(!answered("no\n"));
+        // Not a prefix match: the destructive thing must not fire on a word
+        // that merely starts the same way.
+        assert!(!answered("yesterday\n"));
+        assert!(!answered("nope\n"));
+
+        assert!(answered("y\n"));
+        assert!(answered("Y\n"));
+        assert!(answered("yes\n"));
+    }
+
+    /// The question reaches the person, and says what it will do.
+    #[test]
+    fn the_question_names_the_choice_it_is_offering() {
+        let mut out = Vec::new();
+        confirm("stop every sandbox? 2", &mut "n\n".as_bytes(), &mut out).unwrap();
+        let asked = String::from_utf8(out).unwrap();
+        assert!(asked.contains("stop every sandbox? 2"), "asked: {asked}");
+        assert!(
+            asked.contains("(y/N)"),
+            "the capital is which way silence falls: {asked}"
+        );
+    }
 
     fn marker() -> crate::stack::Marker {
         crate::stack::Marker {

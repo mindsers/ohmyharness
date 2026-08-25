@@ -2464,6 +2464,70 @@ fn the_focused_listing_is_one_session_in_the_document_too() {
     assert_eq!(sessions[0]["id"], "s01", "and it is the one named: {doc}");
 }
 
+/// A wide `down` with nobody to ask stops nothing.
+///
+/// `omh s down` with no session named stops *every* sandbox. That is what it
+/// is for, and it is also the one omh command whose blast radius grows with
+/// how much work you have in flight — four sessions of an afternoon's agent
+/// output, killed by a command one word shorter than the one you meant.
+///
+/// So it asks. And because it asks, it has to handle being unable to: in a
+/// script, in CI, or behind a pipe, there is nobody to answer. `ask`'s own
+/// rule is that silence declines and a closed pipe stops — the safe answer
+/// has to be the one somebody gives when they are not there.
+///
+/// `--all` is the way to mean it without being asked. Without that, a `down`
+/// in CI would either hang or stop everything, and both are worse than
+/// refusing.
+#[test]
+fn a_wide_down_with_nobody_to_ask_stops_nothing() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.session("s01");
+    sb.session("s02");
+    // What omh's probe reads: the shim's `ps` prints this file.
+    std::fs::write(sb.bin.join("containers"), "omh-repo-s01\nomh-repo-s02\n").unwrap();
+
+    // stdin is closed — `Command::output` nulls it — so this is the CI case.
+    let out = sb.omh(&["s", "down"]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "a question nobody answered is not a yes: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let calls = sb.docker_calls(&log);
+    assert!(
+        !calls.iter().any(|c| c.contains("rm")),
+        "and nothing was stopped: {calls:?}"
+    );
+    assert!(
+        said.contains("--all"),
+        "it names the way to mean it: {said}"
+    );
+
+    // Naming one is unchanged — this refuses a *wide* down, not `down`.
+    let one = sb.omh(&["s01", "down"]);
+    assert!(
+        one.status.success(),
+        "a named session still stops: {}",
+        String::from_utf8_lossy(&one.stderr)
+    );
+    assert!(
+        sb.docker_calls(&log).iter().any(|c| c.contains("rm")),
+        "s01 really went down"
+    );
+
+    // …and so is saying you meant all of them.
+    let all = sb.omh(&["s", "down", "--all"]);
+    assert!(
+        all.status.success(),
+        "`--all` is the answer to the question: {}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+}
+
 /// A value the key cannot take is written, and said so.
 ///
 /// `persistence` accepts `dtach` or `none`; anything else parses at *launch*,
