@@ -22,6 +22,7 @@ mod facts;
 mod hook;
 mod idle;
 mod image;
+mod key;
 mod mcp;
 mod memory;
 mod notice;
@@ -3444,6 +3445,24 @@ fn set(
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let w = config::set(&paths, key, value, layer)?;
+    // Written either way. A settings file is hand-editable and a key a newer
+    // omh will read must not be refused by this one — but a key *this* omh
+    // reads nothing from looks identical to one that took, and `carry_ins` is
+    // a plausible thing to type. Named, not refused.
+    match key::describes(key) {
+        None => ctx.warn(&format!(
+            "nothing in omh reads `{key}` — it is written, and it will sit there"
+        )),
+        // Written either way, for the same reason: a value a newer omh will
+        // accept must not be refused by this one. But `persistence = tmux`
+        // otherwise surfaces at the next launch, in a different command,
+        // minutes later.
+        Some(k) => {
+            if let Some(quarrel) = key::quarrel(k, value) {
+                ctx.warn(&format!("{quarrel} — written anyway"));
+            }
+        }
+    }
     ctx.say(
         &report::Action::new("setting-written", format!("wrote → {}", w.path.display())).data(
             serde_json::json!({
@@ -3463,6 +3482,18 @@ fn set(
             "the {} layer is COMMITTED — never put a secret here",
             w.layer
         ));
+        // The general sentence fires for `account` — a name — exactly as it
+        // does for `carry_in`, and a warning that cannot tell those apart is
+        // one people learn to scroll past. Where omh knows the key reaches a
+        // credential, it says so and says where the value would have gone.
+        if let Some(k) = key::describes(key) {
+            if k.secret == key::Secret::Yes {
+                ctx.warn(&format!(
+                    "  `{key}` is one of those — it belongs in {}",
+                    k.default_layer().file(&paths).display()
+                ));
+            }
+        }
     }
     Ok(())
 }
