@@ -307,11 +307,13 @@ enum Cmd {
     },
     /// Open the code graph in your browser.
     ///
-    /// The session comes from the prefix, like everywhere else. It had its own
-    /// positional until the prefix arrived, and for one commit it had both:
+    /// **Not per session**, and `omh s01 graph` is refused rather than
+    /// answered: every session's graph lives in one volume, so a per-session
+    /// server showed every other session's graph anyway. It had its own
+    /// positional until the prefix arrived, and for one commit it had both —
     /// `omh s01 graph` set `cli.session`, `graph` read the positional, and the
-    /// browser opened on whichever session `pick` chose — the silent wrong
-    /// answer that having two ways to say one thing produces.
+    /// browser opened on whichever session `pick` chose. The positional went;
+    /// the comment claiming the prefix scoped this outlived it by longer.
     Graph {
         /// Stop the graph server; the session keeps running.
         #[arg(long)]
@@ -714,8 +716,59 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// Whether this command does anything with the session it was handed.
+///
+/// The selector lifts a leading `sNN` into `cli.session` before the parser
+/// sees the line, so **any** command can arrive carrying one — `omh s01 why
+/// codegraph` parses as `omh why codegraph` with the id set. A command that
+/// does not read it must refuse the line rather than answer it. It used to
+/// answer: a correct report about the repo, exit 0, and the `s01` discarded in
+/// silence. That is a wrong answer wearing a right one's clothes, and it is the
+/// same defect `omh s01 ls` had, fixed there one spelling at a time.
+///
+/// **Exhaustively matched on purpose, with no wildcard.** A new command is then
+/// a compile error until somebody decides which side it is on — the decision
+/// cannot be skipped, and a list that rots cannot be the thing that protects
+/// this. `the_reads_and_the_refusals_agree_with_the_dispatch` checks the
+/// answers here against what the arms actually pass.
+fn consumes_session(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::Sessions { .. } | Cmd::Attach { .. } | Cmd::Run(_) => true,
+        // Only `remember` writes a note against a session; the rest of the
+        // store is repo-wide.
+        Cmd::Memory { cmd } => matches!(cmd, Some(MemoryCmd::Remember { .. })),
+        // `graph` is per repo, not per session, and says so in its own doc
+        // comment — every session's graph lives in one volume. It took
+        // `cli.session` and bound it `_id`, which is how it came to claim
+        // otherwise in the comment above `Cmd::Graph`.
+        Cmd::Graph { .. }
+        | Cmd::Init
+        | Cmd::Doctor { .. }
+        | Cmd::Why { .. }
+        | Cmd::Auth { .. }
+        | Cmd::Ls
+        | Cmd::Config { .. }
+        | Cmd::Repo { .. }
+        | Cmd::Use { .. }
+        | Cmd::Unuse { .. }
+        | Cmd::Import { .. } => false,
+    }
+}
+
 fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     let cwd = std::env::current_dir()?;
+
+    // Before anything reads it. A scope omh cannot honour is refused where it
+    // was named, rather than at whatever depth the handler would have ignored
+    // it — and refusing is the safe half: a command taught to read one later
+    // turns this into an answer, while a command that silently dropped one
+    // never announces that it started mattering.
+    if let Some(id) = cli.session.as_deref() {
+        anyhow::ensure!(
+            consumes_session(&cli.cmd),
+            "`{id}` names a session, and this command does not act on one:\n  omh <command>    without the session"
+        );
+    }
 
     match &cli.cmd {
         Cmd::Init => init(&cwd, ctx),
@@ -723,7 +776,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         Cmd::Ls => ls(&cwd, ctx),
         Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx),
         Cmd::Why { thing } => why_cmd(&cwd, thing, ctx),
-        Cmd::Graph { stop } => graph(&cwd, cli.session.as_deref(), *stop, ctx),
+        Cmd::Graph { stop } => graph(&cwd, *stop, ctx),
         Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx),
 
         // No verb: the listing. With a session named, the same listing scoped
@@ -1267,7 +1320,7 @@ fn attach(
 /// server showed every other session's graph anyway. Matching the server's
 /// scope to its data's scope removes the duplication, survives sessions coming
 /// and going, and lets the container mount only the index.
-fn graph(cwd: &std::path::Path, _id: Option<&str>, stop: bool, ctx: &out::Ctx) -> Result<()> {
+fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     let container = base::ui_container(&paths.repo_name());
@@ -6555,14 +6608,19 @@ mod tests {
             session_prefix(cli_argv(&["s01", "attach", "zed"])),
             (Some("s01".to_string()), cli_argv(&["attach", "zed"]))
         );
-        // `graph` had a positional of its own until this landed, and for one
-        // commit it had both — the prefix set the session and `graph` read the
-        // positional, so the browser opened on whichever session `pick` chose.
+        // `graph` had a positional of its own until the prefix landed, and for
+        // one commit it had both — the prefix set the session and `graph` read
+        // the positional, so the browser opened on whichever session `pick`
+        // chose. This asserts the *lifting*, which is all this function does.
+        // What happens next is a refusal: the graph is one server per repo, so
+        // `omh s01 graph` names a scope nothing can honour and `dispatch` says
+        // so rather than opening on a session the id had no part in choosing.
         let (named, argv) = session_prefix(cli_argv(&["s01", "graph"]));
         assert_eq!(
             the_one_session(named, Cli::try_parse_from(&argv).unwrap().session).unwrap(),
             Some("s01".to_string()),
-            "the graph opens on the session named, not the one picked"
+            "the prefix is lifted whatever follows it — `consumes_session` is \
+             what decides whether the command may have it"
         );
     }
 
@@ -9403,6 +9461,139 @@ because = "a fixture"
     /// `omh <name>` treats any unknown word as a harness, so a command that is
     /// not in RESERVED could be shadowed by an adapter of the same name. This
     /// keeps the list honest without anyone remembering to update it.
+    /// What `consumes_session` claims and what the dispatch does agree.
+    ///
+    /// The exhaustive match makes a new command a compile error until somebody
+    /// classifies it. It cannot make them classify it *correctly* — and the
+    /// wrong direction is silent: a command marked as reading the session that
+    /// does not read it goes straight back to answering with the scope thrown
+    /// away, which is the defect the predicate exists to end.
+    ///
+    /// So this reads both places out of the source and compares them: a
+    /// variant whose dispatch arm mentions `cli.session` must be one
+    /// `consumes_session` answers `true` for, and the reverse.
+    ///
+    /// Reading the source rather than calling the function is deliberate —
+    /// building one `Cmd` of every variant to ask it would mean writing the
+    /// list a third time, and the third copy is the one that rots.
+    #[test]
+    fn the_reads_and_the_refusals_agree_with_the_dispatch() {
+        let body = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        )
+        .unwrap();
+
+        // Every `Cmd::` in a slice of source, ignoring `MemoryCmd::` and
+        // friends — a suffix match would count `MemoryCmd::Remember` as a
+        // top-level `Remember`, which is how the first version of this scan
+        // grew a variant that does not exist.
+        fn variants(text: &str) -> std::collections::BTreeSet<String> {
+            let mut out = std::collections::BTreeSet::new();
+            let bytes = text.as_bytes();
+            for (at, _) in text.match_indices("Cmd::") {
+                if at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_') {
+                    continue;
+                }
+                let name: String = text[at + 5..]
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric())
+                    .collect();
+                if !name.is_empty() {
+                    out.insert(name);
+                }
+            }
+            out
+        }
+
+        // Anchored on the function first: `session_prefix` matches on
+        // `&cli.cmd` too, and splitting on that alone reads the wrong block —
+        // silently, and with an empty result that would have looked like
+        // agreement without the floors below.
+        let dispatch = body
+            .split_once("fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {")
+            .expect("dispatch is still spelled this way")
+            .1
+            .split_once("match &cli.cmd {")
+            .expect("dispatch still matches on cli.cmd")
+            .1;
+
+        let mut reads = std::collections::BTreeSet::new();
+        let mut arm: Option<(String, String)> = None;
+        // An arm consumes the session if it names `cli.session`, or if it
+        // hands the whole `cli` down — `Cmd::Run` does the latter and reads the
+        // session inside `run`, which no scan of this block could see.
+        let consuming = |text: &str| {
+            text.contains("cli.session") || text.contains(", cli,") || text.contains("(cli,")
+        };
+        for line in dispatch.lines() {
+            if line == "    }" {
+                break;
+            }
+            if line.starts_with("        Cmd::") {
+                if let Some((name, text)) = arm.take() {
+                    if consuming(&text) {
+                        reads.insert(name);
+                    }
+                }
+                let name = variants(line).into_iter().next().unwrap_or_default();
+                arm = Some((name, line.to_string()));
+            } else if let Some((_, text)) = arm.as_mut() {
+                text.push_str(line);
+            }
+        }
+        if let Some((name, text)) = arm {
+            if consuming(&text) {
+                reads.insert(name);
+            }
+        }
+
+        // Variants the predicate answers `true` for. Arms are read by their
+        // *result*, not by position: `matches!` counts as true because one of
+        // that command's verbs reads the session.
+        let predicate = body
+            .split_once("fn consumes_session(cmd: &Cmd) -> bool {")
+            .expect("the predicate is still spelled this way")
+            .1
+            .split_once("\n}")
+            .unwrap()
+            .0;
+        let chunks: Vec<&str> = predicate.split("=>").collect();
+        let mut claims = std::collections::BTreeSet::new();
+        for i in 0..chunks.len().saturating_sub(1) {
+            let result = chunks[i + 1].trim_start();
+            if !(result.starts_with("true") || result.starts_with("matches!")) {
+                continue;
+            }
+            // For any arm but the first, drop the previous arm's result before
+            // reading the pattern.
+            let pattern = if i == 0 {
+                chunks[i]
+            } else {
+                chunks[i]
+                    .split_once(',')
+                    .map(|(_, rest)| rest)
+                    .unwrap_or("")
+            };
+            claims.extend(variants(pattern));
+        }
+
+        assert!(
+            !reads.is_empty(),
+            "the scan found no dispatch arm reading the session, so its \
+             agreement means nothing"
+        );
+        assert!(
+            !claims.is_empty(),
+            "the scan could not read `consumes_session`, so its agreement \
+             means nothing"
+        );
+        assert_eq!(
+            reads, claims,
+            "these disagree about which commands act on a session.\n  \
+             dispatch: {reads:?}\n  consumes_session: {claims:?}"
+        );
+    }
+
     #[test]
     fn reserved_lists_every_command_and_alias() {
         for sub in Cli::command().get_subcommands() {

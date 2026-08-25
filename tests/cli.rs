@@ -2464,6 +2464,61 @@ fn the_focused_listing_is_one_session_in_the_document_too() {
     assert_eq!(sessions[0]["id"], "s01", "and it is the one named: {doc}");
 }
 
+/// A session named first is never silently dropped.
+///
+/// The selector's promise is that a leading `sNN` scopes what follows. For a
+/// word `sessions` has no verb for, `session_prefix` falls back to the line as
+/// written — and because `Cmd::Run` swallows any word, that fallback always
+/// parses. So `omh s01 why codegraph` becomes `omh why codegraph` and the
+/// `s01` reaches a handler that never reads it.
+///
+/// Nothing about that is visible: exit 0, a real answer, and the scope gone.
+/// It is the same defect `omh s01 ls` had in #67, and the same one the tombstone
+/// there fixed one spelling at a time. This closes the class instead: a command
+/// that does not consume the session refuses a line that names one.
+///
+/// `doctor` is refused here too. It *should* scope — that is the `--session`
+/// half of the doctor rework — but scoping it needs the session's sandbox, and
+/// a refusal is the honest placeholder until that lands. Refusing and reading
+/// are both correct; silently discarding is not.
+#[test]
+fn a_session_named_first_is_never_silently_dropped() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    sb.session("s01");
+
+    // Both of these answer *successfully* today, which is what makes them the
+    // right red: a command that failed for some other reason would not tell us
+    // whether the scope was honoured or discarded.
+    for line in [
+        vec!["s01", "why", "codegraph"],
+        vec!["--session", "s01", "ls"],
+    ] {
+        let out = sb.omh(&line);
+        let printed = String::from_utf8_lossy(&out.stdout).to_string();
+        let err = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "`omh {}` answered as though the s01 were not there: {printed}",
+            line.join(" ")
+        );
+        assert!(
+            err.contains("s01"),
+            "and the refusal names the scope it could not honour: {err}"
+        );
+    }
+
+    // The same word without a session still works — this refuses a *pairing*,
+    // not a command.
+    let plain = sb.omh(&["why", "codegraph"]);
+    assert!(
+        plain.status.success(),
+        "`omh why` is unaffected: {}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
+}
+
 /// A verb that was retired is refused by name, and never becomes another
 /// command.
 ///
