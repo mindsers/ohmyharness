@@ -1701,6 +1701,138 @@ fn a_new_launch_never_lands_in_a_session_that_already_exists() {
     );
 }
 
+/// A launch records what it launched, and a dry run records nothing.
+///
+/// This is the line the whole feature rests on, and it was very nearly
+/// untested. A first pass asserted it by grepping the source, on the belief
+/// that a non-dry launch needed a container. It does not: everything before
+/// the write is satisfied by the fake runtime, and `a_launch_that_cannot_read_
+/// the_probe_removes_nothing` in this same file has been performing one all
+/// along. Deleting the write left the whole suite green.
+///
+/// Not `#[ignore]`d, so it runs on both CI jobs rather than linux alone.
+#[test]
+fn a_launch_records_the_harness_it_started_and_a_dry_run_does_not() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.session("s01");
+    let marker = sb.home.join(".omh/run/repo/s01/.harness");
+
+    // The launch is allowed to fail after the write — what is under test
+    // happened before it got there. Asserting the file rather than the exit
+    // code is what makes that safe.
+    let _ = sb.omh(&["s01", "opencode"]);
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap_or_default().trim(),
+        "opencode",
+        "a launch did not write down what it launched"
+    );
+
+    // A relaunch records what it launched, not what it launched last time.
+    let _ = sb.omh(&["s01", "claude"]);
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap_or_default().trim(),
+        "claude",
+        "the record is of the last launch, not the first"
+    );
+
+    // A dry run leaves no trace — of this or of anything else.
+    let dry = sandbox();
+    let _log2 = dry.fake_docker();
+    dry.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    dry.session("s01");
+    let _ = dry.omh(&["s01", "--dry-run", "opencode"]);
+    assert!(
+        !dry.home.join(".omh/run/repo/s01/.harness").exists(),
+        "a dry run recorded a harness, so the next resume rejoins a session \
+         that never ran"
+    );
+}
+
+/// A resumed session runs the harness it ran before.
+///
+/// `omh new` creates and `omh s resume` rejoins, which needs a fact almost
+/// nothing records. The staging directory does carry the name —
+/// `runs()/<id>/<harness>` survives `down` — but a session that has run two
+/// harnesses has two of them and no way to say which was last, and staging is
+/// a side effect nothing promises to keep.
+///
+/// Guessing is the wrong answer and the tempting one: `detect::preferred_harness`
+/// is right there and would return something plausible every time. It would
+/// also silently attach claude to a session an afternoon of opencode built.
+///
+/// `#[ignore]`d because `omh init` needs a container runtime.
+#[test]
+#[ignore]
+fn a_resumed_session_runs_the_harness_it_ran_before() {
+    let sb = sandbox();
+    sb.git_init();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+    sb.session("s01");
+
+    // Recorded by a real launch rather than by hand, so this test also fails
+    // if the two halves ever disagree about where the marker lives.
+    let _ = sb.omh(&["s01", "opencode"]);
+
+    let out = sb.omh(&["s01", "resume", "--dry-run"]);
+    let plan = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "resume is a verb: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        plan.contains("opencode"),
+        "it rejoined as something else: {plan}"
+    );
+    assert!(
+        plan.contains("/s01"),
+        "and it rejoined the session that was named: {plan}"
+    );
+}
+
+/// A session omh cannot name a harness for is refused, not guessed at.
+///
+/// Every session made before this release is in that state, and so is one
+/// `omh attach` created for an editor without ever running a harness in it.
+/// `detect::preferred_harness` would answer anyway, and the answer would look
+/// exactly like a correct one — the shape this whole release has been removing.
+///
+/// The remedy has to be a command that rejoins *this* session. An earlier
+/// version offered `omh new <harness>`, which starts a different one, and is
+/// itself refused when applied to a session.
+///
+/// `#[ignore]`d because `omh init` needs a container runtime.
+#[test]
+#[ignore]
+fn a_session_omh_cannot_name_a_harness_for_is_refused_rather_than_guessed() {
+    let sb = sandbox();
+    sb.git_init();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+    sb.session("s01");
+
+    let out = sb.omh(&["s01", "resume"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "a guess is not an answer: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(err.contains("s01"), "the refusal names the session: {err}");
+    assert!(
+        err.contains("s01 <harness>"),
+        "and offers a command that rejoins this session rather than leaving \
+         it: {err}"
+    );
+}
+
 /// `--` is how a flag reaches the harness under `omh new`, and the only way.
 ///
 /// The bare-name form has to guess. `omh claude --json` might be omh's or

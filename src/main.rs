@@ -475,6 +475,8 @@ enum SessionsCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Rejoin a session, running the harness it ran before.
+    Resume,
     /// Stop a sandbox. The worktree and branch survive.
     Down {
         /// Stop every sandbox without being asked.
@@ -845,6 +847,52 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             SessionsCmd::Ls => anyhow::bail!(
                 "there is no `ls` verb any more:\n  omh s      is the listing\n  omh s01    is one row of it"
             ),
+            SessionsCmd::Resume => {
+                let paths = Paths::discover(&cwd)?;
+                let session = existing_session(&paths, cli.session.as_deref())?;
+                // Three answers, three sentences. Saying "omh did not record"
+                // over a marker omh wrote and cannot read is a claim about
+                // history that omh is in no position to make.
+                let harness = match session::harness_of(&paths.runs(), &session.id) {
+                    session::Ran::Harness(name) => name,
+                    // Refused, never guessed. `detect::preferred_harness` would
+                    // answer for a session it knows nothing about, and the
+                    // answer would be indistinguishable from a right one —
+                    // claude attached to a worktree an afternoon of opencode
+                    // built. Every session made before this release is here,
+                    // and so is every one `omh attach` created for an editor.
+                    session::Ran::NeverRecorded => anyhow::bail!(
+                        "omh has no record of a harness running in {id}, so it \
+                         cannot rejoin as one.\n  omh {id} <harness>   rejoin \
+                         it as that\n  omh s               what is here",
+                        id = session.id
+                    ),
+                    session::Ran::CouldNotTell(why) => anyhow::bail!(
+                        "omh recorded a harness for {id} and cannot read it \
+                         back: {why}\n  omh {id} <harness>   rejoin it as \
+                         that, which rewrites the record",
+                        id = session.id
+                    ),
+                };
+                // Named as coming from the record. Without this the user typed
+                // `resume` and is told a word they never said is unknown,
+                // wearing the same message as a mistyped harness.
+                run(
+                    &cwd,
+                    std::slice::from_ref(&harness),
+                    session::Start::Named(&session.id),
+                    cli.account.as_deref(),
+                    cli.dry_run,
+                    ctx,
+                )
+                .with_context(|| {
+                    format!(
+                        "{} recorded `{}`",
+                        session.id,
+                        out::untrusted(&harness)
+                    )
+                })
+            }
             SessionsCmd::Down { all } => down(
                 &cwd,
                 cli.session.as_deref(),
@@ -4035,6 +4083,23 @@ fn run(
         // in use so it is not reaped by the next launch.
         reap_idle(&paths, &session.id, ctx);
         let _ = idle::touch(&paths.runs(), &session.id);
+        // Beside `last-used`, and under the same guard: a dry run must leave
+        // no trace, and this is a trace.
+        //
+        // Said out loud when it fails, unlike `touch` above, because the two
+        // failures do not cost the same. A lost `touch` means one container
+        // survives one reap — `idle::expired` reads a missing marker as *leave
+        // it alone* and claims nothing. A lost record is discovered days later
+        // as a refusal, at the one moment the user was trying to avoid
+        // retyping the harness, and there is nothing left by then to say the
+        // write was attempted.
+        if let Err(e) = session::remember_harness(&paths.runs(), &session.id, name) {
+            ctx.warn(&format!(
+                "could not record that {} ran {name}: {e} — `omh {} resume` \
+                 will not be able to rejoin it",
+                session.id, session.id
+            ));
+        }
     }
 
     let plan = container::plan(
