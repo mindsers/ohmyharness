@@ -447,7 +447,16 @@ enum SessionsCmd {
         force: bool,
     },
     /// Stop a sandbox. The worktree and branch survive.
-    Down,
+    Down {
+        /// Stop every sandbox without being asked.
+        ///
+        /// With no session named this stops all of them, which is what it is
+        /// for and also the one command whose blast radius grows with how much
+        /// work is in flight. It asks first — and a script, a pipe or CI has
+        /// nobody to answer, so this is how that answer is given in advance.
+        #[arg(long)]
+        all: bool,
+    },
     /// Bring the session up to date with its base branch.
     ///
     /// The merge happens on the host, in your repository, and the sandbox only
@@ -801,7 +810,13 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             SessionsCmd::Ls => anyhow::bail!(
                 "there is no `ls` verb any more:\n  omh s      is the listing\n  omh s01    is one row of it"
             ),
-            SessionsCmd::Down => down(&cwd, cli.session.as_deref(), ctx),
+            SessionsCmd::Down { all } => down(
+                &cwd,
+                cli.session.as_deref(),
+                *all,
+                std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                ctx,
+            ),
             SessionsCmd::Sync { base, down } => {
                 sync(&cwd, cli.session.as_deref(), base.as_deref(), *down, ctx)
             }
@@ -1447,12 +1462,37 @@ fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
     }
 }
 
-fn down(cwd: &std::path::Path, id: Option<&str>, ctx: &out::Ctx) -> Result<()> {
+fn down(
+    cwd: &std::path::Path,
+    id: Option<&str>,
+    all: bool,
+    terminal: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
     let ids = match id {
         Some(i) => vec![i.to_string()],
-        None => session::list(&paths.worktrees()),
+        None => {
+            let every = session::list(&paths.worktrees());
+            // Nothing to stop is not a question worth asking.
+            if !all && !every.is_empty() {
+                // On stderr, like every other prompt here: the answer channel
+                // belongs to the report, and `omh s down > log` must not eat
+                // the question.
+                let agreed = terminal
+                    && ask::confirm(
+                        &format!("stop every sandbox? {} — {}", every.len(), every.join(", ")),
+                        &mut std::io::stdin().lock(),
+                        &mut std::io::stderr(),
+                    )?;
+                anyhow::ensure!(
+                    agreed,
+                    "nothing stopped:\n  omh s01 down       that one\n  omh s down --all   every one of them"
+                );
+            }
+            every
+        }
     };
     // Collected, then said once: with no id this is asked about every session,
     // and one `say` per session is one JSON document per session.
