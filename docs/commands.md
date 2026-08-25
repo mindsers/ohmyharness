@@ -267,6 +267,7 @@ omh s commit [-m …]   commit that work onto the session branch
 omh s commit --keep [n,m-o] [--edit]   keep the agent's own commits
 omh s sync [--down]   bring trunk into the session, merged on the host
 omh s push [name]     push it to origin under a name a reviewer can read
+omh s resume          rejoin it, running the harness it ran before
 omh s down            stop the container, keep the worktree and branch
 omh s rm [--force]    remove the session — its container, its worktree, its staging,
                        and the repository the sandbox had. Refuses over work
@@ -433,6 +434,22 @@ $ omh claude -- --new      # claude's, even though omh has one too
 
 Long forms only — `-s` and `-a` are left to the harness, which is likelier to
 want them.
+
+`omh sNN resume` rejoins a session as **the harness it ran before**, which omh
+records at launch beside the session's last-used marker. A session from before
+that recording existed — or one whose run directory was cleared — is refused
+rather than guessed at:
+
+```console
+$ omh s01 resume
+omh: omh did not record which harness s01 ran, so it cannot rejoin as that one.
+  omh new <harness>   start one here
+  omh s               what is running
+```
+
+Guessing would be easy and wrong. omh knows which harness this host prefers,
+and answering with it would attach claude to a worktree an afternoon of
+opencode built, with nothing on screen to say so.
 
 **`omh new` does not guess.** The bare name has to: `omh claude --json` could
 be meant for either, and the rule above is a judgement about which mistake is

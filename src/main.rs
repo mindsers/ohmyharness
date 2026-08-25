@@ -475,6 +475,8 @@ enum SessionsCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Rejoin a session, running the harness it ran before.
+    Resume,
     /// Stop a sandbox. The worktree and branch survive.
     Down {
         /// Stop every sandbox without being asked.
@@ -845,6 +847,30 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             SessionsCmd::Ls => anyhow::bail!(
                 "there is no `ls` verb any more:\n  omh s      is the listing\n  omh s01    is one row of it"
             ),
+            SessionsCmd::Resume => {
+                let paths = Paths::discover(&cwd)?;
+                let session = existing_session(&paths, cli.session.as_deref())?;
+                // Refused, never guessed. `detect::preferred_harness` would
+                // answer for a session it knows nothing about, and the answer
+                // would be indistinguishable from a right one — claude
+                // attached to a worktree an afternoon of opencode built.
+                let harness = session::harness_of(&paths.runs(), &session.id).with_context(|| {
+                    format!(
+                        "omh did not record which harness {} ran, so it cannot \
+                         rejoin as that one.\n  omh new <harness>   start one \
+                         here\n  omh s               what is running",
+                        session.id
+                    )
+                })?;
+                run(
+                    &cwd,
+                    &[harness],
+                    session::Start::Named(&session.id),
+                    cli.account.as_deref(),
+                    cli.dry_run,
+                    ctx,
+                )
+            }
             SessionsCmd::Down { all } => down(
                 &cwd,
                 cli.session.as_deref(),
@@ -4035,6 +4061,9 @@ fn run(
         // in use so it is not reaped by the next launch.
         reap_idle(&paths, &session.id, ctx);
         let _ = idle::touch(&paths.runs(), &session.id);
+        // Beside `last-used`, and under the same guard: a dry run must leave
+        // no trace, and this is a trace.
+        let _ = session::remember_harness(&paths.runs(), &session.id, name);
     }
 
     let plan = container::plan(
@@ -9663,6 +9692,42 @@ because = "a fixture"
         assert!(
             repo_layer(true).is_committed(),
             "and --shared is how you say you meant it"
+        );
+    }
+
+    /// A launch records what it launched.
+    ///
+    /// `omh s resume` can only rejoin a session as itself if something wrote
+    /// down what it was, and the only place that can is the launch. Deleting
+    /// that one line leaves every test green — the resume tests write the
+    /// marker themselves, because a non-dry launch needs a container and
+    /// nothing in this suite performs one — and ships a verb that works for
+    /// hand-made markers and no real session.
+    ///
+    /// So this reads the source instead. Crude, and the alternative was a
+    /// claim in a comment that the writing was covered when it was not.
+    #[test]
+    fn a_launch_records_the_harness_it_started() {
+        let body = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        )
+        .unwrap();
+        let run = body
+            .split_once("\nfn run(")
+            .expect("`run` is still spelled this way")
+            .1;
+        let run = run.split_once("\nfn ").map_or(run, |(before, _)| before);
+        assert!(
+            run.contains("session::remember_harness("),
+            "`run` no longer records which harness it started, so \
+             `omh s resume` has nothing to read and refuses every session"
+        );
+        // Beside `last-used`, under the same guard, so a dry run leaves no
+        // trace of either.
+        assert!(
+            run.contains("idle::touch("),
+            "the two markers are written together; one without the other means \
+             the guard around them moved"
         );
     }
 

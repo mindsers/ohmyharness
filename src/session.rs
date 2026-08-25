@@ -1176,6 +1176,36 @@ pub fn pick(worktrees_dir: &Path, start: Start) -> String {
     }
 }
 
+/// Record which harness a session ran, so it can be rejoined as itself.
+///
+/// Nothing else knows. `Session` is an id, a branch and a worktree; the
+/// container is `omh-<repo>-<id>` with no harness in the name; and the image
+/// tag lives on a container that `omh sNN down` removes. The session most
+/// worth rejoining — stopped, with an afternoon's work in it — is the one
+/// carrying the least evidence of what built it.
+///
+/// Written beside `last-used` in the run directory, which means `omh sNN rm`
+/// takes it away with everything else, and a cleared run directory forgets it
+/// rather than remembering something stale.
+pub fn remember_harness(run_dir: &Path, session: &str, harness: &str) -> std::io::Result<()> {
+    let path = run_dir.join(session).join("harness");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, harness)
+}
+
+/// The harness a session ran, if omh recorded one.
+///
+/// `None` covers three different situations on purpose — no run directory, no
+/// marker, an unreadable file — because the caller does the same thing with
+/// all of them: refuse, and say so. What it must not do is answer.
+pub fn harness_of(run_dir: &Path, session: &str) -> Option<String> {
+    let said = std::fs::read_to_string(run_dir.join(session).join("harness")).ok()?;
+    let name = said.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
 /// Which session a command is asking for.
 ///
 /// Three answers, and they were two parameters — `explicit: Option<&str>` and
@@ -3028,6 +3058,28 @@ mod tests {
     /// *"explicit beats --new"* — pinning which half of a contradiction won.
     /// `Start` has no way to say both, so there is no winner to assert and the
     /// line is gone rather than rewritten.
+    /// What was recorded reads back, and nothing else does.
+    #[test]
+    fn a_recorded_harness_reads_back_and_an_absent_one_is_not_invented() {
+        let d = tempfile::tempdir().unwrap();
+        let runs = d.path();
+
+        assert_eq!(harness_of(runs, "s01"), None, "nothing recorded yet");
+        remember_harness(runs, "s01", "opencode").unwrap();
+        assert_eq!(harness_of(runs, "s01"), Some("opencode".to_string()));
+
+        // A different session is a different answer, not the same one.
+        assert_eq!(harness_of(runs, "s02"), None);
+
+        // A marker somebody emptied is not a harness called "".
+        std::fs::write(runs.join("s01").join("harness"), "   \n").unwrap();
+        assert_eq!(
+            harness_of(runs, "s01"),
+            None,
+            "an empty marker is nothing recorded, not a nameless harness"
+        );
+    }
+
     #[test]
     fn an_explicit_id_always_wins() {
         let (_d, wt) = worktrees(&["s01", "s02"]);
