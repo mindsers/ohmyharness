@@ -186,7 +186,7 @@ harnesses take turns inhabiting.
 ```
        omh new claude ──┐
        omh new opencode ┼── exec ──┐
-       omh attach ──┘  (ssh)   │
+       omh attach ──────┘  (ssh)   │
                                ▼
  ┌──────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │
@@ -400,9 +400,8 @@ drops a session branch only when it has no commits.
 ## Contributing
 
 ```console
-$ cargo test
-$ ./scripts/smoke.sh    # end-to-end walkthrough in a throwaway repo
-$ omh doctor            # the only thing that verifies an adapter
+$ cargo test -- --include-ignored   # the ignored set needs a container runtime
+$ omh doctor                       # the only thing that verifies an adapter
 ```
 
 Two rules do most of the work, and [`CONTRIBUTING.md`](.github/CONTRIBUTING.md)
