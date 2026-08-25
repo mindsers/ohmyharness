@@ -6752,6 +6752,47 @@ mod tests {
         );
     }
 
+    /// Every Rust source under these directories, however deep.
+    ///
+    /// The scans below used `read_dir` and a loop, which reads the top floor
+    /// of a directory and stops there. `src/memory/` is seven files and about
+    /// five thousand lines, and a spliced doc comment or a stranded `#[test]`
+    /// inside it was invisible to the guards that exist to catch exactly
+    /// those — verified by planting one and watching them pass.
+    fn rust_sources(dirs: &[&str]) -> Vec<std::path::PathBuf> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut out = Vec::new();
+        let mut stack: Vec<std::path::PathBuf> = dirs.iter().map(|d| root.join(d)).collect();
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        out
+    }
+
+    /// A scan that stopped early agrees with anything.
+    ///
+    /// Named files rather than a count alone: a count answers *did it read
+    /// something*, and the failure being guarded against is *did it read the
+    /// part nobody thought of*.
+    fn the_whole_tree(files: &[std::path::PathBuf]) {
+        assert!(
+            files.len() > 30,
+            "the scan read {} sources, fewer than this crate has",
+            files.len()
+        );
+        assert!(
+            files.iter().any(|f| f.ends_with("memory/tools.rs")),
+            "the scan never descended into src/memory/"
+        );
+    }
+
     /// Every session command line omh prints is one omh accepts.
     ///
     /// Deleting the positionals broke three printed suggestions at once, in
@@ -6796,17 +6837,12 @@ mod tests {
     /// were zero such instances; a doc comment always comes first here.
     #[test]
     fn no_test_attribute_was_stranded_from_its_function() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut stranded = Vec::new();
-        let mut checked = 0;
-        for dir in ["src", "tests"] {
-            for file in std::fs::read_dir(root.join(dir)).unwrap() {
-                let file = file.unwrap().path();
-                if file.extension().is_none_or(|e| e != "rs") {
-                    continue;
-                }
-                checked += 1;
-                let body = std::fs::read_to_string(&file).unwrap();
+        let files = rust_sources(&["src", "tests"]);
+        the_whole_tree(&files);
+        {
+            for file in &files {
+                let body = std::fs::read_to_string(file).unwrap();
                 let lines: Vec<&str> = body.lines().collect();
                 for (n, line) in lines.iter().enumerate() {
                     if line.trim() != "#[test]" {
@@ -6849,7 +6885,6 @@ mod tests {
                 }
             }
         }
-        assert!(checked > 1, "the scan found no sources to read");
         assert!(
             stranded.is_empty(),
             "`#[test]` separated from its function: {stranded:#?}"
@@ -6912,17 +6947,35 @@ mod tests {
             for entry in std::fs::read_dir(&at).unwrap().flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    // Build output and git's own storage are not ours to read,
-                    // and `target` alone is large enough to matter.
-                    if !matches!(
-                        path.file_name().and_then(|n| n.to_str()),
-                        Some("target") | Some(".git")
-                    ) {
+                    // Build output and git's own storage are not ours to
+                    // read, and `target` alone is large enough to matter.
+                    //
+                    // Dot-directories go too, except `.github`, whose prose
+                    // and templates name commands like any other page. The
+                    // one that forced this is `.omh/`: gitignored, holding
+                    // this checkout's own notes, and *read* until now — so a
+                    // stale spelling in a machine-local file failed this guard
+                    // on a maintainer's laptop and passed on CI, which is
+                    // worse than either being wrong consistently.
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    let skipped = name == "target" || (name.starts_with('.') && name != ".github");
+                    if !skipped {
                         stack.push(path);
                     }
                     continue;
                 }
-                if path.extension().is_none_or(|e| e != "rs" && e != "md") {
+                // Not just `.rs` and `.md`. Every file below names a command
+                // somewhere, and none of them was read: `base/2026.08.toml`
+                // holds eight `remove =` strings that `omh why` prints
+                // verbatim, `install.sh` and the workflows run omh, and
+                // `packaging/homebrew/omh.rb.tmpl` *asserts a command
+                // spelling* inside `brew test` — which fails at release time,
+                // not in CI, because nothing runs it before a tag.
+                let readable = matches!(
+                    path.extension().and_then(|e| e.to_str()),
+                    Some("rs" | "md" | "toml" | "sh" | "yml" | "yaml" | "tmpl")
+                );
+                if !readable {
                     continue;
                 }
                 let body = std::fs::read_to_string(&path).unwrap();
@@ -6948,7 +7001,13 @@ mod tests {
         // Named files rather than a count. A count cannot tell a walk that
         // stopped early from one that read everything, and reading everything
         // is the only claim this guard makes that is worth anything.
-        for must in ["README.md", "src/main.rs", "docs/commands.md"] {
+        for must in [
+            "README.md",
+            "src/main.rs",
+            "docs/commands.md",
+            "base/2026.08.toml",
+            "packaging/homebrew/omh.rb.tmpl",
+        ] {
             assert!(
                 read.iter().any(|p| p == std::path::Path::new(must)),
                 "the scan never read {must}, so its silence says nothing"
@@ -6985,17 +7044,12 @@ mod tests {
     /// something new.
     #[test]
     fn no_doc_comment_was_spliced_onto_itself() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let mut checked = 0;
         let mut doubled = Vec::new();
-        for dir in ["src", "tests"] {
-            for file in std::fs::read_dir(root.join(dir)).unwrap() {
-                let file = file.unwrap().path();
-                if file.extension().is_none_or(|e| e != "rs") {
-                    continue;
-                }
-                checked += 1;
-                for (n, line) in std::fs::read_to_string(&file).unwrap().lines().enumerate() {
+        let files = rust_sources(&["src", "tests"]);
+        the_whole_tree(&files);
+        {
+            for file in &files {
+                for (n, line) in std::fs::read_to_string(file).unwrap().lines().enumerate() {
                     // Two on one line. A doc comment is the whole line by
                     // construction, so a second one is always a splice — and
                     // `///` inside a string or a URL is a different shape
@@ -7006,7 +7060,6 @@ mod tests {
                 }
             }
         }
-        assert!(checked > 1, "the scan found no sources to read");
         assert!(
             doubled.is_empty(),
             "doc comments spliced together: {doubled:#?}"
@@ -7014,19 +7067,19 @@ mod tests {
     }
     #[test]
     fn the_session_lines_omh_prints_are_lines_omh_accepts() {
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut checked = 0;
-        for file in std::fs::read_dir(&src).unwrap() {
-            let file = file.unwrap().path();
-            if file.extension().is_none_or(|e| e != "rs") {
-                continue;
-            }
+        let files = rust_sources(&["src"]);
+        the_whole_tree(&files);
+        // Counted apart from the file floor above: this asks whether the scan
+        // still recognises the *lines* it was written to read, which is the
+        // half that goes quiet when a verb is renamed.
+        let mut qualifying = 0;
+        for file in &files {
             // A message wide enough to wrap is written with Rust's string
             // continuation, which eats the newline and the indent that follows
             // it. Read one line at a time, `omh s commit --keep` looks like
             // ``omh s commit \``, so the scan has to join what the compiler
             // joins before it reads anything.
-            let body = std::fs::read_to_string(&file).unwrap();
+            let body = std::fs::read_to_string(file).unwrap();
             let mut joined = String::new();
             let mut continued = false;
             for line in body.lines() {
@@ -7095,14 +7148,14 @@ mod tests {
                         "{} prints `omh {line}`, which omh does not accept",
                         file.file_name().unwrap().to_string_lossy()
                     );
-                    checked += 1;
+                    qualifying += 1;
                 }
             }
         }
         assert!(
-            checked >= 4,
-            "the scan found only {checked} session lines — it stopped reading, \
-             which is how this passes while saying nothing"
+            qualifying >= 4,
+            "the scan found only {qualifying} session lines — it stopped \
+             reading, which is how this passes while saying nothing"
         );
     }
 
