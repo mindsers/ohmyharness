@@ -1655,6 +1655,52 @@ fn a_dry_run_discloses_the_repos_hooks_and_records_nothing() {
     );
 }
 
+/// `omh new` starts a session rather than resuming one.
+///
+/// Today the bare name resumes the most recent session and `--new` is how you
+/// ask for a fresh one, which means the common case is a flag and the flag is
+/// global — it can be typed anywhere, including after a session prefix that
+/// contradicts it. `omh new claude` is the verb for the thing the flag did.
+///
+/// This asserts the *invariant*, not an id: the session it lands in is not one
+/// that already existed. Pinning `s02` would be pinning `next_id`'s format,
+/// which is a different claim and one this test has no business making.
+///
+/// `#[ignore]`d because it needs git and a container runtime to reach `run()`.
+/// CI's linux job runs `--include-ignored`, which is where this bites.
+#[test]
+#[ignore]
+fn a_new_launch_never_lands_in_a_session_that_already_exists() {
+    let sb = sandbox();
+    sb.git_init();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+    let existing = sb.session("s01");
+    let already = existing.file_name().unwrap().to_string_lossy().to_string();
+
+    let out = sb.omh(&["--dry-run", "new", "claude"]);
+    let plan = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "`omh new` is a command: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !plan.contains(&format!("/{already}")),
+        "`new` landed in the session that was already there: {plan}"
+    );
+
+    // …and the bare name still resumes it, because both spellings live side by
+    // side until the catch-all goes.
+    let resumed = String::from_utf8_lossy(&sb.omh(&["--dry-run", "claude"]).stdout).to_string();
+    assert!(
+        resumed.contains(&format!("/{already}")),
+        "the bare name still resumes the most recent: {resumed}"
+    );
+}
+
 /// The launcher says what this repo is *not* using from your catalogue.
 ///
 /// Same wire, same gap: `notice::selection` and `Selection::unselected` are both

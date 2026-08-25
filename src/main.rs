@@ -289,9 +289,9 @@ fn passthrough(argv: &[String], globals: &[String]) -> Result<Vec<String>> {
 
 /// Built-ins and their aliases always beat a harness name — otherwise an
 /// adapter called `s` or `config` would silently shadow a command.
-pub const RESERVED: [&str; 19] = [
+pub const RESERVED: [&str; 20] = [
     "init", "doctor", "d", "auth", "ls", "attach", "a", "sessions", "s", "config", "c", "graph",
-    "why", "memory", "help", "use", "unuse", "repo", "import",
+    "why", "memory", "help", "use", "unuse", "repo", "import", "new",
 ];
 
 #[derive(Subcommand)]
@@ -382,6 +382,21 @@ enum Cmd {
         /// without pointing it at your own.
         #[arg(long)]
         from: Option<std::path::PathBuf>,
+    },
+    /// Start a session and run a harness in it.
+    ///
+    /// The verb for what `--new` did. A flag is the wrong shape for the
+    /// commonest thing a person does here, and a *global* flag doubly so: it
+    /// can be typed anywhere, including after a session prefix that
+    /// contradicts it, where `session::pick` resolves the pair by dropping one.
+    ///
+    /// Lives beside the bare-name slot rather than replacing it, so both
+    /// spellings work until the catch-all goes.
+    New {
+        harness: String,
+        /// Everything after the harness name belongs to the harness.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Anything else is a harness: `omh claude`, `omh opencode`.
     #[command(external_subcommand)]
@@ -751,7 +766,11 @@ fn consumes_session(cmd: &Cmd) -> bool {
         // comment — every session's graph lives in one volume. It took
         // `cli.session` and bound it `_id`, which is how it came to claim
         // otherwise in the comment above `Cmd::Graph`.
-        Cmd::Graph { .. }
+        // A fresh session's id is generated, so there is nothing for a named
+        // one to mean — the same contradiction `--new` refuses by conflicting
+        // with `--session`.
+        Cmd::New { .. }
+        | Cmd::Graph { .. }
         | Cmd::Init
         | Cmd::Doctor { .. }
         | Cmd::Why { .. }
@@ -952,7 +971,27 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         // Before `run` looks anything up: which flags are whose is a question
         // about the command line, and answering it after resolving an adapter
         // would report an unknown harness for a mistyped flag.
-        Cmd::Run(argv) => run(&cwd, &passthrough(argv, &omh_globals())?, cli, ctx),
+        Cmd::New { harness, args } => {
+            let argv: Vec<String> = std::iter::once(harness.clone())
+                .chain(args.iter().cloned())
+                .collect();
+            run(
+                &cwd,
+                &passthrough(&argv, &omh_globals())?,
+                cli,
+                None,
+                Start::Fresh,
+                ctx,
+            )
+        }
+        Cmd::Run(argv) => run(
+            &cwd,
+            &passthrough(argv, &omh_globals())?,
+            cli,
+            cli.session.as_deref(),
+            if cli.new { Start::Fresh } else { Start::Resume },
+            ctx,
+        ),
     }
 }
 
@@ -3863,7 +3902,35 @@ fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
     Ok(())
 }
 
-fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli, ctx: &out::Ctx) -> Result<()> {
+/// Which session a launch is asking for.
+///
+/// Not to be confused with `Landing`, which is how a session's *work* reaches
+/// a branch. This is which session the work happens in.
+///
+/// A bool called `new`, threaded from a global flag, said it badly: at the
+/// point it was read — `session::pick(dir, explicit, new)` — nothing recorded
+/// that `explicit` silently wins and `new` is never consulted. Two callers now
+/// name what they want, and the one place that resolves it says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Start {
+    /// A session that does not exist yet.
+    Fresh,
+    /// The one already here, or a fresh one if there is none.
+    Resume,
+}
+
+fn run(
+    cwd: &std::path::Path,
+    argv: &[String],
+    cli: &Cli,
+    // Taken explicitly rather than read off `cli`, so a caller that cannot
+    // have one says so by passing `None`. `omh new` is that caller: dispatch
+    // refuses a named session before reaching here, and reading `cli.session`
+    // anyway would leave the two facts agreeing only by luck.
+    session: Option<&str>,
+    start: Start,
+    ctx: &out::Ctx,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let name = &argv[0];
 
@@ -3939,10 +4006,10 @@ fn run(cwd: &std::path::Path, argv: &[String], cli: &Cli, ctx: &out::Ctx) -> Res
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
-    if let Some(explicit) = cli.session.as_deref() {
+    if let Some(explicit) = session {
         session::validate_id(explicit)?;
     }
-    let id = session::pick(&paths.worktrees(), cli.session.as_deref(), cli.new);
+    let id = session::pick(&paths.worktrees(), session, start == Start::Fresh);
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;
@@ -9643,12 +9710,14 @@ because = "a fixture"
 
         let mut reads = std::collections::BTreeSet::new();
         let mut arm: Option<(String, String)> = None;
-        // An arm consumes the session if it names `cli.session`, or if it
-        // hands the whole `cli` down — `Cmd::Run` does the latter and reads the
-        // session inside `run`, which no scan of this block could see.
-        let consuming = |text: &str| {
-            text.contains("cli.session") || text.contains(", cli,") || text.contains("(cli,")
-        };
+        // Naming `cli.session` is the whole rule. It did have a second half —
+        // *or hands the whole `cli` down* — because `run` used to read the
+        // session out of `cli` itself, which no scan of this block could see.
+        // `run` takes it as a parameter now, so a caller that cannot have one
+        // passes `None` and says so here. The looser rule would have called
+        // `omh new` a session command, since it passes `cli` for the account
+        // and the dry-run flag.
+        let consuming = |text: &str| text.contains("cli.session");
         for line in dispatch.lines() {
             if line == "    }" {
                 break;
