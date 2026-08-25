@@ -792,7 +792,28 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 // record and `harness_of` has already refused anything that is
                 // not a harness name.
                 let (harness, from_record) = match harness {
-                    Some(named) => (named.clone(), false),
+                    Some(named) => {
+                        // Naming a harness the session did not run is a switch,
+                        // not a resume: an image is built per harness, so the
+                        // sandbox stops and starts on the other one, and the
+                        // record is rewritten so every later `resume` follows.
+                        // Both are wanted — running two harnesses against one
+                        // session is a feature — but the word says *rejoin*, so
+                        // the other meaning has to be said rather than assumed.
+                        if let session::Ran::Harness(before) =
+                            session::harness_of(&paths.runs(), &session.id)
+                        {
+                            if before != *named {
+                                ctx.warn(&format!(
+                                    "{} was running {}; resuming as {named} \
+                                     restarts its sandbox and records {named}",
+                                    session.id,
+                                    out::untrusted(&before)
+                                ));
+                            }
+                        }
+                        (named.clone(), false)
+                    }
                     None => match session::harness_of(&paths.runs(), &session.id) {
                         session::Ran::Harness(name) => (name, true),
                         // Refused, never guessed. `detect::preferred_harness`
@@ -6694,6 +6715,7 @@ mod tests {
     }
 
     const BUNDLED_ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+    const BUNDLED_EDITORS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/editors");
 
     /// A full command line, program name included, the way `main` sees it.
     fn cli_argv(parts: &[&str]) -> Vec<String> {
@@ -9928,6 +9950,48 @@ because = "a fixture"
     // apart. With no bare-name slot there is no shared namespace: an adapter
     // called `s` or `config` is reached by `omh new s`, and shadows nothing.
     // Deleted rather than left to fail, because what they guarded is gone.
+
+    /// No name omh ships is both a harness and an editor.
+    ///
+    /// `omh new zed` and `omh attach zed` are different commands reaching
+    /// different directories, so a name in both is not ambiguous to the
+    /// parser — it is ambiguous to the person, and to `tool_hint`, which
+    /// answers "`zed` is an editor" for anything it finds in `editors/`. A
+    /// name that is both would have `omh new` quietly use the adapter while
+    /// the hint said the opposite.
+    ///
+    /// `no_bundled_definition_shadows_a_command` used to load both directories
+    /// in one body — for a different reason, and it went with `RESERVED`. The
+    /// namespace it half-covered is the one that still exists, so this is what
+    /// should have replaced it rather than nothing.
+    #[test]
+    fn no_bundled_adapter_shares_a_name_with_an_editor() {
+        let harnesses: std::collections::BTreeSet<String> =
+            Adapter::load_dir(std::path::Path::new(BUNDLED_ADAPTERS))
+                .unwrap()
+                .into_iter()
+                .map(|a| a.name)
+                .collect();
+        let editors: std::collections::BTreeSet<String> =
+            editor::Editor::load_dir(std::path::Path::new(BUNDLED_EDITORS))
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+        assert!(
+            !harnesses.is_empty() && !editors.is_empty(),
+            "the scan read {} harnesses and {} editors, so its silence says \
+             nothing",
+            harnesses.len(),
+            editors.len()
+        );
+        let both: Vec<&String> = harnesses.intersection(&editors).collect();
+        assert!(
+            both.is_empty(),
+            "these are shipped as both a harness and an editor, so `omh new` \
+             and the hint that follows it disagree: {both:?}"
+        );
+    }
 
     /// The grammar splits harnesses from editors, so the one mistake everybody
     /// will make is typing an editor where a harness goes. Say the fix.
