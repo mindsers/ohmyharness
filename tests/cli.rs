@@ -2464,6 +2464,76 @@ fn the_focused_listing_is_one_session_in_the_document_too() {
     assert_eq!(sessions[0]["id"], "s01", "and it is the one named: {doc}");
 }
 
+/// Committing a key that carries a secret says which key, not just which layer.
+///
+/// The warning has read *"the shared layer is COMMITTED — never put a secret
+/// here"* since the layers existed. True, and it fires identically for
+/// `account`, which is a name, and for `carry_in`, which is the one documented
+/// route to a credential. A warning that cannot tell those apart is one people
+/// learn to scroll past.
+///
+/// Now that omh can classify a key, the one write that reaches git can say
+/// what is actually at stake.
+#[test]
+fn committing_a_key_that_carries_a_secret_names_the_key() {
+    let sb = sandbox();
+
+    let risky = sb.omh(&["repo", "set", "--shared", "carry_in", "[\".env\"]"]);
+    let said = String::from_utf8_lossy(&risky.stderr).to_string();
+    assert!(risky.status.success(), "still written: {said}");
+    assert!(
+        said.contains("COMMITTED"),
+        "the standing warning survives: {said}"
+    );
+    assert!(
+        said.contains("carry_in"),
+        "and it names the key that makes this the dangerous one: {said}"
+    );
+
+    // A key that carries no secret keeps the general warning and gains nothing
+    // — otherwise the sharper sentence means nothing.
+    let safe = sb.omh(&["repo", "set", "--shared", "account", "work"]);
+    let mild = String::from_utf8_lossy(&safe.stderr).to_string();
+    assert!(
+        mild.contains("COMMITTED") && !mild.contains("`account` "),
+        "a name is not singled out the way a secret path is: {mild}"
+    );
+}
+
+/// A key omh does not read is written, and said so.
+///
+/// `set` accepts any key at all — it has to, since a settings file is
+/// hand-editable and omh must not refuse a key a newer version will read. But
+/// accepting it silently means `carry_ins` and `idle_timout` land in the file,
+/// are never read by anything, and look exactly like a setting that took.
+///
+/// So it is written and named: the value is not lost, and the typo is not
+/// discovered by wondering why nothing changed.
+#[test]
+fn a_setting_omh_does_not_read_is_written_and_named() {
+    let sb = sandbox();
+
+    let typo = sb.omh(&["repo", "set", "carry_ins", "[\".env\"]"]);
+    let said = String::from_utf8_lossy(&typo.stderr).to_string();
+    assert!(
+        typo.status.success(),
+        "an unknown key is still written: {said}"
+    );
+    assert!(
+        said.contains("carry_ins"),
+        "and omh says which key it knows nothing about: {said}"
+    );
+
+    // A key omh does read says nothing extra — the warning has to mean
+    // something, and one that fires for every write means nothing.
+    let known = sb.omh(&["repo", "set", "carry_in", "[\".env\"]"]);
+    let quiet = String::from_utf8_lossy(&known.stderr).to_string();
+    assert!(
+        !quiet.contains("nothing reads"),
+        "a key omh reads is not reported as unknown: {quiet}"
+    );
+}
+
 /// A session named first is never silently dropped.
 ///
 /// The selector's promise is that a leading `sNN` scopes what follows. For a
