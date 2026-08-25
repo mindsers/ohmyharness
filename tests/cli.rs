@@ -2464,6 +2464,34 @@ fn the_focused_listing_is_one_session_in_the_document_too() {
     assert_eq!(sessions[0]["id"], "s01", "and it is the one named: {doc}");
 }
 
+/// A value the key cannot take is written, and said so.
+///
+/// `persistence` accepts `dtach` or `none`; anything else parses at *launch*,
+/// which is minutes later and in a different command. Written either way, for
+/// the same reason an unknown key is — a settings file is hand-editable and a
+/// value a newer omh will accept must not be refused by this one — but the
+/// typo is named where it was typed.
+#[test]
+fn a_value_the_key_cannot_take_is_written_and_named() {
+    let sb = sandbox();
+
+    let wrong = sb.omh(&["repo", "set", "persistence", "tmux"]);
+    let said = String::from_utf8_lossy(&wrong.stderr).to_string();
+    assert!(wrong.status.success(), "still written: {said}");
+    assert!(
+        said.contains("tmux") && said.contains("dtach"),
+        "the value it cannot take, and the ones it can: {said}"
+    );
+
+    // One it can take says nothing — a warning on every write is no warning.
+    let right = sb.omh(&["repo", "set", "persistence", "dtach"]);
+    let quiet = String::from_utf8_lossy(&right.stderr).to_string();
+    assert!(
+        !quiet.contains("dtach, none"),
+        "a value that fits is not lectured about: {quiet}"
+    );
+}
+
 /// Committing a key that carries a secret says which key, not just which layer.
 ///
 /// The warning has read *"the shared layer is COMMITTED — never put a secret

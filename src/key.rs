@@ -109,6 +109,31 @@ pub fn describes(name: &str) -> Option<&'static Key> {
     KEYS.iter().find(|k| k.name == name)
 }
 
+/// What is wrong with this value for this key, if omh can tell.
+///
+/// Only `Choice` is checkable here, and that is the whole of the claim:
+/// `Text` and `Paths` are freeform, and a `Duration` omh cannot parse is
+/// already reported where it is read, deliberately — `idle::parse_duration`
+/// returns `None` rather than erroring so a typo in one layer cannot stop you
+/// working. `None` back from here means *nothing to say*, never *this is fine*.
+pub fn quarrel(key: &Key, value: &str) -> Option<String> {
+    match key.shape {
+        Shape::Choice(allowed) => {
+            // The value arrives as it was typed; a quoted one is the same
+            // string to a person and a different one to `contains`.
+            let bare = value.trim().trim_matches('"');
+            (!allowed.contains(&bare)).then(|| {
+                format!(
+                    "`{}` does not take `{bare}` — only {}",
+                    key.name,
+                    allowed.join(", ")
+                )
+            })
+        }
+        Shape::Text | Shape::Paths | Shape::Duration => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

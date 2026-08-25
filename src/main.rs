@@ -3449,10 +3449,19 @@ fn set(
     // omh will read must not be refused by this one — but a key *this* omh
     // reads nothing from looks identical to one that took, and `carry_ins` is
     // a plausible thing to type. Named, not refused.
-    if key::describes(key).is_none() {
-        ctx.warn(&format!(
+    match key::describes(key) {
+        None => ctx.warn(&format!(
             "nothing in omh reads `{key}` — it is written, and it will sit there"
-        ));
+        )),
+        // Written either way, for the same reason: a value a newer omh will
+        // accept must not be refused by this one. But `persistence = tmux`
+        // otherwise surfaces at the next launch, in a different command,
+        // minutes later.
+        Some(k) => {
+            if let Some(quarrel) = key::quarrel(k, value) {
+                ctx.warn(&format!("{quarrel} — written anyway"));
+            }
+        }
     }
     ctx.say(
         &report::Action::new("setting-written", format!("wrote → {}", w.path.display())).data(
