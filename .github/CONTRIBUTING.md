@@ -119,7 +119,7 @@ product, not fixing a test.
 | sshd publishes on 127.0.0.1 only | `0.0.0.0` exposes a shell in the sandbox to the LAN |
 | a session runs detached, never `--rm` | it must outlive the terminal, or nothing can attach |
 | a plan is rejected when the backend lacks a capability | else `sbx` fails mysteriously instead of loudly |
-| no command name can be shadowed by an adapter | `omh <anything>` is a harness, so `RESERVED` is load-bearing |
+| no command name can be shadowed by an adapter | every command is named, so a bare word is not a launch and there is no shared slot |
 | every relative link in the docs resolves | a doc tree rots silently; nothing else notices |
 | the note store outlives the worktree that wrote it | a store under /work dies with `git worktree remove --force` |
 | a note is never listed without its date and its layer | an undated, unattributed claim cannot be judged |

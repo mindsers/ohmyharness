@@ -2,15 +2,15 @@
 
 ```
 omh init                          set this repo up
-omh new <harness> [-- args…]  start a session and run an agent in it
-omh <harness> [args…]      claude · omp · opencode   ← bare name = run an agent
+omh new <harness> [-- args…]      start a session, run an agent in it
+omh sessions <id> resume [harness]  rejoin one · claude · omp · opencode
 omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
-omh sessions [log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 log
+omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 log
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
 omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
@@ -22,14 +22,16 @@ Noun-verb groups with single-letter aliases: `omh s log`, `omh c mcp ls`,
 `omh d claude`. The noun on its own is the listing — `omh s` is every session,
 and `omh s01` is that one.
 
-**A bare name is always a harness.** Editors live under `attach`, so `omh new claude`
-and `omh attach zed` cannot be confused for one another — the bare slot means
-exactly one thing.
+**Every command is a named command.** A bare name used to be a harness —
+the bare name launched — which meant any word could be a launch and so no word
+could safely be a command. A `RESERVED` list of nineteen names existed to keep
+them apart, and the selector had to parse each line twice to work out which
+reading was meant.
 
-That creates a hazard: since `omh <anything>` is a harness, an adapter could
-shadow a real command. A `RESERVED` list prevents it, and rather than trusting
-anyone to keep that list current, a test introspects the CLI definition and
-fails if any command or alias is missing from it.
+`omh new claude` costs one word and removes the class. There is no bare slot to
+shadow, so the list and the double parse are both gone. Harnesses and editors
+still share a namespace, but only inside their own verbs — `omh new zed` and
+`omh attach zed` say which they mean.
 
 ### What every command prints
 
@@ -96,10 +98,10 @@ this API printed `""` for both.
 `work` is `null` — not `unknown` — where nobody asked, so a caller can tell an
 unanswered question from an unanswerable one.
 
-Both flags are omh's own, so `omh new claude --json` is **refused** rather than
-handed to the harness — see [omh's flags come before the harness
-name](#omhs-flags-come-before-the-harness-name). Use `omh new claude -- --json` to
-pass it on regardless.
+Both flags are omh's own, so `omh new claude --json` is **omh's** — everything
+before the `--` is. See [where omh's flags end and the harness's
+begin](#where-omhs-flags-end-and-the-harnesss-begin). Use `omh new claude -- --json`
+to hand it to the harness instead.
 
 ---
 
@@ -317,7 +319,7 @@ $ omh s diff          # the session you were last in
 $ omh s01 diff        # that one
 $ omh s01 commit -m "Fix the tap guard"
 $ omh s01 rm
-$ omh s01 claude      # launch into it
+$ omh s01 resume      # rejoin it
 $ omh s01 attach zed
 ```
 
@@ -426,11 +428,11 @@ A session omh cannot read says so. Absence from that section otherwise means
 *collides with nobody*, and an empty section is how "no collisions" is
 rendered — so a partial answer would be indistinguishable from a clean one.
 
-### omh's flags come before the harness name
+### Where omh's flags end and the harness's begin
 
-Everything after a harness name is that harness's argv, so `omh new claude
---dry-run` would hand omh's own flag to claude. It is refused rather than
-obeyed by the wrong side:
+Before the separator a flag is omh's; after it, the harness's. Nothing is
+inferred and nothing is refused for being ambiguous, because nothing is
+ambiguous:
 
 ```console
 $ omh --dry-run new claude       # omh's
@@ -438,8 +440,11 @@ $ omh new claude -- --resume x   # claude's
 $ omh new claude -- --json       # claude's, even though omh has one too
 ```
 
-Long forms only — `-s` and `-a` are left to the harness, which is likelier to
-want them.
+This replaced a rule. The bare name had no separator, so omh had to guess:
+it refused its own long flags after a harness name and left short ones alone,
+on the reasoning that `-s` is a flag plenty of harnesses have and refusing it
+would break launches that worked. With `--` there is nothing to guess, so
+`omh new claude -- -s x` hands `-s` on and `omh new claude -s x` is omh's.
 
 **`omh new` does not guess.** The bare name has to: `omh new claude --json` could
 be meant for either, and the rule above is a judgement about which mistake is
@@ -478,12 +483,12 @@ opencode on omh/s02
 
 $ omh s01 resume
 omh: omh has no record of a harness running in s01, so it cannot rejoin as one.
-  omh s01 <harness>   rejoin it as that
-  omh s               what is here
+  omh s01 resume <harness>   rejoin it as that
+  omh s                      what is here
 
 $ omh s03 resume
 omh: omh recorded a harness for s03 and cannot read it back: …/.harness is empty
-  omh s03 <harness>   rejoin it as that, which rewrites the record
+  omh s03 resume <harness>   rejoin it as that, which rewrites the record
 ```
 
 The middle one covers a session older than this release, one whose run
@@ -652,7 +657,7 @@ s01 · 3 commits from main
     src/tap.rs
 
   omh s01 log             the checkpoint this can be undone from
-  omh s01 claude          the markers are in the sandbox, where fixing them cannot hurt you
+  omh s01 resume          the markers are in the sandbox, where fixing them cannot hurt you
 ```
 
 Your checkout's commits never enter the sandbox's repository. The merge runs

@@ -6,7 +6,7 @@
 //! provenance for a value that did nothing.
 //!
 //! Only the **container** stops. The worktree and the branch survive, so
-//! `omh <harness>` restarts exactly where you left off: stopping an idle
+//! `omh sNN resume` restarts exactly where you left off: stopping an idle
 //! session must never be able to lose work, which is the same rule `omh s rm`
 //! follows for branches.
 

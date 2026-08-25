@@ -123,8 +123,9 @@ impl Cli {
 ///
 /// The desugaring is literal: `omh s01 diff` is `omh sessions --session s01
 /// diff`. When what follows is not a session verb the prefix still names the
-/// session and the command runs where it lives, which is what covers the
-/// launch — `sessions` has no verb for starting a harness.
+/// session and the command runs where it lives — `omh s01 attach zed`,
+/// `omh s01 doctor`. It used to cover the launch too, back when `sessions` had
+/// no verb for starting a harness; `resume` is that verb now.
 ///
 /// Naming it is not the same as it being honoured. `dispatch` refuses a
 /// command that does not act on a session, so `omh s01 why …` and
@@ -142,8 +143,8 @@ impl Cli {
 /// function which flags take values would duplicate knowledge the parser
 /// already has and would rot the first time a global was added. So both
 /// readings are offered to clap and the sessions one is preferred: it loses
-/// only when it does not parse and the line as written does, which is the
-/// launch. When neither parses, the sessions error is the one worth showing —
+/// only when it does not parse and the line as written does — a top-level
+/// command the prefix scopes. When neither parses, the sessions error is the one worth showing —
 /// bare `omh s01` becomes `omh s`, whose error names the verbs.
 ///
 /// The pattern matters more than the list. `s\d+` is what `next_id` generates,
@@ -175,9 +176,9 @@ fn session_prefix(argv: Vec<String>) -> (Option<String>, Vec<String>) {
     // request to launch a harness called `commit`. #56 gave `--keep` a value,
     // so that line now parses both ways — but the rule it established stands
     // for every line that still does not, `omh s01 commit --whatever` among
-    // them. A mistyped verb must not become a launch, so a fallback is a
-    // launch only when what it names is not a session verb.
-    let launch = match (
+    // them. That check is gone with the catch-all: a word that is not a
+    // command no longer parses, so a mistyped verb cannot become anything.
+    let as_typed = match (
         Cli::try_parse_from(&through_sessions),
         Cli::try_parse_from(&as_written),
     ) {
@@ -197,7 +198,11 @@ fn session_prefix(argv: Vec<String>) -> (Option<String>, Vec<String>) {
     };
     (
         Some(first.clone()),
-        if launch { as_written } else { through_sessions },
+        if as_typed {
+            as_written
+        } else {
+            through_sessions
+        },
     )
 }
 
@@ -220,54 +225,6 @@ fn the_one_session(prefix: Option<String>, flag: Option<String>) -> Result<Optio
         );
     }
     Ok(flag.or(prefix))
-}
-
-/// omh's own long flags, taken from the parser rather than written out.
-///
-/// A list would rot: the next global flag added would fall outside the guard
-/// below without anyone noticing, which is exactly how the guarded mistake
-/// happens in the first place.
-fn omh_globals() -> Vec<String> {
-    use clap::CommandFactory;
-    Cli::command()
-        .get_arguments()
-        .filter(|a| a.is_global_set())
-        .filter_map(|a| a.get_long().map(|long| format!("--{long}")))
-        .collect()
-}
-
-/// The harness's arguments, refusing any of omh's own flags among them.
-///
-/// The bare-name form took everything after the name as the harness's argv, so
-/// a `--dry-run` typed after it went to the harness and omh launched for real. Silent, and worst for exactly the flag whose meaning is "change
-/// nothing" — so this refuses rather than warns, and says the form that works.
-///
-/// Long forms only. `-s` is omh's session flag and is also a flag plenty of
-/// harnesses have; refusing shorts would break launches that work today to
-/// guard a mistake nobody has made. `--` ends the inspection and is consumed,
-/// for the day a harness really does have `--new`.
-fn passthrough(argv: &[String], globals: &[String]) -> Result<Vec<String>> {
-    let mut out = vec![argv[0].clone()];
-    let mut rest = argv[1..].iter();
-    for arg in rest.by_ref() {
-        if arg == "--" {
-            break;
-        }
-        if globals.iter().any(|g| g == arg) {
-            anyhow::bail!(
-                "`{arg}` is omh's flag, not {}'s, and everything after a harness \
-                 name belongs to the harness\n  \
-                 try  omh {arg} {}\n  \
-                 or   omh {} -- {arg}   to pass it on regardless",
-                argv[0],
-                argv[0],
-                argv[0]
-            );
-        }
-        out.push(arg.clone());
-    }
-    out.extend(rest.cloned());
-    Ok(out)
 }
 
 #[derive(Subcommand)]
@@ -500,7 +457,7 @@ enum SessionsCmd {
         /// Refused alongside a checkpoint number, which is measured against its
         /// own parent: accepting both would take the flag and silently diff
         /// against something else, the same resolve-by-dropping-one this file
-        /// already refuses for `--new` and `--session`.
+        /// refuses when a session is named two ways at once.
         #[arg(long, conflicts_with = "checkpoint")]
         base: Option<String>,
         /// The patch itself, through your pager, rather than a summary.
@@ -771,10 +728,11 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Unuse { .. }
         | Cmd::Import { .. }
         // A fresh session's id is generated, so there is nothing for a named
-        // one to mean. `--new` refuses the same contradiction, but only when
-        // it is spelled `--session`: `conflicts_with` is checked by clap, and
-        // an `sNN` prefix lands in `cli.session` after that. Refused here
-        // however the id arrived.
+        // one to mean. A global `--new` used to refuse the same contradiction,
+        // but only when the session was spelled `--session`: clap checks
+        // `conflicts_with` before the `sNN` prefix is lifted, so the spelling
+        // people type went through. That flag is gone; this refuses however
+        // the id arrived.
         | Cmd::New { .. } => false,
     }
 }
@@ -827,57 +785,61 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             SessionsCmd::Resume { harness, args } => {
                 let paths = Paths::discover(&cwd)?;
                 let session = existing_session(&paths, cli.session.as_deref())?;
-                // Three answers, three sentences. Saying "omh did not record"
-                // over a marker omh wrote and cannot read is a claim about
-                // history that omh is in no position to make.
-                let harness = match harness.clone().map_or_else(
-                    || session::harness_of(&paths.runs(), &session.id),
-                    session::Ran::Harness,
-                ) {
-                    session::Ran::Harness(name) => name,
-                    // Refused, never guessed. `detect::preferred_harness` would
-                    // answer for a session it knows nothing about, and the
-                    // answer would be indistinguishable from a right one —
-                    // claude attached to a worktree an afternoon of opencode
-                    // built. Every session made before this release is here,
-                    // and so is every one `omh attach` created for an editor.
-                    session::Ran::NeverRecorded => anyhow::bail!(
-                        "omh has no record of a harness running in {id}, so it \
-                         cannot rejoin as one.\n  omh {id} resume <harness>   \
-                         rejoin it as that\n  omh s                       what \
-                         is here",
-                        id = session.id
-                    ),
-                    session::Ran::CouldNotTell(why) => anyhow::bail!(
-                        "omh recorded a harness for {id} and cannot read it \
-                         back: {why}\n  omh {id} resume <harness>   rejoin it \
-                         as that, which rewrites the record",
-                        id = session.id
-                    ),
+                // Where the name came from is kept, not flattened. It decides
+                // both what may be said about it and whether it has been
+                // checked: a name off the command line is the user's word and
+                // `Adapter::find` judges it, a name off the marker is omh's own
+                // record and `harness_of` has already refused anything that is
+                // not a harness name.
+                let (harness, from_record) = match harness {
+                    Some(named) => (named.clone(), false),
+                    None => match session::harness_of(&paths.runs(), &session.id) {
+                        session::Ran::Harness(name) => (name, true),
+                        // Refused, never guessed. `detect::preferred_harness`
+                        // would answer for a session it knows nothing about,
+                        // and the answer would be indistinguishable from a
+                        // right one — claude attached to a worktree an
+                        // afternoon of opencode built. Every session made
+                        // before this release is here, and so is every one
+                        // `omh attach` created for an editor.
+                        session::Ran::NeverRecorded => anyhow::bail!(
+                            "omh has no record of a harness running in {id}, so \
+                             it cannot rejoin as one.\n  \
+                             omh {id} resume <harness>   rejoin it as that\n  \
+                             omh s                       what is here",
+                            id = session.id
+                        ),
+                        session::Ran::CouldNotTell(why) => anyhow::bail!(
+                            "omh recorded a harness for {id} and cannot read it \
+                             back: {why}\n  \
+                             omh {id} resume <harness>   rejoin it as that, \
+                             which rewrites the record",
+                            id = session.id
+                        ),
+                    },
                 };
-                // Named as coming from the record. Without this the user typed
-                // `resume` and is told a word they never said is unknown,
-                // wearing the same message as a mistyped harness.
                 let mut argv = vec![harness.clone()];
-                if !args.is_empty() {
-                    argv.push("--".to_string());
-                    argv.extend(args.iter().cloned());
-                }
-                run(
+                argv.extend(args.iter().cloned());
+                let launched = run(
                     &cwd,
-                    &passthrough(&argv, &omh_globals())?,
+                    &argv,
                     session::Start::Named(&session.id),
                     cli.account.as_deref(),
                     cli.dry_run,
                     ctx,
-                )
-                .with_context(|| {
-                    format!(
-                        "{} recorded `{}`",
-                        session.id,
-                        out::untrusted(&harness)
-                    )
-                })
+                );
+                // Said only when it is true. The record is what omh knows and
+                // the user does not, so a failure needs the provenance; a name
+                // they typed a second ago does not, and claiming omh recorded
+                // it is a statement about history omh cannot support — the
+                // inverse of the mistake this context was added to fix.
+                if from_record {
+                    launched.with_context(|| {
+                        format!("{} recorded `{}`", session.id, out::untrusted(&harness))
+                    })
+                } else {
+                    launched
+                }
             }
             SessionsCmd::Down { all } => down(
                 &cwd,
@@ -1027,14 +989,13 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             // handing it `[claude, --json]` where the user typed
             // `claude -- --json` asks it the wrong question, and it answered
             // by refusing a flag the user had already assigned.
+            // `[harness, ...args]`. There is no separator to strip: clap's
+            // `last = true` means `args` holds only what followed one.
             let mut argv = vec![harness.clone()];
-            if !args.is_empty() {
-                argv.push("--".to_string());
-                argv.extend(args.iter().cloned());
-            }
+            argv.extend(args.iter().cloned());
             run(
                 &cwd,
-                &passthrough(&argv, &omh_globals())?,
+                &argv,
                 session::Start::Fresh,
                 cli.account.as_deref(),
                 cli.dry_run,
@@ -1046,6 +1007,17 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
 
 /// What to tell someone whose word matched nothing. Pure so it can be tested:
 /// the message is the entire value of this path.
+/// What `omh init` tells you to run next.
+///
+/// A function rather than an expression inside `init`, because it is the one
+/// instruction the product prints and it was a parse error for a release: the
+/// line is *composed*, so the scan that reads printed `omh …` literals cannot
+/// see it, and sweeping the doc transcripts to match made the docs show output
+/// omh does not produce. Pulled out here so the parser can be asked.
+fn next_after_init(harness: Option<&str>) -> String {
+    harness.map_or_else(|| "config".to_string(), |h| format!("new {h}"))
+}
+
 fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
     if editors.iter().any(|e| e == name) {
         return format!("`{name}` is an editor — try `omh attach {name}`");
@@ -3970,6 +3942,7 @@ fn run(
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let name = &argv[0];
+    let harness = name.clone();
 
     let adapter =
         Adapter::find(&paths.adapters(), name).map_err(|e| unknown_tool(&paths, name, e))?;
@@ -4050,23 +4023,6 @@ fn run(
         // in use so it is not reaped by the next launch.
         reap_idle(&paths, &session.id, ctx);
         let _ = idle::touch(&paths.runs(), &session.id);
-        // Beside `last-used`, and under the same guard: a dry run must leave
-        // no trace, and this is a trace.
-        //
-        // Said out loud when it fails, unlike `touch` above, because the two
-        // failures do not cost the same. A lost `touch` means one container
-        // survives one reap — `idle::expired` reads a missing marker as *leave
-        // it alone* and claims nothing. A lost record is discovered days later
-        // as a refusal, at the one moment the user was trying to avoid
-        // retyping the harness, and there is nothing left by then to say the
-        // write was attempted.
-        if let Err(e) = session::remember_harness(&paths.runs(), &session.id, name) {
-            ctx.warn(&format!(
-                "could not record that {} ran {name}: {e} — `omh {} resume` \
-                 will not be able to rejoin it",
-                session.id, session.id
-            ));
-        }
     }
 
     let plan = container::plan(
@@ -4126,13 +4082,31 @@ fn run(
         ctx,
     )?;
     // The container is up, so the launch happened and the call-out is spent.
+    //
+    // The harness record is written here rather than beside `last-used`, and
+    // that is the difference between a note and a claim. Written earlier, a
+    // launch that failed at `runtime::select`, at `plan.validate`, or on a
+    // session already running something else still rewrote it — so
+    // `omh s01 resume opencode` that never started anything left s01 recorded
+    // as opencode, and the next bare `resume` rejoined a claude worktree as
+    // opencode. That is the exact harm the refusal for an unrecorded session
+    // exists to prevent, produced by the thing meant to prevent it.
+    //
+    // A dry run returns before this, so it still leaves no trace.
+    if let Err(e) = session::remember_harness(&paths.runs(), &session.id, &harness) {
+        ctx.warn(&format!(
+            "could not record that {} ran {harness}: {e} — `omh {} resume` \
+             will not be able to rejoin it",
+            session.id, session.id
+        ));
+    }
     remember_hooks(hooks_seen, ctx);
     ctx.announce(&status_line);
     let status = Command::new(backend.program())
         .args(backend.exec_args(&name, &plan.argv, true))
         .status()?;
     // `omh s01 diff`, not `omh diff`. There is no top-level `diff` — the name
-    // is not in `RESERVED`, so it falls through to the harness arm and comes
+    // is not a command, so it comes
     // back as ``unknown harness `diff` ``. This line has been wrong since it
     // was written, in two different ways: it named a positional that the
     // session prefix has since deleted, so `the_session_lines_omh_prints_are_
@@ -4727,7 +4701,7 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         .into_iter()
         .map(|(name, why)| (name.to_string(), why.to_string()))
         .collect();
-    summary.next_command = harness.as_deref().unwrap_or("config").to_string();
+    summary.next_command = next_after_init(harness.as_deref());
 
     ctx.say(&summary);
     Ok(())
@@ -6832,12 +6806,14 @@ mod tests {
     /// reads the whole line refuses a launch that has always worked.
     #[test]
     fn a_harness_flag_is_not_omh_naming_the_session_twice() {
-        // Spelled through `omh new` now that a bare word is not a launch.
-        // `-s` is omh's session flag and a flag plenty of harnesses have; after
-        // `--` it is unambiguously the harness's, and the prefix is refused
-        // outright rather than silently kept.
-        let (prefix, argv) = session_prefix(cli_argv(&["new", "claude", "--", "-s", "some"]));
-        assert_eq!(prefix, None, "no prefix to lift");
+        // Spelled through `resume` now that a bare word is not a launch. The
+        // prefix has to survive *and* the harness's own `-s` has to stay the
+        // harness's — an earlier version of this test used `omh new`, where
+        // `session_prefix` returns before the arbitration runs, so both halves
+        // were vacuous.
+        let (prefix, argv) =
+            session_prefix(cli_argv(&["s01", "resume", "claude", "--", "-s", "some"]));
+        assert_eq!(prefix, Some("s01".to_string()), "the prefix is lifted");
         let parsed = Cli::try_parse_from(&argv).expect("a launch is a valid line");
         assert_eq!(parsed.session, None, "the harness keeps its own flags");
     }
@@ -7270,18 +7246,16 @@ mod tests {
                     if raw.contains("types the retired verb on purpose") {
                         continue;
                     }
-                    // The gate reads the command as written; the parse reads it
-                    // filled. `regex_lite_fill` puts `s01` in the first hole it
-                    // finds, so `omh {arg} {}` — whose first hole is a *flag* —
-                    // arrives looking like a session line and is not one.
-                    let literal: Vec<&str> = line.split_whitespace().collect();
-                    let opens_with_a_session = matches!(literal.first(), Some(&"s" | &"sessions"))
-                        || literal.first().is_some_and(|w| {
-                            w.len() > 1
-                                && w.starts_with('s')
-                                && w[1..].chars().all(|c| c.is_ascii_digit())
-                        });
-                    let names_a_session = opens_with_a_session
+                    // The gate reads the *filled* command, because every
+                    // line omh actually prints writes the id as a hole —
+                    // `omh {id} down`, `omh {} resume`. Reading the literal
+                    // instead dropped roughly twenty real messages out of the
+                    // scan, including the two this file had just rewritten,
+                    // while a comment claimed the scan had been widened. It
+                    // was narrowed. The false positive that prompted that —
+                    // `omh {arg} {}` inside `passthrough`, whose first hole is
+                    // a flag — is gone with the function.
+                    let names_a_session = matches!(words.first(), Some(&"s" | &"sessions" | &"s01"))
                         // A line ending in a flag is naming the flag, not
                         // showing a command: five messages in `shadow.rs` say
                         // *take the files as they stand with `omh s commit
@@ -7405,12 +7379,13 @@ mod tests {
     /// omh's `session`.
     #[test]
     fn a_harness_flag_is_still_not_omh_naming_the_session_twice() {
-        let (prefix, argv) = session_prefix(cli_argv(&["new", "claude", "--", "-s", "some"]));
+        let (prefix, argv) =
+            session_prefix(cli_argv(&["s01", "resume", "claude", "--", "-s", "some"]));
         let parsed = Cli::try_parse_from(&argv).expect("a launch is a valid line");
         assert_eq!(
             the_one_session(prefix, parsed.session).unwrap(),
-            None,
-            "a flag past the separator never becomes omh's session"
+            Some("s01".to_string()),
+            "the session stays the prefix's; a flag past the separator is the harness's"
         );
     }
 
@@ -9738,6 +9713,27 @@ because = "a fixture"
         );
     }
 
+    /// Whatever `init` says to run next is a command omh accepts.
+    ///
+    /// It named the bare harness from the day that stopped being a launch,
+    /// and nothing noticed. The line is composed at runtime, so the scan that
+    /// reads printed `omh …` literals cannot see it — and the doc transcripts
+    /// were swept to `omh new claude`, which made the docs show output the
+    /// binary does not produce and hid the break behind a green sweep.
+    #[test]
+    fn what_init_says_to_run_next_is_a_command_omh_accepts() {
+        for harness in [Some("claude"), Some("opencode"), None] {
+            let said = next_after_init(harness);
+            let argv: Vec<String> = std::iter::once("omh".to_string())
+                .chain(said.split_whitespace().map(str::to_string))
+                .collect();
+            assert!(
+                Cli::try_parse_from(&argv).is_ok(),
+                "init tells a new user to run `omh {said}`, which omh does not accept"
+            );
+        }
+    }
+
     /// Only `dispatch` holds the whole `Cli`.
     ///
     /// This is what makes the scan below exact rather than hopeful. That scan
@@ -9787,9 +9783,6 @@ because = "a fixture"
         );
     }
 
-    /// `omh <name>` treats any unknown word as a harness, so a command that is
-    /// not in RESERVED could be shadowed by an adapter of the same name. This
-    /// keeps the list honest without anyone remembering to update it.
     /// What `consumes_session` claims and what the dispatch does agree.
     ///
     /// The exhaustive match makes a new command a compile error until somebody
@@ -10098,43 +10091,18 @@ because = "a fixture"
     }
 
     // ── omh's flags versus the harness's ────────────────────────────────────
-
-    fn argv(parts: &[&str]) -> Vec<String> {
-        parts.iter().map(|s| s.to_string()).collect()
-    }
-
-    /// A `--dry-run` typed after the harness name launched for real. Everything
-    /// after that name was the harness's argv, so omh's own flag went to it and omh
-    /// never saw it. Found by hand while investigating something else — and a
-    /// flag whose entire meaning is "change nothing" is the worst one to
-    /// swallow quietly.
-    #[test]
-    fn omhs_own_flag_after_the_harness_name_is_refused() {
-        let err = passthrough(&argv(&["opencode", "--dry-run"]), &omh_globals()).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("--dry-run"), "name the flag: {msg}");
-        assert!(
-            msg.contains("omh --dry-run opencode"),
-            "and show the form that works: {msg}"
-        );
-    }
-
-    #[test]
-    fn a_flag_the_harness_owns_passes_through_untouched() {
-        let given = argv(&["claude", "--resume", "x"]);
-        assert_eq!(passthrough(&given, &omh_globals()).unwrap(), given);
-    }
-
-    /// Short flags are deliberately left alone. `-s` is omh's session flag and
-    /// is also a flag plenty of harnesses have; refusing it would break
-    /// launches that work today to guard a mistake nobody has made. The long
-    /// forms are the ones worth protecting — they are unlikely to collide and
-    /// they are what people actually type.
-    #[test]
-    fn short_flags_belong_to_the_harness() {
-        let given = argv(&["claude", "-s", "something"]);
-        assert_eq!(passthrough(&given, &omh_globals()).unwrap(), given);
-    }
+    //
+    // `passthrough`, `omh_globals` and six tests were here. They arbitrated a
+    // question the grammar no longer asks: with the bare name gone, both
+    // launch spellings take their harness arguments after a `--`, so clap's
+    // `last = true` decides whose a flag is before anything of omh's runs.
+    // `passthrough` could still be *called*, but its refusal had become
+    // unreachable — its callers inserted the separator it broke on — and its
+    // remedy named two spellings this release deleted. A guard that cannot
+    // fire, advising commands that do not parse, is worse than no guard.
+    //
+    // What replaced it is `omh_new_gives_the_harness_only_what_follows_a_double_dash`
+    // in tests/cli.rs, which asks the parser rather than a second opinion.
 
     /// Under `omh new`, `--` is how a flag reaches the harness — and the only
     /// way.
@@ -10192,22 +10160,6 @@ because = "a fixture"
         }
     }
 
-    /// The escape hatch, for the day a harness really does have `--new`.
-    /// Consumed on the way through, the way every tool that offers `--` does.
-    #[test]
-    fn a_double_dash_hands_the_rest_to_the_harness() {
-        let out = passthrough(&argv(&["claude", "--", "--dry-run"]), &omh_globals()).unwrap();
-        assert_eq!(out, argv(&["claude", "--dry-run"]));
-    }
-
-    /// The harness's own name is never a flag, and a session id that happens to
-    /// look like one is not omh's business either.
-    #[test]
-    fn only_the_arguments_are_inspected_not_the_harness_name() {
-        let given = argv(&["--dry-run"]);
-        assert_eq!(passthrough(&given, &omh_globals()).unwrap(), given);
-    }
-
     /// **Nothing in this file writes to a stream directly.**
     ///
     /// The reason `out::Ctx` exists at all: 197 `println!`s here meant the
@@ -10255,27 +10207,6 @@ because = "a fixture"
             "and the one exemption is the error renderer, not something new — got {:?}",
             offenders[0]
         );
-    }
-
-    /// Derived from the parser rather than typed out, so a global added later
-    /// inherits the guard instead of quietly falling outside it — the same
-    /// reason `RESERVED` is checked against the subcommand list.
-    #[test]
-    fn every_global_flag_is_covered_without_anyone_listing_them() {
-        let globals = omh_globals();
-        let declared: Vec<String> = Cli::command()
-            .get_arguments()
-            .filter(|a| a.is_global_set())
-            .filter_map(|a| a.get_long().map(|l| format!("--{l}")))
-            .collect();
-        assert!(!declared.is_empty(), "the parser must have globals at all");
-        for flag in declared {
-            assert!(globals.contains(&flag), "{flag} is not guarded");
-            assert!(
-                passthrough(&argv(&["claude", &flag]), &globals).is_err(),
-                "{flag} reaches the harness"
-            );
-        }
     }
 
     // ── candidate guards (mutation testing) ─────────────────────────────────

@@ -31,7 +31,7 @@ session started by `omh new claude` is running the claude image and does not con
 `opencode` at all. Asking for the other one restarts the sandbox:
 
 ```console
-$ omh new opencode
+$ omh s01 resume opencode
 omh: restarting the sandbox for omh/s01 — image (omh/claude:b4ed… → omh/opencode:1e1a…), mounts (6 added, 9 removed)
 ```
 
@@ -168,7 +168,7 @@ So omh stamps the plan onto the container as labels at launch, and compares
 before reusing one. If they disagree the container is replaced, naming what
 moved. Two real failures came from never asking:
 
-- `omh new opencode` on a session started by `omh new claude` execed a binary that image
+- `omh s01 resume opencode` on a session started by `omh new claude` execed a binary that image
   does not contain.
 - `--account work` on a session started as `personal` went on quietly using
   `personal` — the exact thing `omh auth` refuses to guess about elsewhere.
@@ -183,7 +183,7 @@ Replacing a container kills whatever is inside it, so a session with a live
 harness is reported instead:
 
 ```console
-$ omh new claude
+$ omh s01 resume claude
 Error: session s01 is running opencode and cannot be reused for this launch (image (…))
   stop it with        omh s01 down
   or start a fresh one  omh new claude
@@ -259,7 +259,7 @@ N sessions means N containers, so this is not a nicety — see
 [risks](design/risks.md).
 
 Only the **container** stops; the worktree and branch survive, so
-`omh <harness>` resumes exactly where you left off. The clock measures when you
+`omh sNN resume` puts you back exactly where you left off. The clock measures when you
 last *launched into* or *attached to* a session, not the agent's own writes — a
 session left running after you walked away is what this exists to reap, and one
 where an agent is working unattended is one you started recently.

@@ -35,7 +35,7 @@ no branch anywhere in the codebase.
 It is announced once, at launch, rather than silently swallowed:
 
 ```console
-$ omh codex
+$ omh new codex
 omh: codex on omh/s01 — dropped 2 hooks, 3 subagents (unsupported)
 ```
 

@@ -227,15 +227,19 @@ and work somewhere else.
 If you believe nothing is running, look at the sockets: `docker exec
 omh-<repo>-s01 ls /omh/sock`. One per live harness, removed when it exits.
 
-### `` `--dry-run` is omh's flag, not claude's ``
+### A flag went to omh when you meant the harness
 
-Everything after a harness name is the harness's argv, so `omh new claude --dry-run`
-handed omh's flag to claude and launched for real. omh's own flags go first:
-`omh --dry-run claude`. If the harness genuinely has a flag of the same name,
-`omh new claude -- --dry-run` passes it on.
+`omh new claude --dry-run` is a dry run *of omh* — everything before the `--`
+is omh's. Put the flag after the separator to hand it to the harness:
 
-Long forms only. `-s` and `-a` are left alone — plenty of harnesses use them, and
-refusing those would break launches that work.
+```console
+$ omh new claude -- --dry-run
+```
+
+This used to be an error rather than a rule. The bare-name form had no
+separator, so omh guessed: it refused its own long flags typed after a harness
+name and left short ones alone, since `-s` and `-a` are flags plenty of
+harnesses use. `omh new` does not guess, so there is nothing left to refuse.
 
 ### `omh s rm` says the session "is not a working tree"
 

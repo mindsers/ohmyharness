@@ -1603,7 +1603,7 @@ impl Shadow {
         // `cherry-pick <a> <b>` **is** "these commits, in this order", which is
         // what a selection means. It needs no editor, so no `sh -c`, no
         // quoting, no second entry point into omh, and no `hide = true`
-        // subcommand that `RESERVED` then has to know about.
+        // subcommand for the command list to know about.
         //
         // The first attempt failed in a way worth recording: `current_exe()`
         // inside a unit test is the *test harness*, so git delivered the todo

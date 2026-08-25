@@ -110,7 +110,7 @@ pub fn decide(
         Probe::Unknown(why) => anyhow::bail!(
             "omh could not tell whether {id}'s sandbox is still usable, so it will neither \
              attach to it nor replace it: {why}\n  \
-             omh {id} claude        try again — a runtime that has come back will answer\n  \
+             omh {id} resume        try again — a runtime that has come back will answer\n  \
              omh {id} down          stop it, and the next launch builds a fresh one"
         ),
     };
@@ -123,7 +123,7 @@ pub fn decide(
         Stamp::Unknown(why) => anyhow::bail!(
             "omh could not read what {id}'s sandbox was built from, so it will neither \
              attach to it nor replace it: {why}\n  \
-             omh {id} claude        try again — a runtime that has come back will answer\n  \
+             omh {id} resume        try again — a runtime that has come back will answer\n  \
              omh {id} down          stop it, and the next launch builds a fresh one"
         ),
     };

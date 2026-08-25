@@ -120,7 +120,7 @@ into every session from the manifest. Your `AGENTS.md` or `CLAUDE.md` is read
 and composed with them — see [Configuration](configuration.md#keeping-the-agents-git-status-clean).
 
 Step 6 is the slow one — about 30 seconds the first time, cached afterwards.
-`init` is not finished until `omh <harness>` works, so it builds the image
+`init` is not finished until `omh new <harness>` works, so it builds the image
 rather than deferring it to your first launch.
 
 Step 3 reads your host only to learn which harness you *prefer*. The harness

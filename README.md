@@ -158,22 +158,23 @@ $ omh new claude                  # sandboxed, logged in, configured
 
 ```
 omh init                          set this repo up
-omh <harness> [args…]      claude · omp · opencode   ← bare name = run an agent
+omh new <harness> [-- args…]      start a session, run an agent in it
+omh s01 resume [harness]          rejoin it · claude · omp · opencode
 omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh ls                            harnesses, editors, sessions
-omh sessions [log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 diff
+omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 diff
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset] this checkout: what it uses and why
 omh use|unuse <capability> <name> omh use skills tdd, omh use --all
 ```
 
-Noun-verb groups with single-letter aliases. A bare name is always a **harness**;
-editors live under `attach`, so `omh new claude` and `omh attach zed` can't be
-confused for each other.
+Noun-verb groups with single-letter aliases. Every command is named — a bare
+word is not a launch, so no adapter can shadow one. Harnesses and editors each
+live under their own verb: `omh new claude`, `omh attach zed`.
 
 ## How it works
 
@@ -331,7 +332,7 @@ omh: graph at http://127.0.0.1:56286
 ```console
 $ omh auth claude personal
 $ omh auth claude work
-$ omh -a work claude          # or, per project: omh repo set account work
+$ omh -a work new claude      # or, per project: omh repo set account work
 ```
 
 Accounts are per harness, and which one a session uses is a project-level

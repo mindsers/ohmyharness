@@ -766,7 +766,7 @@ mod workdir_tests {
     /// store and the launch plan cannot disagree about it. It was not: the plan
     /// spelled it twice and the note store's path folding a third time.
     ///
-    /// Introspects the source, the way the `RESERVED` guard introspects the CLI
+    /// Introspects the source, the way the dispatch guard introspects the CLI
     /// definition, because the obvious test cannot fail. Asserting that the
     /// plan's workdir equals `container_workdir()` passes just as well when the
     /// plan holds the literal — both sides are the same string, so it pins

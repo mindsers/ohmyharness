@@ -1249,7 +1249,7 @@ fn a_worktree_that_left_its_branch_is_refused_whichever_way_you_ask() {
 /// A checkpoint is measured against its own parent, so a `--base` given with
 /// one can only be ignored — and `omh s01 diff 4 --base v1.2` silently
 /// answering about the parent is the resolve-by-quietly-dropping-one this
-/// codebase refuses for `--new` and `--session`.
+/// codebase refuses when a session is named two ways at once.
 #[test]
 fn a_base_given_with_a_checkpoint_is_refused() {
     let sb = sandbox();
@@ -1708,15 +1708,16 @@ fn a_new_launch_never_lands_in_a_session_that_already_exists() {
 ///
 /// `omh s01 --new claude` said two contradictory things — *this exact session*
 /// and *one that does not exist yet* — and omh resolved it by returning `s01`
-/// and never looking at the flag. Exit 0, a plan, no warning.
+/// and never looking at the flag. Exit 0, a plan, no warning. `--new` carried
+/// `conflicts_with = "session"`, which never fired for the spelling people
+/// type: clap checks that against the `--session` flag, and the `sNN` prefix
+/// lands in `cli.session` after the parse.
 ///
-/// `--new` carried `conflicts_with = "session"`, which never fired for the
-/// spelling people actually type: clap checks that against the `--session`
-/// flag, and the `sNN` prefix lands in `cli.session` after the parse.
-///
-/// The fix is deletion rather than another rule. `omh new` is the verb, it
-/// cannot be handed a session, and the flag that could is gone — so the
-/// contradiction has no spelling left.
+/// The flag is deleted, so that line no longer parses — but asserting *that*
+/// would only prove clap rejects an unknown argument, which the compiler
+/// already proves. The contradiction is still spellable, as `omh s01 new
+/// claude`, and that is what this checks: refused by name, not resolved by
+/// picking one.
 #[test]
 fn asking_for_a_fresh_session_while_naming_one_is_refused() {
     let sb = sandbox();
@@ -1724,11 +1725,16 @@ fn asking_for_a_fresh_session_while_naming_one_is_refused() {
     sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
     sb.session("s01");
 
-    let out = sb.omh(&["s01", "--new", "claude"]);
+    let out = sb.omh(&["s01", "new", "claude"]);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
         !out.status.success(),
         "omh answered a line that asked for two different sessions: {}",
         String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        err.contains("s01"),
+        "the refusal names the scope it could not honour: {err}"
     );
 
     // And the session it was pointed at is untouched — a refusal that had
@@ -1865,6 +1871,69 @@ fn a_resumed_session_runs_the_harness_it_ran_before() {
     assert!(
         plan.contains("/s01"),
         "and it rejoined the session that was named: {plan}"
+    );
+}
+
+/// `resume <harness>` overrides the record, and only after it launches.
+///
+/// Added late, to replace `omh s01 claude` — which the bare-name deletion took
+/// away and which was the remedy the refusal below offers. It went in without
+/// a test of its own, and two of its edges are the sort that only a test finds.
+///
+/// The record is written where the launch is known to have happened. Written
+/// earlier, a `resume opencode` that failed at `runtime::select` still left the
+/// session recorded as opencode, so the next bare `resume` rejoined a claude
+/// worktree as opencode — the exact harm the refusal below exists to prevent,
+/// produced by the thing meant to prevent it.
+#[test]
+fn resuming_as_another_harness_records_it_only_if_it_launched() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.session("s01");
+    let marker = sb.home.join(".omh/run/repo/s01/.harness");
+
+    let _ = sb.omh(&["s01", "resume", "claude"]);
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap_or_default().trim(),
+        "claude",
+        "resume with a name records it"
+    );
+
+    // Arguments still reach the harness through the separator, the same way
+    // `omh new` passes them. This block is a copy of `new`'s, which is exactly
+    // where a missing separator would hide.
+    let out = sb.omh(&["s01", "--dry-run", "resume", "claude", "--", "--json"]);
+    let plan = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        plan.contains("--json"),
+        "the harness never got what followed the separator: {plan}"
+    );
+    assert!(
+        !plan.trim_start().starts_with('{'),
+        "and omh did not take it for itself: {plan}"
+    );
+
+    // A launch that does not happen does not rewrite history.
+    //
+    // An unusable `runtime` and not a missing shim, because this has to fail
+    // in one particular window: after the staging block, where the record used
+    // to be written, and before the container comes up. `docker-refuses` fails
+    // earlier than that and `docker-exec-refuses` later — with either, the
+    // assertion below passes whichever side of the launch the write sits on,
+    // which is a test that cannot fail for its own reason. Deleting the shim
+    // would work only on a machine with no docker of its own.
+    assert!(sb
+        .omh(&["repo", "set", "runtime", "bogus"])
+        .status
+        .success());
+    let failed = sb.omh(&["s01", "resume", "opencode"]);
+    assert!(!failed.status.success(), "the launch failed");
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap_or_default().trim(),
+        "claude",
+        "a failed resume rewrote the record, so the next one rejoins as a \
+         harness that never ran here"
     );
 }
 

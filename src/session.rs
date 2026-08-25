@@ -1159,7 +1159,7 @@ pub fn default_branch(repo: &Path) -> String {
         .unwrap_or_else(|_| "HEAD".into())
 }
 
-/// The session a bare `omh <harness>` or `omh attach` should land in: the most
+/// The session `omh attach` should land in when none is named: the most
 /// recently created one.
 pub fn current(worktrees_dir: &Path) -> Option<String> {
     list(worktrees_dir).pop()
