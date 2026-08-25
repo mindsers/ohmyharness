@@ -1168,14 +1168,36 @@ pub fn current(worktrees_dir: &Path) -> Option<String> {
 /// Resolve which session to use. Creating a fresh one on every launch would
 /// defeat persistence entirely — you would never reattach to the agent you left
 /// running — so a new session is something you ask for.
-pub fn pick(worktrees_dir: &Path, explicit: Option<&str>, new: bool) -> String {
-    if let Some(id) = explicit {
-        return id.to_string();
+pub fn pick(worktrees_dir: &Path, start: Start) -> String {
+    match start {
+        Start::Named(id) => id.to_string(),
+        Start::Fresh => next_id(worktrees_dir),
+        Start::Resume => current(worktrees_dir).unwrap_or_else(|| next_id(worktrees_dir)),
     }
-    if new {
-        return next_id(worktrees_dir);
-    }
-    current(worktrees_dir).unwrap_or_else(|| next_id(worktrees_dir))
+}
+
+/// Which session a command is asking for.
+///
+/// Three answers, and they were two parameters — `explicit: Option<&str>` and
+/// `new: bool` — which is four combinations for three meanings. The spare one,
+/// *this exact session, and also a brand new one*, had to be resolved, and it
+/// was: silently, by returning the named id and never looking at the flag. A
+/// test pinned that resolution, for an input the CLI refuses in two places and
+/// no caller could produce.
+///
+/// As one value there is no pair to reconcile, so the precedence rule is not
+/// simplified but deleted, and the caller says which of the three it means
+/// rather than encoding it in the third argument's position.
+///
+/// Not `Landing`, which is how a session's *work* reaches a branch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Start<'a> {
+    /// This one, by id.
+    Named(&'a str),
+    /// One that does not exist yet.
+    Fresh,
+    /// The one already here, or a fresh one if there is none.
+    Resume,
 }
 
 /// Human-readable, monotonic session ids: `s01`, `s02`, ...
@@ -2985,26 +3007,31 @@ mod tests {
     #[test]
     fn a_bare_launch_resumes_rather_than_multiplying_sessions() {
         let (_d, wt) = worktrees(&["s01"]);
-        assert_eq!(pick(&wt, None, false), "s01");
+        assert_eq!(pick(&wt, Start::Resume), "s01");
     }
 
     #[test]
     fn the_first_launch_creates_the_first_session() {
         let (_d, wt) = worktrees(&[]);
-        assert_eq!(pick(&wt, None, false), "s01");
+        assert_eq!(pick(&wt, Start::Resume), "s01");
     }
 
     #[test]
     fn a_new_session_is_something_you_ask_for() {
         let (_d, wt) = worktrees(&["s01", "s02"]);
-        assert_eq!(pick(&wt, None, true), "s03");
+        assert_eq!(pick(&wt, Start::Fresh), "s03");
     }
 
+    /// Naming one gets that one, whether or not it is the current session.
+    ///
+    /// This used to end by asserting `pick(&wt, Some("s09"), true) == "s09"` —
+    /// *"explicit beats --new"* — pinning which half of a contradiction won.
+    /// `Start` has no way to say both, so there is no winner to assert and the
+    /// line is gone rather than rewritten.
     #[test]
     fn an_explicit_id_always_wins() {
         let (_d, wt) = worktrees(&["s01", "s02"]);
-        assert_eq!(pick(&wt, Some("s01"), false), "s01");
-        assert_eq!(pick(&wt, Some("s09"), true), "s09", "explicit beats --new");
+        assert_eq!(pick(&wt, Start::Named("s01")), "s01");
     }
 
     /// Regression: git can lose a worktree's registration while the directory

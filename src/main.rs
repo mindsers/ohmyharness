@@ -134,6 +134,11 @@ impl Cli {
 /// session and the command runs where it lives, which is what covers the
 /// launch — `sessions` has no verb for starting a harness.
 ///
+/// Naming it is not the same as it being honoured. `dispatch` refuses a
+/// command that does not act on a session, so `omh s01 why …` and
+/// `omh s01 new claude` are errors rather than launches: the prefix always
+/// means *this one*, and a command that cannot mean that says so.
+///
 /// Pure, and separate from `Cli::parse` for that reason: what a command line
 /// means is worth testing without a repository, a container or a clock.
 ///
@@ -383,19 +388,28 @@ enum Cmd {
         #[arg(long)]
         from: Option<std::path::PathBuf>,
     },
+    // The verb for what `--new` did. A flag is the wrong shape for the
+    // commonest thing a person does here, and a *global* flag doubly so: it
+    // can be typed anywhere omh's own flags are taken, including after a
+    // session prefix that contradicts it — `omh s01 --new claude` resumes
+    // `s01` and drops the flag without a word, because the prefix lands in
+    // `cli.session` after clap has already checked `conflicts_with`.
+    //
+    // `omh new` cannot be told that: a named session is refused outright. It
+    // also does not inherit the bare name's flag rules. `omh claude --json`
+    // has to be *guessed* at — `passthrough` refuses omh's long flags and
+    // leaves shorts alone, a judgement about which mistake is likelier. Here
+    // the separator answers instead: before `--` is omh's, after it is the
+    // harness's, and nothing has to be inferred.
+    //
+    // Deliberately *not* a doc comment: clap prints those, and the reader of
+    // `--help` is not the reader of this paragraph.
     /// Start a session and run a harness in it.
-    ///
-    /// The verb for what `--new` did. A flag is the wrong shape for the
-    /// commonest thing a person does here, and a *global* flag doubly so: it
-    /// can be typed anywhere, including after a session prefix that
-    /// contradicts it, where `session::pick` resolves the pair by dropping one.
-    ///
-    /// Lives beside the bare-name slot rather than replacing it, so both
-    /// spellings work until the catch-all goes.
     New {
+        /// The harness to start: `claude`, `opencode`, `omp`.
         harness: String,
-        /// Everything after the harness name belongs to the harness.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        /// Arguments for the harness, after a `--`.
+        #[arg(last = true)]
         args: Vec<String>,
     },
     /// Anything else is a harness: `omh claude`, `omh opencode`.
@@ -766,11 +780,7 @@ fn consumes_session(cmd: &Cmd) -> bool {
         // comment — every session's graph lives in one volume. It took
         // `cli.session` and bound it `_id`, which is how it came to claim
         // otherwise in the comment above `Cmd::Graph`.
-        // A fresh session's id is generated, so there is nothing for a named
-        // one to mean — the same contradiction `--new` refuses by conflicting
-        // with `--session`.
-        Cmd::New { .. }
-        | Cmd::Graph { .. }
+        Cmd::Graph { .. }
         | Cmd::Init
         | Cmd::Doctor { .. }
         | Cmd::Why { .. }
@@ -780,7 +790,13 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Repo { .. }
         | Cmd::Use { .. }
         | Cmd::Unuse { .. }
-        | Cmd::Import { .. } => false,
+        | Cmd::Import { .. }
+        // A fresh session's id is generated, so there is nothing for a named
+        // one to mean. `--new` refuses the same contradiction, but only when
+        // it is spelled `--session`: `conflicts_with` is checked by clap, and
+        // an `sNN` prefix lands in `cli.session` after that. Refused here
+        // however the id arrived.
+        | Cmd::New { .. } => false,
     }
 }
 
@@ -972,24 +988,39 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         // about the command line, and answering it after resolving an adapter
         // would report an unknown harness for a mistyped flag.
         Cmd::New { harness, args } => {
-            let argv: Vec<String> = std::iter::once(harness.clone())
-                .chain(args.iter().cloned())
-                .collect();
+            // The `--` is rebuilt, not dropped. `passthrough` is what decides
+            // whose a flag is, and it decides by looking for that separator —
+            // handing it `[claude, --json]` where the user typed
+            // `claude -- --json` asks it the wrong question, and it answered
+            // by refusing a flag the user had already assigned.
+            let mut argv = vec![harness.clone()];
+            if !args.is_empty() {
+                argv.push("--".to_string());
+                argv.extend(args.iter().cloned());
+            }
             run(
                 &cwd,
                 &passthrough(&argv, &omh_globals())?,
-                cli,
-                None,
-                Start::Fresh,
+                session::Start::Fresh,
+                cli.account.as_deref(),
+                cli.dry_run,
                 ctx,
             )
         }
         Cmd::Run(argv) => run(
             &cwd,
             &passthrough(argv, &omh_globals())?,
-            cli,
-            cli.session.as_deref(),
-            if cli.new { Start::Fresh } else { Start::Resume },
+            // Naming one still beats asking for a fresh one, and now it says
+            // so here rather than inside `pick`. The pairing is only reachable
+            // through the `--new` flag, which the next phase deletes; `omh new`
+            // cannot be handed a session at all.
+            match (cli.session.as_deref(), cli.new) {
+                (Some(id), _) => session::Start::Named(id),
+                (None, true) => session::Start::Fresh,
+                (None, false) => session::Start::Resume,
+            },
+            cli.account.as_deref(),
+            cli.dry_run,
             ctx,
         ),
     }
@@ -1233,7 +1264,13 @@ fn attach(
     }
 
     std::fs::create_dir_all(paths.worktrees())?;
-    let id = session::pick(&paths.worktrees(), id, false);
+    // `Resume`, said outright. Attaching an editor to a session that does not
+    // exist yet is not a thing anyone asks for, and the bare `false` in the
+    // third position said so only by where it sat.
+    let id = session::pick(
+        &paths.worktrees(),
+        id.map_or(session::Start::Resume, session::Start::Named),
+    );
     let session = Session::new(&paths.worktrees(), id);
     session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
     carry_in(&paths, &session, ctx)?;
@@ -3902,33 +3939,18 @@ fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
     Ok(())
 }
 
-/// Which session a launch is asking for.
-///
-/// Not to be confused with `Landing`, which is how a session's *work* reaches
-/// a branch. This is which session the work happens in.
-///
-/// A bool called `new`, threaded from a global flag, said it badly: at the
-/// point it was read — `session::pick(dir, explicit, new)` — nothing recorded
-/// that `explicit` silently wins and `new` is never consulted. Two callers now
-/// name what they want, and the one place that resolves it says which.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Start {
-    /// A session that does not exist yet.
-    Fresh,
-    /// The one already here, or a fresh one if there is none.
-    Resume,
-}
-
 fn run(
     cwd: &std::path::Path,
     argv: &[String],
-    cli: &Cli,
-    // Taken explicitly rather than read off `cli`, so a caller that cannot
-    // have one says so by passing `None`. `omh new` is that caller: dispatch
-    // refuses a named session before reaching here, and reading `cli.session`
-    // anyway would leave the two facts agreeing only by luck.
-    session: Option<&str>,
-    start: Start,
+    // Named individually rather than handed the whole `Cli`: a function
+    // holding one can read `cli.session` where the dispatch scan cannot see
+    // it, which is how `run` came to do it in the first place.
+    //
+    // One parameter, not two. `Start` carries the id when there is one, so
+    // there is no second argument that could disagree with it.
+    start: session::Start<'_>,
+    account: Option<&str>,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -3942,13 +3964,8 @@ fn run(
     // Which identity this session runs as. Ambiguity is an error rather than a
     // guess: silently using the wrong account is expensive and invisible.
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(
-        &paths,
-        &adapter,
-        cli.account.as_deref(),
-        configured.as_deref(),
-    )?
-    .map(|a| auth::dir(&paths, name, &a));
+    let account = auth::resolve_for_launch(&paths, &adapter, account, configured.as_deref())?
+        .map(|a| auth::dir(&paths, name, &a));
     if let Some(account_dir) = &account {
         // The mountpoints have to exist before docker binds over them.
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
@@ -3968,7 +3985,7 @@ fn run(
     // container and writes `~/.omh/facts.json`. What is already cached is used,
     // so the plan it prints is the plan a real launch would build from the same
     // knowledge.
-    if !cli.dry_run {
+    if !dry_run {
         if let Ok(backend) =
             runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))
         {
@@ -3986,7 +4003,7 @@ fn run(
 
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
-        staging: if cli.dry_run {
+        staging: if dry_run {
             container::Staging::Skip
         } else {
             container::Staging::Apply
@@ -4006,10 +4023,10 @@ fn run(
     };
 
     std::fs::create_dir_all(paths.worktrees())?;
-    if let Some(explicit) = session {
+    if let session::Start::Named(explicit) = start {
         session::validate_id(explicit)?;
     }
-    let id = session::pick(&paths.worktrees(), session, start == Start::Fresh);
+    let id = session::pick(&paths.worktrees(), start);
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;
@@ -4044,7 +4061,7 @@ fn run(
         None => format!("{} on {}", adapter.name, session.label()),
     };
 
-    if cli.dry_run {
+    if dry_run {
         ctx.say(&report::DryRun {
             status: status_line,
             worktree: session.worktree.display().to_string(),
@@ -9649,6 +9666,55 @@ because = "a fixture"
         );
     }
 
+    /// Only `dispatch` holds the whole `Cli`.
+    ///
+    /// This is what makes the scan below exact rather than hopeful. That scan
+    /// reads the dispatch arms and asks which of them name `cli.session`; it
+    /// can only be right if no arm hands the whole `Cli` to something that
+    /// reads the session out of sight. `run` used to do exactly that, which is
+    /// why the scan once carried a second clause matching a wholesale `cli`.
+    ///
+    /// The clause was formatting-dependent — it looked for `", cli,"`, so
+    /// rustfmt breaking an argument list across lines silently disarmed it —
+    /// and it was removed on the belief that it would otherwise misfire.
+    /// Measured afterwards, it would not have: it had already been disarmed by
+    /// exactly that formatting change, so removing it changed nothing and
+    /// proved nothing.
+    ///
+    /// This replaces it with something that does not depend on how a line is
+    /// wrapped. Keep the `Cli` in one function and the session cannot be read
+    /// anywhere the scan does not look.
+    #[test]
+    fn only_dispatch_is_handed_the_whole_cli() {
+        let whole = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
+        )
+        .unwrap();
+        // The production half only. Below the test module the same spelling
+        // appears inside this very scan, and a guard that counts itself is a
+        // guard that can never reach one.
+        let body = whole
+            .split_once("#[cfg(test)]")
+            .expect("the test module is still spelled this way")
+            .0;
+        let holders: Vec<&str> = body
+            .match_indices("cli: &Cli")
+            .map(|(at, _)| {
+                // Walk back to the `fn` that owns this parameter.
+                let head = &body[..at];
+                let start = head.rfind("fn ").unwrap_or(0);
+                let name = &body[start + 3..at];
+                name.split(['(', '<']).next().unwrap_or("").trim()
+            })
+            .collect();
+        assert_eq!(
+            holders,
+            vec!["dispatch"],
+            "a function other than `dispatch` takes the whole `Cli`, so it can \
+             read `cli.session` where the dispatch scan cannot see it"
+        );
+    }
+
     /// `omh <name>` treats any unknown word as a harness, so a command that is
     /// not in RESERVED could be shadowed by an adapter of the same name. This
     /// keeps the list honest without anyone remembering to update it.
@@ -9710,13 +9776,16 @@ because = "a fixture"
 
         let mut reads = std::collections::BTreeSet::new();
         let mut arm: Option<(String, String)> = None;
-        // Naming `cli.session` is the whole rule. It did have a second half —
-        // *or hands the whole `cli` down* — because `run` used to read the
-        // session out of `cli` itself, which no scan of this block could see.
-        // `run` takes it as a parameter now, so a caller that cannot have one
-        // passes `None` and says so here. The looser rule would have called
-        // `omh new` a session command, since it passes `cli` for the account
-        // and the dry-run flag.
+        // Naming `cli.session` is the whole rule, and it is exact only because
+        // `only_dispatch_is_handed_the_whole_cli` holds: nothing outside this
+        // function has a `Cli` to read a session out of.
+        //
+        // It once carried a second half — *or hands the whole `cli` down* —
+        // for the days when `run` did. That clause matched the literal
+        // `", cli,"`, so rustfmt wrapping an argument list across lines
+        // disarmed it without a word, and it was disarmed by the time anyone
+        // thought to remove it. Removing it therefore changed nothing, which
+        // is also why removing it proved nothing.
         let consuming = |text: &str| text.contains("cli.session");
         for line in dispatch.lines() {
             if line == "    }" {
@@ -10014,6 +10083,62 @@ because = "a fixture"
     fn short_flags_belong_to_the_harness() {
         let given = argv(&["claude", "-s", "something"]);
         assert_eq!(passthrough(&given, &omh_globals()).unwrap(), given);
+    }
+
+    /// Under `omh new`, `--` is how a flag reaches the harness — and the only
+    /// way.
+    ///
+    /// The bare-name form has to guess: `omh claude --json` could be a request
+    /// to omh or an argument for claude, and `passthrough` resolves it by
+    /// refusing omh's own long flags and leaving shorts alone. That rule is a
+    /// judgement about which mistake is likelier, and `src/main.rs`'s own
+    /// comment on it admits as much.
+    ///
+    /// `omh new` does not guess. Everything before `--` is omh's, everything
+    /// after it is the harness's, and there is no third category. So
+    /// `omh new claude --json` reports omh as JSON, while
+    /// `omh new claude -- --json` hands `--json` to claude — including for
+    /// flags omh also has, which is the case the bare form cannot express at
+    /// all without `--` either.
+    ///
+    /// This is a parse-level test on purpose: it is the parser that decides
+    /// which side of the separator a token lands on, and a parse test runs on
+    /// every platform rather than only where a container runtime exists.
+    #[test]
+    fn omh_new_gives_the_harness_only_what_follows_a_double_dash() {
+        let after = Cli::try_parse_from(cli_argv(&["new", "claude", "--", "--json"]))
+            .expect("`--` is how a harness flag is spelled here");
+        assert!(
+            !after.json,
+            "`--json` after `--` is claude's, so omh must not have taken it"
+        );
+        match after.cmd {
+            Cmd::New { harness, args } => {
+                assert_eq!(harness, "claude");
+                assert_eq!(args, vec!["--json".to_string()], "and claude gets it");
+            }
+            _ => panic!("expected a launch"),
+        }
+
+        // Before the separator it is omh's, and that is not a bug to be fixed
+        // later — it is what makes the separator mean something.
+        let before = Cli::try_parse_from(cli_argv(&["new", "claude", "--json"]))
+            .expect("omh's own flag, in omh's own position");
+        assert!(before.json, "`--json` before `--` is omh's");
+        match before.cmd {
+            Cmd::New { args, .. } => assert!(args.is_empty(), "nothing was handed on"),
+            _ => panic!("expected a launch"),
+        }
+
+        // A short flag omh also has. The bare-name form leaves shorts to the
+        // harness by a rule; here the separator says so outright.
+        let short = Cli::try_parse_from(cli_argv(&["new", "claude", "--", "-a", "work"]))
+            .expect("a short flag after the separator");
+        assert!(short.account.is_none(), "`-a` after `--` is claude's");
+        match short.cmd {
+            Cmd::New { args, .. } => assert_eq!(args, vec!["-a".to_string(), "work".to_string()]),
+            _ => panic!("expected a launch"),
+        }
     }
 
     /// The escape hatch, for the day a harness really does have `--new`.

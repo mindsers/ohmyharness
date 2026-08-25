@@ -2,6 +2,7 @@
 
 ```
 omh init                          set this repo up
+omh new <harness> [-- args…]  start a session and run an agent in it
 omh <harness> [args…]      claude · omp · opencode   ← bare name = run an agent
 omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
@@ -432,6 +433,24 @@ $ omh claude -- --new      # claude's, even though omh has one too
 
 Long forms only — `-s` and `-a` are left to the harness, which is likelier to
 want them.
+
+**`omh new` does not guess.** The bare name has to: `omh claude --json` could
+be meant for either, and the rule above is a judgement about which mistake is
+likelier. Under `omh new` the separator decides instead — everything before
+`--` is omh's, everything after it is the harness's, and there is no third
+category.
+
+```console
+$ omh new claude --json          # omh's, reported as JSON
+$ omh new claude -- --json       # claude's
+$ omh new claude -- -a work      # claude's, short flags included
+$ omh new claude --resume x      # an error: omh has no --resume
+```
+
+That last line is the trade. The bare name forwards an unknown flag on the
+assumption it belongs to the harness; `omh new` refuses it, because a flag it
+cannot place is likelier to be a typo than a gift. Put it after `--` and it
+goes through untouched.
 
 ### `omh sNN log` — what the agent has committed
 

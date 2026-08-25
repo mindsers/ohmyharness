@@ -1701,6 +1701,69 @@ fn a_new_launch_never_lands_in_a_session_that_already_exists() {
     );
 }
 
+/// `--` is how a flag reaches the harness under `omh new`, and the only way.
+///
+/// The bare-name form has to guess. `omh claude --json` might be omh's or
+/// claude's, and `passthrough` decides by refusing omh's long flags and
+/// leaving shorts alone — a judgement about which mistake is likelier, which
+/// its own comment admits.
+///
+/// `omh new` does not guess: before `--` is omh's, after it is the harness's,
+/// and there is no third category. That makes the escape hatch load-bearing
+/// rather than a curiosity, so it is tested end to end rather than only at the
+/// parser — the parser was already right, and the argv rebuilt for the launch
+/// was dropping the separator on the floor.
+///
+/// `#[ignore]`d because it needs git and a container runtime to reach `run()`.
+/// CI's linux job runs `--include-ignored`, which is where this bites.
+#[test]
+#[ignore]
+fn omh_new_hands_the_harness_what_follows_a_double_dash() {
+    let sb = sandbox();
+    sb.git_init();
+    assert!(
+        sb.omh(&["init"]).status.success(),
+        "init must set the repo up"
+    );
+
+    // A flag omh also has. After `--` it is unambiguously the harness's, and
+    // this is the case the bare-name form cannot express without `--` either.
+    let out = sb.omh(&["--dry-run", "new", "claude", "--", "--json"]);
+    let plan = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "`--` is not a refusal: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        plan.contains("--json"),
+        "claude never got the flag that was handed to it: {plan}"
+    );
+    assert!(
+        !plan.trim_start().starts_with('{'),
+        "and omh did not take it for itself — this is a human report: {plan}"
+    );
+
+    // Before the separator it is omh's. Not a bug to fix later: it is what
+    // makes the separator mean anything.
+    let mine = sb.omh(&["--dry-run", "new", "claude", "--json"]);
+    let doc = String::from_utf8_lossy(&mine.stdout).to_string();
+    assert!(
+        doc.trim_start().starts_with('{'),
+        "`--json` before `--` is omh's: {doc}"
+    );
+
+    // And an option omh does not have is a mistake, not a silent forward.
+    // Without this, `omh new claude --resume x` looks like it worked while
+    // `--resume` reached a harness that was never told about it.
+    let stray = sb.omh(&["new", "claude", "-x"]);
+    assert!(
+        !stray.status.success(),
+        "an option before `--` has to be omh's or an error: {}",
+        String::from_utf8_lossy(&stray.stdout)
+    );
+}
+
 /// The launcher says what this repo is *not* using from your catalogue.
 ///
 /// Same wire, same gap: `notice::selection` and `Selection::unselected` are both
@@ -2702,6 +2765,12 @@ fn a_session_named_first_is_never_silently_dropped() {
     for line in [
         vec!["s01", "why", "codegraph"],
         vec!["--session", "s01", "ls"],
+        // A fresh session's id is generated, so naming one is a contradiction
+        // rather than a scope to honour. This is also what lets `omh new`
+        // hand `run` a bare `None`: if the refusal above ever stopped
+        // covering it, that `None` would start a *different* session than the
+        // one named, in silence.
+        vec!["s01", "new", "claude"],
     ] {
         let out = sb.omh(&line);
         let printed = String::from_utf8_lossy(&out.stdout).to_string();
