@@ -48,7 +48,8 @@ import = "$HOME/.claude/skills"
 #
 # Mounted over the worktree rather than written into it, the way `rules` is, so
 # git has nothing to report. That does mean the mount hides a project's own
-# `.mcp.json`: `omh config mcp import` is how those servers come along, deliberately a
+# `.mcp.json`: `omh config mcp import` is how those servers come along,
+# deliberately a
 # command someone runs rather than a merge that happens quietly.
 [capabilities.mcp]
 path   = "/work/.mcp.json"

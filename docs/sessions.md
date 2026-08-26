@@ -237,10 +237,9 @@ file, and nothing sitting between you and the harness.
 
 **Open question.** Watching several things in one session — agent, dev server,
 shell — is a real want that `dtach` cannot serve. Whether that calls for tmux
-inside the sandbox, host-side panes over SSH, or a supervisor model (a verb that starts a
-service and one that shows its output, for the things you do not watch) is
-unresolved. Recorded rather than
-answered.
+inside the sandbox, host-side panes over SSH, or a supervisor model — a verb
+that starts a service and another that shows its output, for the things you do
+not watch — is unresolved. Recorded rather than answered.
 
 ## Lifecycle
 

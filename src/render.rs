@@ -208,7 +208,8 @@ fn mcp(render: Render, servers: &BTreeMap<String, Server>) -> Result<String> {
 
 /// Inverse of `mcp`: read a harness's own config back into canonical form.
 ///
-/// `omh config mcp import` exists because nobody retypes MCP servers they already have.
+/// `omh config mcp import` exists because nobody retypes MCP servers they
+/// already have.
 /// Every format that renders must also parse, and the pair must round-trip —
 /// otherwise import silently drops fields the renderer knows how to write.
 pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {

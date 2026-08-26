@@ -1709,7 +1709,8 @@ impl Report for Resynced {
 ///
 /// One vocabulary across all three importers — servers, catalogue entries,
 /// hooks — because they are the same five outcomes wearing different words.
-/// `omh config mcp import` said `already identical` where `omh import skills` said
+/// `omh config mcp import` said `already identical` where `omh import skills`
+/// said
 /// `already in your catalogue`, and a reader had to learn both to read either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {

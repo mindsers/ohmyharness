@@ -3088,7 +3088,7 @@ fn importable(paths: &Paths, harnesses: &[String]) -> Vec<String> {
             Err(e) => {
                 out.push(format!(
                     "import     {name} has hooks in {} that omh could not read \
-                     ({e:#}) — omh import hooks {name} to see why",
+                     ({e:#}) — omh import hooks {name}  to see why",
                     source.display()
                 ));
                 continue;
@@ -4547,8 +4547,8 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 
                 // The stack layer, through the same function every launch
                 // reads — so what `init` reports built is what `omh new` and
-                // `omh sNN resume` run,
-                // by construction rather than by two implementations agreeing.
+                // `omh sNN resume` run, by construction rather than by two
+                // implementations agreeing.
                 //
                 // Re-resolved from disk rather than reusing `recorded`, which
                 // is the committed table alone: `record_resolution` has just
@@ -5129,8 +5129,9 @@ fn measure(
             // Reported and swallowed, never fatal. This is a cache beside the
             // catalogue; a read-only home, a full disk or a `facts.json`
             // somebody replaced with a directory would otherwise abort every
-            // `omh new`, `omh sNN resume`, `omh attach` and `omh doctor` on the
-            // machine — a launch
+            // `omh new`, `omh sNN resume`, `omh attach`, `omh doctor` and `omh
+            // init` on the machine — every caller of `top_up`, which is all of
+            // them — a launch
             // killed by a file whose entire design premise is that losing it
             // degrades to "nobody has looked". `Facts::load` already treats the
             // read side this way and says why.
@@ -6870,6 +6871,43 @@ mod tests {
         out
     }
 
+    /// Every word that can follow `omh`, taken from the parser rather than
+    /// written down.
+    ///
+    /// Keying admission on the current vocabulary is the thing this file
+    /// forbids, for a stated reason: a guard that only reads words the parser
+    /// still knows cannot see a word *leaving*, and retiring `ls` is exactly
+    /// how two printed lines went stale unnoticed. So this is never the only
+    /// way in — the retired spelling this change caught in `ssh.rs` is not in
+    /// here, by definition, and was admitted by its backticks.
+    ///
+    /// As a *supplement* it reaches what no position can: a literal that opens
+    /// with a command, `"omh use <capability> <name>, or …"`, which sits in the
+    /// same place as omh's error voice and cannot be told apart from it by
+    /// looking at what comes before. The blind spot that buys — a retired verb
+    /// at a literal open — is precisely what
+    /// `nothing_still_offers_a_verb_that_was_retired` reads the whole tree for.
+    /// The two guards compose; neither alone is enough.
+    fn vocabulary() -> std::collections::BTreeSet<String> {
+        use clap::CommandFactory;
+        let mut out: std::collections::BTreeSet<String> = Cli::command()
+            .get_subcommands()
+            .flat_map(|c| {
+                std::iter::once(c.get_name().to_string())
+                    .chain(c.get_all_aliases().map(str::to_string))
+            })
+            .collect();
+        // A scan that read no vocabulary would admit nothing through this arm
+        // and say nothing about it.
+        assert!(
+            out.len() > 10,
+            "clap named {} subcommands, fewer than omh has",
+            out.len()
+        );
+        out.insert("s01".to_string());
+        out
+    }
+
     /// The versioned base sets. `omh why` prints strings out of these, so the
     /// printed-line guard reads them beside the source — it is the one caller.
     fn manifests() -> Vec<std::path::PathBuf> {
@@ -7041,11 +7079,16 @@ mod tests {
             format!("omh {}", "opencode"), // types the retired verb on purpose
             format!("omh {}new", "--"),  // types the retired verb on purpose
             // Retired long enough ago that nothing here was watching them, and
-            // found by hand: `attach` replaced the first two, and the third
-            // has only ever been reachable under `config`. All three were
-            // still being offered — one from inside the file omh writes into
-            // your `~/.ssh/config.d/`, one from a shipped adapter, one from a
-            // script that had been dead for months.
+            // found by hand: `attach` replaced the first two, and the third has
+            // only ever been reachable under `config`. **Two** were still being
+            // offered — one from inside the file omh writes into your
+            // `~/.ssh/config.d/`, one from a shipped adapter.
+            //
+            // The middle one is prophylactic and says so rather than borrowing
+            // the other two's evidence: its last site went with `scripts/
+            // smoke.sh` one commit before this one, so nothing offered it when
+            // this was written. A needle costs nothing; a needle presented as
+            // a catch that never caught anything costs the next reader.
             //
             // Their absence from this list is what let a sweep leave them
             // behind, which is the argument for adding a name here whenever
@@ -7196,43 +7239,42 @@ mod tests {
     /// call `omh s01 diff` a failure and `omh s diff s01` a success, both
     /// backwards.
     ///
-    /// **What is read, and why not more.** A line qualifies by naming a
-    /// session — the rule this started as — or by sitting behind one of three
-    /// delimiters: a backtick, the two-space gutter omh puts before a command
-    /// it wants typed, or the manifest's `remove` field, which `omh why`
-    /// prints verbatim as the way out of a feature. 109 lines qualify.
+    /// **What is read.** 130 command lines, from `src/` above each file's test
+    /// module and from `base/*.toml`, where `omh why` prints a `remove` field
+    /// verbatim as the way out of a feature. A line qualifies by sitting behind
+    /// a backtick, the two-space gutter, the em dash the `import` report
+    /// introduces a command with, or that field — or by opening with a word
+    /// [`vocabulary`] knows, which is the only way to reach a literal that
+    /// begins with a command.
     ///
-    /// The one shape deliberately left out is a literal opening with the bare
-    /// word, because that is omh's error voice — `omh could not read {}`, `omh
-    /// ships no stacks at all`. Admitting it reads 169 lines instead of 109
-    /// and refuses 34, and **not one of the 34 is a defect**: 32 are sentences
-    /// with omh as their subject and two are a hook fixture in `render.rs`.
-    /// Sixty more lines read for no signal at all is the trade being declined.
+    /// The shape left out is a literal beginning with a word omh does *not*
+    /// know, because that is omh's error voice: `omh could not tell`, `omh
+    /// ships`. Admitting it reads four more lines and refuses all four — three
+    /// sentences and `shadow.rs`'s `AUTHOR_NAME`, the git identity the sandbox
+    /// commits as. No defect among them.
     ///
-    /// **The two cuts that are not about position.** A command named without
-    /// the argument the reader supplies is prose — *"Add it with `omh config
-    /// mcp add`"* is not a line to type and never was — and clap says which is
-    /// which, so nothing here keeps a list: `MissingRequiredArgument` is the
-    /// sentence, and every way of naming a command omh does not have lands in
-    /// some other kind. Nine lines sit in that bucket today. Separately, a
-    /// line that is long *and* writes no hole is a sentence: see `LONGEST`.
+    /// **Two cuts that are not about position.** A line whose first word omh
+    /// does not know, run longer than `SENTENCE`, is prose. And a command named
+    /// without the argument the reader supplies is prose — *"Add it with `omh
+    /// config mcp add`"* is not a line to type. clap says which is which, so
+    /// nothing keeps a list; 14 lines sit in that second bucket.
     ///
-    /// **The gap, stated at its real size.** Renaming or retiring a command is
-    /// caught — that lands in `InvalidSubcommand`, verified by mutation. What
-    /// is not caught is **arity drift on a command that stayed**: give `diff`'s
-    /// checkpoint a required argument and every printed bare `omh sNN diff`
-    /// becomes unpasteable with this guard green. That is a live class rather
-    /// than a hypothetical — `diff`'s arity changed once already — and
-    /// `nothing_still_offers_a_verb_that_was_retired` does not cover it either.
+    /// **Where the strictness is not uniform, and why.** That second excuse is
+    /// withheld from any line naming a session, because that is precisely the
+    /// class the rule this replaced asserted `is_ok()` on. Granting it there
+    /// would be a weakening dressed as a widening — the first published version
+    /// of this test did exactly that: making `diff`'s checkpoint required went
+    /// from red under the old rule to green under the new one, with every
+    /// published count still reading *wider*. A
+    /// flag-terminated line is excused an owed value, `omh s commit -m` being
+    /// the point of that one.
     ///
-    /// **Read this before narrowing anything here.** The first version of this
-    /// widening replaced the session rule with the delimiters instead of adding
-    /// to them. It read 66 lines where the rule it replaced read 53, so every
-    /// count said *wider* — while 44 printed lines silently left the scan,
-    /// including all three named in the first paragraph above. Nine mutations
-    /// of real user-facing hints passed; four left the whole suite green. The
-    /// named-file floors below exist because of that, and so does the rule that
-    /// an admission may only ever be added.
+    /// **Read this before narrowing anything here.** Twice now a rewrite of
+    /// this test has replaced a rule instead of adding to one, and twice the
+    /// counts said *wider* while a class left the scan in silence — first 44
+    /// printed lines, then the arity of every command a session line names.
+    /// Neither was caught by the suite. The exact map below exists because of
+    /// that, and so does the rule that an admission is only ever added.
     #[test]
     fn the_lines_omh_prints_are_lines_omh_accepts() {
         let mut files = rust_sources(&["src"]);
@@ -7243,7 +7285,23 @@ mod tests {
         // half that goes quiet when a verb is renamed.
         // The longest command omh accepts, counting the words after `omh`
         // once holes are filled — `omh import <skill> <name> --from <harness>`.
-        const LONGEST: usize = 5;
+        // Longer than any command omh prints whose words are all its own.
+        //
+        // This replaces a cut that called itself "the longest command omh
+        // accepts", which was false twice over: `omh memory remember` with its
+        // three required options is eight words, and `McpCmd::Add` takes
+        // `trailing_var_arg`, so what omh accepts has no length at all. What is
+        // measurable is the corpus this scan reads, and even that is only half
+        // the rule — a long line is called a sentence only when its first word
+        // is neither a session nor a command omh knows, so a broken `omh config
+        // mcp addd …` stays checked however long it runs.
+        //
+        // What that leaves unseen: a *misspelt* verb in a line this long,
+        // behind nothing but a gutter. `omh cnofig mcp add a b c` would read as
+        // prose. Short misspellings — the shape that has actually occurred
+        // here — are checked.
+        const SENTENCE: usize = 3;
+        let vocab = vocabulary();
         let mut qualifying = 0;
         let mut checked: std::collections::BTreeMap<String, usize> = Default::default();
         let mut refused: Vec<String> = Vec::new();
@@ -7275,7 +7333,17 @@ mod tests {
                     }
                 }
             }
-            let body = joined;
+            // Stop at the test module. Everything below it is assertion text
+            // and fixtures, not anything omh prints — and counting it is not
+            // harmless: 24 of the lines this scan called "printed" were test
+            // strings, two of them *this test's own failure messages*, and
+            // three of the per-file floors below sat above the number of real
+            // printed lines in their file. A floor reached by counting the
+            // guard's own prose measures nothing about omh.
+            let body = match joined.find("\nmod tests {") {
+                Some(at) => joined[..at].to_string(),
+                None => joined,
+            };
             // The manifest is read for one field. `omh why` prints `remove`
             // verbatim as the way out of a feature, and nothing else in that
             // file is a line anyone is being told to type — `because` and
@@ -7290,9 +7358,11 @@ mod tests {
             let manifest = file.extension().is_some_and(|e| e == "toml");
             for raw in body.lines() {
                 // Comments describe old spellings on purpose — `session_prefix`
-                // documents all four it replaced.
-                let comment = if manifest { "#" } else { "//" };
-                if raw.trim_start().starts_with(comment) {
+                // documents all four it replaced. The manifest needs no such
+                // skip: a `#` line cannot open with `remove `, so the gate just
+                // below drops it anyway, and a second rule that fires on
+                // nothing reads as protection that is not there.
+                if !manifest && raw.trim_start().starts_with("//") {
                     continue;
                 }
                 if manifest {
@@ -7334,6 +7404,26 @@ mod tests {
                     // exact defect this whole test was rewritten to remove.
                     let before = &raw[..at];
                     let trimmed = before.trim_end();
+                    // **Mutating one of these looks like it proves nothing.**
+                    // Disable any single arm below and the suite stays green,
+                    // because on a tree with no defects every line they admit
+                    // is also admitted by `names_a_command` — `omh attach` is
+                    // reachable by its backticks *and* by being a real verb.
+                    //
+                    // That is what they are for. A positional arm earns its
+                    // place only on a line the vocabulary cannot vouch for,
+                    // which is to say a broken one, which is to say never in a
+                    // green tree. So the mutation has to be a pair: break a
+                    // printed line *and* remove the arm that reaches its
+                    // position. Do that and the map below drops that file's
+                    // count and fails.
+                    //
+                    // Two clauses were deleted from this test for admitting
+                    // nothing, and the difference is worth holding onto: those
+                    // could not admit anything *even paired with a defect*.
+                    // These can. A green single-mutation is not evidence of
+                    // dead weight here, and reading it as such is how the arm
+                    // that catches the next retired spelling gets removed.
                     let delimited =
                         // Quoted in prose: *stop it with `omh {} down`*.
                         trimmed.ends_with('`')
@@ -7343,13 +7433,32 @@ mod tests {
                         // spaces, the same separator the stop list below reads
                         // from the other end.
                         || before.ends_with("  ")
+                        // The em dash omh introduces a command with, in the
+                        // `import` report: *{name} has 3 hooks omh can read —
+                        // omh import hooks {name}*. It was already a stop, so a
+                        // command was being cut *at* one while never being
+                        // admitted *after* one — an asymmetry with no argument
+                        // behind it, and two real hints on the wrong side of it.
+                        || trimmed.ends_with('—')
                         // `remove = "omh …"`, which `omh why` prints verbatim.
                         || (manifest && trimmed.ends_with('"'));
                     let rest = &raw[at + "omh ".len()..];
                     // A printed line ends where the message resumes: a newline
-                    // escape, the end of the literal, backticked prose, the
-                    // separator `omh s` uses, or the column padding that lines
-                    // an explanation up beside it.
+                    // escape, the end of the literal, backticked prose, or the
+                    // column padding that lines an explanation up beside it.
+                    //
+                    // A comma stops only when a space follows it. Written bare
+                    // it also fired inside `omh s commit --keep 1,3-4`, cutting
+                    // it to `--keep 1` and deleting the range syntax that
+                    // `session_prefix`'s own notes record as the case which
+                    // settled that behaviour. `, ` is prose resuming; `,3` is
+                    // part of the argument.
+                    //
+                    // `·` went altogether: it was the nearest stop for no
+                    // extraction in the tree, because the one line carrying it
+                    // is cut by the gutter first. A stop can only shorten, and
+                    // a shorter command parses more easily, so a stop that
+                    // earns nothing is a stop that can only hide.
                     // A stop can only shorten, and a shorter command is
                     // strictly likelier to parse — `omh config mcp rm —
                     // codegraph` would be checked as `omh config mcp rm` and
@@ -7357,7 +7466,7 @@ mod tests {
                     // because the manifest separates a command from its
                     // explanation with one, and it is omh's most-used
                     // punctuation, so this is the stop most worth watching.
-                    let end = ["\\n", "\"", "`", "·", "—", "  ", ","]
+                    let end = ["\\n", "\"", "`", "—", "  ", ", "]
                         .iter()
                         .filter_map(|stop| rest.find(stop))
                         .min()
@@ -7367,25 +7476,29 @@ mod tests {
                     // session id is the value that makes the line whole.
                     let filled = regex_lite_fill(line);
                     let words: Vec<&str> = filled.split_whitespace().collect();
-                    // A line naming a session is read wherever it sits, with
-                    // no delimiter asked for. This is the rule the guard had
-                    // before any of the above, and keeping it is what makes the
-                    // scan a superset of the one it replaced rather than a
-                    // trade: the delimiters are an *addition*, and a rule that
-                    // admits is never allowed to become a rule that excludes.
+                    // Naming a session is no longer a way *in*. It was, and it
+                    // was the rule this whole test began as — but `s` and
+                    // `sessions` are subcommands like any other, so
+                    // `names_a_command` already admits every line this used to,
+                    // measured both on the tree as it stands and on one where
+                    // the `s` alias has been retired. A second clause admitting
+                    // nothing is the defect this test keeps being rewritten to
+                    // remove; it does not get to stay just because it reads
+                    // reassuringly.
                     //
-                    // Writing it as a replacement is what went wrong the first
-                    // time. The four cuts above look total — quoted, column,
-                    // gutter, manifest — and they drop forty-four printed lines
-                    // this arm keeps, among them all three the paragraph at the
-                    // top of this test names as the reason it exists.
+                    // It survives for the verdict instead, where it decides how
+                    // strictly a line is judged. That is load-bearing: see the
+                    // excuse table below.
                     //
-                    // `s01` rather than a pattern: the fill below has already
+                    // `s01` rather than a pattern: the fill above has already
                     // turned every hole into that id, so a line naming any
                     // session names this one.
                     let names_a_session =
                         matches!(words.first(), Some(&"s" | &"sessions" | &"s01"));
-                    if !delimited && !names_a_session {
+                    let names_a_command = words
+                        .first()
+                        .is_some_and(|w| vocab.contains(&w.to_string()));
+                    if !delimited && !names_a_command {
                         continue;
                     }
                     // A source line that types a retired spelling on purpose is
@@ -7405,37 +7518,60 @@ mod tests {
                     // was narrowed. The false positive that prompted that —
                     // `omh {arg} {}` inside `passthrough`, whose first hole is
                     // a flag — is gone with the function.
-                    let a_command = words
-                        .last()
-                        .is_some_and(|w| !w.starts_with('-') && *w != "…");
-                    if !a_command {
+                    // An ellipsis means *whatever you were typing* — `omh s01
+                    // …` stands for a line, not a line. Nothing else is dropped
+                    // on the shape of its last word.
+                    //
+                    // A trailing flag used to be dropped here too, justified by
+                    // the five `shadow.rs` messages that say *take the files as
+                    // they stand with `omh s commit -m`*, where the value the
+                    // reader supplies is the point. That reasoning covers the
+                    // six lines ending in an option that owes a value. It threw
+                    // away twenty-two more that owe nothing and are complete as
+                    // printed — `omh use --all`, `omh s down --all`, `omh sNN
+                    // log --turns`, `omh s commit --skip-carried`. Each was
+                    // breakable with the whole suite green.
+                    //
+                    // So the shape of the last word is not the question; clap
+                    // is asked instead, below, and the only excuse a
+                    // flag-terminated line gets is the one that means *you owe
+                    // a value here*.
+                    let ends_in_a_flag = words.last().is_some_and(|w| w.starts_with('-'));
+                    if words.last().is_some_and(|w| *w == "…") {
                         continue;
                     }
-                    // Long and hole-free is a sentence, not a command.
+                    // Unknown and long is a sentence, not a command.
                     //
-                    // omh indents prose under a heading with the same `\n  `
-                    // it indents a column with — *"omh has no rationale for
-                    // this one"* — so padding alone does not separate the
-                    // error voice from a line to type, and four sentences came
-                    // through the cuts above. What separates them is not where
-                    // they sit but what they are: every command omh prints is
-                    // either short or writes a hole for the reader to fill,
-                    // and no sentence does both.
+                    // omh indents prose under a heading with the same `\n  ` it
+                    // indents a column with — *"omh has no rationale for this
+                    // one"* — so position alone does not separate the error
+                    // voice from a line to type. What separates them is what
+                    // they are: a line whose first word omh does not know, run
+                    // out longer than any command omh prints.
                     //
-                    // Five words is the longest omh accepts, measured rather
-                    // than guessed, and the assertion below is what keeps that
-                    // true: a skipped line that *parses* is a command longer
-                    // than this cut, and says so. The number cannot rot
-                    // quietly — only loudly.
-                    let a_sentence = words.len() > LONGEST && !line.contains(['{', '<']);
+                    // Both halves are needed. Length alone called a broken six-
+                    // word `omh config mcp addd …` a sentence, which a reviewer
+                    // planted and the guard swallowed. Vocabulary alone would
+                    // dismiss `omh attatch`, which is the whole point.
+                    //
+                    // The assertion is the valve: a line skipped as prose that
+                    // omh nonetheless *accepts* is a command this cut is now
+                    // wrong about, and it says so rather than going quiet. It
+                    // asks the same way the real check does, through
+                    // `session_prefix` — asking `Cli` alone made it vacuous for
+                    // every session line, since `omh s01 diff` never parses raw.
+                    let a_sentence = !names_a_command && words.len() > SENTENCE;
                     if a_sentence {
+                        let (_, probe) = session_prefix(
+                            std::iter::once("omh")
+                                .chain(words.iter().copied())
+                                .map(str::to_string)
+                                .collect(),
+                        );
                         assert!(
-                            Cli::try_parse_from(
-                                std::iter::once("omh").chain(words.iter().copied())
-                            )
-                            .is_err(),
+                            Cli::try_parse_from(&probe).is_err(),
                             "`omh {line}` is {} words and omh accepts it, so the cut at \
-                             {LONGEST} words is now wrong — raise it",
+                             {SENTENCE} words is now wrong",
                             words.len()
                         );
                         continue;
@@ -7455,8 +7591,36 @@ mod tests {
                     // so nothing here has to keep a list of which is which:
                     // every way of naming a command omh does not have lands in
                     // some other kind.
+                    // **Only where the rule this replaced did not assert.**
+                    // That rule read session lines and demanded `is_ok()` of
+                    // them, full stop. Tolerating a missing argument on those
+                    // too is a weakening dressed as a widening: make `diff`'s
+                    // checkpoint required and `omh s diff {id}` — one of the
+                    // three lines the paragraph at the top names — goes from
+                    // red under the old rule to green under this one. Every
+                    // line the tolerance is for is a sentence in prose, and no
+                    // sentence in prose opens with a session, so the gate costs
+                    // nothing and closes the hole.
+                    let excused: &[clap::error::ErrorKind] = match (names_a_session, ends_in_a_flag)
+                    {
+                        // `omh s commit -m` — the option is real and the value
+                        // is the reader's to write.
+                        (true, true) => &[clap::error::ErrorKind::InvalidValue],
+                        // The same, plus prose naming a command without its
+                        // arguments: `config::Layer::Shared` renders as the
+                        // label `omh repo set --shared`, which is what to type
+                        // *into*, not a line to paste.
+                        (false, true) => &[
+                            clap::error::ErrorKind::InvalidValue,
+                            clap::error::ErrorKind::MissingRequiredArgument,
+                        ],
+                        // Prose naming a command, never a session.
+                        (false, false) => &[clap::error::ErrorKind::MissingRequiredArgument],
+                        // What the rule this replaced demanded, unchanged.
+                        (true, false) => &[],
+                    };
                     if let Err(e) = Cli::try_parse_from(&argv) {
-                        if e.kind() != clap::error::ErrorKind::MissingRequiredArgument {
+                        if !excused.contains(&e.kind()) {
                             refused.push(format!(
                                 "{}: `omh {line}` — {:?}",
                                 file.file_name().unwrap().to_string_lossy(),
@@ -7474,32 +7638,51 @@ mod tests {
              does not accept: {refused:#?}",
             refused.len()
         );
-        // Named files, not a total — the same reason `the_whole_tree` gives
-        // for naming `memory/tools.rs`, applied to the half it does not cover.
-        // `the_whole_tree` protects the file *list*; this protects line
-        // *recognition*, and a total cannot tell the two apart: at the moment
-        // this was written 42 of the qualifying lines came from three files, so
-        // a floor of 40 was satisfied while every other file in `src/` went
-        // dark. Each name below is a shape the cuts have to keep admitting —
-        // a column inside a literal, a gutter after a sentence, a hint wrapped
-        // across source lines, a backticked suggestion, the manifest.
-        for (file, least) in [
-            ("container.rs", 5),
-            ("main.rs", 40),
-            ("notice.rs", 1),
-            ("report.rs", 12),
-            ("session.rs", 3),
-            ("shadow.rs", 6),
-            ("2026.08.toml", 8),
-        ] {
-            let found = checked.get(file).copied().unwrap_or(0);
-            assert!(
-                found >= least,
-                "the scan checked {found} command lines in {file}, not {least} \
-                 — a cut stopped admitting a shape it used to. Checked: \
-                 {checked:#?}"
-            );
-        }
+        // The whole map, exactly — not a floor per file.
+        //
+        // Three earlier shapes of this assertion each failed the same way. A
+        // total (`qualifying >= 40`) sat green while forty-four lines left the
+        // scan. Per-file floors caught an arm going dark but sat above the real
+        // printed lines in three files, reaching their numbers only by counting
+        // this test's own assertion strings. And a floor, by construction, only
+        // ever notices a *fall*.
+        //
+        // An exact map notices both directions and costs one edit when a
+        // message is added or removed — which is the right price, because that
+        // edit is where somebody reads what the scan now sees. A file dropping
+        // out is loud; a file appearing is loud; a shape quietly leaving one
+        // file while another gains lines is loud, and no floor can see that.
+        let expected: std::collections::BTreeMap<String, usize> = [
+            ("2026.08.toml", 9),
+            ("auth.rs", 2),
+            ("base.rs", 3),
+            ("config.rs", 3),
+            ("container.rs", 4),
+            ("doctor.rs", 1),
+            ("ingest.rs", 2),
+            ("main.rs", 64),
+            ("memory.rs", 2),
+            ("notice.rs", 2),
+            ("render.rs", 1),
+            ("report.rs", 15),
+            ("rules.rs", 1),
+            ("selection.rs", 1),
+            ("session.rs", 4),
+            ("shadow.rs", 11),
+            ("ssh.rs", 1),
+            ("stack.rs", 1),
+            ("why.rs", 3),
+        ]
+        .into_iter()
+        .map(|(f, n)| (f.to_string(), n))
+        .collect();
+        assert_eq!(
+            checked, expected,
+            "the set of command lines this scan reads has changed. If you added \
+             or removed a printed line, update the map. If you did not, a cut \
+             stopped admitting a shape it used to — which is how this test has \
+             gone quiet three times."
+        );
     }
 
     /// `{id}`, `{}`, `<id>`: whichever a message uses, fill it.
@@ -7518,11 +7701,12 @@ mod tests {
         // line depends on this, `omh sNN sync` in `doctor.rs`, and without the
         // fill that line reads as a launch of a harness called `sNN`.
         //
-        // It consumes the first-hole slot, because it *is* the first hole. Not
-        // doing so turned `omh sNN diff {n}` into `omh s01 diff s01` — the
-        // exact refusal the braces pass below was written to prevent, one
-        // spelling along.
-        let mut first = !line.split_whitespace().any(|w| w == "sNN");
+        // It does *not* consume the first-hole slot. A guard against that was
+        // written and then removed for admitting nothing: it would matter only
+        // to a printed line carrying both an `sNN` and a `{}`, and the only
+        // such string in the tree is inside a comment this scan discards. Set
+        // it either way and every line reads the same.
+        let mut first = true;
         let line: String = line
             .split_whitespace()
             .map(|w| if w == "sNN" { "s01" } else { w })
