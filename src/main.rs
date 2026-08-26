@@ -234,7 +234,7 @@ enum Cmd {
     /// Verify a harness actually sees the profile, inside a real sandbox.
     #[command(visible_alias = "d")]
     Doctor {
-        /// Which harness to verify. Without it, the one this repo prefers.
+        /// Which harness to verify. Without it, the one your host says you use.
         #[arg(long)]
         harness: Option<String>,
     },
@@ -261,7 +261,7 @@ enum Cmd {
     Auth {
         harness: String,
         /// Account name, e.g. `personal` or `work`.
-        #[arg(long = "name", default_value = auth::DEFAULT_ACCOUNT)]
+        #[arg(long = "name", short = 'n', default_value = auth::DEFAULT_ACCOUNT)]
         account: String,
     },
     /// What you have here: harnesses, editors, sessions.
@@ -767,7 +767,13 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         Cmd::Init => init(&cwd, ctx),
         Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account, ctx),
         Cmd::Info => info(&cwd, ctx),
-        Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx),
+        Cmd::Doctor { harness } => doctor_cmd(
+            &cwd,
+            harness.as_deref(),
+            cli.account.as_deref(),
+            cli.dry_run,
+            ctx,
+        ),
         Cmd::Why { thing } => why_cmd(&cwd, thing, ctx),
         Cmd::Graph { stop } => graph(&cwd, *stop, ctx),
         Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx),
@@ -1654,6 +1660,7 @@ fn down(
 fn doctor_cmd(
     cwd: &std::path::Path,
     harness: Option<&str>,
+    account: Option<&str>,
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
@@ -1674,9 +1681,20 @@ fn doctor_cmd(
 
     // Credentials are the half no in-process test can reach: whether a token
     // saved here survives depends on how the runtime binds the path.
+    // The same resolver `omh new` uses, asked the same way. It read `None` for
+    // the explicit account and then swallowed the answer with `.unwrap_or(None)`
+    // — so `-a work` went nowhere, and *ambiguous* became *no account*, against
+    // a function whose own doc comment reads "Ambiguity is an error, never a
+    // guess". Two accounts captured, and doctor reported credentials unchecked
+    // in exactly the words it uses for a user who has none.
+    //
+    // That mattered more here than anywhere: credentials are the half no
+    // in-process test can reach, so `credential_checks` below is the only
+    // evidence a token survives the mount, and it was being skipped for anyone
+    // with a second account. The remedy the resolver prints names `-a` — the
+    // flag this was discarding.
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, &adapter, None, configured.as_deref())
-        .unwrap_or(None)
+    let account = auth::resolve_for_launch(&paths, &adapter, account, configured.as_deref())?
         .map(|a| auth::dir(&paths, &name, &a));
 
     // Resolved once and used for both the checks and the plan below, so the
@@ -10580,15 +10598,15 @@ because = "a fixture"
         );
     }
 
-    /// Aliases only earn their keep if they are actually short.
     /// A second thing on the line is a flag, not a position.
     ///
     /// `auth` and `doctor` each took an optional bare word after their first
     /// argument — an account for one, a harness for the other. Two problems.
-    /// A reader cannot tell `omh auth claude work` from `omh auth claude
-    /// personal` without knowing which of the two words is the account, and
-    /// `doctor` is due a `--session` as well, at which point a bare word next
-    /// to two flags is the odd one out.
+    /// A reader cannot tell `omh auth claude work` from `omh auth work claude`
+    /// without already knowing which slot is the account — both are well formed
+    /// under the old grammar and they mean different things. And `doctor` is due
+    /// a `--session` as well, at which point a bare word beside two flags is the
+    /// odd one out.
     ///
     /// Named, both read as what they are, and the account keeps its default
     /// so the common line does not grow.
@@ -10596,9 +10614,14 @@ because = "a fixture"
     fn the_optional_second_word_is_named_rather_than_positional() {
         for line in [
             vec!["omh", "auth", "claude", "--name", "work"],
+            vec!["omh", "auth", "claude", "-n", "work"],
             vec!["omh", "auth", "claude"],
             vec!["omh", "doctor", "--harness", "claude"],
             vec!["omh", "doctor"],
+            // The alias is advertised in two command tables, and nothing
+            // asserted it exists — `every_alias_is_a_single_letter` only checks
+            // that whatever aliases *are* there are one character long.
+            vec!["omh", "d", "--harness", "claude"],
         ] {
             assert!(
                 Cli::try_parse_from(&line).is_ok(),
@@ -10611,6 +10634,14 @@ because = "a fixture"
         for line in [
             vec!["omh", "auth", "claude", "work"],
             vec!["omh", "doctor", "claude"],
+            // The global `-a`/`--account` names the same thing and is refused
+            // here, which is worth pinning because the reason is incidental:
+            // this field is still literally called `account`, so it collides
+            // with the global's clap id. Rename the field and the global would
+            // silently start being accepted-and-discarded on `auth` — measured,
+            // and nothing else in the suite would have noticed.
+            vec!["omh", "auth", "claude", "-a", "work"],
+            vec!["omh", "auth", "claude", "--account", "work"],
         ] {
             let Err(refused) = Cli::try_parse_from(&line) else {
                 panic!("`{}` is not a line omh takes any more", line[1..].join(" "));
@@ -10625,6 +10656,7 @@ because = "a fixture"
         }
     }
 
+    /// Aliases only earn their keep if they are actually short.
     #[test]
     fn every_alias_is_a_single_letter() {
         for sub in Cli::command().get_subcommands() {

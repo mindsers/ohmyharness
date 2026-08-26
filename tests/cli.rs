@@ -3111,6 +3111,119 @@ fn a_session_named_first_is_never_silently_dropped() {
     );
 }
 
+/// `omh doctor` honours the account you name, or says why it cannot.
+///
+/// `doctor` is the only evidence this repo has that an adapter works — AGENTS.md
+/// says so under *honesty about coverage* — and credentials are the half no
+/// in-process test can reach. So a `doctor` that skips the credential checks is
+/// the one failure that leaves nothing behind it.
+///
+/// It skipped them for anyone with more than one account. `doctor_cmd` passed a
+/// hardcoded `None` where `omh new` passes the user's `-a`, and then wrapped the
+/// resolver in `.unwrap_or(None)` — turning a function whose own doc comment
+/// reads *"Ambiguity is an error, never a guess"* into a guess of *no account*.
+/// Two accounts captured, and `omh -a work doctor` printed *"no account, so
+/// credentials go unchecked"*, byte-identical to naming none.
+///
+/// The remedy the resolver prints — *pick one with `-a <name>`* — named the very
+/// flag `doctor` was discarding, and was swallowed before it could print.
+#[test]
+fn doctor_checks_the_credentials_of_the_account_it_was_given() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    sb.account("claude", "personal");
+    sb.account("claude", "work");
+
+    // Progress goes to stderr and the answer to stdout, so both are read: the
+    // claim is about which account omh chose, not about where it said so.
+    // Neither run reaches a verdict — the probe needs a container the sandbox
+    // does not provide — and neither needs to. What is being asked is what omh
+    // decided *before* it got there.
+    let both = |o: &std::process::Output| {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&o.stdout),
+            String::from_utf8_lossy(&o.stderr)
+        )
+    };
+
+    // Ambiguous and unnamed: refused, naming both, rather than proceeding as
+    // though the user had no credentials at all.
+    let said = both(&sb.omh(&["doctor", "--harness", "claude"]));
+    assert!(
+        !said.contains("no account"),
+        "two accounts is not no account: {said}"
+    );
+    assert!(
+        said.contains("work") && said.contains("personal"),
+        "the refusal names the accounts it could not choose between: {said}"
+    );
+
+    // Named: the account asked for is the account checked.
+    let said = both(&sb.omh(&["-a", "work", "doctor", "--harness", "claude"]));
+    assert!(
+        !said.contains("no account"),
+        "`-a` is not discarded on the way to doctor: {said}"
+    );
+    assert!(
+        said.contains("as work"),
+        "and the account named is the one checked: {said}"
+    );
+}
+
+/// A named value reaches the thing it names.
+///
+/// The parser guard beside these proves the *grammar* changed — that `--name`
+/// and `--harness` parse and the bare words are refused. It cannot prove the
+/// value arrives anywhere, and six mutations that drop it on the way to the
+/// handler passed the whole suite: `auth` capturing into `default` whatever you
+/// asked for, `doctor` verifying the harness you did not name, and the account
+/// validator deleted outright.
+///
+/// These two ask the binary instead. Neither needs a container: both refusals
+/// happen before anything is provisioned, which is what makes them cheap enough
+/// to be worth having.
+#[test]
+fn a_named_value_is_the_value_the_command_uses() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_adapters();
+
+    // An account name is a single path component, because credentials mount
+    // **writable** — `../../..` resolves to `~` and hands the agent the real
+    // credential store. `validate_name` is well covered as a function; what was
+    // not covered is that anything still calls it.
+    let traversal = sb.omh(&["auth", "claude", "--name", "../../.."]);
+    let err = String::from_utf8_lossy(&traversal.stderr).to_string();
+    assert!(
+        !traversal.status.success(),
+        "an account name that escapes its directory is refused: {}",
+        String::from_utf8_lossy(&traversal.stdout)
+    );
+    assert!(
+        err.contains("single name") || err.contains("not a path"),
+        "and refused as a path, not as something else that happened to fail: {err}"
+    );
+
+    // The harness named is the harness checked. Dropping the value here makes
+    // `doctor` verify whichever harness the host prefers and report it green —
+    // and `doctor` is the only evidence in this repo that an adapter works.
+    let unknown = sb.omh(&["doctor", "--harness", "definitely-not-a-harness"]);
+    let err = String::from_utf8_lossy(&unknown.stderr).to_string();
+    assert!(
+        !unknown.status.success(),
+        "a harness omh does not have is refused rather than swapped for one it \
+         does: {}",
+        String::from_utf8_lossy(&unknown.stdout)
+    );
+    assert!(
+        err.contains("definitely-not-a-harness"),
+        "and the refusal names what was asked for: {err}"
+    );
+}
+
 /// The inventory answers to `info`, and `ls` is gone from the top level too.
 ///
 /// `ls` was the wide listing's verb and `omh s` took over listing sessions in
@@ -3619,6 +3732,42 @@ fn json_carries_leftovers_as_a_field_and_says_nothing_about_them() {
 // file rather than asserting on a function's return value.
 
 impl Sandbox {
+    /// A captured account, without running the harness's login.
+    ///
+    /// `auth::is_captured` asks the adapter what proves a login and checks each
+    /// of those paths exists under the account's directory, so a fixture has to
+    /// create exactly those — inventing a file would make the fixture stop
+    /// resembling what `omh auth` leaves behind.
+    fn account(&self, harness: &str, name: &str) {
+        let dir = self.home.join(".omh/creds").join(harness).join(name);
+        let src = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("adapters")
+            .join(format!("{harness}.toml"));
+        let toml = std::fs::read_to_string(&src).unwrap();
+        let line = toml
+            .lines()
+            .find(|l| l.trim_start().starts_with("token"))
+            .unwrap_or_else(|| panic!("{harness} declares no `token`, so nothing proves a login"));
+        for tok in line.split(['[', ']']).nth(1).unwrap().split(',') {
+            let tok = tok.trim().trim_matches('"');
+            if tok.is_empty() {
+                continue;
+            }
+            let rel = tok.trim_end_matches('/').trim_start_matches("$HOME/");
+            let at = dir.join(rel);
+            if tok.ends_with('/') {
+                std::fs::create_dir_all(&at).unwrap();
+            } else {
+                std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+                // Not `{}` — that is precisely the placeholder `auth::prepare`
+                // writes, and `holds_content` reads it as *not captured*. A
+                // fixture that wrote it would seed an account omh does not
+                // believe in, and the test would pass over the bug.
+                std::fs::write(&at, "{\"token\":\"seeded-by-the-fixture\"}").unwrap();
+            }
+        }
+    }
+
     /// The shipped adapters, where `Paths::adapters()` looks. `init` would put
     /// them there and needs a container to finish.
     fn seed_adapters(&self) {

@@ -162,8 +162,8 @@ omh new <harness> [-- args…]      start a session, run an agent in it
 omh s01 resume [harness]          rejoin it · claude · omp · opencode
 omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
-omh auth <harness> [--name]       log in once; repeat for several accounts
-omh doctor [--harness]        d   verify a harness really sees your profile
+omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
+omh doctor [--harness <name>] d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
 omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 diff

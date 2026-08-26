@@ -6,8 +6,8 @@ omh new <harness> [-- args…]      start a session, run an agent in it
 omh sessions <id> resume [harness]  rejoin one · claude · omp · opencode
 omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
-omh auth <harness> [--name]       log in once; repeat for several accounts
-omh doctor [--harness]        d   verify a harness really sees your profile
+omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
+omh doctor [--harness <name>] d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
 omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 log
@@ -181,7 +181,7 @@ One service per repo, not per session, and it needs no session to exist. See
 
 ## `omh auth <harness> [--name <account>]`
 
-Runs the harness's own login and captures the result. `account` defaults to
+Runs the harness's own login and captures the result. `--name` defaults to
 `default`.
 
 ```console

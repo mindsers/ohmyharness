@@ -318,8 +318,7 @@ pub fn unfilled(
 ///
 /// `auth::dir` joins this onto the creds root, and credentials mount
 /// **writable** — so `omh auth claude --name ../../..` would resolve to `~`
-/// and hand
-/// the agent the user's real credential store. `Path::join` with an absolute
+/// and hand the agent the user's real credential store. `Path::join` with an absolute
 /// path discards the prefix entirely, which needs no traversal at all.
 pub fn validate_name(name: &str) -> Result<()> {
     let trimmed = name.trim();
