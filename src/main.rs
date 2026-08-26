@@ -7495,9 +7495,7 @@ mod tests {
                     // session names this one.
                     let names_a_session =
                         matches!(words.first(), Some(&"s" | &"sessions" | &"s01"));
-                    let names_a_command = words
-                        .first()
-                        .is_some_and(|w| vocab.contains(&w.to_string()));
+                    let names_a_command = words.first().is_some_and(|w| vocab.contains(*w));
                     if !delimited && !names_a_command {
                         continue;
                     }
