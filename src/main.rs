@@ -259,6 +259,7 @@ enum Cmd {
     },
     /// Log a harness in once. Repeat with different names for several accounts.
     Auth {
+        /// Which harness to log in: `claude`, `opencode`, `omp`.
         harness: String,
         /// Account name, e.g. `personal` or `work`.
         #[arg(long = "name", short = 'n', default_value = auth::DEFAULT_ACCOUNT)]
@@ -298,13 +299,19 @@ enum Cmd {
     Use {
         /// One of rules, skills, mcp, commands, subagents, hooks.
         capability: Option<String>,
+        /// Which entry. Without it, everything the catalogue has of that kind.
         name: Option<String>,
         /// Resync every list to the whole catalogue.
         #[arg(long)]
         all: bool,
     },
     /// Stop using a catalogue entry here.
-    Unuse { capability: String, name: String },
+    Unuse {
+        /// One of rules, skills, mcp, commands, subagents, hooks.
+        capability: String,
+        /// Which entry to drop from this repo's list.
+        name: String,
+    },
     /// The note store: what is in it, and what is wrong with it.
     Memory {
         #[command(subcommand)]
@@ -312,7 +319,9 @@ enum Cmd {
     },
     /// Bring a setup you already have into omh.
     Import {
+        /// What to bring over: `hooks`, `skills`, `mcp`, `rules`.
         capability: String,
+        /// Which installed harness to read it out of.
         harness: String,
         /// Read this instead of where the adapter says the harness keeps it —
         /// for a config somewhere else, and for seeing what omh would do
@@ -350,17 +359,24 @@ enum McpCmd {
     Ls,
     /// Add a server to your catalogue.
     Add {
+        /// What to call it. This is the name harnesses will see.
         name: String,
+        /// The program to run, e.g. `npx`.
         command: String,
+        /// Everything after the command, passed to it unchanged.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
         #[arg(long = "env", value_parser = parse_env)]
         env: Vec<(String, String)>,
     },
     /// Remove a server from your catalogue.
-    Rm { name: String },
+    Rm {
+        /// Which server, as `omh config mcp ls` names it.
+        name: String,
+    },
     /// Import servers you already configured in an installed harness.
     Import {
+        /// Which installed harness to read servers out of.
         harness: String,
         #[arg(long)]
         file: Option<std::path::PathBuf>,
@@ -523,13 +539,16 @@ enum SessionsCmd {
 enum ConfigCmd {
     /// Set one of your defaults, in `~/.omh/settings.toml`.
     Set {
+        /// Which setting. `omh why <key>` says what omh reads it for.
         key: String,
+        /// What to set it to.
         value: String,
         #[arg(long, value_parser = parse_layer, hide = true)]
         layer: Option<config::Layer>,
     },
     /// Remove one of your defaults.
     Unset {
+        /// Which setting to drop, letting any lower layer resurface.
         key: String,
         #[arg(long, value_parser = parse_layer, hide = true)]
         layer: Option<config::Layer>,
@@ -554,14 +573,22 @@ enum ConfigCmd {
 #[derive(Subcommand)]
 enum RepoCmd {
     /// Switch one of omh's features on here.
-    Enable { feature: String },
+    Enable {
+        /// Which feature. `omh why <feature>` lists what it brings.
+        feature: String,
+    },
     /// Switch one of omh's features off here. Nothing is uninstalled.
-    Disable { feature: String },
+    Disable {
+        /// Which feature. `omh why <feature>` lists what it brings.
+        feature: String,
+    },
     /// Set a value for this checkout. Gitignored by default, because these
     /// carry `carry_in` paths and MCP env and a mistyped key must not be
     /// committable by accident.
     Set {
+        /// Which setting. `omh why <key>` says what omh reads it for.
         key: String,
+        /// What to set it to.
         value: String,
         /// Write the committed file instead, and say so.
         #[arg(long)]
@@ -569,6 +596,7 @@ enum RepoCmd {
     },
     /// Remove a value, letting any lower layer resurface.
     Unset {
+        /// Which setting to drop from this checkout.
         key: String,
         #[arg(long)]
         shared: bool,
@@ -642,6 +670,7 @@ enum MemoryCmd {
     Lint,
     /// Remove one note. Never a neighbour; reports what linked to it.
     Rm {
+        /// Which note, as `omh memory lint` and the recall output name it.
         key: String,
         #[arg(long, value_parser = parse_note_layer)]
         layer: Option<memory::Layer>,
@@ -10654,6 +10683,52 @@ because = "a fixture"
                 line[1..].join(" ")
             );
         }
+    }
+
+    /// Every argument says what it is.
+    ///
+    /// A flag gets a description for free — it is written as a field with a doc
+    /// comment, and leaving that off looks wrong on the page. A positional does
+    /// not: `harness: String` compiles, reads fine in source, and renders in
+    /// `--help` as a bare `<HARNESS>` with an empty column beside it. Twelve of
+    /// them had accumulated that way, including on `auth`, where the whole
+    /// command is one positional and one flag.
+    ///
+    /// Walked from the parser rather than listed, and recursive, because half
+    /// of them were nested two levels down under `config mcp add` and `repo
+    /// set` where no top-level scan would have looked.
+    #[test]
+    fn every_argument_says_what_it_is() {
+        fn walk(cmd: &clap::Command, path: &str, bare: &mut Vec<String>) {
+            for arg in cmd.get_positionals() {
+                if arg.get_help().is_none() {
+                    bare.push(format!("{path} <{}>", arg.get_id()));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), bare);
+            }
+        }
+        let mut bare = Vec::new();
+        let root = Cli::command();
+        walk(&root, "omh", &mut bare);
+        // A walk that descended into nothing would agree with everything.
+        let mut seen = 0;
+        fn count(cmd: &clap::Command, seen: &mut usize) {
+            *seen += cmd.get_positionals().count();
+            for sub in cmd.get_subcommands() {
+                count(sub, seen);
+            }
+        }
+        count(&root, &mut seen);
+        assert!(
+            seen > 15,
+            "the walk found {seen} arguments, fewer than omh has"
+        );
+        assert!(
+            bare.is_empty(),
+            "these render in `--help` as a name with nothing beside it: {bare:#?}"
+        );
     }
 
     /// Aliases only earn their keep if they are actually short.
