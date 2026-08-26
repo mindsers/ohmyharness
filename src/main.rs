@@ -261,7 +261,7 @@ enum Cmd {
         account: String,
     },
     /// What you have here: harnesses, editors, sessions.
-    Ls,
+    Info,
     /// Open a session in an editor, over SSH.
     #[command(visible_alias = "a")]
     Attach {
@@ -375,7 +375,7 @@ enum McpCmd {
 /// It survives below as a hidden tombstone rather than being deleted
 /// outright, because deleting it did not make `omh s01 ls` unspellable — only
 /// unrefusable. With no `ls` under `sessions`, that line fails the sessions
-/// reading and parses as the **top-level** `omh ls`, which never reads
+/// reading and parses as the **top-level** `omh info`, which never reads
 /// `cli.session`: the scope vanishes and every session is listed, looking
 /// like it had listed one. Kept here, the sessions reading parses again and
 /// wins, so the line is refused by name — and the spelling everyone still has
@@ -650,7 +650,7 @@ enum MemoryCmd {
 /// seeing. Now it goes through `out::problem`, which knows about the palette
 /// and prints the whole cause chain.
 fn main() -> std::process::ExitCode {
-    // A closed pipe (`omh ls | head`) is not a crash. Without this, Rust's
+    // A closed pipe (`omh info | head`) is not a crash. Without this, Rust's
     // default panics on the failed write and prints a backtrace.
     #[cfg(unix)]
     unsafe {
@@ -721,7 +721,7 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Doctor { .. }
         | Cmd::Why { .. }
         | Cmd::Auth { .. }
-        | Cmd::Ls
+        | Cmd::Info
         | Cmd::Config { .. }
         | Cmd::Repo { .. }
         | Cmd::Use { .. }
@@ -755,7 +755,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     match &cli.cmd {
         Cmd::Init => init(&cwd, ctx),
         Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account, ctx),
-        Cmd::Ls => ls(&cwd, ctx),
+        Cmd::Info => info(&cwd, ctx),
         Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx),
         Cmd::Why { thing } => why_cmd(&cwd, thing, ctx),
         Cmd::Graph { stop } => graph(&cwd, *stop, ctx),
@@ -1394,7 +1394,7 @@ fn attach(
             if let Some(ed) = other {
                 ctx.warn(&format!("`{}` is not installed on this machine", ed.bin));
             } else if let Some(w) = &wanted {
-                ctx.warn(&format!("no editor named `{w}` — see `omh ls`"));
+                ctx.warn(&format!("no editor named `{w}` — see `omh info`"));
             }
             None
         }
@@ -5428,7 +5428,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
     Ok(())
 }
 
-fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
+fn info(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let base = session::default_branch(&paths.repo);
 
@@ -5454,7 +5454,7 @@ fn ls(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 let sess = Session::new(&paths.worktrees(), id.clone());
                 report::Session {
                     label: sess.label().to_string(),
-                    // `omh ls` is the wide view and does not ask git what state
+                    // `omh info` is the wide view and does not ask git what state
                     // the work is in; `omh s` is the command for that, and
                     // asking here would cost a subprocess per session for a
                     // column this listing does not print. `None` says *not
@@ -7088,7 +7088,7 @@ mod tests {
         // was: the JSON guard went on invoking a line that no longer parsed,
         // and passed, because its empty stdout read as nothing to say.
         const ON_PURPOSE: &str = "types the retired verb on purpose";
-        let gone: [String; 10] = [
+        let gone: [String; 11] = [
             format!("omh s {}", "ls"),        // types the retired verb on purpose
             format!("omh sessions {}", "ls"), // types the retired verb on purpose
             format!("{:?}, {:?}", "s", "ls"), // types the retired verb on purpose
@@ -7117,6 +7117,10 @@ mod tests {
             // one leaves rather than when someone next trips over it. `run` is
             // not among them: `omh runs` is ordinary prose in four files, and
             // a needle that matches prose is a needle that gets deleted.
+            // The wide listing's verb, retired in favour of the noun. `omh s`
+            // took listing sessions in 2026.08, which left this meaning
+            // *everything except the thing it most suggests*.
+            format!("omh {}", "ls"),   // types the retired verb on purpose
             format!("omh {}", "code"), // types the retired verb on purpose
             format!("omh {} ", "fwd"), // types the retired verb on purpose
             format!("omh {} ", "mcp"), // types the retired verb on purpose

@@ -52,7 +52,7 @@ pub fn accounts(paths: &Paths, adapter: &Adapter) -> Vec<String> {
 /// an interrupted login must never look like a successful one.
 pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
     // Defined in terms of `unfilled` so the two answers can never disagree —
-    // they did, and `omh auth` failed while `omh ls` listed the account.
+    // they did, and `omh auth` failed while `omh info` listed the account.
     unfilled(adapter, &dir(paths, &adapter.name, account), GUEST_HOME).is_empty()
 }
 
@@ -1029,7 +1029,7 @@ mod tests {
     }
 
     /// Regression: the two predicates disagreed, so `omh auth` could fail with
-    /// "the login did not complete" while `omh ls` listed the account and the
+    /// "the login did not complete" while `omh info` listed the account and the
     /// next launch happily used it.
     #[test]
     fn captured_means_exactly_nothing_left_unfilled() {

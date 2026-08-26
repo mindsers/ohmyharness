@@ -9,7 +9,7 @@ omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
-omh ls                            harnesses, editors, sessions
+omh info                          harnesses, editors, sessions
 omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 log
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
@@ -259,7 +259,7 @@ candidate gets re-litigated every time somebody rediscovers it.
 A name matching nothing prints what *is* known rather than guessing — the same
 rule as `omh attach emacs`.
 
-## `omh ls`
+## `omh info`
 
 Everything omh knows about: harnesses, editors, sessions and their state.
 
@@ -308,7 +308,7 @@ separate call, so that one thing has one spelling rather than two.
 
 Typing it still says so. Removing it from the parser did not make `omh s01 ls`
 unspellable, only unrefusable — with no `ls` under `sessions` that line parses
-as the *top-level* `omh ls`, which ignores the session and lists all of them.
+as the *top-level* `omh info`, which ignores the session and lists all of them.
 So the verb is kept as a tombstone that refuses by name and points here.
 
 **The session goes first, and everything after it is what you would have typed

@@ -74,6 +74,6 @@ class Omh < Formula
     # `brew test` runs in a scratch directory that is not a repository, so this
     # is the refusal, on stderr, exiting 1 — all three asserted.
     assert_match "not inside a git repository",
-                 shell_output("#{bin}/omh ls 2>&1", 1)
+                 shell_output("#{bin}/omh info 2>&1", 1)
   end
 end

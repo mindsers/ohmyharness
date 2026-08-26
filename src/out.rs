@@ -56,7 +56,7 @@ pub const NAME: Style = Style::new().fg_color(Some(anstyle::Color::Ansi(AnsiColo
 /// `Auto` is the only value that consults the environment; the other two exist
 /// because the environment gets it wrong in both directions. `Never` is for a
 /// terminal that renders escapes literally, and `Always` is for the far more
-/// common `omh ls | less -R`, where stdout is a pipe and the human on the far
+/// common `omh info | less -R`, where stdout is a pipe and the human on the far
 /// end of it still wants colour.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum Color {
@@ -316,7 +316,7 @@ impl Table {
 /// A section title, in the one place that decides what a section title looks
 /// like.
 ///
-/// `omh ls` wrote `harnesses:`, `omh config` wrote `mcp:`, and `omh repo`
+/// `omh info` wrote `harnesses:`, `omh config` wrote `mcp:`, and `omh repo`
 /// wrote its own third thing — all bare `println!`s, so nothing stopped them
 /// drifting apart, and nothing could restyle them together.
 pub fn heading(p: &Palette, text: &str) -> String {
@@ -336,7 +336,7 @@ pub fn nothing(p: &Palette, why: &str) -> String {
 
 /// What omh calls itself when it speaks about itself.
 ///
-/// Diagnostics carry it, answers do not. `omh ls` printing `omh: ` before every
+/// Diagnostics carry it, answers do not. `omh info` printing `omh: ` before every
 /// session would be noise — the user typed the word — but a warning arriving in
 /// the middle of a harness's own output needs to say who is talking.
 const ME: &str = "omh";
@@ -344,7 +344,7 @@ const ME: &str = "omh";
 /// Something is wrong but the command carried on. **stderr.**
 ///
 /// On stderr even though the command succeeded, because the thing that makes a
-/// warning useful is that `omh ls > sessions.txt` still shows it to the person
+/// warning useful is that `omh info > sessions.txt` still shows it to the person
 /// and still keeps it out of the file.
 pub fn warning(p: &Palette, msg: &str) -> String {
     format!("{}: {msg}\n", p.paint(WARN, ME))

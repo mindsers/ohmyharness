@@ -1751,7 +1751,7 @@ fn asking_for_a_fresh_session_while_naming_one_is_refused() {
 /// recognise. That one arm is why `RESERVED` existed — nineteen names written
 /// out so an adapter could not shadow a command — and why `session_prefix` had
 /// to parse the line twice and arbitrate, which is how `omh s01 ls` once became
-/// `omh ls` with the session dropped.
+/// `omh info` with the session dropped.
 ///
 /// `omh new claude` is the spelling now, and a word omh does not know is a
 /// mistake rather than a launch.
@@ -3079,7 +3079,7 @@ fn a_session_named_first_is_never_silently_dropped() {
     // whether the scope was honoured or discarded.
     for line in [
         vec!["s01", "why", "codegraph"],
-        vec!["--session", "s01", "ls"],
+        vec!["--session", "s01", "info"],
         // A fresh session's id is generated, so naming one is a contradiction
         // rather than a scope to honour. This is also what lets `omh new`
         // hand `run` a bare `None`: if the refusal above ever stopped
@@ -3120,13 +3120,62 @@ fn a_session_named_first_is_never_silently_dropped() {
 ///
 /// Typing it bare is: clap rejects an unknown subcommand. `omh s01 ls` is
 /// not. With no `ls` under `sessions` the sessions reading fails to parse,
-/// the as-written reading `omh ls` parses as the **top-level inventory**, and
+/// the as-written reading `omh info` parses as the **top-level inventory**, and
 /// `session_prefix`'s fallback hands that reading the launch because it is
 /// not a `Cmd::Run`. `Cmd::Ls` never reads `cli.session`, so the session is
 /// dropped in silence and every session is listed — which is verbatim the
 /// harm the refusal removed in #67 existed to prevent: *"it would list every
 /// session and look like it had listed one."*
 ///
+/// The inventory answers to `info`, and `ls` is gone from the top level too.
+///
+/// `ls` was the wide listing's verb and `omh s` took over listing sessions in
+/// 2026.08, which left the old spelling meaning *everything except the thing
+/// `ls` most suggests*. `info` says what it is: what you have here, not what
+/// is running.
+///
+/// Red before the rename: `omh info` is not a command, and `omh info` answers.
+/// Both halves matter — a rename that only adds the new spelling leaves two
+/// ways to say one thing, and this repo has spent four pull requests on lines
+/// that went on naming a verb nobody could type.
+#[test]
+fn the_inventory_answers_to_info_and_not_to_the_verb_it_replaced() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.session("s01");
+
+    let named = sb.omh(&["info"]);
+    let out = String::from_utf8_lossy(&named.stdout).to_string();
+    assert!(
+        named.status.success(),
+        "`omh info` is the inventory: {out}{}",
+        String::from_utf8_lossy(&named.stderr)
+    );
+    // `editors` is omitted when there are none, so it is not asserted here —
+    // the claim is that the inventory is intact under its new name, not that
+    // an empty sandbox grows sections it never had.
+    for section in ["harnesses", "sessions"] {
+        assert!(
+            out.contains(section),
+            "and it still lists what you have — no {section}: {out}"
+        );
+    }
+    assert!(
+        out.contains("s01"),
+        "including the session that exists: {out}"
+    );
+
+    // The old spelling is not a second door. clap answers this one — there is
+    // no tombstone, by explicit decision, since a bare word can no longer be
+    // swallowed by a launch.
+    let old = sb.omh(&["ls"]); // types the retired verb on purpose
+    assert!(
+        !old.status.success(),
+        "the retired spelling is not a command any more: {}",
+        String::from_utf8_lossy(&old.stdout)
+    );
+}
+
 /// So the verb survives as a tombstone rather than as a hole. Deleting it
 /// from the parser did not make the line unspellable, only unrefusable.
 #[test]
