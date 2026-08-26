@@ -2749,6 +2749,191 @@ fn why_answers_for_a_settings_key() {
     );
 }
 
+/// One command switches a feature, the same one that sets a value.
+///
+/// `omh repo enable`/`disable` are two more verbs for *write a thing to the
+/// settings file*, and which of omh's features a project runs with is as much
+/// a fact about the project as which runtime it wants. What the two halves do
+/// not share is the file format — a feature lives in the `[omh]` table, a
+/// setting is a bare key — and that is the whole hazard here.
+#[test]
+fn a_feature_is_switched_by_the_command_that_sets_a_value() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "codegraph", "off"]).status.success());
+    assert!(
+        sb.settings().contains("[omh]") && sb.settings().contains("codegraph = false"),
+        "a feature belongs in the [omh] table: {}",
+        sb.settings()
+    );
+
+    let shown = sb.omh(&["repo"]);
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("codegraph"),
+        "and omh reports it: {}",
+        String::from_utf8_lossy(&shown.stdout)
+    );
+
+    assert!(sb.omh(&["set", "codegraph", "on"]).status.success());
+    assert!(
+        sb.settings().contains("codegraph = true"),
+        "back on: {}",
+        sb.settings()
+    );
+}
+
+/// A feature is never written as a bare settings key.
+///
+/// This is the failure the fork exists to prevent, and it is silent: before
+/// `omh set` knew about features, `omh set codegraph off` wrote a top-level
+/// `codegraph = "off"`, warned that nothing reads it, exited 0 — and the
+/// feature stayed on. A settings file that *looks* like it says what you
+/// meant, next to a feature that ignored you.
+#[test]
+fn a_feature_is_not_written_as_a_bare_settings_key() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    let out = sb.omh(&["set", "codegraph", "off"]);
+    assert!(out.status.success());
+    let written = sb.settings();
+    assert!(
+        !written
+            .lines()
+            .any(|l| l.trim_start().starts_with("codegraph =") && l.contains('"')),
+        "a feature written as a string key is a switch that did nothing: {written}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("nothing in omh reads"),
+        "and it is not reported as an unknown key: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A feature takes `on` or `off`, and says so when given anything else.
+#[test]
+fn a_feature_takes_on_or_off_and_names_them() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    let out = sb.omh(&["set", "codegraph", "true"]);
+    assert!(
+        !out.status.success(),
+        "a feature is not a free-text setting"
+    );
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("on") && said.contains("off"),
+        "the refusal names the two words that work: {said}"
+    );
+    assert!(
+        sb.settings().is_empty() || !sb.settings().contains("codegraph"),
+        "and nothing was written: {}",
+        sb.settings()
+    );
+}
+
+/// The layer flags are refused for a feature rather than quietly ignored.
+///
+/// A feature is a fact about *this checkout*, so `~/.omh/settings.toml` is not
+/// a place one can live, and the committed repo file is not a choice — it is
+/// the only answer. Accepting `--shared` as a no-op would be the smaller lie
+/// and still a lie.
+#[test]
+fn a_feature_refuses_a_flag_that_names_a_file() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    for flag in ["--personal", "--shared"] {
+        let out = sb.omh(&["set", flag, "codegraph", "off"]);
+        assert!(
+            !out.status.success(),
+            "`omh set {flag} codegraph off` must not pretend the flag decided anything"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("codegraph"),
+            "and the refusal names what it is talking about"
+        );
+    }
+}
+
+/// `omh unset <feature>` drops the switch, letting omh's own default return.
+///
+/// Without this, `omh unset codegraph` looked in the wrong shape entirely — a
+/// feature lives in `[omh]`, `unset` removed bare keys — so it reported
+/// `codegraph was not set in the shared layer` while `[omh] codegraph = false`
+/// sat in the file, still off. Same silent-wrong as the one `unset` was just
+/// fixed for, one table over.
+#[test]
+fn unset_a_feature_lets_omhs_own_default_return() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "codegraph", "off"]).status.success());
+    assert!(
+        sb.settings().contains("codegraph = false"),
+        "{}",
+        sb.settings()
+    );
+
+    let out = sb.omh(&["unset", "codegraph"]);
+    assert!(out.status.success());
+    assert!(
+        !sb.settings().contains("codegraph = false"),
+        "the switch is gone: {}",
+        sb.settings()
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("was not set"),
+        "and it was not reported absent while it was sitting in the file: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A feature that was never switched is reported as never switched.
+///
+/// Following omh's default is a third state, not a quiet kind of off, and
+/// `dropped: []` is what a `--json` consumer needs to tell them apart. Without
+/// this, hardcoding the report to claim a removal passes: `omh unset codegraph`
+/// on a repo that never touched it says the switch was dropped, which reads as
+/// "it was on, now it is not".
+#[test]
+fn unsetting_a_feature_nobody_switched_says_so() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    let out = sb.omh(&["--json", "unset", "codegraph"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("\"dropped\": []") || said.contains("\"dropped\":[]"),
+        "nothing was dropped, and the machine-readable answer has to say so: {said}"
+    );
+
+    let human = sb.omh(&["unset", "codegraph"]);
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("was not switched"),
+        "and a person is told the same thing: {}",
+        String::from_utf8_lossy(&human.stdout)
+    );
+}
+
+/// A catalogue entry is still not a feature, through the new spelling too.
+#[test]
+fn set_tells_an_entry_from_the_feature_that_contains_it() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    let out = sb.omh(&["set", "graph-rules", "off"]);
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("codegraph"),
+        "naming the feature it belongs to is how somebody finds the grouping: {said}"
+    );
+}
+
 /// `omh config set` means **you** now. It used to default to the repo's
 /// gitignored file; the secret-safety argument survives intact, because the
 /// personal file is not committed either.

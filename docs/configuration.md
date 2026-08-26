@@ -323,8 +323,9 @@ you added, because `omh init` seeded them there. They are not yours to select:
 ```console
 $ omh use mcp codegraph
 mcp/codegraph is omh's — part of the `codegraph` feature. `[use]` names your
-entries; a feature is all or nothing, so `omh repo enable codegraph` and
-`omh repo disable codegraph` are its switches.
+entries; a feature is all or nothing, so `omh set codegraph on` and
+`omh set codegraph off` are its switches, and `omh unset codegraph` hands the
+decision back to omh's own default.
 ```
 
 An empty `[use]` leaves every omh feature whole — server, hooks and rules
@@ -495,8 +496,8 @@ using
 $ omh use skills tdd                    # → <repo>/.omh/settings.toml   (committed)
 $ omh unuse mcp linear
 $ omh use --all                         # resync every list to the catalogue
-$ omh repo disable codegraph            # → [omh] in settings.toml
-$ omh repo enable codegraph
+$ omh set codegraph off                 # → [omh] in settings.toml
+$ omh set codegraph on
 $ omh set carry_in '[".env"]'           # → settings.local.toml         (gitignored)
 $ omh set idle_timeout 30m              # → settings.toml               (committed)
 $ omh set --personal idle_timeout 45m    # → ~/.omh/settings.toml       (your default)

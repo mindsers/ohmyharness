@@ -412,6 +412,29 @@ pub fn write_feature(paths: &Paths, layer: Layer, feature: &str, on: bool) -> Re
     })
 }
 
+/// Drop a feature switch, so omh's own default decides again.
+///
+/// Reports whether it removed anything, for the same reason `unset` does: a
+/// command that says it dropped a switch which was never there teaches that
+/// the feature was on, or off, when it was neither — it was following the
+/// manifest.
+pub fn forget_feature(paths: &Paths, layer: Layer, feature: &str) -> Result<bool> {
+    let path = layer.file(paths);
+    let mut doc = read_doc(&path)?;
+    let Some(table) = doc
+        .get_mut(OMH)
+        .and_then(toml_edit::Item::as_table_like_mut)
+    else {
+        return Ok(false);
+    };
+    if table.remove(feature).is_none() {
+        return Ok(false);
+    }
+    std::fs::write(&path, doc.to_string())
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(true)
+}
+
 /// The repo layers a write to `table.key` has to reach.
 ///
 /// Always the committed file: what a project uses, and which of omh's features

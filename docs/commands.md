@@ -911,7 +911,9 @@ flag you have to remember.
 
 ```
 omh set <key> <value> [--shared] [--personal]
+omh set <feature> on|off
 omh unset <key> [--shared] [--personal]
+omh unset <feature>                   let omh's own default decide again
 ```
 
 | The key | Where it goes | Why |
@@ -919,6 +921,35 @@ omh unset <key> [--shared] [--personal]
 | can name a credential — `carry_in` | `<repo>/.omh/settings.local.toml`, **gitignored** | `.env.local` in a committed file is a map to a secret |
 | anything else omh reads — `runtime`, `idle_timeout`, `persistence`, `account` | `<repo>/.omh/settings.toml`, **committed** | what runtime a project wants is a fact about the project, and a teammate cloning it should get it |
 | one omh has never heard of | committed, and omh says both things | it cannot classify a key it does not read |
+
+**One of omh's own features takes `on` or `off` instead of a value**, and lands
+in the `[omh]` table rather than as a bare key:
+
+```console
+$ omh set codegraph off
+codegraph is off here
+  nothing was uninstalled; the next repo gets it back
+  wrote → /Users/you/proj/.omh/settings.toml
+
+$ omh unset codegraph
+codegraph follows omh's default here again
+```
+
+The two vocabularies are disjoint, and a test fails the build if they ever
+collide — `omh set <name>` writes two different shapes into one file, so a name
+meaning both would be ambiguous in a way no error message could resolve.
+
+A feature takes no layer flag. `--personal` has nothing to mean, since
+`~/.omh/settings.toml` is not a checkout, and `--shared` is refused rather than
+accepted as a no-op — a flag that appears to have decided something it did not
+is the smaller lie and still a lie. Naming a base-set *entry* is refused too,
+saying which feature contains it:
+
+```console
+$ omh set graph-rules off
+omh: `graph-rules` is part of the `codegraph` feature, not a feature itself. A feature is all or nothing.
+  omh set codegraph off
+```
 
 `omh why <key>` says what omh reads a key for. The classification is a table in
 `src/key.rs`, and a test fails the build when a key the code reads is missing
@@ -1049,8 +1080,8 @@ and reporting success for a typo. `omh use` refuses one your catalogue does not
 have, and names `omh config edit` as the way to create it.
 
 omh's own — `codegraph`, `memory`, the five generated hooks and their rules
-sections — are not selectable in either direction. `omh repo enable` and
-`omh repo disable` are their switches, because a feature is all or nothing. See
+sections — are not selectable in either direction. `omh set <feature> on|off`
+is their switch, because a feature is all or nothing. See
 [Configuration](configuration.md#a-feature-is-not-selectable).
 
 ## `omh memory …`

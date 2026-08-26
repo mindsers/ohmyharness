@@ -1021,8 +1021,17 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             personal,
         } => {
             let paths = Paths::discover(&cwd)?;
-            let dest = set_layer(&paths, key, *shared, *personal)?;
-            set(&paths, key, value, dest, cli.dry_run, ctx)
+            match names(&paths, key)? {
+                Names::AFeature => {
+                    a_feature_names_no_file(key, *shared, *personal)?;
+                    feature_switch(&cwd, key, on_or_off(key, value)?, ctx)
+                }
+                Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(key, &feature)),
+                Names::ASetting | Names::Neither => {
+                    let dest = set_layer(&paths, key, *shared, *personal)?;
+                    set(&paths, key, value, dest, cli.dry_run, ctx)
+                }
+            }
         }
         Cmd::Unset {
             key,
@@ -1030,8 +1039,17 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             personal,
         } => {
             let paths = Paths::discover(&cwd)?;
-            let layers = unset_layers(&paths, key, *shared, *personal)?;
-            unset(&paths, key, &layers, cli.dry_run, ctx)
+            match names(&paths, key)? {
+                Names::AFeature => {
+                    a_feature_names_no_file(key, *shared, *personal)?;
+                    feature_forget(&paths, key, cli.dry_run, ctx)
+                }
+                Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(key, &feature)),
+                Names::ASetting | Names::Neither => {
+                    let layers = unset_layers(&paths, key, *shared, *personal)?;
+                    unset(&paths, key, &layers, cli.dry_run, ctx)
+                }
+            }
         }
 
         Cmd::Repo { cmd } => match cmd {
@@ -3745,6 +3763,143 @@ impl Destination {
     }
 }
 
+/// A feature is a fact about this checkout, so no flag gets to name its file.
+///
+/// `--personal` is the plainly wrong one: `~/.omh/settings.toml` is not a
+/// checkout, and a feature switched on for every project you ever open is a
+/// setting omh does not have. `--shared` is refused for a smaller reason —
+/// it is already what happens, and a flag accepted as a no-op teaches that it
+/// changed something. One spelling, no silent agreement.
+fn a_feature_names_no_file(feature: &str, shared: bool, personal: bool) -> Result<()> {
+    let flag = if personal {
+        "--personal"
+    } else if shared {
+        "--shared"
+    } else {
+        return Ok(());
+    };
+    anyhow::bail!(
+        "`{feature}` is one of omh's features, and {flag} does not apply to one \
+         — a feature is a fact about this checkout, written to its committed \
+         settings.\n  omh set {feature} off"
+    )
+}
+
+/// Drop a feature switch, letting omh's own default return.
+///
+/// The mirror of `feature_switch`, and it exists for the reason `unset` was
+/// just repaired: a feature lives in the `[omh]` table, so `omh unset
+/// codegraph` reading bare keys found nothing and reported the feature absent
+/// while `[omh] codegraph = false` sat in the file, still off.
+fn feature_forget(paths: &Paths, feature: &str, dry_run: bool, ctx: &out::Ctx) -> Result<()> {
+    let layers = config::declaring(paths, config::OMH, feature)?;
+    if dry_run {
+        for layer in layers {
+            ctx.say(&report::Action::new(
+                "feature-forget-planned",
+                format!("would drop the {feature} switch from the {layer} layer"),
+            ));
+        }
+        return Ok(());
+    }
+    let mut dropped = Vec::new();
+    for layer in layers {
+        if config::forget_feature(paths, layer, feature)? {
+            dropped.push(layer);
+        }
+    }
+    ctx.say(
+        &report::Action::new(
+            if dropped.is_empty() {
+                "feature-unset-absent"
+            } else {
+                "feature-unset"
+            },
+            if dropped.is_empty() {
+                format!("{feature} was not switched here — it follows omh's default")
+            } else {
+                format!("{feature} follows omh's default here again")
+            },
+        )
+        .data(serde_json::json!({
+            "feature": feature,
+            "dropped": dropped.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        })),
+    );
+    Ok(())
+}
+
+/// Which of the two things `omh set <name>` is talking about.
+///
+/// A settings key is a bare key with a value you typed; one of omh's features
+/// is a boolean in the `[omh]` table. Same command, different files' shapes,
+/// and getting it wrong is silent in the worst direction: `omh set codegraph
+/// off` used to write a top-level `codegraph = "off"`, warn that nothing reads
+/// it, exit 0, and leave the feature on. A settings file that looks like it
+/// says what you meant, beside a feature that ignored you.
+///
+/// The fork is only safe because the two vocabularies are disjoint, and that
+/// is not luck — `no_name_is_both_a_setting_and_a_feature` reads `key::KEYS`
+/// and the shipped manifest and fails the build if they ever collide. Order
+/// here is therefore not load-bearing, and the guard is what makes that true.
+enum Names {
+    /// In `key::KEYS`.
+    ASetting,
+    /// In the shipped manifest's feature column.
+    AFeature,
+    /// A base-set entry, which belongs to a feature without being one. Named
+    /// separately because it is the interesting mistake: it is how somebody
+    /// discovers the grouping without reading the manifest, and falling
+    /// through to the key path would write `graph-rules = "off"` and report
+    /// success over a rule that stayed on.
+    AnEntryOf(String),
+    /// Neither. Written as a key and reported, the way it always was — a
+    /// settings file is hand-editable and a key a newer omh reads must not be
+    /// refused by this one.
+    Neither,
+}
+
+fn names(paths: &Paths, name: &str) -> Result<Names> {
+    if key::describes(name).is_some() {
+        return Ok(Names::ASetting);
+    }
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    if manifest.entries.iter().any(|e| e.feature == name) {
+        return Ok(Names::AFeature);
+    }
+    if let Some(entry) = manifest.entry(name) {
+        return Ok(Names::AnEntryOf(entry.feature.clone()));
+    }
+    Ok(Names::Neither)
+}
+
+/// The grouping, said where somebody has just guessed at it.
+///
+/// Kept beside `names` so the two orders stay visible together.
+fn an_entry_is_not_a_feature(name: &str, feature: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "`{name}` is part of the `{feature}` feature, not a feature itself. \
+         A feature is all or nothing.\n  omh set {feature} off"
+    )
+}
+
+/// `on` or `off`, and nothing else.
+///
+/// Not `true`/`false`: the file holds a TOML boolean, but the command is a
+/// switch and `omh set codegraph true` reads as somebody guessing at a
+/// serialisation. Refused rather than accepted-and-normalised, because the
+/// refusal is where the two words get taught.
+fn on_or_off(feature: &str, value: &str) -> Result<bool> {
+    match value {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => anyhow::bail!(
+            "`{feature}` is one of omh's features, so it is on or off — \
+             `{other}` is neither.\n  omh set {feature} off"
+        ),
+    }
+}
+
 /// Which file `omh set` writes, given the line as typed.
 ///
 /// Three rules, in this order:
@@ -4161,7 +4316,7 @@ fn feature_switch(cwd: &std::path::Path, feature: &str, on: bool, ctx: &out::Ctx
         if let Some(entry) = manifest.entry(feature) {
             anyhow::bail!(
                 "`{feature}` is part of the `{}` feature, not a feature itself. \
-                 A feature is all or nothing — `omh repo disable {}` switches all of it off.",
+                 A feature is all or nothing — `omh set {} off` switches all of it off.",
                 entry.feature,
                 entry.feature
             );
@@ -8173,7 +8328,7 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 64),
+            ("main.rs", 67),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),
@@ -10614,6 +10769,108 @@ because = "a fixture"
     }
 
     // ── the shipped hooks ───────────────────────────────────────────────────
+
+    /// If the two vocabularies ever did collide, the setting wins.
+    ///
+    /// Defence in depth for the one thing the guard below forbids. The order
+    /// in `names` looks arbitrary while nothing collides — the two arms share
+    /// a dispatch branch, so a mutation removing the key check passes every
+    /// end-to-end test. It is not arbitrary: a colliding name resolving as a
+    /// *feature* would take `carry_in` out of `key::KEYS`' reach and strip the
+    /// credential classification off it, and this is the direction that fails
+    /// safe.
+    ///
+    /// Reachable only by handing `names` a manifest the guard would reject,
+    /// which is exactly what this does.
+    #[test]
+    fn a_colliding_name_resolves_as_the_setting_not_the_feature() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home").join(".omh"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(paths.base()).unwrap();
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        // A manifest that names a feature after a credential-bearing setting.
+        std::fs::write(
+            paths.base().join("2026.08.toml"),
+            "version = \"2026.08\"\n\n\
+             [[entries]]\n\
+             name    = \"collide\"\n\
+             kind    = \"rules\"\n\
+             feature = \"carry_in\"\n\
+             because = \"a fixture\"\n\
+             costs   = \"nothing\"\n\
+             instead = \"nothing\"\n\
+             remove  = \"nothing\"\n",
+        )
+        .unwrap();
+
+        assert!(
+            matches!(names(&paths, "carry_in").unwrap(), Names::ASetting),
+            "a name in both vocabularies has to keep its credential \
+             classification — resolving it as a feature is how `carry_in` \
+             stops being one"
+        );
+    }
+
+    /// No name is both a setting and one of omh's features.
+    ///
+    /// `omh set <name>` forks on this, and the fork writes two different
+    /// shapes into the same file — a bare key with the value you typed, or a
+    /// boolean in `[omh]`. A name in both vocabularies makes the command
+    /// ambiguous in a way no error message could resolve, because both
+    /// readings are things a person could reasonably have meant.
+    ///
+    /// It reads the **bundled** manifest rather than the repo's `base/`
+    /// directory, because what ships is what a user's `omh set` will fork on.
+    /// The two are held equal by `bundled`'s own guard, so this asserts the
+    /// property one step closer to where it bites.
+    #[test]
+    fn no_name_is_both_a_setting_and_a_feature() {
+        let manifest: base::Manifest = bundled::Shipped::Base
+            .files()
+            .iter()
+            .filter(|f| f.name.ends_with(".toml"))
+            .map(|f| toml::from_str(f.contents).expect("the shipped manifest parses"))
+            .next()
+            .expect("omh ships a base manifest");
+
+        let features: std::collections::BTreeSet<&str> = manifest
+            .entries
+            .iter()
+            .map(|e| e.feature.as_str())
+            .collect();
+        assert!(
+            !features.is_empty(),
+            "no features at all, and this test asserts nothing"
+        );
+        assert!(
+            !key::KEYS.is_empty(),
+            "no settings keys at all, and this test asserts nothing"
+        );
+
+        for k in key::KEYS {
+            assert!(
+                !features.contains(k.name),
+                "`{}` is both a setting omh reads and one of its features, so \
+                 `omh set {} …` cannot be resolved",
+                k.name,
+                k.name
+            );
+        }
+
+        // And the entry names, for the same reason one layer down: an entry
+        // that shared a key's name would be refused as *part of a feature*
+        // instead of being written as the setting it is.
+        for k in key::KEYS {
+            assert!(
+                manifest.entry(k.name).is_none(),
+                "`{}` is both a setting omh reads and a base-set entry",
+                k.name
+            );
+        }
+    }
 
     /// Rule 2 only ever moves a write **away** from the file git carries.
     ///
