@@ -2471,28 +2471,32 @@ fn unset_removes_a_credential_key_from_the_committed_file_too() {
     );
 }
 
-/// A value `unset` deliberately does not reach is named, not passed over.
+/// A value `--save` or `--local` left behind is named, not passed over.
 ///
-/// `omh set` and `omh unset` write this checkout. Cross-project defaults in
-/// `~/.omh/settings.toml` are not a repo command's to edit — but silence about
-/// one leaves a person watching a setting survive the command whose whole
-/// purpose was removing it.
+/// Without a flag the rule reaches every repo layer holding the key, so an
+/// unadorned `unset` leaves nothing behind. A named flag touches one file on
+/// purpose — and silence then leaves somebody watching a setting survive the
+/// command whose whole purpose was removing it.
 #[test]
 fn unset_says_what_still_supplies_the_value() {
     let sb = sandbox();
     sb.git_init();
     sb.seed_base();
 
-    // The personal layer, reached the only way a command still reaches it.
     assert!(sb
-        .omh(&["config", "set", "runtime", "docker"])
+        .omh(&["set", "--save", "idle_timeout", "1h"])
         .status
         .success());
-    let out = sb.omh(&["unset", "runtime"]);
+    assert!(sb
+        .omh(&["set", "--local", "idle_timeout", "15m"])
+        .status
+        .success());
+
+    let out = sb.omh(&["unset", "--local", "idle_timeout"]);
     assert!(out.status.success());
     let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        said.contains("personal") && said.contains("runtime"),
+        said.contains("shared") && said.contains("idle_timeout"),
         "the layer still supplying it has to be named: {said}"
     );
 }
@@ -2659,7 +2663,7 @@ fn a_write_reaches_one_layer_and_no_other() {
     sb.seed_base();
 
     assert!(sb.omh(&["set", "carry_in", "[\".env\"]"]).status.success());
-    let personal = std::fs::read_to_string(sb.home.join(".omh/settings.toml")).unwrap_or_default();
+    let personal = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
     assert!(
         !personal.contains("carry_in"),
         "a repo's credential paths must not become your default everywhere: {personal}"
@@ -3206,40 +3210,39 @@ fn a_key_held_in_two_files_is_updated_in_both() {
     );
 }
 
-/// A feature still switched somewhere after a drop is named.
+/// A feature switched in your template does not switch this repo.
 ///
-/// `omh unset codegraph` reported that this checkout no longer switches it
-/// while `~/.omh/settings.toml` held `[omh] codegraph = false` — which no repo
-/// command reaches and every read honours. A confident claim about the
-/// effective state, made by code that had looked at two layers of three.
+/// This is the change, stated where it bites. `[omh] codegraph = false` in
+/// `~/.omh/default.toml` used to switch the feature off in every checkout you
+/// opened — a repo behaving differently because of a file the repo does not
+/// contain and a teammate cloning it does not have. It seeds a *new* repo now
+/// and decides nothing after that.
 #[test]
-fn unset_names_a_feature_switch_it_could_not_reach() {
+fn a_feature_switched_in_the_template_does_not_switch_this_repo() {
     let sb = sandbox();
     sb.git_init();
     sb.seed_base();
 
-    // The personal layer, which no repo command writes and every read consults.
     std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
     std::fs::write(
-        sb.home.join(".omh/settings.toml"),
+        sb.home.join(".omh/default.toml"),
         "[omh]\ncodegraph = false\n",
     )
     .unwrap();
 
-    let out = sb.omh(&["unset", "codegraph"]);
+    let out = sb.omh(&["--json", "unset", "codegraph"]);
     assert!(out.status.success());
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        said.contains("personal") && said.contains("codegraph"),
-        "the layer still switching it has to be named: {said}"
+        String::from_utf8_lossy(&out.stdout).contains("\"dropped\": []")
+            || String::from_utf8_lossy(&out.stdout).contains("\"dropped\":[]"),
+        "nothing in this repo switches it: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
-
-    // And it really is still off, which is what makes the silence a lie.
-    let shown = sb.omh(&["repo"]);
     assert!(
-        String::from_utf8_lossy(&shown.stdout).contains("codegraph"),
-        "{}",
-        String::from_utf8_lossy(&shown.stdout)
+        !String::from_utf8_lossy(&out.stderr).contains("still switched"),
+        "and nothing outside the repo does either, so there is nothing to \
+         report as still deciding: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -3294,6 +3297,365 @@ fn a_removal_that_fails_partway_says_what_it_already_did() {
     );
 }
 
+/// `omh settings` shows what you have set, and what omh reads that you have not.
+///
+/// The registry is what the whole layer rule rests on and a settings file
+/// cannot display it — so the command that shows your defaults is where the
+/// keys omh reads become discoverable without `omh why` and a guess at a name.
+#[test]
+fn settings_shows_your_defaults_and_what_omh_reads() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    assert!(sb
+        .omh(&["settings", "set", "idle_timeout", "45m"])
+        .status
+        .success());
+
+    let out = sb.omh(&["settings"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("idle_timeout") && said.contains("45m"),
+        "what you set: {said}"
+    );
+    // A key omh reads that you have not set is named, with what it is for.
+    assert!(
+        said.contains("runtime") && said.contains("sandbox"),
+        "and the keys you have not set, with what omh reads them for: {said}"
+    );
+}
+
+/// `omh settings set` writes your defaults, not this checkout's.
+///
+/// `omh set` became repo-only, so this is the one route left to
+/// `~/.omh/settings.toml`. If it wrote a repo file the capability would be
+/// gone rather than moved.
+#[test]
+fn settings_set_writes_your_own_file_and_no_repo_file() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    assert!(sb
+        .omh(&["settings", "set", "idle_timeout", "45m"])
+        .status
+        .success());
+    let personal = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap();
+    assert!(personal.contains("45m"), "got: {personal}");
+    assert!(
+        !sb.settings().contains("45m"),
+        "your default is not this repo's: {}",
+        sb.settings()
+    );
+    assert!(
+        !sb.repo.join(".omh/settings.local.toml").exists(),
+        "nor the gitignored one"
+    );
+
+    assert!(sb
+        .omh(&["settings", "unset", "idle_timeout"])
+        .status
+        .success());
+    let personal = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap();
+    assert!(
+        !personal.contains("45m"),
+        "and it comes back out: {personal}"
+    );
+}
+
+/// A credential-bearing key is safe here, and said to be.
+///
+/// `~/.omh/settings.toml` is not a file git carries, so the committed-file
+/// warning has nothing to fire about — but a person who has just been told
+/// `carry_in` belongs in a gitignored file deserves to know this one is.
+#[test]
+fn settings_set_does_not_warn_about_a_file_git_does_not_carry() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let out = sb.omh(&["settings", "set", "carry_in", "[\".env\"]"]);
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("COMMITTED"),
+        "your own file is not committed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// One of omh's features is not a cross-project default.
+///
+/// A feature is a fact about a checkout — `[omh]` is read from the personal
+/// layer, so writing one there would switch it for every project you open,
+/// which is not a decision this command should make easy to reach by accident.
+#[test]
+fn settings_refuses_a_feature_name() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let out = sb.omh(&["settings", "set", "codegraph", "off"]);
+    assert!(!out.status.success(), "a feature is not a default");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("omh set codegraph"),
+        "and it names the spelling that works: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// `omh set` and `omh settings` are one letter apart and never confused.
+///
+/// clap can be told to accept unambiguous prefixes. It is not, and this is
+/// what keeps it that way: with inference on, `omh setting` would silently
+/// become one of these two, and they have opposite scopes.
+#[test]
+fn set_and_settings_are_never_inferred_from_each_other() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for argv in [
+        vec!["setting", "idle_timeout", "45m"],
+        vec!["sett"],
+        vec!["se", "idle_timeout", "45m"],
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            !out.status.success(),
+            "`omh {}` is not a command and must not be guessed at",
+            argv.join(" ")
+        );
+    }
+
+    // And both real spellings work, so the refusal above is about inference
+    // rather than about either command being broken.
+    assert!(sb.omh(&["settings"]).status.success());
+    assert!(sb.omh(&["set", "idle_timeout", "30m"]).status.success());
+}
+
+/// `omh init` seeds a new repo from your template, and says what it took.
+///
+/// This is the one moment `~/.omh/default.toml` has any effect. A seed nobody
+/// is told about is indistinguishable from a default — and the repo now
+/// *carries* the values rather than inheriting them, which is a fact about a
+/// committed file and belongs in the report.
+///
+/// Ignored because `init` builds an image, so this half runs only where a
+/// container runtime does. The seeding itself is a pure function and is tested
+/// without one by `seed_settings_takes_what_omh_reads_and_refuses_a_token` —
+/// this covers the wiring, that covers the rule.
+#[test]
+#[ignore]
+fn init_seeds_the_repo_from_your_template_and_says_so() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "idle_timeout = \"45m\"\nrubbish = \"ignored\"\n\n[use]\nskills = [\"tdd\"]\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("seeded"),
+        "the seed is reported: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let seeded = sb.settings();
+    assert!(seeded.contains("45m"), "the key travelled: {seeded}");
+    assert!(
+        seeded.contains("[use]") && seeded.contains("tdd"),
+        "and the selection: {seeded}"
+    );
+    assert!(
+        !seeded.contains("rubbish"),
+        "a key omh reads nothing from is not propagated into every repo you \
+         ever start: {seeded}"
+    );
+}
+
+/// The template decides nothing in a repo that already exists.
+///
+/// The whole argument for the rename. A repo's behaviour is explained by files
+/// inside the repo — which is what a teammate cloning it can see, and what
+/// `omh repo` can account for without pointing at a file they do not have.
+#[test]
+fn the_template_decides_nothing_in_a_repo_that_already_exists() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "idle_timeout = \"45m\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/settings.toml"), "carry_in = []\n").unwrap();
+
+    let out = sb.omh(&["repo"]);
+    assert!(out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("45m"),
+        "a value from outside the repo reached this repo's resolution: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+}
+
+/// The file 0.7.0 renamed is reported, not silently ignored.
+///
+/// Somebody upgrades, their defaults stop applying, and nothing anywhere says
+/// why — that is the failure this project keeps writing down, and a rename is
+/// exactly when it happens.
+#[test]
+fn the_renamed_template_is_reported_rather_than_dropped() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/settings.toml"),
+        "idle_timeout = \"9h\"\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["settings"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("settings.toml") && said.contains("default.toml"),
+        "the old name and the new one, so the fix is obvious: {said}"
+    );
+}
+
+/// A server's environment is never seeded into a committed file.
+///
+/// `[mcp.<name>.env]` can hold a token and the file `init` writes is committed.
+/// It already has a home — on the server in `~/.omh/mcp.json` — so this is
+/// refused rather than dropped: silently skipping it would leave somebody
+/// believing a token is in force.
+#[test]
+fn a_server_environment_is_refused_in_the_template() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "[mcp.linear.env]\nTOKEN = \"secret\"\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["init"]);
+    assert!(
+        !out.status.success(),
+        "a token must not reach a committed file"
+    );
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("omh config mcp add"),
+        "and it names where a server's environment belongs: {said}"
+    );
+    assert!(
+        !sb.settings().contains("secret"),
+        "nothing was written: {}",
+        sb.settings()
+    );
+}
+
+/// Nothing in the template reaches a repo's resolution — not just the keys.
+///
+/// The bare-key half goes through `config::policy`; `[omh]` and `[use]` go
+/// through `settings::resolve`, which is a different function reading a
+/// different list. Making that one read the template again passed every test
+/// this PR had: the feature switch and the selection would both have come back
+/// as a layer while the keys stayed out, which is the same defect wearing the
+/// half of the change that did land.
+#[test]
+fn no_part_of_the_template_resolves_in_this_repo() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "idle_timeout = \"45m\"\n\n[omh]\ncodegraph = false\n\n\
+         [use]\nskills = [\"from-template\"]\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/settings.toml"), "carry_in = []\n").unwrap();
+
+    let out = sb.omh(&["repo"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !said.contains("45m"),
+        "a bare key from the template resolved here: {said}"
+    );
+    assert!(
+        said.contains("codegraph   on"),
+        "an `[omh]` switch from the template reached this repo: {said}"
+    );
+    assert!(
+        !said.contains("from-template"),
+        "a `[use]` list from the template reached this repo: {said}"
+    );
+}
+
+/// `init` reports a seed only when it created the file.
+///
+/// `write_if_absent` never revisits, so re-running `init` in a configured repo
+/// changes no settings — and claiming a seed there describes an effect the
+/// template did not have, about a file the reader would then go looking in.
+///
+/// Ignored for the same reason as its sibling: `init` builds an image. The
+/// answer it reports off is pinned without a runtime by
+/// `write_if_absent_reports_only_a_write_it_made`.
+#[test]
+#[ignore]
+fn init_claims_no_seed_over_a_settings_file_that_was_already_there() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "idle_timeout = \"45m\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/settings.toml"), "carry_in = []\n").unwrap();
+
+    let out = sb.omh(&["init"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stdout).contains("seeded"),
+        "nothing was seeded, and saying so would send somebody looking for a \
+         value that is not there: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        !sb.settings().contains("45m"),
+        "and the existing file is untouched: {}",
+        sb.settings()
+    );
+}
+
 /// `omh config set` means **you** now. It used to default to the repo's
 /// gitignored file; the secret-safety argument survives intact, because the
 /// personal file is not committed either.
@@ -3305,7 +3667,7 @@ fn config_set_writes_your_defaults() {
         .omh(&["config", "set", "idle_timeout", "45m"])
         .status
         .success());
-    let personal = std::fs::read_to_string(sb.home.join(".omh/settings.toml")).unwrap();
+    let personal = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap();
     assert!(personal.contains("45m"), "got: {personal}");
     assert!(
         !sb.repo.join(".omh/settings.local.toml").exists(),

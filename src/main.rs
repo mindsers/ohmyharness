@@ -282,6 +282,15 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<SessionsCmd>,
     },
+    /// Your defaults, everywhere — what they are, and how to change them.
+    ///
+    /// **Not `omh set`**, which is this checkout. The two are one letter apart
+    /// with opposite scopes, and clap is deliberately not told to accept
+    /// unambiguous prefixes: `omh setting` is refused rather than guessed at.
+    Settings {
+        #[command(subcommand)]
+        cmd: Option<SettingsCmd>,
+    },
     /// Your defaults and your catalogue, or change them.
     #[command(visible_alias = "c")]
     Config {
@@ -602,6 +611,25 @@ enum ConfigCmd {
     },
 }
 
+/// Deliberately two verbs. Reading and changing your own defaults is the whole
+/// of it in 0.7.0; the terminal UI that edits them arrives in 0.8.0 and needs
+/// nothing here to change.
+#[derive(Subcommand)]
+enum SettingsCmd {
+    /// Set one of your defaults, for every project.
+    Set {
+        /// Which setting. `omh why <key>` says what omh reads it for.
+        key: String,
+        /// What to set it to.
+        value: String,
+    },
+    /// Drop one of your defaults, letting omh's own take over again.
+    Unset {
+        /// Which setting to drop.
+        key: String,
+    },
+}
+
 #[derive(Subcommand)]
 enum RepoCmd {
     /// Switch one of omh's features on here.
@@ -795,6 +823,7 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Auth { .. }
         | Cmd::Info
         | Cmd::Config { .. }
+        | Cmd::Settings { .. }
         | Cmd::Repo { .. }
         | Cmd::Set { .. }
         | Cmd::Unset { .. }
@@ -1015,6 +1044,22 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 layer_or(*layer, config::Layer::Personal, ctx),
             ),
             Some(ConfigCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run, ctx),
+        },
+
+        Cmd::Settings { cmd } => match cmd {
+            None => show_settings(&cwd, ctx),
+            Some(SettingsCmd::Set { key, value }) => {
+                let paths = Paths::discover(&cwd)?;
+                no_legacy_write_over_a_feature(&paths, key, ctx)?;
+                let reached = Reach::named(config::Layer::Personal);
+                set(&paths, key, value, reached, cli.dry_run, ctx)
+            }
+            Some(SettingsCmd::Unset { key }) => {
+                let paths = Paths::discover(&cwd)?;
+                no_legacy_write_over_a_feature(&paths, key, ctx)?;
+                let reached = Reach::named(config::Layer::Personal);
+                unset(&paths, key, reached, cli.dry_run, ctx)
+            }
         },
 
         Cmd::Set {
@@ -3572,6 +3617,56 @@ fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String
 /// Deliberately not the resolved three-layer merge any more — that question is
 /// "what is effective *here*", and it moved to `omh repo` with the rest of the
 /// repo-scoped reporting. This command narrows to mean **you**.
+/// Your defaults, against every key omh reads.
+///
+/// The unset half is the useful half. `key::KEYS` is a table in the binary, so
+/// a settings file cannot show it, and until this existed the only way to
+/// learn a key's name was to already know it.
+fn show_settings(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    // Read straight from the file, not through `config::policy` — that
+    // resolves a repo, and the template is not one of the layers it resolves
+    // through. Asking it would report your template as empty.
+    let mine = config::values(&paths, config::Layer::Personal)?;
+
+    // A file 0.7.0 renamed. Silence here is the failure this project keeps
+    // writing down: somebody upgrades, their defaults stop applying, and
+    // nothing anywhere says why.
+    let old = paths.root.join("settings.toml");
+    if old.exists() {
+        ctx.warn(&format!(
+            "{} is not read any more — it became {}, the template a new repo \
+             is seeded from.\n  mv {} {}",
+            old.display(),
+            config::TEMPLATE,
+            old.display(),
+            config::Layer::Personal.file(&paths).display()
+        ));
+    }
+
+    ctx.say(&report::Settings {
+        file: config::Layer::Personal.file(&paths).display().to_string(),
+        known: key::KEYS
+            .iter()
+            .map(|k| report::Known {
+                key: k.name.to_string(),
+                does: k.does.to_string(),
+                value: mine.get(k.name).cloned(),
+            })
+            .collect(),
+        unread: mine
+            .iter()
+            .filter(|(k, _)| key::describes(k).is_none())
+            .map(|(k, v)| report::Setting {
+                key: k.clone(),
+                value: v.clone(),
+                whose: None,
+            })
+            .collect(),
+    });
+    Ok(())
+}
+
 fn show_config(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let profile = Profile::resolve(&paths);
@@ -3945,7 +4040,7 @@ fn feature_forget(
 /// about the effective state made by code that had looked at two layers of
 /// three.
 fn say_what_still_switches(paths: &Paths, feature: &str, ctx: &out::Ctx) -> Result<()> {
-    for layer in config::Layer::ALL {
+    for layer in config::Layer::SETTINGS {
         let doc = config::read_table(paths, layer, config::OMH)?;
         if let Some(on) = doc.get(feature) {
             ctx.warn(&format!(
@@ -4242,12 +4337,18 @@ fn set(
     say_if_shadowed(paths, key, &reach.layers, ctx)
 }
 
-/// Whether git carries this layer's file, in the two words a person reads.
+/// What this layer's file is, in the words a person needs at the moment of a
+/// write.
+///
+/// Three answers, not two. `is_committed()` is a boolean and the template is
+/// neither thing it distinguishes: it is not in a repo, so calling it
+/// "gitignored" is true of nothing and answers a question nobody asked. What
+/// matters about it is when it has an effect.
 fn tracked(layer: config::Layer) -> &'static str {
-    if layer.is_committed() {
-        "committed"
-    } else {
-        "gitignored"
+    match layer {
+        config::Layer::Shared => "committed",
+        config::Layer::Local => "gitignored",
+        config::Layer::Personal => "seeds new repos",
     }
 }
 
@@ -5009,6 +5110,86 @@ fn why_a_key(paths: &Paths, k: &key::Key) -> String {
     text
 }
 
+/// The repo's first `settings.toml`, seeded from your defaults.
+///
+/// `~/.omh/settings.toml` is a **template**, not a layer: nothing reads it at
+/// launch, and this is the one moment it has any effect. That is the whole
+/// argument — a repo's behaviour is explained by files inside the repo, which
+/// is what a teammate cloning it can actually see, and what `omh repo` can
+/// account for without pointing at a file they do not have.
+///
+/// Only keys omh reads are copied. A typo in your template is a typo you get
+/// told about once, rather than one propagated into every repo you ever start.
+///
+/// Returns the file to write and the keys it took, so `init` can report them —
+/// a seed nobody is told about is indistinguishable from a default.
+fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
+    const HEADER: &str = "# What this repo decided. Settings at the top level; `[omh]` switches\n\
+         # omh's own features off here without uninstalling anything.\n\
+         #\n\
+         # Untracked files the worktree needs — a worktree holds only tracked\n\
+         # files, so without this the agent lands somewhere that cannot run your\n\
+         # app. This is the ONLY path by which a secret reaches the agent, so\n\
+         # keep it short and explicit. node_modules belongs in the image, not here.\n\
+         #\n\
+         # carry_in = [\".env.local\", \"certs/\"]\n";
+
+    let template = config::Layer::Personal.file(paths);
+    let doc = config::read_doc(&template)?;
+    let mut took = Vec::new();
+    let mut body = String::new();
+
+    // Keys omh reads, and nothing else. A typo in your template is one you get
+    // told about once, rather than one propagated into every repo you start.
+    for k in key::KEYS {
+        if let Some(item) = doc.get(k.name) {
+            body.push_str(&format!("{} ={}\n", k.name, item.to_string().trim_end()));
+            took.push(k.name.to_string());
+        }
+    }
+    if !took.contains(&"carry_in".to_string()) {
+        body.push_str("carry_in = []\n");
+    }
+
+    // `[use]` and `[omh]` travel too: which entries a project takes and which
+    // of omh's features it runs with are exactly the answers you do not want to
+    // retype per repo.
+    //
+    // **`[mcp]` does not, and is refused rather than skipped.** A server's
+    // environment can be a token and this file is committed, so seeding it
+    // would copy a secret into git — and it already has a home, on the server
+    // in `~/.omh/mcp.json`, which is the file that owns servers. Silently
+    // dropping it would leave somebody believing a token is in force.
+    anyhow::ensure!(
+        doc.get("mcp").is_none(),
+        "{}: `[mcp]` is not seeded into a repo — a server's environment can be \
+         a token, and this template seeds a **committed** file.\n  \
+         omh config mcp add <name> <command> --env KEY=value   sets it on the \
+         server instead",
+        template.display()
+    );
+    for table in [config::USE, config::OMH] {
+        if let Some(item) = doc.get(table) {
+            if let Some(t) = item.as_table_like() {
+                if t.iter().next().is_some() {
+                    body.push_str(&format!("\n[{table}]\n"));
+                    for (k, v) in t.iter() {
+                        body.push_str(&format!("{k} ={}\n", v.to_string().trim_end()));
+                    }
+                    took.push(format!("[{table}]"));
+                }
+            }
+        }
+    }
+
+    let tail = if took.iter().any(|t| t == "[omh]") {
+        String::new()
+    } else {
+        "\n# [omh]\n# codegraph = false\n".to_string()
+    };
+    Ok((format!("{HEADER}{body}{tail}"), took))
+}
+
 fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // Fail fast. Everything below is wasted work outside a repo.
     let paths = Paths::discover(cwd)?;
@@ -5099,22 +5280,13 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         serde_json::to_string_pretty(&serde_json::json!({ "mcpServers": manifest.servers() }))?
             + "\n";
     write_if_absent(&config::mcp_path(&paths), &base_mcp)?;
-    write_if_absent(
-        &repo_omh.join("settings.toml"),
-        "# What this repo decided. Settings at the top level; `[omh]` switches\n\
-         # omh's own features off here without uninstalling anything.\n\
-         #\n\
-         # Untracked files the worktree needs — a worktree holds only tracked\n\
-         # files, so without this the agent lands somewhere that cannot run your\n\
-         # app. This is the ONLY path by which a secret reaches the agent, so\n\
-         # keep it short and explicit. node_modules belongs in the image, not here.\n\
-         #\n\
-         # carry_in = [\".env.local\", \"certs/\"]\n\
-         carry_in = []\n\
-         \n\
-         # [omh]\n\
-         # codegraph = false\n",
-    )?;
+    let (contents, from_template) = seed_settings(&paths)?;
+    // Only when this run actually created the file. Reporting a seed over a
+    // settings.toml that was already there would claim an effect the template
+    // did not have — `write_if_absent` never revisits.
+    if write_if_absent(&repo_omh.join("settings.toml"), &contents)? {
+        summary.seeded = from_template;
+    }
     // No hooks are seeded into the repo. omh's own are generated from the
     // manifest at launch, which is the only arrangement in which omh can ship a
     // fix to them: `write_if_absent` never revisits, so a repo initialised
@@ -5701,11 +5873,12 @@ fn ensure_line(path: &std::path::Path, line: &str) -> Result<()> {
     Ok(())
 }
 
-fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<()> {
-    if !path.exists() {
-        std::fs::write(path, contents)?;
+fn write_if_absent(path: &std::path::Path, contents: &str) -> Result<bool> {
+    if path.exists() {
+        return Ok(false);
     }
-    Ok(())
+    std::fs::write(path, contents)?;
+    Ok(true)
 }
 
 /// Which provides applied, from what the predicates answered.
@@ -8470,7 +8643,7 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 67),
+            ("main.rs", 68),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),
@@ -10911,6 +11084,89 @@ because = "a fixture"
     }
 
     // ── the shipped hooks ───────────────────────────────────────────────────
+
+    /// `write_if_absent` says it wrote only when it wrote.
+    ///
+    /// `init` reports the settings seed off this answer, and the report is a
+    /// claim about a **committed** file: saying a repo was seeded from your
+    /// template when its `settings.toml` was already there describes an effect
+    /// the template did not have.
+    #[test]
+    fn write_if_absent_reports_only_a_write_it_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("settings.toml");
+
+        assert!(
+            write_if_absent(&f, "first").unwrap(),
+            "an absent file is written, and saying so is the whole return value"
+        );
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "first");
+
+        assert!(
+            !write_if_absent(&f, "second").unwrap(),
+            "a file that was already there was not written by this call"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "first",
+            "and it is left alone — the name says absent, not overwrite"
+        );
+    }
+
+    /// The template hands on what omh reads, and refuses what it must not.
+    ///
+    /// `init` builds an image, so the end-to-end half of this runs only where a
+    /// container runtime does. The rule itself does not need one — and the rule
+    /// is the part with a security claim in it, so it is tested where every run
+    /// sees it.
+    #[test]
+    fn seed_settings_takes_what_omh_reads_and_refuses_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home").join(".omh"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.root).unwrap();
+        let template = config::Layer::Personal.file(&paths);
+
+        std::fs::write(
+            &template,
+            "idle_timeout = \"45m\"\nrubbish = \"ignored\"\n\n\
+             [use]\nskills = [\"tdd\"]\n\n[omh]\ncodegraph = false\n",
+        )
+        .unwrap();
+        let (body, took) = seed_settings(&paths).unwrap();
+
+        assert!(body.contains("45m"), "a key omh reads travels: {body}");
+        assert!(
+            !body.contains("rubbish"),
+            "and one it does not is left behind rather than propagated into \
+             every repo you ever start: {body}"
+        );
+        assert!(
+            body.contains("[use]") && body.contains("tdd"),
+            "the selection travels: {body}"
+        );
+        assert!(
+            body.contains("[omh]") && body.contains("codegraph = false"),
+            "and the feature switches: {body}"
+        );
+        assert!(
+            took.contains(&"idle_timeout".to_string()) && took.contains(&"[use]".to_string()),
+            "what travelled is reported, or the seed is indistinguishable from \
+             a default: {took:?}"
+        );
+
+        // A server's environment can be a token and the seeded file is
+        // committed. Refused, not skipped: dropping it silently would leave
+        // somebody believing a token is in force.
+        std::fs::write(&template, "[mcp.linear.env]\nTOKEN = \"secret\"\n").unwrap();
+        let refused = seed_settings(&paths).unwrap_err().to_string();
+        assert!(
+            refused.contains("omh config mcp add"),
+            "the refusal names where a server's environment belongs: {refused}"
+        );
+    }
 
     /// A feature named after its own entry resolves as the feature.
     ///

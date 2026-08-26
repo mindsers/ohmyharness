@@ -73,20 +73,26 @@ struct ServerOverride {
 /// to somebody's team repo.
 pub const LOCAL: &str = "settings.local.toml";
 
-/// Personal, then this repo's, then this repo's gitignored — later winning.
+/// This repo's, then this repo's gitignored — later winning.
 ///
-/// Read from `config::Layer` rather than spelled again, so the file a feature
-/// switch is read from and the file a setting is read from cannot drift apart.
-fn layers(paths: &Paths) -> [PathBuf; 3] {
-    crate::config::Layer::ALL.map(|l| l.file(paths))
+/// `~/.omh/default.toml` is not here and is not a layer. It is the template
+/// `omh init` seeds a new repo from, so a repo's behaviour is explained by
+/// files inside the repo — which is what a teammate cloning it can see, and
+/// what `omh repo` can account for without pointing at a file they do not have.
+///
+/// Read from `config::Layer::SETTINGS` rather than spelled again, so the file a
+/// feature switch is read from and the file a setting is read from cannot drift
+/// apart.
+fn layers(paths: &Paths) -> [PathBuf; 2] {
+    crate::config::Layer::SETTINGS.map(|l| l.file(paths))
 }
 
 /// Everything this repo decided: which of omh's features are off here, and what
 /// it says about the environment of the servers it uses.
 ///
-/// One pass for all of it, because it comes from the same three files and a
-/// second pass would be a second chance for two readers to disagree about which
-/// layer won.
+/// One pass for all of it, because it comes from the same files and a second
+/// pass would be a second chance for two readers to disagree about which layer
+/// won.
 pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut state: BTreeMap<String, bool> = BTreeMap::new();
     let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -144,7 +150,9 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
             state.insert(key, on);
         }
         // Variable by variable, so a later layer adding a token does not drop
-        // the one an earlier layer set.
+        // the one an earlier layer set. A repo overriding a server's
+        // environment; the catalogue's own env lives on the server in
+        // `~/.omh/mcp.json`, which is the file that owns servers.
         for (name, over) in file.mcp {
             mcp_env.entry(name).or_default().extend(over.env);
         }
@@ -428,11 +436,11 @@ mod tests {
     fn env_overrides_merge_variable_by_variable() {
         let (_d, paths, m) = fixture();
         write(
-            paths.root.join("settings.toml"),
+            paths.repo.join(".omh/settings.toml"),
             "[mcp.linear.env]\nTOKEN = \"t\"\n",
         );
         write(
-            paths.repo.join(".omh/settings.toml"),
+            paths.repo.join(".omh/settings.local.toml"),
             "[mcp.linear.env]\nREGION = \"eu\"\n",
         );
         let env = &resolve(&paths, &m).unwrap().mcp_env["linear"];
@@ -559,12 +567,8 @@ mod tests {
     fn provision_entries_merge_key_by_key() {
         let (_d, paths, m) = fixture();
         write(
-            paths.root.join("settings.toml"),
-            "[provision]\n\"go/toolchain\" = true\n",
-        );
-        write(
             paths.repo.join(".omh/settings.toml"),
-            "[provision]\n\"rust/toolchain\" = true\n",
+            "[provision]\n\"go/toolchain\" = true\n\"rust/toolchain\" = true\n",
         );
         write(
             paths.repo.join(".omh/settings.local.toml"),

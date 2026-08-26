@@ -20,7 +20,12 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Layer {
-    /// `~/.omh/settings.toml` — yours, every project.
+    /// `~/.omh/default.toml` — the answers a new repo starts from.
+    ///
+    /// Named for what it is. It was `settings.toml` while it was a layer like
+    /// the two below it; it is a **template** now, read once by `omh init` and
+    /// never at launch, and a file that decides nothing should not be spelled
+    /// the same as the two that decide everything.
     Personal,
     /// `<repo>/.omh/settings.toml` — committed, shared with the team.
     Shared,
@@ -47,12 +52,32 @@ pub struct Written {
 }
 
 impl Layer {
+    /// Every layer that exists, for parsing a name and for reading catalogue
+    /// content. **Not** the layers a setting resolves through — see
+    /// [`Layer::SETTINGS`], and do not reach for this one by reflex.
     pub const ALL: [Layer; 3] = [Self::Personal, Self::Shared, Self::Local];
+
+    /// The layers a **setting** resolves through, later winning.
+    ///
+    /// `Personal` is absent, and that is the whole of what changed in 0.7.0.
+    /// `~/.omh/settings.toml` stopped being a precedence layer and became the
+    /// template `omh init` seeds a repo's `settings.toml` from — so a repo's
+    /// behaviour is explained by files inside the repo, which is the one thing
+    /// a teammate cloning it can actually see. It had been the last piece of
+    /// this release still saying otherwise: `omh set` is repo-only, `--personal`
+    /// is gone, and one rule replaced three, all on the argument that a setting
+    /// is a fact about the checkout.
+    ///
+    /// The personal *catalogue* — skills, rules, hooks, MCP servers under
+    /// `~/.omh` — is untouched and still read. `Personal` is not gone; it is
+    /// not a **settings** layer. Conflating those is easy and would delete a
+    /// feature.
+    pub const SETTINGS: [Layer; 2] = [Self::Shared, Self::Local];
 
     /// The file this layer's settings live in.
     pub fn file(&self, paths: &Paths) -> PathBuf {
         match self {
-            Self::Personal => paths.root.join("settings.toml"),
+            Self::Personal => paths.root.join(TEMPLATE),
             Self::Shared => paths.repo.join(".omh").join("settings.toml"),
             Self::Local => paths.repo.join(".omh").join(crate::settings::LOCAL),
         }
@@ -114,10 +139,13 @@ impl std::fmt::Display for Layer {
     }
 }
 
-/// Every settings key across all layers, resolved with provenance.
+/// Every settings key this repo resolves, with provenance.
+///
+/// The repo's two layers only. Your `~/.omh/settings.toml` is a template for
+/// new repos, not a layer beneath this one — see [`Layer::SETTINGS`].
 pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
     let mut found = Vec::new();
-    for layer in Layer::ALL {
+    for layer in Layer::SETTINGS {
         let path = layer.file(paths);
         let Some(raw) = read_layer(&path)? else {
             continue;
@@ -318,6 +346,12 @@ fn refuse_a_table(doc: &toml_edit::DocumentMut, key: &str) -> Result<()> {
 /// rather than at each writer, so the reader in `settings.rs` and the writers
 /// below cannot drift about what a table is called.
 pub const USE: &str = "use";
+/// The template a new repo is seeded from.
+///
+/// Not `settings.toml`. That name said "a layer like the others" for as long as
+/// it was one; this file is read by `omh init` and by nothing else.
+pub const TEMPLATE: &str = "default.toml";
+
 pub const OMH: &str = "omh";
 /// The resolution `init` records: which provides applied here.
 pub const PROVISION: &str = "provision";
@@ -410,6 +444,27 @@ pub fn write_feature(paths: &Paths, layer: Layer, feature: &str, on: bool) -> Re
     write_table(paths, layer, OMH, |table| {
         table[feature] = toml_edit::value(on);
     })
+}
+
+/// One layer's bare settings, unresolved.
+///
+/// `policy` cannot answer for `Personal` any more — it reads
+/// [`Layer::SETTINGS`], which the personal file is deliberately not part of.
+/// Reading the template is a different question from resolving a repo, and
+/// having one function answer both is how a layer that stopped being a layer
+/// would go on looking like one.
+pub fn values(paths: &Paths, layer: Layer) -> Result<BTreeMap<String, String>> {
+    let path = layer.file(paths);
+    let Some(raw) = read_layer(&path)? else {
+        return Ok(BTreeMap::new());
+    };
+    let table: toml::Table =
+        toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    Ok(table
+        .into_iter()
+        .filter(|(_, v)| !v.is_table())
+        .map(|(k, v)| (k, repr(&v)))
+        .collect())
 }
 
 /// One layer's `[table]`, as booleans.
@@ -604,7 +659,7 @@ fn edit_layer(
 /// write into a replacement. One byte that is not UTF-8 in `settings.toml` used
 /// to take every `[omh]` switch and every `[mcp.<name>.env]` token with it, and
 /// print success.
-fn read_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
+pub fn read_doc(path: &Path) -> Result<toml_edit::DocumentMut> {
     let Some(raw) = read_layer(path)? else {
         return Ok(toml_edit::DocumentMut::new());
     };
@@ -1240,7 +1295,9 @@ mod tests {
         let (_d, paths) = fixture();
         assert_eq!(
             Layer::Personal.file(&paths),
-            paths.root.join("settings.toml")
+            paths.root.join("default.toml"),
+            "the template is named for what it is, not for the layers it \
+             stopped being one of"
         );
         assert_eq!(
             Layer::Shared.file(&paths),
@@ -1274,15 +1331,14 @@ mod tests {
     #[test]
     fn policy_reports_the_winning_layer() {
         let (_d, paths) = fixture();
-        settings(&paths, Layer::Personal, "idle_timeout = \"30m\"");
+        settings(&paths, Layer::Shared, "idle_timeout = \"30m\"");
         let settings = policy(&paths).unwrap();
-        assert_eq!(get(&settings, "idle_timeout").layer, Layer::Personal);
+        assert_eq!(get(&settings, "idle_timeout").layer, Layer::Shared);
     }
 
     #[test]
     fn later_layers_win_and_the_loser_is_named() {
         let (_d, paths) = fixture();
-        settings(&paths, Layer::Personal, "idle_timeout = \"30m\"");
         settings(&paths, Layer::Shared, "idle_timeout = \"5m\"");
         settings(&paths, Layer::Local, "idle_timeout = \"2h\"");
 
@@ -1292,8 +1348,44 @@ mod tests {
         assert_eq!(t.layer, Layer::Local);
         assert_eq!(
             t.shadows,
-            vec![Layer::Personal, Layer::Shared],
-            "a value that beat others must say so, or the merge is undebuggable"
+            vec![Layer::Shared],
+            "a value that beat another must say so, or the merge is undebuggable"
+        );
+    }
+
+    /// Your `~/.omh/settings.toml` is not a layer beneath this repo's.
+    ///
+    /// It is the template `omh init` seeds a new repo from, and nothing reads
+    /// it at launch — so a repo's behaviour is explained by files inside the
+    /// repo, which is what a teammate cloning it can actually see. This is the
+    /// executable half of that: a value there must not appear in a resolution,
+    /// must not shadow, and must not win.
+    #[test]
+    fn the_personal_file_is_a_template_and_not_a_layer() {
+        let (_d, paths) = fixture();
+        settings(&paths, Layer::Personal, "idle_timeout = \"30m\"");
+
+        assert!(
+            policy(&paths).unwrap().is_empty(),
+            "a template that resolves is a layer, whatever it is called"
+        );
+
+        // And it does not merely lose — it is not in the reckoning at all.
+        settings(&paths, Layer::Shared, "idle_timeout = \"5m\"");
+        let resolved = policy(&paths).unwrap();
+        let t = get(&resolved, "idle_timeout");
+        assert_eq!(t.value, "5m");
+        assert!(
+            t.shadows.is_empty(),
+            "the personal value was reported as something the repo beat: {:?}",
+            t.shadows
+        );
+
+        // The file is still readable, by the one thing that reads it.
+        assert_eq!(
+            values(&paths, Layer::Personal).unwrap().get("idle_timeout"),
+            Some(&"30m".to_string()),
+            "the template still has to be legible to `omh settings` and `init`"
         );
     }
 
@@ -1442,15 +1534,15 @@ mod tests {
     #[test]
     fn unset_touches_only_the_named_layer() {
         let (_d, paths) = fixture();
-        settings(&paths, Layer::Personal, "idle_timeout = \"30m\"");
+        settings(&paths, Layer::Shared, "idle_timeout = \"30m\"");
         settings(&paths, Layer::Local, "idle_timeout = \"2h\"");
 
         assert!(unset(&paths, "idle_timeout", Layer::Local).unwrap());
 
         let resolved = policy(&paths).unwrap();
         let t = get(&resolved, "idle_timeout");
-        assert_eq!(t.value, "30m", "the personal layer must resurface");
-        assert_eq!(t.layer, Layer::Personal);
+        assert_eq!(t.value, "30m", "the committed layer must resurface");
+        assert_eq!(t.layer, Layer::Shared);
     }
 
     #[test]

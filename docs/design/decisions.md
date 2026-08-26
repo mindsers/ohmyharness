@@ -20,7 +20,7 @@ these, the reason is what you need to argue with.
 | Capability floor | **superset, adapters degrade** | omh must never cost you a feature you already had |
 | Content scope | **one personal catalogue** | "where is this skill" had three answers, and a union can add but never subtract |
 | Repo content | **hooks, and nothing else** | a hook binds to a repo's commands; a skill is a way you work |
-| Settings scope | **3 layers: personal / shared / local** | a machine-wide preference and a one-repo exception are both real |
+| Settings scope | **2 layers in the repo, plus a template** | a repo's behaviour has to be explained by files the repo contains; `~/.omh/default.toml` seeds a new one and decides nothing after that |
 | Selection | **an allowlist, `[use]`** | removing something is deleting its name; no `include`/`exclude` pair to reconcile |
 | Absent selection | **means everything** | upgrading changes nothing, and a new checkout is useful before it is configured |
 | Command scope | **`omh config` is you, `omh repo` is here** | the two want opposite write defaults, and one `--layer` flag cannot express both |

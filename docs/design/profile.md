@@ -652,7 +652,7 @@ $ omh repo set carry_in '[".env"]'    # → settings.local.toml
 $ omh repo                            # what is effective here, and what decided it
 
 # you, everywhere
-$ omh config set idle_timeout 30m     # → ~/.omh/settings.toml
+$ omh settings set idle_timeout 30m   # → ~/.omh/default.toml (seeds new repos)
 $ omh config mcp add linear npx -- -y mcp-remote https://…
 $ omh config                          # your defaults, and what the catalogue holds
 $ omh config edit                     # $EDITOR on the catalogue
@@ -744,7 +744,7 @@ Content has no layers any more — there is one catalogue. **Settings** keep
 theirs, and the order is unchanged:
 
 ```
-~/.omh/settings.toml  →  <repo>/.omh/settings.toml  →  <repo>/.omh/settings.local.toml
+<repo>/.omh/settings.toml  →  <repo>/.omh/settings.local.toml
 ```
 
 `settings.local.toml` is where omh puts a value that can name a credential —

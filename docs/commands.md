@@ -1004,8 +1004,49 @@ removed carry_in from the local layer
 ```
 
 Anything still supplying the value afterwards is named — an unqualified `unset`
-stays inside the repo, so a cross-project default in `~/.omh/settings.toml`
-survives it and you are told which layer kept it.
+stays inside the repo, and a named flag touches one file on purpose — so
+whatever still supplies the value is named.
+
+## `omh settings`
+
+**You**, before a repo exists. `~/.omh/default.toml` is the template `omh init`
+seeds a new repo's `settings.toml` from — read once, at `init`, and never at
+launch.
+
+```
+omh settings                          your defaults, and what omh reads
+omh settings set <key> <value>        → ~/.omh/default.toml
+omh settings unset <key>
+```
+
+```console
+$ omh settings set idle_timeout 45m
+wrote → /Users/you/.omh/default.toml (seeds new repos)
+
+$ omh settings
+your defaults /Users/you/.omh/default.toml
+  idle_timeout  45m
+
+omh also reads
+  carry_in     Files a session gets that git does not carry — see `src/carry.rs`.
+  account      Which captured login a session is launched with, by name.
+  runtime      Which runtime builds and runs the sandbox. Unset means `auto`.
+  persistence  How a session's terminal survives detaching. Unset means `dtach`.
+```
+
+The second list is the useful half. What omh reads is a table in the binary, so
+no settings file can show it, and until this command existed the only way to
+learn a key's name was to already know it.
+
+**Not `omh set`.** They are one letter apart with opposite scopes — `omh set` is
+this checkout, `omh settings` is what a new one starts from — so clap is
+deliberately not told to accept unambiguous prefixes: `omh setting` is refused
+rather than guessed at.
+
+Bare keys, `[use]` and `[omh]` are seeded. `[mcp.<name>.env]` is **refused**: a
+server's environment can be a token and the file `init` writes is committed. It
+already has a home — `omh config mcp add <name> <command> --env KEY=value` puts
+it on the server in `~/.omh/mcp.json`, where servers live.
 
 ## `omh config …` · `c`
 
