@@ -233,7 +233,11 @@ enum Cmd {
     Init,
     /// Verify a harness actually sees the profile, inside a real sandbox.
     #[command(visible_alias = "d")]
-    Doctor { harness: Option<String> },
+    Doctor {
+        /// Which harness to verify. Without it, the one your host says you use.
+        #[arg(long)]
+        harness: Option<String>,
+    },
     /// Who put this here, and on what grounds.
     Why {
         /// A base-set entry, something you added, or something omh rejected.
@@ -255,9 +259,10 @@ enum Cmd {
     },
     /// Log a harness in once. Repeat with different names for several accounts.
     Auth {
+        /// Which harness to log in: `claude`, `opencode`, `omp`.
         harness: String,
         /// Account name, e.g. `personal` or `work`.
-        #[arg(default_value = auth::DEFAULT_ACCOUNT)]
+        #[arg(long = "name", short = 'n', default_value = auth::DEFAULT_ACCOUNT)]
         account: String,
     },
     /// What you have here: harnesses, editors, sessions.
@@ -294,13 +299,19 @@ enum Cmd {
     Use {
         /// One of rules, skills, mcp, commands, subagents, hooks.
         capability: Option<String>,
+        /// Which entry. Without it, everything the catalogue has of that kind.
         name: Option<String>,
         /// Resync every list to the whole catalogue.
         #[arg(long)]
         all: bool,
     },
     /// Stop using a catalogue entry here.
-    Unuse { capability: String, name: String },
+    Unuse {
+        /// One of rules, skills, mcp, commands, subagents, hooks.
+        capability: String,
+        /// Which entry to drop from this repo's list.
+        name: String,
+    },
     /// The note store: what is in it, and what is wrong with it.
     Memory {
         #[command(subcommand)]
@@ -308,7 +319,9 @@ enum Cmd {
     },
     /// Bring a setup you already have into omh.
     Import {
+        /// What to bring over: `hooks`, `skills`, `mcp`, `rules`.
         capability: String,
+        /// Which installed harness to read it out of.
         harness: String,
         /// Read this instead of where the adapter says the harness keeps it —
         /// for a config somewhere else, and for seeing what omh would do
@@ -346,17 +359,24 @@ enum McpCmd {
     Ls,
     /// Add a server to your catalogue.
     Add {
+        /// What to call it. This is the name harnesses will see.
         name: String,
+        /// The program to run, e.g. `npx`.
         command: String,
+        /// Everything after the command, passed to it unchanged.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
         #[arg(long = "env", value_parser = parse_env)]
         env: Vec<(String, String)>,
     },
     /// Remove a server from your catalogue.
-    Rm { name: String },
+    Rm {
+        /// Which server, as `omh config mcp ls` names it.
+        name: String,
+    },
     /// Import servers you already configured in an installed harness.
     Import {
+        /// Which installed harness to read servers out of.
         harness: String,
         #[arg(long)]
         file: Option<std::path::PathBuf>,
@@ -519,13 +539,16 @@ enum SessionsCmd {
 enum ConfigCmd {
     /// Set one of your defaults, in `~/.omh/settings.toml`.
     Set {
+        /// Which setting. `omh why <key>` says what omh reads it for.
         key: String,
+        /// What to set it to.
         value: String,
         #[arg(long, value_parser = parse_layer, hide = true)]
         layer: Option<config::Layer>,
     },
     /// Remove one of your defaults.
     Unset {
+        /// Which setting to drop, letting any lower layer resurface.
         key: String,
         #[arg(long, value_parser = parse_layer, hide = true)]
         layer: Option<config::Layer>,
@@ -550,14 +573,22 @@ enum ConfigCmd {
 #[derive(Subcommand)]
 enum RepoCmd {
     /// Switch one of omh's features on here.
-    Enable { feature: String },
+    Enable {
+        /// Which feature. `omh why <feature>` lists what it brings.
+        feature: String,
+    },
     /// Switch one of omh's features off here. Nothing is uninstalled.
-    Disable { feature: String },
+    Disable {
+        /// Which feature. `omh why <feature>` lists what it brings.
+        feature: String,
+    },
     /// Set a value for this checkout. Gitignored by default, because these
     /// carry `carry_in` paths and MCP env and a mistyped key must not be
     /// committable by accident.
     Set {
+        /// Which setting. `omh why <key>` says what omh reads it for.
         key: String,
+        /// What to set it to.
         value: String,
         /// Write the committed file instead, and say so.
         #[arg(long)]
@@ -565,6 +596,7 @@ enum RepoCmd {
     },
     /// Remove a value, letting any lower layer resurface.
     Unset {
+        /// Which setting to drop from this checkout.
         key: String,
         #[arg(long)]
         shared: bool,
@@ -638,6 +670,7 @@ enum MemoryCmd {
     Lint,
     /// Remove one note. Never a neighbour; reports what linked to it.
     Rm {
+        /// Which note, as `omh memory lint` and the recall output name it.
         key: String,
         #[arg(long, value_parser = parse_note_layer)]
         layer: Option<memory::Layer>,
@@ -763,7 +796,13 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         Cmd::Init => init(&cwd, ctx),
         Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account, ctx),
         Cmd::Info => info(&cwd, ctx),
-        Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx),
+        Cmd::Doctor { harness } => doctor_cmd(
+            &cwd,
+            harness.as_deref(),
+            cli.account.as_deref(),
+            cli.dry_run,
+            ctx,
+        ),
         Cmd::Why { thing } => why_cmd(&cwd, thing, ctx),
         Cmd::Graph { stop } => graph(&cwd, *stop, ctx),
         Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx),
@@ -1650,6 +1689,7 @@ fn down(
 fn doctor_cmd(
     cwd: &std::path::Path,
     harness: Option<&str>,
+    account: Option<&str>,
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
@@ -1670,9 +1710,20 @@ fn doctor_cmd(
 
     // Credentials are the half no in-process test can reach: whether a token
     // saved here survives depends on how the runtime binds the path.
+    // The same resolver `omh new` uses, asked the same way. It read `None` for
+    // the explicit account and then swallowed the answer with `.unwrap_or(None)`
+    // — so `-a work` went nowhere, and *ambiguous* became *no account*, against
+    // a function whose own doc comment reads "Ambiguity is an error, never a
+    // guess". Two accounts captured, and doctor reported credentials unchecked
+    // in exactly the words it uses for a user who has none.
+    //
+    // That mattered more here than anywhere: credentials are the half no
+    // in-process test can reach, so `credential_checks` below is the only
+    // evidence a token survives the mount, and it was being skipped for anyone
+    // with a second account. The remedy the resolver prints names `-a` — the
+    // flag this was discarding.
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, &adapter, None, configured.as_deref())
-        .unwrap_or(None)
+    let account = auth::resolve_for_launch(&paths, &adapter, account, configured.as_deref())?
         .map(|a| auth::dir(&paths, &name, &a));
 
     // Resolved once and used for both the checks and the plan below, so the
@@ -5393,7 +5444,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
             })
             .collect();
     auth::login_outcome(status.success(), &unfilled)
-        .map_err(|e| e.context(format!("run `omh auth {harness} {account}` again")))?;
+        .map_err(|e| e.context(format!("run `omh auth {harness} --name {account}` again")))?;
     let all = auth::accounts(&paths, &adapter);
     // What the files can and cannot settle. For a harness naming `token` files
     // an empty `unfilled` *is* the login; for one that keeps credentials
@@ -5415,7 +5466,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
             "{harness} keeps its credentials where omh cannot read them, so only \
              {harness} can say whether the login took"
         ))
-        .next(format!("omh doctor {harness}"))
+        .next(format!("omh doctor --harness {harness}"))
     };
     action = action.data(serde_json::json!({
         "harness": harness,
@@ -10573,6 +10624,110 @@ because = "a fixture"
         assert_eq!(
             std::fs::read_to_string(dest.join("mine.toml")).unwrap(),
             "name = \"mine\"\n"
+        );
+    }
+
+    /// A second thing on the line is a flag, not a position.
+    ///
+    /// `auth` and `doctor` each took an optional bare word after their first
+    /// argument — an account for one, a harness for the other. Two problems.
+    /// A reader cannot tell `omh auth claude work` from `omh auth work claude`
+    /// without already knowing which slot is the account — both are well formed
+    /// under the old grammar and they mean different things. And `doctor` is due
+    /// a `--session` as well, at which point a bare word beside two flags is the
+    /// odd one out.
+    ///
+    /// Named, both read as what they are, and the account keeps its default
+    /// so the common line does not grow.
+    #[test]
+    fn the_optional_second_word_is_named_rather_than_positional() {
+        for line in [
+            vec!["omh", "auth", "claude", "--name", "work"],
+            vec!["omh", "auth", "claude", "-n", "work"],
+            vec!["omh", "auth", "claude"],
+            vec!["omh", "doctor", "--harness", "claude"],
+            vec!["omh", "doctor"],
+            // The alias is advertised in two command tables, and nothing
+            // asserted it exists — `every_alias_is_a_single_letter` only checks
+            // that whatever aliases *are* there are one character long.
+            vec!["omh", "d", "--harness", "claude"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&line).is_ok(),
+                "omh accepts `{}`",
+                line[1..].join(" ")
+            );
+        }
+        // And the positional forms are gone rather than quietly still working,
+        // which is the half a rename that only adds the new spelling skips.
+        for line in [
+            vec!["omh", "auth", "claude", "work"],
+            vec!["omh", "doctor", "claude"],
+            // The global `-a`/`--account` names the same thing and is refused
+            // here, which is worth pinning because the reason is incidental:
+            // this field is still literally called `account`, so it collides
+            // with the global's clap id. Rename the field and the global would
+            // silently start being accepted-and-discarded on `auth` — measured,
+            // and nothing else in the suite would have noticed.
+            vec!["omh", "auth", "claude", "-a", "work"],
+            vec!["omh", "auth", "claude", "--account", "work"],
+        ] {
+            let Err(refused) = Cli::try_parse_from(&line) else {
+                panic!("`{}` is not a line omh takes any more", line[1..].join(" "));
+            };
+            assert_eq!(
+                refused.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "`{}` is refused as an argument omh does not know, not as \
+                 something else that happens to fail",
+                line[1..].join(" ")
+            );
+        }
+    }
+
+    /// Every argument says what it is.
+    ///
+    /// A flag gets a description for free — it is written as a field with a doc
+    /// comment, and leaving that off looks wrong on the page. A positional does
+    /// not: `harness: String` compiles, reads fine in source, and renders in
+    /// `--help` as a bare `<HARNESS>` with an empty column beside it. Twelve of
+    /// them had accumulated that way, including on `auth`, where the whole
+    /// command is one positional and one flag.
+    ///
+    /// Walked from the parser rather than listed, and recursive, because half
+    /// of them were nested two levels down under `config mcp add` and `repo
+    /// set` where no top-level scan would have looked.
+    #[test]
+    fn every_argument_says_what_it_is() {
+        fn walk(cmd: &clap::Command, path: &str, bare: &mut Vec<String>) {
+            for arg in cmd.get_positionals() {
+                if arg.get_help().is_none() {
+                    bare.push(format!("{path} <{}>", arg.get_id()));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), bare);
+            }
+        }
+        let mut bare = Vec::new();
+        let root = Cli::command();
+        walk(&root, "omh", &mut bare);
+        // A walk that descended into nothing would agree with everything.
+        let mut seen = 0;
+        fn count(cmd: &clap::Command, seen: &mut usize) {
+            *seen += cmd.get_positionals().count();
+            for sub in cmd.get_subcommands() {
+                count(sub, seen);
+            }
+        }
+        count(&root, &mut seen);
+        assert!(
+            seen > 15,
+            "the walk found {seen} arguments, fewer than omh has"
+        );
+        assert!(
+            bare.is_empty(),
+            "these render in `--help` as a name with nothing beside it: {bare:#?}"
         );
     }
 

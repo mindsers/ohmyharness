@@ -150,8 +150,8 @@ stack, git log names what you work on, the README names the project.
 Then log in once and go:
 
 ```console
-$ omh auth claude personal    # runs the harness's own login, captures it
-$ omh new claude                  # sandboxed, logged in, configured
+$ omh auth claude --name personal   # runs the harness's own login, captures it
+$ omh new claude                   # sandboxed, logged in, configured
 ```
 
 ## Commands
@@ -162,8 +162,8 @@ omh new <harness> [-- args…]      start a session, run an agent in it
 omh s01 resume [harness]          rejoin it · claude · omp · opencode
 omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
-omh auth <harness> [account]      log in once; repeat for several accounts
-omh doctor [harness]          d   verify a harness really sees your profile
+omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
+omh doctor [--harness <name>] d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
 omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 diff
@@ -330,8 +330,8 @@ omh: graph at http://127.0.0.1:56286
 ### Credentials
 
 ```console
-$ omh auth claude personal
-$ omh auth claude work
+$ omh auth claude --name personal
+$ omh auth claude --name work
 $ omh -a work new claude      # or, per project: omh repo set account work
 ```
 

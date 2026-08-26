@@ -157,9 +157,9 @@ work](git.md) adds a version-dependent claim (`merge-tree --write-tree`, git
 `cherry-pick --empty=` needs, which #56 made a dependency of `--keep
 <selection>` without being able to measure the floor.
 
-**7. Auth is verified but was hard-won.** A real `omh auth claude <account>`
-login completes and persists. Five bugs preceded that, every one at the boundary
-with a real harness.
+**7. Auth is verified but was hard-won.** A real `omh auth claude --name
+<account>` login completes and persists. Five bugs preceded that, every one
+at the boundary with a real harness.
 
 **8. Concurrent edits.** You and the agent can write the same file. No worse than
 running `claude` natively, but no better, and the worktree makes it easier to
