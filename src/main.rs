@@ -858,13 +858,26 @@ fn say_if_the_template_was_renamed(cwd: &std::path::Path, ctx: &out::Ctx) {
         return;
     }
     let _ = cwd;
+    let now = root.join(config::TEMPLATE);
+    // `mv` only when there is nothing to overwrite. Advising it unconditionally
+    // destroyed a populated `default.toml` — omh printing the command that
+    // loses somebody's configuration is worse than omh losing it, because they
+    // typed it themselves and have no reason to suspect the tool.
+    let next = if now.exists() {
+        format!(
+            "  both files exist. {} is the one omh reads; merge anything you \
+             still want out of {} and delete it",
+            now.display(),
+            old.display()
+        )
+    } else {
+        format!("  mv {} {}", old.display(), now.display())
+    };
     ctx.warn(&format!(
         "{} is not read any more — it became {}, the template a new repo is \
-         seeded from.\n  mv {} {}",
+         seeded from.\n{next}",
         old.display(),
         config::TEMPLATE,
-        old.display(),
-        root.join(config::TEMPLATE).display()
     ));
 }
 
@@ -4380,6 +4393,13 @@ fn set(
             }
         }
     }
+    // Not for the template. "Outranks" is a claim about resolution, and the
+    // template is not in it — saying a repo value beats your default is the
+    // exact confusion this release removed, printed by the command that owns
+    // the file.
+    if reach.layers == [config::Layer::Personal] {
+        return Ok(());
+    }
     say_if_shadowed(paths, key, &reach.layers, ctx)
 }
 
@@ -5197,17 +5217,10 @@ fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
     // told about once, rather than one propagated into every repo you start.
     for k in key::KEYS {
         if let Some(item) = doc.get(k.name) {
-            // A value, not a table. `[carry_in]` is a hand-edit that means
-            // nothing, and copying it produced a file omh could not parse.
-            anyhow::ensure!(
-                item.is_value(),
-                "{}: `{}` is a table, and omh reads it as a value. Delete the \
-                 `[{}]` header, or give it a value:\n  {} = []",
-                template.display(),
-                k.name,
-                k.name,
-                k.name
-            );
+            // No `is_value()` check here. `refuse_what_cannot_be_seeded` has
+            // already refused every table but `[use]` and `[omh]`, so
+            // `[carry_in]` never reaches this loop — a second guard for it
+            // could not fire, and a check nothing can reach is decoration.
             out.insert(k.name, item.clone());
             took.push(k.name.to_string());
         }
@@ -5232,8 +5245,12 @@ fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
     }
 
     let body = out.to_string();
-    // Parsed before it is written, so a template shape nobody anticipated is an
-    // error naming the template rather than a committed file naming itself.
+    // A backstop, and deliberately one: the refusals above cover every shape
+    // known to break, and the original defect was a shape nobody had thought
+    // of. Unreachable through anything currently spellable, which is why no
+    // test kills a mutation of it — kept because "the input I did not imagine"
+    // is exactly what put a corrupt `settings.toml` in a repo that `init`
+    // could not then repair.
     let assembled = format!("{HEADER}{body}");
     toml::from_str::<toml::Table>(&assembled).with_context(|| {
         format!(
@@ -11287,9 +11304,24 @@ because = "a fixture"
             body.contains("[use]") && body.contains("tdd"),
             "the selection travels: {body}"
         );
+        // Parsed, not grepped. The old assertion was satisfied by the
+        // commented-out `# [omh]` placeholder the header appends when no
+        // switches travel, so dropping `[omh]` from the seed passed.
+        let parsed: toml::Table =
+            toml::from_str(&body).expect("what init writes has to be a settings file");
+        assert_eq!(
+            parsed["omh"]["codegraph"].as_bool(),
+            Some(false),
+            "the feature switches travel, as a switch: {body}"
+        );
+        assert_eq!(
+            parsed["idle_timeout"].as_str(),
+            Some("45m"),
+            "and the key is a value, not a line that happens to contain it"
+        );
         assert!(
-            body.contains("[omh]") && body.contains("codegraph = false"),
-            "and the feature switches: {body}"
+            took.contains(&"[omh]".to_string()),
+            "and what travelled is reported: {took:?}"
         );
         assert!(
             took.contains(&"idle_timeout".to_string()) && took.contains(&"[use]".to_string()),

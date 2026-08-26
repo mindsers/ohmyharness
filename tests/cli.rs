@@ -3371,11 +3371,12 @@ fn settings_set_writes_your_own_file_and_no_repo_file() {
     );
 }
 
-/// A credential-bearing key is safe here, and said to be.
+/// A credential-bearing key in the template draws no committed-file warning.
 ///
-/// `~/.omh/settings.toml` is not a file git carries, so the committed-file
-/// warning has nothing to fire about — but a person who has just been told
-/// `carry_in` belongs in a gitignored file deserves to know this one is.
+/// `~/.omh/default.toml` is not in a repo at all, so the sentence about git
+/// carrying a file has nothing to fire about. What the command *does* say is
+/// which kind of file it wrote, which is asserted here rather than left as a
+/// claim in the title.
 #[test]
 fn settings_set_does_not_warn_about_a_file_git_does_not_carry() {
     let sb = sandbox();
@@ -3388,6 +3389,11 @@ fn settings_set_does_not_warn_about_a_file_git_does_not_carry() {
         !String::from_utf8_lossy(&out.stderr).contains("COMMITTED"),
         "your own file is not committed: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("seeds new repos"),
+        "and it says what the file it wrote is for: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }
 
@@ -3609,9 +3615,15 @@ fn no_part_of_the_template_resolves_in_this_repo() {
         !said.contains("45m"),
         "a bare key from the template resolved here: {said}"
     );
+    // The feature's row, whatever the column widths are. Asserting the padding
+    // pinned the table renderer rather than the behaviour.
+    let row = said
+        .lines()
+        .find(|l| l.trim_start().starts_with("codegraph"))
+        .unwrap_or_else(|| panic!("no codegraph row: {said}"));
     assert!(
-        said.contains("codegraph   on"),
-        "an `[omh]` switch from the template reached this repo: {said}"
+        row.contains(" on") && !row.contains("off"),
+        "an `[omh]` switch from the template reached this repo: {row}"
     );
     assert!(
         !said.contains("from-template"),
@@ -3710,7 +3722,10 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
     for (template, expected) in [
         ("[carry_in]\nx = 1\n", "carry_in"),
         ("[omh]\nnosuchthing = false\n", "nosuchthing"),
-        ("[provision]\n\"go/toolchain\" = true\n", "provision"),
+        // The specific message, not just the name — the generic unknown-table
+        // refusal would also mention `provision`, so asserting the name alone
+        // let the reasoned refusal be deleted with the suite green.
+        ("[provision]\n\"go/toolchain\" = true\n", "machine"),
         ("[mcp.linear.env]\nTOKEN = \"secret\"\n", "mcp"),
         ("[typo_table]\nx = 1\n", "typo_table"),
     ] {
@@ -3818,6 +3833,157 @@ fn settings_shows_the_tables_it_seeds_as_seeded() {
     assert!(
         !said.contains("read by nothing"),
         "and not reported as read by nothing, which is the opposite: {said}"
+    );
+}
+
+/// The rename advice never destroys the file omh actually reads.
+///
+/// `mv old new` was printed unconditionally. With both files present that
+/// overwrites a populated `default.toml` — omh printing the command that loses
+/// somebody's configuration, which is worse than omh losing it, because they
+/// typed it themselves and had no reason to doubt the tool.
+#[test]
+fn the_rename_advice_does_not_overwrite_a_template_that_exists() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/settings.toml"),
+        "idle_timeout = \"9h\"\n",
+    )
+    .unwrap();
+
+    // Only the old file: `mv` is safe and is what to say.
+    let said = String::from_utf8_lossy(&sb.omh(&["repo"]).stderr).to_string();
+    assert!(
+        said.contains("mv "),
+        "with nothing to overwrite, say mv: {said}"
+    );
+    let mv = said.lines().find(|l| l.contains("mv ")).unwrap();
+    let (from, to) = mv.split_once("mv ").unwrap().1.split_once(' ').unwrap();
+    assert!(
+        from.ends_with("settings.toml") && to.ends_with("default.toml"),
+        "the operands are the retired name then the live one, in that order: {mv}"
+    );
+
+    // Both files: `mv` would destroy the live one, so it must not be advised.
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "idle_timeout = \"30m\"\n",
+    )
+    .unwrap();
+    let said = String::from_utf8_lossy(&sb.omh(&["repo"]).stderr).to_string();
+    assert!(
+        !said.contains("mv "),
+        "advising mv here overwrites the template omh reads: {said}"
+    );
+    assert!(
+        said.contains("default.toml") && said.contains("settings.toml"),
+        "and it still says which is which: {said}"
+    );
+}
+
+/// Nothing is said when there is nothing to say.
+///
+/// The notice runs on every command now, so a condition that always holds
+/// would put it in front of every user on every run, naming a file they do not
+/// have.
+#[test]
+fn the_rename_is_silent_when_the_old_file_is_gone() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let said = String::from_utf8_lossy(&sb.omh(&["repo"]).stderr).to_string();
+    assert!(
+        !said.contains("not read any more"),
+        "no retired file exists, so there is nothing to report: {said}"
+    );
+}
+
+/// `omh settings set` does not claim a repo value outranks your template.
+///
+/// "Outranks" is a claim about resolution and the template is not in it. Saying
+/// a repo value beat your default is the exact confusion this release removed,
+/// printed by the command that owns the file.
+#[test]
+fn setting_a_default_is_not_reported_as_losing_to_a_repo() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "idle_timeout", "5m"]).status.success());
+    let out = sb.omh(&["settings", "set", "idle_timeout", "45m"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !said.contains("outranks"),
+        "the template does not lose a contest it is not in: {said}"
+    );
+}
+
+/// A write says which of the three kinds of file it landed in.
+///
+/// `tracked()` has three arms and only one was pinned. Reverting the template
+/// to "gitignored" — the answer the boolean gave — or to "committed" both
+/// passed, and the second would tell somebody a file git does not carry is
+/// carried by git.
+#[test]
+fn a_write_names_which_kind_of_file_it_landed_in() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for (argv, expected) in [
+        (vec!["set", "--save", "idle_timeout", "30m"], "(committed)"),
+        (
+            vec!["set", "--local", "idle_timeout", "15m"],
+            "(gitignored)",
+        ),
+        (
+            vec!["settings", "set", "idle_timeout", "45m"],
+            "(seeds new repos)",
+        ),
+    ] {
+        let out = sb.omh(&argv);
+        assert!(out.status.success());
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(expected),
+            "`omh {}` must say {expected}: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+}
+
+/// `omh settings` lists a key omh reads nothing from, and only such keys.
+///
+/// The *read by nothing* section is described as the point of the report —
+/// "a typo looks exactly like a setting that took" — and nothing pinned it.
+/// Inverting the filter, so it listed the keys omh *does* read and hid the
+/// typos, passed.
+#[test]
+fn settings_names_a_key_read_by_nothing_and_no_other() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/default.toml"),
+        "idle_timeout = \"45m\"\ncarry_ins = \"typo\"\n",
+    )
+    .unwrap();
+
+    let said = String::from_utf8_lossy(&sb.omh(&["settings"]).stdout).to_string();
+    let unread = said
+        .split("set here, and read by nothing")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no unread section: {said}"));
+    assert!(unread.contains("carry_ins"), "the typo is named: {said}");
+    assert!(
+        !unread.contains("idle_timeout"),
+        "and a key omh does read is not listed as unread: {said}"
     );
 }
 
