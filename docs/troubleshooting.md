@@ -313,7 +313,7 @@ confident wrong answers.
 codegraph = false
 ```
 
-or `omh repo disable codegraph`. Nothing is uninstalled and the next repo gets
+or `omh set codegraph off`. Nothing is uninstalled and the next repo gets
 it back.
 
 ### `--layer is going away`

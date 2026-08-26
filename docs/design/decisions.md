@@ -104,8 +104,8 @@ and pinning it is part of `omh doctor` learning git.
 
 ## Reversals worth knowing about
 
-Two decisions were made, shipped, and undone. Both are more instructive than the
-choices that held.
+Three decisions were made, shipped, and undone. All are more instructive than
+the choices that held.
 
 **Per-session graph website → one per repo.** Every session's graph lives in one
 volume, so a per-session server displayed every other session's graph anyway — N
@@ -120,3 +120,23 @@ them.**
 first version mounted a credential volume at `$HOME/.omh-creds`, which no
 harness has ever read. It tested green. See
 [accounts](../accounts.md#mount-the-directory-never-the-token-file).
+
+**The write default lived in the command → it lives in the key.** `omh config
+set` and `omh repo set` had opposite defaults and one flag could not express
+both, so the safety came from the destination: `omh repo set` sent *every*
+value to the gitignored file and nothing could reach git unasked. That was also
+why a teammate cloning a repo got none of the settings it had chosen. One
+command serving every key cannot work that way, so the judgement moved into
+`src/key.rs`, per key, and the committed file became the default.
+
+That reversal forced a second one inside a single release. `omh set` first
+shipped with a rule of its own — the committed file, unless the gitignored one
+already held the key — while `omh use`, `omh unuse` and the feature switch each
+answered differently. Three answers to one question, and every difference was a
+place for a command to report success over something it had not changed:
+`omh unset carry_in` left a map to a credential standing in a committed file
+while saying it had removed it. **The rule is now one function that four
+commands call** — every repo layer that already holds it, else the committed
+file, except a key that can name a credential. Each of the three original
+answers was defensible alone; only asking whether they were answers to the
+*same question* exposed them.

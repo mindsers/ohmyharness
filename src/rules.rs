@@ -440,7 +440,7 @@ fn catalogue(
             anyhow::bail!(
                 "{}: `{name}` is a name omh ships, so this file answers to nothing \
                  — it is not composed, and it does not override omh's. Rename it, \
-                 or switch the feature off with `omh repo disable {feature}` if \
+                 or switch the feature off with `omh set {feature} off` if \
                  what you want is omh's gone.",
                 path.display()
             );

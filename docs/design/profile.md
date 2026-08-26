@@ -686,6 +686,13 @@ file and says so, the way `--layer shared` does today.
 > [Configuration](../configuration.md) for the rule as shipped and
 > [decisions](decisions.md) for the record of the reversal.
 
+> **Also superseded in 0.7.0.** The paragraph below argues for `enable` /
+> `disable` as a separate verb pair. `omh set <feature> on|off` replaced it —
+> the distinction it protects turned out to live in the *refusal*
+> (`omh set graph-rules off` names the feature containing it) rather than in
+> the verb count, and a second pair of verbs for the same file was one more
+> spelling to keep in your head.
+
 **Two verb pairs, mirroring the two tables.** `use` / `unuse` for catalogue
 entries, `enable` / `disable` for omh's features. The CLI teaches the file's
 structure rather than flattening it: if `omh repo disable` accepted a skill name,

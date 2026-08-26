@@ -2183,7 +2183,7 @@ fn use_refuses_a_feature_and_disable_refuses_an_entry() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("codegraph"), "must name it: {err}");
     assert!(
-        err.contains("omh repo disable codegraph"),
+        err.contains("omh set codegraph off"),
         "and point at the switch that does work: {err}"
     );
 
@@ -2326,7 +2326,7 @@ fn set_updates_a_key_where_it_already_lives() {
 fn set_shared_forces_the_committed_file_and_names_the_key() {
     let sb = sandbox();
     sb.seed_base();
-    let out = sb.omh(&["set", "--shared", "carry_in", "[\".env\"]"]);
+    let out = sb.omh(&["set", "--save", "carry_in", "[\".env\"]"]);
     assert!(out.status.success());
     assert!(sb.settings().contains(".env"), "{}", sb.settings());
     let err = String::from_utf8_lossy(&out.stderr);
@@ -2363,7 +2363,7 @@ fn set_mentions_git_where_git_was_asked_for_or_cannot_be_vouched_for() {
     );
 
     // Asked for in so many words.
-    let asked = sb.omh(&["set", "--shared", "account", "work"]);
+    let asked = sb.omh(&["set", "--save", "account", "work"]);
     let said = String::from_utf8_lossy(&asked.stderr).to_string();
     assert!(
         said.contains("COMMITTED"),
@@ -2380,20 +2380,29 @@ fn set_mentions_git_where_git_was_asked_for_or_cannot_be_vouched_for() {
     );
 }
 
-/// `--personal` is where `omh config set` went: your default, every project.
+/// `--local` writes the gitignored file, whatever the key is for.
+///
+/// The mirror of `--save`, and the reason both exist: the rule decides well,
+/// and somebody who disagrees with it about one key needs a way to say so
+/// without arguing with a table.
 #[test]
-fn set_personal_writes_your_defaults_across_projects() {
+fn local_writes_the_gitignored_file_whatever_the_key_is() {
     let sb = sandbox();
+    sb.git_init();
     sb.seed_base();
+
     assert!(sb
-        .omh(&["set", "--personal", "idle_timeout", "45m"])
+        .omh(&["set", "--local", "idle_timeout", "45m"])
         .status
         .success());
-    let personal = std::fs::read_to_string(sb.home.join(".omh/settings.toml")).unwrap();
-    assert!(personal.contains("45m"), "got: {personal}");
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        local.contains("45m"),
+        "a key the rule would have committed goes where you said: {local}"
+    );
     assert!(
         !sb.settings().contains("45m"),
-        "your default is not this repo's: {}",
+        "and not also to the file it would have chosen: {}",
         sb.settings()
     );
 }
@@ -2431,14 +2440,16 @@ fn unset_removes_a_credential_key_from_the_committed_file_too() {
     sb.seed_base();
 
     assert!(sb
-        .omh(&["set", "--shared", "carry_in", "[\".env.shared\"]"])
+        .omh(&["set", "--save", "carry_in", "[\".env.shared\"]"])
         .status
         .success());
     assert!(sb
-        .omh(&["set", "carry_in", "[\".env.local\"]"])
+        .omh(&["set", "--local", "carry_in", "[\".env.local\"]"])
         .status
         .success());
-    // Both files, which is the state omh itself just created.
+    // Both files, which the two flags are the only way to reach — an
+    // unadorned write joins whichever layer already holds it rather than
+    // splitting the value across two.
     assert!(sb.settings().contains(".env.shared"), "{}", sb.settings());
 
     assert!(sb.omh(&["unset", "carry_in"]).status.success());
@@ -2462,17 +2473,19 @@ fn unset_removes_a_credential_key_from_the_committed_file_too() {
 
 /// A value `unset` deliberately does not reach is named, not passed over.
 ///
-/// An unqualified `omh unset` stays inside the repo — reaching into your
-/// personal file because a project mentioned a key would be the wrong kind of
-/// surprise. But silence then leaves a person watching a setting survive a
-/// command whose whole purpose was removing it.
+/// `omh set` and `omh unset` write this checkout. Cross-project defaults in
+/// `~/.omh/settings.toml` are not a repo command's to edit — but silence about
+/// one leaves a person watching a setting survive the command whose whole
+/// purpose was removing it.
 #[test]
 fn unset_says_what_still_supplies_the_value() {
     let sb = sandbox();
+    sb.git_init();
     sb.seed_base();
 
+    // The personal layer, reached the only way a command still reaches it.
     assert!(sb
-        .omh(&["set", "--personal", "runtime", "docker"])
+        .omh(&["config", "set", "runtime", "docker"])
         .status
         .success());
     let out = sb.omh(&["unset", "runtime"]);
@@ -2484,39 +2497,39 @@ fn unset_says_what_still_supplies_the_value() {
     );
 }
 
-/// `--shared` and `--personal` mean that layer on `unset`, and not each other.
+/// `--save` and `--local` mean that file on `unset`, and not each other.
 ///
-/// Transposing the two arguments at the dispatch site passed the whole suite:
-/// `omh unset --shared carry_in` would have deleted from your personal file
-/// and reported the personal layer, leaving the committed `carry_in` in place.
-/// The identical transposition on `set` was caught; only this half was blind.
+/// Transposing the two arguments at the dispatch site passed the whole suite
+/// once already: `omh unset --save carry_in` would delete from the gitignored
+/// file and report the wrong layer, leaving the committed `carry_in` in place.
 #[test]
 fn unset_honours_the_layer_it_was_given() {
     let sb = sandbox();
+    sb.git_init();
     sb.seed_base();
 
     assert!(sb
-        .omh(&["set", "--personal", "idle_timeout", "45m"])
+        .omh(&["set", "--local", "idle_timeout", "45m"])
         .status
         .success());
     assert!(sb
-        .omh(&["set", "--shared", "idle_timeout", "30m"])
+        .omh(&["set", "--save", "idle_timeout", "30m"])
         .status
         .success());
 
     assert!(sb
-        .omh(&["unset", "--shared", "idle_timeout"])
+        .omh(&["unset", "--save", "idle_timeout"])
         .status
         .success());
     assert!(
         !sb.settings().contains("30m"),
-        "--shared names the committed file: {}",
+        "--save names the committed file: {}",
         sb.settings()
     );
-    let personal = std::fs::read_to_string(sb.home.join(".omh/settings.toml")).unwrap();
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
     assert!(
-        personal.contains("45m"),
-        "and it is not the personal one: {personal}"
+        local.contains("45m"),
+        "and it is not the gitignored one: {local}"
     );
 }
 
@@ -2541,39 +2554,41 @@ fn unset_does_not_claim_a_removal_that_did_not_happen() {
 
 /// A write a standing layer outranks says so, rather than reporting success.
 ///
-/// `omh set --shared idle_timeout 30m` over a local `15m` writes the committed
-/// file and exits 0 — correctly, because `--shared` names that file — while
-/// `omh repo` still reports `15m`. Rule 2 exists to prevent exactly this shape
-/// and a named flag walks past it by design. Doing it silently was the bug.
+/// Only reachable with a flag now. Without one the rule reaches every repo
+/// layer that already holds the key, so an unadorned write cannot be outranked
+/// — that is what the rule is for. `--save` walks past it on purpose, because
+/// you named the file, and doing so silently was the bug.
 #[test]
 fn a_write_something_outranks_says_the_value_did_not_change() {
     let sb = sandbox();
+    sb.git_init();
     sb.seed_base();
 
-    assert!(sb.omh(&["set", "idle_timeout", "15m"]).status.success());
+    // Unadorned, over a standing local value: reaches it, so nothing is
+    // shadowed and nothing is said. This half stops the warning firing on
+    // writes that took.
     assert!(sb
-        .omh(&["set", "--personal", "idle_timeout", "5m"])
+        .omh(&["set", "--local", "idle_timeout", "15m"])
         .status
         .success());
-    // Personal is the lowest layer, so the committed write wins and nothing
-    // is said — otherwise this fires on writes that took.
     let quiet = sb.omh(&["set", "idle_timeout", "20m"]);
     assert!(
         !String::from_utf8_lossy(&quiet.stderr).contains("outranks"),
         "a write that took must not be reported as shadowed: {}",
         String::from_utf8_lossy(&quiet.stderr)
     );
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        local.contains("20m"),
+        "because it reached the layer already holding it: {local}"
+    );
 
-    std::fs::write(
-        sb.repo.join(".omh/settings.local.toml"),
-        "idle_timeout = \"15m\"\n",
-    )
-    .unwrap();
-    let out = sb.omh(&["set", "--shared", "idle_timeout", "30m"]);
+    // Named, so the rule steps aside — and says what that cost.
+    let out = sb.omh(&["set", "--save", "idle_timeout", "30m"]);
     assert!(out.status.success(), "the write still happens");
     let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        said.contains("outranks") && said.contains("15m"),
+        said.contains("outranks") && said.contains("20m"),
         "a value that did not change has to say which layer kept it: {said}"
     );
 }
@@ -2589,7 +2604,7 @@ fn the_advice_names_the_gitignored_file_not_the_one_written() {
     let sb = sandbox();
     sb.seed_base();
 
-    let out = sb.omh(&["set", "--shared", "carry_in", "[\".env\"]"]);
+    let out = sb.omh(&["set", "--save", "carry_in", "[\".env\"]"]);
     assert!(out.status.success());
     let said = String::from_utf8_lossy(&out.stderr).to_string();
     let advice = said
@@ -2621,7 +2636,7 @@ fn a_key_that_carries_no_secret_is_not_singled_out() {
     let sb = sandbox();
     sb.seed_base();
 
-    let out = sb.omh(&["set", "--shared", "account", "work"]);
+    let out = sb.omh(&["set", "--save", "account", "work"]);
     let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(said.contains("COMMITTED"), "got: {said}");
     assert!(
@@ -2667,8 +2682,8 @@ fn the_two_layer_flags_cannot_both_be_given() {
     sb.seed_base();
 
     for argv in [
-        vec!["set", "--shared", "--personal", "idle_timeout", "30m"],
-        vec!["unset", "--shared", "--personal", "idle_timeout"],
+        vec!["set", "--save", "--local", "idle_timeout", "30m"],
+        vec!["unset", "--save", "--local", "idle_timeout"],
     ] {
         let out = sb.omh(&argv);
         assert!(
@@ -2749,6 +2764,536 @@ fn why_answers_for_a_settings_key() {
     );
 }
 
+/// One command switches a feature, the same one that sets a value.
+///
+/// `omh repo enable`/`disable` are two more verbs for *write a thing to the
+/// settings file*, and which of omh's features a project runs with is as much
+/// a fact about the project as which runtime it wants. What the two halves do
+/// not share is the file format — a feature lives in the `[omh]` table, a
+/// setting is a bare key — and that is the whole hazard here.
+#[test]
+fn a_feature_is_switched_by_the_command_that_sets_a_value() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "codegraph", "off"]).status.success());
+    assert!(
+        sb.settings().contains("[omh]") && sb.settings().contains("codegraph = false"),
+        "a feature belongs in the [omh] table: {}",
+        sb.settings()
+    );
+
+    let shown = sb.omh(&["repo"]);
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("codegraph"),
+        "and omh reports it: {}",
+        String::from_utf8_lossy(&shown.stdout)
+    );
+
+    assert!(sb.omh(&["set", "codegraph", "on"]).status.success());
+    assert!(
+        sb.settings().contains("codegraph = true"),
+        "back on: {}",
+        sb.settings()
+    );
+}
+
+/// A feature is never written as a bare settings key.
+///
+/// This is the failure the fork exists to prevent, and it is silent: before
+/// `omh set` knew about features, `omh set codegraph off` wrote a top-level
+/// `codegraph = "off"`, warned that nothing reads it, exited 0 — and the
+/// feature stayed on. A settings file that *looks* like it says what you
+/// meant, next to a feature that ignored you.
+#[test]
+fn a_feature_is_not_written_as_a_bare_settings_key() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    let out = sb.omh(&["set", "codegraph", "off"]);
+    assert!(out.status.success());
+    let written = sb.settings();
+    assert!(
+        !written
+            .lines()
+            .any(|l| l.trim_start().starts_with("codegraph =") && l.contains('"')),
+        "a feature written as a string key is a switch that did nothing: {written}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("nothing in omh reads"),
+        "and it is not reported as an unknown key: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A feature takes `on` or `off`, and says so when given anything else.
+#[test]
+fn a_feature_takes_on_or_off_and_names_them() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    let out = sb.omh(&["set", "codegraph", "true"]);
+    assert!(
+        !out.status.success(),
+        "a feature is not a free-text setting"
+    );
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("on") && said.contains("off"),
+        "the refusal names the two words that work: {said}"
+    );
+    assert!(
+        sb.settings().is_empty() || !sb.settings().contains("codegraph"),
+        "and nothing was written: {}",
+        sb.settings()
+    );
+}
+
+/// A feature takes the layer flags too, because it lives in the same files.
+///
+/// It used to refuse them, on the reasoning that a feature is a fact about
+/// this checkout and no flag should name its file. Half of that is true and
+/// the conclusion did not follow: `[omh]` sits in the same two repo files as
+/// every setting, so `--local` and `--save` have exactly as much to mean here.
+#[test]
+fn a_feature_takes_the_layer_flags_like_any_setting() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    assert!(sb
+        .omh(&["set", "--local", "codegraph", "off"])
+        .status
+        .success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        local.contains("codegraph = false"),
+        "--local puts the switch in the gitignored file: {local}"
+    );
+    assert!(
+        !sb.settings().contains("codegraph"),
+        "and not also in the committed one: {}",
+        sb.settings()
+    );
+
+    // An unadorned write then joins it rather than landing underneath.
+    assert!(sb.omh(&["set", "codegraph", "on"]).status.success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        local.contains("codegraph = true"),
+        "the switch moved where it already was: {local}"
+    );
+    assert!(
+        !sb.settings().contains("codegraph"),
+        "still not a second copy: {}",
+        sb.settings()
+    );
+}
+
+/// `omh unset <feature>` drops the switch, letting omh's own default return.
+///
+/// Without this, `omh unset codegraph` looked in the wrong shape entirely — a
+/// feature lives in `[omh]`, `unset` removed bare keys — so it reported
+/// `codegraph was not set in the shared layer` while `[omh] codegraph = false`
+/// sat in the file, still off. Same silent-wrong as the one `unset` was just
+/// fixed for, one table over.
+#[test]
+fn unset_a_feature_lets_omhs_own_default_return() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "codegraph", "off"]).status.success());
+    assert!(
+        sb.settings().contains("codegraph = false"),
+        "{}",
+        sb.settings()
+    );
+
+    let out = sb.omh(&["unset", "codegraph"]);
+    assert!(out.status.success());
+    assert!(
+        !sb.settings().contains("codegraph = false"),
+        "the switch is gone: {}",
+        sb.settings()
+    );
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("was not set"),
+        "and it was not reported absent while it was sitting in the file: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A feature that was never switched is reported as never switched.
+///
+/// Following omh's default is a third state, not a quiet kind of off, and
+/// `dropped: []` is what a `--json` consumer needs to tell them apart. Without
+/// this, hardcoding the report to claim a removal passes: `omh unset codegraph`
+/// on a repo that never touched it says the switch was dropped, which reads as
+/// "it was on, now it is not".
+#[test]
+fn unsetting_a_feature_nobody_switched_says_so() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    let out = sb.omh(&["--json", "unset", "codegraph"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("\"dropped\": []") || said.contains("\"dropped\":[]"),
+        "nothing was dropped, and the machine-readable answer has to say so: {said}"
+    );
+
+    let human = sb.omh(&["unset", "codegraph"]);
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("was not switched"),
+        "and a person is told the same thing: {}",
+        String::from_utf8_lossy(&human.stdout)
+    );
+}
+
+/// A catalogue entry is still not a feature, through the new spelling too.
+#[test]
+fn set_tells_an_entry_from_the_feature_that_contains_it() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    let out = sb.omh(&["set", "graph-rules", "off"]);
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("codegraph"),
+        "naming the feature it belongs to is how somebody finds the grouping: {said}"
+    );
+}
+
+/// `--dry-run` on a feature plans and writes nothing, like its sibling arm.
+///
+/// It used to be accepted and discarded here: `omh --dry-run set codegraph off`
+/// wrote the committed file and printed `wrote →`. The settings arm of the
+/// same command honoured it, which is how somebody learns the wrong lesson
+/// about this one.
+#[test]
+fn a_dry_run_on_a_feature_writes_nothing() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let out = sb.omh(&["--dry-run", "set", "codegraph", "off"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("would switch") && !said.contains("wrote →"),
+        "a plan does not report a write: {said}"
+    );
+    assert!(
+        !sb.repo.join(".omh/settings.toml").exists(),
+        "a dry run that writes is not a dry run"
+    );
+
+    // And the same for the removal half.
+    assert!(sb.omh(&["set", "codegraph", "off"]).status.success());
+    let before = sb.settings();
+    let out = sb.omh(&["--dry-run", "unset", "codegraph"]);
+    assert!(out.status.success());
+    assert_eq!(sb.settings(), before, "the plan changed the file");
+}
+
+/// The plan for a removal agrees with the removal.
+///
+/// The dry run iterated the layers a *write* must reach, which always names
+/// the committed file, so it promised to drop a switch from a repo that had
+/// never switched anything — and the real run then said the opposite. A
+/// preview that contradicts the act it previews is worse than no preview.
+#[test]
+fn the_plan_for_a_feature_removal_agrees_with_the_removal() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let planned = sb.omh(&["--dry-run", "unset", "codegraph"]);
+    assert!(planned.status.success());
+    let plan = String::from_utf8_lossy(&planned.stdout).to_string();
+    assert!(
+        !plan.contains("would drop"),
+        "nothing is switched, so there is nothing to drop: {plan}"
+    );
+
+    let real = sb.omh(&["unset", "codegraph"]);
+    assert!(
+        String::from_utf8_lossy(&real.stdout).contains("was not switched"),
+        "and the real run says the same: {}",
+        String::from_utf8_lossy(&real.stdout)
+    );
+}
+
+/// A removal that happened is reported as one.
+///
+/// `dropped` was pinned in exactly one direction — the empty case — so
+/// hardcoding it empty passed, and a real removal reported itself as a no-op.
+#[test]
+fn a_feature_removal_that_happened_says_which_layer() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "codegraph", "off"]).status.success());
+    let out = sb.omh(&["--json", "unset", "codegraph"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("\"shared\""),
+        "the layer it was dropped from has to be named: {said}"
+    );
+    assert!(
+        !said.contains("\"dropped\": []") && !said.contains("\"dropped\":[]"),
+        "a removal that happened is not an empty list: {said}"
+    );
+}
+
+/// Unsetting one feature leaves another alone.
+///
+/// Deleting the "was it even there" check passes every test that unsets from a
+/// repo with no `[omh]` table at all, because an earlier guard catches those.
+/// It takes a table holding a *different* feature to reach the check.
+#[test]
+fn unsetting_a_feature_leaves_the_others_switched() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "memory", "off"]).status.success());
+    let out = sb.omh(&["--json", "unset", "codegraph"]);
+    assert!(out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("\"dropped\": []")
+            || String::from_utf8_lossy(&out.stdout).contains("\"dropped\":[]"),
+        "codegraph was never switched: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        sb.settings().contains("memory = false"),
+        "and memory is untouched: {}",
+        sb.settings()
+    );
+}
+
+/// `omh unset` refuses an entry name, the same as `omh set` does.
+///
+/// The two arms share a shape and not a line of code, so nothing carried over:
+/// collapsing the entry arm on the `unset` side passed the whole suite, and
+/// `omh unset graph-rules` reported on a bare key that was never there.
+#[test]
+fn unset_tells_an_entry_from_the_feature_that_contains_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let out = sb.omh(&["unset", "graph-rules"]);
+    assert!(!out.status.success(), "an entry is not a feature");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("codegraph"),
+        "and the refusal names the feature that contains it: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A settings write does not depend on the health of omh's base set.
+///
+/// `names` loads the manifest to rule out a feature name. Propagating that
+/// failure made an ordinary repo-local write fail for a reason with nothing to
+/// do with what was typed — in a home where `omh init` had never run, `omh set
+/// my_new_key 1` exited 1, and so did `omh unset`, which is the command a
+/// person runs to get a secret out of git.
+#[test]
+fn a_settings_write_survives_a_base_set_it_cannot_read() {
+    let sb = sandbox();
+    sb.git_init();
+    // Deliberately no `seed_base()`.
+
+    let out = sb.omh(&["set", "my_new_key", "1"]);
+    assert!(
+        out.status.success(),
+        "a hand-editable settings file must not be refused because ~/.omh/base \
+         is missing: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        sb.settings().contains("my_new_key"),
+        "and the value is written: {}",
+        sb.settings()
+    );
+    // Said, not swallowed: omh could not check the name against its features.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("base set"),
+        "the reduced check is reported: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        sb.omh(&["unset", "my_new_key"]).status.success(),
+        "and the removal half too"
+    );
+}
+
+/// The legacy spellings cannot write a bare key over a feature name either.
+///
+/// Routing only `omh set` through the fork guarded one door of four while the
+/// documentation started pointing people at the others. `omh repo set
+/// codegraph off` wrote `codegraph = "off"`, warned nothing reads it, exited
+/// 0, and left the feature on — verbatim the defect the fork exists to end.
+#[test]
+fn the_older_spellings_refuse_a_feature_name_too() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for argv in [
+        vec!["repo", "set", "codegraph", "off"],
+        vec!["config", "set", "codegraph", "off"],
+        vec!["repo", "unset", "codegraph"],
+        vec!["config", "unset", "codegraph"],
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            !out.status.success(),
+            "`omh {}` writes a bare key read by nothing",
+            argv.join(" ")
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("omh set codegraph"),
+            "and it names the spelling that works: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(
+        !sb.settings().contains("codegraph = \"off\""),
+        "nothing was written as a string: {}",
+        sb.settings()
+    );
+}
+
+/// A key held in two files is updated in **both**, not just the first.
+///
+/// This is rule 1's whole point and nothing was checking the plural: writing
+/// only the first layer passed the suite, and `omh set idle_timeout 20m` would
+/// have left the committed file on the old value while reporting success —
+/// visible to a teammate cloning the repo and to nobody else.
+#[test]
+fn a_key_held_in_two_files_is_updated_in_both() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    assert!(sb
+        .omh(&["set", "--save", "idle_timeout", "1h"])
+        .status
+        .success());
+    assert!(sb
+        .omh(&["set", "--local", "idle_timeout", "15m"])
+        .status
+        .success());
+
+    assert!(sb.omh(&["set", "idle_timeout", "20m"]).status.success());
+    assert!(
+        sb.settings().contains("20m") && !sb.settings().contains("1h"),
+        "the committed file was left on the old value: {}",
+        sb.settings()
+    );
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        local.contains("20m") && !local.contains("15m"),
+        "and the gitignored one too: {local}"
+    );
+}
+
+/// A feature still switched somewhere after a drop is named.
+///
+/// `omh unset codegraph` reported that this checkout no longer switches it
+/// while `~/.omh/settings.toml` held `[omh] codegraph = false` — which no repo
+/// command reaches and every read honours. A confident claim about the
+/// effective state, made by code that had looked at two layers of three.
+#[test]
+fn unset_names_a_feature_switch_it_could_not_reach() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    // The personal layer, which no repo command writes and every read consults.
+    std::fs::create_dir_all(sb.home.join(".omh")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/settings.toml"),
+        "[omh]\ncodegraph = false\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["unset", "codegraph"]);
+    assert!(out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("personal") && said.contains("codegraph"),
+        "the layer still switching it has to be named: {said}"
+    );
+
+    // And it really is still off, which is what makes the silence a lie.
+    let shown = sb.omh(&["repo"]);
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("codegraph"),
+        "{}",
+        String::from_utf8_lossy(&shown.stdout)
+    );
+}
+
+/// A removal that fails partway still says what it already did.
+///
+/// A `?` inside the loop abandoned the layers already dropped **and** the
+/// report that would have named them, so a permission error on the second file
+/// left the first one silently rewritten — a committed file, which the user
+/// then finds as an unexplained diff and has no reason to connect to a command
+/// that exited 1 talking about a different path.
+#[test]
+fn a_removal_that_fails_partway_says_what_it_already_did() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    // Running as root ignores the mode bits, and a test that cannot fail is
+    // worse than one that is absent.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    assert!(sb
+        .omh(&["set", "--save", "codegraph", "off"])
+        .status
+        .success());
+    assert!(sb
+        .omh(&["set", "--local", "codegraph", "off"])
+        .status
+        .success());
+
+    let local = sb.repo.join(".omh/settings.local.toml");
+    let mut mode = std::fs::metadata(&local).unwrap().permissions();
+    mode.set_readonly(true);
+    std::fs::set_permissions(&local, mode).unwrap();
+
+    let out = sb.omh(&["unset", "codegraph"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        !out.status.success(),
+        "the failure is still a failure: {said}"
+    );
+    assert!(
+        said.contains("codegraph"),
+        "and what it managed to do is reported before it gives up: {said}"
+    );
+    assert!(
+        !sb.settings().contains("codegraph"),
+        "the committed file really was rewritten, which is the half a silent \
+         failure hides: {}",
+        sb.settings()
+    );
+}
+
 /// `omh config set` means **you** now. It used to default to the repo's
 /// gitignored file; the secret-safety argument survives intact, because the
 /// personal file is not committed either.
@@ -2782,7 +3327,7 @@ fn layer_still_works_and_names_what_replaced_it() {
     let said = String::from_utf8_lossy(&out.stderr);
     assert!(said.contains("going away"), "got: {said}");
     assert!(
-        said.contains("omh set --shared"),
+        said.contains("omh set --save"),
         "and names the form that replaces it: {said}"
     );
     assert!(
