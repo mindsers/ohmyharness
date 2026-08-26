@@ -267,10 +267,16 @@ enum Cmd {
     },
     /// What you have here: harnesses, editors, sessions.
     Info,
-    /// Open a session in an editor, over SSH.
-    #[command(visible_alias = "a")]
+    /// Retired in 2026.08 — it is `omh s attach` now. Kept hidden so that
+    /// typing the spelling everyone has in their fingers says what replaced
+    /// it — the treatment the retired listing verb got, for the same reason: a
+    /// better sentence, not a prevented harm.
+    #[command(hide = true)]
     Attach {
-        /// Defaults to $OMH_EDITOR or $EDITOR.
+        /// Unused. Accepted so the retired spelling with an editor after it
+        /// reaches the refusal rather
+        /// than clap's complaint about an argument the tombstone does not take.
+        #[arg(hide = true)]
         editor: Option<String>,
     },
     /// Work with sessions.
@@ -471,6 +477,15 @@ enum SessionsCmd {
     // name is that sentence: without one it reads the record, with one it
     // overrides and rewrites it. The refusal for a session with no record
     // points here, so the remedy has to be spellable.
+    /// Open a session in an editor, over SSH.
+    ///
+    /// A session verb because a session is what it opens — and it already read
+    /// the scope before it was spelled like one.
+    #[command(visible_alias = "a")]
+    Attach {
+        /// Defaults to $OMH_EDITOR or $EDITOR.
+        editor: Option<String>,
+    },
     /// Rejoin a session, running the harness it ran before.
     Resume {
         /// Rejoin as this harness instead, and record it.
@@ -808,7 +823,7 @@ fn main() -> std::process::ExitCode {
 /// answers here against what the arms actually pass.
 fn consumes_session(cmd: &Cmd) -> bool {
     match cmd {
-        Cmd::Sessions { .. } | Cmd::Attach { .. } => true,
+        Cmd::Sessions { .. } => true,
         // Only `remember` writes a note against a session; the rest of the
         // store is repo-wide.
         Cmd::Memory { cmd } => matches!(cmd, Some(MemoryCmd::Remember { .. })),
@@ -822,6 +837,8 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Why { .. }
         | Cmd::Auth { .. }
         | Cmd::Info
+        // The retired spelling reads nothing; it only says what replaced it.
+        | Cmd::Attach { .. }
         | Cmd::Config { .. }
         | Cmd::Settings { .. }
         | Cmd::Repo { .. }
@@ -910,7 +927,11 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         ),
         Cmd::Why { thing } => why_cmd(&cwd, thing, ctx),
         Cmd::Graph { stop } => graph(&cwd, *stop, ctx),
-        Cmd::Attach { editor } => attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx),
+        // Refused rather than aliased to the session verb. A spelling that
+        // silently keeps working is a spelling nobody stops typing.
+        Cmd::Attach { .. } => anyhow::bail!(
+            "`attach` is a session verb now:\n  omh s attach [editor]     the session omh picks\n  omh s01 attach zed        that one"
+        ),
 
         // No verb: the listing. With a session named, the same listing scoped
         // to it — the prefix means *this one* everywhere else, and this is the
@@ -933,6 +954,9 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             SessionsCmd::Ls => anyhow::bail!(
                 "there is no `ls` verb any more:\n  omh s      is the listing\n  omh s01    is one row of it"
             ),
+            SessionsCmd::Attach { editor } => {
+                attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx)
+            }
             SessionsCmd::Resume { harness, args } => {
                 let paths = Paths::discover(&cwd)?;
                 let session = existing_session(&paths, cli.session.as_deref())?;
@@ -1281,7 +1305,7 @@ fn next_after_init(harness: Option<&str>) -> String {
 
 fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
     if editors.iter().any(|e| e == name) {
-        return format!("`{name}` is an editor — try `omh attach {name}`");
+        return format!("`{name}` is an editor — try `omh s attach {name}`");
     }
     format!(
         "unknown harness `{name}`\n  available: {}",
@@ -7891,11 +7915,19 @@ mod tests {
         // The launch used to be the worked example here — `sessions` had no
         // verb for starting a harness, so `omh s01 claude` fell through to the
         // line as written. It has one now (`resume`), and a bare word is not a
-        // launch, so what is left is the genuine case: a top-level command the
-        // prefix scopes.
+        // launch. `attach` was the example after that, and it stopped being one
+        // the moment it became a session verb: the sessions reading now parses,
+        // which is the *other* branch. `doctor` is the genuine case left — a
+        // top-level command the prefix scopes, with no verb under `sessions`.
+        assert_eq!(
+            session_prefix(cli_argv(&["s01", "doctor"])),
+            (Some("s01".to_string()), cli_argv(&["doctor"]))
+        );
+        // And the branch `attach` moved to: a real session verb, desugared.
         assert_eq!(
             session_prefix(cli_argv(&["s01", "attach", "zed"])),
-            (Some("s01".to_string()), cli_argv(&["attach", "zed"]))
+            (Some("s01".to_string()), cli_argv(&["s", "attach", "zed"])),
+            "a verb `sessions` has is rewritten through it, not left as written"
         );
         // `graph` had a positional of its own until the prefix landed, and for
         // one commit it had both — the prefix set the session and `graph` read
@@ -8194,8 +8226,14 @@ mod tests {
         // was: the JSON guard went on invoking a line that no longer parsed,
         // and passed, because its empty stdout read as nothing to say.
         const ON_PURPOSE: &str = "types the retired verb on purpose";
-        let gone: [String; 12] = [
-            format!("omh s {}", "ls"),        // types the retired verb on purpose
+        let gone: [String; 15] = [
+            // `attach` became a session verb in 2026.08. Both an argv form and
+            // the prose one, because the JSON guard went blind twice to a
+            // needle that only read prose.
+            format!("omh {} ", "attach"), // types the retired verb on purpose
+            format!("omh {}\"", "attach"), // types the retired verb on purpose
+            format!("{:?}, {:?}", "--json", "attach"), // types the retired verb on purpose
+            format!("omh s {}", "ls"),    // types the retired verb on purpose
             format!("omh sessions {}", "ls"), // types the retired verb on purpose
             format!("{:?}, {:?}", "s", "ls"), // types the retired verb on purpose
             format!("{:?}, {:?}", "sessions", "ls"), // types the retired verb on purpose
@@ -8800,7 +8838,7 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 69),
+            ("main.rs", 71),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),
@@ -11823,7 +11861,7 @@ because = "a fixture"
 
     /// No name omh ships is both a harness and an editor.
     ///
-    /// `omh new zed` and `omh attach zed` are different commands reaching
+    /// `omh new zed` and `omh s attach zed` are different commands reaching
     /// different directories, so a name in both is not ambiguous to the
     /// parser — it is ambiguous to the person, and to `tool_hint`, which
     /// answers "`zed` is an editor" for anything it finds in `editors/`. A
@@ -11868,7 +11906,7 @@ because = "a fixture"
     #[test]
     fn naming_an_editor_where_a_harness_goes_names_the_fix() {
         let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
-        assert!(hint.contains("omh attach zed"), "got: {hint}");
+        assert!(hint.contains("omh s attach zed"), "got: {hint}");
     }
 
     #[test]
@@ -11894,7 +11932,7 @@ because = "a fixture"
         // mistaken for anything. What survives is the editor half, which is
         // still a real confusion because editors and harnesses are both names.
         let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
-        assert!(hint.contains("omh attach zed"), "got: {hint}");
+        assert!(hint.contains("omh s attach zed"), "got: {hint}");
     }
 
     /// Regression: bundled definitions were written only if absent, so a fix
@@ -12119,13 +12157,38 @@ because = "a fixture"
     }
 
     /// Aliases only earn their keep if they are actually short.
+    ///
+    /// **Recursively**, and that is not a tidy-up. It walked the top level
+    /// only, so moving `attach` under `sessions` would not have turned this
+    /// red — it would have made it *blind*, and a guard that stops seeing a
+    /// thing looks exactly like a guard that approves of it. The floor below
+    /// is what keeps the recursion honest: it has to reach more aliases than
+    /// the top level holds, or the walk has quietly stopped descending.
     #[test]
     fn every_alias_is_a_single_letter() {
-        for sub in Cli::command().get_subcommands() {
-            for alias in sub.get_visible_aliases() {
-                assert_eq!(alias.chars().count(), 1, "`{alias}` is not a shortcut");
+        fn walk(cmd: &clap::Command, seen: &mut usize) {
+            for sub in cmd.get_subcommands() {
+                for alias in sub.get_visible_aliases() {
+                    *seen += 1;
+                    assert_eq!(alias.chars().count(), 1, "`{alias}` is not a shortcut");
+                }
+                walk(sub, seen);
             }
         }
+        let root = Cli::command();
+        let mut seen = 0;
+        walk(&root, &mut seen);
+
+        let shallow = root
+            .get_subcommands()
+            .flat_map(clap::Command::get_visible_aliases)
+            .count();
+        assert!(
+            seen > shallow,
+            "the recursive walk found {seen} aliases and the top level holds \
+             {shallow} — it is not descending, and a nested alias is exactly \
+             what it was widened for"
+        );
     }
 
     // ── omh's flags versus the harness's ────────────────────────────────────

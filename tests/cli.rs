@@ -3987,6 +3987,123 @@ fn settings_names_a_key_read_by_nothing_and_no_other() {
     );
 }
 
+/// Opening an editor is a session verb, because a session is what it opens.
+///
+/// `omh attach` was top-level while everything else about a session had moved
+/// under `omh s`. The scope was already there — `attach` read `cli.session`
+/// before this — so the spelling was the last thing saying otherwise.
+#[test]
+fn attach_is_a_session_verb() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    // No sessions, so it cannot succeed — but it has to fail as *attach*,
+    // reaching omh's own refusal rather than clap's "unrecognized subcommand".
+    for argv in [
+        vec!["s", "attach"],
+        vec!["s", "attach", "zed"],
+        vec!["s01", "attach", "zed"],
+        vec!["sessions", "attach"],
+    ] {
+        let out = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !said.contains("unrecognized subcommand"),
+            "`omh {}` did not parse as a verb at all: {said}",
+            argv.join(" ")
+        );
+    }
+}
+
+/// The editor stays optional, which is the whole reason it is a positional.
+#[test]
+fn attach_still_takes_an_optional_editor() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let bare = String::from_utf8_lossy(&sb.omh(&["s", "attach"]).stderr).to_string();
+    assert!(
+        !bare.contains("required") && !bare.contains("unrecognized"),
+        "an editor omh can derive is not one you have to type: {bare}"
+    );
+}
+
+/// The retired top-level spelling says what replaced it.
+///
+/// `omh attach` is in people's fingers and clap would answer *unrecognized
+/// subcommand*, which is true and unhelpful. This is the treatment the retired
+/// listing verb got, for the same reason: a better sentence, not a prevented
+/// harm.
+#[test]
+fn the_retired_attach_spelling_names_the_one_that_replaced_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let out = sb.omh(&["attach"]);
+    assert!(!out.status.success(), "the top-level verb is gone");
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("omh s attach"),
+        "and the refusal teaches the spelling that works: {said}"
+    );
+}
+
+/// The short spelling moved with the verb.
+#[test]
+fn the_attach_shortcut_moved_under_sessions() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let said = String::from_utf8_lossy(&sb.omh(&["s", "a"]).stderr).to_string();
+    assert!(
+        !said.contains("unrecognized subcommand"),
+        "`omh s a` is the shortcut, and it has to still be one: {said}"
+    );
+}
+
+/// A feature switch omh cannot read is refused, not skipped.
+///
+/// `read_provision` refuses a non-boolean by name under a comment reading
+/// *"two readers of one table must not disagree about strictness"*.
+/// `read_table` was the third reader and it skipped one — so `omh unset`
+/// reported the feature unswitched here while a layer it had not reached still
+/// held `codegraph = "false"`, and the next command to read settings failed to
+/// parse the file. Success, then a parse error from somewhere else.
+#[test]
+fn a_feature_switch_omh_cannot_read_is_named_not_skipped() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        "carry_in = []\n\n[omh]\ncodegraph = false\n",
+    )
+    .unwrap();
+    // A string where a switch belongs, in the layer `--save` will not touch.
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "[omh]\ncodegraph = \"false\"\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["unset", "--save", "codegraph"]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        said.contains("codegraph") && said.contains("true or false"),
+        "the entry omh cannot read has to be named where it is found, not \
+         passed over: {said}"
+    );
+    assert!(
+        said.contains("settings.local.toml"),
+        "and the file it is in, since that is what has to be edited: {said}"
+    );
+}
+
 /// `omh config set` means **you** now. It used to default to the repo's
 /// gitignored file; the secret-safety argument survives intact, because the
 /// personal file is not committed either.

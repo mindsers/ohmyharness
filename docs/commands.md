@@ -4,7 +4,7 @@
 omh init                          set this repo up
 omh new <harness> [-- args…]      start a session, run an agent in it
 omh sessions <id> resume [harness]  rejoin one · claude · omp · opencode
-omh attach [editor]           a   open the session in your editor, over SSH
+omh s attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
 omh doctor [--harness <name>] d   verify a harness really sees your profile
@@ -31,7 +31,7 @@ reading was meant.
 `omh new claude` costs one word and removes the class. There is no bare slot to
 shadow, so the list and the double parse are both gone. Harnesses and editors
 still share a namespace, but only inside their own verbs — `omh new zed` and
-`omh attach zed` say which they mean.
+`omh s attach zed` say which they mean.
 
 ### What every command prints
 
@@ -145,13 +145,13 @@ omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment)
 
 `-a <account>` selects a credential set for this launch. See [Accounts](accounts.md).
 
-## `omh attach [editor]` · `a`
+## `omh s attach [editor]` · `a`
 
 Opens the session in an editor over SSH. With no argument it resolves
 `$OMH_EDITOR` then `$EDITOR`, and falls back to printing every recipe:
 
 ```console
-$ omh attach
+$ omh s attach
 session s01 is up
 
   ssh://omh-ohmyharness-s01/work
@@ -257,7 +257,7 @@ That last row is why rejections are recorded at all: without them the same
 candidate gets re-litigated every time somebody rediscovers it.
 
 A name matching nothing prints what *is* known rather than guessing — the same
-rule as `omh attach emacs`.
+rule as `omh s attach emacs`.
 
 ## `omh info`
 
@@ -495,7 +495,7 @@ omh: omh recorded a harness for s03 and cannot read it back: …/.harness is emp
 ```
 
 The middle one covers a session older than this release, one whose run
-directory was cleared, and one `omh attach <editor>` created — attaching an
+directory was cleared, and one `omh s attach <editor>` created — attaching an
 editor makes a session without running a harness in it, so there is nothing to
 record. The last one is a marker omh wrote and cannot read now, which is
 different news and says so.

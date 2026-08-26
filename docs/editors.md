@@ -1,9 +1,9 @@
 # Editors
 
 ```console
-$ omh attach              # $OMH_EDITOR, then $EDITOR, then print every recipe
-$ omh attach zed
-$ omh attach code
+$ omh s attach              # $OMH_EDITOR, then $EDITOR, then print every recipe
+$ omh s attach zed
+$ omh s attach code
 ```
 
 ## Why this exists
@@ -49,7 +49,7 @@ boundary of what works.
 
 ## Editors are data
 
-`omh attach <name>` means *attach this tool to the session*. Adding one is a
+`omh s attach <name>` means *attach this tool to the session*. Adding one is a
 TOML file, not a code change, for the same reason [adapters](design/adapters.md)
 are data:
 
@@ -72,7 +72,7 @@ URL, because launching nothing silently would be worse. An editor omh has never
 heard of is also not an error, and omh will not guess a flag for it:
 
 ```console
-$ omh attach emacs
+$ omh s attach emacs
 Error: unknown tool `emacs`
   harnesses: claude, omp, opencode
   editors:   code, cursor, nvim, zed

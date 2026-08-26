@@ -6,7 +6,7 @@ branch**, which many harnesses take turns inhabiting.
 ```
        omh new claude ──┐
        omh new opencode ┼── exec ──┐
-       omh attach ──────┘  (ssh)   │
+       omh s attach ──────┘  (ssh)   │
                                ▼
  ┌──────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │
@@ -98,7 +98,7 @@ Until 2026.08 it had none: the dangling pointer meant every command failed with
 an agent spend turns repairing what could not be repaired. That cost the agent
 `status`, `diff`, `log`, `stash` and `reset --hard` — and cost an attached
 editor its source control panel, since the editor runs *inside* the container —
-for the editors that have one; `omh attach nvim` never did.
+for the editors that have one; `omh s attach nvim` never did.
 
 So omh gives it a repository of its own. A gitdir under `~/.omh/shadow/`, seeded
 with a single commit of the tree the session started from — minus everything omh
@@ -224,7 +224,7 @@ lives in the distribution. Turn it off with `persistence = "none"`.
 ### Why not tmux
 
 tmux is a multiplexer **and** a persistence tool, and omh needs only the second
-half — `omh attach` means SSH already gives you as many shells against a session
+half — `omh s attach` means SSH already gives you as many shells against a session
 as you want.
 
 Adopting tmux would buy one feature we need and one we already have, while
