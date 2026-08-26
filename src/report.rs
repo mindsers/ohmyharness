@@ -1469,6 +1469,116 @@ impl Report for Config {
     }
 }
 
+/// One key omh reads, and what you have said about it.
+#[derive(Debug, Clone)]
+pub struct Known {
+    pub key: String,
+    /// What omh reads it for, from the registry.
+    pub does: String,
+    /// Your default, if you have one.
+    pub value: Option<String>,
+}
+
+/// What `omh settings` shows: your defaults, against everything omh reads.
+///
+/// The unset keys are the point. The registry is a table in the binary, so a
+/// settings file cannot show it, and until this command existed the only way
+/// to learn a key's name was to already know it — or to guess at `omh why`.
+#[derive(Debug, Clone)]
+pub struct Settings {
+    pub file: String,
+    pub known: Vec<Known>,
+    /// Tables in your file that `omh init` copies into a new repo — `[use]`
+    /// and `[omh]`. Shown separately because they are neither a default you
+    /// set nor something read by nothing, and reporting them as the latter was
+    /// exactly backwards.
+    pub tables: Vec<String>,
+    /// Keys in your file that omh reads nothing from. Named rather than
+    /// hidden: a typo looks exactly like a setting that took.
+    pub unread: Vec<Setting>,
+}
+
+impl Report for Settings {
+    fn human(&self, p: &out::Palette) -> String {
+        let (set, unset): (Vec<&Known>, Vec<&Known>) =
+            self.known.iter().partition(|k| k.value.is_some());
+
+        let mut s = format!(
+            "{} {}\n",
+            p.paint(out::HEAD, "your defaults"),
+            p.paint(out::DIM, &self.file)
+        );
+        if set.is_empty() {
+            s.push_str(&out::nothing(p, "nothing set — omh's own defaults apply"));
+        } else {
+            let mut t = Table::new();
+            for k in set {
+                t = t.row(vec![
+                    Cell::styled(&k.key, out::NAME),
+                    Cell::plain(k.value.as_deref().unwrap_or_default()),
+                ]);
+            }
+            s.push_str(&t.render(p));
+        }
+
+        if !unset.is_empty() {
+            s.push('\n');
+            s.push_str(&format!("{}\n", p.paint(out::HEAD, "omh also reads")));
+            let mut t = Table::new();
+            for k in unset {
+                t = t.row(vec![
+                    Cell::styled(&k.key, out::NAME),
+                    Cell::styled(&k.does, out::DIM),
+                ]);
+            }
+            s.push_str(&t.render(p));
+        }
+
+        if !self.tables.is_empty() {
+            s.push('\n');
+            s.push_str(&format!(
+                "{}\n",
+                p.paint(out::HEAD, "also seeded into a new repo")
+            ));
+            let mut t = Table::new();
+            for name in &self.tables {
+                t = t.row(vec![Cell::styled(name, out::NAME)]);
+            }
+            s.push_str(&t.render(p));
+        }
+
+        if !self.unread.is_empty() {
+            s.push('\n');
+            s.push_str(&format!(
+                "{}\n",
+                p.paint(out::HEAD, "set here, and read by nothing")
+            ));
+            let mut t = Table::new();
+            for u in &self.unread {
+                t = t.row(vec![Cell::styled(&u.key, out::NAME), Cell::plain(&u.value)]);
+            }
+            s.push_str(&t.render(p));
+        }
+        s
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "file": self.file,
+            "known": self.known.iter().map(|k| json!({
+                "key": k.key,
+                "does": k.does,
+                "value": k.value,
+            })).collect::<Vec<_>>(),
+            "tables": self.tables,
+            "unread": self.unread.iter().map(|u| json!({
+                "key": u.key,
+                "value": u.value,
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
 /// What `omh config mcp` shows: every server, and which layer decided it.
 #[derive(Debug, Clone)]
 pub struct Servers {
@@ -1912,6 +2022,13 @@ pub struct Init {
     pub base_set: String,
     pub rationale: Vec<(String, String)>,
     pub next_command: String,
+    /// Settings copied out of `~/.omh/settings.toml` into this repo's file.
+    ///
+    /// Reported because it is the one moment that template has any effect —
+    /// nothing reads it at launch. A seed nobody is told about is
+    /// indistinguishable from a default, and this repo now carries the values
+    /// rather than inheriting them, which is a fact about a committed file.
+    pub seeded: Vec<String>,
 }
 
 impl Report for Init {
@@ -1960,6 +2077,16 @@ impl Report for Init {
                 None => Cell::styled("none — no adapters available", out::WARN),
             },
         ]);
+        if !self.seeded.is_empty() {
+            t = t.row(vec![
+                Cell::plain("settings"),
+                Cell::plain(format!(
+                    "{} seeded from your defaults ({})",
+                    self.seeded.len(),
+                    self.seeded.join(", ")
+                )),
+            ]);
+        }
         if let Some(image) = &self.image {
             t = t.row(vec![Cell::plain("image"), Cell::plain(image)]);
         }
@@ -2092,6 +2219,7 @@ impl Report for Init {
                 "why": why,
             })).collect::<Vec<_>>(),
             "next": self.next_command,
+            "seeded": self.seeded,
         })
     }
 }

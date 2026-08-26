@@ -9,7 +9,7 @@ This page covers where it lives, how it resolves, and how to change things.
 ~/.omh/
   rules/  skills/  commands/  subagents/  hooks/   the only place these live
   mcp.json
-  settings.toml                                    your defaults
+  default.toml                                     what a new repo starts from
 ```
 
 **Rules are a directory of named files, not one `AGENTS.md`.** `tdd.md`,
@@ -310,8 +310,8 @@ one followed by its exception reads differently reversed. Without a list they
 compose in filename order, which is the fallback rather than the plan.
 
 It layers like everything else in these files: later wins, **per capability,
-wholesale**. Your `~/.omh/settings.toml` can carry a default selection for every
-project; a repo naming `skills` replaces it outright. Merging would let a repo
+wholesale**. Your `~/.omh/default.toml` can carry a default selection, which
+`omh init` seeds into a new repo; a repo naming `skills` replaces it outright. Merging would let a repo
 add to your list and never take anything off it, which is the thing an allowlist
 exists to make possible.
 
@@ -447,18 +447,26 @@ normal.
 > naming it; delete it, and use `[provision] "<stack>/<name>" = false` if what
 > you want is a provide left out.
 
-## Settings, and their three layers
+## Settings, and their two layers
 
 Content has one home; **settings** keep their layers, because a setting has one
 value and the useful question is which file decided it:
 
 ```
-~/.omh/settings.toml  →  <repo>/.omh/settings.toml  →  <repo>/.omh/settings.local.toml
+<repo>/.omh/settings.toml  →  <repo>/.omh/settings.local.toml
 ```
 
-Later wins. A machine-wide preference and a one-repo exception are both
-expressible, which two layers could not do: the rules for a project belong in
-the repo; the API key that makes one of them work does not.
+Later wins. Both are in the repo, and that is the point: a repo's behaviour is
+explained by files the repo contains — which is what a teammate cloning it can
+actually see, and what `omh repo` can account for without pointing at a file
+they do not have. The rules for a project belong in the committed file; the API
+key that makes one of them work belongs in the gitignored one.
+
+**`~/.omh/default.toml` is not a third layer.** It is the *template* `omh init`
+seeds a new repo from — read once, at `init`, and never at launch. It was
+`settings.toml` and a layer like the two above until 0.7.0; a file that decides
+nothing should not be spelled like the two that decide everything. See
+[`omh settings`](commands.md#omh-settings).
 
 Undebuggable without provenance — the standard complaint about oh-my-zsh, and
 the thing [trust](design/trust.md) exists to prevent. So every effective value
@@ -470,7 +478,6 @@ this repo  /Users/you/proj/.omh
 
 settings
   carry_in         [".env.local"]           ← local (overrides shared)
-  idle_timeout     30m                      ← personal
 
 omh's features
   codegraph        off here
@@ -506,7 +513,7 @@ $ omh unset carry_in
 $ omh repo                              # what is effective here, and what decided it
 
 # you, everywhere
-$ omh config set idle_timeout 45m       # → ~/.omh/settings.toml
+$ omh settings set idle_timeout 45m     # → ~/.omh/default.toml, seeds new repos
 $ omh config unset idle_timeout         # let the layer beneath resurface
 $ omh config edit                       # $EDITOR on your settings
 $ omh config edit skills tdd            # $EDITOR on one catalogue entry
@@ -598,14 +605,16 @@ removed carry_in from the shared layer
 removed carry_in from the local layer
 ```
 
-`--save` and `--local` still mean that file alone. And anything still supplying
-the value after a removal is named, because an unqualified `unset` stays inside
-the repo and a cross-project default survives it:
+`--save` and `--local` still mean that file alone, so anything still supplying
+the value after a removal is named:
 
 ```console
-$ omh unset runtime
-runtime is not set in this repo
-omh: `runtime` is still set in the personal layer — /Users/you/.omh/settings.toml
+$ omh set --local idle_timeout 15m
+wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
+
+$ omh unset --save idle_timeout
+idle_timeout was not set in the shared layer
+omh: `idle_timeout` is still set in the local layer — /Users/you/proj/.omh/settings.local.toml
 ```
 
 ### A write something outranks says so
@@ -679,9 +688,11 @@ of the document *this* session is given, and the next repo gets it back.
 the feature with it, hooks and rules section included, because a hook nudging
 the agent toward a server that is gone is worse than no hook.
 
-It layers like every other setting — `~/.omh/settings.toml`, then this file,
-then `<repo>/.omh/settings.local.toml`, which `omh init` adds to
-`.omh/.gitignore`.
+It layers like every other setting — this file, then
+`<repo>/.omh/settings.local.toml`, which `omh set` adds to `.omh/.gitignore`
+the first time it writes there. `~/.omh/default.toml` can carry an `[omh]`
+table, which seeds a new repo; it decides nothing in a repo that already
+exists.
 
 ## Settings
 

@@ -2,7 +2,7 @@
 //!
 //! N sessions is N containers, which `docs/design/risks.md` names as sandbox
 //! sprawl and answers with `policy.idle_timeout`. The setting existed, resolved
-//! through all three layers, and was read by nothing — so a user who set it got
+//! through every layer, and was read by nothing — so a user who set it got
 //! provenance for a value that did nothing.
 //!
 //! Only the **container** stops. The worktree and the branch survive, so

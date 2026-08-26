@@ -1004,8 +1004,50 @@ removed carry_in from the local layer
 ```
 
 Anything still supplying the value afterwards is named — an unqualified `unset`
-stays inside the repo, so a cross-project default in `~/.omh/settings.toml`
-survives it and you are told which layer kept it.
+stays inside the repo, and a named flag touches one file on purpose — so
+whatever still supplies the value is named.
+
+## `omh settings`
+
+**You**, before a repo exists. `~/.omh/default.toml` is the template `omh init`
+seeds a new repo's `settings.toml` from — read once, at `init`, and never at
+launch.
+
+```
+omh settings                          your defaults, and what omh reads
+omh settings set <key> <value>        → ~/.omh/default.toml
+omh settings unset <key>
+```
+
+```console
+$ omh settings set idle_timeout 45m
+wrote → /Users/you/.omh/default.toml (seeds new repos)
+
+$ omh settings
+your defaults /Users/you/.omh/default.toml
+  idle_timeout  45m
+
+omh also reads
+  carry_in     Files a session gets that git does not carry — see `src/carry.rs`.
+  account      Which captured login a session is launched with, by name.
+  runtime      Which runtime builds and runs the sandbox. Unset means `auto`.
+  persistence  How a session's terminal survives detaching. Unset means `dtach`.
+```
+
+The second list is the useful half. What omh reads is a table in the binary, so
+no settings file can show it, and until this command existed the only way to
+learn a key's name was to already know it.
+
+**Not `omh set`.** They are one letter apart with opposite scopes — `omh set` is
+this checkout, `omh settings` is what a new one starts from — so clap is
+deliberately not told to accept unambiguous prefixes: `omh setting` is refused
+rather than guessed at.
+
+Keys omh reads, plus `[use]` and `[omh]`, are seeded; anything else in the
+file is refused by name rather than left behind. `[mcp.<name>.env]` is **refused**: a
+server's environment can be a token and the file `init` writes is committed. It
+already has a home — `omh config mcp add <name> <command> --env KEY=value` puts
+it on the server in `~/.omh/mcp.json`, where servers live.
 
 ## `omh config …` · `c`
 
@@ -1013,7 +1055,7 @@ survives it and you are told which layer kept it.
 
 ```
 omh config                            your defaults, and what the catalogue holds
-omh config set <key> <value>          → ~/.omh/settings.toml
+omh config set <key> <value>          → ~/.omh/default.toml  (older spelling of `omh settings set`)
 omh config unset <key>                remove one of your defaults
 omh config edit [<capability> [name]] $EDITOR on your settings, or on one entry
 
@@ -1025,16 +1067,16 @@ omh config mcp import <harness> [--file] [--force]
 
 ```console
 $ omh config
-your defaults  /Users/you/.omh/settings.toml
-  idle_timeout     30m
+your defaults /Users/you/.omh/default.toml
+  idle_timeout  30m
 
-your catalogue  /Users/you/.omh
-  rules         2  commit-style, tdd
-  skills        3  graphify, refactor, review-diff
-  mcp           3  codegraph, linear, memory
-  commands      0
-  subagents     1  explorer
-  hooks         1  notify-on-stop
+your catalogue /Users/you/.omh
+  rules      2  commit-style, tdd
+  skills     3  graphify, refactor, review-diff
+  mcp        3  codegraph, linear, memory
+  commands   0
+  subagents  1  explorer
+  hooks      1  notify-on-stop
 ```
 
 MCP lives under `config` because MCP servers **are** configuration. They live in your

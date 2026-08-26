@@ -12,7 +12,7 @@
 //!
 //! Everything else in these files — `carry_in`, `idle_timeout`, and `[use]`
 //! when it lands — is read by [`crate::config::policy`], which resolves the
-//! same three paths with provenance. Two readers of one file rather than two
+//! same paths with provenance. Two readers of one file rather than two
 //! files: a setting and a feature switch are both something a repo decided, and
 //! `policy.toml` was a fourth name for that idea living inside a directory whose
 //! purpose was content.
@@ -73,20 +73,26 @@ struct ServerOverride {
 /// to somebody's team repo.
 pub const LOCAL: &str = "settings.local.toml";
 
-/// Personal, then this repo's, then this repo's gitignored — later winning.
+/// This repo's, then this repo's gitignored — later winning.
 ///
-/// Read from `config::Layer` rather than spelled again, so the file a feature
-/// switch is read from and the file a setting is read from cannot drift apart.
-fn layers(paths: &Paths) -> [PathBuf; 3] {
-    crate::config::Layer::ALL.map(|l| l.file(paths))
+/// `~/.omh/default.toml` is not here and is not a layer. It is the template
+/// `omh init` seeds a new repo from, so a repo's behaviour is explained by
+/// files inside the repo — which is what a teammate cloning it can see, and
+/// what `omh repo` can account for without pointing at a file they do not have.
+///
+/// Read from `config::Layer::SETTINGS` rather than spelled again, so the file a
+/// feature switch is read from and the file a setting is read from cannot drift
+/// apart.
+fn layers(paths: &Paths) -> [PathBuf; 2] {
+    crate::config::Layer::SETTINGS.map(|l| l.file(paths))
 }
 
 /// Everything this repo decided: which of omh's features are off here, and what
 /// it says about the environment of the servers it uses.
 ///
-/// One pass for all of it, because it comes from the same three files and a
-/// second pass would be a second chance for two readers to disagree about which
-/// layer won.
+/// One pass for all of it, because it comes from the same files and a second
+/// pass would be a second chance for two readers to disagree about which layer
+/// won.
 pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
     let mut state: BTreeMap<String, bool> = BTreeMap::new();
     let mut mcp_env: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -144,7 +150,9 @@ pub fn resolve(paths: &Paths, manifest: &Manifest) -> Result<RepoPolicy> {
             state.insert(key, on);
         }
         // Variable by variable, so a later layer adding a token does not drop
-        // the one an earlier layer set.
+        // the one an earlier layer set. A repo overriding a server's
+        // environment; the catalogue's own env lives on the server in
+        // `~/.omh/mcp.json`, which is the file that owns servers.
         for (name, over) in file.mcp {
             mcp_env.entry(name).or_default().extend(over.env);
         }
@@ -350,7 +358,10 @@ mod tests {
     #[test]
     fn a_later_layer_wins() {
         let (_d, paths, m) = fixture();
-        write(paths.root.join("settings.toml"), "[omh]\nmemory = false\n");
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[omh]\nmemory = false\n",
+        );
         write(
             paths.repo.join(".omh/settings.local.toml"),
             "[omh]\nmemory = true\n",
@@ -428,11 +439,11 @@ mod tests {
     fn env_overrides_merge_variable_by_variable() {
         let (_d, paths, m) = fixture();
         write(
-            paths.root.join("settings.toml"),
+            paths.repo.join(".omh/settings.toml"),
             "[mcp.linear.env]\nTOKEN = \"t\"\n",
         );
         write(
-            paths.repo.join(".omh/settings.toml"),
+            paths.repo.join(".omh/settings.local.toml"),
             "[mcp.linear.env]\nREGION = \"eu\"\n",
         );
         let env = &resolve(&paths, &m).unwrap().mcp_env["linear"];
@@ -440,24 +451,26 @@ mod tests {
         assert_eq!(env["REGION"], "eu");
     }
 
-    /// `[use]` is read from all three files, and a later one replaces a
+    /// `[use]` is read from both repo files, and the later one replaces a
     /// capability's list outright.
     ///
     /// The unit tests for this live in `selection.rs` and call `apply` directly
-    /// with invented paths, so guarding the *resolve* with a layer check —
-    /// making a personal `[use]` read by nobody, or a local one unable to
-    /// override the committed list — left the whole suite green. Both are
-    /// stated behaviours: a personal list is your default everywhere, and a
-    /// local one is what `omh use` now has to write through.
+    /// with invented paths, so guarding the *resolve* with a layer check — a
+    /// local `[use]` unable to override the committed list — left the whole
+    /// suite green.
+    ///
+    /// It used to write the personal file, and then this release stopped
+    /// reading that one: the test went on passing while proving nothing, which
+    /// is the failure its own first paragraph was written about.
     #[test]
     fn use_is_read_from_every_layer_and_the_last_one_wins() {
         let (_d, paths, m) = fixture();
         write(
-            paths.root.join("settings.toml"),
+            paths.repo.join(".omh/settings.toml"),
             "[use]\nskills = [\"mine\"]\nrules = [\"tdd\"]\n",
         );
         write(
-            paths.repo.join(".omh/settings.toml"),
+            paths.repo.join(".omh/settings.local.toml"),
             "[use]\nskills = [\"ours\"]\n",
         );
         let s = resolve(&paths, &m).unwrap().selection;
@@ -468,7 +481,7 @@ mod tests {
         );
         assert!(
             s.allows(crate::adapter::Capability::Rules, "tdd"),
-            "and a capability only the personal layer named still stands"
+            "and a capability only the committed layer named still stands"
         );
 
         write(
@@ -559,12 +572,8 @@ mod tests {
     fn provision_entries_merge_key_by_key() {
         let (_d, paths, m) = fixture();
         write(
-            paths.root.join("settings.toml"),
-            "[provision]\n\"go/toolchain\" = true\n",
-        );
-        write(
             paths.repo.join(".omh/settings.toml"),
-            "[provision]\n\"rust/toolchain\" = true\n",
+            "[provision]\n\"go/toolchain\" = true\n\"rust/toolchain\" = true\n",
         );
         write(
             paths.repo.join(".omh/settings.local.toml"),

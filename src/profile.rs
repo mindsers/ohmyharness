@@ -39,6 +39,27 @@ pub struct Paths {
 }
 
 impl Paths {
+    /// `~/.omh`, without needing a repo.
+    ///
+    /// `discover` refuses outside a git repository, correctly — a session is a
+    /// worktree. Two things are true outside one: the catalogue exists, and so
+    /// does the template a new repo is seeded from. Those callers need this.
+    pub fn home() -> Result<PathBuf> {
+        Ok(dirs::home_dir().context("no home directory")?.join(".omh"))
+    }
+
+    /// A `Paths` that works outside a repository.
+    ///
+    /// `repo` is the cwd when there is no repo, which is honest: the caller
+    /// that needs this — `omh settings` — touches only `root`, and a command
+    /// that reaches for `repo` here would be asking a question with no answer.
+    pub fn anywhere(cwd: &Path) -> Result<Self> {
+        Ok(Self {
+            root: Self::home()?,
+            repo: repo_root(cwd).unwrap_or_else(|_| cwd.to_path_buf()),
+        })
+    }
+
     pub fn discover(cwd: &Path) -> Result<Self> {
         let home = dirs::home_dir().context("no home directory")?;
         Ok(Self {

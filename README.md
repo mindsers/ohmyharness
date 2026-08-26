@@ -206,7 +206,7 @@ Harnesses run under `dtach`, so closing your terminal doesn't kill the agent —
 ~/.omh/
   rules/  skills/  commands/  subagents/  hooks/   the only place these live
   mcp.json
-  settings.toml                                    your defaults
+  default.toml                                     what a new repo starts from
 ```
 
 A repo holds configuration, and one kind of content:
