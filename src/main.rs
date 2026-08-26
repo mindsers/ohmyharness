@@ -312,6 +312,32 @@ enum Cmd {
         /// Which entry to drop from this repo's list.
         name: String,
     },
+    /// Change a setting. Which file it lands in follows from what the key is
+    /// for: one that can name a credential goes to the gitignored file, and
+    /// everything else is a fact about the project, so it is committed.
+    Set {
+        /// Which setting. `omh why <key>` says what omh reads it for.
+        key: String,
+        /// What to set it to.
+        value: String,
+        /// Commit it, so a teammate cloning this repo gets it too.
+        #[arg(long, conflicts_with = "personal")]
+        shared: bool,
+        /// Set your own default instead, for every project.
+        #[arg(long)]
+        personal: bool,
+    },
+    /// Drop a setting, letting any lower layer resurface.
+    Unset {
+        /// Which setting to drop.
+        key: String,
+        /// Drop it from the committed file.
+        #[arg(long, conflicts_with = "personal")]
+        shared: bool,
+        /// Drop it from your own defaults.
+        #[arg(long)]
+        personal: bool,
+    },
     /// The note store: what is in it, and what is wrong with it.
     Memory {
         #[command(subcommand)]
@@ -764,6 +790,8 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Info
         | Cmd::Config { .. }
         | Cmd::Repo { .. }
+        | Cmd::Set { .. }
+        | Cmd::Unset { .. }
         | Cmd::Use { .. }
         | Cmd::Unuse { .. }
         | Cmd::Import { .. }
@@ -959,16 +987,18 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         Cmd::Config { cmd } => match cmd {
             None => show_config(&cwd, ctx),
             Some(ConfigCmd::Set { key, value, layer }) => set(
-                &cwd,
+                &Paths::discover(&cwd)?,
                 key,
                 value,
-                layer_or(*layer, config::Layer::Personal, ctx),
+                Destination::named(layer_or(*layer, config::Layer::Personal, ctx)),
+                cli.dry_run,
                 ctx,
             ),
             Some(ConfigCmd::Unset { key, layer }) => unset(
-                &cwd,
+                &Paths::discover(&cwd)?,
                 key,
-                layer_or(*layer, config::Layer::Personal, ctx),
+                &[layer_or(*layer, config::Layer::Personal, ctx)],
+                cli.dry_run,
                 ctx,
             ),
             Some(ConfigCmd::Edit {
@@ -984,14 +1014,45 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             Some(ConfigCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run, ctx),
         },
 
+        Cmd::Set {
+            key,
+            value,
+            shared,
+            personal,
+        } => {
+            let paths = Paths::discover(&cwd)?;
+            let dest = set_layer(&paths, key, *shared, *personal)?;
+            set(&paths, key, value, dest, cli.dry_run, ctx)
+        }
+        Cmd::Unset {
+            key,
+            shared,
+            personal,
+        } => {
+            let paths = Paths::discover(&cwd)?;
+            let layers = unset_layers(&paths, key, *shared, *personal)?;
+            unset(&paths, key, &layers, cli.dry_run, ctx)
+        }
+
         Cmd::Repo { cmd } => match cmd {
             None => show_repo(&cwd, ctx),
             Some(RepoCmd::Enable { feature }) => feature_switch(&cwd, feature, true, ctx),
             Some(RepoCmd::Disable { feature }) => feature_switch(&cwd, feature, false, ctx),
-            Some(RepoCmd::Set { key, value, shared }) => {
-                set(&cwd, key, value, repo_layer(*shared), ctx)
-            }
-            Some(RepoCmd::Unset { key, shared }) => unset(&cwd, key, repo_layer(*shared), ctx),
+            Some(RepoCmd::Set { key, value, shared }) => set(
+                &Paths::discover(&cwd)?,
+                key,
+                value,
+                Destination::named(repo_layer(*shared)),
+                cli.dry_run,
+                ctx,
+            ),
+            Some(RepoCmd::Unset { key, shared }) => unset(
+                &Paths::discover(&cwd)?,
+                key,
+                &[repo_layer(*shared)],
+                cli.dry_run,
+                ctx,
+            ),
         },
 
         Cmd::Use {
@@ -3596,12 +3657,12 @@ fn layer_or(named: Option<config::Layer>, default: config::Layer, ctx: &out::Ctx
     };
     let replacement = match layer {
         config::Layer::Personal => "omh config set",
-        config::Layer::Shared => "omh repo set --shared",
-        config::Layer::Local => "omh repo set",
+        config::Layer::Shared => "omh set --shared",
+        config::Layer::Local => "omh set",
     };
     ctx.warn(&format!(
         "--layer {layer} is going away — that is `{replacement}` now. \
-         Two scopes, two commands: `omh config` is you, `omh repo` is this checkout."
+         `omh set` reads the key to decide what --layer asked you to decide."
     ));
     layer
 }
@@ -3618,15 +3679,215 @@ fn repo_layer(shared: bool) -> config::Layer {
     }
 }
 
+/// Where a key belongs when nothing else has an opinion — the registry alone.
+///
+/// **The default is the committed file**, which is the opposite of what
+/// `omh repo set` did, and the reversal is the point: what runtime a project
+/// wants, and how long its sessions idle, are facts about the project, and a
+/// teammate cloning it should get them. Until this table existed that default
+/// was unavailable, because *every* value went to the gitignored file and the
+/// safety came from the destination rather than from knowing the key.
+///
+/// So an unknown key is committed too. That is deliberate and it is the whole
+/// reason `key::KEYS` is guarded by a scan rather than kept by hand: a key the
+/// code reads and the table has never heard of would otherwise be classified
+/// by whoever typed it. `every_setting_omh_reads_is_a_key_omh_can_classify`
+/// fails the build first.
+fn key_layer(key: &str) -> config::Layer {
+    key::describes(key).map_or(config::Layer::Shared, key::Key::default_layer)
+}
+
+/// Which file a write lands in, and what put it there.
+///
+/// One value, because it is one decision. The layer and the reason used to be
+/// computed separately — `set_layer` returned the layer, and the caller
+/// re-derived the reason from the same two booleans — which is two places to
+/// keep a single judgement, and the drift is silent: a future flag that lands
+/// on the committed file, added to one and not the other, would suppress the
+/// COMMITTED warning for a classified key with nothing failing.
+#[derive(Debug, Clone, Copy)]
+struct Destination {
+    layer: config::Layer,
+    why: Why,
+}
+
+/// What sent a write to its layer.
+///
+/// The COMMITTED warning reads this. It fires on a committed write, which was
+/// rare and deliberate while `--shared` was the only way to reach one and is
+/// nearly *every* write now that `omh set` defaults there. A sentence that
+/// fires on almost every invocation is one people stop reading, and this
+/// codebase has already watched that happen once, to this same sentence, for
+/// the same reason: it could not tell `account` from `carry_in`.
+#[derive(Debug, Clone, Copy)]
+enum Why {
+    /// `--shared`, `--personal`, or a command whose own rule names the file —
+    /// `omh config set` and `omh repo set`, which predate the registry and
+    /// warn the way they always did.
+    Named,
+    /// The gitignored file already gives this key a value, so the write joins
+    /// it rather than landing in a file that value outranks.
+    JoinsAStandingValue,
+    /// The registry classified the key.
+    Registry(&'static key::Key),
+    /// The registry has never heard of it.
+    Unclassified,
+}
+
+impl Destination {
+    /// A command that names its own file. The only route to `Why::Named`, so
+    /// the reason cannot disagree with the layer at a call site.
+    fn named(layer: config::Layer) -> Self {
+        Self {
+            layer,
+            why: Why::Named,
+        }
+    }
+}
+
+/// Which file `omh set` writes, given the line as typed.
+///
+/// Three rules, in this order:
+///
+/// 1. `--personal` and `--shared` are the user saying it outright.
+/// 2. A key the gitignored file already gives a value is written **there**.
+///    `settings::resolve` applies the layers with that one last, so writing
+///    the committed file underneath a standing local value reports success
+///    over a value that never changed — the defect `omh unuse` shipped once.
+/// 3. Otherwise the registry decides, through `key_layer`.
+///
+/// **Rule 2 is deliberately one-directional**, and the asymmetry is the whole
+/// of it: it moves a write *away* from the committed file and never towards
+/// it. The symmetric version — *update a key wherever it already lives* — is
+/// the obvious-looking generalisation and it routes `carry_in` into a tracked
+/// file the moment a repo has a committed `carry_in`. `the_gitignored_file_is_
+/// the_only_direction_rule_two_moves_a_write` is the guard, and it reads this
+/// function rather than `key_layer`, because `key_layer` cannot see rule 2.
+///
+/// `omh unset` does **not** read this. It reaches every repo layer that gives
+/// the key a value — see `unset_layers`, and the defect that taught us why.
+fn set_layer(paths: &Paths, key: &str, shared: bool, personal: bool) -> Result<Destination> {
+    if personal {
+        return Ok(Destination::named(config::Layer::Personal));
+    }
+    if shared {
+        return Ok(Destination::named(config::Layer::Shared));
+    }
+    let (layer, why) = key::describes(key)
+        .map_or((config::Layer::Shared, Why::Unclassified), |k| {
+            (k.default_layer(), Why::Registry(k))
+        });
+    if layer.is_committed() && config::holds(paths, config::Layer::Local, key)? {
+        return Ok(Destination {
+            layer: config::Layer::Local,
+            why: Why::JoinsAStandingValue,
+        });
+    }
+    Ok(Destination { layer, why })
+}
+
+/// Which files `omh unset` has to reach.
+///
+/// **Every repo layer that gives the key a value**, not the one `omh set`
+/// would have written. Those are different questions and answering the second
+/// one shipped a defect: `omh set --shared carry_in` then `omh set carry_in`
+/// leaves the key in both repo files, and an `unset` that consulted `set`'s
+/// rule removed the gitignored copy, said so, exited 0, and left the committed
+/// one — a map to a credential — standing and effective. The command a person
+/// runs to get a secret out of git reported success and did not do it.
+///
+/// `config::declaring` is the precedent: `omh unuse` removes from every layer
+/// that declares the entry, and its doc comment gives this same reason.
+///
+/// A named flag still means that layer alone, so `--shared` and `--personal`
+/// stay surgical. With nothing declared anywhere, the layer `omh set` would
+/// have used is reported as the one looked in — that keeps the *absent*
+/// message about a file rather than about nothing.
+fn unset_layers(
+    paths: &Paths,
+    key: &str,
+    shared: bool,
+    personal: bool,
+) -> Result<Vec<config::Layer>> {
+    if personal {
+        return Ok(vec![config::Layer::Personal]);
+    }
+    if shared {
+        return Ok(vec![config::Layer::Shared]);
+    }
+    let mut reaching = Vec::new();
+    for layer in [config::Layer::Shared, config::Layer::Local] {
+        if config::holds(paths, layer, key)? {
+            reaching.push(layer);
+        }
+    }
+    if reaching.is_empty() {
+        reaching.push(key_layer(key));
+    }
+    Ok(reaching)
+}
+
+/// Make sure the gitignored layer is actually gitignored before writing it.
+///
+/// The whole safety argument rests on this file being ignored, and until now
+/// `omh set` asserted it rather than establishing it: the ignore line is
+/// written by `omh init` alone, so in a repo that was never `omh init`ed —
+/// or one where `.omh/.gitignore` was deleted — `omh set carry_in` created a
+/// credential map that `git add .` would stage. The command that routed the
+/// key there *because* it is secret-bearing is the right place to make that
+/// true. Verified by `the_file_omh_hides_a_secret_in_is_a_file_git_ignores`.
+fn ensure_ignored(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
+    let dir = paths.repo.join(".omh");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let ignore = dir.join(".gitignore");
+    let existing = std::fs::read_to_string(&ignore).unwrap_or_default();
+    if existing.lines().any(|l| l.trim() == settings::LOCAL) {
+        return Ok(());
+    }
+    let mut next = existing;
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(settings::LOCAL);
+    next.push('\n');
+    std::fs::write(&ignore, next).with_context(|| format!("writing {}", ignore.display()))?;
+    ctx.warn(&format!(
+        "nothing was ignoring {} — added it to {}",
+        settings::LOCAL,
+        ignore.display()
+    ));
+    Ok(())
+}
+
+/// Say so when a write cannot be seen, because a layer above it already wins.
+///
+/// `omh set --shared idle_timeout 30m` over a standing local `15m` writes the
+/// committed file, exits 0, prints `wrote → …` — and `omh repo` still reports
+/// `15m`. Rule 2 exists to prevent exactly that and a named flag walks past
+/// it, correctly: `--shared` means *that file*, and honouring it is right.
+/// What was wrong was doing it silently.
+fn say_if_shadowed(paths: &Paths, key: &str, wrote: config::Layer, ctx: &out::Ctx) -> Result<()> {
+    let Some(winning) = config::policy(paths)?.into_iter().find(|s| s.key == key) else {
+        return Ok(());
+    };
+    if winning.layer == wrote {
+        return Ok(());
+    }
+    ctx.warn(&format!(
+        "`{key}` is still {} here — the {} layer sets it, and that outranks {}",
+        winning.value, winning.layer, wrote
+    ));
+    Ok(())
+}
+
 fn set(
-    cwd: &std::path::Path,
+    paths: &Paths,
     key: &str,
     value: &str,
-    layer: config::Layer,
+    dest: Destination,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
-    let paths = Paths::discover(cwd)?;
-    let w = config::set(&paths, key, value, layer)?;
     // Written either way. A settings file is hand-editable and a key a newer
     // omh will read must not be refused by this one — but a key *this* omh
     // reads nothing from looks identical to one that took, and `carry_ins` is
@@ -3645,63 +3906,179 @@ fn set(
             }
         }
     }
-    ctx.say(
-        &report::Action::new("setting-written", format!("wrote → {}", w.path.display())).data(
-            serde_json::json!({
+    if dry_run {
+        ctx.say(
+            &report::Action::new(
+                "setting-planned",
+                format!(
+                    "would write {key} → {} ({})",
+                    dest.layer.file(paths).display(),
+                    tracked(dest.layer)
+                ),
+            )
+            .data(serde_json::json!({
                 "key": key,
                 "value": value,
-                "layer": w.layer.to_string(),
-                "committed": w.committed,
-                "path": w.path.display().to_string(),
-            }),
-        ),
+                "layer": dest.layer.to_string(),
+                "committed": dest.layer.is_committed(),
+                "path": dest.layer.file(paths).display().to_string(),
+            })),
+        );
+        return Ok(());
+    }
+    if !dest.layer.is_committed() && dest.layer == config::Layer::Local {
+        ensure_ignored(paths, ctx)?;
+    }
+    let w = config::set(paths, key, value, dest.layer)?;
+    // The one fact that separates the safe destination from the dangerous one
+    // used to be a five-character infix in an absolute path eighty columns
+    // wide. `settings.toml` and `settings.local.toml` do not read as opposites
+    // at a glance, and on the ordinary path there is no second line to say
+    // which one it was.
+    ctx.say(
+        &report::Action::new(
+            "setting-written",
+            format!("wrote → {} ({})", w.path.display(), tracked(w.layer)),
+        )
+        .data(serde_json::json!({
+            "key": key,
+            "value": value,
+            "layer": w.layer.to_string(),
+            "committed": w.committed,
+            "path": w.path.display().to_string(),
+        })),
     );
     // The one mistake git makes unrecoverable. On stderr through `warn`, so it
-    // survives `omh config set … > log` — which is exactly the invocation a
-    // script that is about to commit a secret would use.
+    // survives `omh set … > log` — which is exactly the invocation a script
+    // that is about to commit a secret would use.
     if w.committed {
-        ctx.warn(&format!(
-            "the {} layer is COMMITTED — never put a secret here",
-            w.layer
-        ));
-        // The general sentence fires for `account` — a name — exactly as it
-        // does for `carry_in`, and a warning that cannot tell those apart is
-        // one people learn to scroll past. Where omh knows the key reaches a
+        match dest.why {
+            // Somebody named this file, by flag or by the command's own rule.
+            Why::Named => ctx.warn(&format!(
+                "the {} layer is COMMITTED — never put a secret here",
+                w.layer
+            )),
+            // omh sent a key it has never heard of to a file git carries,
+            // because that is what it does with an unclassified key. The line
+            // above already said nothing reads it; this is the half of that
+            // which retyping does not undo.
+            Why::Unclassified => ctx.warn(&format!(
+                "and the {} layer is COMMITTED — `{key}` went into a file git carries",
+                w.layer
+            )),
+            // The design, not an accident: the registry classes this key as
+            // carrying nothing secret, so the committed file is where a
+            // teammate cloning the repo should find it.
+            Why::Registry(k) if k.secret == key::Secret::No => {}
+            // Not reachable while `default_layer` sends a secret-bearing key
+            // to the gitignored file, and written against the layer rather
+            // than the flag anyway: this is the sentence that has to survive a
+            // future spelling that reaches git another way.
+            Why::Registry(_) | Why::JoinsAStandingValue => ctx.warn(&format!(
+                "the {} layer is COMMITTED — never put a secret here",
+                w.layer
+            )),
+        }
+        // The general sentence fired for `account` — a name — exactly as it did
+        // for `carry_in`, and a warning that cannot tell those apart is one
+        // people learn to scroll past. Where omh knows the key reaches a
         // credential, it says so and says where the value would have gone.
         if let Some(k) = key::describes(key) {
             if k.secret == key::Secret::Yes {
                 ctx.warn(&format!(
                     "  `{key}` is one of those — it belongs in {}",
-                    k.default_layer().file(&paths).display()
+                    k.default_layer().file(paths).display()
                 ));
             }
         }
     }
-    Ok(())
+    say_if_shadowed(paths, key, w.layer, ctx)
 }
 
-fn unset(cwd: &std::path::Path, key: &str, layer: config::Layer, ctx: &out::Ctx) -> Result<()> {
-    let paths = Paths::discover(cwd)?;
-    let removed = config::unset(&paths, key, layer)?;
-    ctx.say(
-        &report::Action::new(
-            if removed {
-                "setting-removed"
-            } else {
-                "setting-absent"
-            },
-            if removed {
-                format!("removed {key} from the {layer} layer")
-            } else {
-                format!("{key} was not set in the {layer} layer")
-            },
-        )
-        .data(serde_json::json!({
-            "key": key,
-            "layer": layer.to_string(),
-            "removed": removed,
-        })),
-    );
+/// Whether git carries this layer's file, in the two words a person reads.
+fn tracked(layer: config::Layer) -> &'static str {
+    if layer.is_committed() {
+        "committed"
+    } else {
+        "gitignored"
+    }
+}
+
+/// Remove a setting from every layer that was asked for.
+///
+/// Reports per layer, and then says what still stands. Both halves earned
+/// their place from the same defect: `omh unset carry_in` removed the
+/// gitignored copy, said so, exited 0, and left a committed `carry_in` — a map
+/// to a credential — effective. Removing from every declaring repo layer fixes
+/// the case omh itself creates; the survivor line covers the rest, because an
+/// unqualified `unset` deliberately does not reach into your personal file and
+/// a person who cannot see why the value persists has been told nothing.
+fn unset(
+    paths: &Paths,
+    key: &str,
+    layers: &[config::Layer],
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    for &layer in layers {
+        if dry_run {
+            ctx.say(
+                &report::Action::new(
+                    "setting-removal-planned",
+                    format!(
+                        "would drop {key} from the {layer} layer ({})",
+                        tracked(layer)
+                    ),
+                )
+                .data(serde_json::json!({
+                    "key": key,
+                    "layer": layer.to_string(),
+                })),
+            );
+            continue;
+        }
+        let removed = config::unset(paths, key, layer)?;
+        ctx.say(
+            &report::Action::new(
+                if removed {
+                    "setting-removed"
+                } else {
+                    "setting-absent"
+                },
+                if removed {
+                    format!("removed {key} from the {layer} layer")
+                } else {
+                    format!("{key} was not set in the {layer} layer")
+                },
+            )
+            .data(serde_json::json!({
+                "key": key,
+                "layer": layer.to_string(),
+                "removed": removed,
+            })),
+        );
+    }
+    if dry_run {
+        return Ok(());
+    }
+    // What a person asked for was for the setting to stop applying. Anything
+    // still supplying it is the answer to "why did nothing change", and if it
+    // is a credential-bearing key in a file git carries it is the answer to a
+    // more urgent question than that.
+    if let Some(still) = config::policy(paths)?.into_iter().find(|s| s.key == key) {
+        ctx.warn(&format!(
+            "`{key}` is still set in the {} layer — {}",
+            still.layer,
+            still.layer.file(paths).display()
+        ));
+        if still.layer.is_committed()
+            && key::describes(key).is_some_and(|k| k.secret == key::Secret::Yes)
+        {
+            ctx.warn(&format!(
+                "  and that file is COMMITTED — `omh unset --shared {key}` drops it there"
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -3992,7 +4369,7 @@ fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
             // get; a tracked file is already on the branch.
             carry::Action::AlreadyTracked => ctx.warn(&format!(
                 "carry_in lists {} — git already tracks it, so the worktree has it \
-                 already. Not carried; drop it with `omh repo set carry_in`.",
+                 already. Not carried; drop it with `omh set carry_in`.",
                 item.path
             )),
             carry::Action::Missing => ctx.warn(&format!(
@@ -4222,6 +4599,22 @@ fn resolved(paths: &Paths) -> Result<(base::Own, settings::RepoPolicy)> {
 /// removed.
 fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
+
+    // A settings key, before the catalogue is consulted at all. `why` resolves
+    // against MCP servers and hooks, and a key is neither, so every one of them
+    // came back *nothing recorded under that name* — while three `--help`
+    // strings and two documentation pages told people to ask here. `why.rs`
+    // calls that its own failure mode; this closes it rather than deleting the
+    // sentence, because the classification is what the whole layer rule rests
+    // on and a person has no other way to read it.
+    if let Some(k) = key::describes(thing) {
+        ctx.say(&report::Why {
+            thing: thing.to_string(),
+            text: why_a_key(&paths, k),
+        });
+        return Ok(());
+    }
+
     let manifest = base::Manifest::load_dir(&paths.base())?;
 
     // Servers and hooks are the same kind of thing here: installed, from a
@@ -4289,6 +4682,34 @@ fn why_cmd(cwd: &std::path::Path, thing: &str, ctx: &out::Ctx) -> Result<()> {
         text: why::render_with_source(&catalog, &catalog.why(thing), &version, &source),
     });
     Ok(())
+}
+
+/// What omh knows about a settings key, as prose.
+///
+/// Says where an unadorned `omh set` would put it and whether git carries that
+/// file, because the destination is the half a person cannot check any other
+/// way — the classification is a table in the binary, not something a settings
+/// file shows.
+fn why_a_key(paths: &Paths, k: &key::Key) -> String {
+    let layer = k.default_layer();
+    let mut text = format!("`{}` is a setting omh reads.\n\n  {}\n", k.name, k.does);
+    text.push_str(&match k.shape {
+        key::Shape::Text => "  takes  one word or phrase\n".to_string(),
+        key::Shape::Paths => "  takes  a TOML array of paths, e.g. [\".env\"]\n".to_string(),
+        key::Shape::Duration => "  takes  90s, 30m, 2h, 1d, or bare seconds\n".to_string(),
+        key::Shape::Choice(all) => format!("  takes  one of {}\n", all.join(", ")),
+    });
+    text.push_str(&format!(
+        "  kept   {} ({})\n",
+        layer.file(paths).display(),
+        tracked(layer)
+    ));
+    if k.secret == key::Secret::Yes {
+        text.push_str(
+            "\n  A value here can name a credential, which is why omh keeps it\n  out of the file git carries.\n",
+        );
+    }
+    text
 }
 
 fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
@@ -5480,7 +5901,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
     if all.len() > 1 {
         action = action
             .note(format!("accounts: {}", all.join(", ")))
-            .next("omh repo set account <name>");
+            .next("omh set account <name>");
     }
     ctx.say(&action);
     Ok(())
@@ -7700,7 +8121,7 @@ mod tests {
                         (true, true) => &[clap::error::ErrorKind::InvalidValue],
                         // The same, plus prose naming a command without its
                         // arguments: `config::Layer::Shared` renders as the
-                        // label `omh repo set --shared`, which is what to type
+                        // label `omh set --shared`, which is what to type
                         // *into*, not a line to paste.
                         (false, true) => &[
                             clap::error::ErrorKind::InvalidValue,
@@ -10194,16 +10615,134 @@ because = "a fixture"
 
     // ── the shipped hooks ───────────────────────────────────────────────────
 
-    /// The safety property, restated where it now lives.
+    /// Rule 2 only ever moves a write **away** from the file git carries.
     ///
-    /// It used to be `Layer::DEFAULT_WRITE`: one flag, one default, and an
+    /// This is the guard the per-key one above cannot be. That one reads
+    /// `key_layer`, which is the table lookup alone; `omh set` calls
+    /// `set_layer`, and rule 2 lives there — the only place in the design
+    /// where a classified key can be sent somewhere other than the table said.
+    ///
+    /// The mutation it exists for is not contrived. `omh unset` had a defect
+    /// whose obvious repair is to make rule 2 symmetric — *update a key
+    /// wherever it already lives, either direction* — and that one line routes
+    /// `carry_in` into a tracked file the moment a repo has a committed
+    /// `carry_in`. Written as a real fixture rather than an assertion about
+    /// the source, because the symmetric version is a plausible line of code
+    /// and not a typo: nothing about its shape marks it as wrong.
+    #[test]
+    fn the_gitignored_file_is_the_only_direction_rule_two_moves_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home").join(".omh"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        std::fs::create_dir_all(&paths.root).unwrap();
+
+        // Every layer already declares every key, so rule 2 has something to
+        // find in whichever direction it might look.
+        for layer in config::Layer::ALL {
+            std::fs::write(
+                layer.file(&paths),
+                "carry_in = [\".env\"]\nidle_timeout = \"15m\"\n",
+            )
+            .unwrap();
+        }
+
+        let secret: Vec<&str> = key::KEYS
+            .iter()
+            .filter(|k| k.secret == key::Secret::Yes)
+            .map(|k| k.name)
+            .collect();
+        assert!(
+            !secret.is_empty(),
+            "with no credential-bearing key the loop below asserts nothing"
+        );
+        for name in &secret {
+            let dest = set_layer(&paths, name, false, false).unwrap();
+            assert!(
+                !dest.layer.is_committed(),
+                "a committed `{name}` standing in the repo pulled an unadorned \
+                 `omh set {name}` into the file git carries"
+            );
+        }
+
+        // And the direction rule 2 *does* move: a safe key with a standing
+        // local value joins it rather than landing underneath it. Without
+        // this, deleting rule 2 outright would satisfy the loop above.
+        let safe = set_layer(&paths, "idle_timeout", false, false).unwrap();
+        assert_eq!(
+            safe.layer,
+            config::Layer::Local,
+            "rule 2 stopped moving a write away from the committed file"
+        );
+    }
+
+    /// The safety property, restated where it now lives — **per key**.
+    ///
+    /// It began as `Layer::DEFAULT_WRITE`: one flag, one default, and an
     /// unqualified write could never reach version control. `--layer` split
     /// into two commands because the two scopes want opposite defaults, so the
-    /// constant went — and the property it carried did not. Neither command's
-    /// default may be the committed file, and reaching it has to be asked for
-    /// in so many words.
+    /// constant went and this test carried the property instead, asserting it
+    /// of each command's default.
+    ///
+    /// `omh set` ends that reading. Its default **is** the committed file, so
+    /// the protection stopped being a property of the command the moment one
+    /// command served every key. It is a property of the key now, and the loop
+    /// below is the whole of it: for every key that can name a credential, the
+    /// layer an unadorned `omh set` picks must not be one git will carry.
+    ///
+    /// The loop asserts nothing if the table has no such key, so the floor
+    /// underneath it is not decoration — a `Secret::Yes` downgraded to `No`
+    /// would otherwise empty this test rather than fail it.
+    ///
+    /// Three guards, one chain, no duplication. `key.rs`'s
+    /// `no_key_that_carries_a_secret_defaults_to_the_committed_layer` reads
+    /// `Key::default_layer`. This reads `key_layer` — the table lookup plus
+    /// the fallback for a key the table never saw — so making `key_layer`
+    /// ignore the table leaves that one green and fails this one. Neither
+    /// reaches `set_layer`, which is what `omh set` calls and where rule 2
+    /// lives; `the_gitignored_file_is_the_only_direction_rule_two_moves_a_write`
+    /// covers that step, with a fixture, because rule 2 needs files on disk.
     #[test]
     fn no_unqualified_write_can_reach_version_control() {
+        let secret: Vec<&str> = key::KEYS
+            .iter()
+            .filter(|k| k.secret == key::Secret::Yes)
+            .map(|k| k.name)
+            .collect();
+        assert!(
+            !secret.is_empty(),
+            "with no credential-bearing key in the table, the loop below \
+             asserts nothing at all"
+        );
+        for name in &secret {
+            assert!(
+                !key_layer(name).is_committed(),
+                "`{name}` can name a credential, so `omh set {name} …` with \
+                 nothing else on the line must not write a file git carries"
+            );
+        }
+        assert!(
+            config::Layer::Shared.is_committed(),
+            "and --shared is how you say you meant it — a test that read \
+             `is_committed` as false everywhere would pass the loop above"
+        );
+        // The fallback, asserted where the doc comment claims it. A key the
+        // table never saw is committed on purpose, and that is only safe
+        // because `every_setting_omh_reads_is_a_key_omh_can_classify` stops
+        // omh's own keys from ever taking this path.
+        assert!(
+            key::describes("no-such-key-is-in-the-table").is_none(),
+            "the fixture below stops meaning anything if the table gains this"
+        );
+        assert!(
+            key_layer("no-such-key-is-in-the-table").is_committed(),
+            "an unclassified key is committed deliberately — flipping it to \
+             the gitignored file would hide a typo rather than report it"
+        );
+
+        // The two commands `omh set` replaces, while they are still spelled.
         assert!(
             !repo_layer(false).is_committed(),
             "omh repo set holds carry_in paths and MCP env"

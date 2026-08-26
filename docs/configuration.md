@@ -497,9 +497,10 @@ $ omh unuse mcp linear
 $ omh use --all                         # resync every list to the catalogue
 $ omh repo disable codegraph            # → [omh] in settings.toml
 $ omh repo enable codegraph
-$ omh repo set carry_in '[".env"]'      # → settings.local.toml         (gitignored)
-$ omh repo set --shared account work    # → settings.toml               (committed)
-$ omh repo unset carry_in
+$ omh set carry_in '[".env"]'           # → settings.local.toml         (gitignored)
+$ omh set idle_timeout 30m              # → settings.toml               (committed)
+$ omh set --personal idle_timeout 45m    # → ~/.omh/settings.toml       (your default)
+$ omh unset carry_in
 $ omh repo                              # what is effective here, and what decided it
 
 # you, everywhere
@@ -510,24 +511,122 @@ $ omh config edit skills tdd            # $EDITOR on one catalogue entry
 $ omh config                            # your defaults, and what the catalogue holds
 ```
 
-**The two scopes want opposite defaults**, which is why one `--layer` flag could
-not serve both:
+**The two scopes wanted opposite defaults**, which is why one `--layer` flag
+could not serve both — and why `omh set` asks the key instead of the command:
 
 | Command | Writes to | Why that default |
 |---|---|---|
 | `omh use` / `unuse` | `settings.toml`, **committed** | what a project uses is a fact about the project, and a teammate cloning should get it |
-| `omh repo set` | `settings.local.toml`, **gitignored** | these carry `carry_in` paths and MCP env; a mistyped key must not be committable by accident |
+| `omh set` | **the key decides** — see below | one command, and the classification lives with the key rather than in your memory |
+| `omh repo set` | `settings.local.toml`, **gitignored** | the older spelling, kept for one release; it could not tell one key from another, so it defaulted away from git for all of them |
 
-**The committed file is never reached by accident, only on purpose.** `omh use`,
-`omh unuse` and `omh repo enable`/`disable` write it by default, because what a
-project uses and which of omh's features it runs with are facts about the
-project. What they write is a name, never a value you typed. The commands that
-do take a value — `omh repo set` and `omh config set` — default away from it,
-and say so when you ask for it:
+**The protection moved from the command to the key.** While `omh repo set` sent
+every value to the gitignored file, the safety came from the destination and no
+value could reach git unasked. `omh set` defaults to the *committed* file,
+because most settings — what runtime a project wants, how long its sessions idle
+— are facts about the project that a teammate cloning it should get. What keeps
+a credential out of git is now `src/key.rs`: a table saying, per key, whether a
+value there can name one.
 
 ```console
-$ omh repo set --shared carry_in '[".env"]'
-warning: the shared layer is COMMITTED — never put a secret here
+$ omh set carry_in '[".env"]'
+wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
+
+$ omh set idle_timeout 30m
+wrote → /Users/you/proj/.omh/settings.toml (committed)
+```
+
+The word in brackets is the point, and it is there because the path is not
+enough: `settings.toml` and `settings.local.toml` do not read as opposites at a
+glance in a line eighty columns wide.
+
+`omh set` also makes its own premise true. The gitignored file is only safe
+because git ignores it, and the ignore line used to be written by `omh init`
+alone — so in a repo that had never been `omh init`ed, `omh set carry_in` left
+a credential map that `git add .` would stage:
+
+```console
+$ omh set carry_in '[".env"]'
+omh: nothing was ignoring settings.local.toml — added it to /Users/you/proj/.omh/.gitignore
+wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
+```
+
+A key omh has never heard of is written to the committed file and reported
+twice — nothing reads it, and it went somewhere git carries:
+
+```console
+$ omh set carry_ins '[".env"]'
+omh: nothing in omh reads `carry_ins` — it is written, and it will sit there
+wrote → /Users/you/proj/.omh/settings.toml (committed)
+omh: and the shared layer is COMMITTED — `carry_ins` went into a file git carries
+```
+
+A test fails the build if a key omh's own code reads is missing from the table,
+which is what stops omh's own keys ever taking that path.
+
+Asking for the committed file still says what that means, and names the key when
+the key is one that reaches a credential:
+
+```console
+$ omh set --shared carry_in '[".env"]'
+wrote → /Users/you/proj/.omh/settings.toml (committed)
+omh: the shared layer is COMMITTED — never put a secret here
+omh:   `carry_in` is one of those — it belongs in /Users/you/proj/.omh/settings.local.toml
+```
+
+### `omh unset` reaches every repo layer that holds the key
+
+Not the one `omh set` would have written — those are different questions, and
+answering the second one shipped a defect worth recording. `omh set --shared
+carry_in` followed by `omh set carry_in` leaves the key in **both** repo files;
+omh wrote both. An `unset` that consulted `set`'s rule removed the gitignored
+copy, said so, exited 0, and left a map to a credential standing in the file git
+carries. The command you run to get a secret out of git reported success and did
+not do it.
+
+```console
+$ omh unset carry_in
+removed carry_in from the shared layer
+removed carry_in from the local layer
+```
+
+`--shared` and `--personal` still mean that layer alone. And anything still
+supplying the value after a removal is named, because an unqualified `unset`
+deliberately does not reach into your personal file:
+
+```console
+$ omh unset runtime
+runtime was not set in the shared layer
+omh: `runtime` is still set in the personal layer — /Users/you/.omh/settings.toml
+```
+
+### A write something outranks says so
+
+`settings.local.toml` wins at read time, so writing the committed file
+underneath a standing local value changes nothing you can observe. `--shared`
+walks past that on purpose — you named the file — but it no longer does it
+quietly:
+
+```console
+$ omh set --shared idle_timeout 30m
+wrote → /Users/you/proj/.omh/settings.toml (committed)
+omh: `idle_timeout` is still 15m here — the local layer sets it, and that outranks shared
+```
+
+### `omh why <key>` says what a key is for
+
+The classification is a table in the binary, so a settings file cannot show it:
+
+```console
+$ omh why carry_in
+`carry_in` is a setting omh reads.
+
+  Files a session gets that git does not carry — see `src/carry.rs`.
+  takes  a TOML array of paths, e.g. [".env"]
+  kept   /Users/you/proj/.omh/settings.local.toml (gitignored)
+
+  A value here can name a credential, which is why omh keeps it
+  out of the file git carries.
 ```
 
 Where a repo already carries a `[use]` or `[omh]` table in its **gitignored**

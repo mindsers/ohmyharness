@@ -99,6 +99,10 @@ product, not fixing a test.
 | `rm` keeps a branch that has commits; `ensure` reattaches | unreviewed agent work must be unloseable |
 | the rules omh stages are mounted, never written into the worktree | written there they are indistinguishable from the agent's work, and `info/exclude` cannot hide a file git tracks |
 | `s commit` never commits a file omh put in the worktree | omh's own `CLAUDE.md` in the user's PR is omh corrupting the work it exists to isolate |
+| a key that can name a credential never lands in a committed file unasked | `omh set` defaults to the committed file, so the protection is a property of the key, not of the command — `src/key.rs` is the whole of it |
+| the file omh hides a secret in is a file git ignores | it is routed there *because* it is hidden, and the ignore line used to be `omh init`'s alone |
+| rule 2 only moves a write away from the committed file, never toward it | the symmetric version is the obvious-looking repair and it commits `carry_in` |
+| `omh unset` reaches every repo layer that holds the key | removing where `set` would have written left a committed `carry_in` standing and reported success |
 | a `carry_in` entry git already tracks is reported, not copied | it overwrites the branch's copy with the checkout's, and the only path a secret takes to the agent is not one to widen |
 | `s commit` refuses a carried file rather than dropping it | omh cannot tell a credential from a deliberate change, and silently discarding either is worse than stopping |
 | every hook command parses and runs under `sh` | a hook that cannot parse satisfies every assertion about its text and never runs |

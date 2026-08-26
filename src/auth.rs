@@ -86,7 +86,7 @@ pub fn resolve(
         // never say so.
         _ => anyhow::bail!(
             "{harness} has several accounts: {}\n  \
-             pick one with `omh repo set account <name>` or `-a <name>`",
+             pick one with `omh set account <name>` or `-a <name>`",
             available.join(", ")
         ),
     }
@@ -545,7 +545,7 @@ mod tests {
             "got: {err}"
         );
         assert!(
-            err.contains("omh repo set account"),
+            err.contains("omh set account"),
             "must say how to fix it: {err}"
         );
     }

@@ -24,7 +24,7 @@ these, the reason is what you need to argue with.
 | Selection | **an allowlist, `[use]`** | removing something is deleting its name; no `include`/`exclude` pair to reconcile |
 | Absent selection | **means everything** | upgrading changes nothing, and a new checkout is useful before it is configured |
 | Command scope | **`omh config` is you, `omh repo` is here** | the two want opposite write defaults, and one `--layer` flag cannot express both |
-| Write default | **a value never lands in the committed file; a name may** | `omh repo set`/`omh config set` take a value you typed and default away from git. `omh use`/`unuse` and `omh repo enable`/`disable` write only names, and what a project uses is a fact about the project |
+| Write default | **the key decides, not the command** | it was *a value never lands in the committed file; a name may*, which held while `omh repo set` sent every value to the gitignored file. `omh set` serves every key from one command, so the judgement moved into `src/key.rs`: per key, whether a value there can name a credential. Committed is the default now — most settings are facts about the project — and the table is what keeps a secret out of it |
 | Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
 | Tool vocabulary | **one closed set, per-adapter map** | the one thing skills, subagents and hooks all leak |
 | Naming a session | **`sNN` first, one form** | several sandboxes of one repo are reached from one place, so the selector leads and everything after it is unchanged — designed, see [git](git.md) |
