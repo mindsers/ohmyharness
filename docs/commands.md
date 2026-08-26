@@ -6,8 +6,8 @@ omh new <harness> [-- args…]      start a session, run an agent in it
 omh sessions <id> resume [harness]  rejoin one · claude · omp · opencode
 omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
-omh auth <harness> [account]      log in once; repeat for several accounts
-omh doctor [harness]          d   verify a harness really sees your profile
+omh auth <harness> [--name]       log in once; repeat for several accounts
+omh doctor [--harness]        d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
 omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 log
@@ -179,19 +179,19 @@ omh: graph at http://127.0.0.1:56286
 One service per repo, not per session, and it needs no session to exist. See
 [Code graph](code-graph.md#omh-graph).
 
-## `omh auth <harness> [account]`
+## `omh auth <harness> [--name <account>]`
 
 Runs the harness's own login and captures the result. `account` defaults to
 `default`.
 
 ```console
-$ omh auth claude personal
-$ omh auth claude work
+$ omh auth claude --name personal
+$ omh auth claude --name work
 ```
 
 See [Accounts](accounts.md).
 
-## `omh doctor [harness]` · `d`
+## `omh doctor [--harness <name>]` · `d`
 
 Launches the real image with the real mounts and checks the guest paths the
 adapter claims. The only thing that can verify an adapter. See

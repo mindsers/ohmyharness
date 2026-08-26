@@ -188,7 +188,7 @@ means import silently drops fields. That is a test, not a hope.
 
 1. Write `~/.omh/adapters/<name>.toml`. Declare only what the harness genuinely
    supports.
-2. `omh doctor <name>`.
+2. `omh doctor --harness <name>`.
 3. Fix whatever it says. Repeat.
 
 Step 2 is not optional, and it is not a formality. **Adapter facts are

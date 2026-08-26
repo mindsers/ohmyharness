@@ -129,7 +129,7 @@ that runs is the one inside the sandbox, which is a different installation.
 ## Log in
 
 ```console
-$ omh auth claude personal
+$ omh auth claude --name personal
 ```
 
 This runs the harness's **own** login flow — the same `/login` you would use

@@ -233,7 +233,11 @@ enum Cmd {
     Init,
     /// Verify a harness actually sees the profile, inside a real sandbox.
     #[command(visible_alias = "d")]
-    Doctor { harness: Option<String> },
+    Doctor {
+        /// Which harness to verify. Without it, the one this repo prefers.
+        #[arg(long)]
+        harness: Option<String>,
+    },
     /// Who put this here, and on what grounds.
     Why {
         /// A base-set entry, something you added, or something omh rejected.
@@ -257,7 +261,7 @@ enum Cmd {
     Auth {
         harness: String,
         /// Account name, e.g. `personal` or `work`.
-        #[arg(default_value = auth::DEFAULT_ACCOUNT)]
+        #[arg(long = "name", default_value = auth::DEFAULT_ACCOUNT)]
         account: String,
     },
     /// What you have here: harnesses, editors, sessions.
@@ -5393,7 +5397,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
             })
             .collect();
     auth::login_outcome(status.success(), &unfilled)
-        .map_err(|e| e.context(format!("run `omh auth {harness} {account}` again")))?;
+        .map_err(|e| e.context(format!("run `omh auth {harness} --name {account}` again")))?;
     let all = auth::accounts(&paths, &adapter);
     // What the files can and cannot settle. For a harness naming `token` files
     // an empty `unfilled` *is* the login; for one that keeps credentials
@@ -5415,7 +5419,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
             "{harness} keeps its credentials where omh cannot read them, so only \
              {harness} can say whether the login took"
         ))
-        .next(format!("omh doctor {harness}"))
+        .next(format!("omh doctor --harness {harness}"))
     };
     action = action.data(serde_json::json!({
         "harness": harness,
@@ -10577,6 +10581,50 @@ because = "a fixture"
     }
 
     /// Aliases only earn their keep if they are actually short.
+    /// A second thing on the line is a flag, not a position.
+    ///
+    /// `auth` and `doctor` each took an optional bare word after their first
+    /// argument — an account for one, a harness for the other. Two problems.
+    /// A reader cannot tell `omh auth claude work` from `omh auth claude
+    /// personal` without knowing which of the two words is the account, and
+    /// `doctor` is due a `--session` as well, at which point a bare word next
+    /// to two flags is the odd one out.
+    ///
+    /// Named, both read as what they are, and the account keeps its default
+    /// so the common line does not grow.
+    #[test]
+    fn the_optional_second_word_is_named_rather_than_positional() {
+        for line in [
+            vec!["omh", "auth", "claude", "--name", "work"],
+            vec!["omh", "auth", "claude"],
+            vec!["omh", "doctor", "--harness", "claude"],
+            vec!["omh", "doctor"],
+        ] {
+            assert!(
+                Cli::try_parse_from(&line).is_ok(),
+                "omh accepts `{}`",
+                line[1..].join(" ")
+            );
+        }
+        // And the positional forms are gone rather than quietly still working,
+        // which is the half a rename that only adds the new spelling skips.
+        for line in [
+            vec!["omh", "auth", "claude", "work"],
+            vec!["omh", "doctor", "claude"],
+        ] {
+            let Err(refused) = Cli::try_parse_from(&line) else {
+                panic!("`{}` is not a line omh takes any more", line[1..].join(" "));
+            };
+            assert_eq!(
+                refused.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "`{}` is refused as an argument omh does not know, not as \
+                 something else that happens to fail",
+                line[1..].join(" ")
+            );
+        }
+    }
+
     #[test]
     fn every_alias_is_a_single_letter() {
         for sub in Cli::command().get_subcommands() {

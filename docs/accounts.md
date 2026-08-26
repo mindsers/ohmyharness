@@ -1,8 +1,8 @@
 # Accounts
 
 ```console
-$ omh auth claude personal
-$ omh auth claude work
+$ omh auth claude --name personal
+$ omh auth claude --name work
 $ omh -a work new claude          # or, per project: omh repo set account work
 ```
 
@@ -86,8 +86,8 @@ A placeholder is recognised as one, so it never counts as a login.
 - **Two identities and no stated preference** stops it too. Guessing would send
   work traffic through a personal account and never mention it.
 - **Account names are validated as single path components.** Credentials mount
-  writable, so `omh auth claude ../../..` would otherwise resolve to `~` and
-  hand the agent your real credential store.
+  writable, so `omh auth claude --name ../../..` would otherwise resolve to
+  `~` and hand the agent your real credential store.
 - **The runtime's exit status is checked before the filesystem.** A container
   that failed to start leaves the previous credentials in place, which would
   otherwise read as a successful re-authentication.
