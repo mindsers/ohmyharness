@@ -904,6 +904,54 @@ removed session s01; branch omh/s01 kept — omh could not count it against main
   git branch -D omh/s01
 ```
 
+## `omh set` · `omh unset`
+
+Change a setting. **Which file it lands in follows from the key**, not from a
+flag you have to remember.
+
+```
+omh set <key> <value> [--shared] [--personal]
+omh unset <key> [--shared] [--personal]
+```
+
+| The key | Where it goes | Why |
+|---|---|---|
+| can name a credential — `carry_in` | `<repo>/.omh/settings.local.toml`, **gitignored** | `.env.local` in a committed file is a map to a secret |
+| anything else omh reads — `runtime`, `idle_timeout`, `persistence`, `account` | `<repo>/.omh/settings.toml`, **committed** | what runtime a project wants is a fact about the project, and a teammate cloning it should get it |
+| one omh has never heard of | committed, and omh says both things | it cannot classify a key it does not read |
+
+`omh why <key>` says what omh reads a key for. The classification is a table in
+`src/key.rs`, and a test fails the build when a key the code reads is missing
+from it — that table is the whole protection now that committed is the default.
+
+```console
+$ omh set carry_in '[".env"]'
+wrote → /Users/you/proj/.omh/settings.local.toml
+
+$ omh set idle_timeout 30m
+wrote → /Users/you/proj/.omh/settings.toml
+```
+
+Two flags override the rule. `--shared` writes the committed file; `--personal`
+writes `~/.omh/settings.toml`, your default in every project. Asking for the
+committed file says what that means, and names the key when the key is one that
+reaches a credential:
+
+```console
+$ omh set --shared carry_in '[".env"]'
+wrote → /Users/you/proj/.omh/settings.toml
+omh: the shared layer is COMMITTED — never put a secret here
+omh:   `carry_in` is one of those — it belongs in /Users/you/proj/.omh/settings.local.toml
+```
+
+**A key the gitignored file already sets is updated there**, whatever the table
+would otherwise have chosen. That file wins at read time, so writing the
+committed one underneath a standing local value would report success over a
+value that never changed.
+
+`omh unset` reads the same rule, so it removes the value from the file `omh set`
+would have written.
+
 ## `omh config …` · `c`
 
 **You**, everywhere. Your defaults and your catalogue.

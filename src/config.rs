@@ -445,6 +445,20 @@ pub fn declares(paths: &Paths, layer: Layer, table: &str) -> Result<bool> {
     Ok(read_doc(&layer.file(paths))?.contains_key(table))
 }
 
+/// Does this layer's file already give this setting a value?
+///
+/// Separate from `declares` although the operation is the same read: that one
+/// asks after a `[table]`, this after a bare key, and the two answer different
+/// commands. Collapsing them would make `omh set carry_in` and `omh use rules`
+/// share a call site that neither of them describes.
+///
+/// A `[carry_in]` *table* would answer `true` here and is not a value at all —
+/// `set` refuses one through `refuse_a_table` before writing, so the wrong
+/// answer costs a layer choice on a line that is about to be refused anyway.
+pub fn holds(paths: &Paths, layer: Layer, key: &str) -> Result<bool> {
+    Ok(read_doc(&layer.file(paths))?.contains_key(key))
+}
+
 fn declares_key(paths: &Paths, layer: Layer, table: &str, key: &str) -> Result<bool> {
     Ok(read_doc(&layer.file(paths))?
         .get(table)

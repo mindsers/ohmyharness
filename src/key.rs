@@ -277,8 +277,16 @@ mod tests {
     /// per-key override that disagrees with it.
     ///
     /// It is the executable half of the rule `docs/configuration.md` states as
-    /// prose — *the committed file is never reached by accident, only on
-    /// purpose* — after that rule stops being a property of the command.
+    /// prose — *the protection moved from the command to the key*. The prose it
+    /// used to quote said *the committed file is never reached by accident,
+    /// only on purpose*, which was a property of `omh repo set` sending every
+    /// value to the gitignored file; `omh set` defaults to the committed one,
+    /// so the table below is what carries the guarantee now.
+    ///
+    /// `no_unqualified_write_can_reach_version_control` in `main.rs` is the
+    /// other half and not a duplicate of this: this pins the step from the
+    /// judgement to `default_layer`, that one pins the step from `omh set` to
+    /// the judgement — including what happens to a key the table never saw.
     #[test]
     fn no_key_that_carries_a_secret_defaults_to_the_committed_layer() {
         assert!(!KEYS.is_empty(), "an empty table satisfies every rule");

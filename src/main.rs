@@ -312,6 +312,32 @@ enum Cmd {
         /// Which entry to drop from this repo's list.
         name: String,
     },
+    /// Change a setting. Which file it lands in follows from what the key is
+    /// for: one that can name a credential goes to the gitignored file, and
+    /// everything else is a fact about the project, so it is committed.
+    Set {
+        /// Which setting. `omh why <key>` says what omh reads it for.
+        key: String,
+        /// What to set it to.
+        value: String,
+        /// Commit it, so a teammate cloning this repo gets it too.
+        #[arg(long, conflicts_with = "personal")]
+        shared: bool,
+        /// Set your own default instead, for every project.
+        #[arg(long)]
+        personal: bool,
+    },
+    /// Drop a setting, letting any lower layer resurface.
+    Unset {
+        /// Which setting to drop.
+        key: String,
+        /// Drop it from the committed file.
+        #[arg(long, conflicts_with = "personal")]
+        shared: bool,
+        /// Drop it from your own defaults.
+        #[arg(long)]
+        personal: bool,
+    },
     /// The note store: what is in it, and what is wrong with it.
     Memory {
         #[command(subcommand)]
@@ -764,6 +790,8 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Info
         | Cmd::Config { .. }
         | Cmd::Repo { .. }
+        | Cmd::Set { .. }
+        | Cmd::Unset { .. }
         | Cmd::Use { .. }
         | Cmd::Unuse { .. }
         | Cmd::Import { .. }
@@ -963,6 +991,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 key,
                 value,
                 layer_or(*layer, config::Layer::Personal, ctx),
+                Chose::Told,
                 ctx,
             ),
             Some(ConfigCmd::Unset { key, layer }) => unset(
@@ -984,12 +1013,36 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             Some(ConfigCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run, ctx),
         },
 
+        Cmd::Set {
+            key,
+            value,
+            shared,
+            personal,
+        } => {
+            let paths = Paths::discover(&cwd)?;
+            let layer = set_layer(&paths, key, *shared, *personal)?;
+            let chose = if *shared || *personal {
+                Chose::Told
+            } else {
+                Chose::Derived
+            };
+            set(&cwd, key, value, layer, chose, ctx)
+        }
+        Cmd::Unset {
+            key,
+            shared,
+            personal,
+        } => {
+            let paths = Paths::discover(&cwd)?;
+            unset(&cwd, key, set_layer(&paths, key, *shared, *personal)?, ctx)
+        }
+
         Cmd::Repo { cmd } => match cmd {
             None => show_repo(&cwd, ctx),
             Some(RepoCmd::Enable { feature }) => feature_switch(&cwd, feature, true, ctx),
             Some(RepoCmd::Disable { feature }) => feature_switch(&cwd, feature, false, ctx),
             Some(RepoCmd::Set { key, value, shared }) => {
-                set(&cwd, key, value, repo_layer(*shared), ctx)
+                set(&cwd, key, value, repo_layer(*shared), Chose::Told, ctx)
             }
             Some(RepoCmd::Unset { key, shared }) => unset(&cwd, key, repo_layer(*shared), ctx),
         },
@@ -3618,11 +3671,81 @@ fn repo_layer(shared: bool) -> config::Layer {
     }
 }
 
+/// Where a key belongs when nothing else has an opinion — the registry alone.
+///
+/// **The default is the committed file**, which is the opposite of what
+/// `omh repo set` did, and the reversal is the point: what runtime a project
+/// wants, and how long its sessions idle, are facts about the project, and a
+/// teammate cloning it should get them. Until this table existed that default
+/// was unavailable, because *every* value went to the gitignored file and the
+/// safety came from the destination rather than from knowing the key.
+///
+/// So an unknown key is committed too. That is deliberate and it is the whole
+/// reason `key::KEYS` is guarded by a scan rather than kept by hand: a key the
+/// code reads and the table has never heard of would otherwise be classified
+/// by whoever typed it. `every_setting_omh_reads_is_a_key_omh_can_classify`
+/// fails the build first.
+fn key_layer(key: &str) -> config::Layer {
+    key::describes(key).map_or(config::Layer::Shared, key::Key::default_layer)
+}
+
+/// Which file `omh set`/`omh unset` act on, given the line as typed.
+///
+/// Three rules, in this order:
+///
+/// 1. `--personal` and `--shared` are the user saying it outright.
+/// 2. A key the gitignored file already gives a value is written **there**.
+///    `settings::resolve` applies the layers with that one last, so writing
+///    the committed file underneath a standing local value reports success
+///    over a value that never changed — the defect `omh unuse` shipped once.
+/// 3. Otherwise the registry decides, through `key_layer`.
+///
+/// `unset` reads the same rule rather than a mirrored one, so the pair cannot
+/// disagree about where a setting lives. The cost is a key hand-written into
+/// *both* repo files: rule 2 picks the local one, `unset` removes it there and
+/// says so, and the committed value resurfaces. Nothing omh writes creates
+/// that state, and the report names the layer it acted on.
+fn set_layer(paths: &Paths, key: &str, shared: bool, personal: bool) -> Result<config::Layer> {
+    if personal {
+        return Ok(config::Layer::Personal);
+    }
+    if shared {
+        return Ok(config::Layer::Shared);
+    }
+    let belongs = key_layer(key);
+    if belongs.is_committed() && config::holds(paths, config::Layer::Local, key)? {
+        return Ok(config::Layer::Local);
+    }
+    Ok(belongs)
+}
+
+/// Whether the file about to be written was named on the command line.
+///
+/// The COMMITTED warning needs to know. It fires on a committed write, which
+/// was a rare and deliberate thing while `--shared` was the only way to reach
+/// one — and is nearly *every* write now that `omh set` defaults there. A
+/// sentence that fires on almost every invocation is one people stop reading,
+/// and this codebase has already watched that happen once, to the same
+/// sentence, for the same reason: it could not tell `account` from `carry_in`.
+///
+/// So it fires where somebody asked for the file git carries, and stays quiet
+/// where the registry judged that file safe for this key. The judgement is
+/// `key::Secret`, and `no_unqualified_write_can_reach_version_control` is what
+/// keeps it honest.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Chose {
+    /// `--shared`, `--personal`, or a command with only one destination.
+    Told,
+    /// `omh set` with nothing on the line but the key and the value.
+    Derived,
+}
+
 fn set(
     cwd: &std::path::Path,
     key: &str,
     value: &str,
     layer: config::Layer,
+    chose: Chose,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -3657,17 +3780,36 @@ fn set(
         ),
     );
     // The one mistake git makes unrecoverable. On stderr through `warn`, so it
-    // survives `omh config set … > log` — which is exactly the invocation a
-    // script that is about to commit a secret would use.
+    // survives `omh set … > log` — which is exactly the invocation a script
+    // that is about to commit a secret would use.
     if w.committed {
-        ctx.warn(&format!(
-            "the {} layer is COMMITTED — never put a secret here",
-            w.layer
-        ));
-        // The general sentence fires for `account` — a name — exactly as it
-        // does for `carry_in`, and a warning that cannot tell those apart is
-        // one people learn to scroll past. Where omh knows the key reaches a
+        match (chose, key::describes(key)) {
+            // Somebody typed the flag that reaches git.
+            (Chose::Told, _) => ctx.warn(&format!(
+                "the {} layer is COMMITTED — never put a secret here",
+                w.layer
+            )),
+            // omh sent a key it has never heard of to a file git carries,
+            // because that is what it does with an unclassified key. The line
+            // above already said nothing reads it; this is the half of that
+            // which retyping does not undo.
+            (Chose::Derived, None) => ctx.warn(&format!(
+                "and the {} layer is COMMITTED — `{key}` went into a file git carries",
+                w.layer
+            )),
+            // The design, not an accident: a key the registry classes as
+            // carrying nothing secret, in the file a teammate should get.
+            (Chose::Derived, Some(_)) => {}
+        }
+        // The general sentence fired for `account` — a name — exactly as it did
+        // for `carry_in`, and a warning that cannot tell those apart is one
+        // people learn to scroll past. Where omh knows the key reaches a
         // credential, it says so and says where the value would have gone.
+        //
+        // Unreachable through `Chose::Derived` today, since `key_layer` sends
+        // those keys elsewhere. Written against `w.committed` rather than
+        // against the flag anyway: this is the sentence that must survive a
+        // future spelling that gets there another way.
         if let Some(k) = key::describes(key) {
             if k.secret == key::Secret::Yes {
                 ctx.warn(&format!(
@@ -10194,16 +10336,55 @@ because = "a fixture"
 
     // ── the shipped hooks ───────────────────────────────────────────────────
 
-    /// The safety property, restated where it now lives.
+    /// The safety property, restated where it now lives — **per key**.
     ///
-    /// It used to be `Layer::DEFAULT_WRITE`: one flag, one default, and an
+    /// It began as `Layer::DEFAULT_WRITE`: one flag, one default, and an
     /// unqualified write could never reach version control. `--layer` split
     /// into two commands because the two scopes want opposite defaults, so the
-    /// constant went — and the property it carried did not. Neither command's
-    /// default may be the committed file, and reaching it has to be asked for
-    /// in so many words.
+    /// constant went and this test carried the property instead, asserting it
+    /// of each command's default.
+    ///
+    /// `omh set` ends that reading. Its default **is** the committed file, so
+    /// the protection stopped being a property of the command the moment one
+    /// command served every key. It is a property of the key now, and the loop
+    /// below is the whole of it: for every key that can name a credential, the
+    /// layer an unadorned `omh set` picks must not be one git will carry.
+    ///
+    /// The loop asserts nothing if the table has no such key, so the floor
+    /// underneath it is not decoration — a `Secret::Yes` downgraded to `No`
+    /// would otherwise empty this test rather than fail it.
+    ///
+    /// `key::no_key_that_carries_a_secret_defaults_to_the_committed_layer` is
+    /// adjacent and not the same claim. That one reads `Key::default_layer`;
+    /// this reads `key_layer`, which is what `omh set` actually calls — table
+    /// lookup, fallback for an unrecognised key, and all. Making `key_layer`
+    /// ignore the table outright leaves that test green and fails this one.
     #[test]
     fn no_unqualified_write_can_reach_version_control() {
+        let secret: Vec<&str> = key::KEYS
+            .iter()
+            .filter(|k| k.secret == key::Secret::Yes)
+            .map(|k| k.name)
+            .collect();
+        assert!(
+            !secret.is_empty(),
+            "with no credential-bearing key in the table, the loop below \
+             asserts nothing at all"
+        );
+        for name in &secret {
+            assert!(
+                !key_layer(name).is_committed(),
+                "`{name}` can name a credential, so `omh set {name} …` with \
+                 nothing else on the line must not write a file git carries"
+            );
+        }
+        assert!(
+            config::Layer::Shared.is_committed(),
+            "and --shared is how you say you meant it — a test that read \
+             `is_committed` as false everywhere would pass the loop above"
+        );
+
+        // The two commands `omh set` replaces, while they are still spelled.
         assert!(
             !repo_layer(false).is_committed(),
             "omh repo set holds carry_in paths and MCP env"

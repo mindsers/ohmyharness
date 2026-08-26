@@ -2255,6 +2255,168 @@ fn repo_set_is_gitignored_and_shared_says_it_is_not() {
     );
 }
 
+/// `omh set` reads the key registry to decide which file it writes.
+///
+/// The claim is about **both** files, deliberately. A test asserting only that
+/// the value landed where it belongs would pass just as well if `omh set` wrote
+/// every layer — and a `carry_in` in the committed file is a map to a secret
+/// whether or not the gitignored one also has it.
+#[test]
+fn set_asks_the_registry_which_file_a_key_belongs_in() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "carry_in", "[\".env\"]"]).status.success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        local.contains(".env"),
+        "a key that can name a credential goes to the gitignored file: {local}"
+    );
+    assert!(
+        !sb.settings().contains(".env"),
+        "and nowhere near the committed one: {}",
+        sb.settings()
+    );
+
+    assert!(sb.omh(&["set", "idle_timeout", "30m"]).status.success());
+    assert!(
+        sb.settings().contains("30m"),
+        "a key holding nothing secret is a fact about the project: {}",
+        sb.settings()
+    );
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        !local.contains("30m"),
+        "and it is written once, not to both: {local}"
+    );
+}
+
+/// A key the gitignored file already carries is updated **there**.
+///
+/// `settings::resolve` applies the layers with the local one last, so writing
+/// the committed file while a local value stands reports success over a value
+/// that never changed. That is the defect `omh unuse` shipped once already —
+/// same shape, one command over.
+#[test]
+fn set_updates_a_key_where_it_already_lives() {
+    let sb = sandbox();
+    sb.seed_base();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "idle_timeout = \"15m\"\n",
+    )
+    .unwrap();
+
+    assert!(sb.omh(&["set", "idle_timeout", "30m"]).status.success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(
+        local.contains("30m") && !local.contains("15m"),
+        "got: {local}"
+    );
+    assert!(
+        !sb.settings().contains("30m"),
+        "and not a second copy in the file the local one outranks: {}",
+        sb.settings()
+    );
+}
+
+/// `--shared` is how you say you meant it, and it still says what that costs.
+#[test]
+fn set_shared_forces_the_committed_file_and_names_the_key() {
+    let sb = sandbox();
+    sb.seed_base();
+    let out = sb.omh(&["set", "--shared", "carry_in", "[\".env\"]"]);
+    assert!(out.status.success());
+    assert!(sb.settings().contains(".env"), "{}", sb.settings());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("COMMITTED"), "got: {err}");
+    assert!(
+        err.contains("carry_in"),
+        "a warning that cannot name the key is one people learn to scroll past: {err}"
+    );
+}
+
+/// The COMMITTED warning stays rare, now that committed is the default.
+///
+/// Under `omh repo set` a committed write was something you asked for, so the
+/// sentence was rare and it meant something. `omh set` defaults there, so
+/// warning on every committed write would put it on nearly every invocation —
+/// and this project has already watched that exact sentence stop being read
+/// once, when it could not tell `account` from `carry_in`.
+///
+/// So the claim is two-sided, and the quiet half is the one that matters: a
+/// warning that fires everywhere would pass a test that only checked it fires.
+#[test]
+fn set_mentions_git_where_git_was_asked_for_or_cannot_be_vouched_for() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    // Committed because the registry says this key is safe there. The design,
+    // not a hazard — and it says nothing alarming.
+    let designed = sb.omh(&["set", "idle_timeout", "30m"]);
+    let quiet = String::from_utf8_lossy(&designed.stderr).to_string();
+    assert!(designed.status.success(), "{quiet}");
+    assert!(
+        !quiet.contains("COMMITTED"),
+        "the default path must not carry the warning, or nothing does: {quiet}"
+    );
+
+    // Asked for in so many words.
+    let asked = sb.omh(&["set", "--shared", "account", "work"]);
+    let said = String::from_utf8_lossy(&asked.stderr).to_string();
+    assert!(
+        said.contains("COMMITTED"),
+        "typing --shared is asking, and asking gets an answer: {said}"
+    );
+
+    // omh routed a key it has never heard of into a file git carries. It
+    // cannot vouch for the value, and that is the half retyping does not undo.
+    let unknown = sb.omh(&["set", "carry_ins", "[\".env\"]"]);
+    let flagged = String::from_utf8_lossy(&unknown.stderr).to_string();
+    assert!(
+        flagged.contains("COMMITTED") && flagged.contains("carry_ins"),
+        "an unclassified key reaching git is named, with where it went: {flagged}"
+    );
+}
+
+/// `--personal` is where `omh config set` went: your default, every project.
+#[test]
+fn set_personal_writes_your_defaults_across_projects() {
+    let sb = sandbox();
+    sb.seed_base();
+    assert!(sb
+        .omh(&["set", "--personal", "idle_timeout", "45m"])
+        .status
+        .success());
+    let personal = std::fs::read_to_string(sb.home.join(".omh/settings.toml")).unwrap();
+    assert!(personal.contains("45m"), "got: {personal}");
+    assert!(
+        !sb.settings().contains("45m"),
+        "your default is not this repo's: {}",
+        sb.settings()
+    );
+}
+
+/// `omh unset` reaches the file `omh set` chose, without being told which.
+///
+/// Both halves read the same rule, so the pair is symmetric by construction
+/// rather than by two lists agreeing.
+#[test]
+fn unset_reaches_the_file_set_wrote() {
+    let sb = sandbox();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "carry_in", "[\".env\"]"]).status.success());
+    assert!(sb.omh(&["unset", "carry_in"]).status.success());
+    let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
+    assert!(!local.contains(".env"), "got: {local}");
+
+    assert!(sb.omh(&["set", "idle_timeout", "30m"]).status.success());
+    assert!(sb.omh(&["unset", "idle_timeout"]).status.success());
+    assert!(!sb.settings().contains("30m"), "got: {}", sb.settings());
+}
+
 /// `omh config set` means **you** now. It used to default to the repo's
 /// gitignored file; the secret-safety argument survives intact, because the
 /// personal file is not committed either.
