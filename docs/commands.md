@@ -906,43 +906,84 @@ removed session s01; branch omh/s01 kept — omh could not count it against main
 
 ## `omh set` · `omh unset`
 
-Change a setting. **Which file it lands in follows from the key**, not from a
-flag you have to remember.
+Change a setting, or switch one of omh's features. **Which file it lands in
+follows from the key**, not from a flag you have to remember.
 
 ```
-omh set <key> <value> [--shared] [--personal]
+omh set <key> <value> [--local] [--save]
 omh set <feature> on|off
-omh unset <key> [--shared] [--personal]
+omh unset <key> [--local] [--save]
 omh unset <feature>                   let omh's own default decide again
 ```
 
-| The key | Where it goes | Why |
-|---|---|---|
-| can name a credential — `carry_in` | `<repo>/.omh/settings.local.toml`, **gitignored** | `.env.local` in a committed file is a map to a secret |
-| anything else omh reads — `runtime`, `idle_timeout`, `persistence`, `account` | `<repo>/.omh/settings.toml`, **committed** | what runtime a project wants is a fact about the project, and a teammate cloning it should get it |
-| one omh has never heard of | committed, and omh says both things | it cannot classify a key it does not read |
+One rule, and `omh use` / `omh unuse` follow it too:
 
-**One of omh's own features takes `on` or `off` instead of a value**, and lands
-in the `[omh]` table rather than as a bare key:
+1. **Every repo file that already gives it a value.** Writing one while another
+   still declares the key is how a command reports success over something that
+   never changed.
+2. If none does — the **committed** `settings.toml`, because what runtime a
+   project wants and which of omh's features it runs with are facts about the
+   project a teammate cloning should get.
+3. **Except** a key that can name a credential, which goes to the gitignored
+   `settings.local.toml`. That exception is a table in `src/key.rs`, per key,
+   and it is the whole of what keeps a secret out of git now that committed is
+   the default. `omh why <key>` says which a key is.
+
+```console
+$ omh set carry_in '[".env"]'
+omh: nothing was ignoring settings.local.toml — added it to /Users/you/proj/.omh/.gitignore
+wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
+
+$ omh set idle_timeout 30m
+wrote → /Users/you/proj/.omh/settings.toml (committed)
+```
+
+The word in brackets is the point: `settings.toml` and `settings.local.toml`
+do not read as opposites at a glance in a path eighty columns wide.
+
+**`--local` and `--save` name the file outright**, and are the only way to put
+one key in both. A key held in two files is then updated in both:
+
+```console
+$ omh set --local idle_timeout 45m
+wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
+
+$ omh set idle_timeout 20m
+wrote → /Users/you/proj/.omh/settings.toml (committed)
+wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
+```
+
+A named flag steps outside rule 1, so it can write a file something outranks —
+and says so rather than reporting a change you cannot observe.
+
+`omh set` also makes its own premise true: the gitignored file is only safe
+because git ignores it, and that line used to be `omh init`'s alone. If nothing
+is ignoring it, `omh set` adds the line and says it did.
+
+### Features take `on` or `off`
+
+One of omh's own features is a boolean in the `[omh]` table rather than a bare
+key. It follows the same rule about which file, and takes the same two flags.
 
 ```console
 $ omh set codegraph off
 codegraph is off here
   nothing was uninstalled; the next repo gets it back
-  wrote → /Users/you/proj/.omh/settings.toml
+  wrote → /Users/you/proj/.omh/settings.toml (committed)
+omh: the committed file is COMMITTED — a teammate cloning this repo gets `codegraph` off
 
 $ omh unset codegraph
-codegraph follows omh's default here again
+this checkout no longer switches codegraph
 ```
 
-The two vocabularies are disjoint, and a test fails the build if they ever
-collide — `omh set <name>` writes two different shapes into one file, so a name
-meaning both would be ambiguous in a way no error message could resolve.
+Switched off, and *following omh's default*, are different states — which is
+why `unset` exists for a feature at all.
 
-A feature takes no layer flag. `--personal` has nothing to mean, since
-`~/.omh/settings.toml` is not a checkout, and `--shared` is refused rather than
-accepted as a no-op — a flag that appears to have decided something it did not
-is the smaller lie and still a lie. Naming a base-set *entry* is refused too,
+Settings keys never collide with feature names, and a test fails the build if
+they ever do: `omh set <name>` writes two different shapes into one file, so a
+name meaning both could not be resolved by any error message. Feature and
+*entry* names do overlap on purpose — the manifest names a feature after its
+principal entry — and the feature reading wins. Naming an entry is refused,
 saying which feature contains it:
 
 ```console
@@ -951,40 +992,10 @@ omh: `graph-rules` is part of the `codegraph` feature, not a feature itself. A f
   omh set codegraph off
 ```
 
-`omh why <key>` says what omh reads a key for. The classification is a table in
-`src/key.rs`, and a test fails the build when a key the code reads is missing
-from it — that table is the whole protection now that committed is the default.
-
-```console
-$ omh set carry_in '[".env"]'
-wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
-
-$ omh set idle_timeout 30m
-wrote → /Users/you/proj/.omh/settings.toml (committed)
-```
-
-Two flags override the rule. `--shared` writes the committed file; `--personal`
-writes `~/.omh/settings.toml`, your default in every project. Asking for the
-committed file says what that means, and names the key when the key is one that
-reaches a credential:
-
-```console
-$ omh set --shared carry_in '[".env"]'
-wrote → /Users/you/proj/.omh/settings.toml (committed)
-omh: the shared layer is COMMITTED — never put a secret here
-omh:   `carry_in` is one of those — it belongs in /Users/you/proj/.omh/settings.local.toml
-```
-
-**A key the gitignored file already sets is updated there**, whatever the table
-would otherwise have chosen. That file wins at read time, so writing the
-committed one underneath a standing local value would report success over a
-value that never changed.
-
-`omh unset` does **not** read that rule. It removes the key from every repo
-layer that gives it a value, because "where would `set` put this" and "where is
-this set" are different questions and answering the second with the first left a
-committed `carry_in` standing while reporting success. A named flag still means
-that layer alone, and whatever still supplies the value afterwards is reported.
+`omh unset` removes the key from every repo file that holds it, because *where
+would `set` put this* and *where is this set* are different questions, and
+answering the second with the first left a committed `carry_in` standing while
+reporting success:
 
 ```console
 $ omh unset carry_in
@@ -992,9 +1003,9 @@ removed carry_in from the shared layer
 removed carry_in from the local layer
 ```
 
-A write that a higher-precedence layer outranks says so rather than reporting a
-change you cannot observe, and `omh set` makes its own premise true — if nothing
-is ignoring `settings.local.toml`, it adds the line and says it did.
+Anything still supplying the value afterwards is named — an unqualified `unset`
+stays inside the repo, so a cross-project default in `~/.omh/settings.toml`
+survives it and you are told which layer kept it.
 
 ## `omh config …` · `c`
 

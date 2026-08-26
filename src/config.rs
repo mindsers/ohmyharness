@@ -307,7 +307,7 @@ fn refuse_a_table(doc: &toml_edit::DocumentMut, key: &str) -> Result<()> {
     {
         anyhow::bail!(
             "`{key}` is a table, not a setting — omh will not replace it with a value. \
-             `[omh]` is `omh repo enable`/`disable`, `[use]` is `omh use`/`unuse`, and \
+             `[omh]` is `omh set <feature> on|off`, `[use]` is `omh use`/`unuse`, and \
              `[mcp.<name>.env]` is edited by hand."
         );
     }
@@ -412,6 +412,25 @@ pub fn write_feature(paths: &Paths, layer: Layer, feature: &str, on: bool) -> Re
     })
 }
 
+/// One layer's `[table]`, as booleans.
+///
+/// `policy` cannot answer questions about `[omh]` — it skips tables by design,
+/// so a feature switch is invisible to it — and a reader that guessed would be
+/// the same bug one spelling over.
+pub fn read_table(paths: &Paths, layer: Layer, table: &str) -> Result<BTreeMap<String, bool>> {
+    let doc = read_doc(&layer.file(paths))?;
+    let Some(t) = doc.get(table).and_then(toml_edit::Item::as_table_like) else {
+        return Ok(BTreeMap::new());
+    };
+    let mut out = BTreeMap::new();
+    for (k, v) in t.iter() {
+        if let Some(on) = v.as_bool() {
+            out.insert(k.to_string(), on);
+        }
+    }
+    Ok(out)
+}
+
 /// Drop a feature switch, so omh's own default decides again.
 ///
 /// Reports whether it removed anything, for the same reason `unset` does: a
@@ -480,6 +499,41 @@ pub fn declares(paths: &Paths, layer: Layer, table: &str) -> Result<bool> {
 /// refuses one through `refuse_a_table` before writing, so the wrong answer
 /// costs a layer choice on a line about to be refused anyway. It cannot arise
 /// for a credential-bearing key, whose layer never depends on this read.
+/// The repo layers that already give this bare key a value.
+///
+/// Committed first, gitignored second — the order they resolve in, so a caller
+/// reporting them reads the way `omh repo` does.
+///
+/// This is half of the rule four commands share. `omh set`, `omh unset`,
+/// `omh use` and `omh unuse` all answer the same question first — *where is
+/// this already?* — and only fall back to a default when the answer is
+/// nowhere. Writing one layer while another still declares the key is how a
+/// command reports success over a value that never changed, which this
+/// codebase has now shipped twice.
+pub fn holding(paths: &Paths, key: &str) -> Result<Vec<Layer>> {
+    let mut out = Vec::new();
+    for layer in [Layer::Shared, Layer::Local] {
+        if holds(paths, layer, key)? {
+            out.push(layer);
+        }
+    }
+    Ok(out)
+}
+
+/// The repo layers whose `[table]` already declares this key.
+///
+/// The same question as [`holding`], one level in — `[use]` and `[omh]` hold
+/// their entries in a table rather than at the top level.
+pub fn holding_in(paths: &Paths, table: &str, key: &str) -> Result<Vec<Layer>> {
+    let mut out = Vec::new();
+    for layer in [Layer::Shared, Layer::Local] {
+        if declares_key(paths, layer, table, key)? {
+            out.push(layer);
+        }
+    }
+    Ok(out)
+}
+
 pub fn holds(paths: &Paths, layer: Layer, key: &str) -> Result<bool> {
     Ok(read_doc(&layer.file(paths))?.contains_key(key))
 }
@@ -525,7 +579,7 @@ fn write_table(
 /// difference is not cosmetic: a settings file is one somebody maintains by
 /// hand, `omh init` writes it full of explanatory comments, and P4 turned
 /// writing it from something `omh config set` did occasionally into something
-/// `omh use`, `omh unuse` and `omh repo enable` all do. A serializer round trip
+/// `omh use`, `omh unuse` and `omh set <feature> on|off` all do. A serializer round trip
 /// deletes every comment in the file, which is deleting what the user wrote.
 fn edit_layer(
     paths: &Paths,

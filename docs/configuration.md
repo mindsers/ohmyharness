@@ -322,10 +322,10 @@ you added, because `omh init` seeded them there. They are not yours to select:
 
 ```console
 $ omh use mcp codegraph
-mcp/codegraph is omh's — part of the `codegraph` feature. `[use]` names your
-entries; a feature is all or nothing, so `omh set codegraph on` and
-`omh set codegraph off` are its switches, and `omh unset codegraph` hands the
-decision back to omh's own default.
+omh: mcp/codegraph is omh's — part of the `codegraph` feature. `[use]` names
+     your entries; a feature is all or nothing, so `omh set codegraph on` and
+     `omh set codegraph off` are its switches, and `omh unset codegraph` hands
+     the decision back to omh's own default.
 ```
 
 An empty `[use]` leaves every omh feature whole — server, hooks and rules
@@ -500,7 +500,8 @@ $ omh set codegraph off                 # → [omh] in settings.toml
 $ omh set codegraph on
 $ omh set carry_in '[".env"]'           # → settings.local.toml         (gitignored)
 $ omh set idle_timeout 30m              # → settings.toml               (committed)
-$ omh set --personal idle_timeout 45m    # → ~/.omh/settings.toml       (your default)
+$ omh set --local idle_timeout 45m      # → settings.local.toml, because you said so
+$ omh set --save carry_in '[".env"]'    # → settings.toml, because you said so
 $ omh unset carry_in
 $ omh repo                              # what is effective here, and what decided it
 
@@ -513,12 +514,13 @@ $ omh config                            # your defaults, and what the catalogue 
 ```
 
 **The two scopes wanted opposite defaults**, which is why one `--layer` flag
-could not serve both — and why `omh set` asks the key instead of the command:
+could not serve both — and why these commands ask *where the value already is*
+before they ask anything else:
 
 | Command | Writes to | Why that default |
 |---|---|---|
 | `omh use` / `unuse` | `settings.toml`, **committed** | what a project uses is a fact about the project, and a teammate cloning should get it |
-| `omh set` | **the key decides** — see below | one command, and the classification lives with the key rather than in your memory |
+| `omh set` / `unset` / `use` / `unuse` | **where it already is**, else the key decides — see below | one rule, four commands; the classification lives with the key rather than in your memory |
 | `omh repo set` | `settings.local.toml`, **gitignored** | the older spelling, kept for one release; it could not tell one key from another, so it defaulted away from git for all of them |
 
 **The protection moved from the command to the key.** While `omh repo set` sent
@@ -528,6 +530,11 @@ because most settings — what runtime a project wants, how long its sessions id
 — are facts about the project that a teammate cloning it should get. What keeps
 a credential out of git is now `src/key.rs`: a table saying, per key, whether a
 value there can name one.
+
+**And every write reaches every layer that already holds the key**, so one
+cannot land under a value that outranks it. `--local` and `--save` step outside
+that on purpose — you named the file — and say so when the result is a value
+you cannot observe changing.
 
 ```console
 $ omh set carry_in '[".env"]'
@@ -559,7 +566,7 @@ twice — nothing reads it, and it went somewhere git carries:
 $ omh set carry_ins '[".env"]'
 omh: nothing in omh reads `carry_ins` — it is written, and it will sit there
 wrote → /Users/you/proj/.omh/settings.toml (committed)
-omh: and the shared layer is COMMITTED — `carry_ins` went into a file git carries
+omh: and the committed file is COMMITTED — `carry_ins` went into a file git carries
 ```
 
 A test fails the build if a key omh's own code reads is missing from the table,
@@ -569,21 +576,21 @@ Asking for the committed file still says what that means, and names the key when
 the key is one that reaches a credential:
 
 ```console
-$ omh set --shared carry_in '[".env"]'
+$ omh set --save carry_in '[".env"]'
 wrote → /Users/you/proj/.omh/settings.toml (committed)
-omh: the shared layer is COMMITTED — never put a secret here
+omh: the committed file is COMMITTED — never put a secret here
 omh:   `carry_in` is one of those — it belongs in /Users/you/proj/.omh/settings.local.toml
 ```
 
 ### `omh unset` reaches every repo layer that holds the key
 
 Not the one `omh set` would have written — those are different questions, and
-answering the second one shipped a defect worth recording. `omh set --shared
-carry_in` followed by `omh set carry_in` leaves the key in **both** repo files;
-omh wrote both. An `unset` that consulted `set`'s rule removed the gitignored
-copy, said so, exited 0, and left a map to a credential standing in the file git
-carries. The command you run to get a secret out of git reported success and did
-not do it.
+answering the second one shipped a defect worth recording. `omh set --save
+carry_in` followed by `omh set --local carry_in` leaves the key in **both** repo
+files; omh wrote both. An `unset` that consulted `set`'s rule removed the
+gitignored copy, said so, exited 0, and left a map to a credential standing in
+the file git carries. The command you run to get a secret out of git reported
+success and did not do it.
 
 ```console
 $ omh unset carry_in
@@ -591,27 +598,28 @@ removed carry_in from the shared layer
 removed carry_in from the local layer
 ```
 
-`--shared` and `--personal` still mean that layer alone. And anything still
-supplying the value after a removal is named, because an unqualified `unset`
-deliberately does not reach into your personal file:
+`--save` and `--local` still mean that file alone. And anything still supplying
+the value after a removal is named, because an unqualified `unset` stays inside
+the repo and a cross-project default survives it:
 
 ```console
 $ omh unset runtime
-runtime was not set in the shared layer
+runtime is not set in this repo
 omh: `runtime` is still set in the personal layer — /Users/you/.omh/settings.toml
 ```
 
 ### A write something outranks says so
 
 `settings.local.toml` wins at read time, so writing the committed file
-underneath a standing local value changes nothing you can observe. `--shared`
-walks past that on purpose — you named the file — but it no longer does it
-quietly:
+underneath a standing local value changes nothing you can observe. Without a
+flag that cannot happen — the rule reaches every layer already holding the key.
+`--save` walks past it on purpose, and no longer does so quietly:
 
 ```console
-$ omh set --shared idle_timeout 30m
+$ omh set --save idle_timeout 30m
 wrote → /Users/you/proj/.omh/settings.toml (committed)
-omh: `idle_timeout` is still 15m here — the local layer sets it, and that outranks shared
+omh: the committed file is COMMITTED — never put a secret here
+omh: `idle_timeout` is still 15m here — the local layer sets it, and that outranks what was written
 ```
 
 ### `omh why <key>` says what a key is for

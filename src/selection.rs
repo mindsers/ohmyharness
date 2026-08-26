@@ -145,7 +145,7 @@ impl Selection {
                 bail!(
                     "{}: `[use] {cap}` names `{name}`, which is omh's — part of the \
                      `{feature}` feature. `[use]` names your entries; a feature is all \
-                     or nothing and `omh repo disable {feature}` is its switch.",
+                     or nothing and `omh set {feature} off` is its switch.",
                     whence.display()
                 );
             }
@@ -220,7 +220,7 @@ impl Selection {
     ///
     /// Public because a refusal is only actionable if it names the switch: the
     /// interesting half of "`git-rules` is omh's" is `git-notice`, which is what
-    /// `omh repo disable` takes.
+    /// `omh set <feature> off` takes.
     pub fn owner(&self, cap: Capability, name: &str) -> Option<&str> {
         self.owned.get(&cap)?.get(name).map(String::as_str)
     }
@@ -400,7 +400,7 @@ mod tests {
             let err = refused(&[(cap, &[name])]);
             assert!(err.contains(name), "must name it: {err}");
             assert!(
-                err.contains("omh repo disable"),
+                err.contains("omh set"),
                 "and point at the switch that does work: {err}"
             );
         }
