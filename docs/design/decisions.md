@@ -51,7 +51,7 @@ omh config mcp add … → the archive is still there, one command away,
 |---|---|---|
 | sandbox + worktree branch | ✅ | safety; non-negotiable |
 | `AGENTS.md` from detected stack | ✅ | the thing everyone writes badly |
-| `omh attach` | ✅ | IDE attach |
+| `omh s attach` | ✅ | IDE attach |
 | **`codegraph`** | ✅ | structural queries instead of re-grepping every task |
 | test-on-stop + format-on-edit hooks | ✅ | `init` detects the commands and wires them |
 | memory | ⬜ | survives harness switches |

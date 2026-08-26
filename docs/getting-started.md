@@ -151,7 +151,7 @@ mounted and the agent cannot reach it.
 $ omh s diff              # what the agent changed
 $ omh s commit -m "..."   # commit it onto the session branch
 $ omh s push fix/thing    # push it to origin under a name a reviewer can read
-$ omh attach              # open the same session in your editor
+$ omh s attach            # open the same session in your editor
 $ omh graph               # browse the codebase as a graph
 ```
 

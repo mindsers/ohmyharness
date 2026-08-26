@@ -9,7 +9,7 @@
 ```console
 $ omh init         # detects your stack, decides, reports. no questions.
 $ omh new claude       # sandboxed, curated, your setup already inside
-$ omh attach       # open that same session in your editor
+$ omh s attach     # open that same session in your editor
 $ omh graph        # browse your codebase as a graph
 ```
 
@@ -80,7 +80,7 @@ Switch from Claude Code to opencode and everything follows.
 refreshed after every turn (0.14s), with hooks that point the agent at it when
 it is about to grep or read a whole file.
 
-**Your editor attached to the same place.** `omh attach` opens VS Code, Zed,
+**Your editor attached to the same place.** `omh s attach` opens VS Code, Zed,
 Cursor or Neovim over SSH *into the sandbox* — one dependency tree, shared with
 the agent, instead of a second one on your host that silently diverges.
 
@@ -160,13 +160,12 @@ $ omh new claude                   # sandboxed, logged in, configured
 omh init                          set this repo up
 omh new <harness> [-- args…]      start a session, run an agent in it
 omh s01 resume [harness]          rejoin it · claude · omp · opencode
-omh attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
 omh doctor [--harness <name>] d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
-omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 diff
+omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] s  omh s, omh s01 diff
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset] this checkout: what it uses and why
 omh use|unuse <capability> <name> omh use skills tdd, omh use --all
@@ -174,7 +173,7 @@ omh use|unuse <capability> <name> omh use skills tdd, omh use --all
 
 Noun-verb groups with single-letter aliases. Every command is named — a bare
 word is not a launch, so no adapter can shadow one. Harnesses and editors each
-live under their own verb: `omh new claude`, `omh attach zed`.
+live under their own verb: `omh new claude`, `omh s attach zed`.
 
 ## How it works
 
@@ -186,7 +185,7 @@ harnesses take turns inhabiting.
 ```
        omh new claude ──┐
        omh new opencode ┼── exec ──┐
-       omh attach ──────┘  (ssh)   │
+       omh s attach ────┘  (ssh)   │
                                ▼
  ┌──────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │

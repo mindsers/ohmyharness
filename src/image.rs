@@ -1912,7 +1912,7 @@ mod tests {
         }
     }
 
-    /// `omh attach` attaches an IDE over SSH, so the session has to serve it.
+    /// `omh s attach` attaches an IDE over SSH, so the session has to serve it.
     /// The base set has to be *in* the image, or every session starts without
     /// the thing that makes omh more than a launcher.
     #[test]
