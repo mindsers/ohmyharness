@@ -812,7 +812,7 @@ impl Session {
                 "{} is listed in carry_in and git tracks it, so what is in the worktree \
                  is your local copy rather than the branch's.\n  omh will neither publish \
                  that nor drop it silently.\n\n  \
-                 fix the cause:  omh repo set carry_in   (carry_in is for files git does not \
+                 fix the cause:  omh set carry_in        (carry_in is for files git does not \
                  track; a tracked file is already in the worktree)\n  \
                  or just this once:  omh s commit --skip-carried",
                 from_your_checkout.join(", ")

@@ -788,7 +788,7 @@ Error: config.toml is listed in carry_in and git tracks it, so what is in the
 worktree is your local copy rather than the branch's.
   omh will neither publish that nor drop it silently.
 
-  fix the cause:  omh repo set carry_in   (carry_in is for files git does not
+  fix the cause:  omh set carry_in        (carry_in is for files git does not
                   track; a tracked file is already in the worktree)
   or just this once:  omh s commit --skip-carried
 ```
@@ -926,10 +926,10 @@ from it — that table is the whole protection now that committed is the default
 
 ```console
 $ omh set carry_in '[".env"]'
-wrote → /Users/you/proj/.omh/settings.local.toml
+wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
 
 $ omh set idle_timeout 30m
-wrote → /Users/you/proj/.omh/settings.toml
+wrote → /Users/you/proj/.omh/settings.toml (committed)
 ```
 
 Two flags override the rule. `--shared` writes the committed file; `--personal`
@@ -939,7 +939,7 @@ reaches a credential:
 
 ```console
 $ omh set --shared carry_in '[".env"]'
-wrote → /Users/you/proj/.omh/settings.toml
+wrote → /Users/you/proj/.omh/settings.toml (committed)
 omh: the shared layer is COMMITTED — never put a secret here
 omh:   `carry_in` is one of those — it belongs in /Users/you/proj/.omh/settings.local.toml
 ```
@@ -949,8 +949,21 @@ would otherwise have chosen. That file wins at read time, so writing the
 committed one underneath a standing local value would report success over a
 value that never changed.
 
-`omh unset` reads the same rule, so it removes the value from the file `omh set`
-would have written.
+`omh unset` does **not** read that rule. It removes the key from every repo
+layer that gives it a value, because "where would `set` put this" and "where is
+this set" are different questions and answering the second with the first left a
+committed `carry_in` standing while reporting success. A named flag still means
+that layer alone, and whatever still supplies the value afterwards is reported.
+
+```console
+$ omh unset carry_in
+removed carry_in from the shared layer
+removed carry_in from the local layer
+```
+
+A write that a higher-precedence layer outranks says so rather than reporting a
+change you cannot observe, and `omh set` makes its own premise true — if nothing
+is ignoring `settings.local.toml`, it adds the line and says it did.
 
 ## `omh config …` · `c`
 

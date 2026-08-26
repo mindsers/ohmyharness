@@ -449,12 +449,14 @@ pub fn declares(paths: &Paths, layer: Layer, table: &str) -> Result<bool> {
 ///
 /// Separate from `declares` although the operation is the same read: that one
 /// asks after a `[table]`, this after a bare key, and the two answer different
-/// commands. Collapsing them would make `omh set carry_in` and `omh use rules`
-/// share a call site that neither of them describes.
+/// commands. `declares` has one caller, `repo_has_selection`, reached from
+/// `init` and `import_hooks`; collapsing the two would give `omh set` and
+/// those a shared call site that describes neither.
 ///
-/// A `[carry_in]` *table* would answer `true` here and is not a value at all —
-/// `set` refuses one through `refuse_a_table` before writing, so the wrong
-/// answer costs a layer choice on a line that is about to be refused anyway.
+/// A `[key]` *table* answers `true` here and is not a value at all — `set`
+/// refuses one through `refuse_a_table` before writing, so the wrong answer
+/// costs a layer choice on a line about to be refused anyway. It cannot arise
+/// for a credential-bearing key, whose layer never depends on this read.
 pub fn holds(paths: &Paths, layer: Layer, key: &str) -> Result<bool> {
     Ok(read_doc(&layer.file(paths))?.contains_key(key))
 }

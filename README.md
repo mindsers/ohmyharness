@@ -237,8 +237,9 @@ mcp    = ["*"]                     # keep following the catalogue as it grows
 ```
 
 Absent means everything, so upgrading changes nothing and a new checkout is
-useful before it's configured. Two scopes, so two commands: `omh config` means
-you, `omh repo` means this checkout, and they want opposite defaults —
+useful before it's configured. Settings are `omh set <key> <value>`, and the
+key decides which file it lands in: one that can name a credential is kept out
+of git, everything else is committed so a teammate cloning gets it —
 [Configuration](docs/configuration.md#two-scopes-two-commands) has the rest.
 
 ### The base set is data too, and it has to justify itself

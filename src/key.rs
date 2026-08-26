@@ -43,6 +43,14 @@ pub enum Secret {
 #[derive(Debug, Clone, Copy)]
 pub struct Key {
     pub name: &'static str,
+    /// What omh reads this for, in one sentence.
+    ///
+    /// Here rather than in the docs because `omh why <key>` promises it, in
+    /// `--help` text this table's own command prints. That promise was made
+    /// before anything could keep it: `why` resolved against MCP servers and
+    /// hooks, so every settings key came back *nothing recorded under that
+    /// name* — the failure mode `why.rs` names as its own.
+    pub does: &'static str,
     pub shape: Shape,
     pub secret: Secret,
 }
@@ -75,30 +83,35 @@ pub const KEYS: &[Key] = &[
     // in a committed file is a map to one.
     Key {
         name: "carry_in",
+        does: "Files a session gets that git does not carry — see `src/carry.rs`.",
         shape: Shape::Paths,
         secret: Secret::Yes,
     },
     // A *name*, selecting which captured login gets mounted. The credential
     // itself lives under `paths.creds()` and never passes through here, which
     // is why this is the one value-taking key the docs show being shared on
-    // purpose: `omh repo set --shared account work`.
+    // purpose: `omh set --shared account work`.
     Key {
         name: "account",
+        does: "Which captured login a session is launched with, by name.",
         shape: Shape::Text,
         secret: Secret::No,
     },
     Key {
         name: "idle_timeout",
+        does: "How long a session may sit unused before omh stops it.",
         shape: Shape::Duration,
         secret: Secret::No,
     },
     Key {
         name: "runtime",
+        does: "Which runtime builds and runs the sandbox. Unset means `auto`.",
         shape: Shape::Choice(&["auto", "docker", "sbx"]),
         secret: Secret::No,
     },
     Key {
         name: "persistence",
+        does: "How a session's terminal survives detaching. Unset means `dtach`.",
         shape: Shape::Choice(&["dtach", "none"]),
         secret: Secret::No,
     },
@@ -137,6 +150,25 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every key says what omh reads it for.
+    ///
+    /// `--help` and the docs both tell a person to run `omh why <key>` to find
+    /// out, and an empty sentence there is that promise broken quietly. A
+    /// length floor rather than a non-empty check: `does: ""` and `does: "."`
+    /// are the two ways a hurried addition satisfies "not empty".
+    #[test]
+    fn every_key_says_what_omh_reads_it_for() {
+        assert!(!KEYS.is_empty(), "an empty table satisfies every rule");
+        for k in KEYS {
+            assert!(
+                k.does.len() > 20,
+                "`{}` does not say what omh reads it for: {:?}",
+                k.name,
+                k.does
+            );
+        }
+    }
 
     /// Every key omh reads is a key omh can describe.
     ///
@@ -283,10 +315,13 @@ mod tests {
     /// value to the gitignored file; `omh set` defaults to the committed one,
     /// so the table below is what carries the guarantee now.
     ///
-    /// `no_unqualified_write_can_reach_version_control` in `main.rs` is the
-    /// other half and not a duplicate of this: this pins the step from the
-    /// judgement to `default_layer`, that one pins the step from `omh set` to
-    /// the judgement — including what happens to a key the table never saw.
+    /// Two guards in `main.rs` cover the steps this one cannot see, and the
+    /// three are a chain rather than three spellings of one claim:
+    /// `no_unqualified_write_can_reach_version_control` reads `key_layer`, the
+    /// table lookup plus the fallback for a key the table never saw; and
+    /// `the_gitignored_file_is_the_only_direction_rule_two_moves_a_write`
+    /// reads `set_layer`, where the one layer override in the design lives.
+    /// This one pins the step from the judgement to `default_layer`.
     #[test]
     fn no_key_that_carries_a_secret_defaults_to_the_committed_layer() {
         assert!(!KEYS.is_empty(), "an empty table satisfies every rule");

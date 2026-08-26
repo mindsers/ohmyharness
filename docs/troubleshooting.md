@@ -319,9 +319,11 @@ it back.
 ### `--layer is going away`
 
 `omh config set --layer shared` still works and prints the form that replaced
-it. Two scopes, two commands: `omh config` is you, `omh repo` is this checkout,
-and they want opposite defaults — what a project *uses* is committed, what it
-*overrides* is not. See [Configuration](configuration.md#two-scopes-two-commands).
+it: `omh set`. You no longer pick the file — the key does. `carry_in` is kept
+out of git because a value there can name a credential; everything else is
+committed, because it is a fact about the project a teammate cloning should
+get. `omh why <key>` says which a key is. See
+[Configuration](configuration.md#two-scopes-two-commands).
 
 ### `your catalogue has no skills called …`
 

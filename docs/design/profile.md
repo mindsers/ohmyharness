@@ -675,6 +675,17 @@ One flag cannot express two opposite defaults, which is why today's single
 `omh config --layer` strains. `omh repo set --shared` still writes the committed
 file and says so, the way `--layer shared` does today.
 
+> **Superseded in 0.7.0.** The table above is the shape this section argued for
+> and it did not survive contact with a second question: *which* value. Two
+> commands with opposite defaults means the safety lives in the command, so
+> `omh repo set` had to send **every** value to the gitignored file — which is
+> also why a teammate cloning a repo got none of the settings it had chosen.
+>
+> `omh set` replaces both. The default is the **committed** file, and what keeps
+> a credential out of it is `src/key.rs`, per key. See
+> [Configuration](../configuration.md) for the rule as shipped and
+> [decisions](decisions.md) for the record of the reversal.
+
 **Two verb pairs, mirroring the two tables.** `use` / `unuse` for catalogue
 entries, `enable` / `disable` for omh's features. The CLI teaches the file's
 structure rather than flattening it: if `omh repo disable` accepted a skill name,
@@ -729,9 +740,11 @@ theirs, and the order is unchanged:
 ~/.omh/settings.toml  →  <repo>/.omh/settings.toml  →  <repo>/.omh/settings.local.toml
 ```
 
-`settings.local.toml` is the write target for `omh repo set`, for the reason it
-always was: a mistyped API key must not be committable by accident. It is also
-where per-project MCP secrets go —
+`settings.local.toml` is where omh puts a value that can name a credential —
+`carry_in` today — for the reason it always was: a mistyped API key must not be
+committable by accident. It stopped being the target for *every* value in
+0.7.0; the key decides, and `src/key.rs` holds the judgement. It is also where
+per-project MCP secrets go —
 
 ```toml
 [mcp.linear.env]
