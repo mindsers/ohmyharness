@@ -1488,6 +1488,11 @@ pub struct Known {
 pub struct Settings {
     pub file: String,
     pub known: Vec<Known>,
+    /// Tables in your file that `omh init` copies into a new repo — `[use]`
+    /// and `[omh]`. Shown separately because they are neither a default you
+    /// set nor something read by nothing, and reporting them as the latter was
+    /// exactly backwards.
+    pub tables: Vec<String>,
     /// Keys in your file that omh reads nothing from. Named rather than
     /// hidden: a typo looks exactly like a setting that took.
     pub unread: Vec<Setting>,
@@ -1529,6 +1534,19 @@ impl Report for Settings {
             s.push_str(&t.render(p));
         }
 
+        if !self.tables.is_empty() {
+            s.push('\n');
+            s.push_str(&format!(
+                "{}\n",
+                p.paint(out::HEAD, "also seeded into a new repo")
+            ));
+            let mut t = Table::new();
+            for name in &self.tables {
+                t = t.row(vec![Cell::styled(name, out::NAME)]);
+            }
+            s.push_str(&t.render(p));
+        }
+
         if !self.unread.is_empty() {
             s.push('\n');
             s.push_str(&format!(
@@ -1552,6 +1570,7 @@ impl Report for Settings {
                 "does": k.does,
                 "value": k.value,
             })).collect::<Vec<_>>(),
+            "tables": self.tables,
             "unread": self.unread.iter().map(|u| json!({
                 "key": u.key,
                 "value": u.value,

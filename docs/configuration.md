@@ -9,7 +9,7 @@ This page covers where it lives, how it resolves, and how to change things.
 ~/.omh/
   rules/  skills/  commands/  subagents/  hooks/   the only place these live
   mcp.json
-  settings.toml                                    your defaults
+  default.toml                                     what a new repo starts from
 ```
 
 **Rules are a directory of named files, not one `AGENTS.md`.** `tdd.md`,
@@ -478,7 +478,6 @@ this repo  /Users/you/proj/.omh
 
 settings
   carry_in         [".env.local"]           ← local (overrides shared)
-  idle_timeout     30m                      ← personal
 
 omh's features
   codegraph        off here
@@ -606,14 +605,16 @@ removed carry_in from the shared layer
 removed carry_in from the local layer
 ```
 
-`--save` and `--local` still mean that file alone. And anything still supplying
-the value after a removal is named, because an unqualified `unset` stays inside
-the repo and a cross-project default survives it:
+`--save` and `--local` still mean that file alone, so anything still supplying
+the value after a removal is named:
 
 ```console
-$ omh unset runtime
-runtime is not set in this repo
-omh: `runtime` is still set in the personal layer — /Users/you/.omh/settings.toml
+$ omh set --local idle_timeout 15m
+wrote → /Users/you/proj/.omh/settings.local.toml (gitignored)
+
+$ omh unset --save idle_timeout
+idle_timeout was not set in the shared layer
+omh: `idle_timeout` is still set in the local layer — /Users/you/proj/.omh/settings.local.toml
 ```
 
 ### A write something outranks says so

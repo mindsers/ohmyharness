@@ -9,7 +9,7 @@ the runtime backend is kept swappable.
 ~/.omh/
   rules/ skills/ commands/    the catalogue — the only place content lives
   subagents/ hooks/ mcp.json
-  settings.toml               your defaults
+  default.toml                what a new repo starts from
   adapters/*.toml             one file per harness (data, not code)
   editors/*.toml              one file per editor
   base/                       the curated base set, versioned

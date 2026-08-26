@@ -42,7 +42,7 @@ that it also discards the repo's.
   subagents/           /
   mcp.json
   hooks/               yours — and the one kind a repo may also declare
-  settings.toml        your defaults
+  default.toml         what a new repo starts from
 ```
 
 **Rules are a directory of named files, not one `AGENTS.md`.** That is what makes

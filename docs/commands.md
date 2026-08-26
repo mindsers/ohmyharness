@@ -1043,7 +1043,8 @@ this checkout, `omh settings` is what a new one starts from — so clap is
 deliberately not told to accept unambiguous prefixes: `omh setting` is refused
 rather than guessed at.
 
-Bare keys, `[use]` and `[omh]` are seeded. `[mcp.<name>.env]` is **refused**: a
+Keys omh reads, plus `[use]` and `[omh]`, are seeded; anything else in the
+file is refused by name rather than left behind. `[mcp.<name>.env]` is **refused**: a
 server's environment can be a token and the file `init` writes is committed. It
 already has a home — `omh config mcp add <name> <command> --env KEY=value` puts
 it on the server in `~/.omh/mcp.json`, where servers live.
@@ -1054,7 +1055,7 @@ it on the server in `~/.omh/mcp.json`, where servers live.
 
 ```
 omh config                            your defaults, and what the catalogue holds
-omh config set <key> <value>          → ~/.omh/settings.toml
+omh config set <key> <value>          → ~/.omh/default.toml  (older spelling of `omh settings set`)
 omh config unset <key>                remove one of your defaults
 omh config edit [<capability> [name]] $EDITOR on your settings, or on one entry
 
@@ -1066,16 +1067,16 @@ omh config mcp import <harness> [--file] [--force]
 
 ```console
 $ omh config
-your defaults  /Users/you/.omh/settings.toml
-  idle_timeout     30m
+your defaults /Users/you/.omh/default.toml
+  idle_timeout  30m
 
-your catalogue  /Users/you/.omh
-  rules         2  commit-style, tdd
-  skills        3  graphify, refactor, review-diff
-  mcp           3  codegraph, linear, memory
-  commands      0
-  subagents     1  explorer
-  hooks         1  notify-on-stop
+your catalogue /Users/you/.omh
+  rules      2  commit-style, tdd
+  skills     3  graphify, refactor, review-diff
+  mcp        3  codegraph, linear, memory
+  commands   0
+  subagents  1  explorer
+  hooks      1  notify-on-stop
 ```
 
 MCP lives under `config` because MCP servers **are** configuration. They live in your

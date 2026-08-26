@@ -12,7 +12,7 @@
 //!
 //! Everything else in these files — `carry_in`, `idle_timeout`, and `[use]`
 //! when it lands — is read by [`crate::config::policy`], which resolves the
-//! same three paths with provenance. Two readers of one file rather than two
+//! same paths with provenance. Two readers of one file rather than two
 //! files: a setting and a feature switch are both something a repo decided, and
 //! `policy.toml` was a fourth name for that idea living inside a directory whose
 //! purpose was content.
@@ -358,7 +358,10 @@ mod tests {
     #[test]
     fn a_later_layer_wins() {
         let (_d, paths, m) = fixture();
-        write(paths.root.join("settings.toml"), "[omh]\nmemory = false\n");
+        write(
+            paths.repo.join(".omh/settings.toml"),
+            "[omh]\nmemory = false\n",
+        );
         write(
             paths.repo.join(".omh/settings.local.toml"),
             "[omh]\nmemory = true\n",
@@ -448,24 +451,26 @@ mod tests {
         assert_eq!(env["REGION"], "eu");
     }
 
-    /// `[use]` is read from all three files, and a later one replaces a
+    /// `[use]` is read from both repo files, and the later one replaces a
     /// capability's list outright.
     ///
     /// The unit tests for this live in `selection.rs` and call `apply` directly
-    /// with invented paths, so guarding the *resolve* with a layer check —
-    /// making a personal `[use]` read by nobody, or a local one unable to
-    /// override the committed list — left the whole suite green. Both are
-    /// stated behaviours: a personal list is your default everywhere, and a
-    /// local one is what `omh use` now has to write through.
+    /// with invented paths, so guarding the *resolve* with a layer check — a
+    /// local `[use]` unable to override the committed list — left the whole
+    /// suite green.
+    ///
+    /// It used to write the personal file, and then this release stopped
+    /// reading that one: the test went on passing while proving nothing, which
+    /// is the failure its own first paragraph was written about.
     #[test]
     fn use_is_read_from_every_layer_and_the_last_one_wins() {
         let (_d, paths, m) = fixture();
         write(
-            paths.root.join("settings.toml"),
+            paths.repo.join(".omh/settings.toml"),
             "[use]\nskills = [\"mine\"]\nrules = [\"tdd\"]\n",
         );
         write(
-            paths.repo.join(".omh/settings.toml"),
+            paths.repo.join(".omh/settings.local.toml"),
             "[use]\nskills = [\"ours\"]\n",
         );
         let s = resolve(&paths, &m).unwrap().selection;
@@ -476,7 +481,7 @@ mod tests {
         );
         assert!(
             s.allows(crate::adapter::Capability::Rules, "tdd"),
-            "and a capability only the personal layer named still stands"
+            "and a capability only the committed layer named still stands"
         );
 
         write(

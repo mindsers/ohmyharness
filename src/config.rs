@@ -1,6 +1,6 @@
 //! Settings with provenance.
 //!
-//! Three layers means the useful question is never "what is this set to" but
+//! Layers mean the useful question is never "what is this set to" but
 //! "which layer is it coming from, and what is it shadowing". So the resolver
 //! reports origin alongside every value, the way `git config --show-origin`
 //! does — otherwise a three-layer merge is undebuggable.
@@ -101,7 +101,7 @@ impl Layer {
     /// Whose this is, for reporting *content* rather than a setting.
     ///
     /// The layer names are exactly right for a setting — they are what `--layer`
-    /// takes, and personal/shared/local says which of three files decided a
+    /// takes, and shared/local says which of the repo's files decided a
     /// value. They are wrong for content, where there is one catalogue and one
     /// repo tier: `omh why rust-test` reporting a hook this project committed
     /// as "installed shared" names a layer that no longer describes anything.
@@ -406,7 +406,8 @@ pub fn write_provision(
 
 /// What **one layer** says it resolved to.
 ///
-/// Deliberately not `settings::resolve`, which merges all three. `reconcile`
+/// Deliberately not `settings::resolve`, which merges the repo's layers.
+/// `reconcile`
 /// writes the committed file, so it must be fed the committed file — reading
 /// the merge would take a `false` somebody wrote in `settings.local.toml`,
 /// meaning *not on this laptop*, and export it to everybody who clones.
@@ -460,10 +461,20 @@ pub fn values(paths: &Paths, layer: Layer) -> Result<BTreeMap<String, String>> {
     };
     let table: toml::Table =
         toml::from_str(&raw).with_context(|| format!("parsing {}", path.display()))?;
+    // Tables included, rendered as `[name]`. Filtering them out left
+    // `omh settings` unable to show `[use]` and `[omh]` — which it seeds into
+    // every new repo — or to name a mistyped table, which is precisely the
+    // "a typo looks exactly like a setting that took" case the caller's
+    // *unread* list exists for.
     Ok(table
         .into_iter()
-        .filter(|(_, v)| !v.is_table())
-        .map(|(k, v)| (k, repr(&v)))
+        .map(|(k, v)| {
+            if v.is_table() {
+                (format!("[{k}]"), String::new())
+            } else {
+                (k, repr(&v))
+            }
+        })
         .collect())
 }
 
@@ -479,9 +490,20 @@ pub fn read_table(paths: &Paths, layer: Layer, table: &str) -> Result<BTreeMap<S
     };
     let mut out = BTreeMap::new();
     for (k, v) in t.iter() {
-        if let Some(on) = v.as_bool() {
-            out.insert(k.to_string(), on);
-        }
+        // Refused, never dropped — `read_provision` two functions up makes the
+        // same call and says why: *two readers of one table must not disagree
+        // about strictness*. This was the lenient third reader. `[omh]
+        // codegraph = "false"` is a plausible hand-edit; `settings::resolve`
+        // refuses it, and a reader that skipped it left `omh unset` reporting
+        // "not switched here" while the next command failed to parse the file.
+        let on = v.as_bool().with_context(|| {
+            format!(
+                "{}: `[{table}] {k}` is not true or false — omh will not read \
+                 a table it cannot read all of",
+                layer.file(paths).display()
+            )
+        })?;
+        out.insert(k.to_string(), on);
     }
     Ok(out)
 }
@@ -567,7 +589,7 @@ pub fn declares(paths: &Paths, layer: Layer, table: &str) -> Result<bool> {
 /// codebase has now shipped twice.
 pub fn holding(paths: &Paths, key: &str) -> Result<Vec<Layer>> {
     let mut out = Vec::new();
-    for layer in [Layer::Shared, Layer::Local] {
+    for layer in Layer::SETTINGS {
         if holds(paths, layer, key)? {
             out.push(layer);
         }
@@ -581,7 +603,7 @@ pub fn holding(paths: &Paths, key: &str) -> Result<Vec<Layer>> {
 /// their entries in a table rather than at the top level.
 pub fn holding_in(paths: &Paths, table: &str, key: &str) -> Result<Vec<Layer>> {
     let mut out = Vec::new();
-    for layer in [Layer::Shared, Layer::Local] {
+    for layer in Layer::SETTINGS {
         if declares_key(paths, layer, table, key)? {
             out.push(layer);
         }
