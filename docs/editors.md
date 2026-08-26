@@ -73,9 +73,16 @@ heard of is also not an error, and omh will not guess a flag for it:
 
 ```console
 $ omh s attach emacs
-Error: unknown tool `emacs`
-  harnesses: claude, omp, opencode
-  editors:   code, cursor, nvim, zed
+omh: no editor named `emacs` — see `omh info`
+session s01 is up
+
+  ssh://omh-ohmyharness-s01/work
+  ssh omh-ohmyharness-s01
+
+  code    code --remote ssh-remote+omh-ohmyharness-s01 /work
+  cursor  cursor --remote ssh-remote+omh-ohmyharness-s01 /work
+  nvim    ssh -t omh-ohmyharness-s01 cd /work && nvim
+  zed     zed ssh://omh-ohmyharness-s01/work
 ```
 
 Guessing would launch the wrong thing, which is harder to diagnose than being

@@ -134,7 +134,7 @@ impl Runtime for Docker {
 
     fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String> {
         // Detached and unnamed by --rm: a session must outlive the terminal
-        // that started it, or `omh attach` has nothing to attach to.
+        // that started it, or `omh s attach` has nothing to attach to.
         let mut a: Vec<String> = vec![
             "run".into(),
             "-d".into(),

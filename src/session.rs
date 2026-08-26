@@ -1159,7 +1159,7 @@ pub fn default_branch(repo: &Path) -> String {
         .unwrap_or_else(|_| "HEAD".into())
 }
 
-/// The session `omh attach` should land in when none is named: the most
+/// The session `omh s attach` should land in when none is named: the most
 /// recently created one.
 pub fn current(worktrees_dir: &Path) -> Option<String> {
     list(worktrees_dir).pop()
@@ -1224,7 +1224,7 @@ pub enum Ran {
     /// omh recorded this name.
     Harness(String),
     /// No run directory, or no marker in it. The honest reading of a session
-    /// older than this feature — and of one started by `omh attach`, which
+    /// older than this feature — and of one started by `omh s attach`, which
     /// makes a session for an editor and never runs a harness in it.
     NeverRecorded,
     /// The marker is there and omh could not read it, and why. A truncated

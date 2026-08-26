@@ -6,7 +6,7 @@ branch**, which many harnesses take turns inhabiting.
 ```
        omh new claude ──┐
        omh new opencode ┼── exec ──┐
-       omh s attach ──────┘  (ssh)   │
+       omh s attach ────┘  (ssh)   │
                                ▼
  ┌──────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │

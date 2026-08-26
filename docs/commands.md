@@ -4,13 +4,12 @@
 omh init                          set this repo up
 omh new <harness> [-- args…]      start a session, run an agent in it
 omh sessions <id> resume [harness]  rejoin one · claude · omp · opencode
-omh s attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
 omh doctor [--harness <name>] d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
-omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 log
+omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] s  omh s, omh s01 log
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
 omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
@@ -145,7 +144,7 @@ omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment)
 
 `-a <account>` selects a credential set for this launch. See [Accounts](accounts.md).
 
-## `omh s attach [editor]` · `a`
+## `omh s attach [editor]` · `omh s a`
 
 Opens the session in an editor over SSH. With no argument it resolves
 `$OMH_EDITOR` then `$EDITOR`, and falls back to printing every recipe:
@@ -157,10 +156,15 @@ session s01 is up
   ssh://omh-ohmyharness-s01/work
   ssh omh-ohmyharness-s01
 
-  VS Code / Cursor   code --remote ssh-remote+omh-ohmyharness-s01 /work
-  Zed                zed ssh://omh-ohmyharness-s01/work
-  JetBrains          Gateway → SSH → omh-ohmyharness-s01
+  code    code --remote ssh-remote+omh-ohmyharness-s01 /work
+  cursor  cursor --remote ssh-remote+omh-ohmyharness-s01 /work
+  nvim    ssh -t omh-ohmyharness-s01 cd /work && nvim
+  zed     zed ssh://omh-ohmyharness-s01/work
 ```
+
+One row per editor omh has, keyed by the name it knows it under —
+`omh info` lists them. JetBrains Gateway reaches the same host through the
+`ssh` alias above; it is not an editor omh ships a recipe for.
 
 An editor that is not installed is **not an error** — omh says so and prints the
 URL. See [Editors](editors.md).

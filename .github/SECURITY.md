@@ -28,7 +28,7 @@ it. In rough order of how much they matter:
   the harness reads, exposed to another session, or captured into the wrong
   account. Note that an account name is required to be a single path component
   precisely because the alternative mounts the user's real `~` writable.
-- **The sshd used by `omh attach` reachable off-host.** It is meant to publish
+- **The sshd used by `omh s attach` reachable off-host.** It is meant to publish
   on `127.0.0.1` only; anything that binds it wider hands a shell in the
   sandbox to the LAN.
 - **Escape from the session worktree to the host checkout**, or to another

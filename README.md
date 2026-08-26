@@ -9,7 +9,7 @@
 ```console
 $ omh init         # detects your stack, decides, reports. no questions.
 $ omh new claude       # sandboxed, curated, your setup already inside
-$ omh s attach       # open that same session in your editor
+$ omh s attach     # open that same session in your editor
 $ omh graph        # browse your codebase as a graph
 ```
 
@@ -160,13 +160,12 @@ $ omh new claude                   # sandboxed, logged in, configured
 omh init                          set this repo up
 omh new <harness> [-- args…]      start a session, run an agent in it
 omh s01 resume [harness]          rejoin it · claude · omp · opencode
-omh s attach [editor]           a   open the session in your editor, over SSH
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
 omh doctor [--harness <name>] d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
-omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 diff
+omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] s  omh s, omh s01 diff
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset] this checkout: what it uses and why
 omh use|unuse <capability> <name> omh use skills tdd, omh use --all
@@ -186,7 +185,7 @@ harnesses take turns inhabiting.
 ```
        omh new claude ──┐
        omh new opencode ┼── exec ──┐
-       omh s attach ──────┘  (ssh)   │
+       omh s attach ────┘  (ssh)   │
                                ▼
  ┌──────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │

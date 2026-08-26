@@ -267,18 +267,6 @@ enum Cmd {
     },
     /// What you have here: harnesses, editors, sessions.
     Info,
-    /// Retired in 2026.08 — it is `omh s attach` now. Kept hidden so that
-    /// typing the spelling everyone has in their fingers says what replaced
-    /// it — the treatment the retired listing verb got, for the same reason: a
-    /// better sentence, not a prevented harm.
-    #[command(hide = true)]
-    Attach {
-        /// Unused. Accepted so the retired spelling with an editor after it
-        /// reaches the refusal rather
-        /// than clap's complaint about an argument the tombstone does not take.
-        #[arg(hide = true)]
-        editor: Option<String>,
-    },
     /// Work with sessions.
     #[command(visible_alias = "s")]
     Sessions {
@@ -456,10 +444,6 @@ enum McpCmd {
 /// in their fingers gets somewhere to point.
 #[derive(Subcommand)]
 enum SessionsCmd {
-    /// Retired in 2026.08. Kept so that typing it says so — see above, and
-    /// `the_retired_listing_verb_is_refused_by_name_rather_than_widening`.
-    #[command(hide = true)]
-    Ls,
     /// Remove a session — its container and its worktree. A branch holding
     /// commits is kept.
     Rm {
@@ -764,6 +748,79 @@ enum MemoryCmd {
 /// the problem — and it is the one piece of output no user can opt out of
 /// seeing. Now it goes through `out::problem`, which knows about the palette
 /// and prints the whole cause chain.
+/// Spellings this release retired, and the sentence naming the replacement.
+///
+/// **Data, not variants.** These were `Cmd::Attach` and `SessionsCmd::Ls`:
+/// members of a command enum whose only job was to make a dead spelling
+/// *parse*. That is worse than verbose, because
+/// `the_lines_omh_prints_are_lines_omh_accepts` decides staleness **by
+/// parsing** — so a tombstone is a hole cut in the guard exactly the size of
+/// the spelling it commemorates. It cost us one: `ssh.rs` wrote the retired
+/// spelling into the user's `~/.ssh/config.d/` on every attach, and the guard
+/// stayed green — because the tombstone made that line parse.
+///
+/// A table also covers what a variant could not: the retired *alias*, any
+/// number of arguments after it, and `--session` on the old spelling — all of
+/// which reached clap's complaint or the wrong refusal instead of the sentence.
+///
+/// Consulted **after** clap refuses the line, never before, so the parser stays
+/// the only thing deciding what a command is. A refusing catch-all would make
+/// every line parse again, which is the defect `session_prefix` had with
+/// `Cmd::Run` and this release deleted.
+const RETIRED: &[Retired] = &[
+    Retired {
+        spellings: &["attach", "a"], // types the retired verb on purpose
+        after: &[],
+        said: "`attach` is a session verb now:\n  omh s attach [editor]     the session omh picks\n  omh s01 attach zed        that one",
+    },
+    Retired {
+        spellings: &["ls"], // types the retired verb on purpose
+        // Only under `sessions`. Top-level `ls` became `omh info`, and that
+        // rename deliberately kept no sentence at all — `the_inventory_answers_
+        // to_info_and_not_to_the_verb_it_replaced` asserts clap's own refusal.
+        // Unscoped, the table would answer the top-level spelling with the
+        // *sessions* replacement — a confident wrong answer where there had
+        // been an honest plain one.
+        after: &["s", "sessions"],
+        said: "there is no `ls` verb any more:\n  omh s      is the listing\n  omh s01    is one row of it",
+    },
+];
+
+/// One retired spelling, and where it was retired *from*.
+struct Retired {
+    spellings: &'static [&'static str],
+    /// Words this must follow to count. Empty means anywhere — a top-level
+    /// verb. Non-empty scopes it, because the same word can be retired in one
+    /// place and never have existed in another.
+    after: &'static [&'static str],
+    said: &'static str,
+}
+
+/// The better sentence for a line clap could not read, when a word in it names
+/// a spelling this release retired.
+///
+/// Stops at `--`: everything after it belongs to a harness, and a harness is
+/// allowed a verb omh retired.
+fn retired(argv: &[String]) -> Option<&'static str> {
+    let words: Vec<&str> = argv
+        .iter()
+        .skip(1)
+        .take_while(|word| *word != "--")
+        .map(String::as_str)
+        .collect();
+    words.iter().enumerate().find_map(|(i, word)| {
+        RETIRED
+            .iter()
+            .find(|r| {
+                r.spellings.contains(word)
+                    && (r.after.is_empty()
+                        || i.checked_sub(1)
+                            .is_some_and(|prev| r.after.contains(&words[prev])))
+            })
+            .map(|r| r.said)
+    })
+}
+
 fn main() -> std::process::ExitCode {
     // A closed pipe (`omh info | head`) is not a crash. Without this, Rust's
     // default panics on the failed write and prints a backtrace.
@@ -784,7 +841,15 @@ fn main() -> std::process::ExitCode {
         // The session is lifted out of the command line before clap sees it,
         // so every command below reads it from one place.
         let (named, argv) = session_prefix(std::env::args().collect());
-        let mut cli = Cli::parse_from(argv);
+        let mut cli = match Cli::try_parse_from(&argv) {
+            Ok(cli) => cli,
+            // A line clap cannot read might be one this release renamed. Asked
+            // here rather than through a variant, so nothing retired parses.
+            Err(e) => match retired(&argv) {
+                Some(said) => anyhow::bail!("{said}"),
+                None => e.exit(),
+            },
+        };
         cli.session = the_one_session(named, cli.session.take())?;
         let (format, resolved) = cli.output();
         palette = resolved;
@@ -837,8 +902,6 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Why { .. }
         | Cmd::Auth { .. }
         | Cmd::Info
-        // The retired spelling reads nothing; it only says what replaced it.
-        | Cmd::Attach { .. }
         | Cmd::Config { .. }
         | Cmd::Settings { .. }
         | Cmd::Repo { .. }
@@ -927,11 +990,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         ),
         Cmd::Why { thing } => why_cmd(&cwd, thing, ctx),
         Cmd::Graph { stop } => graph(&cwd, *stop, ctx),
-        // Refused rather than aliased to the session verb. A spelling that
-        // silently keeps working is a spelling nobody stops typing.
-        Cmd::Attach { .. } => anyhow::bail!(
-            "`attach` is a session verb now:\n  omh s attach [editor]     the session omh picks\n  omh s01 attach zed        that one"
-        ),
 
         // No verb: the listing. With a session named, the same listing scoped
         // to it — the prefix means *this one* everywhere else, and this is the
@@ -948,12 +1006,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 )?;
                 rm(&cwd, id, *force, ctx)
             }
-            // Refused rather than aliased to the listing. The verb is gone,
-            // and a spelling that silently keeps working is a spelling
-            // nobody stops typing.
-            SessionsCmd::Ls => anyhow::bail!(
-                "there is no `ls` verb any more:\n  omh s      is the listing\n  omh s01    is one row of it"
-            ),
             SessionsCmd::Attach { editor } => {
                 attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx)
             }
@@ -997,7 +1049,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                         // right one — claude attached to a worktree an
                         // afternoon of opencode built. Every session made
                         // before this release is here, and so is every one
-                        // `omh attach` created for an editor.
+                        // `omh s attach` created for an editor.
                         session::Ran::NeverRecorded => anyhow::bail!(
                             "omh has no record of a harness running in {id}, so \
                              it cannot rejoin as one.\n  \
@@ -1558,7 +1610,7 @@ fn attach(
     // Said here, because `attach` is the one launch path that never said it.
     // `run` carries the drop list in its status line, built from the plan it
     // makes itself; `session_up` builds its own plan and discards it, so
-    // `omh attach` staged a hooks document with hooks removed and reported
+    // `omh s attach` staged a hooks document with hooks removed and reported
     // nothing — and this is the path where it matters most, for the reason
     // `say_selection` gives: it is how you rejoin a session whose setup you
     // have since changed.
@@ -5005,7 +5057,7 @@ fn run(
     }
 
     // The session is a running container. Exec into it rather than starting a
-    // throwaway, so MCP daemons stay warm and `omh attach` has something to
+    // throwaway, so MCP daemons stay warm and `omh s attach` has something to
     // attach to.
     //
     // "Many harnesses take turns inhabiting it" is what this comment used to
@@ -6280,7 +6332,7 @@ fn measure(
             // Reported and swallowed, never fatal. This is a cache beside the
             // catalogue; a read-only home, a full disk or a `facts.json`
             // somebody replaced with a directory would otherwise abort every
-            // `omh new`, `omh sNN resume`, `omh attach`, `omh doctor` and `omh
+            // `omh new`, `omh sNN resume`, `omh s attach`, `omh doctor` and `omh
             // init` on the machine — every caller of `top_up`, which is all of
             // them — a launch
             // killed by a file whose entire design premise is that losing it
@@ -8226,14 +8278,23 @@ mod tests {
         // was: the JSON guard went on invoking a line that no longer parsed,
         // and passed, because its empty stdout read as nothing to say.
         const ON_PURPOSE: &str = "types the retired verb on purpose";
-        let gone: [String; 15] = [
-            // `attach` became a session verb in 2026.08. Both an argv form and
-            // the prose one, because the JSON guard went blind twice to a
-            // needle that only read prose.
-            format!("omh {} ", "attach"), // types the retired verb on purpose
-            format!("omh {}\"", "attach"), // types the retired verb on purpose
+        let gone: [String; 14] = [
+            // `attach` became a session verb in 2026.08.
+            //
+            // **No trailing character.** The first version of this needle had a
+            // trailing space and a trailing quote, and matched *nothing* — this
+            // repo cites a command inside backticks, and a backtick is
+            // neither. Seventeen sites survived while the guard reported clean,
+            // one of them the header omh writes into `~/.ssh/config.d/`.
+            //
+            // That is this defect's third outing, and the shape is always the
+            // same: the needle gets written to match the last leftover somebody
+            // remembers rather than how the tree actually spells a command. The
+            // `code` needle below never had a trailing character and never had
+            // the problem.
+            format!("omh {}", "attach"), // types the retired verb on purpose
             format!("{:?}, {:?}", "--json", "attach"), // types the retired verb on purpose
-            format!("omh s {}", "ls"),    // types the retired verb on purpose
+            format!("omh s {}", "ls"),   // types the retired verb on purpose
             format!("omh sessions {}", "ls"), // types the retired verb on purpose
             format!("{:?}, {:?}", "s", "ls"), // types the retired verb on purpose
             format!("{:?}, {:?}", "sessions", "ls"), // types the retired verb on purpose
@@ -8587,7 +8648,7 @@ mod tests {
                     // **Mutating one of these looks like it proves nothing.**
                     // Disable any single arm below and the suite stays green,
                     // because on a tree with no defects every line they admit
-                    // is also admitted by `names_a_command` — `omh attach` is
+                    // is also admitted by `names_a_command` — `omh s attach` is
                     // reachable by its backticks *and* by being a real verb.
                     //
                     // That is what they are for. A positional arm earns its
@@ -12179,16 +12240,37 @@ because = "a fixture"
         let mut seen = 0;
         walk(&root, &mut seen);
 
-        let shallow = root
-            .get_subcommands()
-            .flat_map(clap::Command::get_visible_aliases)
-            .count();
-        assert!(
-            seen > shallow,
-            "the recursive walk found {seen} aliases and the top level holds \
-             {shallow} — it is not descending, and a nested alias is exactly \
-             what it was widened for"
-        );
+        // **Structural, not numeric.** A count floor answers "did it descend at
+        // all", which a hard-coded single extra level satisfies while `config
+        // mcp <verb>` at depth three goes unvisited. It also rested on there
+        // being a nested alias to find — retire the one and the guard accuses
+        // the recursion of a fault that belongs to an empty set.
+        //
+        // Naming the deep paths asks the question that matters: did the walk
+        // reach here. `config mcp` is the deepest the tree goes.
+        fn reached(cmd: &clap::Command, path: &[&str]) -> bool {
+            match path {
+                [] => true,
+                [head, rest @ ..] => cmd
+                    .get_subcommands()
+                    .find(|s| s.get_name() == *head)
+                    .is_some_and(|s| reached(s, rest)),
+            }
+        }
+        for path in [
+            &["sessions"][..],
+            &["sessions", "attach"][..],
+            &["config", "mcp"][..],
+            &["config", "mcp", "add"][..],
+        ] {
+            assert!(
+                reached(&root, path),
+                "`omh {}` is not reachable by the same walk this test makes, so \
+                 whatever it checked, it did not check there",
+                path.join(" ")
+            );
+        }
+        assert!(seen > 0, "no aliases at all, and the loop asserted nothing");
     }
 
     // ── omh's flags versus the harness's ────────────────────────────────────

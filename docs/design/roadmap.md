@@ -12,7 +12,7 @@ verified runtime.
 ## v0 — the base set, one harness
 
 ✅ `omh init` that decides · ✅ images · ✅ sandbox + worktree · ✅ persistence ·
-✅ `omh auth` · ✅ `omh attach` · ✅ `omh doctor` · ✅ `carry_in` ·
+✅ `omh auth` · ✅ `omh s attach` · ✅ `omh doctor` · ✅ `carry_in` ·
 ✅ code graph · ✅ `omh graph` · ✅ stack hooks ·
 🔶 [memory](memory.md) — the store, retrieval, the team layer and staleness
 ship; hub pages do not

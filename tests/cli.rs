@@ -1987,7 +1987,7 @@ fn resuming_as_a_different_harness_says_it_is_a_switch() {
 /// A session omh cannot name a harness for is refused, not guessed at.
 ///
 /// Every session made before this release is in that state, and so is one
-/// `omh attach` created for an editor without ever running a harness in it.
+/// `omh s attach` created for an editor without ever running a harness in it.
 /// `detect::preferred_harness` would answer anyway, and the answer would look
 /// exactly like a correct one — the shape this whole release has been removing.
 ///
@@ -3987,84 +3987,6 @@ fn settings_names_a_key_read_by_nothing_and_no_other() {
     );
 }
 
-/// Opening an editor is a session verb, because a session is what it opens.
-///
-/// `omh attach` was top-level while everything else about a session had moved
-/// under `omh s`. The scope was already there — `attach` read `cli.session`
-/// before this — so the spelling was the last thing saying otherwise.
-#[test]
-fn attach_is_a_session_verb() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed_base();
-
-    // No sessions, so it cannot succeed — but it has to fail as *attach*,
-    // reaching omh's own refusal rather than clap's "unrecognized subcommand".
-    for argv in [
-        vec!["s", "attach"],
-        vec!["s", "attach", "zed"],
-        vec!["s01", "attach", "zed"],
-        vec!["sessions", "attach"],
-    ] {
-        let out = sb.omh(&argv);
-        let said = String::from_utf8_lossy(&out.stderr).to_string();
-        assert!(
-            !said.contains("unrecognized subcommand"),
-            "`omh {}` did not parse as a verb at all: {said}",
-            argv.join(" ")
-        );
-    }
-}
-
-/// The editor stays optional, which is the whole reason it is a positional.
-#[test]
-fn attach_still_takes_an_optional_editor() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed_base();
-
-    let bare = String::from_utf8_lossy(&sb.omh(&["s", "attach"]).stderr).to_string();
-    assert!(
-        !bare.contains("required") && !bare.contains("unrecognized"),
-        "an editor omh can derive is not one you have to type: {bare}"
-    );
-}
-
-/// The retired top-level spelling says what replaced it.
-///
-/// `omh attach` is in people's fingers and clap would answer *unrecognized
-/// subcommand*, which is true and unhelpful. This is the treatment the retired
-/// listing verb got, for the same reason: a better sentence, not a prevented
-/// harm.
-#[test]
-fn the_retired_attach_spelling_names_the_one_that_replaced_it() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed_base();
-
-    let out = sb.omh(&["attach"]);
-    assert!(!out.status.success(), "the top-level verb is gone");
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(
-        said.contains("omh s attach"),
-        "and the refusal teaches the spelling that works: {said}"
-    );
-}
-
-/// The short spelling moved with the verb.
-#[test]
-fn the_attach_shortcut_moved_under_sessions() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed_base();
-
-    let said = String::from_utf8_lossy(&sb.omh(&["s", "a"]).stderr).to_string();
-    assert!(
-        !said.contains("unrecognized subcommand"),
-        "`omh s a` is the shortcut, and it has to still be one: {said}"
-    );
-}
-
 /// A feature switch omh cannot read is refused, not skipped.
 ///
 /// `read_provision` refuses a non-boolean by name under a comment reading
@@ -4101,6 +4023,115 @@ fn a_feature_switch_omh_cannot_read_is_named_not_skipped() {
     assert!(
         said.contains("settings.local.toml"),
         "and the file it is in, since that is what has to be edited: {said}"
+    );
+}
+
+/// `omh s01 attach zed` opens **that** session, in **that** editor.
+///
+/// The four tests this replaces asserted only that stderr lacked
+/// *unrecognized subcommand*. All four produced the identical message — `no
+/// adapters installed`, the first statement `attach` makes — so they proved
+/// clap had routed the line somewhere and nothing else. Three mutations passed
+/// them all: the arm doing nothing, the arm calling `graph`, and the arm
+/// dropping `cli.session` so `omh s01 attach` opens the newest session
+/// instead.
+///
+/// The premise that excused them was wrong. The success path needs no
+/// container runtime — `fake_docker` and a seeded catalogue are enough, and
+/// `tests/cli.rs` already records learning that once, one verb over, in
+/// `a_launch_records_the_harness_it_started_and_a_dry_run_does_not`.
+#[test]
+fn attach_opens_the_session_and_the_editor_it_was_given() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.fake_docker();
+    // Two, so "the one named" and "the newest" are different answers.
+    sb.session("s01");
+    sb.session("s02");
+
+    let out = sb.omh(&["s01", "attach", "zed"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("s01"),
+        "the prefix names which session to open, and s02 is the newer: {said}"
+    );
+    assert!(
+        !said.contains("s02"),
+        "and it is not the one the prefix did not name: {said}"
+    );
+    assert!(
+        said.contains("zed"),
+        "the editor named is the editor opened: {said}"
+    );
+}
+
+/// The editor stays optional: with none given, omh prints every recipe.
+#[test]
+fn attach_without_an_editor_prints_the_recipes() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.fake_docker();
+    sb.session("s01");
+
+    let out = sb.omh(&["s01", "attach"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("code") && said.contains("zed"),
+        "one row per editor omh knows: {said}"
+    );
+}
+
+/// Every retired spelling in the table is refused, and names a line that parses.
+///
+/// The table replaced two hand-rolled tombstone variants. This is what a table
+/// buys that variants could not: one walk asserting the property of all of
+/// them, including the shapes a variant missed — the retired alias, arguments
+/// after it, and `--session` on the old spelling.
+#[test]
+fn every_retired_spelling_is_refused_and_names_a_replacement() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for argv in [
+        vec!["attach"],                            // types the retired verb on purpose
+        vec!["attach", "zed"],                     // types the retired verb on purpose
+        vec!["attach", "zed", "nvim"],             // types the retired verb on purpose
+        vec!["a"],                                 // types the retired verb on purpose
+        vec!["a", "zed"],                          // types the retired verb on purpose
+        vec!["-s", "s01", "attach"],               // types the retired verb on purpose
+        vec!["--session", "s01", "attach", "zed"], // types the retired verb on purpose
+        vec!["s", "ls"],                           // types the retired verb on purpose
+        vec!["sessions", "ls"],                    // types the retired verb on purpose
+        vec!["s01", "ls"],                         // types the retired verb on purpose
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            !out.status.success(),
+            "`omh {}` names a retired spelling and must be refused",
+            argv.join(" ")
+        );
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            said.contains("omh s attach") || said.contains("omh s "),
+            "`omh {}` must name the spelling that replaced it, not clap's \
+             complaint: {said}",
+            argv.join(" ")
+        );
+    }
+
+    // And the table does not overreach: a spelling retired *under* `sessions`
+    // must not answer for the top-level word, which became `omh info` in a
+    // rename that deliberately kept no sentence at all.
+    let out = sb.omh(&["ls"]); // types the retired verb on purpose
+    assert!(!out.status.success());
+    assert!(
+        !String::from_utf8_lossy(&out.stderr).contains("is the listing"),
+        "the sessions replacement is not the answer for a top-level word"
     );
 }
 

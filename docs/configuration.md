@@ -424,7 +424,7 @@ and nobody is asked about it:
 ```
 
 That line appears at `omh init`, and again at every launch — in the status line
-of `omh new` and `omh sNN resume`, and named individually by `omh attach` — in
+of `omh new` and `omh sNN resume`, and named individually by `omh s attach` — in
 the same list as a hook your harness cannot spell — a held-back hook is never silently absent. It
 is re-decided from the measurement each time, so a sandbox that gains the tool
 gets its hook back with nothing to un-configure.
