@@ -261,7 +261,9 @@ rule as `omh attach emacs`.
 
 ## `omh info`
 
-Everything omh knows about: harnesses, editors, sessions and their state.
+Everything omh knows about here: harnesses, editors, and which sessions
+exist. What each session is *doing* is `omh s` — this one never asks git,
+so it costs no subprocess per session.
 
 ## `omh sessions …` · `s`
 
@@ -306,10 +308,11 @@ There is no `ls` verb. It was one until 2026.08, and what made this row
 possible is the listing learning a scope; retiring the verb is the smaller and
 separate call, so that one thing has one spelling rather than two.
 
-Typing it still says so. Removing it from the parser did not make `omh s01 ls`
-unspellable, only unrefusable — with no `ls` under `sessions` that line parses
-as the *top-level* `omh info`, which ignores the session and lists all of them.
-So the verb is kept as a tombstone that refuses by name and points here.
+Typing it still says so. The verb is kept as a tombstone because clap's
+*unrecognized subcommand* does not name what replaced it, and this does. It was
+once kept for a stronger reason — the line used to fall through to a top-level
+`ls` and quietly list every session — but that spelling is gone, so the line no
+longer parses either way.
 
 **The session goes first, and everything after it is what you would have typed
 anyway.**

@@ -150,9 +150,10 @@ Two rules make the parse unambiguous:
   joins them, or `--session diff` creates a session you can never address
 
 `omh s01 ls` names a verb retired in 2026.08. It errors — *"there is no `ls`
-verb any more"* — rather than ignoring the scope, which is what it would do if
-the verb were merely absent: the line would fall through to the top-level
-`omh info` and list every session.
+verb any more"* — rather than ignoring the scope, which is what it would have
+done when this was written: the line fell through to a live top-level `ls` and
+listed every session. That fall-through is gone twice over now, so what the
+tombstone buys is the wording, not the refusal.
 
 ## The replay point
 

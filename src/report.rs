@@ -1176,7 +1176,7 @@ impl Report for Sessions {
     }
 }
 
-// ── omh info ──────────────────────────────────────────────────────────────────
+// ── omh info ────────────────────────────────────────────────────────────────
 
 /// A harness omh knows about here, and who it is logged in as.
 #[derive(Debug, Clone)]
@@ -3866,7 +3866,8 @@ mod tests {
 
     /// **A harness nobody has authed is listed, not hidden.**
     ///
-    /// The reason to run `omh info` at all is usually "why can't it log in", and
+    /// The reason to run `omh info` at all is usually "why can't it log in",
+    /// and
     /// the answer is a harness with no accounts. Filtering the empty case out
     /// of either format — the tempting `if !accounts.is_empty()` — deletes the
     /// one row the user came to see, and leaves a list that looks complete.
