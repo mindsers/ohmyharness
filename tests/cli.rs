@@ -1751,7 +1751,7 @@ fn asking_for_a_fresh_session_while_naming_one_is_refused() {
 /// recognise. That one arm is why `RESERVED` existed — nineteen names written
 /// out so an adapter could not shadow a command — and why `session_prefix` had
 /// to parse the line twice and arbitrate, which is how `omh s01 ls` once became
-/// `omh ls` with the session dropped.
+/// the top-level inventory with the session dropped.
 ///
 /// `omh new claude` is the spelling now, and a word omh does not know is a
 /// mistake rather than a launch.
@@ -3079,7 +3079,7 @@ fn a_session_named_first_is_never_silently_dropped() {
     // whether the scope was honoured or discarded.
     for line in [
         vec!["s01", "why", "codegraph"],
-        vec!["--session", "s01", "ls"],
+        vec!["--session", "s01", "info"],
         // A fresh session's id is generated, so naming one is a contradiction
         // rather than a scope to honour. This is also what lets `omh new`
         // hand `run` a bare `None`: if the refusal above ever stopped
@@ -3111,6 +3111,73 @@ fn a_session_named_first_is_never_silently_dropped() {
     );
 }
 
+/// The inventory answers to `info`, and `ls` is gone from the top level too.
+///
+/// `ls` was the wide listing's verb and `omh s` took over listing sessions in
+/// 2026.08, which left the old spelling meaning *everything except the thing
+/// `ls` most suggests*. `info` says what it is: what you have here, not what
+/// is running.
+///
+/// Red before the rename, in both directions: `omh info` was not a command,
+/// and the retired spelling still answered. Both halves matter — a rename that
+/// only adds the new spelling leaves two ways to say one thing, which is the
+/// shape this repo keeps paying for in lines that go on naming a verb nobody
+/// can type.
+#[test]
+fn the_inventory_answers_to_info_and_not_to_the_verb_it_replaced() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_adapters();
+    sb.session("s01");
+
+    let named = sb.omh(&["info"]);
+    let out = String::from_utf8_lossy(&named.stdout).to_string();
+    assert!(
+        named.status.success(),
+        "`omh info` is the inventory: {out}{}",
+        String::from_utf8_lossy(&named.stderr)
+    );
+    // Contents, not headings. `harnesses:` and `sessions:` are printed
+    // unconditionally, empty list and all, so asserting on them passes over a
+    // `fn info` whose harness collection has been replaced by `Vec::new()` —
+    // measured, and it survived the whole suite. What each section *found* is
+    // the only part that can go wrong quietly.
+    //
+    // `editors` is not asserted: that section is omitted entirely when the
+    // catalogue is empty, which this sandbox's is.
+    assert!(
+        out.contains("claude"),
+        "the harness this sandbox has is listed: {out}"
+    );
+    assert!(
+        out.contains("s01"),
+        "and so is the session that exists: {out}"
+    );
+
+    // The old spelling is not a second door. Asserting only that it *fails*
+    // is not enough and was measured not to be: a hidden variant that printed
+    // the whole inventory and then exited non-zero passed that check, which is
+    // exactly the "two ways to say one thing" this test is named against. So
+    // the claim is that it answered with nothing, and that the refusal came
+    // from clap rather than from omh — there is no tombstone here, by explicit
+    // decision, since a bare word can no longer be swallowed by a launch.
+    let old = sb.omh(&["ls"]); // types the retired verb on purpose
+    let said = String::from_utf8_lossy(&old.stdout).to_string();
+    let why = String::from_utf8_lossy(&old.stderr).to_string();
+    assert!(
+        !old.status.success(),
+        "the retired spelling is not a command"
+    );
+    assert!(
+        said.is_empty(),
+        "and it answers with nothing at all: {said}"
+    );
+    assert!(
+        why.contains("unrecognized subcommand"),
+        "refused by the parser, not by a tombstone omh maintains: {why}"
+    );
+}
+
 /// A verb that was retired is refused by name, and never becomes another
 /// command.
 ///
@@ -3118,17 +3185,18 @@ fn a_session_named_first_is_never_silently_dropped() {
 /// memory and in scripts. Retiring it left two ways to get this wrong, and
 /// only one of them is harmless.
 ///
-/// Typing it bare is: clap rejects an unknown subcommand. `omh s01 ls` is
-/// not. With no `ls` under `sessions` the sessions reading fails to parse,
-/// the as-written reading `omh ls` parses as the **top-level inventory**, and
-/// `session_prefix`'s fallback hands that reading the launch because it is
-/// not a `Cmd::Run`. `Cmd::Ls` never reads `cli.session`, so the session is
-/// dropped in silence and every session is listed — which is verbatim the
-/// harm the refusal removed in #67 existed to prevent: *"it would list every
-/// session and look like it had listed one."*
+/// Typing it bare is: clap rejects an unknown subcommand. `omh s01 ls` was
+/// not. With no `ls` under `sessions` the sessions reading failed to parse,
+/// the as-written reading was a live top-level `ls`, and `session_prefix`'s
+/// fallback handed that reading the launch — to a command that never read
+/// `cli.session`, so the scope was dropped in silence and every session was
+/// listed, which is verbatim the harm the refusal removed in #67 existed to
+/// prevent: *"it would list every session and look like it had listed one."*
 ///
-/// So the verb survives as a tombstone rather than as a hole. Deleting it
-/// from the parser did not make the line unspellable, only unrefusable.
+/// Past tense throughout, and deliberately. `consumes_session` refuses a
+/// prefix nothing consumes, and the top-level verb has since been renamed, so
+/// the as-written reading no longer parses either. The tombstone survives for
+/// what it *says* — clap names no replacement, and this does.
 #[test]
 fn the_retired_listing_verb_is_refused_by_name_rather_than_widening() {
     let sb = sandbox();
@@ -3137,7 +3205,7 @@ fn the_retired_listing_verb_is_refused_by_name_rather_than_widening() {
     sb.session("s02");
 
     // The scoped spelling must not quietly become the wide one.
-    let scoped = sb.omh(&["s01", "ls"]);
+    let scoped = sb.omh(&["s01", "ls"]); // types the retired verb on purpose
     let out = String::from_utf8_lossy(&scoped.stdout).to_string();
     let err = String::from_utf8_lossy(&scoped.stderr).to_string();
     assert!(
@@ -4053,20 +4121,34 @@ fn every_json_answer_is_one_document_and_not_several() {
     .unwrap();
 
     for args in [
-        vec!["--json", "ls"],
+        vec!["--json", "info"],
         vec!["--json", "repo"],
         vec!["--json", "config"],
         vec!["--json", "use", "skills", "beta"],
         vec!["--json", "unuse", "skills", "beta"],
         vec!["--json", "repo", "disable", "codegraph"],
         vec!["--json", "s"],
-        vec!["--json", "memory", "ls"],
+        vec!["--json", "memory", "lint"],
     ] {
         let out = sb.omh(&args);
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-        if stdout.trim().is_empty() {
-            continue; // a command with nothing to say is not this test's business
-        }
+        // Invoked, not merely attempted. Skipping on empty stdout is how this
+        // guard went quiet twice: clap writes `unrecognized subcommand` to
+        // stderr, so a line naming a verb that had been retired left stdout
+        // empty and read as *nothing to say*. Both `ls` entries here were dead
+        // that way — one of them for the verb this very list was meant to
+        // cover. A guard that skips what it cannot invoke guards nothing.
+        assert!(
+            out.status.success(),
+            "`omh {}` did not run: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !stdout.trim().is_empty(),
+            "`omh {}` answered with nothing on stdout",
+            args.join(" ")
+        );
         let documents = stdout.lines().filter(|l| *l == "}").count();
         assert_eq!(
             documents,

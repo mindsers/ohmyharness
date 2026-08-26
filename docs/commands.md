@@ -9,7 +9,7 @@ omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [account]      log in once; repeat for several accounts
 omh doctor [harness]          d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
-omh ls                            harnesses, editors, sessions
+omh info                          harnesses, editors, sessions
 omh sessions [resume|log|diff|commit|push|sync|down|rm]  s   omh s, omh s01 log
 omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
 omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
@@ -259,9 +259,11 @@ candidate gets re-litigated every time somebody rediscovers it.
 A name matching nothing prints what *is* known rather than guessing — the same
 rule as `omh attach emacs`.
 
-## `omh ls`
+## `omh info`
 
-Everything omh knows about: harnesses, editors, sessions and their state.
+Everything omh knows about here: harnesses, editors, and which sessions
+exist. What each session is *doing* is `omh s` — this one never asks git,
+so it costs no subprocess per session.
 
 ## `omh sessions …` · `s`
 
@@ -306,10 +308,11 @@ There is no `ls` verb. It was one until 2026.08, and what made this row
 possible is the listing learning a scope; retiring the verb is the smaller and
 separate call, so that one thing has one spelling rather than two.
 
-Typing it still says so. Removing it from the parser did not make `omh s01 ls`
-unspellable, only unrefusable — with no `ls` under `sessions` that line parses
-as the *top-level* `omh ls`, which ignores the session and lists all of them.
-So the verb is kept as a tombstone that refuses by name and points here.
+Typing it still says so. The verb is kept as a tombstone because clap's
+*unrecognized subcommand* does not name what replaced it, and this does. It was
+once kept for a stronger reason — the line used to fall through to a top-level
+`ls` and quietly list every session — but that spelling is gone, so the line no
+longer parses either way.
 
 **The session goes first, and everything after it is what you would have typed
 anyway.**

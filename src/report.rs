@@ -778,10 +778,10 @@ pub struct Session {
     pub running: Option<crate::image::Running>,
     /// **`None` means nobody asked**, which is not `Some(Work::Clean)`.
     ///
-    /// `omh ls` is the wide view and does not spend a git subprocess per
+    /// `omh info` is the wide view and does not spend a git subprocess per
     /// session on a column it never prints. It filled this with `Work::Clean`
     /// once — harmless only because `Inventory` happened not to read the
-    /// field, and one line away from reporting every session in `omh ls` as
+    /// field, and one line away from reporting every session in `omh info` as
     /// having nothing in it. `Work::Unknown` exists to keep *cannot tell*
     /// apart from *nothing to do*; `Option` keeps *did not ask* apart from
     /// both, and makes the mistake unspellable rather than merely absent.
@@ -884,7 +884,7 @@ fn running_cell(running: &Option<crate::image::Running>) -> Cell {
         // same state, and for the same reason.
         //
         // This said `no runtime`: a statement about the machine that only one
-        // of this field's two producers had established. `omh ls` sets `None`
+        // of this field's two producers had established. `omh info` sets `None`
         // because asking costs a subprocess per session, on a machine that may
         // well have docker, and it was harmless only because that listing
         // never renders this column — one line from being false, which is
@@ -898,7 +898,7 @@ fn running_cell(running: &Option<crate::image::Running>) -> Cell {
 /// How far a session trails its base, as one cell — three answers, three
 /// renderings.
 ///
-/// Shared by `omh s` and by the session list in `omh ls`. Both were wrong
+/// Shared by `omh s` and by the session list in `omh info`. Both were wrong
 /// the same way — `Some(0) | None` rendered an empty cell, so *up to date* and
 /// *omh could not count* were the same sight on the two surfaces where a user
 /// picks which session to open.
@@ -1176,7 +1176,7 @@ impl Report for Sessions {
     }
 }
 
-// ── omh ls ──────────────────────────────────────────────────────────────────
+// ── omh info ────────────────────────────────────────────────────────────────
 
 /// A harness omh knows about here, and who it is logged in as.
 #[derive(Debug, Clone)]
@@ -1193,7 +1193,7 @@ pub struct Editor {
     pub installed: bool,
 }
 
-/// What `omh ls` found: harnesses, editors, sessions.
+/// What `omh info` found: harnesses, editors, sessions.
 #[derive(Debug, Clone)]
 pub struct Inventory {
     pub harnesses: Vec<Harness>,
@@ -3696,7 +3696,7 @@ mod tests {
         );
     }
 
-    /// `omh ls` renders the same column and had the same bug.
+    /// `omh info` renders the same column and had the same bug.
     ///
     /// The extraction's whole argument is that two copies is one more than can
     /// be checked — and the first version of it checked one. Restoring the old
@@ -3866,7 +3866,8 @@ mod tests {
 
     /// **A harness nobody has authed is listed, not hidden.**
     ///
-    /// The reason to run `omh ls` at all is usually "why can't it log in", and
+    /// The reason to run `omh info` at all is usually "why can't it log in",
+    /// and
     /// the answer is a harness with no accounts. Filtering the empty case out
     /// of either format — the tempting `if !accounts.is_empty()` — deletes the
     /// one row the user came to see, and leaves a list that looks complete.

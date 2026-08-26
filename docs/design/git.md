@@ -150,9 +150,10 @@ Two rules make the parse unambiguous:
   joins them, or `--session diff` creates a session you can never address
 
 `omh s01 ls` names a verb retired in 2026.08. It errors — *"there is no `ls`
-verb any more"* — rather than ignoring the scope, which is what it would do if
-the verb were merely absent: the line would fall through to the top-level
-`omh ls` and list every session.
+verb any more"* — rather than ignoring the scope, which is what it would have
+done when this was written: the line fell through to a live top-level `ls` and
+listed every session. That fall-through is gone twice over now, so what the
+tombstone buys is the wording, not the refusal.
 
 ## The replay point
 
@@ -241,7 +242,7 @@ session.
 Retiring `ls` followed, so that one thing has one spelling; it is not what made
 the row possible, and deleting it outright turned out to be the wrong shape.
 `omh s01 ls` stayed typeable and stopped being refusable, falling through to the
-top-level `omh ls` with the session silently dropped — the very harm step 8's
+top-level inventory with the session silently dropped — the very harm step 8's
 refusal was written against. The verb is kept as a hidden tombstone that refuses
 by name. That is the selector's own rule reaching the last place it had
 not, rather than a special case — which is also why `omh s01` is that row and
