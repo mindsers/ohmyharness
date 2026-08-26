@@ -375,8 +375,8 @@ What it decided is written into your committed settings:
 
 That table is the input to everything afterwards. Your sessions run an image
 built from exactly these, so a teammate who clones the repo gets the same
-sandbox without being asked anything, and `omh run` never re-evaluates a
-condition.
+sandbox without being asked anything, and neither `omh new` nor `omh sNN
+resume` re-evaluates a condition.
 
 **omh only ever writes `true`.** A `false` can only have been typed, so it is
 treated as a decision and left alone:
@@ -422,9 +422,9 @@ and nobody is asked about it:
              sandbox has it
 ```
 
-That line appears at `omh init`, and again at every launch — in `omh run`'s status
-line and named individually by `omh code` — in the same list as a
-hook your harness cannot spell — a held-back hook is never silently absent. It
+That line appears at `omh init`, and again at every launch — in the status line
+of `omh new` and `omh sNN resume`, and named individually by `omh attach` — in
+the same list as a hook your harness cannot spell — a held-back hook is never silently absent. It
 is re-decided from the measurement each time, so a sandbox that gains the tool
 gets its hook back with nothing to un-configure.
 

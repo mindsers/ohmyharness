@@ -2066,7 +2066,8 @@ mod tests {
 
     /// And it is a placeholder, never a rewrite: a repo that commits its own
     /// `.mcp.json` finds it byte-identical afterwards. The mount hides it for
-    /// the length of the session — `omh mcp import` is how those servers come
+    /// the length of the session — `omh config mcp import` is how those
+    /// servers come
     /// along — but hiding a file and truncating one look very different in
     /// somebody's diff.
     #[test]

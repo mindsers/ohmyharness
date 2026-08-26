@@ -567,7 +567,7 @@ impl Report for Log {
             ));
         }
         // Written a step early once and caught by
-        // `the_session_lines_omh_prints_are_lines_omh_accepts`: `diff` did not
+        // `the_lines_omh_prints_are_lines_omh_accepts`: `diff` did not
         // take a number until the step after this one, and a hint is a promise
         // that the line can be selected and pasted. It arrived with the
         // argument it names.
@@ -1709,7 +1709,8 @@ impl Report for Resynced {
 ///
 /// One vocabulary across all three importers — servers, catalogue entries,
 /// hooks — because they are the same five outcomes wearing different words.
-/// `omh mcp import` said `already identical` where `omh import skills` said
+/// `omh config mcp import` said `already identical` where `omh import skills`
+/// said
 /// `already in your catalogue`, and a reader had to learn both to read either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
@@ -3097,7 +3098,7 @@ mod tests {
         );
         // …and the newest checkpoint, now that `diff` takes a number. That one
         // line is read out of the tree and parsed by
-        // `the_session_lines_omh_prints_are_lines_omh_accepts`; the `--keep`
+        // `the_lines_omh_prints_are_lines_omh_accepts`; the `--keep`
         // line above is not, because that scan skips anything ending in a flag
         // and says why. Hence this assertion, which covers what the scan
         // cannot.
