@@ -316,7 +316,7 @@ impl Table {
 /// A section title, in the one place that decides what a section title looks
 /// like.
 ///
-/// `omh info` wrote `harnesses:`, the defaults report wrote `mcp:`, and `omh repo`
+/// `omh info` wrote `harnesses:`, the defaults report wrote `mcp:`, and `omh info --repo`
 /// wrote its own third thing — all bare `println!`s, so nothing stopped them
 /// drifting apart, and nothing could restyle them together.
 pub fn heading(p: &Palette, text: &str) -> String {

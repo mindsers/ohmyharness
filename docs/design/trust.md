@@ -12,12 +12,12 @@ The shape of the answer matters as much as the commands: omh's curation is
 legitimate because it is **stated, visible, and reversible**, not because it is
 proven. See [measure the cost, argue the benefit](#measure-the-cost-argue-the-benefit).
 
-## `omh repo` — provenance ✅
+## `omh info --repo` — provenance ✅
 
 Every value says where it came from and what it beat.
 
 ```console
-$ omh repo
+$ omh info --repo
 settings
   carry_in   [".env.local"]   ← local (overrides shared)
 ```

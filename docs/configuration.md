@@ -458,7 +458,7 @@ value and the useful question is which file decided it:
 
 Later wins. Both are in the repo, and that is the point: a repo's behaviour is
 explained by files the repo contains — which is what a teammate cloning it can
-actually see, and what `omh repo` can account for without pointing at a file
+actually see, and what `omh info --repo` can account for without pointing at a file
 they do not have. The rules for a project belong in the committed file; the API
 key that makes one of them work belongs in the gitignored one.
 
@@ -473,7 +473,7 @@ the thing [trust](design/trust.md) exists to prevent. So every effective value
 reports where it came from and what it beat:
 
 ```console
-$ omh repo
+$ omh info --repo
 this repo  /Users/you/proj/.omh
 
 settings
@@ -495,7 +495,7 @@ using
 
 ## Two scopes, two commands
 
-`omh settings` means **you** — the defaults a new repo starts from. `omh repo` means
+`omh settings` means **you** — the defaults a new repo starts from. `omh info --repo` means
 **this checkout**.
 
 ```console
@@ -510,7 +510,7 @@ $ omh set idle_timeout 30m              # → settings.toml               (commi
 $ omh set --local idle_timeout 45m      # → settings.local.toml, because you said so
 $ omh set --save carry_in '[".env"]'    # → settings.toml, because you said so
 $ omh unset carry_in
-$ omh repo                              # what is effective here, and what decided it
+$ omh info --repo                              # what is effective here, and what decided it
 
 # you, everywhere
 $ omh settings set idle_timeout 45m     # → ~/.omh/default.toml, seeds new repos
@@ -529,9 +529,9 @@ before they ask anything else:
 |---|---|---|
 | `omh use` / `unuse` | `settings.toml`, **committed** | what a project uses is a fact about the project, and a teammate cloning should get it |
 | `omh set` / `unset` / `use` / `unuse` | **where it already is**, else the key decides — see below | one rule, four commands; the classification lives with the key rather than in your memory |
-| `omh repo set` | `settings.local.toml`, **gitignored** | the older spelling, kept for one release; it could not tell one key from another, so it defaulted away from git for all of them |
+| `omh set` | `settings.local.toml`, **gitignored** | the older spelling, kept for one release; it could not tell one key from another, so it defaulted away from git for all of them |
 
-**The protection moved from the command to the key.** While `omh repo set` sent
+**The protection moved from the command to the key.** While `omh set` sent
 every value to the gitignored file, the safety came from the destination and no
 value could reach git unasked. `omh set` defaults to the *committed* file,
 because most settings — what runtime a project wants, how long its sessions idle
@@ -656,7 +656,7 @@ gitignored file is how a teammate stops getting what the repo says it uses.
 
 **Two verb pairs, mirroring the two tables.** `use`/`unuse` for catalogue
 entries, `enable`/`disable` for omh's features. The CLI teaches the file's
-structure rather than flattening it: if `omh repo disable` took a skill name,
+structure rather than flattening it: if `omh set` took a skill name,
 the difference between an entry you chose and a feature omh ships would exist
 only here.
 
@@ -665,7 +665,7 @@ what lets the layer beneath take over again — the difference matters when you
 are overriding a team default temporarily.
 
 > **`--layer` is going away.** `omh settings set --layer shared` still works and
-> prints the `omh repo` form that replaces it. It is accepted for one release,
+> prints the `omh info --repo` form that replaces it. It is accepted for one release,
 > then removed.
 
 ## `[omh]` — omh's own features

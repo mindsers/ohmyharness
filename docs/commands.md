@@ -11,7 +11,7 @@ omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
 omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] s  omh s, omh s01 log
 omh settings [set|unset|edit|mcp]  you: your defaults, and what you have
-omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
+omh info --repo      this checkout: what it uses, and why
 omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
 ```
 
@@ -1091,16 +1091,16 @@ is refused before `$EDITOR` sees it. Past that there is no fence to draw —
 elsewhere: every catalogue directory omh mounts into a sandbox is mounted
 **read-only**, so the agent can read a selected skill and cannot write one.
 
-## `omh repo …`
+## `omh info --repo`
 
 **This checkout.** What it uses, what it decided, and what decided it.
 
 ```
-omh repo                              effective here, with provenance
-omh repo enable <feature>             → [omh] in <repo>/.omh/settings.toml
-omh repo disable <feature>            off here; nothing is uninstalled
-omh repo set <key> <value> [--shared] → settings.local.toml, gitignored
-omh repo unset <key> [--shared]       lets the layer beneath resurface
+omh info --repo                       effective here, with provenance
+omh set <feature>             → [omh] in <repo>/.omh/settings.toml
+omh set <feature>            off here; nothing is uninstalled
+omh set <key> <value> [--shared] → settings.local.toml, gitignored
+omh unset <key> [--shared]       lets the layer beneath resurface
 ```
 
 ## `omh use` · `omh unuse`
@@ -1115,7 +1115,7 @@ omh use --all                         resync every list to the whole catalogue
 
 Capabilities: `rules`, `skills`, `mcp`, `commands`, `subagents`, `hooks`.
 
-The write target is the **committed** file, the opposite of `omh repo set` —
+The write target is the **committed** file, the opposite of `omh set` —
 what a project uses is a fact about the project, while what it overrides holds
 `carry_in` paths and MCP env. One flag could not express two opposite defaults,
 which is why `--layer` became two commands.

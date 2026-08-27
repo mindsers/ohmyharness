@@ -317,7 +317,7 @@ pub fn unset(paths: &Paths, key: &str, layer: Layer) -> Result<bool> {
 /// A table is configuration *for* something, never a setting with a value.
 ///
 /// `write_table` refuses the opposite direction and says why; the guard was
-/// one-way, so `omh repo set omh false` replaced the whole `[omh]` table with a
+/// one-way, so `omh set omh false` replaced the whole `[omh]` table with a
 /// scalar. That is worse than losing the switches it held: `settings::File`
 /// deserialises `omh` as a map, so every command afterwards failed to parse the
 /// file — while the write printed a path and exited 0.
@@ -579,7 +579,7 @@ pub fn declares(paths: &Paths, layer: Layer, table: &str) -> Result<bool> {
 /// The repo layers that already give this bare key a value.
 ///
 /// Committed first, gitignored second — the order they resolve in, so a caller
-/// reporting them reads the way `omh repo` does.
+/// reporting them reads the way `omh info --repo` does.
 ///
 /// This is half of the rule four commands share. `omh set`, `omh unset`,
 /// `omh use` and `omh unuse` all answer the same question first — *where is
@@ -1461,10 +1461,10 @@ mod tests {
     ///
     /// `write_table` refuses the opposite direction and says why — "a non-table
     /// under this name would be silently replaced, taking whatever somebody
-    /// wrote with it" — and the guard was one-way, so `omh repo set omh false`
+    /// wrote with it" — and the guard was one-way, so `omh set omh false`
     /// replaced the whole `[omh]` table with `omh = false`. That is worse than
     /// losing the switches: `settings::File` deserialises `omh` as a map, so
-    /// **every subsequent command** — launch, `omh repo`, `omh use` — failed to
+    /// **every subsequent command** — launch, `omh info --repo`, `omh use` — failed to
     /// parse the file, while the write itself printed a path and exited 0.
     ///
     /// `[use]` and `[mcp]` are the same shape of accident one key over.

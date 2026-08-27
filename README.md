@@ -167,7 +167,7 @@ omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
 omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] s  omh s, omh s01 diff
 omh settings [set|unset|edit|mcp]  you: your defaults, and what you have
-omh repo [enable|disable|set|unset] this checkout: what it uses and why
+omh info --repo    this checkout: what it uses and why
 omh use|unuse <capability> <name> omh use skills tdd, omh use --all
 ```
 

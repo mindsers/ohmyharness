@@ -1583,7 +1583,7 @@ impl Report for Servers {
     }
 }
 
-// ── omh repo ────────────────────────────────────────────────────────────────
+// ── omh info --repo ─────────────────────────────────────────────────────────
 
 /// One effective setting, and what it beat to get there.
 #[derive(Debug, Clone)]
@@ -4154,7 +4154,7 @@ mod tests {
     /// selection that happens to name all of today's entries does not. They
     /// look identical the moment you print them as a list of names, and they
     /// diverge the first time somebody adds a skill — one repo gets it, the
-    /// other silently does not, and `omh repo` said the same thing about both.
+    /// other silently does not, and `omh info --repo` said the same thing about both.
     ///
     /// So the human form says `everything`, and the machine form says `null`
     /// rather than an array.
@@ -4199,7 +4199,7 @@ mod tests {
 
     /// A setting says which layer won **and** what it beat.
     ///
-    /// `omh repo` exists because of the three-layer merge, and the question it
+    /// `omh info --repo` exists because of the three-layer merge, and the question it
     /// is opened to answer is "why is this value this". A row that gives the
     /// winner and drops the losers answers the easy half.
     #[test]

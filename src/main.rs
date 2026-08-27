@@ -265,8 +265,16 @@ enum Cmd {
         #[arg(long = "name", short = 'n', default_value = auth::DEFAULT_ACCOUNT)]
         account: String,
     },
-    /// What you have here: harnesses, editors, sessions.
-    Info,
+    /// What you have here: harnesses, editors, sessions, your catalogue.
+    Info {
+        /// This checkout instead: what it resolved, and which file decided it.
+        ///
+        /// A flag rather than a command because it is the same question at a
+        /// different scope — `omh info` is the machine, `omh info --repo` is
+        /// the checkout. It was its own command until 0.7.0.
+        #[arg(long)]
+        repo: bool,
+    },
     /// Work with sessions.
     #[command(visible_alias = "s")]
     Sessions {
@@ -284,11 +292,6 @@ enum Cmd {
     Settings {
         #[command(subcommand)]
         cmd: Option<SettingsCmd>,
-    },
-    /// This checkout: what it uses, what it decided, and what decided it.
-    Repo {
-        #[command(subcommand)]
-        cmd: Option<RepoCmd>,
     },
     /// Select a catalogue entry for this repo. Writes the committed file: what
     /// a project uses is a fact about the project, and a teammate cloning it
@@ -562,7 +565,7 @@ enum SessionsCmd {
 }
 
 /// Two scopes, so two commands. `omh settings` narrows to mean **you** — your
-/// catalogue and your defaults. `omh repo` means **this checkout**.
+/// catalogue and your defaults. `omh info --repo` means **this checkout**.
 ///
 /// `--layer` used to carry both, and it strained because the two want opposite
 /// defaults: what a project *uses* is a fact about the project and should be
@@ -598,39 +601,6 @@ enum SettingsCmd {
     Mcp {
         #[command(subcommand)]
         cmd: McpCmd,
-    },
-}
-
-#[derive(Subcommand)]
-enum RepoCmd {
-    /// Switch one of omh's features on here.
-    Enable {
-        /// Which feature. `omh why <feature>` lists what it brings.
-        feature: String,
-    },
-    /// Switch one of omh's features off here. Nothing is uninstalled.
-    Disable {
-        /// Which feature. `omh why <feature>` lists what it brings.
-        feature: String,
-    },
-    /// Set a value for this checkout. Gitignored by default, because these
-    /// carry `carry_in` paths and MCP env and a mistyped key must not be
-    /// committable by accident.
-    Set {
-        /// Which setting. `omh why <key>` says what omh reads it for.
-        key: String,
-        /// What to set it to.
-        value: String,
-        /// Write the committed file instead, and say so.
-        #[arg(long)]
-        shared: bool,
-    },
-    /// Remove a value, letting any lower layer resurface.
-    Unset {
-        /// Which setting to drop from this checkout.
-        key: String,
-        #[arg(long)]
-        shared: bool,
     },
 }
 
@@ -744,6 +714,11 @@ const RETIRED: &[Retired] = &[
         spellings: &["attach", "a"], // types the retired verb on purpose
         after: &[],
         said: "`attach` is a session verb now:\n  omh s attach [editor]     the session omh picks\n  omh s01 attach zed        that one",
+    },
+    Retired {
+        spellings: &["repo"], // types the retired verb on purpose
+        after: &[],
+        said: "`repo` is gone — the report is `omh info --repo` now:\n  omh info --repo           what this checkout resolved\n  omh set <key> <value>     change it\n  omh set <feature> on|off  switch one of omh's features",
     },
     Retired {
         spellings: &["config", "c"], // types the retired verb on purpose
@@ -878,9 +853,8 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Doctor { .. }
         | Cmd::Why { .. }
         | Cmd::Auth { .. }
-        | Cmd::Info
+        | Cmd::Info { .. }
         | Cmd::Settings { .. }
-        | Cmd::Repo { .. }
         | Cmd::Set { .. }
         | Cmd::Unset { .. }
         | Cmd::Use { .. }
@@ -956,7 +930,13 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     match &cli.cmd {
         Cmd::Init => init(&cwd, ctx),
         Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account, ctx),
-        Cmd::Info => info(&cwd, ctx),
+        Cmd::Info { repo } => {
+            if *repo {
+                show_repo(&cwd, ctx)
+            } else {
+                info(&cwd, ctx)
+            }
+        }
         Cmd::Doctor { harness } => doctor_cmd(
             &cwd,
             harness.as_deref(),
@@ -1170,6 +1150,11 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     ctx,
                 ),
                 Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(key, &feature)),
+                Names::ACatalogueEntry => anyhow::bail!(
+                    "`{key}` is one of your catalogue entries, not a setting — \
+                     what a project takes from your catalogue is `omh use`.\n  \
+                     omh use skills {key}\n  omh unuse skills {key}"
+                ),
                 Names::ASetting | Names::Neither => {
                     let reached = reach(&paths, key, *local, *save)?;
                     set(&paths, key, value, reached, cli.dry_run, ctx)
@@ -1187,38 +1172,17 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     ctx,
                 ),
                 Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(key, &feature)),
+                Names::ACatalogueEntry => anyhow::bail!(
+                    "`{key}` is one of your catalogue entries, not a setting — \
+                     what a project takes from your catalogue is `omh use`.\n  \
+                     omh use skills {key}\n  omh unuse skills {key}"
+                ),
                 Names::ASetting | Names::Neither => {
                     let reached = reach(&paths, key, *local, *save)?;
                     unset(&paths, key, reached, cli.dry_run, ctx)
                 }
             }
         }
-
-        Cmd::Repo { cmd } => match cmd {
-            None => show_repo(&cwd, ctx),
-            Some(RepoCmd::Enable { feature }) => {
-                let paths = Paths::discover(&cwd)?;
-                let reached = reach_in(&paths, config::OMH, feature, false, false)?;
-                feature_switch(&paths, feature, true, reached, cli.dry_run, ctx)
-            }
-            Some(RepoCmd::Disable { feature }) => {
-                let paths = Paths::discover(&cwd)?;
-                let reached = reach_in(&paths, config::OMH, feature, false, false)?;
-                feature_switch(&paths, feature, false, reached, cli.dry_run, ctx)
-            }
-            Some(RepoCmd::Set { key, value, shared }) => {
-                let paths = Paths::discover(&cwd)?;
-                no_legacy_write_over_a_feature(&paths, key, ctx)?;
-                let reached = Reach::named(repo_layer(*shared));
-                set(&paths, key, value, reached, cli.dry_run, ctx)
-            }
-            Some(RepoCmd::Unset { key, shared }) => {
-                let paths = Paths::discover(&cwd)?;
-                no_legacy_write_over_a_feature(&paths, key, ctx)?;
-                let reached = Reach::named(repo_layer(*shared));
-                unset(&paths, key, reached, cli.dry_run, ctx)
-            }
-        },
 
         Cmd::Use {
             capability,
@@ -2853,7 +2817,7 @@ fn show_servers(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 ///
 /// Writes the **committed** file. What a project uses is a fact about the
 /// project, and a teammate cloning it should get the same selection — the
-/// opposite default from `omh repo set`, which holds secrets.
+/// opposite default from the gitignored file, which holds secrets.
 ///
 /// A capability with no list is following the whole catalogue, so adding one
 /// name to it has to write the catalogue out first. Writing `["tdd"]` alone
@@ -2986,7 +2950,7 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Re
         // Refused rather than written as a no-op: a name this repo never used
         // is a typo, and writing the list back would report success for it.
         anyhow::bail!(
-            "{cap}/{name} is not used here. `omh repo` lists what is.\n  \
+            "{cap}/{name} is not used here. `omh info --repo` lists what is.\n  \
              using: {}",
             if names.is_empty() {
                 "nothing".to_string()
@@ -3796,7 +3760,7 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // Kept in the **declared** order, not `entries`' alphabetical one. For
         // `rules` that order is the whole feature — this page's own docs say
         // "the list is the order" — and building the line from the sorted
-        // catalogue made `omh repo` the one place that contradicted it. Filtered
+        // catalogue made this report the one place that contradicted it. Filtered
         // by what the catalogue actually holds, so a name nothing answers to is
         // reported as missing rather than listed as used.
         using.push(report::Using {
@@ -3822,22 +3786,10 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     Ok(())
 }
 
-/// `omh repo set` writes the gitignored file; `--shared` writes the committed
-/// one. The opposite default from `omh use`, deliberately: these carry
-/// `carry_in` paths and MCP env, and a mistyped key must not be committable by
-/// accident.
-fn repo_layer(shared: bool) -> config::Layer {
-    if shared {
-        config::Layer::Shared
-    } else {
-        config::Layer::Local
-    }
-}
-
 /// Where a key belongs when nothing else has an opinion — the registry alone.
 ///
 /// **The default is the committed file**, which is the opposite of what
-/// `omh repo set` did, and the reversal is the point: what runtime a project
+/// `omh set` did, and the reversal is the point: what runtime a project
 /// wants, and how long its sessions idle, are facts about the project, and a
 /// teammate cloning it should get them. Until this table existed that default
 /// was unavailable, because *every* value went to the gitignored file and the
@@ -4114,6 +4066,9 @@ enum Names {
     /// through to the key path would write `graph-rules = "off"` and report
     /// success over a rule that stayed on.
     AnEntryOf(String),
+    /// One of your own catalogue entries, which `omh use`/`omh unuse` select
+    /// and no settings key is named after.
+    ACatalogueEntry,
     /// Neither. Written as a key and reported, the way it always was — a
     /// settings file is hand-editable and a key a newer omh reads must not be
     /// refused by this one.
@@ -4153,12 +4108,24 @@ fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
     if let Some(entry) = manifest.entry(name) {
         return Names::AnEntryOf(entry.feature.clone());
     }
+    // A name from your own catalogue. The deleted feature-switch command
+    // refused one by name — "a skill is not a feature" — and losing it would
+    // have turned the refusal into a bare key nothing reads, which is a
+    // quieter answer to a question somebody asked clearly.
+    if Profile::resolve(paths)
+        .entries(adapter::Capability::Skills)
+        .into_iter()
+        .flatten()
+        .any(|e| e == name)
+    {
+        return Names::ACatalogueEntry;
+    }
     Names::Neither
 }
 
 /// The legacy spellings must not write a feature name as a bare key.
 ///
-/// `omh settings set codegraph off` and `omh repo set codegraph off` did exactly
+/// `omh settings set codegraph off` and `omh set codegraph off` did exactly
 /// that — a top-level `codegraph = "off"`, a warning that nothing reads it,
 /// exit 0, and the feature still on. That is the defect the fork exists to
 /// end, and routing only `omh set` through it guarded one door of four while
@@ -4170,7 +4137,7 @@ fn no_legacy_write_over_a_feature(paths: &Paths, name: &str, ctx: &out::Ctx) -> 
              that name is read by nothing.\n  omh set {name} off"
         ),
         Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(name, &feature)),
-        Names::ASetting | Names::Neither => Ok(()),
+        Names::ACatalogueEntry | Names::ASetting | Names::Neither => Ok(()),
     }
 }
 
@@ -4240,7 +4207,7 @@ fn ensure_ignored(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
 /// `--local` walk past that on purpose — you named the file, and honouring
 /// that is right — so this is the case they leave behind. `omh set --save
 /// idle_timeout 30m` over a standing local `15m` writes the committed file,
-/// exits 0, and `omh repo` still says `15m`. Doing it silently was the bug.
+/// exits 0, and `omh info --repo` still says `15m`. Doing it silently was the bug.
 fn say_if_shadowed(
     paths: &Paths,
     key: &str,
@@ -5152,7 +5119,7 @@ fn why_a_key(paths: &Paths, k: &key::Key) -> String {
 /// `~/.omh/default.toml` is a **template**, not a layer: nothing reads it at
 /// launch, and this is the one moment it has any effect. That is the whole
 /// argument — a repo's behaviour is explained by files inside the repo, which
-/// is what a teammate cloning it can see, and what `omh repo` can account for
+/// is what a teammate cloning it can see, and what `omh info --repo` can account for
 /// without pointing at a file they do not have.
 ///
 /// **Assembled as a document, not as text.** The first version wrote
@@ -8186,7 +8153,7 @@ mod tests {
         // was: the JSON guard went on invoking a line that no longer parsed,
         // and passed, because its empty stdout read as nothing to say.
         const ON_PURPOSE: &str = "types the retired verb on purpose";
-        let gone: [String; 16] = [
+        let gone: [String; 19] = [
             // `attach` became a session verb in 2026.08.
             //
             // **No trailing character.** The first version of this needle had a
@@ -8245,9 +8212,17 @@ mod tests {
             // both for exactly that reason — the parse guard had dropped them
             // silently the moment `config` left the vocabulary.
             format!("omh {}", "config"), // types the retired verb on purpose
-            format!("omh {}", "code"),   // types the retired verb on purpose
-            format!("omh {}", "fwd"),    // types the retired verb on purpose
-            format!("omh {}", "mcp"),    // types the retired verb on purpose
+            // Three shapes, because a bare needle would also match "omh
+            // reports" — `repo` is a prefix of ordinary English here in a way
+            // `attach` never was. The lesson from that one is not *never
+            // terminate*; it is *cover the shapes the tree actually uses*:
+            // backticked prose, prose with a verb after it, and an argv array.
+            format!("omh {}`", "repo"), // types the retired verb on purpose
+            format!("omh {} ", "repo"), // types the retired verb on purpose
+            format!("[{:?}", "repo"),   // types the retired verb on purpose
+            format!("omh {}", "code"),  // types the retired verb on purpose
+            format!("omh {}", "fwd"),   // types the retired verb on purpose
+            format!("omh {}", "mcp"),   // types the retired verb on purpose
             // The wide listing's verb, retired in favour of the noun. It still
             // listed sessions — what it never showed was what any of them was
             // *doing*, which is `omh s`, so the name promised a summary it did
@@ -8828,7 +8803,7 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 72),
+            ("main.rs", 82),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),
@@ -11618,18 +11593,14 @@ because = "a fixture"
             "an unclassified key is committed on purpose"
         );
 
-        // The two commands `omh set` replaces, while they are still spelled.
-        assert!(
-            !repo_layer(false).is_committed(),
-            "omh repo set holds carry_in paths and MCP env"
-        );
+        // The template is not a file git carries, so `omh settings set` cannot
+        // put a secret in one however the key is classified. The two other
+        // clauses here were about the commands `omh set` replaced; both were
+        // deleted in 0.7.0, and an assertion about a spelling that no longer
+        // exists is not evidence of anything.
         assert!(
             !config::Layer::Personal.is_committed(),
             "omh settings set writes your own file"
-        );
-        assert!(
-            repo_layer(true).is_committed(),
-            "and --shared is how you say you meant it"
         );
     }
 

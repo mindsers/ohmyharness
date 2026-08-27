@@ -296,7 +296,7 @@ omh:   omh use skills refactor    ·    omh use --all
 
 `omh init` writes `[use]` with every entry named, so anything added to your
 catalogue *afterwards* is off here until you say otherwise. That is the trade an
-explicit list makes, and this line is what stops it being silent. `omh repo`
+explicit list makes, and this line is what stops it being silent. `omh info --repo`
 shows the same thing without launching.
 
 ### `mcp/codegraph is omh's`

@@ -1929,10 +1929,7 @@ fn resuming_as_another_harness_records_it_only_if_it_launched() {
     // assertion below passes whichever side of the launch the write sits on,
     // which is a test that cannot fail for its own reason. Deleting the shim
     // would work only on a machine with no docker of its own.
-    assert!(sb
-        .omh(&["repo", "set", "runtime", "bogus"])
-        .status
-        .success());
+    assert!(sb.omh(&["set", "runtime", "bogus"]).status.success());
     let failed = sb.omh(&["s01", "resume", "opencode"]);
     assert!(!failed.status.success(), "the launch failed");
     assert_eq!(
@@ -2124,7 +2121,7 @@ fn a_dry_run_names_the_catalogue_entries_this_repo_is_not_using() {
 
 /// `omh use` writes the **committed** file. What a project uses is a fact about
 /// the project, and a teammate cloning it should get the same selection — the
-/// opposite default from `omh repo set`, which holds `carry_in` paths and MCP
+/// opposite default from `omh set`, which holds `carry_in` paths and MCP
 /// env and must not be committable by accident. One flag could not express both,
 /// which is why `--layer` split into two commands.
 #[test]
@@ -2143,7 +2140,7 @@ fn use_writes_the_committed_file_and_unuse_takes_a_name_back_out() {
     );
     assert!(
         !sb.repo.join(".omh/settings.local.toml").exists(),
-        "the gitignored file is `omh repo set`'s, not this command's"
+        "the gitignored file is `omh set`'s, not this command's"
     );
 
     assert!(sb.omh(&["unuse", "skills", "refactor"]).status.success());
@@ -2194,20 +2191,20 @@ fn use_refuses_a_feature_and_disable_refuses_an_entry() {
     );
 
     // And the other direction, so the distinction is not one-way.
-    let out = sb.omh(&["repo", "disable", "review-diff"]);
+    let out = sb.omh(&["set", "review-diff", "off"]);
     assert!(!out.status.success(), "a skill is not a feature");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("omh use"), "point back the other way: {err}");
 }
 
-/// `omh repo disable` writes `[omh]` in the committed file, and says plainly
+/// `omh set` writes `[omh]` in the committed file, and says plainly
 /// that nothing was uninstalled — the distinction the whole feature rests on.
 #[test]
-fn repo_disable_switches_a_feature_off_here_without_uninstalling_it() {
+fn switching_a_feature_off_here_uninstalls_nothing() {
     let sb = sandbox();
     sb.seed_base();
 
-    let out = sb.omh(&["repo", "disable", "codegraph"]);
+    let out = sb.omh(&["set", "codegraph", "off"]);
     assert!(
         out.status.success(),
         "{:?}",
@@ -2220,7 +2217,7 @@ fn repo_disable_switches_a_feature_off_here_without_uninstalling_it() {
     );
     assert!(String::from_utf8_lossy(&out.stdout).contains("nothing was uninstalled"));
 
-    assert!(sb.omh(&["repo", "enable", "codegraph"]).status.success());
+    assert!(sb.omh(&["set", "codegraph", "on"]).status.success());
     assert!(
         sb.settings().contains("codegraph = true"),
         "{}",
@@ -2228,27 +2225,24 @@ fn repo_disable_switches_a_feature_off_here_without_uninstalling_it() {
     );
 }
 
-/// The two opposite defaults, side by side. `omh repo set` must not be able to
+/// The two opposite defaults, side by side. `omh set` must not be able to
 /// put a token in a file git will commit unless asked in so many words.
 #[test]
 fn repo_set_is_gitignored_and_shared_says_it_is_not() {
     let sb = sandbox();
     sb.seed_base();
 
-    assert!(sb
-        .omh(&["repo", "set", "carry_in", "[\".env\"]"])
-        .status
-        .success());
+    assert!(sb.omh(&["set", "carry_in", "[\".env\"]"]).status.success());
     let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
     assert!(local.contains(".env"), "got: {local}");
 
-    let out = sb.omh(&["repo", "set", "--shared", "idle_timeout", "30m"]);
+    let out = sb.omh(&["set", "--save", "idle_timeout", "30m"]);
     assert!(out.status.success());
     assert!(sb.settings().contains("30m"), "{}", sb.settings());
     // On **stderr**, and that is the stronger place for it. This warning is
     // the last thing standing between somebody and a token in git history,
     // and the invocation where that actually happens is the scripted one —
-    // `omh repo set --shared … > log`, where anything on stdout goes to the
+    // `omh set --save … > log`, where anything on stdout goes to the
     // file unread. stderr is the stream that still reaches a person there.
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("COMMITTED"),
@@ -2345,7 +2339,7 @@ fn set_shared_forces_the_committed_file_and_names_the_key() {
 
 /// The COMMITTED warning stays rare, now that committed is the default.
 ///
-/// Under `omh repo set` a committed write was something you asked for, so the
+/// Under `omh set` a committed write was something you asked for, so the
 /// sentence was rare and it meant something. `omh set` defaults there, so
 /// warning on every committed write would put it on nearly every invocation —
 /// and this project has already watched that exact sentence stop being read
@@ -2469,7 +2463,7 @@ fn unset_removes_a_credential_key_from_the_committed_file_too() {
     assert!(!local.contains("carry_in"), "got: {local}");
 
     // The claim is about what omh *reads*, not about two files' bytes.
-    let after = sb.omh(&["repo"]);
+    let after = sb.omh(&["info", "--repo"]);
     assert!(
         !String::from_utf8_lossy(&after.stdout).contains("carry_in"),
         "a removal that leaves the value effective is not a removal: {}",
@@ -2776,7 +2770,7 @@ fn why_answers_for_a_settings_key() {
 
 /// One command switches a feature, the same one that sets a value.
 ///
-/// `omh repo enable`/`disable` are two more verbs for *write a thing to the
+/// `omh set`/`disable` are two more verbs for *write a thing to the
 /// settings file*, and which of omh's features a project runs with is as much
 /// a fact about the project as which runtime it wants. What the two halves do
 /// not share is the file format — a feature lives in the `[omh]` table, a
@@ -2793,7 +2787,7 @@ fn a_feature_is_switched_by_the_command_that_sets_a_value() {
         sb.settings()
     );
 
-    let shown = sb.omh(&["repo"]);
+    let shown = sb.omh(&["info", "--repo"]);
     assert!(
         String::from_utf8_lossy(&shown.stdout).contains("codegraph"),
         "and omh reports it: {}",
@@ -3145,41 +3139,6 @@ fn a_settings_write_survives_a_base_set_it_cannot_read() {
     );
 }
 
-/// The legacy spellings cannot write a bare key over a feature name either.
-///
-/// Routing only `omh set` through the fork guarded one door of four while the
-/// documentation started pointing people at the others. `omh repo set
-/// codegraph off` wrote `codegraph = "off"`, warned nothing reads it, exited
-/// 0, and left the feature on — verbatim the defect the fork exists to end.
-#[test]
-fn the_older_spellings_refuse_a_feature_name_too() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed_base();
-
-    for argv in [
-        vec!["repo", "set", "codegraph", "off"],
-        vec!["repo", "unset", "codegraph"],
-    ] {
-        let out = sb.omh(&argv);
-        assert!(
-            !out.status.success(),
-            "`omh {}` writes a bare key read by nothing",
-            argv.join(" ")
-        );
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains("omh set codegraph"),
-            "and it names the spelling that works: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-    assert!(
-        !sb.settings().contains("codegraph = \"off\""),
-        "nothing was written as a string: {}",
-        sb.settings()
-    );
-}
-
 /// A key held in two files is updated in **both**, not just the first.
 ///
 /// This is rule 1's whole point and nothing was checking the plural: writing
@@ -3498,7 +3457,7 @@ fn init_seeds_the_repo_from_your_template_and_says_so() {
 ///
 /// The whole argument for the rename. A repo's behaviour is explained by files
 /// inside the repo — which is what a teammate cloning it can see, and what
-/// `omh repo` can account for without pointing at a file they do not have.
+/// `omh info --repo` can account for without pointing at a file they do not have.
 #[test]
 fn the_template_decides_nothing_in_a_repo_that_already_exists() {
     let sb = sandbox();
@@ -3513,7 +3472,7 @@ fn the_template_decides_nothing_in_a_repo_that_already_exists() {
     std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
     std::fs::write(sb.repo.join(".omh/settings.toml"), "carry_in = []\n").unwrap();
 
-    let out = sb.omh(&["repo"]);
+    let out = sb.omh(&["info", "--repo"]);
     assert!(out.status.success());
     assert!(
         !String::from_utf8_lossy(&out.stdout).contains("45m"),
@@ -3606,7 +3565,7 @@ fn no_part_of_the_template_resolves_in_this_repo() {
     std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
     std::fs::write(sb.repo.join(".omh/settings.toml"), "carry_in = []\n").unwrap();
 
-    let out = sb.omh(&["repo"]);
+    let out = sb.omh(&["info", "--repo"]);
     assert!(out.status.success());
     let said = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
@@ -3691,7 +3650,7 @@ fn the_rename_is_reported_by_commands_other_than_settings() {
     )
     .unwrap();
 
-    for argv in [vec!["repo"], vec!["info"], vec!["settings"]] {
+    for argv in [vec!["info"], vec!["settings"]] {
         let out = sb.omh(&argv);
         let said = String::from_utf8_lossy(&out.stderr).to_string();
         assert!(
@@ -3824,7 +3783,7 @@ fn the_rename_advice_does_not_overwrite_a_template_that_exists() {
     .unwrap();
 
     // Only the old file: `mv` is safe and is what to say.
-    let said = String::from_utf8_lossy(&sb.omh(&["repo"]).stderr).to_string();
+    let said = String::from_utf8_lossy(&sb.omh(&["info", "--repo"]).stderr).to_string();
     assert!(
         said.contains("mv "),
         "with nothing to overwrite, say mv: {said}"
@@ -3842,7 +3801,7 @@ fn the_rename_advice_does_not_overwrite_a_template_that_exists() {
         "idle_timeout = \"30m\"\n",
     )
     .unwrap();
-    let said = String::from_utf8_lossy(&sb.omh(&["repo"]).stderr).to_string();
+    let said = String::from_utf8_lossy(&sb.omh(&["info", "--repo"]).stderr).to_string();
     assert!(
         !said.contains("mv "),
         "advising mv here overwrites the template omh reads: {said}"
@@ -3864,7 +3823,7 @@ fn the_rename_is_silent_when_the_old_file_is_gone() {
     sb.git_init();
     sb.seed_base();
 
-    let said = String::from_utf8_lossy(&sb.omh(&["repo"]).stderr).to_string();
+    let said = String::from_utf8_lossy(&sb.omh(&["info", "--repo"]).stderr).to_string();
     assert!(
         !said.contains("not read any more"),
         "no retired file exists, so there is nothing to report: {said}"
@@ -4174,6 +4133,84 @@ fn the_layer_flag_is_gone() {
     assert!(!out.status.success(), "--layer is not a flag any more");
 }
 
+/// `omh info --repo` answers what this checkout resolved.
+///
+/// `omh info --repo` was deleted, and its report is the only place that says which
+/// file decided a value, which of omh's features are on here, and which
+/// catalogue entries this project takes. `omh info` already means *what you
+/// have*; `--repo` narrows that from the machine to the checkout.
+#[test]
+fn info_repo_reports_what_this_checkout_resolved() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    assert!(sb.omh(&["set", "idle_timeout", "30m"]).status.success());
+    assert!(sb.omh(&["set", "codegraph", "off"]).status.success());
+
+    let out = sb.omh(&["info", "--repo"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        said.contains("30m") && said.contains("shared"),
+        "a value and the file that decided it — the whole point of the \
+         report: {said}"
+    );
+    assert!(
+        said.contains("codegraph"),
+        "and which of omh's features are on here: {said}"
+    );
+}
+
+/// The two scopes stay apart: the machine, and this checkout.
+#[test]
+fn info_without_repo_is_still_about_the_machine() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    assert!(sb.omh(&["set", "idle_timeout", "30m"]).status.success());
+
+    let said = String::from_utf8_lossy(&sb.omh(&["info"]).stdout).to_string();
+    assert!(
+        said.contains("harnesses"),
+        "the host inventory is what bare `omh info` is: {said}"
+    );
+    assert!(
+        !said.contains("30m"),
+        "and a repo's resolved settings are the other question: {said}"
+    );
+}
+
+/// The retired spelling says what replaced it.
+#[test]
+fn the_retired_repo_spelling_names_what_replaced_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for argv in [
+        vec!["repo"],                               // types the retired verb on purpose
+        vec!["repo", "set", "idle_timeout", "30m"], // types the retired verb on purpose
+        vec!["repo", "enable", "codegraph"],        // types the retired verb on purpose
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            !out.status.success(),
+            "`omh {}` names a retired spelling",
+            argv.join(" ")
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("omh info --repo"),
+            "and the refusal names the report that replaced it: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
 /// A name is checked where it is minted, so `edit` cannot be talked into
 /// joining a path to the catalogue directory.
 #[test]
@@ -4185,7 +4222,7 @@ fn edit_refuses_a_name_that_climbs_out_of_the_catalogue() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("never a path"));
 }
 
-/// Bare `omh repo` is where the reporting this design keeps promising surfaces:
+/// Bare `omh info --repo` is where the reporting this design keeps promising surfaces:
 /// with a curated list the useful question stops being "what is this set to" and
 /// becomes "why is this skill not here".
 #[test]
@@ -4195,10 +4232,10 @@ fn bare_repo_reports_what_is_used_what_is_not_and_what_decided_it() {
     sb.catalogue(&["skills/review-diff/SKILL.md", "skills/refactor/SKILL.md"]);
     sb.omh(&["use", "skills", "review-diff"]);
     sb.omh(&["unuse", "skills", "refactor"]);
-    sb.omh(&["repo", "disable", "codegraph"]);
-    sb.omh(&["repo", "set", "carry_in", "[\".env\"]"]);
+    sb.omh(&["set", "codegraph", "off"]);
+    sb.omh(&["set", "carry_in", "[\".env\"]"]);
 
-    let out = sb.omh(&["repo"]);
+    let out = sb.omh(&["info", "--repo"]);
     assert!(
         out.status.success(),
         "{:?}",
@@ -4220,7 +4257,7 @@ fn bare_repo_reports_what_is_used_what_is_not_and_what_decided_it() {
 /// of what they wrote.
 ///
 /// Before P4 a write to `.omh/settings.toml` was rare — `omh settings set` and
-/// nothing else. Now `omh use`, `omh unuse` and `omh repo enable` all touch it,
+/// nothing else. Now `omh use`, `omh unuse` and `omh set` all touch it,
 /// and `init` writes it *full* of explanatory comments, so a round trip through
 /// a serializer would have the first `omh use` silently delete everything init
 /// had just explained. That is data loss, not formatting.
@@ -4551,7 +4588,7 @@ fn a_local_file_that_declares_nothing_stays_that_way() {
     );
 }
 
-/// `[omh]` layers the same way, so `omh repo enable` has the same hole.
+/// `[omh]` layers the same way, so `omh set` has the same hole.
 #[test]
 fn a_feature_switch_reaches_the_layer_that_decides() {
     let sb = sandbox();
@@ -4563,7 +4600,7 @@ fn a_feature_switch_reaches_the_layer_that_decides() {
     )
     .unwrap();
 
-    assert!(sb.omh(&["repo", "enable", "codegraph"]).status.success());
+    assert!(sb.omh(&["set", "codegraph", "on"]).status.success());
     let local = std::fs::read_to_string(sb.repo.join(".omh/settings.local.toml")).unwrap();
     assert!(
         local.contains("codegraph = true"),
@@ -4844,7 +4881,7 @@ fn a_wide_down_with_nobody_to_ask_stops_nothing() {
 fn a_value_the_key_cannot_take_is_written_and_named() {
     let sb = sandbox();
 
-    let wrong = sb.omh(&["repo", "set", "persistence", "tmux"]);
+    let wrong = sb.omh(&["set", "persistence", "tmux"]);
     let said = String::from_utf8_lossy(&wrong.stderr).to_string();
     assert!(wrong.status.success(), "still written: {said}");
     assert!(
@@ -4853,7 +4890,7 @@ fn a_value_the_key_cannot_take_is_written_and_named() {
     );
 
     // One it can take says nothing — a warning on every write is no warning.
-    let right = sb.omh(&["repo", "set", "persistence", "dtach"]);
+    let right = sb.omh(&["set", "persistence", "dtach"]);
     let quiet = String::from_utf8_lossy(&right.stderr).to_string();
     assert!(
         !quiet.contains("dtach, none"),
@@ -4875,7 +4912,7 @@ fn a_value_the_key_cannot_take_is_written_and_named() {
 fn committing_a_key_that_carries_a_secret_names_the_key() {
     let sb = sandbox();
 
-    let risky = sb.omh(&["repo", "set", "--shared", "carry_in", "[\".env\"]"]);
+    let risky = sb.omh(&["set", "--save", "carry_in", "[\".env\"]"]);
     let said = String::from_utf8_lossy(&risky.stderr).to_string();
     assert!(risky.status.success(), "still written: {said}");
     assert!(
@@ -4889,7 +4926,7 @@ fn committing_a_key_that_carries_a_secret_names_the_key() {
 
     // A key that carries no secret keeps the general warning and gains nothing
     // — otherwise the sharper sentence means nothing.
-    let safe = sb.omh(&["repo", "set", "--shared", "account", "work"]);
+    let safe = sb.omh(&["set", "--save", "account", "work"]);
     let mild = String::from_utf8_lossy(&safe.stderr).to_string();
     assert!(
         mild.contains("COMMITTED") && !mild.contains("`account` "),
@@ -4910,7 +4947,7 @@ fn committing_a_key_that_carries_a_secret_names_the_key() {
 fn a_setting_omh_does_not_read_is_written_and_named() {
     let sb = sandbox();
 
-    let typo = sb.omh(&["repo", "set", "carry_ins", "[\".env\"]"]);
+    let typo = sb.omh(&["set", "carry_ins", "[\".env\"]"]);
     let said = String::from_utf8_lossy(&typo.stderr).to_string();
     assert!(
         typo.status.success(),
@@ -4923,7 +4960,7 @@ fn a_setting_omh_does_not_read_is_written_and_named() {
 
     // A key omh does read says nothing extra — the warning has to mean
     // something, and one that fires for every write means nothing.
-    let known = sb.omh(&["repo", "set", "carry_in", "[\".env\"]"]);
+    let known = sb.omh(&["set", "carry_in", "[\".env\"]"]);
     let quiet = String::from_utf8_lossy(&known.stderr).to_string();
     assert!(
         !quiet.contains("nothing reads"),
@@ -6152,11 +6189,11 @@ fn every_json_answer_is_one_document_and_not_several() {
 
     for args in [
         vec!["--json", "info"],
-        vec!["--json", "repo"],
+        vec!["--json", "info", "--repo"],
         vec!["--json", "settings"],
         vec!["--json", "use", "skills", "beta"],
         vec!["--json", "unuse", "skills", "beta"],
-        vec!["--json", "repo", "disable", "codegraph"],
+        vec!["--json", "set", "codegraph", "off"],
         vec!["--json", "s"],
         vec!["--json", "memory", "lint"],
     ] {

@@ -1,7 +1,7 @@
 //! The settings omh reads, and what omh knows about each one.
 //!
 //! Until this existed, a setting key was a string literal at the call site and
-//! nothing else. `omh repo set` accepted any key at all and wrote it to the
+//! nothing else. `omh set` accepted any key at all and wrote it to the
 //! gitignored layer — safe, but only because *every* value went there, which
 //! also meant a teammate cloning the repo got none of them.
 //!
@@ -250,7 +250,7 @@ mod tests {
     /// So this pins the judgement itself against what the code already
     /// asserts in prose: `src/carry.rs` calls it the only path by which a
     /// secret reaches the agent, `init` writes that same sentence into every
-    /// new settings file, and `omh repo set` defaulted away from the committed
+    /// new settings file, and `omh set` defaulted away from the committed
     /// layer *because* of this key.
     ///
     /// It protects one key. A sixth key misclassified on the day it is added
@@ -311,7 +311,7 @@ mod tests {
     /// It is the executable half of the rule `docs/configuration.md` states as
     /// prose — *the protection moved from the command to the key*. The prose it
     /// used to quote said *the committed file is never reached by accident,
-    /// only on purpose*, which was a property of `omh repo set` sending every
+    /// only on purpose*, which was a property of `omh set` sending every
     /// value to the gitignored file; `omh set` defaults to the committed one,
     /// so the table below is what carries the guarantee now.
     ///
