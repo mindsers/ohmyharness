@@ -2960,6 +2960,27 @@ fn use_cmd(
     // the entry first.
     let available = catalogue_names(&paths, cap)?;
     if !available.iter().any(|n| n == name) {
+        // **Two states, and only one of them is absence.** `catalogue_names`
+        // narrows hooks to the ecosystems this repo actually is, so in a rust
+        // repo `go-test` falls out of it — and the refusal used to word that
+        // narrowing as *your catalogue has no hooks called `go-test`*, which
+        // `omh info` contradicts one command later by listing it.
+        //
+        // The second half cost more than the wrong sentence: it offered
+        // `omh settings edit hooks go-test`, which creates a second
+        // `go-test.json` beside the one already there.
+        let held = Profile::resolve(&paths).entries(cap)?;
+        if held.iter().any(|n| n == name) {
+            anyhow::bail!(
+                "{cap}/{name} is in your catalogue, but names an ecosystem this repo is \
+                 not — nothing here would run it.\n  {cap} this repo can take: {}",
+                if available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available.join(", ")
+                }
+            );
+        }
         anyhow::bail!(
             "your catalogue has no {cap} called `{name}`. `omh settings edit {cap} {name}` \
              creates it.\n  {cap}: {}",

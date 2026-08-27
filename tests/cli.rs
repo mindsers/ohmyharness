@@ -4001,6 +4001,60 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
     }
 }
 
+/// A name this repo cannot use is not a name your catalogue lacks.
+///
+/// `omh use hooks go-test` in a rust repo said *"your catalogue has no hooks
+/// called `go-test`"* — while `omh info` listed all six, `go-test` among them.
+/// The check reads `catalogue_names`, which filters hooks down to the
+/// ecosystems this repo actually is, and then worded the filtering as absence.
+///
+/// Two costs, and the second is worse than the wrong sentence: it went on to
+/// offer `omh settings edit hooks go-test`, which creates a *second*
+/// `go-test.json` beside the one already there.
+///
+/// The invariant is that the two states are told apart. A catalogue that
+/// genuinely lacks the name is the case where creating it is the answer; a
+/// catalogue that has it is never that case.
+#[test]
+fn a_name_this_repo_cannot_use_is_not_a_name_the_catalogue_lacks() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    // The hook *files*, not just the manifest — `go-test` has to really be in
+    // the catalogue for the claim that it is not to be false.
+    sb.seed_catalogue(&["hooks", "stacks"]);
+    // Rust, so omh's go and python hooks are in the catalogue and inapplicable.
+    std::fs::write(
+        sb.repo.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let missing = sb.omh(&["use", "hooks", "nosuchhook"]);
+    let missing_said = String::from_utf8_lossy(&missing.stderr).to_string();
+    assert!(!missing.status.success());
+    assert!(
+        missing_said.contains("no hooks called"),
+        "a name nothing answers to is absent, and creating it is the answer: {missing_said}"
+    );
+
+    let present = sb.omh(&["use", "hooks", "go-test"]);
+    let present_said = String::from_utf8_lossy(&present.stderr).to_string();
+    assert!(
+        !present.status.success(),
+        "a hook for an ecosystem this repo is not is still refused"
+    );
+    assert!(
+        !present_said.contains("no hooks called"),
+        "your catalogue has `go-test` — `omh info` lists it: {present_said}"
+    );
+    assert!(
+        !present_said.contains("settings edit"),
+        "and offering to create it would write a second copy beside the one \
+         that is already there: {present_said}"
+    );
+}
+
 /// The way out that `omh why` prints is a way out.
 ///
 /// Every base-set entry carries a `remove` field, and `omh why` prints it
