@@ -1339,6 +1339,65 @@ mod tests {
         );
     }
 
+    /// Every placeholder omh puts in the worktree is one git ignores.
+    ///
+    /// A bind mount needs its destination to exist, and for a destination under
+    /// `/work` the runtime will not make one — `/work` is the host worktree, so
+    /// docker resolves the path back to the host and refuses. `place_destination`
+    /// creates the file there instead, which is correct and is why the launch
+    /// works at all.
+    ///
+    /// What was missing is the other half. `carry::STAGED_RULES` listed two
+    /// names by hand — `CLAUDE.md` and `AGENTS.md` — under a doc saying *"A
+    /// harness whose rules file is named something else needs adding to this
+    /// list too."* `.mcp.json` is mounted the same way and was never added, so
+    /// on a session where the agent had done nothing:
+    ///
+    /// - `omh s` reported `1 uncommitted`
+    /// - `omh s01 diff` showed `.mcp.json | 0` as the session's work
+    /// - `omh s01 commit` committed it, and `omh s01 push` would publish it
+    ///
+    /// The invariant, so the hand-maintained list cannot fall behind the mounts
+    /// again: whatever `place_destination` writes, `carry` hides.
+    #[test]
+    fn every_placeholder_a_launch_leaves_in_the_worktree_is_one_git_ignores() {
+        let fx = fixture();
+        for harness in ["claude", "opencode"] {
+            let plan = plan_for(&fx, harness);
+            // **What omh puts there, not what you asked it to carry.**
+            // `carry_in` files land in the worktree too and are excluded by
+            // their own patterns in `carry::stage` — they are the user's files,
+            // named by the user, and hiding them is a different decision made
+            // in a different place. `read_only` is the line between the two and
+            // is not incidental: a carried file is config the agent may
+            // legitimately edit, so it is mounted read-write, and omh's own
+            // documents are mounted read-only precisely because they are not
+            // the agent's to change.
+            let placed: Vec<String> = plan
+                .mounts
+                .iter()
+                .filter(|m| m.read_only && m.file)
+                .filter_map(|m| m.guest.to_str()?.strip_prefix("/work/"))
+                // `.git` is the shadow gitdir pointer. git does not offer its
+                // own directory as a change, so there is nothing here for an
+                // exclude file to say.
+                .filter(|name| *name != ".git")
+                .map(str::to_string)
+                .collect();
+            assert!(
+                !placed.is_empty(),
+                "{harness} mounts nothing into the worktree, so this proves nothing"
+            );
+            for name in placed {
+                assert!(
+                    crate::carry::hidden_in_the_worktree().contains(&name.as_str()),
+                    "{harness} leaves `{name}` in the worktree and git would offer it \
+                     as the agent's work"
+                );
+            }
+        }
+    }
+
     fn plan_for(fx: &Fx, harness: &str) -> Plan {
         plan_with_memory_bin(fx, harness, None)
     }
