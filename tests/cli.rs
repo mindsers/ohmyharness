@@ -4084,6 +4084,78 @@ fn the_committed_warning_is_kept_for_what_it_is_for() {
     );
 }
 
+/// A session scopes a session verb, and nothing else.
+///
+/// `memory remember` was the one exception, and it did not earn it: the id
+/// reached exactly one line, and it was not a scope —
+///
+///     input.source = match session {
+///         Some(id) => format!("session {id}, cli"),
+///         None => "cli".into(),
+///     };
+///
+/// Provenance, in a text field. Nothing is filed, scoped or retrieved by
+/// session; the store is repo-wide, which is what the design says it is. So the
+/// exception bought a global flag for a string that `--source` already writes,
+/// and left `consumes_session` claiming a relationship the store does not have.
+///
+/// The in-sandbox path is unaffected — `memory serve` carries its own
+/// `--session`, which is how an agent's notes get attribution.
+#[test]
+fn a_session_scopes_a_session_verb_and_nothing_else() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    // Complete, deliberately. An incomplete line fails *both* readings, and
+    // the arbitration then prefers the sessions error — so a short fixture
+    // would have tested clap's message rather than this rule.
+    let out = sb.omh(&[
+        "s01",
+        "memory",
+        "remember",
+        "--expected",
+        "a",
+        "--observed",
+        "b",
+        "--evidence",
+        "c",
+        "--answers",
+        "d",
+    ]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "the store is repo-wide, so a session id here scopes nothing: {said}"
+    );
+    assert!(
+        said.contains("does not act on one"),
+        "and it is refused where it was named, like every other command that \
+         does not read one: {said}"
+    );
+
+    // The provenance it used to supply, said outright.
+    let wrote = sb.omh(&[
+        "memory",
+        "remember",
+        "--expected",
+        "a",
+        "--observed",
+        "b",
+        "--evidence",
+        "c",
+        "--answers",
+        "d",
+        "--source",
+        "session s01, cli",
+    ]);
+    assert!(
+        wrote.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wrote.stderr)
+    );
+}
+
 /// A name nothing answers to is refused, whichever command you typed.
 ///
 /// `omh settings mcp rm nope` exited **0** and said *"nope is not in your

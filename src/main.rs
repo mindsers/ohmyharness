@@ -917,9 +917,20 @@ fn main() -> std::process::ExitCode {
 fn consumes_session(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::Sessions { .. } => true,
-        // Only `remember` writes a note against a session; the rest of the
-        // store is repo-wide.
-        Cmd::Memory { cmd } => matches!(cmd, Some(MemoryCmd::Remember { .. })),
+        // **The store is repo-wide, including `remember`.** This returned
+        // `true` for it and claimed a relationship the store does not have:
+        // the id reached exactly one line, and it was not a scope —
+        // `input.source = format!("session {id}, cli")`. Provenance, in a text
+        // field, which `--source` already writes. Nothing is filed, scoped or
+        // retrieved by session.
+        //
+        // It bought a global flag for a spelling that half-worked, too: only
+        // `-s s01` ever reached it. `omh s01 memory remember` fell to the
+        // sessions grammar and answered with clap's *unrecognized subcommand*.
+        //
+        // The in-sandbox path is untouched — `memory serve` carries its own
+        // `--session`, which is how an agent's notes get attribution.
+        Cmd::Memory { .. } => false,
         // `graph` is per repo, not per session, and says so in its own doc
         // comment — every session's graph lives in one volume. It took
         // `cli.session` and bound it `_id`, which is how it came to claim
@@ -1300,7 +1311,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     recorded: memory::today(),
                 },
                 *if_exists,
-                cli.session.as_deref(),
                 ctx,
             ),
         },
@@ -2469,18 +2479,16 @@ fn memory_remember(
     cwd: &std::path::Path,
     mut input: memory::Remembered,
     if_exists: memory::IfExists,
-    session: Option<&str>,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     if input.source.trim().is_empty() {
-        // Provenance is omh's to supply, so that it cannot be omitted. On the
-        // CLI there may be no session, and saying `cli` is honest where
-        // inventing a session id would not be.
-        input.source = match session {
-            Some(id) => format!("session {id}, cli"),
-            None => "cli".into(),
-        };
+        // Provenance is omh's to supply, so that it cannot be omitted. `cli` is
+        // what this path is, and it is the whole of what omh can say without
+        // being told: a session id used to be spliced in here from `-s`, which
+        // made a global flag out of one text field. `--source` says it
+        // outright, and `memory serve` supplies it for the agent.
+        input.source = "cli".into();
     }
     ctx.say(&match memory::remember(&paths, &input, if_exists)? {
         memory::Wrote::Created(path) => {
