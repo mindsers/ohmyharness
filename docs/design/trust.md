@@ -28,9 +28,9 @@ work was refusing to throw it away.
 
 It grew a second half when selection landed, and the new half is the one people
 will actually use. With a curated catalogue the interesting question stops being
-"what is this set to" and becomes **"why is this skill not here"** — so `omh
-repo` answers that too, naming what this checkout uses, what it does not, and
-which of omh's features are off:
+"what is this set to" and becomes **"why is this skill not here"** — so
+`omh info --repo` answers that too, naming what this checkout uses, what it
+does not, and which of omh's features are off:
 
 ```console
 using

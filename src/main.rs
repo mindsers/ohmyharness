@@ -564,17 +564,19 @@ enum SessionsCmd {
     },
 }
 
-/// Two scopes, so two commands. `omh settings` narrows to mean **you** — your
-/// catalogue and your defaults. `omh info --repo` means **this checkout**.
+/// Your side of the split: `omh settings` means **you**, and `omh info --repo`
+/// means **this checkout**.
 ///
-/// `--layer` used to carry both, and it strained because the two want opposite
-/// defaults: what a project *uses* is a fact about the project and should be
+/// One flag carried both once, and it strained because the two want opposite
+/// defaults — what a project *uses* is a fact about the project and should be
 /// committed, while what a project *overrides* holds `carry_in` paths and MCP
-/// env and must not be committable by accident. One flag cannot express two
-/// opposite defaults.
-/// Deliberately two verbs. Reading and changing your own defaults is the whole
-/// of it in 0.7.0; the terminal UI that edits them arrives in 0.8.0 and needs
-/// nothing here to change.
+/// env and must not be committable by accident. Two commands, so neither has
+/// to be told which it meant.
+///
+/// The four verbs are the ones that act on `~/.omh`: two that write a default,
+/// one that opens the file, and the MCP catalogue. Listing the catalogue is
+/// not among them — that is `omh info`, which is where the machine is
+/// described.
 #[derive(Subcommand)]
 enum SettingsCmd {
     /// Set one of your defaults, for every project you start after this.
@@ -712,17 +714,24 @@ enum MemoryCmd {
 const RETIRED: &[Retired] = &[
     Retired {
         spellings: &["attach", "a"], // types the retired verb on purpose
-        after: &[],
+        at: At::Verb,
         said: "`attach` is a session verb now:\n  omh s attach [editor]     the session omh picks\n  omh s01 attach zed        that one",
+    },
+    // Also `omh info repo`, which was reaching the right sentence only because
+    // the match used to be unscoped. Stated rather than relied on.
+    Retired {
+        spellings: &["repo"], // types the retired verb on purpose
+        at: At::Under(&["info"]),
+        said: "the report is a flag now:\n  omh info --repo",
     },
     Retired {
         spellings: &["repo"], // types the retired verb on purpose
-        after: &[],
+        at: At::Verb,
         said: "`repo` is gone — the report is `omh info --repo` now:\n  omh info --repo           what this checkout resolved\n  omh set <key> <value>     change it\n  omh set <feature> on|off  switch one of omh's features",
     },
     Retired {
         spellings: &["config", "c"], // types the retired verb on purpose
-        after: &[],
+        at: At::Verb,
         said: "`config` is gone — it is `omh settings` now:\n  omh settings              your defaults\n  omh settings set <key> <value>\n  omh settings edit         $EDITOR on them\n  omh settings mcp ls       your MCP servers",
     },
     Retired {
@@ -733,7 +742,7 @@ const RETIRED: &[Retired] = &[
         // Unscoped, the table would answer the top-level spelling with the
         // *sessions* replacement — a confident wrong answer where there had
         // been an honest plain one.
-        after: &["s", "sessions"],
+        at: At::Under(&["s", "sessions"]),
         said: "there is no `ls` verb any more:\n  omh s      is the listing\n  omh s01    is one row of it",
     },
 ];
@@ -741,11 +750,52 @@ const RETIRED: &[Retired] = &[
 /// One retired spelling, and where it was retired *from*.
 struct Retired {
     spellings: &'static [&'static str],
-    /// Words this must follow to count. Empty means anywhere — a top-level
-    /// verb. Non-empty scopes it, because the same word can be retired in one
-    /// place and never have existed in another.
-    after: &'static [&'static str],
+    at: At,
     said: &'static str,
+}
+
+/// Where a retired spelling has to appear before it is the one being asked
+/// about.
+///
+/// It was `after: &[]` meaning *anywhere in the line*, which is a different
+/// claim from *the verb* — and with spellings as short as `a` and `c` in the
+/// table, anywhere is almost always somewhere else. `omh s c` answered about
+/// `config` when the word was a session id; `omh s attach --nope` answered
+/// about a retired spelling when `attach` was the live one.
+///
+/// A sentinel empty slice is a `None` no compiler makes you handle. This is
+/// the same decision as a value, so every entry states it.
+enum At {
+    /// The verb itself — the first word that is not a global option or one of
+    /// their values, which is not the same as the first word after `omh`.
+    Verb,
+    /// The verb after one of these: `ls` was only ever a verb under `s`.
+    Under(&'static [&'static str]),
+}
+
+/// Where the verb sits, once the global options in front of it are stepped
+/// over.
+///
+/// `i == 0` was the first attempt and it broke `omh -s s01 attach`, which is
+/// exactly the line the `attach` entry exists for: the globals are declared
+/// `global = true`, so they may precede the subcommand, and three of them take
+/// a value that would otherwise read as the verb.
+///
+/// Named here rather than derived from clap, which has no public way to ask.
+/// A global added without a line here makes `retired` fall silent for lines
+/// that start with it — quiet, and the direction that costs a sentence rather
+/// than invents one.
+fn verb_position(words: &[&str]) -> Option<usize> {
+    const TAKES_A_VALUE: [&str; 5] = ["-s", "--session", "-a", "--account", "--color"];
+    let mut i = 0;
+    while let Some(word) = words.get(i) {
+        if !word.starts_with('-') {
+            return Some(i);
+        }
+        // `--color=never` carries its value; `--color never` does not.
+        i += if TAKES_A_VALUE.contains(word) { 2 } else { 1 };
+    }
+    None
 }
 
 /// The better sentence for a line clap could not read, when a word in it names
@@ -760,14 +810,18 @@ fn retired(argv: &[String]) -> Option<&'static str> {
         .take_while(|word| *word != "--")
         .map(String::as_str)
         .collect();
+    let verb = verb_position(&words);
     words.iter().enumerate().find_map(|(i, word)| {
         RETIRED
             .iter()
             .find(|r| {
                 r.spellings.contains(word)
-                    && (r.after.is_empty()
-                        || i.checked_sub(1)
-                            .is_some_and(|prev| r.after.contains(&words[prev])))
+                    && match r.at {
+                        At::Verb => Some(i) == verb,
+                        At::Under(parents) => i
+                            .checked_sub(1)
+                            .is_some_and(|prev| parents.contains(&words[prev])),
+                    }
             })
             .map(|r| r.said)
     })
@@ -1103,7 +1157,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             match cmd {
                 None => show_settings(&paths, ctx),
                 Some(SettingsCmd::Set { key, value }) => {
-                    no_legacy_write_over_a_feature(&paths, key, ctx)?;
+                    no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
                     set(
                         &paths,
                         key,
@@ -1114,7 +1168,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     )
                 }
                 Some(SettingsCmd::Unset { key }) => {
-                    no_legacy_write_over_a_feature(&paths, key, ctx)?;
+                    no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
                     unset(
                         &paths,
                         key,
@@ -1124,12 +1178,12 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     )
                 }
                 Some(SettingsCmd::Edit { capability, name }) => edit(
-                    &cwd,
+                    &paths,
                     capability.as_deref(),
                     name.as_deref(),
                     config::Layer::Personal,
                 ),
-                Some(SettingsCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run, ctx),
+                Some(SettingsCmd::Mcp { cmd }) => mcp(&paths, cmd, cli.dry_run, ctx),
             }
         }
 
@@ -1150,11 +1204,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     ctx,
                 ),
                 Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(key, &feature)),
-                Names::ACatalogueEntry => anyhow::bail!(
-                    "`{key}` is one of your catalogue entries, not a setting — \
-                     what a project takes from your catalogue is `omh use`.\n  \
-                     omh use skills {key}\n  omh unuse skills {key}"
-                ),
+                Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(key, cap)),
                 Names::ASetting | Names::Neither => {
                     let reached = reach(&paths, key, *local, *save)?;
                     set(&paths, key, value, reached, cli.dry_run, ctx)
@@ -1172,11 +1222,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     ctx,
                 ),
                 Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(key, &feature)),
-                Names::ACatalogueEntry => anyhow::bail!(
-                    "`{key}` is one of your catalogue entries, not a setting — \
-                     what a project takes from your catalogue is `omh use`.\n  \
-                     omh use skills {key}\n  omh unuse skills {key}"
-                ),
+                Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(key, cap)),
                 Names::ASetting | Names::Neither => {
                     let reached = reach(&paths, key, *local, *save)?;
                     unset(&paths, key, reached, cli.dry_run, ctx)
@@ -1511,14 +1557,19 @@ fn attach(
     }
 
     std::fs::create_dir_all(paths.worktrees())?;
-    // `Resume`, said outright. Attaching an editor to a session that does not
-    // exist yet is not a thing anyone asks for, and the bare `false` in the
-    // third position said so only by where it sat.
-    let id = session::pick(
-        &paths.worktrees(),
-        id.map_or(session::Start::Resume, session::Start::Named),
-    );
-    let session = Session::new(&paths.worktrees(), id);
+    // Through `existing_session`, like every other verb under `omh s`.
+    //
+    // It used to be `session::pick`, which returns a named id **unchecked**,
+    // and then `ensure` created the worktree — so `omh s42 attach` built an
+    // empty session off the base branch and opened an editor on it, exit 0,
+    // reporting `session s42 is up`: the sentence a real rejoin prints. A typo
+    // became a session. The comment that stood here claimed the opposite, that
+    // attaching to a session which does not exist "is not a thing anyone asks
+    // for" — true, and the code did it anyway.
+    //
+    // `attach` became a session verb in 0.7.0 and did not join the discipline
+    // of the group it moved into. `existing_session` is that discipline.
+    let session = existing_session(&paths, id)?;
     session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
     carry_in(&paths, &session, ctx)?;
     let _ = idle::touch(&paths.runs(), &session.id);
@@ -2663,10 +2714,16 @@ fn parse_env(s: &str) -> std::result::Result<(String, String), String> {
         .ok_or_else(|| format!("expected KEY=VALUE, got `{s}`"))
 }
 
-fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Result<()> {
-    let paths = Paths::discover(cwd)?;
+/// Takes the `Paths` its caller resolved rather than resolving its own.
+///
+/// It called `Paths::discover`, which refuses outside a repository — so the
+/// arm above it went to the trouble of `Paths::anywhere` and then handed down
+/// a `cwd` that threw the answer away. `omh settings mcp ls` reads your
+/// catalogue and nothing else; it refused to list it in a directory that
+/// happened not to be a checkout.
+fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Result<()> {
     match cmd {
-        McpCmd::Ls => show_servers(cwd, ctx),
+        McpCmd::Ls => show_servers(paths, ctx),
 
         McpCmd::Add {
             name,
@@ -2679,7 +2736,7 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Re
                 args: args.clone(),
                 env: env.iter().cloned().collect(),
             };
-            let w = config::mcp_add(&paths, name, server)?;
+            let w = config::mcp_add(paths, name, server)?;
             let mut action =
                 report::Action::new("mcp-added", format!("wrote → {}", w.path.display())).data(
                     serde_json::json!({ "server": name, "path": w.path.display().to_string() }),
@@ -2699,7 +2756,7 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Re
         }
 
         McpCmd::Rm { name } => {
-            let removed = config::mcp_remove(&paths, name)?;
+            let removed = config::mcp_remove(paths, name)?;
             ctx.say(
                 &report::Action::new(
                     if removed { "mcp-removed" } else { "mcp-absent" },
@@ -2743,9 +2800,9 @@ fn mcp(cwd: &std::path::Path, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Re
             })?;
             let incoming = render::parse(binding.render, &raw)?;
 
-            let outcome = config::mcp_import(&paths, incoming, *force, dry_run)?;
+            let outcome = config::mcp_import(paths, incoming, *force, dry_run)?;
             let wrote = (!dry_run && !outcome.added.is_empty())
-                .then(|| config::mcp_path(&paths).display().to_string());
+                .then(|| config::mcp_path(paths).display().to_string());
 
             let considered = outcome
                 .added
@@ -2798,10 +2855,9 @@ fn repo_has_selection(paths: &Paths) -> Result<bool> {
 }
 
 /// The catalogue's MCP servers, with whose each one is.
-fn show_servers(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
-    let paths = Paths::discover(cwd)?;
+fn show_servers(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
     ctx.say(&report::Servers {
-        servers: config::servers(&paths)?
+        servers: config::servers(paths)?
             .into_iter()
             .map(|s| report::Setting {
                 key: s.key,
@@ -4068,7 +4124,12 @@ enum Names {
     AnEntryOf(String),
     /// One of your own catalogue entries, which `omh use`/`omh unuse` select
     /// and no settings key is named after.
-    ACatalogueEntry,
+    ///
+    /// Carries *which*. The refusal has to name the capability, and a variant
+    /// that cannot say it gets answered with whichever one was hardcoded —
+    /// which is how this checked `skills` alone and told somebody with a rule
+    /// of that name that nothing reads it.
+    ACatalogueEntry(adapter::Capability),
     /// Neither. Written as a key and reported, the way it always was — a
     /// settings file is hand-editable and a key a newer omh reads must not be
     /// refused by this one.
@@ -4112,33 +4173,64 @@ fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
     // refused one by name — "a skill is not a feature" — and losing it would
     // have turned the refusal into a bare key nothing reads, which is a
     // quieter answer to a question somebody asked clearly.
-    if Profile::resolve(paths)
-        .entries(adapter::Capability::Skills)
-        .into_iter()
-        .flatten()
-        .any(|e| e == name)
-    {
-        return Names::ACatalogueEntry;
+    //
+    // **Every capability, not just skills.** The first version checked
+    // `Skills` alone, so a rule or a command of the same name got the dead key
+    // instead — the same mistake one word over, which is what the refusal
+    // exists to catch. `Capability::ALL` is the list that cannot rot.
+    let profile = Profile::resolve(paths);
+    for cap in adapter::Capability::ALL {
+        // Not `.flatten()`. `Profile::entries` returns `Result` precisely so a
+        // half-read catalogue is not reported as an empty one — its own
+        // comment says so — and swallowing that here turns an unreadable
+        // directory into a bare key written to a committed file.
+        match profile.entries(cap) {
+            Ok(entries) if entries.iter().any(|e| e == name) => {
+                return Names::ACatalogueEntry(cap);
+            }
+            Ok(_) => {}
+            Err(e) => ctx.warn(&format!(
+                "could not read your {cap} catalogue, so `{name}` was not \
+                 checked against it\n  because {e:#}"
+            )),
+        }
     }
     Names::Neither
 }
 
-/// The legacy spellings must not write a feature name as a bare key.
+/// `omh settings set` must not write a name omh already owns as a bare key.
 ///
-/// `omh settings set codegraph off` and `omh set codegraph off` did exactly
-/// that — a top-level `codegraph = "off"`, a warning that nothing reads it,
-/// exit 0, and the feature still on. That is the defect the fork exists to
-/// end, and routing only `omh set` through it guarded one door of four while
-/// the documentation started pointing people at the other three.
-fn no_legacy_write_over_a_feature(paths: &Paths, name: &str, ctx: &out::Ctx) -> Result<()> {
+/// `omh settings set codegraph off` wrote a top-level `codegraph = "off"`,
+/// warned that nothing reads it, exited 0, and left the feature on. That is
+/// the defect the fork exists to end, and `omh set` was routed through the
+/// same reading while this door stayed open.
+///
+/// **Catalogue entries refuse here too.** They were let through on the reading
+/// that this guard was about features, which is the function's old name and
+/// not its job: `omh settings set myskill on` put `myskill = "on"` into
+/// `default.toml` — the file **every new repo is seeded from** — while
+/// `omh set myskill on` refused the same word. One name, two answers, and the
+/// wrong one is the one that persists.
+fn no_legacy_write_over_a_name_omh_owns(paths: &Paths, name: &str, ctx: &out::Ctx) -> Result<()> {
     match names(paths, name, ctx) {
         Names::AFeature => anyhow::bail!(
             "`{name}` is one of omh's features, not a setting — a bare key of \
              that name is read by nothing.\n  omh set {name} off"
         ),
         Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(name, &feature)),
-        Names::ACatalogueEntry | Names::ASetting | Names::Neither => Ok(()),
+        Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(name, cap)),
+        Names::ASetting | Names::Neither => Ok(()),
     }
+}
+
+/// A catalogue entry is selected, not set. Beside `an_entry_is_not_a_feature`
+/// so the two refusals stay one shape.
+fn a_catalogue_entry_is_not_a_setting(name: &str, cap: adapter::Capability) -> anyhow::Error {
+    anyhow::anyhow!(
+        "`{name}` is one of your {cap}, not a setting — what a project takes \
+         from your catalogue is `omh use`.\n  omh use {cap} {name}\n  \
+         omh unuse {cap} {name}"
+    )
 }
 
 /// The grouping, said where somebody has just guessed at it.
@@ -4453,15 +4545,17 @@ fn unset(paths: &Paths, key: &str, reach: Reach, dry_run: bool, ctx: &out::Ctx) 
 /// it to a directory: `omh settings edit skills ../../../.ssh/id_rsa` is
 /// traversal. Same rule and same function as `[use]` uses, because it is the
 /// same act — a name being minted.
+/// Takes the `Paths` its caller resolved, for the reason `mcp` does: the file
+/// it opens is `~/.omh/default.toml` or a directory under `~/.omh`, and
+/// `Paths::discover` made both unreachable outside a checkout.
 fn edit(
-    cwd: &std::path::Path,
+    paths: &Paths,
     capability: Option<&str>,
     name: Option<&str>,
     layer: config::Layer,
 ) -> Result<()> {
-    let paths = Paths::discover(cwd)?;
     let file = match capability {
-        None => layer.file(&paths),
+        None => layer.file(paths),
         Some(key) => {
             let cap = adapter::Capability::from_key(key).with_context(|| {
                 format!(
@@ -4497,10 +4591,11 @@ fn capability_list() -> String {
 
 /// Switch one of omh's features on or off in this checkout.
 ///
-/// Reached from `omh set <feature> on|off` and from the older `omh repo
-/// enable`/`disable`. It writes the `[omh]` table rather than a bare key,
-/// which is the whole reason `names` exists: a feature written as a settings
-/// key is read by nothing, and looks in the file exactly like one that took.
+/// Reached from `omh set <feature> on|off`, which since 0.7.0 is the only
+/// caller — `enable`/`disable` were the other two and are retired. It writes
+/// the `[omh]` table rather than a bare key, which is the whole reason `names`
+/// exists: a feature written as a settings key is read by nothing, and looks
+/// in the file exactly like one that took.
 ///
 /// The layers come from the same rule every other write uses, so a switch
 /// cannot land under a value that outranks it — `omh use` and `omh unuse`
@@ -4519,6 +4614,13 @@ fn feature_switch(
         .iter()
         .map(|e| e.feature.as_str())
         .collect();
+    // **Unreachable through today's only caller, and kept.** `names` reads
+    // this same manifest from this same path and returns `AFeature` only when
+    // it holds the name, so `omh set` cannot arrive here with a word this
+    // check would refuse. What it stops is the *next* caller: without it, a
+    // route that skipped `names` would write `[omh] nosuchfeature = true`,
+    // which is a file that looks like it took and a feature that never
+    // existed — the defect this whole fork was built to end, one door over.
     if !features.contains(feature) {
         // The entry-name case is the interesting error: it is how somebody
         // discovers the grouping without reading the manifest.
@@ -8135,6 +8237,21 @@ mod tests {
     /// invocation — "there is no `ls` verb", not the line somebody used to
     /// type. That is a real limitation and the cheaper side of it: a scan that
     /// tried to judge intent would let the next one through.
+    /// A wrapped line with its comment leader off, so joining it to the line
+    /// above reads as the one sentence the author wrote.
+    ///
+    /// Without this, a continuation opens with its comment leader, and no
+    /// needle whose first word is `omh` can match across the break.
+    fn continuation(line: &str) -> &str {
+        let text = line.trim_start();
+        for leader in ["///", "//!", "//", "#", "*", ">"] {
+            if let Some(rest) = text.strip_prefix(leader) {
+                return rest.trim_start();
+            }
+        }
+        text
+    }
+
     #[test]
     fn nothing_still_offers_a_verb_that_was_retired() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -8284,7 +8401,8 @@ mod tests {
                 }
                 let body = std::fs::read_to_string(&path).unwrap();
                 read.push(path.strip_prefix(root).unwrap_or(&path).to_path_buf());
-                for (n, line) in body.lines().enumerate() {
+                let lines: Vec<&str> = body.lines().collect();
+                for (n, line) in lines.iter().enumerate() {
                     // Declared, not inferred. Two lines have to type the verb
                     // to do their job — the needles just above, and the test
                     // that checks typing it is refused — and a scan that tried
@@ -8294,8 +8412,27 @@ mod tests {
                     if line.contains(ON_PURPOSE) {
                         continue;
                     }
+                    // **And the line after it, joined.** Every needle here is
+                    // two words with a space between them, and rustfmt wraps
+                    // comments wherever the column runs out — so `omh` ending
+                    // one line and `config mcp add` opening the next is a
+                    // spelling the scan simply could not see. Four sites
+                    // survived that way, one of them user-facing prose
+                    // offering a command that exits 1.
+                    //
+                    // The needles reason carefully about *terminators* — a
+                    // backtick is not a space, and that has cost this guard
+                    // three outings. A line break supplies no terminator at
+                    // all, which is the same blind spot one step further out.
+                    let wrapped = lines
+                        .get(n + 1)
+                        .filter(|next| !next.contains(ON_PURPOSE))
+                        .map(|next| format!("{} {}", line.trim_end(), continuation(next)));
                     for spelling in &gone {
-                        if line.contains(spelling.as_str()) {
+                        let across = wrapped
+                            .as_deref()
+                            .is_some_and(|w| w.contains(spelling.as_str()));
+                        if line.contains(spelling.as_str()) || across {
                             found.push(format!("{}:{}", path.display(), n + 1));
                         }
                     }
@@ -8400,8 +8537,8 @@ mod tests {
     ///
     /// **Two cuts that are not about position.** A line whose first word omh
     /// does not know, run longer than `SENTENCE`, is prose. And a command named
-    /// without the argument the reader supplies is prose — *"Add it with `omh
-    /// config mcp add`"* is not a line to type. clap says which is which, so
+    /// without the argument the reader supplies is prose — *"Add it with
+    /// `omh settings mcp add`"* is not a line to type. clap says which is which, so
     /// nothing keeps a list; 14 lines sit in that second bucket.
     ///
     /// **Where the strictness is not uniform, and why.** That second excuse is
@@ -8729,8 +8866,8 @@ mod tests {
                         .and_modify(|n| *n += 1)
                         .or_insert(1usize);
                     // A command named without the argument the reader supplies
-                    // is a sentence, not a suggestion — *"drop it with `omh
-                    // repo set carry_in`"*. clap already tells the two apart,
+                    // is a sentence, not a suggestion — *"drop it with
+                    // `omh set carry_in`"*. clap already tells the two apart,
                     // so nothing here has to keep a list of which is which:
                     // every way of naming a command omh does not have lands in
                     // some other kind.
@@ -8803,7 +8940,7 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 82),
+            ("main.rs", 80),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),

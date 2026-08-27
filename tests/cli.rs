@@ -63,8 +63,40 @@ impl Sandbox {
             .current_dir(cwd)
             .env("HOME", &self.home)
             .env("PATH", path)
+            // `edit` spawns `$EDITOR`, falling back to `vi` — which, given a
+            // test harness for a terminal, waits forever. `true` exits 0 and
+            // touches nothing, so a test can assert *that* omh got as far as
+            // opening a file without asserting anything about the editor.
+            .env("EDITOR", "true")
             .output()
             .expect("the binary under test must run")
+    }
+
+    /// An editor on the sandbox's PATH that records the argv it was given.
+    ///
+    /// Without one, `omh s attach zed` finds the **real** Zed: `runtime::installed`
+    /// asks PATH, the sandbox only *prepends* to PATH, and the launch is an
+    /// ordinary `Command::new("zed")`. Running the suite opened windows on the
+    /// developer's desktop pointing at `omh-repo-s01` — a host alias that
+    /// exists only inside a `TempDir` that is deleted seconds later, so each
+    /// one failed to resolve and reported it as Zed's error.
+    ///
+    /// The log is the assertion worth making anyway: stdout says which session
+    /// omh *reported* opening, and this says which one it actually passed.
+    fn fake_editor(&self, name: &str) -> PathBuf {
+        let log = self.bin.join(format!("{name}.log"));
+        let shim = self.bin.join(name);
+        std::fs::write(
+            &shim,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        log
     }
 
     /// A `docker` that records every invocation and claims the session
@@ -3727,7 +3759,84 @@ fn settings_works_outside_a_repository() {
     let template = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap();
     assert!(template.contains("45m"), "got: {template}");
 
-    assert!(sb.omh_in(&outside, &["settings"]).status.success());
+    // Every verb, not just the one that was checked. `set` and the bare form
+    // were reached through the `Paths::anywhere` the arm resolves; `edit` and
+    // `mcp` were handed the bare `cwd` and called `Paths::discover` on it
+    // themselves, so they went on refusing while the test above stayed green.
+    for argv in [
+        vec!["settings"],
+        vec!["settings", "edit"],
+        vec!["settings", "mcp", "ls"],
+    ] {
+        let out = sb.omh_in(&outside, &argv);
+        let said = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "`omh {}` reads or writes ~/.omh and needs no worktree: {said}",
+            argv.join(" ")
+        );
+        assert!(
+            !said.contains("git repository"),
+            "`omh {}` answered about worktree branches: {said}",
+            argv.join(" ")
+        );
+    }
+}
+
+/// A name from your catalogue is refused by **both** doors, and each names the
+/// capability it actually found the name in.
+///
+/// The refusal checked `Skills` alone, so a rule or a hook of the same name
+/// got a bare key in the committed file and exit 0 — the quiet answer the
+/// refusal exists to replace. `omh info --repo` prints hook names next to
+/// `not selected`, which is exactly where somebody reads one and types it.
+///
+/// And `omh settings set` let all of them through on the reading that its
+/// guard was about features, writing into the file new repos are seeded from.
+#[test]
+fn a_catalogue_entry_of_any_capability_is_not_a_setting() {
+    let sb = sandbox();
+    sb.seed_base();
+    sb.catalogue(&[
+        "skills/myskill/SKILL.md",
+        "rules/myrule.md",
+        "commands/mycommand.md",
+        "subagents/mysubagent.md",
+        "hooks/myhook.json",
+    ]);
+
+    for (name, capability) in [
+        ("myskill", "skills"),
+        ("myrule", "rules"),
+        ("mycommand", "commands"),
+        ("mysubagent", "subagents"),
+        ("myhook", "hooks"),
+    ] {
+        for argv in [vec!["set", name, "on"], vec!["settings", "set", name, "on"]] {
+            let out = sb.omh(&argv);
+            let said = String::from_utf8_lossy(&out.stderr).to_string();
+            assert!(
+                !out.status.success(),
+                "`omh {}` wrote a catalogue entry as a bare key: {said}",
+                argv.join(" ")
+            );
+            assert!(
+                said.contains(&format!("omh use {capability} {name}")),
+                "the refusal spells the capability it found `{name}` in, or it                  is advice that does not work: {said}"
+            );
+        }
+    }
+    assert!(
+        !sb.settings().contains("myrule"),
+        "the committed file took a key nothing reads: {}",
+        sb.settings()
+    );
+    assert!(
+        !std::fs::read_to_string(sb.home.join(".omh/default.toml"))
+            .unwrap_or_default()
+            .contains("myrule"),
+        "the file every new repo is seeded from took one"
+    );
 }
 
 /// `omh settings` shows the tables it seeds as seeded, not as read by nothing.
@@ -3979,6 +4088,8 @@ fn attach_opens_the_session_and_the_editor_it_was_given() {
     sb.session("s01");
     sb.session("s02");
 
+    let opened = sb.fake_editor("zed");
+
     let out = sb.omh(&["s01", "attach", "zed"]);
     let said = String::from_utf8_lossy(&out.stdout).to_string();
     assert!(
@@ -3992,6 +4103,69 @@ fn attach_opens_the_session_and_the_editor_it_was_given() {
     assert!(
         said.contains("zed"),
         "the editor named is the editor opened: {said}"
+    );
+    // What the editor was actually handed, not what the report claims. The
+    // report is built from the same `alias` either way, so it agrees with
+    // itself whether or not the launch ever happened.
+    let launched = std::fs::read_to_string(&opened).unwrap_or_default();
+    assert!(
+        launched.contains("s01") && !launched.contains("s02"),
+        "the editor opened the session the prefix named: {launched:?}"
+    );
+}
+
+/// `omh s42 attach` refuses a session that does not exist, like every sibling.
+///
+/// It invented one. `Start::Named` returns the id unchecked and `ensure`
+/// creates the worktree, so a typo built an empty session off the base branch
+/// and opened your editor on it, exit 0, saying `session s42 is up` — the same
+/// sentence a real rejoin prints. The comment directly above claimed the
+/// opposite: *attaching an editor to a session that does not exist yet is not
+/// a thing anyone asks for*.
+///
+/// Every other verb under `omh s` goes through `existing_session`, which
+/// refuses by name. This one joined that group in 0.7.0 and did not join its
+/// discipline.
+#[test]
+fn attach_refuses_a_session_that_does_not_exist() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.fake_docker();
+    sb.session("s01");
+
+    let out = sb.omh(&["s42", "attach", "zed"]);
+    assert!(
+        !out.status.success(),
+        "a session that does not exist is a typo, not a request to make one: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("s42"),
+        "and the refusal names it: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !sb.home.join(".omh/worktrees/repo/s42").exists(),
+        "nothing was built for it"
+    );
+}
+
+/// With no sessions at all, attach says so rather than inventing one.
+#[test]
+fn attach_with_no_sessions_says_so() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.fake_docker();
+
+    let out = sb.omh(&["s", "attach"]);
+    assert!(
+        !out.status.success(),
+        "there is nothing to attach to: {}",
+        String::from_utf8_lossy(&out.stdout)
     );
 }
 
@@ -4183,6 +4357,89 @@ fn info_without_repo_is_still_about_the_machine() {
         !said.contains("30m"),
         "and a repo's resolved settings are the other question: {said}"
     );
+}
+
+/// The catalogue listing that `omh info` inherited is asserted here, or the
+/// relocation can be undone without anything going red.
+///
+/// It was the half of bare `config` that was **moved** rather than
+/// deleted, and moved capabilities are the ones that go missing quietly:
+/// replacing the whole block with `Vec::new()` left the suite green. The JSON
+/// carries it too, because that is the shape a script reads.
+#[test]
+fn info_lists_the_catalogue_it_inherited_from_the_deleted_command() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/myskill/SKILL.md", "rules/myrule.md"]);
+
+    let said = String::from_utf8_lossy(&sb.omh(&["info"]).stdout).to_string();
+    for want in ["your catalogue", "myskill", "myrule"] {
+        assert!(
+            said.contains(want),
+            "bare `config` listed the catalogue and `omh info` is where it \
+             went — no `{want}`: {said}"
+        );
+    }
+
+    let out = sb.omh(&["info", "--json"]);
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json is machine-readable");
+    let catalogue = json["catalogue"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no catalogue in {json:#}"));
+    let skills = catalogue
+        .iter()
+        .find(|c| c["capability"] == "skills")
+        .unwrap_or_else(|| panic!("no skills row in {json:#}"));
+    assert_eq!(skills["count"], 1, "got {json:#}");
+    assert_eq!(skills["entries"][0], "myskill", "got {json:#}");
+}
+
+/// A retired spelling is answered for where the verb goes, and nowhere else.
+///
+/// `retired()` runs after clap has refused, for *any* reason — so a table
+/// entry that matched a word anywhere in the line answered a migration
+/// question nobody asked. `config` and `repo` are ordinary names for a
+/// settings key, a skill, or an MCP server, and every line below is a plain
+/// typo whose honest answer clap already had. Getting *"`config` is gone — it
+/// is `omh settings` now"* from `omh settings mcp add config` is a confident
+/// wrong answer in place of a correct one.
+#[test]
+fn a_retired_spelling_somewhere_other_than_the_verb_gets_claps_own_refusal() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for (argv, expected) in [
+        (vec!["settings", "set", "config"], "<VALUE>"),
+        (vec!["set", "repo"], "<VALUE>"),
+        (vec!["settings", "mcp", "add", "config"], "<COMMAND>"),
+        // `c` and `a` are retired *verbs*, and both are one letter — the
+        // shape most likely to turn up as an argument to something else.
+        (vec!["s", "c"], "unrecognized subcommand"),
+        (vec!["doctor", "c"], "unexpected argument"),
+        (vec!["s", "attach", "--nope"], "unexpected argument"),
+    ] {
+        let out = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "`omh {}` is not a line omh accepts",
+            argv.join(" ")
+        );
+        assert!(
+            said.contains(expected),
+            "`omh {}` deserves clap's own `{expected}`, not a retirement \
+             notice: {said}",
+            argv.join(" ")
+        );
+        assert!(
+            !said.contains("is gone"),
+            "`omh {}` was answered as a migration: {said}",
+            argv.join(" ")
+        );
+    }
 }
 
 /// The retired spelling says what replaced it.

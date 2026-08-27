@@ -1172,7 +1172,6 @@ pub fn pick(worktrees_dir: &Path, start: Start) -> String {
     match start {
         Start::Named(id) => id.to_string(),
         Start::Fresh => next_id(worktrees_dir),
-        Start::Resume => current(worktrees_dir).unwrap_or_else(|| next_id(worktrees_dir)),
     }
 }
 
@@ -1261,6 +1260,13 @@ pub fn harness_of(run_dir: &Path, session: &str) -> Ran {
 
 /// Which session a command is asking for.
 ///
+/// **`Resume` was the third answer and is gone.** It meant *the one already
+/// here, or a fresh one if there is none*, and that second half is what let
+/// `attach` open an editor on a session nobody started. Rejoining is
+/// `existing_session` now, which refuses by name instead of inventing — so
+/// there is no caller left that wants "or make one up", and a variant kept
+/// alive by its own unit tests is a shape the next caller would reach for.
+///
 /// Three answers, and they were two parameters — `explicit: Option<&str>` and
 /// `new: bool` — which is four combinations for three meanings. The spare one,
 /// *this exact session, and also a brand new one*, had to be resolved, and it
@@ -1279,8 +1285,6 @@ pub enum Start<'a> {
     Named(&'a str),
     /// One that does not exist yet.
     Fresh,
-    /// The one already here, or a fresh one if there is none.
-    Resume,
 }
 
 /// Human-readable, monotonic session ids: `s01`, `s02`, ...
@@ -3082,21 +3086,6 @@ mod tests {
     fn the_current_session_is_the_most_recent() {
         let (_d, wt) = worktrees(&["s01", "s02", "s03"]);
         assert_eq!(current(&wt).as_deref(), Some("s03"));
-    }
-
-    /// Regression: every bare launch called `next_id`, so launching twice
-    /// produced two sessions and you could never reattach to the agent you left
-    /// running — which makes dtach persistence pointless.
-    #[test]
-    fn a_bare_launch_resumes_rather_than_multiplying_sessions() {
-        let (_d, wt) = worktrees(&["s01"]);
-        assert_eq!(pick(&wt, Start::Resume), "s01");
-    }
-
-    #[test]
-    fn the_first_launch_creates_the_first_session() {
-        let (_d, wt) = worktrees(&[]);
-        assert_eq!(pick(&wt, Start::Resume), "s01");
     }
 
     #[test]
