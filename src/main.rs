@@ -8317,14 +8317,21 @@ mod tests {
             // this was written. A needle costs nothing; a needle presented as
             // a catch that never caught anything costs the next reader.
             //
+            // **None of these end in a space.** Two did, and `attach` was added
+            // the same way and matched nothing at all while seventeen sites
+            // survived — this repo writes a command inside backticks, and a
+            // backtick is not a space. Audited when that was found: no site was
+            // hiding behind the two, so this is hardening rather than a repair,
+            // but the shape is the one that has now failed three times.
+            //
             // Their absence from this list is what let a sweep leave them
             // behind, which is the argument for adding a name here whenever
             // one leaves rather than when someone next trips over it. `run` is
             // not among them: `omh runs` is ordinary prose in four files, and
             // a needle that matches prose is a needle that gets deleted.
             format!("omh {}", "code"), // types the retired verb on purpose
-            format!("omh {} ", "fwd"), // types the retired verb on purpose
-            format!("omh {} ", "mcp"), // types the retired verb on purpose
+            format!("omh {}", "fwd"),  // types the retired verb on purpose
+            format!("omh {}", "mcp"),  // types the retired verb on purpose
             // The wide listing's verb, retired in favour of the noun. It still
             // listed sessions — what it never showed was what any of them was
             // *doing*, which is `omh s`, so the name promised a summary it did
