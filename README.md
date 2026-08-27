@@ -124,23 +124,29 @@ $ omh init
 ```
 omh init — decided, asked nothing
 
-  harnesses  3 (claude, omp, opencode)
-  editors    4 (code, cursor, nvim, zed)
   harness    claude  (found on your host)
-  stack      rust (from Cargo.toml) → test `cargo test`, format `cargo fmt`
-  memory     seeded from 2 sources:
-               README.md    Launch any coding harness, in a sandbox…
-               Cargo.toml   stack: rust (test `cargo test`, format `cargo fmt`)
-  image      omh/claude:a1240cb9 (built)
+  image      omh/claude:b4edd8fd15d4d669 (already built)
+  image      omh/claude:8eae0d5c1511fa89 (this repo's toolchain)
+  stack      rust (from Cargo.toml)
+  hooks      2 selected  (4 more in your catalogue)
+  provision  rust/linker
+  provision  rust/toolchain
+  memory     2 notes written, 0 already there
   graph      indexing in background → omh-cache-your-project
 
-  base set  (2026.08)
+  catalogue  /Users/you/.omh
+  this repo  /Users/you/code/your-project/.omh  (committed)
+
+  base set (2026.08)
     codegraph  structural queries instead of re-grepping the repo every task
+    memory     what a session learned outlives it — a removed session leaves no transcript to grep
 
   omh why <name>  what it costs, what was considered instead, how to remove it
 
-not yet done: cost accounting.
-next: omh new claude
+  next
+    omh new claude  start a session
+    omh s resume    rejoin it later
+    omh s attach    open it in your editor
 ```
 
 `init` **decides and reports** — it never asks. Every question is hassle the tool
@@ -151,7 +157,7 @@ Then log in once and go:
 
 ```console
 $ omh auth claude --name personal   # runs the harness's own login, captures it
-$ omh new claude                   # sandboxed, logged in, configured
+$ omh new claude                    # sandboxed, logged in, configured
 ```
 
 ## Commands

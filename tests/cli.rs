@@ -126,6 +126,12 @@ impl Sandbox {
     /// `omh-repo-s10` reported `omh-repo-s1` as running. Nothing in the tree
     /// needs that emulation now.
     ///
+    /// `docker-probe-refuses` fails only the `--pull=never` run, which is the
+    /// facts probe and nothing else — the predicate run that decides which
+    /// stack provides apply carries no such flag. That is the narrowest of the
+    /// three, and it is the one whose failure `measure` reports and swallows:
+    /// the answers stay as they were, which reads as *nobody has looked*.
+    ///
     /// Writing `docker-refuses` into the bin directory makes the shim exit
     /// non-zero, which is how a runtime that cannot be reached is reachable
     /// from a test at all. `docker-exec-refuses` fails only `exec`, which is
@@ -142,11 +148,14 @@ impl Sandbox {
                  [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
                  if [ \"$1\" = exec ] && [ -f {exec_refuses} ]; then \
                  cat {exec_refuses} >&2; exit 1; fi\n\
+                 case \"$*\" in *--pull=never*) [ -f {probe_refuses} ] && {{ \
+                 echo 'no such image' >&2; exit 125; }} ;; esac\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\n\
                  if [ \"$1\" = ps ]; then cat {containers} 2>/dev/null; fi\nexit 0\n",
                 log = log.display(),
                 refuses = self.bin.join("docker-refuses").display(),
                 exec_refuses = self.bin.join("docker-exec-refuses").display(),
+                probe_refuses = self.bin.join("docker-probe-refuses").display(),
                 containers = self.bin.join("containers").display()
             ),
         )
@@ -3536,6 +3545,206 @@ fn init_seeds_the_repo_from_your_template_and_says_so() {
         !seeded.contains("rubbish"),
         "a key omh reads nothing from is not propagated into every repo you \
          ever start: {seeded}"
+    );
+}
+
+/// `init` reports what it did **here**, and not what the machine has.
+///
+/// Nothing asserted init's printed output at all — every other init test reads
+/// files on disk — so the report was unguarded in both directions: a row could
+/// be dropped or invented and the suite would not notice. The rewrite that
+/// dropped the inventory is exactly the change that needed one.
+///
+/// The three claims, in the order they broke:
+///
+/// - **No inventory.** `harnesses 3 (…)` and `editors 4 (…)` opened the report
+///   and were true before the command ran. `omh info` answers that.
+/// - **The catalogue selection**, which is the thing `init` actually decided
+///   about this repo and which nothing said.
+/// - **Three next lines**, not one. `omh new` starts a session and
+///   `omh s resume` rejoins it, and a reader shown only the first starts a
+///   second session instead — which is the mistake splitting the two verbs
+///   apart was meant to make unreachable.
+///
+/// Ignored because `init` builds an image.
+#[test]
+#[ignore]
+fn init_reports_what_it_did_here_and_not_what_the_machine_has() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/refactor/SKILL.md"]);
+
+    let out = sb.omh(&["init"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    for gone in ["harnesses", "editors"] {
+        assert!(
+            !said.contains(gone),
+            "`{gone}` is a fact about the machine, unchanged by this command \
+             — `omh info` is where it lives now: {said}"
+        );
+    }
+    // Separately, and for a different reason: `not yet done: recall` sat four
+    // lines under the base set's own `memory` row, which is the MCP server
+    // that answers `recall`. A new user's first screen contradicted itself.
+    // The constant and the guard reading it went with the line; this is what
+    // is left of the claim, and it is the claim rather than the spelling that
+    // mattered.
+    assert!(
+        !said.contains("not yet done"),
+        "no line calls undone what the rows above just installed: {said}"
+    );
+    // The row, not two substrings that could sit anywhere. The gutter is
+    // padded to the widest label in the table, so its width is data and
+    // cannot be spelled here — the line is found by its label instead.
+    let skills = said
+        .lines()
+        .find(|l| l.trim_start().starts_with("skills"))
+        .unwrap_or_else(|| panic!("no skills row: {said}"));
+    assert!(
+        skills.contains("2 selected"),
+        "the count belongs to the capability beside it: {skills:?}"
+    );
+    for line in ["omh new claude", "omh s resume", "omh s attach"] {
+        assert!(
+            said.contains(line),
+            "`{line}` is one of the three, and a reader shown only the first \
+             starts a second session rather than rejoining: {said}"
+        );
+    }
+
+    // The same answer, and the same shape, as the command whose whole job it
+    // is. Two derivations of one fact are two facts.
+    let repo = String::from_utf8_lossy(&sb.omh(&["info", "--repo"]).stdout).to_string();
+    assert!(
+        repo.contains("review-diff") && repo.contains("refactor"),
+        "init wrote the selection `omh info --repo` reads: {repo}"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
+        .expect("--json is machine-readable");
+    assert!(json["adapters"].is_null(), "the inventory left: {json:#}");
+    let skills = json["using"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no using in {json:#}"))
+        .iter()
+        .find(|u| u["capability"] == "skills")
+        .unwrap_or_else(|| panic!("no skills row in {json:#}"));
+    assert_eq!(skills["selected"].as_array().map(Vec::len), Some(2));
+    assert_eq!(json["next"][0]["run"], "omh new claude", "got {json:#}");
+}
+
+/// A probe that could not run is not a sandbox that has everything.
+///
+/// The deepest of the gates, and the one that reaches this report looking most
+/// like success. `measure` reports a failed probe and swallows it — right for a
+/// launch, where an unmeasured program suppresses nothing and no hook is
+/// dropped on a guess — so the facts stay as they were, `render::held_back`
+/// derives an empty list from them, and `init` printed a clean bill of health
+/// issued by a doctor who was out. `--json` carried no trace of it at all: the
+/// warning goes to stderr, and a machine consumer read `held_back: []`.
+///
+/// The healthy run and the broken one were byte-identical.
+///
+/// Ignored because `init` runs a container.
+#[test]
+#[ignore]
+fn a_probe_that_could_not_run_is_not_a_clean_bill_of_health() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    // **No stack**, deliberately. With one there are provisioning conditions
+    // to ask about, the shim answers none of them, and `fired_from` stops the
+    // run at the shallower gate — which reports correctly and never reaches
+    // the one this test is about. Nothing to provision is what gets `init` all
+    // the way down to the ask.
+    sb.fake_docker();
+    // Only the `--pull=never` run, which is the facts probe. The predicate run
+    // carries no such flag and is unaffected.
+    std::fs::write(sb.bin.join("docker-probe-refuses"), "x").unwrap();
+
+    let out = sb.omh(&["init"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "a diagnostic that could not run does not fail the setup: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("not measured"),
+        "the sandbox was never asked, and an empty list says the opposite: {said}"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
+        .expect("--json is machine-readable");
+    assert!(
+        !json["hooks_unchecked"].is_null(),
+        "the warning is on stderr, so this is all a script has: {json:#}"
+    );
+}
+
+/// When the hooks were not measured, the report names the gate that stopped it.
+///
+/// An empty held-back list meant both *nothing was held back* and *nothing was
+/// asked*, and only one of those is good news. The field that tells them apart
+/// carried a single string set where it was declared — so a repo with a
+/// harness, an image, and a probe that came back short was told
+/// `not measured — no harness`, two rows under the line naming its harness.
+///
+/// A field that exists to end a misleading silence must not replace it with a
+/// misleading sentence, so the reason is written by whichever gate stopped it
+/// and this asserts the *content*, not the presence.
+///
+/// Ignored because `init` runs a container.
+#[test]
+#[ignore]
+fn a_hook_measurement_that_did_not_happen_says_which_gate_stopped_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    // A stack, so there are conditions to ask about — with none, "asked
+    // nothing" is the honest answer and this row correctly never appears.
+    std::fs::write(
+        sb.repo.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    // Answers `inspect` but returns nothing from `run`, which is a probe that
+    // came back short rather than one that failed — the arm that reported the
+    // wrong reason, because it is the one that looks like an ordinary run.
+    sb.fake_docker();
+
+    let out = sb.omh(&["init"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("not measured"),
+        "an unasked question is not an answer of `none`: {said}"
+    );
+    assert!(
+        !said.contains("not measured — no harness"),
+        "this repo has a harness, and the row above says so: {said}"
+    );
+    assert!(
+        said.contains("conditions") || said.contains("could not be asked"),
+        "the reason names the gate that actually stopped it: {said}"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
+        .expect("--json is machine-readable");
+    assert!(
+        !json["hooks_unchecked"].is_null(),
+        "and a script reads the same fact: {json:#}"
     );
 }
 

@@ -1612,6 +1612,9 @@ pub struct Using {
     /// list that happens to name everything in it today, because one keeps up
     /// as the catalogue grows and the other does not.
     pub selected: Option<Vec<String>>,
+    /// Empty whenever `selected` is `None` — a capability following the whole
+    /// catalogue has nothing it left behind, and `Selection::unselected` says
+    /// so. `Init`'s decision about which rows to print depends on it.
     pub unselected: Vec<String>,
 }
 
@@ -1941,13 +1944,40 @@ impl Report for Imported {
 
 // ── omh init ────────────────────────────────────────────────────────────────
 
-/// What omh has not built yet, printed on `init`'s last line.
+/// What the sandbox said about this repo's hooks — or why it was never asked.
 ///
-/// A constant rather than a literal in the middle of `human` because it is a
-/// claim about the whole product that nothing else re-checks, and it is
-/// exactly the kind of line that gets typed once and left. It was: `recall`
-/// shipped with the memory server and this sentence went on calling it undone.
-const NOT_YET_DONE: &str = "not yet done: cost accounting.";
+/// One field rather than a `Vec` beside an `Option<String>`, because an empty
+/// list and an unasked question render identically and only one of them is
+/// good news: the measurement sits two `if let`s deep in `init` — a harness,
+/// and a provisioning probe that answered in full — so a repo whose sandbox
+/// could not be reached reported nothing held back while the launcher went on
+/// holding hooks back.
+///
+/// **The default is `Unchecked`, and that is the point.** As two fields the
+/// derived `Default` was `None` beside an empty `Vec`, which the renderer read
+/// as *asked, and all clear* — so a branch that forgot to say anything got the
+/// reassuring answer for free. That is the shape of the defect this replaced,
+/// one level up.
+///
+/// Two fields could also say *not measured* and *here is what was measured* at
+/// once. This cannot.
+#[derive(Debug, Clone)]
+pub enum Hooks {
+    /// The sandbox answered. `(hook, program it needs)` — written and
+    /// travelling, but not running here. Empty is a clean bill of health.
+    Measured(Vec<(String, String)>),
+    /// The question was never put, and why — written by the branch that
+    /// skipped it, so it cannot describe a different one. It carried a single
+    /// string set where it was declared, and told a repo with a harness, an
+    /// image and a failed probe `not measured — no harness`.
+    Unchecked(String),
+}
+
+impl Default for Hooks {
+    fn default() -> Self {
+        Self::Unchecked("the sandbox was not asked".to_string())
+    }
+}
 
 /// Everything `omh init` decided, in the order somebody reads it.
 ///
@@ -1965,8 +1995,6 @@ pub struct Init {
     /// a question declined was still a question asked, and the headline claims
     /// omh asked nothing.
     pub asked: usize,
-    pub adapters: Vec<String>,
-    pub editors: Vec<String>,
     pub harness: Option<String>,
     pub harness_on_host: bool,
     /// The base image, and the repo-specific one if a stack layer was built.
@@ -1975,10 +2003,15 @@ pub struct Init {
     /// `(name, marker)` per detected stack.
     pub stacks: Vec<(String, String)>,
     pub provisioned: Vec<String>,
-    /// Things that went wrong while provisioning without failing `init`.
-    pub provision_problems: Vec<String>,
-    /// `(hook, program it needs)` — written and travelling, but not running here.
-    pub held_back: Vec<(String, String)>,
+    /// What went wrong without failing `init`.
+    ///
+    /// Provisioning's alone once, and named for it. The report's own reads —
+    /// the catalogue, the selection — joined it when they stopped propagating:
+    /// `init` reaches them having already built two images and written the
+    /// repo, and turning that into exit 1 and one line of permission error
+    /// reported none of the work it had actually done.
+    pub problems: Vec<String>,
+    pub hooks: Hooks,
     pub importable: Vec<String>,
     pub memory: String,
     pub catalogue_dir: String,
@@ -1986,8 +2019,35 @@ pub struct Init {
     pub graph: Option<String>,
     pub base_set: String,
     pub rationale: Vec<(String, String)>,
-    pub next_command: String,
-    /// Settings copied out of `~/.omh/settings.toml` into this repo's file.
+    /// What this repo takes from your catalogue, per capability.
+    ///
+    /// The same value `omh info --repo` reports, built the same way, because
+    /// the question *what did init select here* and the question *what is
+    /// selected here* have one answer and two commands that must not be able
+    /// to disagree about it.
+    ///
+    /// **Selected, never installed.** Every capability but hooks is composed
+    /// into each session from the catalogue rather than copied in — which is
+    /// what lets a fix reach a repo that ran `init` a year ago — and MCP lives
+    /// in `~/.omh/mcp.json`, which `init` writes to your *catalogue*, not
+    /// here. Hooks are the one capability `init` writes into **this repo**,
+    /// and only the ones it derives. Saying *installed* would describe work
+    /// that does not happen.
+    pub using: Vec<Using>,
+    /// The advisory lines the selection wants to add, the same ones
+    /// `omh info --repo` prints.
+    ///
+    /// Without them the two reports disagreed at exactly the place the rows
+    /// above claim they cannot: a `[use]` entry naming something nothing
+    /// answers to is filtered out of *both* `selected` and `unselected`, so
+    /// when it was a capability's only entry the row vanished from `init` —
+    /// while `omh info --repo`, one command later, warned about it by name.
+    /// The derivation was shared; the reporting was not.
+    pub notices: Vec<String>,
+    /// `(run, does)`, in the order somebody does them — the names `json`
+    /// publishes, so the pair has one set of names rather than three.
+    pub next: Vec<(String, String)>,
+    /// Settings copied out of `~/.omh/default.toml` into this repo's file.
     ///
     /// Reported because it is the one moment that template has any effect —
     /// nothing reads it at launch. A seed nobody is told about is
@@ -2015,23 +2075,12 @@ impl Report for Init {
             )
         );
 
+        // **No inventory.** `harnesses 3 (claude, omp, opencode)` and
+        // `editors 4 (…)` opened this report and answered a question nobody
+        // asks after `init`: they are facts about the machine, true before the
+        // command ran and unchanged by it. `omh info` is where the machine is
+        // described. What belongs here is what happened to *this repo*.
         let mut t = Table::new();
-        t = t.row(vec![
-            Cell::plain("harnesses"),
-            Cell::plain(format!(
-                "{} ({})",
-                self.adapters.len(),
-                self.adapters.join(", ")
-            )),
-        ]);
-        t = t.row(vec![
-            Cell::plain("editors"),
-            Cell::plain(format!(
-                "{} ({})",
-                self.editors.len(),
-                self.editors.join(", ")
-            )),
-        ]);
         t = t.row(vec![
             Cell::plain("harness"),
             match &self.harness {
@@ -2079,23 +2128,67 @@ impl Report for Init {
                 Cell::plain(format!("{name} (from {marker})")),
             ]);
         }
+        // Selected, and what was left in the catalogue — the second half is
+        // the one that is invisible otherwise, and it is the reason somebody
+        // later asks why a skill they have is not running here.
+        for using in &self.using {
+            // A capability you have nothing in has nothing to report. On a
+            // fresh install that is five rows of `0 selected` between the
+            // stack and the provisioning, and a reader learns from them only
+            // that omh has six capabilities — which is `omh info`'s answer,
+            // not this one's.
+            let mut said = match (&using.selected, using.unselected.is_empty()) {
+                (Some(taken), true) if taken.is_empty() => continue,
+                (None, _) => "everything in your catalogue".to_string(),
+                (Some(taken), _) => format!("{} selected", taken.len()),
+            };
+            if !using.unselected.is_empty() {
+                // *More in your catalogue*, not *declined*. This count is the
+                // unfiltered catalogue — the same list `omh info --repo`
+                // shows — so in a repo with no stack detected it counts
+                // `go-test` and `python-format`, which this repo could never
+                // have taken. Calling those "not here" told a first-time
+                // reader they had turned down six things they never saw. What
+                // narrows to the applicable set is `notices`, below, which is
+                // why both are on this page.
+                said.push_str(&format!(
+                    "  ({} more in your catalogue)",
+                    using.unselected.len()
+                ));
+            }
+            t = t.row(vec![Cell::plain(&using.capability), Cell::plain(said)]);
+        }
         for key in &self.provisioned {
             t = t.row(vec![Cell::plain("provision"), Cell::plain(key)]);
         }
-        for problem in &self.provision_problems {
+        // `problem`, not `provision`. The list was provisioning's alone and
+        // is now where every non-fatal failure `init` hits goes — a catalogue
+        // it could not read is not a provisioning problem, and labelling it
+        // one sends the reader to look at their stacks.
+        for problem in &self.problems {
             t = t.row(vec![
-                Cell::plain("provision"),
+                Cell::plain("problem"),
                 Cell::styled(problem, out::WARN),
             ]);
         }
         // Named, with the evidence, because the alternative is the failure the
         // whole design replaces: a hook that runs on turn one and reports
         // `cargo: not found`, saying nothing about who decided to run cargo.
-        for (name, wanted) in &self.held_back {
-            t = t.row(vec![
-                Cell::styled("held back", out::WARN),
-                Cell::plain(format!("`{name}` needs {wanted}")),
-            ]);
+        match &self.hooks {
+            Hooks::Measured(held) => {
+                for (name, wanted) in held {
+                    t = t.row(vec![
+                        Cell::styled("held back", out::WARN),
+                        Cell::plain(format!("`{name}` needs {wanted}")),
+                    ]);
+                }
+            }
+            Hooks::Unchecked(why) => {
+                t = t.row(vec![
+                    Cell::styled("held back", out::WARN),
+                    Cell::plain(format!("not measured — {why}")),
+                ]);
+            }
         }
         for line in &self.importable {
             t = t.row(vec![Cell::plain(""), Cell::plain(line)]);
@@ -2149,16 +2242,26 @@ impl Report for Init {
                 "omh why <name>  what it costs, what was considered instead, how to remove it"
             )
         ));
-        s.push_str(&format!("\n{}\n", p.paint(out::DIM, NOT_YET_DONE)));
-        s.push_str(&format!("next: omh {}\n", self.next_command));
+        // Three lines rather than one, because the first thing after `init`
+        // is not the only thing: the two that follow it are how you get back
+        // to the session you are about to start, and a person who never sees
+        // them starts a second one instead.
+        for line in &self.notices {
+            s.push_str(&format!("\n{line}\n"));
+        }
+
+        s.push_str(&format!("\n  {}\n", p.paint(out::HEAD, "next")));
+        let mut next = Table::new().indent(4);
+        for (line, does) in &self.next {
+            next = next.row(vec![Cell::styled(line, out::NAME), Cell::plain(does)]);
+        }
+        s.push_str(&next.render(p));
         s
     }
 
     fn json(&self) -> serde_json::Value {
         json!({
             "asked": self.asked,
-            "adapters": self.adapters,
-            "editors": self.editors,
             "harness": self.harness,
             "harness_on_host": self.harness_on_host,
             "image": self.image,
@@ -2168,11 +2271,22 @@ impl Report for Init {
                 "marker": marker,
             })).collect::<Vec<_>>(),
             "provisioned": self.provisioned,
-            "provision_problems": self.provision_problems,
-            "held_back": self.held_back.iter().map(|(name, wanted)| json!({
-                "hook": name,
-                "needs": wanted,
-            })).collect::<Vec<_>>(),
+            "problems": self.problems,
+            // Both keys kept, and the enum matched to fill them: a script
+            // reading `held_back == []` has to be able to tell the clean bill
+            // from the unasked question, which is the same distinction the
+            // human rows make.
+            "held_back": match &self.hooks {
+                Hooks::Measured(held) => held.iter().map(|(name, wanted)| json!({
+                    "hook": name,
+                    "needs": wanted,
+                })).collect::<Vec<_>>(),
+                Hooks::Unchecked(_) => Vec::new(),
+            },
+            "hooks_unchecked": match &self.hooks {
+                Hooks::Measured(_) => serde_json::Value::Null,
+                Hooks::Unchecked(why) => json!(why),
+            },
             "importable": self.importable,
             "memory": self.memory,
             "catalogue_dir": self.catalogue_dir,
@@ -2183,7 +2297,16 @@ impl Report for Init {
                 "name": name,
                 "why": why,
             })).collect::<Vec<_>>(),
-            "next": self.next_command,
+            "using": self.using.iter().map(|u| json!({
+                "capability": u.capability,
+                "selected": u.selected,
+                "unselected": u.unselected,
+            })).collect::<Vec<_>>(),
+            "notices": self.notices,
+            "next": self.next.iter().map(|(line, does)| json!({
+                "run": line,
+                "does": does,
+            })).collect::<Vec<_>>(),
             "seeded": self.seeded,
         })
     }
@@ -2715,29 +2838,6 @@ impl Report for Lint {
 
 #[cfg(test)]
 mod tests {
-    /// `init` does not call unfinished something the same screen installed.
-    ///
-    /// `omh init` prints the base set it just seeded — including *"memory —
-    /// what a session learned outlives it"*, which is the MCP server answering
-    /// `recall` and `remember` — and then printed *"not yet done: recall"* four
-    /// lines below it. A new user's first screen contradicted itself, and the
-    /// sentence was a literal buried in `human` that nothing read again.
-    ///
-    /// The tool names are the pair `doctor::memory_checks` expects the server
-    /// to speak, so this fails if the sentence ever re-names a shipped one.
-    #[test]
-    fn init_does_not_call_unfinished_a_capability_that_ships() {
-        for tool in ["recall", "remember"] {
-            assert!(
-                !super::NOT_YET_DONE.contains(tool),
-                "`{}` ships — the memory server answers it and `omh doctor` \
-                 checks that it does — but init still reports it as undone: {}",
-                tool,
-                super::NOT_YET_DONE
-            );
-        }
-    }
-
     /// A sync names every file that needs a decision, and counts them in a
     /// sentence rather than in a template.
     ///
@@ -4152,6 +4252,163 @@ mod tests {
     /// **Following the catalogue is not the same as listing everything in it.**
     ///
     /// A capability with no selection tracks the catalogue as it grows; a
+    /// What `init` reports, without a container in sight.
+    ///
+    /// Nearly all of this report's coverage rides on `#[ignore]`, because
+    /// `init` builds an image — so a plain `cargo test`, and every macOS run,
+    /// was blind to the whole of `Init::human` and `Init::json`. These are
+    /// decisions the renderer makes on its own, and they need no runtime at
+    /// all: mutation found the `using` loop, the `notices` loop, the JSON keys
+    /// for both, the empty-capability skip and every one of the three rows
+    /// `init` *kept* to be deletable with the suite green.
+    fn an_init() -> Init {
+        Init {
+            harness: Some("claude".into()),
+            harness_on_host: true,
+            image: Some("omh/claude:abc".into()),
+            stacks: vec![("rust".into(), "Cargo.toml".into())],
+            using: vec![
+                Using {
+                    capability: "rules".into(),
+                    selected: None,
+                    unselected: vec![],
+                },
+                Using {
+                    capability: "skills".into(),
+                    selected: Some(vec!["review-diff".into()]),
+                    unselected: vec!["refactor".into()],
+                },
+                Using {
+                    capability: "hooks".into(),
+                    selected: Some(vec![]),
+                    unselected: vec![],
+                },
+            ],
+            notices: vec!["warning: [use] names an entry nothing answers to: skills/nope".into()],
+            next: vec![("omh new claude".into(), "start a session".into())],
+            hooks: Hooks::Measured(vec![("rust-test".into(), "`cargo`".into())]),
+            ..Default::default()
+        }
+    }
+
+    /// Every row `init` keeps is a row somebody reads, and each was deletable.
+    ///
+    /// The report guarded what it *removed* — `harnesses`, `editors`,
+    /// `not yet done` — and nothing it retained. Deleting the harness row, the
+    /// image rows or the stack rows left the suite green, which is the shape
+    /// of a report that can be hollowed out one line per commit.
+    #[test]
+    fn init_keeps_the_rows_it_kept() {
+        let human = emit(&an_init(), Format::Human, &Palette::plain());
+        for row in [
+            "harness",
+            "claude",
+            "image",
+            "omh/claude:abc",
+            "stack",
+            "rust",
+        ] {
+            assert!(human.contains(row), "no `{row}` row: {human}");
+        }
+    }
+
+    /// A capability with nothing in it is skipped; one following the whole
+    /// catalogue is not.
+    ///
+    /// Both directions, because both were free. Widening the skip deletes the
+    /// `everything in your catalogue` rows — the state `Using`'s own doc
+    /// argues is distinct from a complete list — and dropping it restores the
+    /// five `0 selected` rows a fresh install has no use for.
+    #[test]
+    fn an_empty_capability_is_skipped_and_an_unpinned_one_is_not() {
+        let human = emit(&an_init(), Format::Human, &Palette::plain());
+        assert!(
+            human.contains("rules") && human.contains("everything in your catalogue"),
+            "following the catalogue is something to say: {human}"
+        );
+        assert!(
+            !human.contains("hooks"),
+            "nothing selected and nothing left over is nothing to report: {human}"
+        );
+        assert!(
+            human.contains("1 more in your catalogue"),
+            "and what is left over is counted, not called declined: {human}"
+        );
+    }
+
+    /// The notices reach both reports, or the two disagree.
+    ///
+    /// `init` took half of `omh info --repo`'s answer: it shared the
+    /// derivation and not the reporting, so a `[use]` entry naming something
+    /// nothing answers to vanished from one and was warned about by name in
+    /// the other. Dropping the loop or the JSON key left the suite green.
+    #[test]
+    fn init_carries_the_notices_the_repo_report_carries() {
+        let init = an_init();
+        let human = emit(&init, Format::Human, &Palette::plain());
+        assert!(
+            human.contains("nothing answers to: skills/nope"),
+            "the warning is on the page somebody reads first: {human}"
+        );
+        assert_eq!(
+            init.json()["notices"],
+            json!(["warning: [use] names an entry nothing answers to: skills/nope"]),
+            "and a script reads the same fact"
+        );
+    }
+
+    /// A sandbox that answered says what it found; one that was never asked
+    /// says so instead.
+    ///
+    /// Both arms, because pinning only the unhealthy one leaves the whole
+    /// `Measured` arm — the held-back rows, which are the feature — deletable
+    /// in silence.
+    #[test]
+    fn a_measured_sandbox_and_an_unasked_one_do_not_read_alike() {
+        let measured = emit(&an_init(), Format::Human, &Palette::plain());
+        assert!(
+            measured.contains("rust-test") && measured.contains("`cargo`"),
+            "what is held back is named, with what it needs: {measured}"
+        );
+        assert!(
+            !measured.contains("not measured"),
+            "the sandbox answered: {measured}"
+        );
+        assert!(
+            an_init().json()["hooks_unchecked"].is_null(),
+            "and a script reads these as answers"
+        );
+
+        let unasked = Init {
+            hooks: Hooks::Unchecked("the sandbox could not be asked".into()),
+            ..an_init()
+        };
+        let human = emit(&unasked, Format::Human, &Palette::plain());
+        assert!(
+            human.contains("not measured — the sandbox could not be asked"),
+            "and an empty list is not a clean bill of health: {human}"
+        );
+        assert_eq!(unasked.json()["held_back"], json!([]));
+        assert_eq!(
+            unasked.json()["hooks_unchecked"],
+            json!("the sandbox could not be asked"),
+            "the one key that tells the two empties apart"
+        );
+    }
+
+    /// What `init` says to run next reaches both forms.
+    #[test]
+    fn the_next_block_is_in_the_report_and_in_the_json() {
+        let init = an_init();
+        let human = emit(&init, Format::Human, &Palette::plain());
+        assert!(
+            human.contains("next") && human.contains("omh new claude"),
+            "{human}"
+        );
+        assert_eq!(init.json()["next"][0]["run"], json!("omh new claude"));
+        assert_eq!(init.json()["next"][0]["does"], json!("start a session"));
+    }
+
     /// selection that happens to name all of today's entries does not. They
     /// look identical the moment you print them as a list of names, and they
     /// diverge the first time somebody adds a skill — one repo gets it, the

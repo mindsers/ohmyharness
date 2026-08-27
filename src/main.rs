@@ -1308,22 +1308,48 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     }
 }
 
-/// What to tell someone whose word matched nothing. Pure so it can be tested:
-/// the message is the entire value of this path.
-/// What `omh init` tells you to run next.
+/// What to do next, in the order somebody does it.
 ///
 /// A function rather than an expression inside `init`, because it is the one
 /// instruction the product prints and it was a parse error for a release: the
 /// line is *composed*, so the scan that reads printed `omh …` literals cannot
 /// see it, and sweeping the doc transcripts to match made the docs show output
 /// omh does not produce. Pulled out here so the parser can be asked.
-fn next_after_init(harness: Option<&str>) -> String {
-    // `settings`, not `config` — the command that held your defaults was
-    // deleted in 0.7.0, and telling a new user to run it on their very first
-    // command is the worst possible place to leave a retired spelling.
-    harness.map_or_else(|| "settings".to_string(), |h| format!("new {h}"))
+///
+/// One line was the whole of this, and it named the launch — which is right
+/// and is not enough: the two lines under it are how you get *back* to the
+/// session you are about to start, and somebody who never sees them starts a
+/// second one instead. That is the failure `omh new` and `omh s resume` were
+/// split apart to make impossible to reach by accident, and this is where a
+/// first-time reader learns the pair exists.
+///
+/// `settings`, not `config` — the command that held your defaults was deleted
+/// in 0.7.0, and telling a new user to run it on their very first command is
+/// the worst possible place to leave a retired spelling.
+fn next_after_init(harness: Option<&str>) -> Vec<(String, String)> {
+    let Some(harness) = harness else {
+        return vec![(
+            "omh settings".into(),
+            "no harness to start — your defaults are here".into(),
+        )];
+    };
+    vec![
+        (format!("omh new {harness}"), "start a session".into()),
+        ("omh s resume".into(), "rejoin it later".into()),
+        // `omh s attach`, not `omh s01 attach zed`. Two guesses in one line:
+        // `s01` is a constant, and `init` is re-runnable — in a repo already
+        // carrying `s01`, `omh new` makes `s04` and this advice would open an
+        // unrelated session, successfully and silently. And naming `zed`
+        // guesses at the machine in the commit that deleted the `editors` row
+        // for being a fact about the machine. `attach` with no id takes the
+        // session omh picks and `$EDITOR` if you have one, which is right on
+        // every run.
+        ("omh s attach".into(), "open it in your editor".into()),
+    ]
 }
 
+/// What to tell someone whose word matched nothing. Pure so it can be tested:
+/// the message is the entire value of this path.
 fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
     if editors.iter().any(|e| e == name) {
         return format!("`{name}` is an editor — try `omh s attach {name}`");
@@ -3777,7 +3803,6 @@ fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
 /// features and the settings in one place.
 fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let profile = Profile::resolve(&paths);
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let policy = settings::resolve(&paths, &manifest)?;
 
@@ -3806,6 +3831,26 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         })
         .collect();
 
+    let using = using_here(&paths, &manifest)?;
+
+    ctx.say(&report::Repo {
+        dir: paths.repo.join(".omh").display().to_string(),
+        settings,
+        features,
+        using,
+        notices: selection_notices(&paths, &manifest)?,
+    });
+    Ok(())
+}
+
+/// What this repo takes from your catalogue, per capability.
+///
+/// Lifted out of `show_repo` when `init` needed the same answer. Two commands
+/// deriving it separately is two answers that are free to disagree, and the
+/// one a person reads first is `init`'s.
+fn using_here(paths: &Paths, manifest: &base::Manifest) -> Result<Vec<report::Using>> {
+    let profile = Profile::resolve(paths);
+    let policy = settings::resolve(paths, manifest)?;
     let mut using = Vec::new();
     for cap in adapter::Capability::ALL {
         let entries = profile.entries(cap)?;
@@ -3817,9 +3862,9 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // Kept in the **declared** order, not `entries`' alphabetical one. For
         // `rules` that order is the whole feature — this page's own docs say
         // "the list is the order" — and building the line from the sorted
-        // catalogue made this report the one place that contradicted it. Filtered
-        // by what the catalogue actually holds, so a name nothing answers to is
-        // reported as missing rather than listed as used.
+        // catalogue made this report the one place that contradicted it.
+        // Filtered by what the catalogue actually holds, so a name nothing
+        // answers to is reported as missing rather than listed as used.
         using.push(report::Using {
             capability: cap.to_string(),
             selected: policy.selection.order(cap).map(|order| {
@@ -3832,15 +3877,17 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             unselected,
         });
     }
+    Ok(using)
+}
 
-    ctx.say(&report::Repo {
-        dir: paths.repo.join(".omh").display().to_string(),
-        settings,
-        features,
-        using,
-        notices: notice::selection(&profile, &policy.selection, &catalogue_lists(&paths)?)?,
-    });
-    Ok(())
+/// The advisory lines a selection wants to add, for the two reports that print
+/// them.
+fn selection_notices(paths: &Paths, manifest: &base::Manifest) -> Result<Vec<String>> {
+    notice::selection(
+        &Profile::resolve(paths),
+        &settings::resolve(paths, manifest)?.selection,
+        &catalogue_lists(paths)?,
+    )
 }
 
 /// Where a key belongs when nothing else has an opinion — the registry alone.
@@ -5399,7 +5446,9 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // A fresh install has no adapters, so `omh <harness>` would fail no matter
     // what else init did. Ship them before anything else.
     let adapters = install_bundled_adapters(&paths, ctx)?;
-    let editors = install_bundled(&paths.editors(), bundled::Shipped::Editors, ctx)?;
+    // Shipped, and no longer reported here: what editors exist is a fact
+    // about the machine, which is `omh info`'s question.
+    install_bundled(&paths.editors(), bundled::Shipped::Editors, ctx)?;
     // The base set ships as data next to the adapters, for the same reason: the
     // opinion should be reviewable by the people it is imposed on. It travels
     // *inside* the binary now — otherwise a released omh installs nothing — but
@@ -5613,8 +5662,22 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // the machine cannot build an image yet.
     // Which of this repo's hooks the sandbox turned out to be unable to run.
     // Measured, not asked about — see the block below.
-    let mut held_back: Vec<hook::Dropped> = Vec::new();
+    // One value, so *nothing held back* and *nothing asked* cannot both be
+    // said and cannot be confused. The reason is written by whichever gate
+    // stops the measurement, and it starts as the first of them.
+    //
+    // A single string set here and only ever cleared was the first attempt,
+    // and it told a repo that has a harness, an image, and a probe that failed
+    // `not measured — no harness`, two rows under the line naming its harness.
+    // A value that exists to end a misleading silence must not replace it with
+    // a misleading sentence.
+    let mut hooks = report::Hooks::Unchecked("no harness, so no sandbox to ask".into());
     if let Some(h) = &harness {
+        // Past the first gate, so the harness is no longer the reason. Set
+        // before the probe rather than after it, because the two arms that
+        // fail below return an empty answer and read as ordinary — the reason
+        // has to be true from the moment it stops being the previous one.
+        hooks = report::Hooks::Unchecked("the sandbox could not be asked".into());
         let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
         // Without it the headline command cannot run, so init is not finished
@@ -5652,6 +5715,12 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             // has still been answered — the answer is "nothing applies" — and
             // skipping would leave a resolution recorded when this repo *was* a
             // rust project asserting `rust/toolchain = true` for ever.
+            // Why the probe itself failed, when it did. Kept apart from
+            // `hooks_unchecked` so the specific reason outranks the generic
+            // one derived below: *the sandbox could not be asked (exit 3)*
+            // says what to go and fix, and *answered for 0 of 2 conditions*
+            // is the same event counted from the other end.
+            let mut probe_problem: Option<String> = None;
             let answered = if candidates.is_empty() {
                 Vec::new()
             } else {
@@ -5670,12 +5739,14 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     // its summary with nothing said. The `Err` arm's own
                     // comment forbids exactly that.
                     Ok(out) if !out.status.success() => {
-                        summary.provision_problems.push(format!(
+                        summary.problems.push(format!(
                             "the sandbox could not be asked ({}) — nothing recorded",
                             out.status
                         ));
+                        probe_problem =
+                            Some(format!("the sandbox could not be asked ({})", out.status));
                         for line in String::from_utf8_lossy(&out.stderr).lines().take(3) {
-                            summary.provision_problems.push(line.to_string());
+                            summary.problems.push(line.to_string());
                         }
                         Vec::new()
                     }
@@ -5685,9 +5756,10 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                         // repo up, and failing that over a diagnostic would be
                         // the tail wagging the dog — but saying nothing would
                         // let somebody believe the sandbox had been checked.
-                        summary.provision_problems.push(format!(
+                        summary.problems.push(format!(
                             "could not ask the sandbox ({e}) — nothing recorded"
                         ));
+                        probe_problem = Some(format!("could not ask the sandbox ({e})"));
                         Vec::new()
                     }
                 }
@@ -5695,7 +5767,7 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 
             for a in answered.iter().filter(|a| !a.ok) {
                 if let stack::Verdict::CouldNotAnswer(code) = stack::verdict(a) {
-                    summary.provision_problems.push(format!(
+                    summary.problems.push(format!(
                         "{}'s condition could not answer{} — not applied",
                         a.name,
                         code.map(|c| format!(" (exit {c})")).unwrap_or_default()
@@ -5706,6 +5778,15 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             // Recorded only when something was actually measured. `reconcile`
             // drops every `true` it is not told about, so writing an empty
             // answer would erase the repo's resolution rather than leave it be.
+            if fired_from(candidates.len(), &answered).is_none() {
+                hooks = report::Hooks::Unchecked(probe_problem.unwrap_or_else(|| {
+                    format!(
+                        "the sandbox answered for {} of {} conditions",
+                        answered.len(),
+                        candidates.len()
+                    )
+                }));
+            }
             if let Some(fired) = fired_from(candidates.len(), &answered) {
                 let recorded = record_resolution(&paths, &fired)?;
                 for key in recorded.iter().filter(|(_, on)| **on).map(|(k, _)| k) {
@@ -5752,7 +5833,7 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 for name in &sandbox.owed {
                     if sandbox.resolves.get(name) == Some(&false) {
                         summary
-                            .provision_problems
+                            .problems
                             .push(format!("{name} did not resolve after installing"));
                     }
                 }
@@ -5770,16 +5851,35 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // stayed off for everybody who cloned it, with nothing to
                 // re-ask. Now nothing is on file, because nothing had to be
                 // decided.
-                held_back = render::held_back(&hook_dirs, &own, &repo, &sandbox.resolves)?;
+                // **Only when the image was actually asked.** `measure`
+                // reports and swallows a probe that will not run, which is
+                // right for a launch — an unmeasured program suppresses
+                // nothing, so no hook is dropped on a guess — and reaches this
+                // report as an empty `resolves`, from which `render::held_back`
+                // derives an empty list. Read as `Measured`, that is a clean
+                // bill of health issued by a doctor who was out. It is the same
+                // defect one level in from the one this value was added for,
+                // and it is why the ask is asked about rather than assumed.
+                hooks = match &sandbox.unmeasured {
+                    Some(why) => report::Hooks::Unchecked(why.clone()),
+                    None => report::Hooks::Measured(
+                        render::held_back(&hook_dirs, &own, &repo, &sandbox.resolves)?
+                            .iter()
+                            .map(|d| (d.name.clone(), d.wanted.clone()))
+                            .collect(),
+                    ),
+                };
             }
         }
     }
     // No harness is no image, and no image is no sandbox to ask about. The
     // hooks are already written either way.
 
-    // Report every decision, so `omh why` has something to explain. Printed as
-    // each one is made rather than collected for the end, which is why the
-    // image and graph lines below appear inside the summary.
+    // Report every decision, so `omh why` has something to explain. Collected
+    // here and printed once, which is `report::Init`'s own rule — the comment
+    // that stood here claimed the opposite, and had since the report was
+    // centralised.
+    //
     // The headline is a claim about this run, so it has to be able to stop
     // being true. omh derives what it can and asks only what nothing could
     // derive; printing "asked nothing" after putting a question on screen would
@@ -5790,8 +5890,6 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // question declined was still a question asked, and claiming otherwise
     // would let omh interrogate somebody and then deny it.
     summary.asked = asked;
-    summary.adapters = adapters.clone();
-    summary.editors = editors.clone();
     summary.harness_on_host = harness.as_deref().is_some_and(runtime::installed);
     summary.harness = harness.clone();
     summary.stacks = stacks
@@ -5812,10 +5910,7 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // statement about itself and it is committed; whether a program exists is
     // a fact about one image, and it decides what runs here, never what the
     // repo contains.
-    summary.held_back = held_back
-        .iter()
-        .map(|d| (d.name.clone(), d.wanted.clone()))
-        .collect();
+    summary.hooks = hooks;
 
     // Hooks somebody already has, somewhere omh can see them. **Noticed, never
     // acted on**: importing writes executable content into the repo, and doing
@@ -5869,7 +5964,41 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         .into_iter()
         .map(|(name, why)| (name.to_string(), why.to_string()))
         .collect();
-    summary.next_command = next_after_init(harness.as_deref());
+    summary.next = next_after_init(harness.as_deref());
+    // The selection as it stands now that `init` has written it, read the way
+    // `omh info --repo` reads it. Built from the same policy rather than from
+    // what this function happened to write, so the two commands cannot
+    // disagree about what this repo takes — and so a re-run over a curated
+    // list reports the curated list rather than the list it did not write.
+    // **Reported and withdrawn, never fatal**, which is the rule every other
+    // read in this function follows and the one these two arrived without.
+    // They are the *report*, and `init` reaches here having already built two
+    // images, written `settings.toml`, the gitignore, the memory notes and the
+    // provisioning table. An unreadable `~/.omh/skills` — reachable on a first
+    // `init`, because a template carrying `[use]` skips the earlier catalogue
+    // read — turned all of that into exit 1 and a one-line permission error,
+    // with nothing said about the work that had actually been done.
+    //
+    // The manifest is the one this function already holds. Loading a second
+    // put two `Manifest` values in one `init`, with `base_set` reporting the
+    // version of one and the selection resolved against the `owns()` map of
+    // the other.
+    match using_here(&paths, &manifest) {
+        Ok(using) => summary.using = using,
+        Err(e) => summary
+            .problems
+            .push(format!("what this repo takes could not be read ({e:#})")),
+    }
+    // The same advisory lines `omh info --repo` prints, from the same
+    // function. `init`'s rows count the raw catalogue and these narrow to what
+    // this repo could ever take; between them a `[use]` entry that answers to
+    // nothing is named here rather than filtered out of both.
+    match selection_notices(&paths, &manifest) {
+        Ok(notices) => summary.notices = notices,
+        Err(e) => summary
+            .problems
+            .push(format!("the selection could not be checked ({e:#})")),
+    }
 
     ctx.say(&summary);
     Ok(())
@@ -6266,13 +6395,28 @@ fn measured_or_reason(
     Ok(doctor::parse(stdout))
 }
 
+/// What an image was found to have — and whether it was actually asked.
+///
+/// The two together, because apart they are indistinguishable at the far end:
+/// a probe that could not run leaves the facts as they were, `has` comes back
+/// as *nobody has looked*, and `render::held_back` reads an unmeasured program
+/// as *not blocked*. For a launch that is right and deliberate — an
+/// unmeasured program suppresses nothing, so nothing is dropped on a guess.
+/// For `init`'s report it is a clean bill of health issued by a doctor who was
+/// out, which is the exact sentence that report was rewritten to stop printing.
+struct Measured {
+    has: BTreeMap<String, bool>,
+    /// Why the ask did not happen. `None` means these answers are answers.
+    gave_up: Option<String>,
+}
+
 fn measure(
     program: &str,
     paths: &Paths,
     tag: &str,
     wanted: &BTreeSet<String>,
     ctx: &out::Ctx,
-) -> Result<BTreeMap<String, bool>> {
+) -> Result<Measured> {
     let mut facts = facts::Facts::load(paths);
     let unseen = facts.unseen(tag, wanted);
     if !unseen.is_empty() {
@@ -6288,10 +6432,18 @@ fn measure(
             ),
             Err(e) => Err(format!("could not ask the sandbox what it has ({e})")),
         };
-        let outcomes = outcomes.unwrap_or_else(|reason| {
-            ctx.warn(&reason);
-            Vec::new()
-        });
+        let outcomes = match outcomes {
+            Ok(outcomes) => outcomes,
+            Err(reason) => {
+                ctx.warn(&reason);
+                // Still not fatal — see below — but no longer indistinguishable
+                // from an image that was asked and had nothing.
+                return Ok(Measured {
+                    has: facts.about(tag),
+                    gave_up: Some(reason.lines().next().unwrap_or_default().to_string()),
+                });
+            }
+        };
         if !outcomes.is_empty() {
             facts.learn(tag, &outcomes);
             // Reported and swallowed, never fatal. This is a cache beside the
@@ -6310,7 +6462,10 @@ fn measure(
             }
         }
     }
-    Ok(facts.about(tag))
+    Ok(Measured {
+        has: facts.about(tag),
+        gave_up: None,
+    })
 }
 
 /// What this repo's sandbox is: the recipe its stacks provision, the image that
@@ -6329,6 +6484,13 @@ struct Sandbox {
     /// Carried here rather than re-derived, so the caller that tops the
     /// measurements up asks about the same list `init` reported on.
     owed: BTreeSet<String>,
+    /// Why `resolves` is not an answer, when it is not.
+    ///
+    /// `None` until `top_up` has asked. A launch does not read this — an
+    /// unmeasured program suppresses nothing either way — but a report that
+    /// says what is held back has to be able to say *nothing was asked*, and
+    /// `resolves` alone cannot: an empty map is what both outcomes look like.
+    unmeasured: Option<String>,
 }
 
 impl Sandbox {
@@ -6392,7 +6554,9 @@ impl Sandbox {
             &paths.repo,
         )?;
         let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
-        self.resolves = measure(program, paths, &self.tag, &wanted, ctx)?;
+        let measured = measure(program, paths, &self.tag, &wanted, ctx)?;
+        self.resolves = measured.has;
+        self.unmeasured = measured.gave_up;
         Ok(())
     }
 }
@@ -6433,6 +6597,9 @@ fn sandbox(paths: &Paths, adapter: &Adapter, repo: &settings::RepoPolicy) -> Res
         tag,
         resolves,
         owed,
+        // Nothing has been asked yet — this reads the cache and never the
+        // container. `top_up` is what turns it into an answer.
+        unmeasured: Some("the sandbox has not been asked".into()),
     })
 }
 
@@ -8742,7 +8909,7 @@ mod tests {
         // loud, and a shape leaving one page while another gains lines is
         // loud — none of which a total or a floor can say.
         let expected: std::collections::BTreeMap<String, usize> = [
-            ("README.md", 32),
+            ("README.md", 35),
             ("accounts.md", 2),
             ("adapters.md", 1),
             ("code-graph.md", 1),
@@ -8750,7 +8917,7 @@ mod tests {
             ("configuration.md", 42),
             ("decisions.md", 1),
             ("editors.md", 4),
-            ("getting-started.md", 11),
+            ("getting-started.md", 14),
             ("git.md", 18),
             ("memory.md", 5),
             ("profile.md", 3),
@@ -9084,6 +9251,15 @@ mod tests {
                     // `s01` rather than a pattern: the fill above has already
                     // turned every hole into that id, so a line naming any
                     // session names this one.
+                    //
+                    // **A literal id in a printed line is a trap.** `s01` is
+                    // in the vocabulary, so `omh s01 attach zed` was admitted;
+                    // written `s02` it is not a command's first word, the line
+                    // leaves the scan entirely, and the map below drops by one
+                    // — under a message inviting the reader to update the
+                    // number. Nothing in the tree writes a literal id into a
+                    // printed line today, which is the only reason this is a
+                    // note and not a defect.
                     let names_a_session =
                         matches!(words.first(), Some(&"s" | &"sessions" | &"s01"));
                     let names_a_command = words.first().is_some_and(|w| vocab.contains(*w));
@@ -9249,11 +9425,11 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 80),
+            ("main.rs", 84),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),
-            ("report.rs", 15),
+            ("report.rs", 14),
             ("rules.rs", 1),
             ("selection.rs", 1),
             ("session.rs", 4),
@@ -11361,6 +11537,7 @@ mod tests {
             tag: tag.to_string(),
             resolves: BTreeMap::new(),
             owed: owed.iter().map(|s| (*s).to_string()).collect(),
+            unmeasured: Some("not asked yet".into()),
         }
     }
 
@@ -12057,17 +12234,27 @@ because = "a fixture"
     /// reads printed `omh …` literals cannot see it — and the doc transcripts
     /// were swept to `omh new claude`, which made the docs show output the
     /// binary does not produce and hid the break behind a green sweep.
+    ///
+    /// **Every line, now that there are three.** The list grew from one to a
+    /// block, and a loop that read `said` as a single command would have gone
+    /// on checking the first and ignoring the two under it — which are the
+    /// two a first-time reader has never typed.
     #[test]
     fn what_init_says_to_run_next_is_a_command_omh_accepts() {
         for harness in [Some("claude"), Some("opencode"), None] {
-            let said = next_after_init(harness);
-            let argv: Vec<String> = std::iter::once("omh".to_string())
-                .chain(said.split_whitespace().map(str::to_string))
-                .collect();
+            let lines = next_after_init(harness);
             assert!(
-                Cli::try_parse_from(&argv).is_ok(),
-                "init tells a new user to run `omh {said}`, which omh does not accept"
+                !lines.is_empty(),
+                "init has to leave somebody with something to run"
             );
+            for (said, _) in &lines {
+                let argv: Vec<String> = said.split_whitespace().map(str::to_string).collect();
+                let (_, argv) = session_prefix(argv);
+                assert!(
+                    Cli::try_parse_from(&argv).is_ok(),
+                    "init tells a new user to run `{said}`, which omh does not accept"
+                );
+            }
         }
     }
 
