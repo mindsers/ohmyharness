@@ -458,7 +458,7 @@ value and the useful question is which file decided it:
 
 Later wins. Both are in the repo, and that is the point: a repo's behaviour is
 explained by files the repo contains — which is what a teammate cloning it can
-actually see, and what `omh repo` can account for without pointing at a file
+actually see, and what `omh info --repo` can account for without pointing at a file
 they do not have. The rules for a project belong in the committed file; the API
 key that makes one of them work belongs in the gitignored one.
 
@@ -473,29 +473,33 @@ the thing [trust](design/trust.md) exists to prevent. So every effective value
 reports where it came from and what it beat:
 
 ```console
-$ omh repo
-this repo  /Users/you/proj/.omh
+$ omh info --repo
+this repo /Users/you/proj/.omh
 
 settings
-  carry_in         [".env.local"]           ← local (overrides shared)
+  carry_in  [".env.local"]  ← local (overrides shared)
 
 omh's features
-  codegraph        off here
-  git-notice       on
-  memory           on
+  codegraph   off here
+  git-notice  on
+  memory      on
 
 using
-  rules            tdd, commit-style
-  skills           review-diff   (1 not selected: refactor)
-  mcp              everything
-  commands         nothing
-  subagents        everything
-  hooks            rust-test, rust-format
+  rules      commit-style, tdd
+  skills     review-diff             (1 not selected: refactor)
+  mcp        everything
+  commands   everything
+  subagents  everything
+  hooks      rust-format, rust-test
+
+1 catalogue entry is not selected here: skills/refactor
+
+  omh use skills refactor    ·    omh use --all
 ```
 
 ## Two scopes, two commands
 
-`omh config` means **you** — your catalogue and your defaults. `omh repo` means
+`omh settings` means **you** — the defaults a new repo starts from. `omh info --repo` means
 **this checkout**.
 
 ```console
@@ -510,14 +514,15 @@ $ omh set idle_timeout 30m              # → settings.toml               (commi
 $ omh set --local idle_timeout 45m      # → settings.local.toml, because you said so
 $ omh set --save carry_in '[".env"]'    # → settings.toml, because you said so
 $ omh unset carry_in
-$ omh repo                              # what is effective here, and what decided it
+$ omh info --repo                       # what is effective here, and what decided it
 
 # you, everywhere
 $ omh settings set idle_timeout 45m     # → ~/.omh/default.toml, seeds new repos
-$ omh config unset idle_timeout         # let the layer beneath resurface
-$ omh config edit                       # $EDITOR on your settings
-$ omh config edit skills tdd            # $EDITOR on one catalogue entry
-$ omh config                            # your defaults, and what the catalogue holds
+$ omh settings unset idle_timeout       # let the layer beneath resurface
+$ omh settings edit                     # $EDITOR on your defaults
+$ omh settings edit skills tdd          # $EDITOR on one catalogue entry
+$ omh settings                          # your defaults
+$ omh info                              # and what you have here
 ```
 
 **The two scopes wanted opposite defaults**, which is why one `--layer` flag
@@ -526,17 +531,19 @@ before they ask anything else:
 
 | Command | Writes to | Why that default |
 |---|---|---|
-| `omh use` / `unuse` | `settings.toml`, **committed** | what a project uses is a fact about the project, and a teammate cloning should get it |
-| `omh set` / `unset` / `use` / `unuse` | **where it already is**, else the key decides — see below | one rule, four commands; the classification lives with the key rather than in your memory |
-| `omh repo set` | `settings.local.toml`, **gitignored** | the older spelling, kept for one release; it could not tell one key from another, so it defaulted away from git for all of them |
+| `omh set` / `unset` / `use` / `unuse` | **where it already is**, else the key decides | one rule, four commands; the classification lives with the key rather than in your memory |
+| … with `--save` | `settings.toml`, **committed** | you named the file, and writing a committed one is said out loud |
+| … with `--local` | `settings.local.toml`, **gitignored** | the same, in the direction that keeps a value off your teammates' machines |
 
-**The protection moved from the command to the key.** While `omh repo set` sent
-every value to the gitignored file, the safety came from the destination and no
-value could reach git unasked. `omh set` defaults to the *committed* file,
-because most settings — what runtime a project wants, how long its sessions idle
-— are facts about the project that a teammate cloning it should get. What keeps
-a credential out of git is now `src/key.rs`: a table saying, per key, whether a
-value there can name one.
+**The protection moved from the command to the key.** Before 0.7.0 the
+repo-scoped write sent every value to the gitignored file: the safety came from
+the destination, and no value could reach git unasked — at the price that a
+teammate cloning the repo got none of your settings. `omh set` defaults to the
+*committed* file now, because most settings — what runtime a project wants, how
+long its sessions idle — are facts about the project that a teammate cloning it
+should get. What keeps a credential out of git is `src/key.rs`: a table saying,
+per key, whether a value there can name one. `carry_in` is in it, so
+`omh set carry_in …` still writes the gitignored file with no flag at all.
 
 **And every write reaches every layer that already holds the key**, so one
 cannot land under a value that outranks it. `--local` and `--save` step outside
@@ -653,19 +660,17 @@ that reported success while the layer beneath overruled it would be lying.
 Never a layer that did not already declare the key: a selection appearing in a
 gitignored file is how a teammate stops getting what the repo says it uses.
 
-**Two verb pairs, mirroring the two tables.** `use`/`unuse` for catalogue
-entries, `enable`/`disable` for omh's features. The CLI teaches the file's
-structure rather than flattening it: if `omh repo disable` took a skill name,
-the difference between an entry you chose and a feature omh ships would exist
-only here.
+**One command, two tables, and the refusal teaches the difference.**
+`omh use`/`unuse` name catalogue entries; `omh set <feature> on|off` writes
+`[omh]`. `omh set` reads the name first and refuses the wrong kind — a
+catalogue entry is answered with `omh use <capability> <name>`, an entry that
+belongs to a feature is answered with the feature — so the difference between
+*an entry you chose* and *a feature omh ships* is stated where somebody just
+guessed at it, rather than only here.
 
 `unset` removes the value from one layer rather than forcing a value, which is
 what lets the layer beneath take over again — the difference matters when you
 are overriding a team default temporarily.
-
-> **`--layer` is going away.** `omh config set --layer shared` still works and
-> prints the `omh repo` form that replaces it. It is accepted for one release,
-> then removed.
 
 ## `[omh]` — omh's own features
 
@@ -684,7 +689,7 @@ off" is a graph that quietly stops tracking the code.
 
 Disabling is not removal: your `mcp.json` is untouched, the server is left out
 of the document *this* session is given, and the next repo gets it back.
-**Removing the server is the other door** — `omh config mcp rm codegraph` takes
+**Removing the server is the other door** — `omh settings mcp rm codegraph` takes
 the feature with it, hooks and rules section included, because a hook nudging
 the agent toward a server that is gone is worse than no hook.
 
@@ -709,13 +714,13 @@ Top-level keys of the same files:
 ## MCP servers
 
 ```console
-$ omh config mcp ls
-$ omh config mcp add linear npx -- -y mcp-remote https://mcp.linear.app/sse
-$ omh config mcp rm linear
+$ omh settings mcp ls
+$ omh settings mcp add linear npx -- -y mcp-remote https://mcp.linear.app/sse
+$ omh settings mcp rm linear
 ```
 
-MCP lives under `config` because MCP servers **are** configuration. They live in
-your catalogue, and `omh config mcp add` writes there — the catalogue is not
+MCP lives under `omh settings` because MCP servers **are** configuration. They live in
+your catalogue, and `omh settings mcp add` writes there — the catalogue is not
 committed, so nothing here reaches a teammate by `git clone`.
 
 ### A token for one repo
@@ -739,7 +744,7 @@ of a setting somebody swears they configured.
 ### Importing what you already have
 
 ```console
-$ omh config mcp import claude
+$ omh settings mcp import claude
 ```
 
 Nobody retypes MCP servers they have already configured, so `import` is the

@@ -78,7 +78,7 @@ pub const LOCAL: &str = "settings.local.toml";
 /// `~/.omh/default.toml` is not here and is not a layer. It is the template
 /// `omh init` seeds a new repo from, so a repo's behaviour is explained by
 /// files inside the repo — which is what a teammate cloning it can see, and
-/// what `omh repo` can account for without pointing at a file they do not have.
+/// what `omh info --repo` can account for without pointing at a file they do not have.
 ///
 /// Read from `config::Layer::SETTINGS` rather than spelled again, so the file a
 /// feature switch is read from and the file a setting is read from cannot drift

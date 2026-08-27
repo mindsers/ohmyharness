@@ -440,7 +440,7 @@ mod tests {
     /// and `Selection::read_list` refuses one that begins with a dot — so a
     /// `.DS_Store` in `~/.omh/skills`, which Finder creates in any directory
     /// somebody opens, was written into `[use]` and then refused by every
-    /// command that read the file afterwards. `omh repo`, `omh use`, and the
+    /// command that read the file afterwards. `omh info --repo`, `omh use`, and the
     /// launch itself, all dead until the file was hand-edited.
     ///
     /// The rule this restores is `validate_entry_name`'s own: checked where a

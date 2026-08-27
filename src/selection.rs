@@ -229,7 +229,7 @@ impl Selection {
 /// A name is one entry in one directory, so it is a name and never a path.
 ///
 /// Checked where a name is **minted** — here, in `omh use`, and in
-/// `omh config edit` — rather than where it is joined to a directory, the rule
+/// `omh settings edit` — rather than where it is joined to a directory, the rule
 /// `memory::validate_key` and `carry::validate_pattern` already follow. Every
 /// future caller inherits the guard instead of having to remember it, which is
 /// the difference between a rule and a habit.
@@ -372,7 +372,7 @@ mod tests {
         assert!(err.contains("subagents"), "and list the six: {err}");
     }
 
-    /// The traversal guard, at the place a name is minted. `omh config edit`
+    /// The traversal guard, at the place a name is minted. `omh settings edit`
     /// joins one of these to a directory, and a guard that lives there instead
     /// is a guard every future caller has to remember.
     #[test]

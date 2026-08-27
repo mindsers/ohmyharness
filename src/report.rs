@@ -1193,7 +1193,7 @@ pub struct Editor {
     pub installed: bool,
 }
 
-/// What `omh info` found: harnesses, editors, sessions.
+/// What `omh info` found: harnesses, editors, sessions, your catalogue.
 #[derive(Debug, Clone)]
 pub struct Inventory {
     pub harnesses: Vec<Harness>,
@@ -1202,6 +1202,14 @@ pub struct Inventory {
     pub editors: Vec<Editor>,
     pub sessions: Vec<Session>,
     pub base: String,
+    /// Where your catalogue lives, so the listing below can be found on disk.
+    pub catalogue_dir: String,
+    /// What your catalogue holds, per capability.
+    ///
+    /// It lived under the command 0.7.0 deleted. `omh info` means
+    /// *what you have here*, and a catalogue is exactly that — dropping it
+    /// with the command would have lost the only listing of it.
+    pub catalogue: Vec<Catalogue>,
 }
 
 impl Report for Inventory {
@@ -1262,6 +1270,24 @@ impl Report for Inventory {
             }
             s.push_str(&t.render(p));
         }
+
+        s.push('\n');
+        s.push_str(&format!(
+            "{} {}\n",
+            p.paint(out::HEAD, "your catalogue"),
+            p.paint(out::DIM, &self.catalogue_dir)
+        ));
+        let mut t = Table::new();
+        for c in &self.catalogue {
+            // The count as well as the names: a catalogue is a thing that
+            // grows, and this is the number the unselected report talks about.
+            t = t.row(vec![
+                Cell::plain(&c.capability),
+                Cell::styled(c.entries.len().to_string(), out::DIM),
+                Cell::plain(c.entries.join(", ")),
+            ]);
+        }
+        s.push_str(&t.render(p));
         s
     }
 
@@ -1287,6 +1313,12 @@ impl Report for Inventory {
                 "behind": s.behind,
             })).collect::<Vec<_>>(),
             "base": self.base,
+            "catalogue_dir": self.catalogue_dir,
+            "catalogue": self.catalogue.iter().map(|c| json!({
+                "capability": c.capability,
+                "count": c.entries.len(),
+                "entries": c.entries,
+            })).collect::<Vec<_>>(),
         })
     }
 }
@@ -1383,7 +1415,7 @@ impl Report for Doctor {
     }
 }
 
-// ── omh config ──────────────────────────────────────────────────────────────
+// ── omh settings ────────────────────────────────────────────────────────────
 
 /// One setting, and which file decided it.
 #[derive(Debug, Clone)]
@@ -1400,73 +1432,6 @@ pub struct Setting {
 pub struct Catalogue {
     pub capability: String,
     pub entries: Vec<String>,
-}
-
-/// What `omh config` shows: your defaults, and what you have to draw on.
-#[derive(Debug, Clone)]
-pub struct Config {
-    pub defaults_file: String,
-    pub settings: Vec<Setting>,
-    pub catalogue_dir: String,
-    pub catalogue: Vec<Catalogue>,
-}
-
-impl Report for Config {
-    fn human(&self, p: &out::Palette) -> String {
-        let mut s = format!(
-            "{} {}\n",
-            p.paint(out::HEAD, "your defaults"),
-            p.paint(out::DIM, &self.defaults_file)
-        );
-        if self.settings.is_empty() {
-            s.push_str(&out::nothing(p, "nothing set"));
-        } else {
-            let mut t = Table::new();
-            for setting in &self.settings {
-                t = t.row(vec![
-                    Cell::styled(&setting.key, out::NAME),
-                    Cell::plain(&setting.value),
-                ]);
-            }
-            s.push_str(&t.render(p));
-        }
-
-        s.push('\n');
-        s.push_str(&format!(
-            "{} {}\n",
-            p.paint(out::HEAD, "your catalogue"),
-            p.paint(out::DIM, &self.catalogue_dir)
-        ));
-        let mut t = Table::new();
-        for c in &self.catalogue {
-            // The count as well as the names: a catalogue is a thing that
-            // grows, and this is the number the unselected report talks about.
-            t = t.row(vec![
-                Cell::plain(&c.capability),
-                Cell::styled(c.entries.len().to_string(), out::DIM),
-                Cell::plain(c.entries.join(", ")),
-            ]);
-        }
-        s.push_str(&t.render(p));
-        s
-    }
-
-    fn json(&self) -> serde_json::Value {
-        json!({
-            "defaults_file": self.defaults_file,
-            "settings": self.settings.iter().map(|s| json!({
-                "key": s.key,
-                "value": s.value,
-                "whose": s.whose,
-            })).collect::<Vec<_>>(),
-            "catalogue_dir": self.catalogue_dir,
-            "catalogue": self.catalogue.iter().map(|c| json!({
-                "capability": c.capability,
-                "count": c.entries.len(),
-                "entries": c.entries,
-            })).collect::<Vec<_>>(),
-        })
-    }
 }
 
 /// One key omh reads, and what you have said about it.
@@ -1579,7 +1544,7 @@ impl Report for Settings {
     }
 }
 
-/// What `omh config mcp` shows: every server, and which layer decided it.
+/// What `omh settings mcp` shows: every server, and which layer decided it.
 #[derive(Debug, Clone)]
 pub struct Servers {
     pub servers: Vec<Setting>,
@@ -1619,7 +1584,7 @@ impl Report for Servers {
     }
 }
 
-// ── omh repo ────────────────────────────────────────────────────────────────
+// ── omh info --repo ─────────────────────────────────────────────────────────
 
 /// One effective setting, and what it beat to get there.
 #[derive(Debug, Clone)]
@@ -1819,7 +1784,7 @@ impl Report for Resynced {
 ///
 /// One vocabulary across all three importers — servers, catalogue entries,
 /// hooks — because they are the same five outcomes wearing different words.
-/// `omh config mcp import` said `already identical` where `omh import skills`
+/// `omh settings mcp import` said `already identical` where `omh import skills`
 /// said
 /// `already in your catalogue`, and a reader had to learn both to read either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3841,6 +3806,8 @@ mod tests {
                 editors: vec![],
                 sessions: vec![row],
                 base: "main".into(),
+                catalogue_dir: String::new(),
+                catalogue: Vec::new(),
             }
             .human(&out::Palette::plain())
         };
@@ -3878,6 +3845,8 @@ mod tests {
                 editors: vec![],
                 sessions: vec![row(behind)],
                 base: "main".into(),
+                catalogue_dir: String::new(),
+                catalogue: Vec::new(),
             }
             .json()["sessions"][0]["behind"]
                 .clone()
@@ -3989,6 +3958,8 @@ mod tests {
             editors: vec![],
             sessions: vec![],
             base: "main".into(),
+            catalogue_dir: String::new(),
+            catalogue: Vec::new(),
         }
     }
 
@@ -4184,7 +4155,7 @@ mod tests {
     /// selection that happens to name all of today's entries does not. They
     /// look identical the moment you print them as a list of names, and they
     /// diverge the first time somebody adds a skill — one repo gets it, the
-    /// other silently does not, and `omh repo` said the same thing about both.
+    /// other silently does not, and `omh info --repo` said the same thing about both.
     ///
     /// So the human form says `everything`, and the machine form says `null`
     /// rather than an array.
@@ -4229,7 +4200,7 @@ mod tests {
 
     /// A setting says which layer won **and** what it beat.
     ///
-    /// `omh repo` exists because of the three-layer merge, and the question it
+    /// `omh info --repo` exists because of the three-layer merge, and the question it
     /// is opened to answer is "why is this value this". A row that gives the
     /// winner and drops the losers answers the easy half.
     #[test]

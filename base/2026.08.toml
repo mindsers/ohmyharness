@@ -23,7 +23,7 @@ kind    = "mcp"
 feature = "codegraph"
 since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
-remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
 command = "codebase-memory-mcp"
 
   [[entry.measured]]
@@ -60,7 +60,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "the agent is given the module map instead of discovering it by reading files"
-remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "per context rebuild"
@@ -78,7 +78,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "structural questions answer in one call instead of an iterative grep"
-remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "per grep"
@@ -96,7 +96,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "one symbol instead of a whole file, when the file is big enough for that to matter"
-remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "when it fires"
@@ -120,7 +120,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "the graph describes the code as it is now, not as the session found it"
-remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "per turn"
@@ -138,7 +138,7 @@ kind    = "rules"
 feature = "codegraph"
 since   = "2026.08"
 because = "a graph the agent has not been told about is a graph it never queries — the four hooks fire while it is already doing something, and this is what is true before it starts"
-remove  = "omh config mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
@@ -262,7 +262,7 @@ kind    = "mcp"
 feature = "memory"
 since   = "2026.08"
 because = "what a session learned outlives it — a removed session leaves no transcript to grep"
-remove  = "omh config mcp rm memory"
+remove  = "omh settings mcp rm memory"
 command = "omh"
 args    = [
   "memory", "serve",
@@ -304,7 +304,7 @@ kind    = "rules"
 feature = "memory"
 since   = "2026.08"
 because = "*record what surprised you* is a trigger, and an agent cannot look up a rule it does not know it needs — no tool description can carry that. The note shape rides along for the case `memory::deliver` documents: a session that got no memory server writes the file by hand"
-remove  = "omh config mcp rm memory"
+remove  = "omh settings mcp rm memory"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"

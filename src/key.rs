@@ -1,9 +1,9 @@
 //! The settings omh reads, and what omh knows about each one.
 //!
 //! Until this existed, a setting key was a string literal at the call site and
-//! nothing else. `omh repo set` accepted any key at all and wrote it to the
-//! gitignored layer — safe, but only because *every* value went there, which
-//! also meant a teammate cloning the repo got none of them.
+//! nothing else. The repo-scoped write accepted any key at all and put it in
+//! the gitignored layer — safe, but only because *every* value went there,
+//! which also meant a teammate cloning the repo got none of them.
 //!
 //! Moving that default is what needs this table. Once most keys land in the
 //! committed file, "which keys must not" stops being a property of the command
@@ -250,8 +250,8 @@ mod tests {
     /// So this pins the judgement itself against what the code already
     /// asserts in prose: `src/carry.rs` calls it the only path by which a
     /// secret reaches the agent, `init` writes that same sentence into every
-    /// new settings file, and `omh repo set` defaulted away from the committed
-    /// layer *because* of this key.
+    /// new settings file, and the repo-scoped write defaulted away from the
+    /// committed layer *because* of this key.
     ///
     /// It protects one key. A sixth key misclassified on the day it is added
     /// is not caught by anything here, and cannot be — that is a judgement
@@ -311,8 +311,8 @@ mod tests {
     /// It is the executable half of the rule `docs/configuration.md` states as
     /// prose — *the protection moved from the command to the key*. The prose it
     /// used to quote said *the committed file is never reached by accident,
-    /// only on purpose*, which was a property of `omh repo set` sending every
-    /// value to the gitignored file; `omh set` defaults to the committed one,
+    /// only on purpose*, which was a property of a command that sent every
+    /// value to the gitignored file. `omh set` defaults to the committed one,
     /// so the table below is what carries the guarantee now.
     ///
     /// Two guards in `main.rs` cover the steps this one cannot see, and the

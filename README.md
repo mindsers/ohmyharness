@@ -162,13 +162,16 @@ omh new <harness> [-- args…]      start a session, run an agent in it
 omh s01 resume [harness]          rejoin it · claude · omp · opencode
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
-omh doctor [--harness <name>] d   verify a harness really sees your profile
+omh doctor [--harness <name>]     verify a harness sees your profile · d
 omh why <thing>                   who put this here, and on what grounds
-omh info                          harnesses, editors, sessions
-omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] s  omh s, omh s01 diff
-omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
-omh repo [enable|disable|set|unset] this checkout: what it uses and why
-omh use|unuse <capability> <name> omh use skills tdd, omh use --all
+omh info                          harnesses, editors, sessions, your catalogue
+omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] …
+                                  omh s · omh s01 diff
+omh settings [set|unset|edit|mcp] …
+                                  you: your defaults
+omh info --repo                   this checkout: what it uses and why
+omh use|unuse <capability> <name>
+                                  omh use skills tdd · omh use --all
 ```
 
 Noun-verb groups with single-letter aliases. Every command is named — a bare
@@ -255,7 +258,7 @@ codegraph — omh's choice, in the base set since 2026.06
   costs       0.46s to index this repo, cold   measured 2026-08-06
               index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
   instead of  gitnexus            PolyForm-Noncommercial licence
-  remove      omh config mcp rm codegraph
+  remove      omh settings mcp rm codegraph
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```

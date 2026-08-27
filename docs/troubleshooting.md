@@ -296,7 +296,7 @@ omh:   omh use skills refactor    ·    omh use --all
 
 `omh init` writes `[use]` with every entry named, so anything added to your
 catalogue *afterwards* is off here until you say otherwise. That is the trade an
-explicit list makes, and this line is what stops it being silent. `omh repo`
+explicit list makes, and this line is what stops it being silent. `omh info --repo`
 shows the same thing without launching.
 
 ### `mcp/codegraph is omh's`
@@ -316,19 +316,19 @@ codegraph = false
 or `omh set codegraph off`. Nothing is uninstalled and the next repo gets
 it back.
 
-### `--layer is going away`
+### `unexpected argument '--layer' found`
 
-`omh config set --layer shared` still works and prints the form that replaced
-it: `omh set`. You no longer pick the file — the key does. `carry_in` is kept
-out of git because a value there can name a credential; everything else is
-committed, because it is a fact about the project a teammate cloning should
-get. `omh why <key>` says which a key is. See
+`--layer` was removed in 0.7.0 along with the command that carried it. You no
+longer pick the file — the key does. `carry_in` is kept out of git because a
+value there can name a credential; everything else is committed, because it is
+a fact about the project a teammate cloning should get. `omh why <key>` says
+which a key is, and `--save` or `--local` overrides it for one write. See
 [Configuration](configuration.md#two-scopes-two-commands).
 
 ### `your catalogue has no skills called …`
 
 `omh use` names an entry that has to exist, so a typo is refused rather than
-written and reported at the next launch. `omh config edit skills <name>` creates
+written and reported at the next launch. `omh settings edit skills <name>` creates
 one.
 
 The mirror of it: `omh unuse` refuses a name this repo was not using, instead of
@@ -337,7 +337,7 @@ writing the list back unchanged and reporting success.
 ### `a repo names servers from your catalogue, it cannot declare one`
 
 There is an `mcp.json` in `<repo>/.omh/`. That was where servers lived before
-the catalogue, and nothing reads it now. `omh config mcp add` puts one in your
+the catalogue, and nothing reads it now. `omh settings mcp add` puts one in your
 catalogue; a token for this repo alone goes under `[mcp.<name>.env]` in
 `.omh/settings.local.toml`.
 

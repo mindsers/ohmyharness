@@ -12,14 +12,16 @@ The shape of the answer matters as much as the commands: omh's curation is
 legitimate because it is **stated, visible, and reversible**, not because it is
 proven. See [measure the cost, argue the benefit](#measure-the-cost-argue-the-benefit).
 
-## `omh repo` — provenance ✅
+## `omh info --repo` — provenance ✅
 
 Every value says where it came from and what it beat.
 
 ```console
-$ omh repo
+$ omh info --repo
+this repo /Users/you/proj/.omh
+
 settings
-  carry_in   [".env.local"]   ← local (overrides shared)
+  carry_in  [".env.local"]  ← local (overrides shared)
 ```
 
 No competitor does this. It is what makes layered settings debuggable instead of
@@ -28,13 +30,13 @@ work was refusing to throw it away.
 
 It grew a second half when selection landed, and the new half is the one people
 will actually use. With a curated catalogue the interesting question stops being
-"what is this set to" and becomes **"why is this skill not here"** — so `omh
-repo` answers that too, naming what this checkout uses, what it does not, and
-which of omh's features are off:
+"what is this set to" and becomes **"why is this skill not here"** — so
+`omh info --repo` answers that too, naming what this checkout uses, what it
+does not, and which of omh's features are off:
 
 ```console
 using
-  skills      review-diff   (1 not selected: refactor)
+  skills     review-diff             (1 not selected: refactor)
 ```
 
 See [Configuration](../configuration.md#two-scopes-two-commands).
@@ -64,7 +66,7 @@ codegraph — omh's choice, in the base set since 2026.06
               codegraphcontext    needs a Neo4j service running
               @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
   installed   this repo
-  remove      omh config mcp rm codegraph
+  remove      omh settings mcp rm codegraph
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```

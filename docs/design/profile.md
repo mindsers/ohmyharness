@@ -203,9 +203,9 @@ feature = "codegraph"
 
 | Feature | What it is | Removed by |
 |---|---|---|
-| `codegraph` | the MCP server, plus `graph-orient`, `graph-first`, `graph-read`, `graph-refresh` | `omh config mcp rm codegraph` — takes all five |
+| `codegraph` | the MCP server, plus `graph-orient`, `graph-first`, `graph-read`, `graph-refresh` | `omh settings mcp rm codegraph` — takes all five |
 | `git-notice` | the rules section telling the agent whose repository the sandbox's git is, plus `git-note` — the hook that tells it a sync moved its tree | nothing to uninstall; `[omh]` or not at all |
-| `memory` | the MCP server, plus the note-taking rules section | `omh config mcp rm memory` |
+| `memory` | the MCP server, plus the note-taking rules section | `omh settings mcp rm memory` |
 
 **A feature is not a group of hooks. It is a group of entries across kinds** — a
 server, some hooks, a section of the rules — and that is why it is the unit that
@@ -217,7 +217,7 @@ is not a smaller version of it.
 Three things follow that were previously convention.
 
 **Removal is symmetric with installation, and feature-level.**
-`omh config mcp rm codegraph` takes the server and all four of its hooks
+`omh settings mcp rm codegraph` takes the server and all four of its hooks
 together; installing it brings all four back. Today removing the server leaves
 four hooks nudging the agent toward something that is gone. There is deliberately
 no way to delete `graph-refresh` while keeping the graph, because that is the one
@@ -268,7 +268,7 @@ can list what it brought. Neither is expressible while the link is a comment.
 and conflating them is what made the first draft of this section wrong.
 
 A feature off in this repo needs no warning, because nothing is left half-working
-to warn about: `omh repo` reports it off and which file said so, and that is
+to warn about: the repo report says it is off and which file said so, and that is
 the whole of it. Silence is only dangerous when something is still running while
 believing something else is too.
 
@@ -608,7 +608,7 @@ Settings stay top-level, exactly as `policy.toml` has them today, so
 `config::policy`, which iterates every top-level key and stringifies whatever it
 finds: `use`, `omh` and `mcp` would be listed as settings whose value is an inline
 table. It skips table values instead — one guard, one test, and the alternative is
-`omh repo` reporting a curated skill list as though it were a duration.
+the repo report showing a curated skill list as though it were a duration.
 
 **One mechanism: an allowlist.** No `exclude`, no `include`/`exclude` pair.
 Removing something is deleting its name, and there is one place to look to
@@ -638,30 +638,35 @@ it is not doing, by name.
 
 ### The commands
 
-Two scopes, so two commands. `omh config` narrows to mean **you** — your
-catalogue and your defaults. `omh repo` means **this checkout**.
+Two scopes, so two commands. `config` narrows to mean **you** — your
+catalogue and your defaults. `repo` means **this checkout**.
 
-```console
+```
 # this repo
-$ omh use skills tdd                  # select from the catalogue → settings.toml
-$ omh unuse mcp linear
-$ omh use --all                       # resync the list to the whole catalogue
-$ omh repo disable codegraph          # an omh feature, off here → [omh]
-$ omh repo enable codegraph
-$ omh repo set carry_in '[".env"]'    # → settings.local.toml
-$ omh repo                            # what is effective here, and what decided it
+use skills tdd                  # select from the catalogue → settings.toml
+unuse mcp linear
+use --all                       # resync the list to the whole catalogue
+repo disable codegraph          # an omh feature, off here → [omh]
+repo enable codegraph
+repo set carry_in '[".env"]'    # → settings.local.toml
+repo                            # what is effective here, and what decided it
 
 # you, everywhere
-$ omh settings set idle_timeout 30m   # → ~/.omh/default.toml (seeds new repos)
-$ omh config mcp add linear npx -- -y mcp-remote https://…
-$ omh config                          # your defaults, and what the catalogue holds
-$ omh config edit                     # $EDITOR on the catalogue
+config set idle_timeout 30m     # → ~/.omh/settings.toml
+config mcp add linear npx -- -y mcp-remote https://…
+config                          # your defaults and your catalogue
+config edit                     # $EDITOR on the catalogue
 ```
 
+> **Renamed in 0.7.0**, so none of the above is a line to type. `repo` became
+> `omh info --repo`; `repo set`/`unset` and `enable`/`disable` became
+> `omh set`/`omh unset`; `config` became `omh settings`, whose catalogue half
+> moved to `omh info`.
+
 **Both commands show when given no verb**, which is the pattern `Config` and
-`Memory` already follow — `Option<subcommand>`, bare means report.
-`omh repo`, `omh config` and `omh memory` then read the same way, and `omh s`
-stays the one command that demands a verb, as it already does.
+`Memory` already follow — `Option<subcommand>`, bare means report. `repo`,
+`config` and `omh memory` then read the same way, and `omh s` stays the one
+command that demands a verb, as it already does.
 
 **`--layer` disappears.** The command already says where the write lands, and
 that matters because the two scopes want **opposite defaults**:
@@ -669,16 +674,16 @@ that matters because the two scopes want **opposite defaults**:
 | Command | Writes to | Why that default |
 |---|---|---|
 | `omh use` / `unuse` | `settings.toml`, **committed** | what a project uses is a fact about the project, and a teammate cloning should get it |
-| `omh repo set` | `settings.local.toml`, **gitignored** | these carry `carry_in` paths and MCP env; a mistyped key must not be committable by accident |
+| `repo set` | `settings.local.toml`, **gitignored** | these carry `carry_in` paths and MCP env; a mistyped key must not be committable by accident |
 
 One flag cannot express two opposite defaults, which is why today's single
-`omh config --layer` strains. `omh repo set --shared` still writes the committed
+`config --layer` strains. `repo set --shared` still writes the committed
 file and says so, the way `--layer shared` does today.
 
 > **Superseded in 0.7.0.** The table above is the shape this section argued for
 > and it did not survive contact with a second question: *which* value. Two
 > commands with opposite defaults means the safety lives in the command, so
-> `omh repo set` had to send **every** value to the gitignored file — which is
+> `omh set` had to send **every** value to the gitignored file — which is
 > also why a teammate cloning a repo got none of the settings it had chosen.
 >
 > `omh set` replaces both. The default is the **committed** file, and what keeps
@@ -695,20 +700,30 @@ file and says so, the way `--layer shared` does today.
 
 **Two verb pairs, mirroring the two tables.** `use` / `unuse` for catalogue
 entries, `enable` / `disable` for omh's features. The CLI teaches the file's
-structure rather than flattening it: if `omh repo disable` accepted a skill name,
-the distinction between *an entry you chose* and *a feature omh ships* would exist
+structure rather than flattening it: if `enable` accepted a skill name, the
+distinction between *an entry you chose* and *a feature omh ships* would exist
 only in the docs.
 
-Bare `omh repo` is the provenance view, and it is where the reporting this design
+> **What happened in 0.7.0.** One command took both jobs. `omh set <name>`
+> reads the name and refuses the wrong kind — a catalogue entry is answered
+> with `omh use`, an entry of a feature is answered with the feature — so the
+> distinction lives in the refusal rather than in the verb count.
+
+Bare `repo` is the provenance view, and it is where the reporting this design
 keeps promising actually surfaces — every entry on or off, every
 setting and which file decided it, omh's features and their state, plus the
 unselected entries and missing names the launcher warns about. With a curated
 list the useful question stops being "what is this set to" and becomes "why is
 this skill not here".
 
-**This renames a shipped command.** `omh config set --layer shared` exists today
+**This renames a shipped command.** `config set --layer shared` exists today
 and would break. It gets the treatment `keys.toml` gets: `--layer` is accepted
-for one release, printing the `omh repo` form it maps to, then removed.
+for one release, printing the form it maps to, then removed.
+
+> **What happened in 0.7.0.** The command carrying `--layer` was deleted
+> outright rather than deprecated, so the flag went with it in one release
+> instead of two. `omh settings set --layer shared` is clap's
+> `unexpected argument`, not a notice.
 
 **One thing this section did not anticipate**, found while building it: making
 the settings file something four commands write turned an old cosmetic problem
@@ -733,7 +748,7 @@ before a review caught it. Read-only is the true version and carries the same
 argument; the false one carried a stronger claim than omh can support.
 
 What does need a guard is the **name**, the moment `edit` takes one and joins it
-to a directory: `omh config edit skills ../../../.ssh/id_rsa` is traversal, and
+to a directory: `omh settings edit skills ../../../.ssh/id_rsa` is traversal, and
 it is the shape `memory::validate_key` and `carry::validate_pattern` already
 refuse. Same rule, same place — validate where the name is minted, not where it
 is used, so every future caller inherits the guard instead of remembering it.
@@ -801,7 +816,7 @@ The rules file is assembled on the host, in this order, and then mounted:
 3.  omh's generated section    the sandbox — always last
 ```
 
-Each section carries a provenance marker, so the agent and `omh repo` can both
+Each section carries a provenance marker, so the agent and the repo report can both
 answer whose rule is whose.
 
 ### Concatenating is the fallback, not the plan
@@ -978,7 +993,7 @@ have settled.
 | **P1** | compose the rules on a `concat` binding | **landed** — fixed a bug on its own; no storage change |
 | **P2** | `kind = "rules"` and `feature` in the base set, omh's own hooks **generated** rather than seeded, `remove` moved to the feature level | **landed**, plus `[omh]` read-only, brought forward so `remove` names something that works |
 | **P3** | catalogue move, the canonical hook format and its three maps | **landed**. No migration: omh had no users but its author, so the one repo and the one home directory holding the old layout were moved by hand |
-| **P4** | `[use]`, `omh use` / `unuse`, `omh repo`, `init` writing it expanded, the unselected report | **landed**, plus one rule the plan for it had wrong: a feature is not selectable in *any* capability, not just hooks — `init` seeds omh's servers into your `mcp.json`, where they look exactly like yours |
+| **P4** | `[use]`, `omh use` / `unuse`, `repo`, `init` writing it expanded, the unselected report | **landed**, plus one rule the plan for it had wrong: a feature is not selectable in *any* capability, not just hooks — `init` seeds omh's servers into your `mcp.json`, where they look exactly like yours |
 | **P5** | the three maps exercised by a **second** harness | **landed**, and it disproved its own premise: no second harness takes hooks as config, so omh generates a plugin. The format gained `refuse`, because advisory and blocking are one field on Claude and two different mechanisms elsewhere |
 
 **Generation came before the move**, and an earlier draft had it the other way
@@ -1017,7 +1032,7 @@ P2 rewrote five `remove` fields in the manifest. Each currently reads
 `rm .omh/profile/hooks/<name>.json`, which will name a path that no longer
 exists — and a `remove` instruction that silently does nothing is worse than
 none, because `omh why` presents it as the way out. The four graph hooks point at
-`omh config mcp rm codegraph`; `git-rules` points at `[omh] git-notice`,
+`omh settings mcp rm codegraph`; `git-rules` points at `[omh] git-notice`,
 since there is nothing to uninstall.
 
 `feature` lands in the same phase, and it needs the test the other fields have:
@@ -1047,7 +1062,7 @@ because they are the ones that would ship silently:
   a **manifest** name is an **error naming both**
 - a stack detected with no hook for it is reported, and a hook whose stack is
   gone is reported — `init` writes once, so the launcher is what keeps noticing
-- `omh config mcp rm codegraph` leaves **no** graph hooks behind — today it
+- `omh settings mcp rm codegraph` leaves **no** graph hooks behind — today it
   leaves four, nudging the agent toward a server that is gone
 - the repo's hooks are named at launch, and a new or changed one is called out
 - `edit` refuses a name that escapes its directory — `..`, a leading `/`, a

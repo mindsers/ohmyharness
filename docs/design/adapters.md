@@ -20,7 +20,7 @@ render = "concat"
 [capabilities.mcp]
 path   = "/work/.mcp.json"     # project-scoped; this harness reads no other
 render = "mcp-json"
-import = "$REPO/.mcp.json"     # host-side, for `omh config mcp import`
+import = "$REPO/.mcp.json"     # host-side, for `omh settings mcp import`
 verify = "claude mcp list"     # what `omh doctor` asks the harness itself
 ready  = "Connected"           # what that answer calls a server it loaded
 
@@ -180,7 +180,7 @@ indistinguishable from a harness that declares no hooks, except that this one
 claimed to have them. These maps are refused on any other capability, where
 nothing would read them.
 
-**Every renderer must round-trip through its parser.** `omh config mcp import`
+**Every renderer must round-trip through its parser.** `omh settings mcp import`
 is the exact inverse of rendering, so a format that renders but parses lossily
 means import silently drops fields. That is a test, not a hope.
 

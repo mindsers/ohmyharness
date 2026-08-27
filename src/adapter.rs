@@ -136,7 +136,7 @@ pub struct Binding {
     #[serde(default)]
     pub also: Vec<String>,
     pub render: Render,
-    /// Host-side path `omh config mcp import` reads from. Distinct from
+    /// Host-side path `omh settings mcp import` reads from. Distinct from
     /// `path`, which
     /// is where the *container* expects the file.
     #[serde(default)]
@@ -435,7 +435,7 @@ pub fn expand(template: &str, home: &str) -> PathBuf {
 }
 
 /// Expand an import path against the **host**. Separate from `expand` on
-/// purpose: reusing the guest home here would send `omh config mcp import`
+/// purpose: reusing the guest home here would send `omh settings mcp import`
 /// looking
 /// inside a container filesystem that does not exist yet.
 pub fn expand_host(template: &str, home: &Path, repo: &Path) -> PathBuf {
@@ -972,7 +972,7 @@ install="x""#,
             let a = Adapter::find(Path::new(REAL), name).unwrap();
             assert!(
                 a.supports(Capability::Mcp).unwrap().import.is_some(),
-                "{name} must say where `omh config mcp import` should look"
+                "{name} must say where `omh settings mcp import` should look"
             );
         }
     }

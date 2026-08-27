@@ -121,7 +121,7 @@ the same thing:
 
 ```console
 $ omh s diff              # the session omh picks
-$ omh s diff s01          # positional
+$ omh s diff s01          # positional — an error since #53
 $ omh s -s s01 diff       # flag after the namespace
 $ omh -s s01 s diff       # flag before it
 ```
