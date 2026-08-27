@@ -62,10 +62,6 @@ struct Cli {
     #[arg(long, short, global = true)]
     session: Option<String>,
 
-    /// Which captured account to log in as.
-    #[arg(long, short = 'a', global = true)]
-    account: Option<String>,
-
     // Global, and under `omh new` that is the whole rule: before `--` it is
     // omh's, after `--` it is the harness's. The bare-name form had to guess,
     // and `passthrough` did the guessing — it refused omh's long flags and
@@ -1024,13 +1020,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 info(&cwd, ctx)
             }
         }
-        Cmd::Doctor { harness } => doctor_cmd(
-            &cwd,
-            harness.as_deref(),
-            cli.account.as_deref(),
-            cli.dry_run,
-            ctx,
-        ),
+        Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx),
         Cmd::Why { thing } => why_cmd(&cwd, thing, ctx),
         Cmd::Graph { stop } => graph(&cwd, *stop, ctx),
 
@@ -1115,7 +1105,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     &cwd,
                     &argv,
                     session::Start::Named(&session.id),
-                    cli.account.as_deref(),
                     cli.dry_run,
                     ctx,
                 );
@@ -1191,6 +1180,12 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 None => show_settings(&paths, ctx),
                 Some(SettingsCmd::Set { key, value }) => {
                     no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
+                    // Both doors, for the reason the guard above exists: a
+                    // check on one spelling of a write is a check somebody
+                    // routes around by typing the other.
+                    if key == "account" {
+                        no_account_that_no_login_answers_to(&paths, value, ctx)?;
+                    }
                     set(
                         &paths,
                         key,
@@ -1239,6 +1234,9 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(key, &feature)),
                 Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(key, cap)),
                 Names::ASetting | Names::Neither => {
+                    if key == "account" {
+                        no_account_that_no_login_answers_to(&paths, value, ctx)?;
+                    }
                     let reached = reach(&paths, key, *local, *save)?;
                     set(&paths, key, value, reached, cli.dry_run, ctx)
                 }
@@ -1328,14 +1326,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             // `last = true` means `args` holds only what followed one.
             let mut argv = vec![harness.clone()];
             argv.extend(args.iter().cloned());
-            run(
-                &cwd,
-                &argv,
-                session::Start::Fresh,
-                cli.account.as_deref(),
-                cli.dry_run,
-                ctx,
-            )
+            run(&cwd, &argv, session::Start::Fresh, cli.dry_run, ctx)
         }
     }
 }
@@ -1634,7 +1625,7 @@ fn attach(
     let _ = idle::touch(&paths.runs(), &session.id);
 
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, &adapter, None, configured.as_deref())?
+    let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, &adapter.name, &a));
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
@@ -1992,7 +1983,6 @@ fn down(
 fn doctor_cmd(
     cwd: &std::path::Path,
     harness: Option<&str>,
-    account: Option<&str>,
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
@@ -2026,7 +2016,7 @@ fn doctor_cmd(
     // with a second account. The remedy the resolver prints names `-a` — the
     // flag this was discarding.
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, &adapter, account, configured.as_deref())?
+    let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, &name, &a));
 
     // Resolved once and used for both the checks and the plan below, so the
@@ -4328,6 +4318,48 @@ fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
     Names::Neither
 }
 
+/// A value only omh can check: which captured login `account` names.
+///
+/// The account is one thing with one spelling — `omh auth <harness> -n work`
+/// creates it, this selects it, and everything that launches or probes reads
+/// the setting. The global `-a` that used to override it per invocation is
+/// gone, so a typo here is now the only way to point a launch at credentials
+/// that are not there, and it would otherwise surface as a failed login inside
+/// a sandbox rather than as a wrong word on the command line.
+///
+/// Accounts live per harness — `~/.omh/creds/<harness>/<account>` — so this
+/// has three answers rather than two, and the middle one is the common case:
+/// captured for *some* harness is accepted, because "I only use claude" is
+/// ordinary, and the harnesses are named because `work` is right until the day
+/// you run `omh new opencode`.
+fn no_account_that_no_login_answers_to(paths: &Paths, name: &str, ctx: &out::Ctx) -> Result<()> {
+    let adapters = Adapter::load_dir(&paths.adapters()).unwrap_or_default();
+    let mut has: Vec<String> = Vec::new();
+    let mut all: Vec<String> = Vec::new();
+    for adapter in &adapters {
+        for account in auth::accounts(paths, adapter) {
+            if account == name {
+                has.push(adapter.name.clone());
+            }
+            all.push(format!("{} ({})", account, adapter.name));
+        }
+    }
+    if !has.is_empty() {
+        ctx.announce(&format!("`{name}` is captured for {}", has.join(", ")));
+        return Ok(());
+    }
+    all.sort();
+    all.dedup();
+    anyhow::bail!(
+        "no captured login called `{name}`.\n  {}",
+        if all.is_empty() {
+            "omh auth <harness> -n <name>   capture one first".to_string()
+        } else {
+            format!("captured: {}", all.join(", "))
+        }
+    );
+}
+
 /// `omh settings set` must not write a name omh already owns as a bare key.
 ///
 /// `omh settings set codegraph off` wrote a top-level `codegraph = "off"`,
@@ -5031,7 +5063,6 @@ fn run(
     // One parameter, not two. `Start` carries the id when there is one, so
     // there is no second argument that could disagree with it.
     start: session::Start<'_>,
-    account: Option<&str>,
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
@@ -5047,7 +5078,7 @@ fn run(
     // Which identity this session runs as. Ambiguity is an error rather than a
     // guess: silently using the wrong account is expensive and invisible.
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, &adapter, account, configured.as_deref())?
+    let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, name, &a));
     if let Some(account_dir) = &account {
         // The mountpoints have to exist before docker binds over them.
@@ -9048,8 +9079,8 @@ mod tests {
         // loud, and a shape leaving one page while another gains lines is
         // loud — none of which a total or a floor can say.
         let expected: std::collections::BTreeMap<String, usize> = [
-            ("README.md", 35),
-            ("accounts.md", 2),
+            ("README.md", 37),
+            ("accounts.md", 4),
             ("adapters.md", 1),
             ("code-graph.md", 1),
             ("commands.md", 121),
@@ -9624,7 +9655,7 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 84),
+            ("main.rs", 85),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),
@@ -13124,11 +13155,15 @@ because = "a fixture"
 
         // A short flag omh also has. The bare-name form leaves shorts to the
         // harness by a rule; here the separator says so outright.
-        let short = Cli::try_parse_from(cli_argv(&["new", "claude", "--", "-a", "work"]))
+        //
+        // `-s`, because `-a` is not omh's any more: the account is the setting
+        // and there is no flag to collide with. `-s` is the remaining short
+        // that would otherwise be read as omh's.
+        let short = Cli::try_parse_from(cli_argv(&["new", "claude", "--", "-s", "work"]))
             .expect("a short flag after the separator");
-        assert!(short.account.is_none(), "`-a` after `--` is claude's");
+        assert!(short.session.is_none(), "`-s` after `--` is claude's");
         match short.cmd {
-            Cmd::New { args, .. } => assert_eq!(args, vec!["-a".to_string(), "work".to_string()]),
+            Cmd::New { args, .. } => assert_eq!(args, vec!["-s".to_string(), "work".to_string()]),
             _ => panic!("expected a launch"),
         }
     }

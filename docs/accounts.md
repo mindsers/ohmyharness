@@ -3,7 +3,8 @@
 ```console
 $ omh auth claude --name personal
 $ omh auth claude --name work
-$ omh -a work new claude          # or, per project: omh set account work
+$ omh set account work            # which one this project uses
+$ omh new claude
 ```
 
 An **account is a captured snapshot of a harness's own credential files.**

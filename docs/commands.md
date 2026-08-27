@@ -145,7 +145,8 @@ omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment)
      graph-read (no way to inject text before a tool runs)
 ```
 
-`-a <account>` selects a credential set for this launch. See [Accounts](accounts.md).
+Which credential set a launch uses is `omh set account <name>`, per project. See
+[Accounts](accounts.md).
 
 ## `omh s attach [editor]` · `omh s a`
 
@@ -468,7 +469,7 @@ category.
 ```console
 $ omh new claude --json          # omh's, reported as JSON
 $ omh new claude -- --json       # claude's
-$ omh new claude -- -a work      # claude's, short flags included
+$ omh new claude -- -s work      # claude's, short flags included
 $ omh new claude --resume x      # an error: omh has no --resume
 ```
 

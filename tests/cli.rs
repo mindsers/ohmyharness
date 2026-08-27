@@ -2431,6 +2431,12 @@ fn set_mentions_git_where_git_was_asked_for_or_cannot_be_vouched_for() {
     );
 
     // Asked for in so many words.
+    // A captured login, because `omh set account` now refuses a name none
+    // answers to — `account` is still the example here for the reason the
+    // key registry gives it: a name, not a credential, and the one
+    // value-taking key the docs show being shared on purpose.
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
     let asked = sb.omh(&["set", "--save", "account", "work"]);
     let said = String::from_utf8_lossy(&asked.stderr).to_string();
     assert!(
@@ -2716,6 +2722,12 @@ fn a_key_that_carries_no_secret_is_not_singled_out() {
     let sb = sandbox();
     sb.seed_base();
 
+    // A captured login, because `omh set account` now refuses a name none
+    // answers to — `account` is still the example here for the reason the
+    // key registry gives it: a name, not a credential, and the one
+    // value-taking key the docs show being shared on purpose.
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
     let out = sb.omh(&["set", "--save", "account", "work"]);
     let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(said.contains("COMMITTED"), "got: {said}");
@@ -4081,6 +4093,108 @@ fn the_committed_warning_is_kept_for_what_it_is_for() {
         "a key omh cannot classify reaching a file git carries is the case this \
          sentence exists for: {}",
         String::from_utf8_lossy(&unknown.stderr)
+    );
+}
+
+/// The account is the setting, and there is no second way to say it.
+///
+/// `-a` was a global that overrode the setting for one invocation and recorded
+/// nothing. So a session started with it could not be resumed without
+/// repeating it — and forgetting meant the account mount no longer matched the
+/// container's stamp, which either blocked the resume or brought the container
+/// back as a different account. It looked like *run this session as work* and
+/// was *run this launch as work, then give the session an identity it cannot
+/// remember*.
+///
+/// One account per repo is the shape that was actually wanted, and
+/// `omh set account` already expressed it: `resolve_for_launch` is
+/// `explicit.or(configured)`, so the setting was the fallback the whole time.
+/// Removing the flag leaves the fallback as the answer.
+#[test]
+fn the_account_is_the_setting_and_there_is_no_second_way_to_say_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
+
+    for argv in [
+        vec!["-a", "work", "new", "claude"],
+        vec!["new", "claude", "-a", "work"],
+        vec!["s01", "resume", "-a", "work"],
+        vec!["doctor", "-a", "work"],
+    ] {
+        let out = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "`omh {}` names an account a second way",
+            argv.join(" ")
+        );
+        assert!(
+            said.contains("unexpected argument") || said.contains("--account"),
+            "and clap refuses it as an argument that is not there: {said}"
+        );
+    }
+}
+
+/// `omh set account` refuses a name no login answers to.
+///
+/// The account is one thing with one spelling now: `omh auth <harness> -n work`
+/// creates it, `omh set account work` selects it, and every command that
+/// launches or probes reads the setting. The global `-a` that used to override
+/// it per invocation is gone — it recorded nothing, so a session started with
+/// it could not be resumed without repeating it, and forgetting meant the
+/// stamp either blocked the resume or brought the container back as a
+/// different account.
+///
+/// Which makes this check the whole safety net: a typo in the setting is now
+/// the only way to point a launch at credentials that are not there, and it
+/// would otherwise surface as a failed login inside a sandbox.
+///
+/// Accounts are stored per harness — `~/.omh/creds/<harness>/<account>` — so
+/// there are three answers, not two, and the middle one is the common case.
+#[test]
+fn setting_an_account_refuses_a_name_no_login_answers_to() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    // Accounts are discovered per harness, so there has to be a harness.
+    sb.seed_catalogue(&["adapters"]);
+
+    // Nothing captured at all: the answer is how to capture one.
+    let none = sb.omh(&["set", "account", "work"]);
+    let said = String::from_utf8_lossy(&none.stderr).to_string();
+    assert!(!none.status.success(), "no login answers to `work`: {said}");
+    assert!(
+        said.contains("omh auth"),
+        "and the answer is the command that creates one: {said}"
+    );
+
+    sb.account("claude", "work");
+
+    // Captured for a harness: accepted, and it says which — `work` is right
+    // until the day you run `omh new opencode`, and that is the moment to have
+    // been told.
+    let ok = sb.omh(&["set", "account", "work"]);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&ok.stderr).contains("claude"),
+        "the harness it is captured for is worth saying: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    // A typo, with something to compare against.
+    let typo = sb.omh(&["set", "account", "wrok"]);
+    let said = String::from_utf8_lossy(&typo.stderr).to_string();
+    assert!(!typo.status.success(), "`wrok` is a typo: {said}");
+    assert!(
+        said.contains("work"),
+        "and the refusal names what does exist: {said}"
     );
 }
 
@@ -5835,6 +5949,12 @@ fn committing_a_key_that_carries_a_secret_names_the_key() {
 
     // A key that carries no secret keeps the general warning and gains nothing
     // — otherwise the sharper sentence means nothing.
+    // A captured login, because `omh set account` now refuses a name none
+    // answers to — `account` is still the example here for the reason the
+    // key registry gives it: a name, not a credential, and the one
+    // value-taking key the docs show being shared on purpose.
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
     let safe = sb.omh(&["set", "--save", "account", "work"]);
     let mild = String::from_utf8_lossy(&safe.stderr).to_string();
     assert!(
@@ -5988,15 +6108,18 @@ fn doctor_checks_the_credentials_of_the_account_it_was_given() {
         "the refusal names the accounts it could not choose between: {said}"
     );
 
-    // Named: the account asked for is the account checked.
-    let said = both(&sb.omh(&["-a", "work", "doctor", "--harness", "claude"]));
+    // Chosen: the account the setting names is the account checked. It was a
+    // flag — `-a work` — and the flag is gone: the account is one thing with
+    // one spelling, and `doctor` reads it like every command that launches.
+    assert!(sb.omh(&["set", "account", "work"]).status.success());
+    let said = both(&sb.omh(&["doctor", "--harness", "claude"]));
     assert!(
         !said.contains("no account"),
-        "`-a` is not discarded on the way to doctor: {said}"
+        "the setting is not discarded on the way to doctor: {said}"
     );
     assert!(
         said.contains("as work"),
-        "and the account named is the one checked: {said}"
+        "and the account chosen is the one checked: {said}"
     );
 }
 

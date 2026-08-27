@@ -238,8 +238,8 @@ $ omh new claude -- --dry-run
 
 This used to be an error rather than a rule. The bare-name form had no
 separator, so omh guessed: it refused its own long flags typed after a harness
-name and left short ones alone, since `-s` and `-a` are flags plenty of
-harnesses use. `omh new` does not guess, so there is nothing left to refuse.
+name and left short ones alone, since `-s` is a flag plenty of harnesses use.
+`omh new` does not guess, so there is nothing left to refuse.
 
 ### `omh s rm` says the session "is not a working tree"
 
@@ -315,6 +315,20 @@ codegraph = false
 
 or `omh set codegraph off`. Nothing is uninstalled and the next repo gets
 it back.
+
+### `unexpected argument '-a' found`
+
+`-a`/`--account` was removed in 0.7.0. It overrode the account for one
+invocation and recorded nothing — so a session started with it could not be
+resumed without repeating it, and forgetting meant the account mount no longer
+matched the container's stamp, which either blocked the resume or brought the
+container back as a different account.
+
+The account is one thing with one spelling now: `omh auth <harness> -n <name>`
+captures it, `omh set account <name>` chooses it, and every command that
+launches or probes reads that. `omh set account` refuses a name no captured
+login answers to, so a typo is caught where you type it rather than as a failed
+login inside a sandbox.
 
 ### `unexpected argument '--layer' found`
 
