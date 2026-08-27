@@ -9418,7 +9418,7 @@ mod tests {
         // out is loud; a file appearing is loud; a shape quietly leaving one
         // file while another gains lines is loud, and no floor can see that.
         let expected: std::collections::BTreeMap<String, usize> = [
-            ("2026.08.toml", 9),
+            ("2026.08.toml", 19),
             ("auth.rs", 2),
             ("base.rs", 3),
             ("config.rs", 3),

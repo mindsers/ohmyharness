@@ -4001,6 +4001,106 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
     }
 }
 
+/// The way out that `omh why` prints is a way out.
+///
+/// Every base-set entry carries a `remove` field, and `omh why` prints it
+/// verbatim as the answer to "how do I get rid of this". Nothing checked that
+/// running it got rid of anything: the existing guard asks only whether the
+/// line *parses*, so six entries shipped naming a command that removes a third
+/// of what they claim — the MCP server, leaving the feature `on` with nothing
+/// behind it and its hooks still selected.
+///
+/// The invariant, not the wording: **after running what the field says, the
+/// feature is no longer on in this repo.** A rewrite of the sentence keeps
+/// passing; a command that does not do the job does not.
+///
+/// Runs everywhere — none of these commands needs a container.
+#[test]
+fn the_way_out_the_base_set_prints_is_a_way_out() {
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("base/2026.08.toml"))
+            .unwrap();
+
+    // `(feature, remove)` per entry, read positionally: the fields are written
+    // in a fixed order in the file and both are required, so a pair that fails
+    // to form is a manifest this test should not be silent about.
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut feature: Option<String> = None;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("feature = ") {
+            feature = Some(rest.trim_matches('"').to_string());
+        }
+        if let Some(rest) = line.strip_prefix("remove  = ") {
+            let said = rest.trim_matches('"');
+            entries.push((
+                feature
+                    .clone()
+                    .expect("`feature` precedes `remove` in an entry"),
+                said.to_string(),
+            ));
+        }
+    }
+    assert!(
+        entries.len() > 8,
+        "the scan read {} entries, fewer than the base set has",
+        entries.len()
+    );
+
+    let mut wrong = Vec::new();
+    for (feature, said) in &entries {
+        // **The field opens with the command**, then an em dash and what it
+        // does or does not take with it. Anchored at the start rather than
+        // found anywhere, because these fields are prose and their prose names
+        // other commands: one `git-notice` entry mentions `omh sNN log --turns`
+        // to say it stops working, and a scan that searched the sentence
+        // dutifully ran it.
+        //
+        // A field with no command is a failure, not a skip. That is the shape
+        // three `git-notice` entries hid behind, telling the reader to
+        // hand-edit `[omh]` in a TOML file long after `omh set <feature> off`
+        // existed — an answer you cannot run, printed under the heading
+        // `remove`.
+        let Some(rest) = said.strip_prefix("omh ") else {
+            wrong.push(format!(
+                "`{feature}`'s way out does not open with a command to type: {said}"
+            ));
+            continue;
+        };
+        let command = rest.split('—').next().unwrap_or(rest).trim();
+
+        let sb = sandbox();
+        sb.git_init();
+        sb.seed_base();
+        let out = sb.omh(&command.split_whitespace().collect::<Vec<_>>());
+        if !out.status.success() {
+            wrong.push(format!(
+                "`omh {command}` does not run: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+            continue;
+        }
+        let after = sb.omh(&["info", "--repo"]);
+        assert!(after.status.success());
+        let said_after = String::from_utf8_lossy(&after.stdout).to_string();
+        let still_on = said_after
+            .lines()
+            .any(|l| l.trim_start().starts_with(feature.as_str()) && l.contains("on"));
+        if still_on {
+            wrong.push(format!(
+                "`omh {command}` leaves `{feature}` on — printed as the way out of it"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the base set prints {} way{} out that does not work:\n  {}",
+        wrong.len(),
+        if wrong.len() == 1 { "" } else { "s" },
+        wrong.join("\n  ")
+    );
+}
+
 /// `omh settings` works where the file it edits lives — outside a repo.
 ///
 /// Its own docs open with "**You**, before a repo exists". It refused with a

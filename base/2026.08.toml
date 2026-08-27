@@ -23,7 +23,7 @@ kind    = "mcp"
 feature = "codegraph"
 since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
-remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
 command = "codebase-memory-mcp"
 
   [[entry.measured]]
@@ -60,7 +60,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "the agent is given the module map instead of discovering it by reading files"
-remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
 
   [[entry.measured]]
   what  = "per context rebuild"
@@ -78,7 +78,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "structural questions answer in one call instead of an iterative grep"
-remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
 
   [[entry.measured]]
   what  = "per grep"
@@ -96,7 +96,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "one symbol instead of a whole file, when the file is big enough for that to matter"
-remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
 
   [[entry.measured]]
   what  = "when it fires"
@@ -120,7 +120,7 @@ kind    = "hook"
 feature = "codegraph"
 since   = "2026.08"
 because = "the graph describes the code as it is now, not as the session found it"
-remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
 
   [[entry.measured]]
   what  = "per turn"
@@ -138,7 +138,7 @@ kind    = "rules"
 feature = "codegraph"
 since   = "2026.08"
 because = "a graph the agent has not been told about is a graph it never queries — the four hooks fire while it is already doing something, and this is what is true before it starts"
-remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh set codegraph off — the feature, its server and its hooks together. Nothing is uninstalled and the next repo gets it back; `omh settings mcp rm codegraph` takes the server out of your catalogue for every repo"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
@@ -160,7 +160,7 @@ kind    = "rules"
 feature = "git-notice"
 since   = "2026.08"
 because = "the sandbox has a repository of its own — its worktree's `.git` still points into the checkout omh never mounts, so omh mounts a gitdir it made instead. That gives the agent `status`, `diff`, `log`, `stash` and `reset --hard`, and puts a `.git` an editor attached over SSH can find. What the agent cannot work out on its own is whose repository it is: commits here are not the branch anyone reviews, and an agent that assumes otherwise reports work as delivered that nobody will ever see. Two more things it cannot work out: there is no history in that repository to read, and the branch it came from may move underneath it — both of which an agent otherwise reports as a broken checkout"
-remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml"
+remove  = "omh set git-notice off — nothing to uninstall, and the next repo gets it back"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
@@ -182,7 +182,7 @@ kind    = "hook"
 feature = "git-notice"
 since   = "2026.08"
 because = "`omh sNN sync` changes the sandbox's files while the agent is stopped, and an agent that comes back to a tree it did not write has no way to find that out. Everything about the sync is already legible from inside — `git show HEAD` is what arrived, `git status` names what is left — but only to somebody who knows to look, and nothing about resuming a session suggests it. Without this the agent's first act is to re-derive a tree it thinks it knows, which is the silent-wrong-work case: it edits from what it remembers and trunk's changes disappear inside a plausible patch"
-remove  = "nothing to uninstall — `git-notice = false` under `[omh]` in .omh/settings.toml, which turns off the git rules with it. `sync` still leaves its note in the gitdir afterwards; with nothing reading it, one small file sits there overwritten by each sync and read by nobody"
+remove  = "omh set git-notice off — nothing to uninstall, and it turns off the git rules with it. `sync` still leaves its note in the gitdir afterwards; with nothing reading it, one small file sits there overwritten by each sync and read by nobody"
 
   [[entry.measured]]
   what  = "once, after a sync — and nothing at all otherwise"
@@ -204,7 +204,7 @@ kind    = "hook"
 feature = "git-notice"
 since   = "2026.08"
 because = "an agent that never runs `git commit` leaves no trace of a whole session, and most of them never do — so `omh sNN log` has nothing to show for the work it can plainly see in the diff. This photographs the tree at the end of each turn onto a side ref, which gives that session a timeline to read and gives it a tree to restore from for every turn it took (`git restore --source=refs/omh/turn~N`, never a `reset --hard` — that would move the branch onto omh's own commits and `--keep` would replant them as the agent's work). It touches neither HEAD, the index nor the worktree: after it runs, the agent's own `git status` says exactly what it said before, which is why it is a snapshot rather than a commit"
-remove  = "`git-notice = false` under `[omh]` in .omh/settings.toml, which turns off the git rules and the sync note with it. Two things are left behind rather than uninstalled: `refs/omh/turn` in each existing sandbox, holding whatever was photographed before it was switched off, and the session loses its timeline — `omh sNN log --turns` will say there is nothing recorded. Both go when the session does"
+remove  = "omh set git-notice off — it turns off the git rules and the sync note with it. Two things are left behind rather than uninstalled: `refs/omh/turn` in each existing sandbox, holding whatever was photographed before it was switched off, and the session loses its timeline, so the turn-by-turn listing will say there is nothing recorded. Both go when the session does"
 
   [[entry.measured]]
   what  = "per turn — half that and no disk when the tree has not changed"
@@ -262,7 +262,7 @@ kind    = "mcp"
 feature = "memory"
 since   = "2026.08"
 because = "what a session learned outlives it — a removed session leaves no transcript to grep"
-remove  = "omh settings mcp rm memory"
+remove  = "omh set memory off — the feature and its server together. Your notes stay where they are; `omh settings mcp rm memory` takes the server out of your catalogue for every repo"
 command = "omh"
 args    = [
   "memory", "serve",
@@ -304,7 +304,7 @@ kind    = "rules"
 feature = "memory"
 since   = "2026.08"
 because = "*record what surprised you* is a trigger, and an agent cannot look up a rule it does not know it needs — no tool description can carry that. The note shape rides along for the case `memory::deliver` documents: a session that got no memory server writes the file by hand"
-remove  = "omh settings mcp rm memory"
+remove  = "omh set memory off — the feature and its server together. Your notes stay where they are; `omh settings mcp rm memory` takes the server out of your catalogue for every repo"
 
   [[entry.measured]]
   what  = "in the agent's context, every turn"
