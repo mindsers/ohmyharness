@@ -166,7 +166,7 @@ omh doctor [--harness <name>] d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
 omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] s  omh s, omh s01 diff
-omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
+omh settings [set|unset|edit|mcp]  you: your defaults, and what you have
 omh repo [enable|disable|set|unset] this checkout: what it uses and why
 omh use|unuse <capability> <name> omh use skills tdd, omh use --all
 ```
@@ -255,7 +255,7 @@ codegraph — omh's choice, in the base set since 2026.06
   costs       0.46s to index this repo, cold   measured 2026-08-06
               index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
   instead of  gitnexus            PolyForm-Noncommercial licence
-  remove      omh config mcp rm codegraph
+  remove      omh settings mcp rm codegraph
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```

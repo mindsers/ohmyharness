@@ -11,7 +11,7 @@ probably here.
 ## The reframing
 
 An earlier version described memory as a **layered fact store**: personal facts,
-project facts, team facts, merged with provenance like `omh config`. That
+project facts, team facts, merged with provenance like a settings file. That
 answered the wrong question.
 
 The idea is closer to the code graph, pointed at everything that is not code: a

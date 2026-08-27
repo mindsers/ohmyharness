@@ -23,7 +23,7 @@ these, the reason is what you need to argue with.
 | Settings scope | **2 layers in the repo, plus a template** | a repo's behaviour has to be explained by files the repo contains; `~/.omh/default.toml` seeds a new one and decides nothing after that |
 | Selection | **an allowlist, `[use]`** | removing something is deleting its name; no `include`/`exclude` pair to reconcile |
 | Absent selection | **means everything** | upgrading changes nothing, and a new checkout is useful before it is configured |
-| Command scope | **`omh config` is you, `omh repo` is here** | the two want opposite write defaults, and one `--layer` flag cannot express both |
+| Command scope | **`omh settings` is you, this checkout is the rest** | it was *`config` is you, `repo` is here*, on the argument that the two wanted opposite write defaults, and one `--layer` flag cannot express both |
 | Write default | **the key decides, not the command** | it was *a value never lands in the committed file; a name may*, which held while `omh repo set` sent every value to the gitignored file. `omh set` serves every key from one command, so the judgement moved into `src/key.rs`: per key, whether a value there can name a credential. Committed is the default now — most settings are facts about the project — and the table is what keeps a secret out of it |
 | Hook vocabulary | **closed, translated at staging** | `event`/`matcher`/payload are one harness's words; no runtime shim |
 | Tool vocabulary | **one closed set, per-adapter map** | the one thing skills, subagents and hooks all leak |
@@ -43,7 +43,7 @@ This is the product. Everything else is a place to put it.
 ```
 omh init             → base system. no questions.
                      → stack rules and hooks, derived from what init detected.
-omh config mcp add … → the archive is still there, one command away,
+omh settings mcp add … → the archive is still there, one command away,
                        and not in your face.
 ```
 
@@ -121,7 +121,7 @@ first version mounted a credential volume at `$HOME/.omh-creds`, which no
 harness has ever read. It tested green. See
 [accounts](../accounts.md#mount-the-directory-never-the-token-file).
 
-**The write default lived in the command → it lives in the key.** `omh config
+**The write default lived in the command → it lives in the key.** The `config
 set` and `omh repo set` had opposite defaults and one flag could not express
 both, so the safety came from the destination: `omh repo set` sent *every*
 value to the gitignored file and nothing could reach git unasked. That was also

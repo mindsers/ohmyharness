@@ -156,7 +156,7 @@ pub fn policy(paths: &Paths) -> Result<Vec<Setting>> {
             // A table is configuration *for* something, not a setting with a
             // value. `[omh]` shares this file, and `[mcp]` will — stringifying
             // either would report a feature switch as a setting whose value is
-            // an inline table, and `omh config` would print it as one.
+            // an inline table, and the defaults report would print it as one.
             if value.is_table() {
                 continue;
             }
@@ -278,14 +278,14 @@ pub fn servers(paths: &Paths) -> Result<Vec<Setting>> {
 /// `<repo>/.omh/` holds `settings.toml`, `memory.toml` and `hooks/`, and it
 /// used to hold `mcp.json` too — so writing one there is the natural mistake
 /// rather than the exotic one, and it is silent in the worst way: reported as
-/// installed by `omh config mcp ls`, never mounted, and counted as `installed`
+/// installed by `omh settings mcp ls`, never mounted, and counted as `installed`
 /// when deciding whether a feature's server is still there.
 fn refuse_a_repo_server(paths: &Paths) -> Result<()> {
     let stray = paths.repo.join(".omh").join("mcp.json");
     if stray.exists() {
         anyhow::bail!(
             "{}: a repo names servers from your catalogue, it cannot declare one — \
-             nothing reads this file. Add it with `omh config mcp add`, and put a \
+             nothing reads this file. Add it with `omh settings mcp add`, and put a \
              token for this repo alone under `[mcp.<name>.env]` in .omh/{}.",
             stray.display(),
             crate::settings::LOCAL
@@ -655,7 +655,7 @@ fn write_table(
 /// `DocumentMut` rather than `toml::Table` and `to_string_pretty`, and the
 /// difference is not cosmetic: a settings file is one somebody maintains by
 /// hand, `omh init` writes it full of explanatory comments, and P4 turned
-/// writing it from something `omh config set` did occasionally into something
+/// writing it from something `omh settings set` did occasionally into something
 /// `omh use`, `omh unuse` and `omh set <feature> on|off` all do. A serializer round trip
 /// deletes every comment in the file, which is deleting what the user wrote.
 fn edit_layer(
@@ -901,7 +901,7 @@ mod tests {
     ///
     /// `policy` stringifies whatever it finds at the top level, so with `[omh]`
     /// now sharing the file it would report a feature switch as a setting whose
-    /// value is an inline table — and `omh config` would print it as one.
+    /// value is an inline table — and the defaults report would print it as one.
     #[test]
     fn a_table_is_not_reported_as_a_setting() {
         let (_d, paths) = fixture();
@@ -1169,7 +1169,7 @@ mod tests {
     /// `set` and `mcp_add` are read-modify-write. Treating every read error as
     /// "empty" meant one unreadable byte — a token pasted with a stray
     /// character, a file an editor saved as UTF-16 — turned the write into a
-    /// **replacement**: `omh config set idle_timeout 30m` would report success
+    /// **replacement**: `omh settings set idle_timeout 30m` would report success
     /// having deleted every `[omh]` switch and every `[mcp.<name>.env]` token
     /// beside it.
     ///
@@ -1218,7 +1218,7 @@ mod tests {
     /// `<repo>/.omh/` holds `settings.toml`, `memory.toml` and `hooks/`, so
     /// dropping an `mcp.json` beside them is the natural mistake — and it used
     /// to be the *documented* place for one. Reported as installed by
-    /// `omh config mcp ls` and never mounted, it is a server you would swear
+    /// `omh settings mcp ls` and never mounted, it is a server you would swear
     /// you configured; worse, it fed `installed`, so naming `codegraph` there
     /// kept the graph hooks generated against a server no session receives —
     /// the exact state `base::own`'s `gone` set exists to prevent.
@@ -1235,7 +1235,7 @@ mod tests {
         let err = format!("{:#}", servers(&paths).unwrap_err());
         assert!(err.contains("mcp.json"), "must name the file: {err}");
         assert!(
-            err.contains("omh config mcp add"),
+            err.contains("omh settings mcp add"),
             "and where a server goes instead: {err}"
         );
     }
@@ -1663,7 +1663,7 @@ mod tests {
     }
 
     /// Re-importing the same config must be a no-op, not a duplicate or a churn
-    /// of the file — otherwise `omh config mcp import` is unsafe to re-run.
+    /// of the file — otherwise `omh settings mcp import` is unsafe to re-run.
     #[test]
     fn importing_twice_changes_nothing() {
         let (_d, paths) = fixture();

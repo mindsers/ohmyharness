@@ -344,7 +344,7 @@ guards in `cargo test`; the rest are honest about not being.
 **Invariant 9 was overstated, corrected during M2.** `doctor` *cannot* enforce
 it: it replaces the launch command with its probe, so no harness ever starts,
 and a tool description is consumed by a model rather than written anywhere
-inspectable. What `doctor` does prove is that the server omh configured
+inspectable. What `doctor` does prove is that the server omh set up
 actually starts where the harness will spawn it, answers `tools/list`, and
 names both tools — reporting the store's own census, because `0 notes` is what
 a wrong mount looks like and a blank detail hides it. Whether a *harness*
@@ -386,7 +386,7 @@ removed s03 (2 commits, merged)
 
 [`base-set.md`](base-set.md) requires a measured cost, a stated benefit,
 alternatives, and a removal command before this ships as an entry. The removal
-command is `omh config mcp rm memory`; the alternatives are in
+command is `omh settings mcp rm memory`; the alternatives are in
 [the survey](memory-rationale.md#survey-what-already-exists).
 
 The measurement is **this repo's own history** as a question set — `EBUSY` on a

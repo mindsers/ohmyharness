@@ -495,7 +495,7 @@ using
 
 ## Two scopes, two commands
 
-`omh config` means **you** — your catalogue and your defaults. `omh repo` means
+`omh settings` means **you** — the defaults a new repo starts from. `omh repo` means
 **this checkout**.
 
 ```console
@@ -514,10 +514,11 @@ $ omh repo                              # what is effective here, and what decid
 
 # you, everywhere
 $ omh settings set idle_timeout 45m     # → ~/.omh/default.toml, seeds new repos
-$ omh config unset idle_timeout         # let the layer beneath resurface
-$ omh config edit                       # $EDITOR on your settings
-$ omh config edit skills tdd            # $EDITOR on one catalogue entry
-$ omh config                            # your defaults, and what the catalogue holds
+$ omh settings unset idle_timeout         # let the layer beneath resurface
+$ omh settings edit                       # $EDITOR on your settings
+$ omh settings edit skills tdd            # $EDITOR on one catalogue entry
+$ omh settings                          # your defaults
+$ omh info                              # and what you have here
 ```
 
 **The two scopes wanted opposite defaults**, which is why one `--layer` flag
@@ -663,7 +664,7 @@ only here.
 what lets the layer beneath take over again — the difference matters when you
 are overriding a team default temporarily.
 
-> **`--layer` is going away.** `omh config set --layer shared` still works and
+> **`--layer` is going away.** `omh settings set --layer shared` still works and
 > prints the `omh repo` form that replaces it. It is accepted for one release,
 > then removed.
 
@@ -684,7 +685,7 @@ off" is a graph that quietly stops tracking the code.
 
 Disabling is not removal: your `mcp.json` is untouched, the server is left out
 of the document *this* session is given, and the next repo gets it back.
-**Removing the server is the other door** — `omh config mcp rm codegraph` takes
+**Removing the server is the other door** — `omh settings mcp rm codegraph` takes
 the feature with it, hooks and rules section included, because a hook nudging
 the agent toward a server that is gone is worse than no hook.
 
@@ -709,13 +710,13 @@ Top-level keys of the same files:
 ## MCP servers
 
 ```console
-$ omh config mcp ls
-$ omh config mcp add linear npx -- -y mcp-remote https://mcp.linear.app/sse
-$ omh config mcp rm linear
+$ omh settings mcp ls
+$ omh settings mcp add linear npx -- -y mcp-remote https://mcp.linear.app/sse
+$ omh settings mcp rm linear
 ```
 
 MCP lives under `config` because MCP servers **are** configuration. They live in
-your catalogue, and `omh config mcp add` writes there — the catalogue is not
+your catalogue, and `omh settings mcp add` writes there — the catalogue is not
 committed, so nothing here reaches a teammate by `git clone`.
 
 ### A token for one repo
@@ -739,7 +740,7 @@ of a setting somebody swears they configured.
 ### Importing what you already have
 
 ```console
-$ omh config mcp import claude
+$ omh settings mcp import claude
 ```
 
 Nobody retypes MCP servers they have already configured, so `import` is the

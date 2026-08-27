@@ -99,7 +99,7 @@ mod tests {
         assert_eq!(parse_duration("30m"), Some(Duration::from_secs(1800)));
         assert_eq!(parse_duration("2h"), Some(Duration::from_secs(7200)));
         assert_eq!(parse_duration("1d"), Some(Duration::from_secs(86_400)));
-        // `omh config set idle_timeout 30m` stores a bare string; the resolver
+        // `omh settings set idle_timeout 30m` stores a bare string; the resolver
         // hands values back quoted from TOML.
         assert_eq!(parse_duration("\"30m\""), Some(Duration::from_secs(1800)));
         assert_eq!(parse_duration(" 45m "), Some(Duration::from_secs(2700)));

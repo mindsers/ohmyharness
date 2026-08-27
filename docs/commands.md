@@ -10,7 +10,7 @@ omh doctor [--harness <name>] d   verify a harness really sees your profile
 omh why <thing>                   who put this here, and on what grounds
 omh info                          harnesses, editors, sessions
 omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] s  omh s, omh s01 log
-omh config [set|unset|edit|mcp] c you: your defaults and your catalogue
+omh settings [set|unset|edit|mcp]  you: your defaults, and what you have
 omh repo [enable|disable|set|unset]   this checkout: what it uses, and why
 omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
 ```
@@ -227,13 +227,13 @@ codegraph — omh's choice, in the base set since 2026.06
               codegraphcontext    needs a Neo4j service running
               @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
   installed   this repo
-  remove      omh config mcp rm codegraph — the feature, server and hooks together
+  remove      omh settings mcp rm codegraph — the feature, server and hooks together
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```
 
 **Everything omh ships belongs to a feature**, and removal follows the feature:
-`omh config mcp rm codegraph` takes the server and its four hooks together.
+`omh settings mcp rm codegraph` takes the server and its four hooks together.
 `omh why graph-first` answers "part of codegraph" from the other direction, and
 says `(off here)` when this repo has switched the feature off in
 `.omh/settings.toml`.
@@ -1050,44 +1050,42 @@ rather than guessed at.
 Keys omh reads, plus `[use]` and `[omh]`, are seeded; anything else in the
 file is refused by name rather than left behind. `[mcp.<name>.env]` is **refused**: a
 server's environment can be a token and the file `init` writes is committed. It
-already has a home — `omh config mcp add <name> <command> --env KEY=value` puts
+already has a home — `omh settings mcp add <name> <command> --env KEY=value` puts
 it on the server in `~/.omh/mcp.json`, where servers live.
 
-## `omh config …` · `c`
+## `omh settings …`
 
 **You**, everywhere. Your defaults and your catalogue.
 
 ```
-omh config                            your defaults, and what the catalogue holds
-omh config set <key> <value>          → ~/.omh/default.toml  (older spelling of `omh settings set`)
-omh config unset <key>                remove one of your defaults
-omh config edit [<capability> [name]] $EDITOR on your settings, or on one entry
+omh settings                          your defaults
+omh settings set <key> <value>          → ~/.omh/default.toml  (older spelling of `omh settings set`)
+omh settings unset <key>                remove one of your defaults
+omh settings edit [<capability> [name]] $EDITOR on your settings, or on one entry
 
-omh config mcp ls
-omh config mcp add <name> <cmd> [args…] [--env K=V]
-omh config mcp rm <name>
-omh config mcp import <harness> [--file] [--force]
+omh settings mcp ls
+omh settings mcp add <name> <cmd> [args…] [--env K=V]
+omh settings mcp rm <name>
+omh settings mcp import <harness> [--file] [--force]
 ```
 
 ```console
-$ omh config
+$ omh settings
 your defaults /Users/you/.omh/default.toml
   idle_timeout  30m
 
-your catalogue /Users/you/.omh
-  rules      2  commit-style, tdd
-  skills     3  graphify, refactor, review-diff
-  mcp        3  codegraph, linear, memory
-  commands   0
-  subagents  1  explorer
-  hooks      1  notify-on-stop
+omh also reads
+  carry_in     Files a session gets that git does not carry — see `src/carry.rs`.
+  account      Which captured login a session is launched with, by name.
+  runtime      Which runtime builds and runs the sandbox. Unset means `auto`.
+  persistence  How a session's terminal survives detaching. Unset means `dtach`.
 ```
 
 MCP lives under `config` because MCP servers **are** configuration. They live in your
 catalogue; a repo overrides a server's environment without redeclaring it. See
 [Configuration](configuration.md).
 
-`edit` takes a name, so it validates one: `omh config edit skills ../../.ssh/id_rsa`
+`edit` takes a name, so it validates one: `omh settings edit skills ../../.ssh/id_rsa`
 is refused before `$EDITOR` sees it. Past that there is no fence to draw —
 `$EDITOR` is a full program running as you, and the boundary that matters is
 elsewhere: every catalogue directory omh mounts into a sandbox is mounted
@@ -1134,7 +1132,7 @@ using skills/review-diff — wrote → /Users/you/proj/.omh/settings.toml
 
 `unuse` refuses a name this repo never used, rather than writing the list back
 and reporting success for a typo. `omh use` refuses one your catalogue does not
-have, and names `omh config edit` as the way to create it.
+have, and names `omh settings edit` as the way to create it.
 
 omh's own — `codegraph`, `memory`, the five generated hooks and their rules
 sections — are not selectable in either direction. `omh set <feature> on|off`

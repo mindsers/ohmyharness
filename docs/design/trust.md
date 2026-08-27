@@ -64,7 +64,7 @@ codegraph — omh's choice, in the base set since 2026.06
               codegraphcontext    needs a Neo4j service running
               @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
   installed   this repo
-  remove      omh config mcp rm codegraph
+  remove      omh settings mcp rm codegraph
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```

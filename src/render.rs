@@ -59,12 +59,12 @@ pub fn document(
             // ones are dropped. Checked after, an override for a feature this
             // repo switched off reported "not in your catalogue" about a
             // server that is plainly in it — advice pointing at
-            // `omh config mcp ls`, which lists it, and no way forward.
+            // `omh settings mcp ls`, which lists it, and no way forward.
             for name in repo.mcp_env.keys() {
                 if !servers.contains_key(name) {
                     anyhow::bail!(
                         "[mcp.{name}.env] overrides a server that is not in your \
-                         catalogue — nothing would read it. `omh config mcp ls` \
+                         catalogue — nothing would read it. `omh settings mcp ls` \
                          lists what is there."
                     );
                 }
@@ -78,7 +78,7 @@ pub fn document(
             // Variable by variable, not entry by entry: a repo overriding one
             // token must not silently inherit the rest of a catalogue entry it
             // never saw. Named where it is applied rather than merged into the
-            // sources, so `omh config` still shows the catalogue as written.
+            // sources, so `omh info` still shows the catalogue as written.
             //
             // A server whose feature is off here is simply gone by now, so its
             // override is a no-op rather than an error: switching a feature off
@@ -208,7 +208,7 @@ fn mcp(render: Render, servers: &BTreeMap<String, Server>) -> Result<String> {
 
 /// Inverse of `mcp`: read a harness's own config back into canonical form.
 ///
-/// `omh config mcp import` exists because nobody retypes MCP servers they
+/// `omh settings mcp import` exists because nobody retypes MCP servers they
 /// already have.
 /// Every format that renders must also parse, and the pair must round-trip —
 /// otherwise import silently drops fields the renderer knows how to write.

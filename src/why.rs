@@ -1,7 +1,7 @@
 //! `omh why` — who put this here, and on what grounds.
 //!
 //! An opinionated tool's characteristic failure is opacity: "without the hassle
-//! of understanding" curdling into "unable to understand". `omh config` answers
+//! of understanding" curdling into "unable to understand". `omh settings` answers
 //! *where* a value came from; this answers *why*, and for whose reasons.
 //!
 //! The distinction that matters is authorship. omh's own choices carry a
@@ -792,7 +792,7 @@ mod tests {
             "the alternatives are missing:\n{out}"
         );
         assert!(
-            out.contains("omh config mcp rm codegraph"),
+            out.contains("omh settings mcp rm codegraph"),
             "no way out:\n{out}"
         );
     }

@@ -1565,7 +1565,7 @@ mod tests {
         assert!(script.contains("printf 'fail"), "got: {script}");
     }
 
-    /// A server omh configured but that cannot start is invisible from the
+    /// A server omh set up but that cannot start is invisible from the
     /// host: every host-side test proves the tool list is right about a host
     /// directory, which is circular in the way this module exists to break.
     #[test]

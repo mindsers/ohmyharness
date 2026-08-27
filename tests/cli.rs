@@ -3159,9 +3159,7 @@ fn the_older_spellings_refuse_a_feature_name_too() {
 
     for argv in [
         vec!["repo", "set", "codegraph", "off"],
-        vec!["config", "set", "codegraph", "off"],
         vec!["repo", "unset", "codegraph"],
-        vec!["config", "unset", "codegraph"],
     ] {
         let out = sb.omh(&argv);
         assert!(
@@ -3575,7 +3573,7 @@ fn a_server_environment_is_refused_in_the_template() {
     );
     let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        said.contains("omh config mcp add"),
+        said.contains("omh settings mcp add"),
         "and it names where a server's environment belongs: {said}"
     );
     assert!(
@@ -3745,35 +3743,6 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
             !sb.repo.join(".omh/settings.toml").exists(),
             "`{template}` left a settings.toml behind; `write_if_absent` never \
              revisits, so that repo cannot be repaired by re-running init"
-        );
-    }
-}
-
-/// `omh config` and `omh settings` agree about the file they both read.
-///
-/// `show_config` filtered `config::policy` to the personal layer, which
-/// `policy` stopped being able to return — a statically empty vector. One
-/// command reported every user's defaults as empty while the other showed
-/// them, from the same file, at the same moment.
-#[test]
-fn config_and_settings_tell_the_same_story_about_your_defaults() {
-    let sb = sandbox();
-    sb.git_init();
-    sb.seed_base();
-
-    assert!(sb
-        .omh(&["settings", "set", "idle_timeout", "45m"])
-        .status
-        .success());
-
-    for argv in [vec!["config"], vec!["settings"]] {
-        let out = sb.omh(&argv);
-        assert!(out.status.success());
-        assert!(
-            String::from_utf8_lossy(&out.stdout).contains("45m"),
-            "`omh {}` cannot see a default the other one shows: {}",
-            argv.join(" "),
-            String::from_utf8_lossy(&out.stdout)
         );
     }
 }
@@ -4135,47 +4104,74 @@ fn every_retired_spelling_is_refused_and_names_a_replacement() {
     );
 }
 
-/// `omh config set` means **you** now. It used to default to the repo's
-/// gitignored file; the secret-safety argument survives intact, because the
-/// personal file is not committed either.
+/// The retired command is gone; everything under it answers to `omh settings`.
+///
+/// `set` and `unset` were already there. `edit` and `mcp` move rather than
+/// retire: opening your settings in `$EDITOR` and curating your MCP servers
+/// are both things you do to `~/.omh`, which is what `omh settings` now means.
 #[test]
-fn config_set_writes_your_defaults() {
+fn what_config_held_answers_to_settings() {
     let sb = sandbox();
+    sb.git_init();
     sb.seed_base();
-    assert!(sb
-        .omh(&["config", "set", "idle_timeout", "45m"])
-        .status
-        .success());
-    let personal = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap();
-    assert!(personal.contains("45m"), "got: {personal}");
-    assert!(
-        !sb.repo.join(".omh/settings.local.toml").exists(),
-        "this is not a repo-scoped command any more"
-    );
+
+    for argv in [
+        vec!["settings", "mcp", "ls"],
+        vec!["settings", "set", "idle_timeout", "45m"],
+        vec!["settings", "unset", "idle_timeout"],
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            out.status.success(),
+            "`omh {}` must work: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 }
 
-/// `--layer` keeps working for one release and says what replaced it. A flag
-/// that outlives its documentation is how people learn a form that is about to
-/// stop existing; a hard error would cost more than it protects, since this one
-/// is recoverable by retyping.
+/// The retired spelling says what replaced it, for every verb it held.
 #[test]
-fn layer_still_works_and_names_what_replaced_it() {
+fn the_retired_config_spelling_names_what_replaced_it() {
     let sb = sandbox();
+    sb.git_init();
     sb.seed_base();
-    let out = sb.omh(&["config", "set", "--layer", "shared", "idle_timeout", "1h"]);
-    assert!(out.status.success(), "still works");
-    assert!(sb.settings().contains("1h"), "and writes where it said");
-    let said = String::from_utf8_lossy(&out.stderr);
-    assert!(said.contains("going away"), "got: {said}");
-    assert!(
-        said.contains("omh set --save"),
-        "and names the form that replaces it: {said}"
-    );
-    assert!(
-        !said.contains("omh repo set"),
-        "the form it names must be the one that survives the release, not the \
-         other spelling this same release is retiring: {said}"
-    );
+
+    for argv in [
+        vec!["config"],                               // types the retired verb on purpose
+        vec!["config", "set", "idle_timeout", "45m"], // types the retired verb on purpose
+        vec!["config", "unset", "idle_timeout"],      // types the retired verb on purpose
+        vec!["config", "edit"],                       // types the retired verb on purpose
+        vec!["config", "mcp", "ls"],                  // types the retired verb on purpose
+        vec!["c"],                                    // types the retired verb on purpose
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            !out.status.success(),
+            "`omh {}` names a retired spelling",
+            argv.join(" ")
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("omh settings"),
+            "and the refusal teaches the one that works: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// `--layer` goes with the command that needed it.
+///
+/// It existed because two commands wanted opposite write defaults. One rule
+/// across four commands replaced that, and the flag has been printing its own
+/// replacement for a release.
+#[test]
+fn the_layer_flag_is_gone() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let out = sb.omh(&["settings", "set", "--layer", "shared", "idle_timeout", "1h"]);
+    assert!(!out.status.success(), "--layer is not a flag any more");
 }
 
 /// A name is checked where it is minted, so `edit` cannot be talked into
@@ -4184,7 +4180,7 @@ fn layer_still_works_and_names_what_replaced_it() {
 fn edit_refuses_a_name_that_climbs_out_of_the_catalogue() {
     let sb = sandbox();
     sb.seed_base();
-    let out = sb.omh(&["config", "edit", "skills", "../../../.ssh/id_rsa"]);
+    let out = sb.omh(&["settings", "edit", "skills", "../../../.ssh/id_rsa"]);
     assert!(!out.status.success(), "traversal must not reach $EDITOR");
     assert!(String::from_utf8_lossy(&out.stderr).contains("never a path"));
 }
@@ -4223,7 +4219,7 @@ fn bare_repo_reports_what_is_used_what_is_not_and_what_decided_it() {
 /// A settings file is a file somebody maintains by hand, and comments are part
 /// of what they wrote.
 ///
-/// Before P4 a write to `.omh/settings.toml` was rare — `omh config set` and
+/// Before P4 a write to `.omh/settings.toml` was rare — `omh settings set` and
 /// nothing else. Now `omh use`, `omh unuse` and `omh repo enable` all touch it,
 /// and `init` writes it *full* of explanatory comments, so a round trip through
 /// a serializer would have the first `omh use` silently delete everything init
@@ -6019,7 +6015,7 @@ fn importing_refuses_an_entry_whose_name_is_a_path() {
 }
 
 /// Import never clobbers. An entry you have since edited is left exactly as it
-/// is, and re-running is a no-op — the rule `omh config mcp import` already
+/// is, and re-running is a no-op — the rule `omh settings mcp import` already
 /// follows.
 #[test]
 fn importing_twice_changes_nothing_the_second_time() {
@@ -6157,7 +6153,7 @@ fn every_json_answer_is_one_document_and_not_several() {
     for args in [
         vec!["--json", "info"],
         vec!["--json", "repo"],
-        vec!["--json", "config"],
+        vec!["--json", "settings"],
         vec!["--json", "use", "skills", "beta"],
         vec!["--json", "unuse", "skills", "beta"],
         vec!["--json", "repo", "disable", "codegraph"],

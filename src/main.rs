@@ -285,12 +285,6 @@ enum Cmd {
         #[command(subcommand)]
         cmd: Option<SettingsCmd>,
     },
-    /// Your defaults and your catalogue, or change them.
-    #[command(visible_alias = "c")]
-    Config {
-        #[command(subcommand)]
-        cmd: Option<ConfigCmd>,
-    },
     /// This checkout: what it uses, what it decided, and what decided it.
     Repo {
         #[command(subcommand)]
@@ -406,7 +400,7 @@ enum McpCmd {
     },
     /// Remove a server from your catalogue.
     Rm {
-        /// Which server, as `omh config mcp ls` names it.
+        /// Which server, as `omh settings mcp ls` names it.
         name: String,
     },
     /// Import servers you already configured in an installed harness.
@@ -567,7 +561,7 @@ enum SessionsCmd {
     },
 }
 
-/// Two scopes, so two commands. `omh config` narrows to mean **you** — your
+/// Two scopes, so two commands. `omh settings` narrows to mean **you** — your
 /// catalogue and your defaults. `omh repo` means **this checkout**.
 ///
 /// `--layer` used to carry both, and it strained because the two want opposite
@@ -575,41 +569,6 @@ enum SessionsCmd {
 /// committed, while what a project *overrides* holds `carry_in` paths and MCP
 /// env and must not be committable by accident. One flag cannot express two
 /// opposite defaults.
-#[derive(Subcommand)]
-enum ConfigCmd {
-    /// Set one of your defaults. The older spelling of `omh settings set`.
-    Set {
-        /// Which setting. `omh why <key>` says what omh reads it for.
-        key: String,
-        /// What to set it to.
-        value: String,
-        #[arg(long, value_parser = parse_layer, hide = true)]
-        layer: Option<config::Layer>,
-    },
-    /// Remove one of your defaults.
-    Unset {
-        /// Which setting to drop from your defaults.
-        key: String,
-        #[arg(long, value_parser = parse_layer, hide = true)]
-        layer: Option<config::Layer>,
-    },
-    /// Open your settings, or one catalogue entry, in $EDITOR.
-    Edit {
-        /// One of rules, skills, mcp, commands, subagents, hooks. Without it,
-        /// your settings file.
-        capability: Option<String>,
-        /// Which entry. Without it, the capability's directory.
-        name: Option<String>,
-        #[arg(long, value_parser = parse_layer, hide = true)]
-        layer: Option<config::Layer>,
-    },
-    /// MCP servers — configuration, so it lives here.
-    Mcp {
-        #[command(subcommand)]
-        cmd: McpCmd,
-    },
-}
-
 /// Deliberately two verbs. Reading and changing your own defaults is the whole
 /// of it in 0.7.0; the terminal UI that edits them arrives in 0.8.0 and needs
 /// nothing here to change.
@@ -626,6 +585,19 @@ enum SettingsCmd {
     Unset {
         /// Which setting to drop.
         key: String,
+    },
+    /// Open your defaults, or one catalogue entry, in $EDITOR.
+    Edit {
+        /// One of rules, skills, mcp, commands, subagents, hooks. Without it,
+        /// your defaults file.
+        capability: Option<String>,
+        /// Which entry. Without it, the capability's directory.
+        name: Option<String>,
+    },
+    /// MCP servers — your catalogue's, and what they run with.
+    Mcp {
+        #[command(subcommand)]
+        cmd: McpCmd,
     },
 }
 
@@ -774,6 +746,11 @@ const RETIRED: &[Retired] = &[
         said: "`attach` is a session verb now:\n  omh s attach [editor]     the session omh picks\n  omh s01 attach zed        that one",
     },
     Retired {
+        spellings: &["config", "c"], // types the retired verb on purpose
+        after: &[],
+        said: "`config` is gone — it is `omh settings` now:\n  omh settings              your defaults\n  omh settings set <key> <value>\n  omh settings edit         $EDITOR on them\n  omh settings mcp ls       your MCP servers",
+    },
+    Retired {
         spellings: &["ls"], // types the retired verb on purpose
         // Only under `sessions`. Top-level `ls` became `omh info`, and that
         // rename deliberately kept no sentence at all — `the_inventory_answers_
@@ -902,7 +879,6 @@ fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Why { .. }
         | Cmd::Auth { .. }
         | Cmd::Info
-        | Cmd::Config { .. }
         | Cmd::Settings { .. }
         | Cmd::Repo { .. }
         | Cmd::Set { .. }
@@ -1137,33 +1113,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             }
         },
 
-        Cmd::Config { cmd } => match cmd {
-            None => show_config(&cwd, ctx),
-            Some(ConfigCmd::Set { key, value, layer }) => {
-                let paths = Paths::discover(&cwd)?;
-                no_legacy_write_over_a_feature(&paths, key, ctx)?;
-                let reached = Reach::named(layer_or(*layer, config::Layer::Personal, ctx));
-                set(&paths, key, value, reached, cli.dry_run, ctx)
-            }
-            Some(ConfigCmd::Unset { key, layer }) => {
-                let paths = Paths::discover(&cwd)?;
-                no_legacy_write_over_a_feature(&paths, key, ctx)?;
-                let reached = Reach::named(layer_or(*layer, config::Layer::Personal, ctx));
-                unset(&paths, key, reached, cli.dry_run, ctx)
-            }
-            Some(ConfigCmd::Edit {
-                capability,
-                name,
-                layer,
-            }) => edit(
-                &cwd,
-                capability.as_deref(),
-                name.as_deref(),
-                layer_or(*layer, config::Layer::Personal, ctx),
-            ),
-            Some(ConfigCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run, ctx),
-        },
-
         // Outside a repo too. `Paths::discover` refuses there, correctly — a
         // session is a worktree — but this command's whole subject is the file
         // you configure *before* a repo exists, and its own docs say so. The
@@ -1194,6 +1143,13 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                         ctx,
                     )
                 }
+                Some(SettingsCmd::Edit { capability, name }) => edit(
+                    &cwd,
+                    capability.as_deref(),
+                    name.as_deref(),
+                    config::Layer::Personal,
+                ),
+                Some(SettingsCmd::Mcp { cmd }) => mcp(&cwd, cmd, cli.dry_run, ctx),
             }
         }
 
@@ -1352,7 +1308,10 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
 /// see it, and sweeping the doc transcripts to match made the docs show output
 /// omh does not produce. Pulled out here so the parser can be asked.
 fn next_after_init(harness: Option<&str>) -> String {
-    harness.map_or_else(|| "config".to_string(), |h| format!("new {h}"))
+    // `settings`, not `config` — the command that held your defaults was
+    // deleted in 0.7.0, and telling a new user to run it on their very first
+    // command is the worst possible place to leave a retired spelling.
+    harness.map_or_else(|| "settings".to_string(), |h| format!("new {h}"))
 }
 
 fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
@@ -2416,10 +2375,6 @@ fn runtime_preference(paths: &Paths) -> String {
     policy_value(paths, "runtime").unwrap_or_else(|| "auto".into())
 }
 
-fn parse_layer(s: &str) -> std::result::Result<config::Layer, String> {
-    s.parse().map_err(|e: anyhow::Error| e.to_string())
-}
-
 /// A note's layer, which is a different set from a profile's: notes have no
 /// personal layer, and the two they do have never merge.
 fn parse_note_layer(s: &str) -> std::result::Result<memory::Layer, String> {
@@ -2938,12 +2893,12 @@ fn use_cmd(
     };
     let (cap, mut names, was_open) = current_list(&paths, key, name)?;
     // A name nothing answers to is a typo far more often than a plan, and the
-    // launcher would only report it later. `omh config edit` is how you create
+    // launcher would only report it later. `omh settings edit` is how you create
     // the entry first.
     let available = catalogue_names(&paths, cap)?;
     if !available.iter().any(|n| n == name) {
         anyhow::bail!(
-            "your catalogue has no {cap} called `{name}`. `omh config edit {cap} {name}` \
+            "your catalogue has no {cap} called `{name}`. `omh settings edit {cap} {name}` \
              creates it.\n  {cap}: {}",
             if available.is_empty() {
                 "(empty)".to_string()
@@ -3172,7 +3127,7 @@ fn import_cmd(
         // whose format is omh's own — and they land in the repo.
         adapter::Capability::Hooks => import_hooks(&paths, &adapter, binding, &source, ctx),
         adapter::Capability::Mcp => anyhow::bail!(
-            "MCP servers are `omh config mcp import {harness}` — a server is a \
+            "MCP servers are `omh settings mcp import {harness}` — a server is a \
              record in one file, not an entry with its own"
         ),
         _ => import_entries(&paths, harness, cap, binding.render, &source, ctx),
@@ -3793,44 +3748,6 @@ fn show_settings(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
     Ok(())
 }
 
-/// Your defaults and your catalogue.
-///
-/// Deliberately not the resolved merge — that question is "what is effective
-/// *here*", and it lives in `omh repo` with the rest of the repo-scoped
-/// reporting. This command narrows to mean **you**.
-fn show_config(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
-    let paths = Paths::discover(cwd)?;
-    let profile = Profile::resolve(&paths);
-
-    let mut catalogue = Vec::new();
-    for cap in adapter::Capability::ALL {
-        catalogue.push(report::Catalogue {
-            capability: cap.to_string(),
-            entries: profile.entries(cap)?,
-        });
-    }
-
-    ctx.say(&report::Config {
-        defaults_file: config::Layer::Personal.file(&paths).display().to_string(),
-        // `config::values`, not `config::policy`. `policy` resolves a repo and
-        // no longer reads the template at all, so filtering its output to
-        // `Personal` was a constant empty vector — this command reported every
-        // user's defaults as empty while `omh settings` showed them, from the
-        // same file, at the same moment.
-        settings: config::values(&paths, config::Layer::Personal)?
-            .into_iter()
-            .map(|(key, value)| report::Setting {
-                key,
-                value,
-                whose: None,
-            })
-            .collect(),
-        catalogue_dir: paths.root.display().to_string(),
-        catalogue,
-    });
-    Ok(())
-}
-
 /// What is effective in this checkout, and which file decided it.
 ///
 /// Where the reporting this design keeps promising actually surfaces. With a
@@ -3903,28 +3820,6 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         notices: notice::selection(&profile, &policy.selection, &catalogue_lists(&paths)?)?,
     });
     Ok(())
-}
-
-/// `--layer` is going away. Accepted for one release, saying what replaced it.
-///
-/// The `keys.toml` treatment minus the refusal: this one is recoverable by
-/// retyping, so a hard error would cost more than it protects. What it must not
-/// do is keep working silently — a flag that outlives its documentation is how
-/// people learn a command by copying a form that is about to stop existing.
-fn layer_or(named: Option<config::Layer>, default: config::Layer, ctx: &out::Ctx) -> config::Layer {
-    let Some(layer) = named else {
-        return default;
-    };
-    let replacement = match layer {
-        config::Layer::Personal => "omh settings set",
-        config::Layer::Shared => "omh set --save",
-        config::Layer::Local => "omh set --local",
-    };
-    ctx.warn(&format!(
-        "--layer {layer} is going away — that is `{replacement}` now. \
-         `omh set` reads the key to decide what --layer asked you to decide."
-    ));
-    layer
 }
 
 /// `omh repo set` writes the gitignored file; `--shared` writes the committed
@@ -4263,7 +4158,7 @@ fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
 
 /// The legacy spellings must not write a feature name as a bare key.
 ///
-/// `omh config set codegraph off` and `omh repo set codegraph off` did exactly
+/// `omh settings set codegraph off` and `omh repo set codegraph off` did exactly
 /// that — a top-level `codegraph = "off"`, a warning that nothing reads it,
 /// exit 0, and the feature still on. That is the defect the fork exists to
 /// end, and routing only `omh set` through it guarded one door of four while
@@ -4588,7 +4483,7 @@ fn unset(paths: &Paths, key: &str, reach: Reach, dry_run: bool, ctx: &out::Ctx) 
 /// version and carries the same argument.
 ///
 /// What does need a guard is the **name**, the moment this takes one and joins
-/// it to a directory: `omh config edit skills ../../../.ssh/id_rsa` is
+/// it to a directory: `omh settings edit skills ../../../.ssh/id_rsa` is
 /// traversal. Same rule and same function as `[use]` uses, because it is the
 /// same act — a name being minted.
 fn edit(
@@ -5126,7 +5021,7 @@ fn resolved(paths: &Paths) -> Result<(base::Own, settings::RepoPolicy)> {
     let manifest = base::Manifest::load_dir(&paths.base())?;
     let repo = settings::resolve(paths, &manifest)?;
     // What the catalogue still declares, so removing a server takes its feature
-    // with it. `omh config mcp rm codegraph` edits `mcp.json` and nothing
+    // with it. `omh settings mcp rm codegraph` edits `mcp.json` and nothing
     // else, so this read is where that instruction is kept or broken.
     let installed = config::servers(paths)?.into_iter().map(|s| s.key).collect();
     Ok((base::own(&manifest, &repo.off, &installed)?, repo))
@@ -5349,7 +5244,7 @@ fn refuse_what_cannot_be_seeded(doc: &toml_edit::DocumentMut, at: &std::path::Pa
         doc.get("mcp").is_none(),
         "{}: `[mcp]` is not seeded into a repo — a server's environment can be \
          a token, and this template seeds a **committed** file.\n  \
-         omh config mcp add <name> <command> --env KEY=value   sets it on the \
+         omh settings mcp add <name> <command> --env KEY=value   sets it on the \
          server instead",
         at.display()
     );
@@ -5461,7 +5356,7 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     std::fs::create_dir_all(paths.worktrees())?;
 
     // The catalogue, empty and ready. Created rather than left absent so
-    // `omh config edit` has somewhere to open and the shape is discoverable
+    // `omh settings edit` has somewhere to open and the shape is discoverable
     // without reading a document.
     for cap in adapter::Capability::ALL {
         if cap != adapter::Capability::Mcp {
@@ -6614,7 +6509,20 @@ fn info(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let base = session::default_branch(&paths.repo);
 
+    // What your catalogue holds. It belonged to the command 0.7.0 deleted, and that is
+    // gone — `omh info` means *what you have here*, which a catalogue is.
+    let profile = Profile::resolve(&paths);
+    let mut catalogue = Vec::new();
+    for cap in adapter::Capability::ALL {
+        catalogue.push(report::Catalogue {
+            capability: cap.to_string(),
+            entries: profile.entries(cap)?,
+        });
+    }
+
     ctx.say(&report::Inventory {
+        catalogue_dir: paths.root.display().to_string(),
+        catalogue,
         harnesses: Adapter::load_dir(&paths.adapters())?
             .iter()
             .map(|a| report::Harness {
@@ -8278,7 +8186,7 @@ mod tests {
         // was: the JSON guard went on invoking a line that no longer parsed,
         // and passed, because its empty stdout read as nothing to say.
         const ON_PURPOSE: &str = "types the retired verb on purpose";
-        let gone: [String; 14] = [
+        let gone: [String; 16] = [
             // `attach` became a session verb in 2026.08.
             //
             // **No trailing character.** The first version of this needle had a
@@ -8329,9 +8237,17 @@ mod tests {
             // one leaves rather than when someone next trips over it. `run` is
             // not among them: `omh runs` is ordinary prose in four files, and
             // a needle that matches prose is a needle that gets deleted.
-            format!("omh {}", "code"), // types the retired verb on purpose
-            format!("omh {}", "fwd"),  // types the retired verb on purpose
-            format!("omh {}", "mcp"),  // types the retired verb on purpose
+            // `config` went in 0.7.0. Added to the *needle* list as well as to
+            // `RETIRED`, which is a different list for a different job: that
+            // one gives a person the replacement, this one stops a stale
+            // spelling surviving in the tree. Adding to one is not adding to
+            // the other, and eight lines in the base manifest were invisible to
+            // both for exactly that reason — the parse guard had dropped them
+            // silently the moment `config` left the vocabulary.
+            format!("omh {}", "config"), // types the retired verb on purpose
+            format!("omh {}", "code"),   // types the retired verb on purpose
+            format!("omh {}", "fwd"),    // types the retired verb on purpose
+            format!("omh {}", "mcp"),    // types the retired verb on purpose
             // The wide listing's verb, retired in favour of the noun. It still
             // listed sessions — what it never showed was what any of them was
             // *doing*, which is `omh s`, so the name promised a summary it did
@@ -8345,7 +8261,13 @@ mod tests {
             // one retirement earlier, repeated because only half the needle
             // was written.
             format!("omh {}", "ls"), // types the retired verb on purpose
-            format!("{:?}]", "ls"),  // types the retired verb on purpose
+            // Scoped to the sessions argv forms. It was `format!("{:?}]", "ls")`
+            // — any array ending in `"ls"` — which also matched
+            // `["settings", "mcp", "ls"]`, where `ls` is a live verb of a
+            // different command. A needle that fires on a spelling that still
+            // works teaches the reader to route around the guard.
+            format!("{:?}, {:?}]", "s", "ls"), // types the retired verb on purpose
+            format!("{:?}, {:?}]", "sessions", "ls"), // types the retired verb on purpose
         ];
         let mut found = Vec::new();
         let mut read = Vec::new();
@@ -8541,7 +8463,7 @@ mod tests {
         // `trailing_var_arg`, so what omh accepts has no length at all. What is
         // measurable is the corpus this scan reads, and even that is only half
         // the rule — a long line is called a sentence only when its first word
-        // is neither a session nor a command omh knows, so a broken `omh config
+        // is neither a session nor a command omh knows, so a broken `config
         // mcp addd …` stays checked however long it runs.
         //
         // What that leaves unseen: a *misspelt* verb in a line this long,
@@ -8708,8 +8630,8 @@ mod tests {
                     // a shorter command parses more easily, so a stop that
                     // earns nothing is a stop that can only hide.
                     // A stop can only shorten, and a shorter command is
-                    // strictly likelier to parse — `omh config mcp rm —
-                    // codegraph` would be checked as `omh config mcp rm` and
+                    // strictly likelier to parse — `omh settings mcp rm —
+                    // codegraph` would be checked as `omh settings mcp rm` and
                     // tolerated as a missing argument. The em dash is here
                     // because the manifest separates a command from its
                     // explanation with one, and it is omh's most-used
@@ -8796,7 +8718,7 @@ mod tests {
                     // out longer than any command omh prints.
                     //
                     // Both halves are needed. Length alone called a broken six-
-                    // word `omh config mcp addd …` a sentence, which a reviewer
+                    // word `omh settings mcp addd …` a sentence, which a reviewer
                     // planted and the guard swallowed. Vocabulary alone would
                     // dismiss `omh attatch`, which is the whole point.
                     //
@@ -8906,7 +8828,7 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 71),
+            ("main.rs", 72),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),
@@ -11441,7 +11363,7 @@ because = "a fixture"
         std::fs::write(&template, "[mcp.linear.env]\nTOKEN = \"secret\"\n").unwrap();
         let refused = seed_settings(&paths).unwrap_err().to_string();
         assert!(
-            refused.contains("omh config mcp add"),
+            refused.contains("omh settings mcp add"),
             "the refusal names where a server's environment belongs: {refused}"
         );
     }
@@ -11703,7 +11625,7 @@ because = "a fixture"
         );
         assert!(
             !config::Layer::Personal.is_committed(),
-            "omh config set writes your own file"
+            "omh settings set writes your own file"
         );
         assert!(
             repo_layer(true).is_committed(),
@@ -11993,10 +11915,10 @@ because = "a fixture"
 
     #[test]
     fn a_command_typed_as_a_harness_is_no_longer_a_thing_that_can_happen() {
-        // This asserted that `omh config` — a command typed where a harness
-        // went — pointed at `omh config --help` rather than reporting an
+        // This asserted that `config` — a command typed where a harness
+        // went — pointed at `config --help` rather than reporting an
         // unknown harness. There is no "where a harness goes" any more: a bare
-        // word is not a launch, so `omh config` is the command and cannot be
+        // word is not a launch, so `config` is the command and cannot be
         // mistaken for anything. What survives is the editor half, which is
         // still a real confusion because editors and harnesses are both names.
         let hint = tool_hint("zed", &["claude".into()], &["zed".into()]);
@@ -12267,8 +12189,8 @@ because = "a fixture"
         for path in [
             &["sessions"][..],
             &["sessions", "attach"][..],
-            &["config", "mcp"][..],
-            &["config", "mcp", "add"][..],
+            &["settings", "mcp"][..],
+            &["settings", "mcp", "add"][..],
         ] {
             assert!(
                 reached(&root, path),
