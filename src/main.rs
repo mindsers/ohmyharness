@@ -1317,11 +1317,30 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
 /// line is *composed*, so the scan that reads printed `omh …` literals cannot
 /// see it, and sweeping the doc transcripts to match made the docs show output
 /// omh does not produce. Pulled out here so the parser can be asked.
-fn next_after_init(harness: Option<&str>) -> String {
-    // `settings`, not `config` — the command that held your defaults was
-    // deleted in 0.7.0, and telling a new user to run it on their very first
-    // command is the worst possible place to leave a retired spelling.
-    harness.map_or_else(|| "settings".to_string(), |h| format!("new {h}"))
+/// What to do next, in the order somebody does it.
+///
+/// One line was the whole of this, and it named the launch — which is right
+/// and is not enough: the two lines under it are how you get *back* to the
+/// session you are about to start, and somebody who never sees them starts a
+/// second one instead. That is the failure `omh new` and `omh s resume` were
+/// split apart to make impossible to reach by accident, and this is where a
+/// first-time reader learns the pair exists.
+///
+/// `settings`, not `config` — the command that held your defaults was deleted
+/// in 0.7.0, and telling a new user to run it on their very first command is
+/// the worst possible place to leave a retired spelling.
+fn next_after_init(harness: Option<&str>) -> Vec<(String, String)> {
+    let Some(harness) = harness else {
+        return vec![(
+            "omh settings".into(),
+            "no harness to start — your defaults are here".into(),
+        )];
+    };
+    vec![
+        (format!("omh new {harness}"), "start a session".into()),
+        ("omh s resume".into(), "rejoin it later".into()),
+        ("omh s01 attach zed".into(), "open it in your editor".into()),
+    ]
 }
 
 fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) -> String {
@@ -3806,6 +3825,26 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         })
         .collect();
 
+    let using = using_here(&paths, &manifest)?;
+
+    ctx.say(&report::Repo {
+        dir: paths.repo.join(".omh").display().to_string(),
+        settings,
+        features,
+        using,
+        notices: notice::selection(&profile, &policy.selection, &catalogue_lists(&paths)?)?,
+    });
+    Ok(())
+}
+
+/// What this repo takes from your catalogue, per capability.
+///
+/// Lifted out of `show_repo` when `init` needed the same answer. Two commands
+/// deriving it separately is two answers that are free to disagree, and the
+/// one a person reads first is `init`'s.
+fn using_here(paths: &Paths, manifest: &base::Manifest) -> Result<Vec<report::Using>> {
+    let profile = Profile::resolve(paths);
+    let policy = settings::resolve(paths, manifest)?;
     let mut using = Vec::new();
     for cap in adapter::Capability::ALL {
         let entries = profile.entries(cap)?;
@@ -3817,9 +3856,9 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // Kept in the **declared** order, not `entries`' alphabetical one. For
         // `rules` that order is the whole feature — this page's own docs say
         // "the list is the order" — and building the line from the sorted
-        // catalogue made this report the one place that contradicted it. Filtered
-        // by what the catalogue actually holds, so a name nothing answers to is
-        // reported as missing rather than listed as used.
+        // catalogue made this report the one place that contradicted it.
+        // Filtered by what the catalogue actually holds, so a name nothing
+        // answers to is reported as missing rather than listed as used.
         using.push(report::Using {
             capability: cap.to_string(),
             selected: policy.selection.order(cap).map(|order| {
@@ -3832,15 +3871,7 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             unselected,
         });
     }
-
-    ctx.say(&report::Repo {
-        dir: paths.repo.join(".omh").display().to_string(),
-        settings,
-        features,
-        using,
-        notices: notice::selection(&profile, &policy.selection, &catalogue_lists(&paths)?)?,
-    });
-    Ok(())
+    Ok(using)
 }
 
 /// Where a key belongs when nothing else has an opinion — the registry alone.
@@ -5399,7 +5430,9 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // A fresh install has no adapters, so `omh <harness>` would fail no matter
     // what else init did. Ship them before anything else.
     let adapters = install_bundled_adapters(&paths, ctx)?;
-    let editors = install_bundled(&paths.editors(), bundled::Shipped::Editors, ctx)?;
+    // Shipped, and no longer reported here: what editors exist is a fact
+    // about the machine, which is `omh info`'s question.
+    install_bundled(&paths.editors(), bundled::Shipped::Editors, ctx)?;
     // The base set ships as data next to the adapters, for the same reason: the
     // opinion should be reviewable by the people it is imposed on. It travels
     // *inside* the binary now — otherwise a released omh installs nothing — but
@@ -5614,6 +5647,13 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // Which of this repo's hooks the sandbox turned out to be unable to run.
     // Measured, not asked about — see the block below.
     let mut held_back: Vec<hook::Dropped> = Vec::new();
+    // Whether that empty list means *nothing was held back* or *nothing was
+    // asked*. They render identically and only one of them is good news:
+    // `held_back` is computed three `if let`s deep — a harness, an image, and
+    // a provisioning probe that answered — so a repo whose sandbox could not
+    // be reached reported no held-back hooks while the launcher went on
+    // holding them back. Silence read as a clean bill of health.
+    let mut hooks_unchecked = Some("no harness, so no sandbox to ask".to_string());
     if let Some(h) = &harness {
         let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p))?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
@@ -5771,15 +5811,18 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // re-ask. Now nothing is on file, because nothing had to be
                 // decided.
                 held_back = render::held_back(&hook_dirs, &own, &repo, &sandbox.resolves)?;
+                hooks_unchecked = None;
             }
         }
     }
     // No harness is no image, and no image is no sandbox to ask about. The
     // hooks are already written either way.
 
-    // Report every decision, so `omh why` has something to explain. Printed as
-    // each one is made rather than collected for the end, which is why the
-    // image and graph lines below appear inside the summary.
+    // Report every decision, so `omh why` has something to explain. Collected
+    // here and printed once, which is `report::Init`'s own rule — the comment
+    // that stood here claimed the opposite, and had since the report was
+    // centralised.
+    //
     // The headline is a claim about this run, so it has to be able to stop
     // being true. omh derives what it can and asks only what nothing could
     // derive; printing "asked nothing" after putting a question on screen would
@@ -5790,8 +5833,6 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // question declined was still a question asked, and claiming otherwise
     // would let omh interrogate somebody and then deny it.
     summary.asked = asked;
-    summary.adapters = adapters.clone();
-    summary.editors = editors.clone();
     summary.harness_on_host = harness.as_deref().is_some_and(runtime::installed);
     summary.harness = harness.clone();
     summary.stacks = stacks
@@ -5816,6 +5857,7 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         .iter()
         .map(|d| (d.name.clone(), d.wanted.clone()))
         .collect();
+    summary.hooks_unchecked = hooks_unchecked;
 
     // Hooks somebody already has, somewhere omh can see them. **Noticed, never
     // acted on**: importing writes executable content into the repo, and doing
@@ -5869,7 +5911,13 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         .into_iter()
         .map(|(name, why)| (name.to_string(), why.to_string()))
         .collect();
-    summary.next_command = next_after_init(harness.as_deref());
+    summary.next = next_after_init(harness.as_deref());
+    // The selection as it stands now that `init` has written it, read the way
+    // `omh info --repo` reads it. Built from the same policy rather than from
+    // what this function happened to write, so the two commands cannot
+    // disagree about what this repo takes — and so a re-run over a curated
+    // list reports the curated list rather than the list it did not write.
+    summary.using = using_here(&paths, &base::Manifest::load_dir(&paths.base())?)?;
 
     ctx.say(&summary);
     Ok(())
@@ -8742,7 +8790,7 @@ mod tests {
         // loud, and a shape leaving one page while another gains lines is
         // loud — none of which a total or a floor can say.
         let expected: std::collections::BTreeMap<String, usize> = [
-            ("README.md", 32),
+            ("README.md", 35),
             ("accounts.md", 2),
             ("adapters.md", 1),
             ("code-graph.md", 1),
@@ -8750,7 +8798,7 @@ mod tests {
             ("configuration.md", 42),
             ("decisions.md", 1),
             ("editors.md", 4),
-            ("getting-started.md", 11),
+            ("getting-started.md", 14),
             ("git.md", 18),
             ("memory.md", 5),
             ("profile.md", 3),
@@ -9249,11 +9297,11 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 80),
+            ("main.rs", 84),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),
-            ("report.rs", 15),
+            ("report.rs", 14),
             ("rules.rs", 1),
             ("selection.rs", 1),
             ("session.rs", 4),
@@ -12057,17 +12105,27 @@ because = "a fixture"
     /// reads printed `omh …` literals cannot see it — and the doc transcripts
     /// were swept to `omh new claude`, which made the docs show output the
     /// binary does not produce and hid the break behind a green sweep.
+    ///
+    /// **Every line, now that there are three.** The list grew from one to a
+    /// block, and a loop that read `said` as a single command would have gone
+    /// on checking the first and ignoring the two under it — which are the
+    /// two a first-time reader has never typed.
     #[test]
     fn what_init_says_to_run_next_is_a_command_omh_accepts() {
         for harness in [Some("claude"), Some("opencode"), None] {
-            let said = next_after_init(harness);
-            let argv: Vec<String> = std::iter::once("omh".to_string())
-                .chain(said.split_whitespace().map(str::to_string))
-                .collect();
+            let lines = next_after_init(harness);
             assert!(
-                Cli::try_parse_from(&argv).is_ok(),
-                "init tells a new user to run `omh {said}`, which omh does not accept"
+                !lines.is_empty(),
+                "init has to leave somebody with something to run"
             );
+            for (said, _) in &lines {
+                let argv: Vec<String> = said.split_whitespace().map(str::to_string).collect();
+                let (_, argv) = session_prefix(argv);
+                assert!(
+                    Cli::try_parse_from(&argv).is_ok(),
+                    "init tells a new user to run `{said}`, which omh does not accept"
+                );
+            }
         }
     }
 

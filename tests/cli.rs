@@ -3539,6 +3539,80 @@ fn init_seeds_the_repo_from_your_template_and_says_so() {
     );
 }
 
+/// `init` reports what it did **here**, and not what the machine has.
+///
+/// Nothing asserted init's printed output at all — every other init test reads
+/// files on disk — so the report was unguarded in both directions: a row could
+/// be dropped or invented and the suite would not notice. The rewrite that
+/// dropped the inventory is exactly the change that needed one.
+///
+/// The three claims, in the order they broke:
+///
+/// - **No inventory.** `harnesses 3 (…)` and `editors 4 (…)` opened the report
+///   and were true before the command ran. `omh info` answers that.
+/// - **The catalogue selection**, which is the thing `init` actually decided
+///   about this repo and which nothing said.
+/// - **Three next lines**, not one. `omh new` starts a session and
+///   `omh s resume` rejoins it, and a reader shown only the first starts a
+///   second session instead — which is the mistake splitting the two verbs
+///   apart was meant to make unreachable.
+///
+/// Ignored because `init` builds an image.
+#[test]
+#[ignore]
+fn init_reports_what_it_did_here_and_not_what_the_machine_has() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/review-diff/SKILL.md", "skills/refactor/SKILL.md"]);
+
+    let out = sb.omh(&["init"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    for gone in ["harnesses", "editors", "not yet done"] {
+        assert!(
+            !said.contains(gone),
+            "`{gone}` is a fact about the machine, unchanged by this command —              `omh info` is where it lives now: {said}"
+        );
+    }
+    assert!(
+        said.contains("skills") && said.contains("2 selected"),
+        "what this repo takes from your catalogue is what init decided: {said}"
+    );
+    for line in ["omh new claude", "omh s resume", "omh s01 attach zed"] {
+        assert!(
+            said.contains(line),
+            "`{line}` is one of the three, and a reader shown only the first \
+             starts a second session rather than rejoining: {said}"
+        );
+    }
+
+    // The same answer, and the same shape, as the command whose whole job it
+    // is. Two derivations of one fact are two facts.
+    let repo = String::from_utf8_lossy(&sb.omh(&["info", "--repo"]).stdout).to_string();
+    assert!(
+        repo.contains("review-diff") && repo.contains("refactor"),
+        "init wrote the selection `omh info --repo` reads: {repo}"
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
+        .expect("--json is machine-readable");
+    assert!(json["adapters"].is_null(), "the inventory left: {json:#}");
+    let skills = json["using"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no using in {json:#}"))
+        .iter()
+        .find(|u| u["capability"] == "skills")
+        .unwrap_or_else(|| panic!("no skills row in {json:#}"));
+    assert_eq!(skills["selected"].as_array().map(Vec::len), Some(2));
+    assert_eq!(json["next"][0]["run"], "omh new claude", "got {json:#}");
+}
+
 /// The template decides nothing in a repo that already exists.
 ///
 /// The whole argument for the rename. A repo's behaviour is explained by files

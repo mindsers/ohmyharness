@@ -1941,14 +1941,6 @@ impl Report for Imported {
 
 // ── omh init ────────────────────────────────────────────────────────────────
 
-/// What omh has not built yet, printed on `init`'s last line.
-///
-/// A constant rather than a literal in the middle of `human` because it is a
-/// claim about the whole product that nothing else re-checks, and it is
-/// exactly the kind of line that gets typed once and left. It was: `recall`
-/// shipped with the memory server and this sentence went on calling it undone.
-const NOT_YET_DONE: &str = "not yet done: cost accounting.";
-
 /// Everything `omh init` decided, in the order somebody reads it.
 ///
 /// Assembled and reported once, rather than printed as it goes. The old
@@ -1965,8 +1957,6 @@ pub struct Init {
     /// a question declined was still a question asked, and the headline claims
     /// omh asked nothing.
     pub asked: usize,
-    pub adapters: Vec<String>,
-    pub editors: Vec<String>,
     pub harness: Option<String>,
     pub harness_on_host: bool,
     /// The base image, and the repo-specific one if a stack layer was built.
@@ -1979,6 +1969,13 @@ pub struct Init {
     pub provision_problems: Vec<String>,
     /// `(hook, program it needs)` — written and travelling, but not running here.
     pub held_back: Vec<(String, String)>,
+    /// Why the question was never put, when it was not.
+    ///
+    /// An empty `held_back` says *nothing is held back*, and it also said
+    /// *nothing was asked* — the measurement sits three conditions deep, and a
+    /// repo whose sandbox could not be reached got the reassuring reading of
+    /// the two while the launcher went on holding hooks back.
+    pub hooks_unchecked: Option<String>,
     pub importable: Vec<String>,
     pub memory: String,
     pub catalogue_dir: String,
@@ -1986,8 +1983,22 @@ pub struct Init {
     pub graph: Option<String>,
     pub base_set: String,
     pub rationale: Vec<(String, String)>,
-    pub next_command: String,
-    /// Settings copied out of `~/.omh/settings.toml` into this repo's file.
+    /// What this repo takes from your catalogue, per capability.
+    ///
+    /// The same value `omh info --repo` reports, built the same way, because
+    /// the question *what did init select here* and the question *what is
+    /// selected here* have one answer and two commands that must not be able
+    /// to disagree about it.
+    ///
+    /// **Selected, never installed.** Rules and skills are composed into each
+    /// session from the catalogue rather than copied in — which is what lets a
+    /// fix reach a repo that ran `init` a year ago — and MCP lives in
+    /// `~/.omh/mcp.json`. Hooks are the one capability `init` writes files for.
+    /// Saying *installed* would describe work that does not happen.
+    pub using: Vec<Using>,
+    /// `(line, what it does)`, in the order somebody does them.
+    pub next: Vec<(String, String)>,
+    /// Settings copied out of `~/.omh/default.toml` into this repo's file.
     ///
     /// Reported because it is the one moment that template has any effect —
     /// nothing reads it at launch. A seed nobody is told about is
@@ -2015,23 +2026,12 @@ impl Report for Init {
             )
         );
 
+        // **No inventory.** `harnesses 3 (claude, omp, opencode)` and
+        // `editors 4 (…)` opened this report and answered a question nobody
+        // asks after `init`: they are facts about the machine, true before the
+        // command ran and unchanged by it. `omh info` is where the machine is
+        // described. What belongs here is what happened to *this repo*.
         let mut t = Table::new();
-        t = t.row(vec![
-            Cell::plain("harnesses"),
-            Cell::plain(format!(
-                "{} ({})",
-                self.adapters.len(),
-                self.adapters.join(", ")
-            )),
-        ]);
-        t = t.row(vec![
-            Cell::plain("editors"),
-            Cell::plain(format!(
-                "{} ({})",
-                self.editors.len(),
-                self.editors.join(", ")
-            )),
-        ]);
         t = t.row(vec![
             Cell::plain("harness"),
             match &self.harness {
@@ -2079,6 +2079,30 @@ impl Report for Init {
                 Cell::plain(format!("{name} (from {marker})")),
             ]);
         }
+        // Selected, and what was left in the catalogue — the second half is
+        // the one that is invisible otherwise, and it is the reason somebody
+        // later asks why a skill they have is not running here.
+        for using in &self.using {
+            // A capability you have nothing in has nothing to report. On a
+            // fresh install that is five rows of `0 selected` between the
+            // stack and the provisioning, and a reader learns from them only
+            // that omh has six capabilities — which is `omh info`'s answer,
+            // not this one's.
+            if using.selected.as_ref().is_some_and(Vec::is_empty) && using.unselected.is_empty() {
+                continue;
+            }
+            let mut said = match &using.selected {
+                None => "everything in your catalogue".to_string(),
+                Some(taken) => format!("{} selected", taken.len()),
+            };
+            if !using.unselected.is_empty() {
+                said.push_str(&format!(
+                    "  ({} in your catalogue, not here)",
+                    using.unselected.len()
+                ));
+            }
+            t = t.row(vec![Cell::plain(&using.capability), Cell::plain(said)]);
+        }
         for key in &self.provisioned {
             t = t.row(vec![Cell::plain("provision"), Cell::plain(key)]);
         }
@@ -2095,6 +2119,12 @@ impl Report for Init {
             t = t.row(vec![
                 Cell::styled("held back", out::WARN),
                 Cell::plain(format!("`{name}` needs {wanted}")),
+            ]);
+        }
+        if let Some(why) = &self.hooks_unchecked {
+            t = t.row(vec![
+                Cell::styled("held back", out::WARN),
+                Cell::plain(format!("not measured — {why}")),
             ]);
         }
         for line in &self.importable {
@@ -2149,16 +2179,22 @@ impl Report for Init {
                 "omh why <name>  what it costs, what was considered instead, how to remove it"
             )
         ));
-        s.push_str(&format!("\n{}\n", p.paint(out::DIM, NOT_YET_DONE)));
-        s.push_str(&format!("next: omh {}\n", self.next_command));
+        // Three lines rather than one, because the first thing after `init`
+        // is not the only thing: the two that follow it are how you get back
+        // to the session you are about to start, and a person who never sees
+        // them starts a second one instead.
+        s.push_str(&format!("\n  {}\n", p.paint(out::HEAD, "next")));
+        let mut next = Table::new().indent(4);
+        for (line, does) in &self.next {
+            next = next.row(vec![Cell::styled(line, out::NAME), Cell::plain(does)]);
+        }
+        s.push_str(&next.render(p));
         s
     }
 
     fn json(&self) -> serde_json::Value {
         json!({
             "asked": self.asked,
-            "adapters": self.adapters,
-            "editors": self.editors,
             "harness": self.harness,
             "harness_on_host": self.harness_on_host,
             "image": self.image,
@@ -2173,6 +2209,7 @@ impl Report for Init {
                 "hook": name,
                 "needs": wanted,
             })).collect::<Vec<_>>(),
+            "hooks_unchecked": self.hooks_unchecked,
             "importable": self.importable,
             "memory": self.memory,
             "catalogue_dir": self.catalogue_dir,
@@ -2183,7 +2220,15 @@ impl Report for Init {
                 "name": name,
                 "why": why,
             })).collect::<Vec<_>>(),
-            "next": self.next_command,
+            "using": self.using.iter().map(|u| json!({
+                "capability": u.capability,
+                "selected": u.selected,
+                "unselected": u.unselected,
+            })).collect::<Vec<_>>(),
+            "next": self.next.iter().map(|(line, does)| json!({
+                "run": line,
+                "does": does,
+            })).collect::<Vec<_>>(),
             "seeded": self.seeded,
         })
     }
@@ -2715,29 +2760,6 @@ impl Report for Lint {
 
 #[cfg(test)]
 mod tests {
-    /// `init` does not call unfinished something the same screen installed.
-    ///
-    /// `omh init` prints the base set it just seeded — including *"memory —
-    /// what a session learned outlives it"*, which is the MCP server answering
-    /// `recall` and `remember` — and then printed *"not yet done: recall"* four
-    /// lines below it. A new user's first screen contradicted itself, and the
-    /// sentence was a literal buried in `human` that nothing read again.
-    ///
-    /// The tool names are the pair `doctor::memory_checks` expects the server
-    /// to speak, so this fails if the sentence ever re-names a shipped one.
-    #[test]
-    fn init_does_not_call_unfinished_a_capability_that_ships() {
-        for tool in ["recall", "remember"] {
-            assert!(
-                !super::NOT_YET_DONE.contains(tool),
-                "`{}` ships — the memory server answers it and `omh doctor` \
-                 checks that it does — but init still reports it as undone: {}",
-                tool,
-                super::NOT_YET_DONE
-            );
-        }
-    }
-
     /// A sync names every file that needs a decision, and counts them in a
     /// sentence rather than in a template.
     ///
