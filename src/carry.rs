@@ -292,8 +292,7 @@ pub fn exclude_path(worktree: &Path) -> Option<PathBuf> {
 ///
 /// Named once because three things have to agree about them, in three modules:
 /// the `concat` targets the adapters declare, `hide_staged_rules` here, and
-/// `Session::commit`'s backstop. A harness whose rules file is named something
-/// else needs adding to this list too.
+/// `Session::commit`'s backstop.
 pub const STAGED_RULES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
 
 /// Hide the rules filenames from the agent's `git status`.
@@ -307,7 +306,34 @@ pub const STAGED_RULES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
 /// semantics, silent about a file git already has — which is why the mount, not
 /// this, is what keeps omh's staging out of the user's commit.
 pub fn hide_staged_rules(worktree: &Path) -> Result<()> {
-    exclude(worktree, &STAGED_RULES.map(String::from))
+    let names: Vec<String> = hidden_in_the_worktree()
+        .into_iter()
+        .map(String::from)
+        .collect();
+    exclude(worktree, &names)
+}
+
+/// Every name a launch may leave in the worktree as a mount destination.
+///
+/// **Checked against the mounts, not remembered.** This was `STAGED_RULES`
+/// alone — two names kept by hand under a doc comment asking the next person to
+/// remember — and `.mcp.json`, mounted into `/work` exactly like the rules
+/// files, was never added. So on a session where the agent had done nothing,
+/// `omh s` reported `1 uncommitted`, `omh sNN diff` showed `.mcp.json | 0` as
+/// the session's work, and `omh sNN commit` put omh's own plumbing onto the
+/// user's branch, where `omh sNN push` would publish it.
+///
+/// A list is still the right shape: `hide_staged_rules` runs where there is no
+/// plan to read, and a launch has to hide these *before* it builds one. What
+/// changed is that `every_placeholder_a_launch_leaves_in_the_worktree_is_one_git_ignores`
+/// now walks the plan's `/work` mounts and fails if any name is missing here,
+/// so the list cannot fall behind the mounts the way it did.
+///
+/// Silent about a file git already tracks — this is `info/exclude`, which is
+/// gitignore semantics. A repo carrying its own `.mcp.json` is unaffected; the
+/// mount hides it for the length of the session and nothing else.
+pub fn hidden_in_the_worktree() -> Vec<&'static str> {
+    STAGED_RULES.into_iter().chain([".mcp.json"]).collect()
 }
 
 /// Keep carried files out of the agent's `git status`, so they never show up as

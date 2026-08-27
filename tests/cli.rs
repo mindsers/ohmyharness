@@ -2431,6 +2431,12 @@ fn set_mentions_git_where_git_was_asked_for_or_cannot_be_vouched_for() {
     );
 
     // Asked for in so many words.
+    // A captured login, because `omh set account` now refuses a name none
+    // answers to — `account` is still the example here for the reason the
+    // key registry gives it: a name, not a credential, and the one
+    // value-taking key the docs show being shared on purpose.
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
     let asked = sb.omh(&["set", "--save", "account", "work"]);
     let said = String::from_utf8_lossy(&asked.stderr).to_string();
     assert!(
@@ -2716,6 +2722,12 @@ fn a_key_that_carries_no_secret_is_not_singled_out() {
     let sb = sandbox();
     sb.seed_base();
 
+    // A captured login, because `omh set account` now refuses a name none
+    // answers to — `account` is still the example here for the reason the
+    // key registry gives it: a name, not a credential, and the one
+    // value-taking key the docs show being shared on purpose.
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
     let out = sb.omh(&["set", "--save", "account", "work"]);
     let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(said.contains("COMMITTED"), "got: {said}");
@@ -3999,6 +4011,662 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
              revisits, so that repo cannot be repaired by re-running init"
         );
     }
+}
+
+/// A repo nobody has configured reports nothing configured.
+///
+/// `init` wrote `carry_in = []` into every new `settings.toml`, so the first
+/// thing `omh info --repo` said about a fresh repo was
+///
+///     settings
+///       carry_in  []  ← shared
+///
+/// which reads as a decision somebody made. Nobody made it. The file already
+/// carries the commented example that teaches the key — `# carry_in =
+/// [".env.local", "certs/"]` — and a commented line is the honest way to show
+/// a setting you are not setting.
+///
+/// Ignored because `init` builds an image.
+#[test]
+#[ignore]
+fn a_repo_nobody_has_configured_reports_nothing_configured() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    assert!(sb.omh(&["init"]).status.success());
+
+    let said = String::from_utf8_lossy(&sb.omh(&["info", "--repo"]).stdout).to_string();
+    let settings = said
+        .split("omh's features")
+        .next()
+        .unwrap_or_else(|| panic!("no settings section: {said}"));
+    assert!(
+        !settings.contains("carry_in"),
+        "nobody set this — the template teaches the key with a commented \
+         example, which is what a setting you are not setting looks like: {said}"
+    );
+
+    // The teaching line survives, because dropping the value must not drop the
+    // explanation with it.
+    let file = sb.settings();
+    assert!(
+        file.contains("# carry_in"),
+        "the commented example is how somebody learns the key exists: {file}"
+    );
+}
+
+/// The COMMITTED warning fires where a secret could land, not on every write.
+///
+/// `Why` exists to keep this sentence rare, and its doc says why: the warning
+/// *"was rare and deliberate while a flag was the only way to reach one and is
+/// nearly every write now that the committed file is the default. A sentence
+/// that fires on almost every invocation is one people stop reading, and this
+/// codebase has already watched that happen once, to this same sentence."*
+///
+/// `set <key> <value>` got that narrowing. `set <feature> on|off` did not — and
+/// a feature switch is **always** a committed write, so the warning fired every
+/// single time, on the most ordinary action the command has. That is the
+/// crying-wolf the narrowing was built to stop, one arm over.
+///
+/// The line still has to appear where it matters, so both directions are here.
+#[test]
+fn the_committed_warning_is_kept_for_what_it_is_for() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let switch = sb.omh(&["set", "codegraph", "off"]);
+    assert!(switch.status.success());
+    assert!(
+        !String::from_utf8_lossy(&switch.stderr).contains("COMMITTED"),
+        "switching a feature off for this repo is what the committed file is \
+         for: {}",
+        String::from_utf8_lossy(&switch.stderr)
+    );
+
+    // A key nothing classified, sent to the committed file because that is what
+    // omh does with one it has never heard of. Still worth saying out loud.
+    let unknown = sb.omh(&["set", "somekey", "somevalue"]);
+    assert!(unknown.status.success());
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("COMMITTED"),
+        "a key omh cannot classify reaching a file git carries is the case this \
+         sentence exists for: {}",
+        String::from_utf8_lossy(&unknown.stderr)
+    );
+}
+
+/// A command that cannot preview says so, rather than running.
+///
+/// The other half of the rule. `--dry-run` is global, so clap accepts it
+/// everywhere — and where nothing read it, the command ran and the flag
+/// evaporated. Refusing is what makes "no command silently ignores it" true
+/// today, for the ones whose preview is real work: `init` builds images, and
+/// the session verbs stop containers, replant commits and delete worktrees.
+///
+/// Read-only commands are here for a different reason: they *are* their own
+/// dry run, so there is nothing to withhold, and accepting the flag would
+/// promise a preview they never give.
+#[test]
+fn a_command_that_cannot_preview_refuses_the_flag() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for argv in [
+        vec!["init"],
+        vec!["info"],
+        vec!["why", "account"],
+        vec!["settings", "edit"],
+        vec!["memory", "promote", "x"],
+        vec!["s", "down"],
+        vec!["s", "rm"],
+        vec!["s", "commit"],
+    ] {
+        let mut dry = vec!["--dry-run"];
+        dry.extend(argv.iter().copied());
+        let out = sb.omh(&dry);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "`omh {}` took a flag it does not honour",
+            dry.join(" ")
+        );
+        assert!(
+            said.contains("--dry-run"),
+            "and the refusal names the flag, not whatever it hit next: {said}"
+        );
+    }
+}
+
+/// `--dry-run` writes nothing, on every command that writes.
+///
+/// It was a global flag that ten commands read and the rest accepted and
+/// discarded — so on the ones that change things it was not inert, it was a
+/// **lie**:
+///
+///     $ omh --dry-run use --all
+///     resynced to your catalogue — wrote → …/.omh/settings.toml
+///
+/// Accepted, ignored, and the output says it wrote. The same shape as the
+/// `feature_switch` defect this codebase already fixed once and wrote a comment
+/// about, reproduced across `use`, `unuse`, `import`, `settings edit` and the
+/// session verbs — including the ones that delete.
+///
+/// The rule is the whole of it: **run as usual, withhold the writes.** Not a
+/// second description of what would happen, free to drift from what does — the
+/// real code path, with persistence the only thing removed. So the test is a
+/// fingerprint of the tree before and after, and the assertion is that they
+/// match.
+#[test]
+fn a_dry_run_writes_nothing() {
+    // `(argv, what it needs first)`. Every command here changes something when
+    // run for real; the read-only ones are a different question and are covered
+    // by refusing the flag, below.
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["use", "--all"],
+        vec!["use", "skills", "review-diff"],
+        vec!["unuse", "hooks", "rust-test"],
+        vec!["set", "idle_timeout", "45m"],
+        vec!["set", "codegraph", "off"],
+        vec!["unset", "carry_in"],
+        vec!["settings", "set", "idle_timeout", "45m"],
+        vec!["settings", "unset", "idle_timeout"],
+        vec!["settings", "mcp", "add", "srv", "echo"],
+        vec!["settings", "mcp", "rm", "srv0"],
+        vec!["memory", "rm", "proj"],
+    ];
+
+    // Two identical sandboxes per case: one runs the command dry, the other
+    // runs it for real. Both are asserted — the dry one must change nothing,
+    // and **the wet one must change something**, because a case that would not
+    // have written anyway proves nothing about withholding writes. The first
+    // draft of this test had two such cases and passed them.
+    for argv in cases {
+        let dry_sb = ready();
+        let wet_sb = ready();
+        let before = fingerprint(&dry_sb);
+
+        let mut dry = vec!["--dry-run"];
+        dry.extend(argv.iter().copied());
+        let said = dry_sb.omh(&dry);
+        assert_eq!(
+            before,
+            fingerprint(&dry_sb),
+            "`omh {}` changed the tree under --dry-run\n  said: {}",
+            dry.join(" "),
+            String::from_utf8_lossy(&said.stdout)
+        );
+        // And says so. Withholding the write while printing `wrote →` is the
+        // same lie one layer up — the file is untouched and the report claims
+        // otherwise, which is what somebody reads.
+        let printed = String::from_utf8_lossy(&said.stdout).to_string();
+        assert!(
+            !printed.lines().any(|l| l.contains("wrote →")),
+            "`omh {}` withheld the write and reported one: {printed}",
+            dry.join(" ")
+        );
+
+        let wet = wet_sb.omh(&argv);
+        assert!(
+            wet.status.success(),
+            "`omh {}` has to work for the dry half to mean anything: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&wet.stderr)
+        );
+        assert_ne!(
+            fingerprint_at(&wet_sb, &before),
+            before,
+            "`omh {}` writes nothing even without --dry-run, so it is not a \
+             case this test can learn from",
+            argv.join(" ")
+        );
+    }
+}
+
+/// A sandbox with something to change and something to remove.
+fn ready() -> Sandbox {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "hooks", "stacks"]);
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    std::fs::write(
+        sb.repo.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    assert!(sb.omh(&["set", "carry_in", "[\".env\"]"]).status.success());
+    assert!(sb
+        .omh(&["settings", "set", "idle_timeout", "9m"])
+        .status
+        .success());
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "srv0", "echo"])
+        .status
+        .success());
+    sb.seed("proj.md", &note("proj", WHOLE));
+    sb
+}
+
+/// The same fingerprint, with the other sandbox's temporary directory swapped
+/// in — two sandboxes have different roots, and comparing the paths would
+/// differ for that reason alone.
+fn fingerprint_at(sb: &Sandbox, like: &[(String, Vec<u8>)]) -> Vec<(String, Vec<u8>)> {
+    let (Some(mine), Some(theirs)) = (
+        sb.home.parent().map(|p| p.display().to_string()),
+        like.first()
+            .and_then(|(p, _)| p.rsplit_once("/home/"))
+            .map(|(root, _)| root.to_string()),
+    ) else {
+        return fingerprint(sb);
+    };
+    fingerprint(sb)
+        .into_iter()
+        .map(|(p, b)| (p.replace(&mine, &theirs), b))
+        .collect()
+}
+
+/// Every file below the sandbox's home and repo, with its bytes.
+///
+/// A fingerprint rather than a list of paths: `--dry-run` writing the *same*
+/// files with different contents is the failure this is looking for as much as
+/// creating new ones.
+fn fingerprint(sb: &Sandbox) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    for root in [&sb.home, &sb.repo] {
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                // `.git` churns on its own — index mtimes, gc state — and none
+                // of it is a write omh made.
+                if p.file_name().is_some_and(|n| n == ".git") {
+                    continue;
+                }
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push((
+                        p.display().to_string(),
+                        std::fs::read(&p).unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The account is the setting, and there is no second way to say it.
+///
+/// `-a` was a global that overrode the setting for one invocation and recorded
+/// nothing. So a session started with it could not be resumed without
+/// repeating it — and forgetting meant the account mount no longer matched the
+/// container's stamp, which either blocked the resume or brought the container
+/// back as a different account. It looked like *run this session as work* and
+/// was *run this launch as work, then give the session an identity it cannot
+/// remember*.
+///
+/// One account per repo is the shape that was actually wanted, and
+/// `omh set account` already expressed it: `resolve_for_launch` is
+/// `explicit.or(configured)`, so the setting was the fallback the whole time.
+/// Removing the flag leaves the fallback as the answer.
+#[test]
+fn the_account_is_the_setting_and_there_is_no_second_way_to_say_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
+
+    for argv in [
+        vec!["-a", "work", "new", "claude"],
+        vec!["new", "claude", "-a", "work"],
+        vec!["s01", "resume", "-a", "work"],
+        vec!["doctor", "-a", "work"],
+    ] {
+        let out = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "`omh {}` names an account a second way",
+            argv.join(" ")
+        );
+        assert!(
+            said.contains("unexpected argument") || said.contains("--account"),
+            "and clap refuses it as an argument that is not there: {said}"
+        );
+    }
+}
+
+/// `omh set account` refuses a name no login answers to.
+///
+/// The account is one thing with one spelling now: `omh auth <harness> -n work`
+/// creates it, `omh set account work` selects it, and every command that
+/// launches or probes reads the setting. The global `-a` that used to override
+/// it per invocation is gone — it recorded nothing, so a session started with
+/// it could not be resumed without repeating it, and forgetting meant the
+/// stamp either blocked the resume or brought the container back as a
+/// different account.
+///
+/// Which makes this check the whole safety net: a typo in the setting is now
+/// the only way to point a launch at credentials that are not there, and it
+/// would otherwise surface as a failed login inside a sandbox.
+///
+/// Accounts are stored per harness — `~/.omh/creds/<harness>/<account>` — so
+/// there are three answers, not two, and the middle one is the common case.
+#[test]
+fn setting_an_account_refuses_a_name_no_login_answers_to() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    // Accounts are discovered per harness, so there has to be a harness.
+    sb.seed_catalogue(&["adapters"]);
+
+    // Nothing captured at all: the answer is how to capture one.
+    let none = sb.omh(&["set", "account", "work"]);
+    let said = String::from_utf8_lossy(&none.stderr).to_string();
+    assert!(!none.status.success(), "no login answers to `work`: {said}");
+    assert!(
+        said.contains("omh auth"),
+        "and the answer is the command that creates one: {said}"
+    );
+
+    sb.account("claude", "work");
+
+    // Captured for a harness: accepted, and it says which — `work` is right
+    // until the day you run `omh new opencode`, and that is the moment to have
+    // been told.
+    let ok = sb.omh(&["set", "account", "work"]);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&ok.stderr).contains("claude"),
+        "the harness it is captured for is worth saying: {}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+
+    // A typo, with something to compare against.
+    let typo = sb.omh(&["set", "account", "wrok"]);
+    let said = String::from_utf8_lossy(&typo.stderr).to_string();
+    assert!(!typo.status.success(), "`wrok` is a typo: {said}");
+    assert!(
+        said.contains("work"),
+        "and the refusal names what does exist: {said}"
+    );
+}
+
+/// A session scopes a session verb, and nothing else.
+///
+/// `memory remember` was the one exception, and it did not earn it: the id
+/// reached exactly one line, and it was not a scope —
+///
+///     input.source = match session {
+///         Some(id) => format!("session {id}, cli"),
+///         None => "cli".into(),
+///     };
+///
+/// Provenance, in a text field. Nothing is filed, scoped or retrieved by
+/// session; the store is repo-wide, which is what the design says it is. So the
+/// exception bought a global flag for a string that `--source` already writes,
+/// and left `consumes_session` claiming a relationship the store does not have.
+///
+/// The in-sandbox path is unaffected — `memory serve` carries its own
+/// `--session`, which is how an agent's notes get attribution.
+#[test]
+fn a_session_scopes_a_session_verb_and_nothing_else() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    // Complete, deliberately. An incomplete line fails *both* readings, and
+    // the arbitration then prefers the sessions error — so a short fixture
+    // would have tested clap's message rather than this rule.
+    let out = sb.omh(&[
+        "s01",
+        "memory",
+        "remember",
+        "--expected",
+        "a",
+        "--observed",
+        "b",
+        "--evidence",
+        "c",
+        "--answers",
+        "d",
+    ]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !out.status.success(),
+        "the store is repo-wide, so a session id here scopes nothing: {said}"
+    );
+    assert!(
+        said.contains("does not act on one"),
+        "and it is refused where it was named, like every other command that \
+         does not read one: {said}"
+    );
+
+    // The provenance it used to supply, said outright.
+    let wrote = sb.omh(&[
+        "memory",
+        "remember",
+        "--expected",
+        "a",
+        "--observed",
+        "b",
+        "--evidence",
+        "c",
+        "--answers",
+        "d",
+        "--source",
+        "session s01, cli",
+    ]);
+    assert!(
+        wrote.status.success(),
+        "{}",
+        String::from_utf8_lossy(&wrote.stderr)
+    );
+}
+
+/// A name nothing answers to is refused, whichever command you typed.
+///
+/// `omh settings mcp rm nope` exited **0** and said *"nope is not in your
+/// catalogue"* — a typo reported as success, which is the one thing every
+/// sibling already refuses to do. `use`, `unuse`, `memory rm` and
+/// `memory promote` all exit 1 on the same mistake, and one of them carries a
+/// comment saying why: a name this repo never used is a typo, and reporting
+/// success for it is how the typo survives.
+///
+/// A script cannot tell a removal from a misspelling when the exit code is the
+/// same, and a person reads a green exit as *done*.
+#[test]
+fn a_name_nothing_answers_to_is_refused_whichever_command_you_typed() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/real/SKILL.md"]);
+
+    for argv in [
+        vec!["settings", "mcp", "rm", "nope"],
+        vec!["unuse", "skills", "nope"],
+        vec!["use", "skills", "nope"],
+        vec!["memory", "rm", "nope"],
+        vec!["memory", "promote", "nope"],
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            !out.status.success(),
+            "`omh {}` reported a typo as success",
+            argv.join(" ")
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("nope"),
+            "and names the word it could not find: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// A name this repo cannot use is not a name your catalogue lacks.
+///
+/// `omh use hooks go-test` in a rust repo said *"your catalogue has no hooks
+/// called `go-test`"* — while `omh info` listed all six, `go-test` among them.
+/// The check reads `catalogue_names`, which filters hooks down to the
+/// ecosystems this repo actually is, and then worded the filtering as absence.
+///
+/// Two costs, and the second is worse than the wrong sentence: it went on to
+/// offer `omh settings edit hooks go-test`, which creates a *second*
+/// `go-test.json` beside the one already there.
+///
+/// The invariant is that the two states are told apart. A catalogue that
+/// genuinely lacks the name is the case where creating it is the answer; a
+/// catalogue that has it is never that case.
+#[test]
+fn a_name_this_repo_cannot_use_is_not_a_name_the_catalogue_lacks() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    // The hook *files*, not just the manifest — `go-test` has to really be in
+    // the catalogue for the claim that it is not to be false.
+    sb.seed_catalogue(&["hooks", "stacks"]);
+    // Rust, so omh's go and python hooks are in the catalogue and inapplicable.
+    std::fs::write(
+        sb.repo.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+
+    let missing = sb.omh(&["use", "hooks", "nosuchhook"]);
+    let missing_said = String::from_utf8_lossy(&missing.stderr).to_string();
+    assert!(!missing.status.success());
+    assert!(
+        missing_said.contains("no hooks called"),
+        "a name nothing answers to is absent, and creating it is the answer: {missing_said}"
+    );
+
+    let present = sb.omh(&["use", "hooks", "go-test"]);
+    let present_said = String::from_utf8_lossy(&present.stderr).to_string();
+    assert!(
+        !present.status.success(),
+        "a hook for an ecosystem this repo is not is still refused"
+    );
+    assert!(
+        !present_said.contains("no hooks called"),
+        "your catalogue has `go-test` — `omh info` lists it: {present_said}"
+    );
+    assert!(
+        !present_said.contains("settings edit"),
+        "and offering to create it would write a second copy beside the one \
+         that is already there: {present_said}"
+    );
+}
+
+/// The way out that `omh why` prints is a way out.
+///
+/// Every base-set entry carries a `remove` field, and `omh why` prints it
+/// verbatim as the answer to "how do I get rid of this". Nothing checked that
+/// running it got rid of anything: the existing guard asks only whether the
+/// line *parses*, so six entries shipped naming a command that removes a third
+/// of what they claim — the MCP server, leaving the feature `on` with nothing
+/// behind it and its hooks still selected.
+///
+/// The invariant, not the wording: **after running what the field says, the
+/// feature is no longer on in this repo.** A rewrite of the sentence keeps
+/// passing; a command that does not do the job does not.
+///
+/// Runs everywhere — none of these commands needs a container.
+#[test]
+fn the_way_out_the_base_set_prints_is_a_way_out() {
+    let manifest =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("base/2026.08.toml"))
+            .unwrap();
+
+    // `(feature, remove)` per entry, read positionally: the fields are written
+    // in a fixed order in the file and both are required, so a pair that fails
+    // to form is a manifest this test should not be silent about.
+    let mut entries: Vec<(String, String)> = Vec::new();
+    let mut feature: Option<String> = None;
+    for line in manifest.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("feature = ") {
+            feature = Some(rest.trim_matches('"').to_string());
+        }
+        if let Some(rest) = line.strip_prefix("remove  = ") {
+            let said = rest.trim_matches('"');
+            entries.push((
+                feature
+                    .clone()
+                    .expect("`feature` precedes `remove` in an entry"),
+                said.to_string(),
+            ));
+        }
+    }
+    assert!(
+        entries.len() > 8,
+        "the scan read {} entries, fewer than the base set has",
+        entries.len()
+    );
+
+    let mut wrong = Vec::new();
+    for (feature, said) in &entries {
+        // **The field opens with the command**, then an em dash and what it
+        // does or does not take with it. Anchored at the start rather than
+        // found anywhere, because these fields are prose and their prose names
+        // other commands: one `git-notice` entry mentions `omh sNN log --turns`
+        // to say it stops working, and a scan that searched the sentence
+        // dutifully ran it.
+        //
+        // A field with no command is a failure, not a skip. That is the shape
+        // three `git-notice` entries hid behind, telling the reader to
+        // hand-edit `[omh]` in a TOML file long after `omh set <feature> off`
+        // existed — an answer you cannot run, printed under the heading
+        // `remove`.
+        let Some(rest) = said.strip_prefix("omh ") else {
+            wrong.push(format!(
+                "`{feature}`'s way out does not open with a command to type: {said}"
+            ));
+            continue;
+        };
+        let command = rest.split('—').next().unwrap_or(rest).trim();
+
+        let sb = sandbox();
+        sb.git_init();
+        sb.seed_base();
+        let out = sb.omh(&command.split_whitespace().collect::<Vec<_>>());
+        if !out.status.success() {
+            wrong.push(format!(
+                "`omh {command}` does not run: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+            continue;
+        }
+        let after = sb.omh(&["info", "--repo"]);
+        assert!(after.status.success());
+        let said_after = String::from_utf8_lossy(&after.stdout).to_string();
+        let still_on = said_after
+            .lines()
+            .any(|l| l.trim_start().starts_with(feature.as_str()) && l.contains("on"));
+        if still_on {
+            wrong.push(format!(
+                "`omh {command}` leaves `{feature}` on — printed as the way out of it"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the base set prints {} way{} out that does not work:\n  {}",
+        wrong.len(),
+        if wrong.len() == 1 { "" } else { "s" },
+        wrong.join("\n  ")
+    );
 }
 
 /// `omh settings` works where the file it edits lives — outside a repo.
@@ -5487,6 +6155,12 @@ fn committing_a_key_that_carries_a_secret_names_the_key() {
 
     // A key that carries no secret keeps the general warning and gains nothing
     // — otherwise the sharper sentence means nothing.
+    // A captured login, because `omh set account` now refuses a name none
+    // answers to — `account` is still the example here for the reason the
+    // key registry gives it: a name, not a credential, and the one
+    // value-taking key the docs show being shared on purpose.
+    sb.seed_catalogue(&["adapters"]);
+    sb.account("claude", "work");
     let safe = sb.omh(&["set", "--save", "account", "work"]);
     let mild = String::from_utf8_lossy(&safe.stderr).to_string();
     assert!(
@@ -5640,15 +6314,18 @@ fn doctor_checks_the_credentials_of_the_account_it_was_given() {
         "the refusal names the accounts it could not choose between: {said}"
     );
 
-    // Named: the account asked for is the account checked.
-    let said = both(&sb.omh(&["-a", "work", "doctor", "--harness", "claude"]));
+    // Chosen: the account the setting names is the account checked. It was a
+    // flag — `-a work` — and the flag is gone: the account is one thing with
+    // one spelling, and `doctor` reads it like every command that launches.
+    assert!(sb.omh(&["set", "account", "work"]).status.success());
+    let said = both(&sb.omh(&["doctor", "--harness", "claude"]));
     assert!(
         !said.contains("no account"),
-        "`-a` is not discarded on the way to doctor: {said}"
+        "the setting is not discarded on the way to doctor: {said}"
     );
     assert!(
         said.contains("as work"),
-        "and the account named is the one checked: {said}"
+        "and the account chosen is the one checked: {said}"
     );
 }
 

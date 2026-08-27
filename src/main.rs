@@ -62,10 +62,6 @@ struct Cli {
     #[arg(long, short, global = true)]
     session: Option<String>,
 
-    /// Which captured account to log in as.
-    #[arg(long, short = 'a', global = true)]
-    account: Option<String>,
-
     // Global, and under `omh new` that is the whole rule: before `--` it is
     // omh's, after `--` it is the harness's. The bare-name form had to guess,
     // and `passthrough` did the guessing — it refused omh's long flags and
@@ -154,20 +150,36 @@ impl Cli {
 /// given, `main` refuses a line that names the session twice rather than
 /// choosing between them.
 fn session_prefix(argv: Vec<String>) -> (Option<String>, Vec<String>) {
-    let Some(first) = argv.get(1) else {
+    // Where the id sits, once the globals in front of it are stepped over.
+    //
+    // This was `argv.get(1)`, so the id had to be the literal first word — and
+    // every global is declared `global = true`, so clap takes them anywhere.
+    // `omh --json s01 log`, which is exactly what a script wants, got clap's
+    // `unrecognized subcommand 's01'` and a tip pointing at `s`, which is a
+    // different command. Same reading `retired` needs one function over, and
+    // the same helper: three of the globals take a value, and that value is
+    // not a verb.
+    let words: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
+    let Some(at) = verb_position(&words).map(|i| i + 1) else {
         return (None, argv);
     };
+    let first = &argv[at];
     let looks_like_a_session =
         first.len() > 1 && first.starts_with('s') && first[1..].chars().all(|c| c.is_ascii_digit());
     if !looks_like_a_session {
         return (None, argv);
     }
 
-    let as_written: Vec<String> = std::iter::once(argv[0].clone())
-        .chain(argv.iter().skip(2).cloned())
+    // The flags in front of the id keep their place. They are omh's either
+    // way, and moving them would change what `--` means to the harness.
+    let as_written: Vec<String> = argv
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != at)
+        .map(|(_, w)| w.clone())
         .collect();
     let mut through_sessions = as_written.clone();
-    through_sessions.insert(1, "s".to_string());
+    through_sessions.insert(at, "s".to_string());
 
     // Which reading is meant, decided by what each one parses to rather than by
     // whether it parses at all. `omh s01 commit --keep 1,3` proved the weaker
@@ -245,7 +257,7 @@ enum Cmd {
     },
     /// Open the code graph in your browser.
     ///
-    /// **Not per session**, and `omh s01 graph` is refused rather than
+    /// Not per session, and `omh s01 graph` is refused rather than
     /// answered: every session's graph lives in one volume, so a per-session
     /// server showed every other session's graph anyway. It had its own
     /// positional until the prefix arrived, and for one commit it had both —
@@ -286,16 +298,17 @@ enum Cmd {
     },
     /// Your defaults — what a repo starts from, and how to change them.
     ///
-    /// **Not `omh set`**, which is this checkout. The two are one letter apart
+    /// Not `omh set`, which is this checkout. The two are one letter apart
     /// with opposite scopes, and clap is deliberately not told to accept
     /// unambiguous prefixes: `omh setting` is refused rather than guessed at.
     Settings {
         #[command(subcommand)]
         cmd: Option<SettingsCmd>,
     },
-    /// Select a catalogue entry for this repo. Writes the committed file: what
-    /// a project uses is a fact about the project, and a teammate cloning it
-    /// should get the same one.
+    /// Select a catalogue entry for this repo.
+    ///
+    /// Writes the committed file: what a project uses is a fact about the
+    /// project, and a teammate cloning it should get the same one.
     Use {
         /// One of rules, skills, mcp, commands, subagents, hooks.
         capability: Option<String>,
@@ -441,18 +454,6 @@ enum McpCmd {
 /// in their fingers gets somewhere to point.
 #[derive(Subcommand)]
 enum SessionsCmd {
-    /// Remove a session — its container and its worktree. A branch holding
-    /// commits is kept.
-    Rm {
-        /// Remove it even though the sandbox holds work no branch has — or
-        /// omh could not tell whether it does.
-        ///
-        /// The refusal without this is the whole point: those commits and
-        /// those edits exist nowhere else, and `rm` is what deletes the
-        /// repository holding them. This says *I know, and I want them gone*.
-        #[arg(long)]
-        force: bool,
-    },
     // Deleting the bare-name slot took `omh s01 claude` with it, and that was
     // the only way to say *run this harness in this session*. `resume` with a
     // name is that sentence: without one it reads the record, with one it
@@ -528,9 +529,11 @@ enum SessionsCmd {
         #[arg(long, short = 'p')]
         patch: bool,
     },
-    /// Commit a session's work onto its branch. Run on the host: the sandbox's
-    /// git is its own repository and cannot reach yours, and the worktree omh
-    /// keeps out of your way is not somewhere you should have to go.
+    /// Commit a session's work onto its branch.
+    ///
+    /// Run on the host: the sandbox's git is its own repository and cannot
+    /// reach yours, and the worktree omh keeps out of your way is not
+    /// somewhere you should have to go.
     Commit {
         /// The message, verbatim. Without it, git opens your editor.
         #[arg(short = 'm', long)]
@@ -561,6 +564,21 @@ enum SessionsCmd {
         /// Open a pull request with `gh` once it is pushed.
         #[arg(long)]
         pr: bool,
+    },
+    // Last, because a command list is read top to bottom and this is the
+    // one that deletes a container and a worktree. It was first, above
+    // `attach`, for no reason anybody wrote down.
+    /// Remove a session — its container and its worktree. A branch holding
+    /// commits is kept.
+    Rm {
+        /// Remove it even though the sandbox holds work no branch has — or
+        /// omh could not tell whether it does.
+        ///
+        /// The refusal without this is the whole point: those commits and
+        /// those edits exist nowhere else, and `rm` is what deletes the
+        /// repository holding them. This says *I know, and I want them gone*.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -892,12 +910,59 @@ fn main() -> std::process::ExitCode {
 /// cannot be skipped, and a list that rots cannot be the thing that protects
 /// this. `the_reads_and_the_refusals_agree_with_the_dispatch` checks the
 /// answers here against what the arms actually pass.
+/// Whether this command can show you what it would do without doing it.
+///
+/// **A `--dry-run` that is accepted and discarded is a lie**, and it was one on
+/// most of the surface: ten commands read the flag and the rest took it and
+/// carried on, so `omh --dry-run use --all` wrote the file and printed
+/// `wrote →`. The rule is that no command silently ignores it — either it
+/// previews, or it says it cannot.
+///
+/// Exhaustive and matched by variant, like `consumes_session`, so a command
+/// added without deciding this is a compile error rather than a silent `false`.
+///
+/// The ones answering `false` are the ones whose preview is real work: `init`
+/// builds images, and the session verbs stop containers, replant commits and
+/// delete worktrees — each has to compute what it *would* do, and a preview
+/// that guessed would be worse than none. They refuse the flag until they can
+/// answer it.
+fn previews(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::Set { .. }
+        | Cmd::Unset { .. }
+        | Cmd::Use { .. }
+        | Cmd::Unuse { .. }
+        | Cmd::Import { .. }
+        | Cmd::New { .. }
+        | Cmd::Doctor { .. } => true,
+        Cmd::Settings { cmd } => !matches!(cmd, Some(SettingsCmd::Edit { .. })),
+        Cmd::Memory { cmd } => matches!(cmd, Some(MemoryCmd::Rm { .. })),
+        Cmd::Sessions { cmd } => matches!(cmd, Some(SessionsCmd::Resume { .. })),
+        // Read-only: the command *is* its own dry run, so there is nothing to
+        // withhold and nothing to describe. Refusing says that, where accepting
+        // would imply a preview it never gives.
+        Cmd::Info { .. } | Cmd::Why { .. } => false,
+        Cmd::Init | Cmd::Auth { .. } | Cmd::Graph { .. } => false,
+    }
+}
+
 fn consumes_session(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::Sessions { .. } => true,
-        // Only `remember` writes a note against a session; the rest of the
-        // store is repo-wide.
-        Cmd::Memory { cmd } => matches!(cmd, Some(MemoryCmd::Remember { .. })),
+        // **The store is repo-wide, including `remember`.** This returned
+        // `true` for it and claimed a relationship the store does not have:
+        // the id reached exactly one line, and it was not a scope —
+        // `input.source = format!("session {id}, cli")`. Provenance, in a text
+        // field, which `--source` already writes. Nothing is filed, scoped or
+        // retrieved by session.
+        //
+        // It bought a global flag for a spelling that half-worked, too: only
+        // `-s s01` ever reached it. `omh s01 memory remember` fell to the
+        // sessions grammar and answered with clap's *unrecognized subcommand*.
+        //
+        // The in-sandbox path is untouched — `memory serve` carries its own
+        // `--session`, which is how an agent's notes get attribution.
+        Cmd::Memory { .. } => false,
         // `graph` is per repo, not per session, and says so in its own doc
         // comment — every session's graph lives in one volume. It took
         // `cli.session` and bound it `_id`, which is how it came to claim
@@ -981,6 +1046,16 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         );
     }
 
+    // Same shape, same reason. A flag this command cannot honour is refused
+    // where it was typed, rather than accepted and dropped at whatever depth
+    // stopped reading it — which is what made `omh --dry-run use --all` write
+    // the file and then say `wrote →`.
+    anyhow::ensure!(
+        !cli.dry_run || previews(&cli.cmd),
+        "`--dry-run` is not something this command can answer yet:\n  \
+         omh <command>    to run it"
+    );
+
     match &cli.cmd {
         Cmd::Init => init(&cwd, ctx),
         Cmd::Auth { harness, account } => auth_cmd(&cwd, harness, account, ctx),
@@ -991,13 +1066,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 info(&cwd, ctx)
             }
         }
-        Cmd::Doctor { harness } => doctor_cmd(
-            &cwd,
-            harness.as_deref(),
-            cli.account.as_deref(),
-            cli.dry_run,
-            ctx,
-        ),
+        Cmd::Doctor { harness } => doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx),
         Cmd::Why { thing } => why_cmd(&cwd, thing, ctx),
         Cmd::Graph { stop } => graph(&cwd, *stop, ctx),
 
@@ -1082,7 +1151,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     &cwd,
                     &argv,
                     session::Start::Named(&session.id),
-                    cli.account.as_deref(),
                     cli.dry_run,
                     ctx,
                 );
@@ -1158,6 +1226,12 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 None => show_settings(&paths, ctx),
                 Some(SettingsCmd::Set { key, value }) => {
                     no_legacy_write_over_a_name_omh_owns(&paths, key, ctx)?;
+                    // Both doors, for the reason the guard above exists: a
+                    // check on one spelling of a write is a check somebody
+                    // routes around by typing the other.
+                    if key == "account" {
+                        no_account_that_no_login_answers_to(&paths, value, ctx)?;
+                    }
                     set(
                         &paths,
                         key,
@@ -1206,6 +1280,9 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 Names::AnEntryOf(feature) => Err(an_entry_is_not_a_feature(key, &feature)),
                 Names::ACatalogueEntry(cap) => Err(a_catalogue_entry_is_not_a_setting(key, cap)),
                 Names::ASetting | Names::Neither => {
+                    if key == "account" {
+                        no_account_that_no_login_answers_to(&paths, value, ctx)?;
+                    }
                     let reached = reach(&paths, key, *local, *save)?;
                     set(&paths, key, value, reached, cli.dry_run, ctx)
                 }
@@ -1234,14 +1311,21 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             capability,
             name,
             all,
-        } => use_cmd(&cwd, capability.as_deref(), name.as_deref(), *all, ctx),
-        Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name, ctx),
+        } => use_cmd(
+            &cwd,
+            capability.as_deref(),
+            name.as_deref(),
+            *all,
+            cli.dry_run,
+            ctx,
+        ),
+        Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name, cli.dry_run, ctx),
 
         Cmd::Import {
             capability,
             harness,
             from,
-        } => import_cmd(&cwd, capability, harness, from.as_deref(), ctx),
+        } => import_cmd(&cwd, capability, harness, from.as_deref(), cli.dry_run, ctx),
 
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd, ctx),
@@ -1254,7 +1338,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 session,
             }) => memory_serve(team.clone(), local.clone(), session.clone()),
             Some(MemoryCmd::Rm { key, layer, at }) => {
-                memory_rm(&cwd, key, *layer, at.as_deref(), ctx)
+                memory_rm(&cwd, key, *layer, at.as_deref(), cli.dry_run, ctx)
             }
             Some(MemoryCmd::Remember {
                 expected,
@@ -1278,7 +1362,6 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     recorded: memory::today(),
                 },
                 *if_exists,
-                cli.session.as_deref(),
                 ctx,
             ),
         },
@@ -1296,14 +1379,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             // `last = true` means `args` holds only what followed one.
             let mut argv = vec![harness.clone()];
             argv.extend(args.iter().cloned());
-            run(
-                &cwd,
-                &argv,
-                session::Start::Fresh,
-                cli.account.as_deref(),
-                cli.dry_run,
-                ctx,
-            )
+            run(&cwd, &argv, session::Start::Fresh, cli.dry_run, ctx)
         }
     }
 }
@@ -1445,6 +1521,7 @@ fn session_up(
         backend.program(),
         paths,
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        ctx,
     ) {
         Ok(bin) => opts.memory_bin = Some(bin),
         Err(e) => {
@@ -1601,7 +1678,7 @@ fn attach(
     let _ = idle::touch(&paths.runs(), &session.id);
 
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, &adapter, None, configured.as_deref())?
+    let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, &adapter.name, &a));
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
@@ -1635,7 +1712,7 @@ fn attach(
             persist: persist::Mode::None,
             tty: false,
             account_dir: account,
-            memory_bin: memory::deliver::available(&paths),
+            memory_bin: memory::deliver::available(&paths, ctx),
             base: Some(session::default_branch(&paths.repo)),
             omh: own,
             repo,
@@ -1959,7 +2036,6 @@ fn down(
 fn doctor_cmd(
     cwd: &std::path::Path,
     harness: Option<&str>,
-    account: Option<&str>,
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
@@ -1993,7 +2069,7 @@ fn doctor_cmd(
     // with a second account. The remedy the resolver prints names `-a` — the
     // flag this was discarding.
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, &adapter, account, configured.as_deref())?
+    let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, &name, &a));
 
     // Resolved once and used for both the checks and the plan below, so the
@@ -2051,7 +2127,7 @@ fn doctor_cmd(
         persist: persist::Mode::None,
         tty: false,
         account_dir: account.clone(),
-        memory_bin: memory::deliver::available(&paths),
+        memory_bin: memory::deliver::available(&paths, ctx),
         // The probe has to compose the same rules a launch would, or it proves
         // the harness reads a document nobody will be given.
         base: Some(session::default_branch(&paths.repo)),
@@ -2446,18 +2522,16 @@ fn memory_remember(
     cwd: &std::path::Path,
     mut input: memory::Remembered,
     if_exists: memory::IfExists,
-    session: Option<&str>,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     if input.source.trim().is_empty() {
-        // Provenance is omh's to supply, so that it cannot be omitted. On the
-        // CLI there may be no session, and saying `cli` is honest where
-        // inventing a session id would not be.
-        input.source = match session {
-            Some(id) => format!("session {id}, cli"),
-            None => "cli".into(),
-        };
+        // Provenance is omh's to supply, so that it cannot be omitted. `cli` is
+        // what this path is, and it is the whole of what omh can say without
+        // being told: a session id used to be spliced in here from `-s`, which
+        // made a global flag out of one text field. `--source` says it
+        // outright, and `memory serve` supplies it for the agent.
+        input.source = "cli".into();
     }
     ctx.say(&match memory::remember(&paths, &input, if_exists)? {
         memory::Wrote::Created(path) => {
@@ -2704,20 +2778,25 @@ fn memory_rm(
     key: &str,
     layer: Option<memory::Layer>,
     at: Option<&str>,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let removed = memory::remove(&paths, layer, key, at)?;
+    let removed = memory::remove(&paths, layer, key, at, dry_run)?;
 
-    let mut action =
-        report::Action::new("note-removed", format!("removed {key} ({})", removed.layer)).data(
-            serde_json::json!({
-                "key": key,
-                "layer": removed.layer.to_string(),
-                "committed": removed.layer.is_committed(),
-                "inbound": removed.inbound,
-            }),
-        );
+    let mut action = report::Action::new(
+        "note-removed",
+        match dry_run {
+            true => format!("would remove {key} ({})", removed.layer),
+            false => format!("removed {key} ({})", removed.layer),
+        },
+    )
+    .data(serde_json::json!({
+        "key": key,
+        "layer": removed.layer.to_string(),
+        "committed": removed.layer.is_committed(),
+        "inbound": removed.inbound,
+    }));
     // The file is gone here, but a teammate still has it until the deletion is
     // committed. Saying so beats letting someone believe a shared note
     // disappeared for everybody.
@@ -2762,6 +2841,16 @@ fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Result<()>
                 args: args.clone(),
                 env: env.iter().cloned().collect(),
             };
+            // The server is built and the destination resolved either way;
+            // only the write is withheld. `mcp_import` in the same enum has
+            // read `dry_run` since it was written, and these two did not.
+            if dry_run {
+                ctx.say(&report::Action::new(
+                    "mcp-planned",
+                    format!("would add {name} → {}", config::mcp_path(paths).display()),
+                ));
+                return Ok(());
+            }
             let w = config::mcp_add(paths, name, server)?;
             let mut action =
                 report::Action::new("mcp-added", format!("wrote → {}", w.path.display())).data(
@@ -2782,17 +2871,41 @@ fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Result<()>
         }
 
         McpCmd::Rm { name } => {
-            let removed = config::mcp_remove(paths, name)?;
-            ctx.say(
-                &report::Action::new(
-                    if removed { "mcp-removed" } else { "mcp-absent" },
-                    if removed {
-                        format!("removed {name} from your catalogue")
+            // **Refused, not reported.** A name that was not there is a typo
+            // far more often than a plan, and this arm used to exit 0 saying so
+            // — the one command in the group that did. `use`, `unuse`,
+            // `memory rm` and `memory promote` all refuse the same mistake, and
+            // a script cannot tell a removal from a misspelling when both come
+            // back green.
+            if dry_run {
+                let known = config::servers(paths)?;
+                anyhow::ensure!(
+                    known.iter().any(|s| s.key == *name),
+                    "no server `{name}` in your catalogue."
+                );
+                ctx.say(&report::Action::new(
+                    "mcp-planned",
+                    format!("would remove {name} from your catalogue"),
+                ));
+                return Ok(());
+            }
+            if !config::mcp_remove(paths, name)? {
+                let known = config::servers(paths)?
+                    .into_iter()
+                    .map(|s| s.key)
+                    .collect::<Vec<_>>();
+                anyhow::bail!(
+                    "no server `{name}` in your catalogue.\n  servers: {}",
+                    if known.is_empty() {
+                        "(none)".to_string()
                     } else {
-                        format!("{name} is not in your catalogue")
-                    },
-                )
-                .data(serde_json::json!({ "server": name, "removed": removed })),
+                        known.join(", ")
+                    }
+                );
+            }
+            ctx.say(
+                &report::Action::new("mcp-removed", format!("removed {name} from your catalogue"))
+                    .data(serde_json::json!({ "server": name, "removed": true })),
             );
             Ok(())
         }
@@ -2911,6 +3024,7 @@ fn use_cmd(
     capability: Option<&str>,
     name: Option<&str>,
     all: bool,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -2920,7 +3034,8 @@ fn use_cmd(
         }
         let lists = catalogue_lists(&paths)?;
         ctx.say(&report::Resynced {
-            wrote: write_lists(&paths, &lists)?
+            dry_run,
+            wrote: write_lists(&paths, &lists, dry_run)?
                 .into_iter()
                 .map(|w| w.path.display().to_string())
                 .collect(),
@@ -2944,6 +3059,27 @@ fn use_cmd(
     // the entry first.
     let available = catalogue_names(&paths, cap)?;
     if !available.iter().any(|n| n == name) {
+        // **Two states, and only one of them is absence.** `catalogue_names`
+        // narrows hooks to the ecosystems this repo actually is, so in a rust
+        // repo `go-test` falls out of it — and the refusal used to word that
+        // narrowing as *your catalogue has no hooks called `go-test`*, which
+        // `omh info` contradicts one command later by listing it.
+        //
+        // The second half cost more than the wrong sentence: it offered
+        // `omh settings edit hooks go-test`, which creates a second
+        // `go-test.json` beside the one already there.
+        let held = Profile::resolve(&paths).entries(cap)?;
+        if held.iter().any(|n| n == name) {
+            anyhow::bail!(
+                "{cap}/{name} is in your catalogue, but names an ecosystem this repo is \
+                 not — nothing here would run it.\n  {cap} this repo can take: {}",
+                if available.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    available.join(", ")
+                }
+            );
+        }
         anyhow::bail!(
             "your catalogue has no {cap} called `{name}`. `omh settings edit {cap} {name}` \
              creates it.\n  {cap}: {}",
@@ -2978,31 +3114,54 @@ fn use_cmd(
     let written = write_lists(
         &paths,
         &std::collections::BTreeMap::from([(cap, names.clone())]),
+        dry_run,
     )?;
     // Said out loud, because this is the moment a capability turns from
     // "follows the catalogue" into "this list" — everything is still selected,
     // but from now on by name, and an entry added later will not be.
+    // The tense the write actually happened in. Withholding it and printing
+    // `wrote →` is the same lie one layer up from the one this flag was fixed
+    // for: the file is untouched and the report says otherwise, which is the
+    // part somebody reads.
+    let did = |past: String, future: String| match dry_run {
+        true => future,
+        false => past,
+    };
     let froze = was_open.then(|| {
-        format!(
-            "{cap} was following your whole catalogue; wrote its {} entries as the list",
-            names.len()
+        did(
+            format!(
+                "{cap} was following your whole catalogue; wrote its {} entries as the list",
+                names.len()
+            ),
+            format!(
+                "{cap} follows your whole catalogue; its {} entries would become the list",
+                names.len()
+            ),
         )
     });
     let paths = written_paths(&written);
-    let mut action = report::Action::new("capability-used", format!("using {cap}/{name}")).data(
-        serde_json::json!({
-            "capability": cap.to_string(),
-            "name": name,
-            "changed": true,
-            "froze_selection": was_open,
-            "paths": paths,
-        }),
-    );
+    let mut action = report::Action::new(
+        "capability-used",
+        did(
+            format!("using {cap}/{name}"),
+            format!("would use {cap}/{name}"),
+        ),
+    )
+    .data(serde_json::json!({
+        "capability": cap.to_string(),
+        "name": name,
+        "changed": true,
+        "froze_selection": was_open,
+        "paths": paths,
+    }));
     if let Some(line) = &froze {
         action = action.note(line);
     }
     for path in &paths {
-        action = action.note(format!("wrote → {path}"));
+        action = action.note(did(
+            format!("wrote → {path}"),
+            format!("would write → {path}"),
+        ));
     }
     ctx.say(&action);
     Ok(())
@@ -3026,7 +3185,13 @@ fn written_paths(written: &[config::Written]) -> Vec<String> {
 }
 
 /// Stop using a catalogue entry here.
-fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Result<()> {
+fn unuse_cmd(
+    cwd: &std::path::Path,
+    key: &str,
+    name: &str,
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let (cap, mut names, was_open) = current_list(&paths, key, name)?;
     if !names.iter().any(|n| n == name) {
@@ -3055,23 +3220,42 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Re
         )
     });
     let remaining = names.len();
-    let written = write_lists(&paths, &std::collections::BTreeMap::from([(cap, names)]))?;
+    let written = write_lists(
+        &paths,
+        &std::collections::BTreeMap::from([(cap, names)]),
+        dry_run,
+    )?;
     let paths = written_paths(&written);
-    let mut action =
-        report::Action::new("capability-unused", format!("no longer using {cap}/{name}")).data(
-            serde_json::json!({
-                "capability": cap.to_string(),
-                "name": name,
-                "froze_selection": was_open,
-                "remaining": remaining,
-                "paths": paths,
-            }),
-        );
+    // **Said in the tense it happened in.** The write is withheld under
+    // `--dry-run` and the sentence was not, so the file was left untouched and
+    // the output still read `wrote →` — the same lie one layer up from the one
+    // this flag was fixed for.
+    let did = |past: String, future: String| match dry_run {
+        true => future,
+        false => past,
+    };
+    let mut action = report::Action::new(
+        "capability-unused",
+        did(
+            format!("no longer using {cap}/{name}"),
+            format!("would stop using {cap}/{name}"),
+        ),
+    )
+    .data(serde_json::json!({
+        "capability": cap.to_string(),
+        "name": name,
+        "froze_selection": was_open,
+        "remaining": remaining,
+        "paths": paths,
+    }));
     if let Some(line) = &froze {
         action = action.note(line);
     }
     for path in &paths {
-        action = action.note(format!("wrote → {path}"));
+        action = action.note(did(
+            format!("wrote → {path}"),
+            format!("would write → {path}"),
+        ));
     }
     ctx.say(&action);
     Ok(())
@@ -3086,11 +3270,25 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Re
 fn write_lists(
     paths: &Paths,
     lists: &std::collections::BTreeMap<adapter::Capability, Vec<String>>,
+    dry_run: bool,
 ) -> Result<Vec<config::Written>> {
     let mut out = Vec::new();
     for (cap, names) in lists {
         let one = std::collections::BTreeMap::from([(*cap, names.clone())]);
         for layer in config::declaring(paths, config::USE, &cap.to_string())? {
+            // **Everything but the write.** The layers are resolved, the list
+            // is built, and the record the report reads is the same one — only
+            // persistence is skipped. A `--dry-run` that took a shortcut here
+            // would be describing a different command from the one it claims
+            // to be previewing.
+            if dry_run {
+                out.push(config::Written {
+                    path: layer.file(paths),
+                    layer,
+                    committed: layer.is_committed(),
+                });
+                continue;
+            }
             out.push(config::write_selection(paths, layer, &one)?);
         }
     }
@@ -3126,6 +3324,7 @@ fn import_cmd(
     capability: &str,
     harness: &str,
     from: Option<&std::path::Path>,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let cap = adapter::Capability::from_key(capability).with_context(|| {
@@ -3172,7 +3371,9 @@ fn import_cmd(
     match cap {
         // Hooks are translated rather than copied — they are the one capability
         // whose format is omh's own — and they land in the repo.
-        adapter::Capability::Hooks => import_hooks(&paths, &adapter, binding, &source, ctx),
+        adapter::Capability::Hooks => {
+            import_hooks(&paths, &adapter, binding, &source, dry_run, ctx)
+        }
         adapter::Capability::Mcp => anyhow::bail!(
             "MCP servers are `omh settings mcp import {harness}` — a server is a \
              record in one file, not an entry with its own"
@@ -3531,6 +3732,7 @@ fn import_hooks(
     adapter: &Adapter,
     binding: &adapter::Binding,
     source: &std::path::Path,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let harness = &adapter.name;
@@ -3597,7 +3799,7 @@ fn import_hooks(
         names.sort();
         names.dedup();
         let lists = std::collections::BTreeMap::from([(cap, names)]);
-        for w in write_lists(paths, &lists)? {
+        for w in write_lists(paths, &lists, dry_run)? {
             selected_in.push(w.path.display().to_string());
         }
     }
@@ -3851,10 +4053,27 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 fn using_here(paths: &Paths, manifest: &base::Manifest) -> Result<Vec<report::Using>> {
     let profile = Profile::resolve(paths);
     let policy = settings::resolve(paths, manifest)?;
+    // What omh's own features bring, which `[use]` never names — a feature owns
+    // its entries, so they are excluded from the selection. Reported beside the
+    // selection rather than folded into it: they are here because a feature is
+    // on, and `omh set <feature> off` is what takes them away.
+    let owned = manifest.owns();
     let mut using = Vec::new();
     for cap in adapter::Capability::ALL {
         let entries = profile.entries(cap)?;
         let unselected = policy.selection.unselected(cap, &entries);
+        let from_a_feature: Vec<String> = owned
+            .get(&cap)
+            .map(|names| {
+                let mut on: Vec<String> = names
+                    .iter()
+                    .filter(|(_, feature)| !policy.off.contains(*feature))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                on.sort();
+                on
+            })
+            .unwrap_or_default();
         // `None` rather than a list identical to the catalogue's, because the
         // two are different states: one follows the catalogue as it grows and
         // the other is a list that happens to be complete today.
@@ -3875,6 +4094,7 @@ fn using_here(paths: &Paths, manifest: &base::Manifest) -> Result<Vec<report::Us
                     .collect()
             }),
             unselected,
+            from_a_feature,
         });
     }
     Ok(using)
@@ -4244,6 +4464,48 @@ fn names(paths: &Paths, name: &str, ctx: &out::Ctx) -> Names {
         }
     }
     Names::Neither
+}
+
+/// A value only omh can check: which captured login `account` names.
+///
+/// The account is one thing with one spelling — `omh auth <harness> -n work`
+/// creates it, this selects it, and everything that launches or probes reads
+/// the setting. The global `-a` that used to override it per invocation is
+/// gone, so a typo here is now the only way to point a launch at credentials
+/// that are not there, and it would otherwise surface as a failed login inside
+/// a sandbox rather than as a wrong word on the command line.
+///
+/// Accounts live per harness — `~/.omh/creds/<harness>/<account>` — so this
+/// has three answers rather than two, and the middle one is the common case:
+/// captured for *some* harness is accepted, because "I only use claude" is
+/// ordinary, and the harnesses are named because `work` is right until the day
+/// you run `omh new opencode`.
+fn no_account_that_no_login_answers_to(paths: &Paths, name: &str, ctx: &out::Ctx) -> Result<()> {
+    let adapters = Adapter::load_dir(&paths.adapters()).unwrap_or_default();
+    let mut has: Vec<String> = Vec::new();
+    let mut all: Vec<String> = Vec::new();
+    for adapter in &adapters {
+        for account in auth::accounts(paths, adapter) {
+            if account == name {
+                has.push(adapter.name.clone());
+            }
+            all.push(format!("{} ({})", account, adapter.name));
+        }
+    }
+    if !has.is_empty() {
+        ctx.announce(&format!("`{name}` is captured for {}", has.join(", ")));
+        return Ok(());
+    }
+    all.sort();
+    all.dedup();
+    anyhow::bail!(
+        "no captured login called `{name}`.\n  {}",
+        if all.is_empty() {
+            "omh auth <harness> -n <name>   capture one first".to_string()
+        } else {
+            format!("captured: {}", all.join(", "))
+        }
+    );
 }
 
 /// `omh settings set` must not write a name omh already owns as a bare key.
@@ -4742,13 +5004,18 @@ fn feature_switch(
     // still switching it is what you just typed. That sentence answers "why did
     // nothing change", which is a question a *removal* raises and a write does
     // not.
-    if written.iter().any(|w| w.committed) {
-        ctx.warn(&format!(
-            "the committed file is COMMITTED — a teammate cloning this repo gets \
-             `{feature}` {}",
-            if on { "on" } else { "off" }
-        ));
-    }
+    // **No COMMITTED warning here.** `Why` was built to keep that sentence
+    // rare, and its own doc gives the reason: it is nearly every write now that
+    // the committed file is the default, and a sentence that fires on almost
+    // every invocation is one people stop reading — which this codebase has
+    // already watched happen once, to this same sentence.
+    //
+    // `set <key> <value>` got the narrowing and this arm did not, so it fired
+    // on every feature switch. A switch is *always* a committed write, and
+    // committing it is the point: what a repo does with omh's features is a
+    // fact about the repo, and a teammate cloning it should get the same one.
+    // The line below already says so, in the voice of an outcome rather than a
+    // warning about a secret.
     Ok(())
 }
 
@@ -4944,7 +5211,6 @@ fn run(
     // One parameter, not two. `Start` carries the id when there is one, so
     // there is no second argument that could disagree with it.
     start: session::Start<'_>,
-    account: Option<&str>,
     dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
@@ -4960,7 +5226,7 @@ fn run(
     // Which identity this session runs as. Ambiguity is an error rather than a
     // guess: silently using the wrong account is expensive and invisible.
     let configured = policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, &adapter, account, configured.as_deref())?
+    let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, name, &a));
     if let Some(account_dir) = &account {
         // The mountpoints have to exist before docker binds over them.
@@ -5010,7 +5276,7 @@ fn run(
             .parse()?,
         tty: true,
         account_dir: account,
-        memory_bin: memory::deliver::available(&paths),
+        memory_bin: memory::deliver::available(&paths, ctx),
         base: Some(base.clone()),
         omh: own,
         repo,
@@ -5058,9 +5324,56 @@ fn run(
     };
 
     if dry_run {
+        // What the agent is given, read off the plan's own mounts — so the
+        // report cannot describe a launch other than the one that would happen.
+        let mut reads: Vec<(String, String)> = Vec::new();
+        if let Some(name) = &plan.rules.composed {
+            reads.push((
+                "rules".to_string(),
+                format!("composed with this project's {name}"),
+            ));
+        }
+        // The names, not a count of mounts. Counting mounts said `skills 2
+        // mounted` on a repo using no skills at all — each capability takes a
+        // layer mount and a rendered one, so the number measured omh's
+        // plumbing rather than anything the agent gets. This is the same
+        // answer `omh info --repo` gives, from the same function.
+        for u in using_here(&paths, &base::Manifest::load_dir(&paths.base())?)? {
+            let summary = u.summary();
+            if summary != "nothing" {
+                reads.push((u.capability, summary));
+            }
+        }
+        for (cap, n) in &plan.dropped {
+            reads.push((
+                cap.to_string(),
+                format!("{n} dropped — {} cannot take them", adapter.name),
+            ));
+        }
+
+        // Everything omh mounts is read-only but these, so naming them names
+        // the whole of what a session can reach. The worktree *is* `/work`, so
+        // it is named once, by the path you would go and look at.
+        let workdir = container_workdir();
+        let writes: Vec<String> = std::iter::once(format!(
+            "{}  — this session's worktree, as {workdir}",
+            session.worktree.display()
+        ))
+        .chain(
+            plan.mounts
+                .iter()
+                .filter(|m| !m.read_only && m.guest != std::path::Path::new(workdir))
+                .map(|m| m.guest.display().to_string()),
+        )
+        .collect();
+
         ctx.say(&report::DryRun {
             status: status_line,
             worktree: session.worktree.display().to_string(),
+            image: plan.image.clone(),
+            network: plan.network.clone(),
+            reads,
+            writes,
             argv: std::iter::once(backend.program().to_string())
                 .chain(backend.args(&plan))
                 .collect(),
@@ -5313,9 +5626,14 @@ fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
             took.push(k.name.to_string());
         }
     }
-    if !took.iter().any(|t| t == "carry_in") {
-        out.insert("carry_in", toml_edit::value(toml_edit::Array::new()));
-    }
+    // **No empty `carry_in`.** Seeding `carry_in = []` made the first thing
+    // `omh info --repo` said about a fresh repo a setting nobody had set —
+    // `carry_in  []  ← shared`, which reads as somebody's decision. The header
+    // above already carries the commented example that teaches the key, and a
+    // commented line is what a setting you are not setting looks like.
+    //
+    // A template that *does* name `carry_in` still travels: the loop above
+    // takes it, because then somebody did choose it.
 
     // `[use]` and `[omh]` travel too: which entries a project takes and which
     // of omh's features it runs with are exactly the answers you do not want to
@@ -5641,7 +5959,7 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             names.sort();
             names.dedup();
             let lists = std::collections::BTreeMap::from([(cap, names)]);
-            write_lists(&paths, &lists)?;
+            write_lists(&paths, &lists, false)?;
         }
     }
 
@@ -6641,7 +6959,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
             persist: persist::Mode::None,
             tty: true,
             account_dir: Some(account_dir.clone()),
-            memory_bin: memory::deliver::available(&paths),
+            memory_bin: memory::deliver::available(&paths, ctx),
             // Empty, like the base this scratch session was created with at
             // `session.ensure(&paths.repo, "")`: a login is not work on the
             // project, so there are no project rules to look up.
@@ -8909,8 +9227,8 @@ mod tests {
         // loud, and a shape leaving one page while another gains lines is
         // loud — none of which a total or a floor can say.
         let expected: std::collections::BTreeMap<String, usize> = [
-            ("README.md", 35),
-            ("accounts.md", 2),
+            ("README.md", 37),
+            ("accounts.md", 4),
             ("adapters.md", 1),
             ("code-graph.md", 1),
             ("commands.md", 121),
@@ -8980,6 +9298,66 @@ mod tests {
         assert!(
             doubled.is_empty(),
             "doc comments spliced together: {doubled:#?}"
+        );
+    }
+
+    /// A command list is scannable, and none of it is markdown.
+    ///
+    /// Two shapes, both read off clap's own rendering rather than off the doc
+    /// comments, because what matters is what a person sees:
+    ///
+    /// - **One line per entry.** `omh use` and `omh sessions commit` carried
+    ///   paragraph-length descriptions, so `omh --help` and `omh s --help` each
+    ///   had one entry sprawling over four lines while every sibling was a
+    ///   scannable line. The reasoning belongs in that command's own `--help`,
+    ///   where somebody has asked for it.
+    /// - **No markdown.** `omh settings --help` printed its emphasis markers
+    ///   literally, asterisks and all. A doc comment on a clap item is rustdoc
+    ///   *and* terminal output, and only one of them renders emphasis.
+    #[test]
+    fn a_command_list_is_scannable_and_none_of_it_is_markdown() {
+        use clap::CommandFactory;
+
+        fn walk(cmd: &clap::Command, path: &str, wide: &mut Vec<String>, marked: &mut Vec<String>) {
+            for sub in cmd.get_subcommands() {
+                let here = format!("{path} {}", sub.get_name());
+                // The line clap puts in the parent's command list.
+                if let Some(about) = sub.get_about() {
+                    let about = about.to_string();
+                    // Measured, not guessed: on the tree where this was
+                    // written the longest entry that reads as a line is
+                    // `omh sessions rm` at 85 characters, and the two that
+                    // read as paragraphs are 155 and 200. 100 sits in the gap
+                    // with room either side.
+                    if about.len() > 100 || about.contains('\n') {
+                        wide.push(format!("{here}: {about}"));
+                    }
+                }
+                for text in [sub.get_about(), sub.get_long_about()]
+                    .into_iter()
+                    .flatten()
+                    .map(|t| t.to_string())
+                {
+                    if text.contains("**") || text.contains("*`") {
+                        marked.push(format!("{here}: {text}"));
+                    }
+                }
+                walk(sub, &here, wide, marked);
+            }
+        }
+
+        let cmd = Cli::command();
+        let (mut wide, mut marked) = (Vec::new(), Vec::new());
+        walk(&cmd, "omh", &mut wide, &mut marked);
+        assert!(
+            wide.is_empty(),
+            "a command list is read by scanning it, and these entries are \
+             paragraphs — move the reasoning into their own --help: {wide:#?}"
+        );
+        assert!(
+            marked.is_empty(),
+            "a doc comment is terminal output as well as rustdoc, and the \
+             terminal does not render emphasis: {marked:#?}"
         );
     }
 
@@ -9418,14 +9796,14 @@ mod tests {
         // out is loud; a file appearing is loud; a shape quietly leaving one
         // file while another gains lines is loud, and no floor can see that.
         let expected: std::collections::BTreeMap<String, usize> = [
-            ("2026.08.toml", 9),
+            ("2026.08.toml", 19),
             ("auth.rs", 2),
             ("base.rs", 3),
             ("config.rs", 3),
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 84),
+            ("main.rs", 86),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),
@@ -9496,6 +9874,64 @@ mod tests {
         }
         out.push_str(rest);
         out
+    }
+
+    /// A leading session id is found wherever the globals leave it.
+    ///
+    /// It was `argv.get(1)` and nothing else, so the id had to be the literal
+    /// first word. Every global is declared `global = true` and clap takes them
+    /// anywhere — so `omh --json s01 log`, which is precisely what a script
+    /// wants, got clap's `unrecognized subcommand 's01'` and the actively wrong
+    /// tip *a similar subcommand exists: 's'*.
+    ///
+    /// Three of the five globals take a value, and that value must not be read
+    /// as the verb — `-s s02` is a session named the other way, not a prefix.
+    ///
+    /// A unit test rather than a CLI one: `session_prefix` is pure, and this is
+    /// a question about argv rather than about a session existing.
+    #[test]
+    fn a_leading_session_id_survives_the_flags_in_front_of_it() {
+        for front in [
+            vec!["--json"],
+            vec!["--dry-run"],
+            vec!["--color", "never"],
+            vec!["--color=never"],
+            vec!["--json", "--dry-run"],
+            vec!["--dry-run", "--color", "always", "--json"],
+        ] {
+            let line: Vec<&str> = front.iter().copied().chain(["s01", "diff"]).collect();
+            let want: Vec<&str> = front.iter().copied().chain(["s", "diff"]).collect();
+            assert_eq!(
+                session_prefix(cli_argv(&line)),
+                (Some("s01".to_string()), cli_argv(&want)),
+                "`omh {}` names a session",
+                line.join(" ")
+            );
+        }
+    }
+
+    /// A flag's value is not the verb, and not a session either.
+    ///
+    /// The reason the step over the globals has to know which of them take a
+    /// value: read naively, `omh -s s02 diff` has `s02` where the prefix would
+    /// be. It is the flag's argument, `the_one_session` already reconciles the
+    /// two spellings, and treating it as a prefix would hand that function two
+    /// names for one session on every ordinary invocation.
+    #[test]
+    fn a_value_belonging_to_a_flag_is_not_a_session_prefix() {
+        for line in [
+            vec!["-s", "s02", "diff"],
+            vec!["--session", "s02", "diff"],
+            vec!["-a", "s02", "info"],
+            vec!["--account", "s02", "info"],
+        ] {
+            assert_eq!(
+                session_prefix(cli_argv(&line)),
+                (None, cli_argv(&line)),
+                "`omh {}` names its session through the flag",
+                line.join(" ")
+            );
+        }
     }
 
     /// Anything that is not `sNN` is left exactly as it was.
@@ -12867,11 +13303,15 @@ because = "a fixture"
 
         // A short flag omh also has. The bare-name form leaves shorts to the
         // harness by a rule; here the separator says so outright.
-        let short = Cli::try_parse_from(cli_argv(&["new", "claude", "--", "-a", "work"]))
+        //
+        // `-s`, because `-a` is not omh's any more: the account is the setting
+        // and there is no flag to collide with. `-s` is the remaining short
+        // that would otherwise be read as omh's.
+        let short = Cli::try_parse_from(cli_argv(&["new", "claude", "--", "-s", "work"]))
             .expect("a short flag after the separator");
-        assert!(short.account.is_none(), "`-a` after `--` is claude's");
+        assert!(short.session.is_none(), "`-s` after `--` is claude's");
         match short.cmd {
-            Cmd::New { args, .. } => assert_eq!(args, vec!["-a".to_string(), "work".to_string()]),
+            Cmd::New { args, .. } => assert_eq!(args, vec!["-s".to_string(), "work".to_string()]),
             _ => panic!("expected a launch"),
         }
     }
@@ -12897,32 +13337,109 @@ because = "a fixture"
     /// lint and catches the same mistake at the same moment.
     #[test]
     fn no_command_writes_to_a_stream_behind_the_output_layer() {
-        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
-            .expect("this file is readable from its own test");
+        // **The whole tree, not `main.rs`.** This read one file for as long as
+        // it existed, which is why `memory/deliver.rs` could write straight to
+        // stderr — bypassing `--json` and `--color` — and dump a cargo build
+        // log as the first thing a new user sees after `init` tells them to run
+        // `omh new`. A guard that reads one file makes a claim about one file
+        // and was cited as a claim about the program.
+        let files = rust_sources(&["src"]);
+        the_whole_tree(&files);
 
-        let offenders: Vec<(usize, &str)> = source
-            .lines()
-            .enumerate()
-            .map(|(i, line)| (i + 1, line.trim()))
-            // Only calls, never the word in a doc comment or a string that
-            // talks *about* the rule — this very comment mentions `println!`.
-            .filter(|(_, line)| {
-                ["println!", "print!(", "eprintln!", "eprint!("]
+        let mut offenders: Vec<String> = Vec::new();
+        for file in &files {
+            // `out.rs` **is** the output layer. Every macro in it is the
+            // implementation of the methods this rule is about, so exempting
+            // the file is exempting the thing rather than making a hole in it.
+            if file.file_name().is_some_and(|n| n == "out.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(file).expect("a source this crate compiles");
+            let name = file
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .unwrap_or(file)
+                .display()
+                .to_string();
+            // Below the test module is fixture and assertion text, not
+            // anything omh prints — the same cut the printed-line scan makes,
+            // and for the same reason.
+            let source = match source.find("\nmod tests {") {
+                Some(at) => source[..at].to_string(),
+                None => source,
+            };
+            for (i, line) in source.lines().enumerate() {
+                let line = line.trim();
+                // Only calls, never the word in a doc comment or a string that
+                // talks *about* the rule — this very comment mentions
+                // `println!`.
+                if ["println!", "print!(", "eprintln!", "eprint!("]
                     .iter()
                     .any(|m| line.starts_with(m))
+                {
+                    offenders.push(format!("{name}:{}: {line}", i + 1));
+                }
+            }
+        }
+
+        // **Declared, not counted.** Widening this scan from one file to the
+        // tree turned up ten sites, and the honest thing is to name every one
+        // rather than assert a number that goes stale the first time somebody
+        // moves a line.
+        //
+        // Two are the exemptions this rule has always had: the error renderer
+        // in `main`, which cannot report through the thing it is reporting
+        // about, and the MCP line reader, which speaks protocol.
+        //
+        // The other seven are **owed a fix, not excused one**. They predate the
+        // scan reading their files at all, and every one writes an `omh: ` line
+        // straight to stderr — no palette, and not suppressed under `--json`,
+        // which is what `progress` and `announce` exist to do. Routing them
+        // means threading a `Ctx` through `image`, `facts` and the delivery
+        // path, roughly sixteen call sites, one of which (`sandbox`) has none
+        // in scope. That is its own change; doing it inside a release fix would
+        // be a large diff in the wrong week. The list is here so it cannot grow
+        // quietly in the meantime — an eighth entry fails this test.
+        // Named by what the line *is*, not by where it sits. The first draft
+        // pinned `file:line` and went stale the moment anything above it grew,
+        // which is a guard failing for a reason that has nothing to do with
+        // what it guards.
+        let named = [
+            // The two real exemptions.
+            ("src/main.rs", "out::problem"),
+            ("src/mcp.rs", "omh-mcp: ignoring unparseable line"),
+            // Owed a `Ctx`. See above.
+            ("src/facts.rs", "could not read"),
+            // Wrapped, so the macro line carries no text of its own — the
+            // only one of these where the file alone has to do it.
+            ("src/facts.rs", "eprintln!("),
+            ("src/image.rs", "this repo's toolchain, first run only"),
+            ("src/image.rs", "(first run only)"),
+            ("src/image.rs", "omh: building {t}"),
+            ("src/image.rs", "could not list images to reap"),
+            ("src/image.rs", "this build replaced"),
+        ];
+        let unexpected: Vec<&String> = offenders
+            .iter()
+            .filter(|o| {
+                !named
+                    .iter()
+                    .any(|(file, what)| o.starts_with(file) && o.contains(what))
             })
             .collect();
-
-        assert_eq!(
-            offenders.len(),
-            1,
-            "every write goes through out::Ctx but the error sink in `main` — found {offenders:#?}"
-        );
         assert!(
-            offenders[0].1.contains("out::problem"),
-            "and the one exemption is the error renderer, not something new — got {:?}",
-            offenders[0]
+            unexpected.is_empty(),
+            "every write goes through out::Ctx but the sites named in this test — \
+             found {unexpected:#?}"
         );
+        for (file, what) in named {
+            assert!(
+                offenders
+                    .iter()
+                    .any(|o| o.starts_with(file) && o.contains(what)),
+                "{file} no longer writes `{what}` — a stale exemption is a hole \
+                 this test says is not there"
+            );
+        }
     }
 
     // ── candidate guards (mutation testing) ─────────────────────────────────

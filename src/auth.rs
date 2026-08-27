@@ -58,19 +58,18 @@ pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
 
 /// Which account to use. Ambiguity is an error, never a guess — silently
 /// picking the wrong identity is worse than stopping.
-pub fn resolve(
-    paths: &Paths,
-    adapter: &Adapter,
-    explicit: Option<&str>,
-    configured: Option<&str>,
-) -> Result<String> {
+pub fn resolve(paths: &Paths, adapter: &Adapter, configured: Option<&str>) -> Result<String> {
     let harness = &adapter.name;
     let available = accounts(paths, adapter);
     if available.is_empty() {
         anyhow::bail!("no account for {harness} — run `omh auth {harness}` first");
     }
 
-    if let Some(name) = explicit.or(configured) {
+    // One source. It was `explicit.or(configured)` — a global `-a` overriding
+    // the setting for one invocation — and the flag recorded nothing, so a
+    // session started with it could not be resumed without repeating it. What
+    // is left is the setting, which every command already fell back to.
+    if let Some(name) = configured {
         if !available.iter().any(|a| a == name) {
             anyhow::bail!(
                 "no account `{name}` for {harness}\n  captured: {}",
@@ -86,7 +85,7 @@ pub fn resolve(
         // never say so.
         _ => anyhow::bail!(
             "{harness} has several accounts: {}\n  \
-             pick one with `omh set account <name>` or `-a <name>`",
+             pick one with `omh set account <name>`",
             available.join(", ")
         ),
     }
@@ -192,14 +191,12 @@ pub fn prepare(adapter: &Adapter, account_dir: &std::path::Path, guest_home: &st
 pub fn resolve_for_launch(
     paths: &Paths,
     adapter: &Adapter,
-    explicit: Option<&str>,
     configured: Option<&str>,
 ) -> Result<Option<String>> {
-    let asked = explicit.or(configured).is_some();
-    if !asked && accounts(paths, adapter).is_empty() {
+    if configured.is_none() && accounts(paths, adapter).is_empty() {
         return Ok(None);
     }
-    resolve(paths, adapter, explicit, configured).map(Some)
+    resolve(paths, adapter, configured).map(Some)
 }
 
 /// Does this file hold more than what `prepare` put there?
@@ -501,23 +498,12 @@ mod tests {
     // ── choosing ────────────────────────────────────────────────────────────
 
     #[test]
-    fn an_explicit_account_wins() {
-        let (_d, paths) = fixture();
-        capture(&paths, "claude", "work");
-        capture(&paths, "claude", "personal");
-        assert_eq!(
-            resolve(&paths, &claude(), Some("work"), Some("personal")).unwrap(),
-            "work"
-        );
-    }
-
-    #[test]
     fn the_configured_account_is_used_when_there_are_several() {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
         capture(&paths, "claude", "personal");
         assert_eq!(
-            resolve(&paths, &claude(), None, Some("personal")).unwrap(),
+            resolve(&paths, &claude(), Some("personal")).unwrap(),
             "personal"
         );
     }
@@ -526,7 +512,7 @@ mod tests {
     fn a_single_account_needs_no_choosing() {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "personal");
-        assert_eq!(resolve(&paths, &claude(), None, None).unwrap(), "personal");
+        assert_eq!(resolve(&paths, &claude(), None).unwrap(), "personal");
     }
 
     /// Two identities and no stated preference is exactly when guessing is
@@ -537,9 +523,7 @@ mod tests {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
         capture(&paths, "claude", "personal");
-        let err = resolve(&paths, &claude(), None, None)
-            .unwrap_err()
-            .to_string();
+        let err = resolve(&paths, &claude(), None).unwrap_err().to_string();
         assert!(
             err.contains("work") && err.contains("personal"),
             "got: {err}"
@@ -553,9 +537,7 @@ mod tests {
     #[test]
     fn no_accounts_at_all_points_at_omh_auth() {
         let (_d, paths) = fixture();
-        let err = resolve(&paths, &claude(), None, None)
-            .unwrap_err()
-            .to_string();
+        let err = resolve(&paths, &claude(), None).unwrap_err().to_string();
         assert!(err.contains("omh auth claude"), "got: {err}");
     }
 
@@ -563,7 +545,7 @@ mod tests {
     fn naming_an_account_that_was_never_captured_is_an_error() {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
-        let err = resolve(&paths, &claude(), Some("nope"), None)
+        let err = resolve(&paths, &claude(), Some("nope"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("nope"), "got: {err}");
@@ -716,10 +698,7 @@ mod tests {
     #[test]
     fn launching_without_any_account_is_allowed() {
         let (_d, paths) = fixture();
-        assert_eq!(
-            resolve_for_launch(&paths, &claude(), None, None).unwrap(),
-            None
-        );
+        assert_eq!(resolve_for_launch(&paths, &claude(), None).unwrap(), None);
     }
 
     /// Regression: `-a work` for an account that does not exist silently ran
@@ -729,7 +708,7 @@ mod tests {
     fn naming_a_missing_account_stops_the_launch() {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "personal");
-        let err = resolve_for_launch(&paths, &claude(), Some("work"), None).unwrap_err();
+        let err = resolve_for_launch(&paths, &claude(), Some("work")).unwrap_err();
         assert!(err.to_string().contains("work"), "got: {err}");
     }
 
@@ -737,7 +716,7 @@ mod tests {
     fn a_configured_account_that_is_missing_also_stops_the_launch() {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "personal");
-        assert!(resolve_for_launch(&paths, &claude(), None, Some("work")).is_err());
+        assert!(resolve_for_launch(&paths, &claude(), Some("work")).is_err());
     }
 
     #[test]
@@ -745,7 +724,7 @@ mod tests {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "personal");
         assert_eq!(
-            resolve_for_launch(&paths, &claude(), None, None)
+            resolve_for_launch(&paths, &claude(), None)
                 .unwrap()
                 .as_deref(),
             Some("personal")
@@ -757,7 +736,7 @@ mod tests {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
         capture(&paths, "claude", "personal");
-        assert!(resolve_for_launch(&paths, &claude(), None, None).is_err());
+        assert!(resolve_for_launch(&paths, &claude(), None).is_err());
     }
 
     // ── directories vs files ────────────────────────────────────────────────

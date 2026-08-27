@@ -18,6 +18,23 @@ omh use|unuse <capability> <name>
                                   omh use skills tdd · omh use --all
 ```
 
+## `--dry-run`
+
+**Everything runs; nothing is written.** Not a description of what would happen
+— the real code path, with persistence withheld. So the layers a write would
+reach, the list a selection would become and the refusals a bad name would earn
+all happen exactly as they would for real, and the only difference is that the
+file is left alone.
+
+A command that cannot yet answer it **refuses the flag** rather than running.
+`init` builds images, and the session verbs stop containers, replant commits
+and delete worktrees; each has to compute what it *would* do, and a preview
+that guessed would be worse than none. Read-only commands refuse it too, for
+the opposite reason: `omh info` is its own dry run.
+
+That rule exists because the flag used to be accepted and discarded —
+`omh --dry-run use --all` wrote the file and printed `wrote →`.
+
 ## The shape of the CLI
 
 Noun-verb groups with single-letter aliases: `omh s log`, `omh s01 commit`,
@@ -145,7 +162,8 @@ omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment)
      graph-read (no way to inject text before a tool runs)
 ```
 
-`-a <account>` selects a credential set for this launch. See [Accounts](accounts.md).
+Which credential set a launch uses is `omh set account <name>`, per project. See
+[Accounts](accounts.md).
 
 ## `omh s attach [editor]` · `omh s a`
 
@@ -468,7 +486,7 @@ category.
 ```console
 $ omh new claude --json          # omh's, reported as JSON
 $ omh new claude -- --json       # claude's
-$ omh new claude -- -a work      # claude's, short flags included
+$ omh new claude -- -s work      # claude's, short flags included
 $ omh new claude --resume x      # an error: omh has no --resume
 ```
 

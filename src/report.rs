@@ -1279,6 +1279,13 @@ impl Report for Inventory {
         ));
         let mut t = Table::new();
         for c in &self.catalogue {
+            // A capability you have nothing in is nothing to report. On a fresh
+            // install four of the six rows read `0` and taught the reader only
+            // that omh has six capabilities, which is not what `omh info` was
+            // asked. Same cut `init` makes, for the same reason.
+            if c.entries.is_empty() {
+                continue;
+            }
             // The count as well as the names: a catalogue is a thing that
             // grows, and this is the number the unselected report talks about.
             t = t.row(vec![
@@ -1286,6 +1293,9 @@ impl Report for Inventory {
                 Cell::styled(c.entries.len().to_string(), out::DIM),
                 Cell::plain(c.entries.join(", ")),
             ]);
+        }
+        if self.catalogue.iter().all(|c| c.entries.is_empty()) {
+            s.push_str(&out::nothing(p, "nothing in it yet"));
         }
         s.push_str(&t.render(p));
         s
@@ -1616,14 +1626,37 @@ pub struct Using {
     /// catalogue has nothing it left behind, and `Selection::unselected` says
     /// so. `Init`'s decision about which rows to print depends on it.
     pub unselected: Vec<String>,
+    /// What a feature supplies here, which `[use]` never names.
+    ///
+    /// A feature owns its server, so `codegraph` and `memory` are excluded from
+    /// the selection — and the row read `mcp  nothing` in a repo whose features
+    /// block said `codegraph on` and `memory on` two lines above it, and whose
+    /// `omh info` listed both in the catalogue. Three true statements, one of
+    /// which was read as *there is no MCP here*.
+    pub from_a_feature: Vec<String>,
 }
 
 impl Using {
-    fn summary(&self) -> String {
-        match &self.selected {
-            None => "everything".into(),
-            Some(taken) if taken.is_empty() => "nothing".into(),
+    pub fn summary(&self) -> String {
+        // What a feature brings is named beside what you chose, because it is
+        // here either way and `[use]` never mentions it. Without this the row
+        // read `mcp  nothing` in a repo whose features block said `codegraph
+        // on` and `memory on` two lines above — three true statements, one of
+        // which a reader takes as *there is no MCP here*.
+        let theirs = match self.from_a_feature.as_slice() {
+            [] => String::new(),
+            names => format!("{} (omh's)", names.join(", ")),
+        };
+        let yours = match &self.selected {
+            None => "everything".to_string(),
+            Some(taken) if taken.is_empty() => String::new(),
             Some(taken) => taken.join(", "),
+        };
+        match (yours.is_empty(), theirs.is_empty()) {
+            (true, true) => "nothing".into(),
+            (true, false) => theirs,
+            (false, true) => yours,
+            (false, false) => format!("{yours} · {theirs}"),
         }
     }
 }
@@ -1695,9 +1728,16 @@ impl Report for Repo {
                 if u.unselected.is_empty() {
                     Cell::plain("")
                 } else {
+                    // *More in your catalogue*, not *declined*. This is the
+                    // unfiltered catalogue, so in a rust repo it counts
+                    // `go-test` and `python-format` — hooks naming ecosystems
+                    // this repo is not, which `omh use` refuses outright.
+                    // Calling those "not selected" claims a decision where
+                    // there was never a choice. `init` was corrected for the
+                    // same fact and reads the same way.
                     Cell::styled(
                         format!(
-                            "({} not selected: {})",
+                            "({} more in your catalogue: {})",
                             u.unselected.len(),
                             u.unselected.join(", ")
                         ),
@@ -1748,6 +1788,10 @@ impl Report for Repo {
 pub struct Resynced {
     /// The files written — one per repo layer that has a say.
     pub wrote: Vec<String>,
+    /// Withheld, so the sentence is in the tense it happened in. The write was
+    /// skipped under `--dry-run` and this line was not, which left the file
+    /// untouched and the output reading `wrote →`.
+    pub dry_run: bool,
     /// `(capability, how many entries)`.
     pub counts: Vec<(String, usize)>,
 }
@@ -1756,10 +1800,16 @@ impl Report for Resynced {
     fn human(&self, p: &out::Palette) -> String {
         let mut s = String::new();
         for path in &self.wrote {
-            s.push_str(&format!("resynced to your catalogue — wrote → {path}\n"));
+            s.push_str(&match self.dry_run {
+                true => format!("would resync to your catalogue — would write → {path}\n"),
+                false => format!("resynced to your catalogue — wrote → {path}\n"),
+            });
         }
         let mut t = Table::new();
-        for (capability, count) in &self.counts {
+        for (capability, count) in self.counts.iter().filter(|(_, n)| *n > 0) {
+            // Same cut as `omh info`'s catalogue block: a capability with
+            // nothing in it is not what this command was asked about, and on a
+            // fresh install it was four rows of `0` out of six.
             t = t.row(vec![
                 Cell::plain(capability),
                 Cell::styled(count.to_string(), out::DIM),
@@ -2372,14 +2422,27 @@ impl Age {
 
 /// The launch that would have happened.
 ///
-/// `--dry-run` is the one place the runtime command line is the *product*, so
-/// it goes to **stdout** where it can be redirected into a script, and it is
-/// printed as one argv per line — the shape you can read, diff, and paste
-/// behind a `docker` you are debugging.
+/// **The plan, not the command line.** This printed 55 lines of `docker run`
+/// argv, one token per line, and nothing else — no image, no summary, nothing
+/// a person could read. The argument was that the argv *is* the product,
+/// pasteable behind a docker you are debugging, and that reader is real; they
+/// are just not the reader `--dry-run` exists for. Somebody deciding whether to
+/// let this tool near their repository asks *what will it do*, and got bind
+/// mounts.
+///
+/// So the argv keeps its home in `--json`, whole and in order, which is where
+/// a script was reading it from anyway — and the human form answers the
+/// question.
 #[derive(Debug, Clone)]
 pub struct DryRun {
     pub status: String,
     pub worktree: String,
+    pub image: String,
+    pub network: String,
+    /// `(capability, what it contributes)` — what the agent will be given.
+    pub reads: Vec<(String, String)>,
+    /// What the session can change, which is the short list that matters.
+    pub writes: Vec<String>,
     /// The program and its arguments, program first.
     pub argv: Vec<String>,
 }
@@ -2387,14 +2450,38 @@ pub struct DryRun {
 impl Report for DryRun {
     fn human(&self, p: &out::Palette) -> String {
         let mut s = format!("{}\n", p.paint(out::HEAD, &self.status));
+        let mut t = Table::new();
+        t = t.row(vec![Cell::plain("image"), Cell::plain(&self.image)]);
+        t = t.row(vec![Cell::plain("network"), Cell::plain(&self.network)]);
+        t = t.row(vec![Cell::plain("worktree"), Cell::plain(&self.worktree)]);
+        s.push_str(&t.render(p));
+
+        if !self.reads.is_empty() {
+            s.push_str(&format!(
+                "\n  {}\n",
+                p.paint(out::HEAD, "the agent is given")
+            ));
+            let mut r = Table::new().indent(4);
+            for (what, detail) in &self.reads {
+                r = r.row(vec![Cell::styled(what, out::NAME), Cell::plain(detail)]);
+            }
+            s.push_str(&r.render(p));
+        }
+
+        // The short list, and the reason this report exists. Everything omh
+        // mounts is read-only but these, so naming them is naming the whole of
+        // what a session can reach.
+        s.push_str(&format!("\n  {}\n", p.paint(out::HEAD, "it can write")));
+        let mut w = Table::new().indent(4);
+        for line in &self.writes {
+            w = w.row(vec![Cell::plain(line)]);
+        }
+        s.push_str(&w.render(p));
+
         s.push_str(&format!(
-            "worktree {}\n\n",
-            p.paint(out::DIM, &self.worktree)
+            "\n  {}\n",
+            p.paint(out::DIM, "the runtime command line is in --json")
         ));
-        // Continued with `\` so the whole thing is one pasteable command, which
-        // is the only reason anybody reads this output rather than `omh doctor`.
-        s.push_str(&self.argv.join(" \\\n       "));
-        s.push('\n');
         s
     }
 
@@ -2402,6 +2489,13 @@ impl Report for DryRun {
         json!({
             "status": self.status,
             "worktree": self.worktree,
+            "image": self.image,
+            "network": self.network,
+            "reads": self.reads.iter().map(|(what, detail)| json!({
+                "what": what,
+                "detail": detail,
+            })).collect::<Vec<_>>(),
+            "writes": self.writes,
             "argv": self.argv,
         })
     }
@@ -4252,6 +4346,184 @@ mod tests {
     /// **Following the catalogue is not the same as listing everything in it.**
     ///
     /// A capability with no selection tracks the catalogue as it grows; a
+    /// `--dry-run` answers what the session gets, not how docker is spelled.
+    ///
+    /// It printed 55 lines of `docker run` argv, one token per line, and
+    /// nothing else — no image, no summary, nothing a person could read. The
+    /// doc argued the argv *is* the product, pasteable behind a docker you are
+    /// debugging, and that reader is real. They are not the reader deciding
+    /// whether to let this tool near their repository, and that reader is the
+    /// one `--dry-run` exists for: it is the trust surface, and it answered
+    /// with bind mounts.
+    ///
+    /// So the plan is the human form and the argv stays whole in `--json`,
+    /// which is where a script was reading it from anyway.
+    #[test]
+    fn a_dry_run_says_what_the_session_gets() {
+        let report = DryRun {
+            status: "claude on omh/s01".into(),
+            worktree: "/h/.omh/worktrees/proj/s01".into(),
+            image: "omh/claude:abc".into(),
+            network: "omh-proj".into(),
+            reads: vec![
+                ("rules".into(), "composed with your AGENTS.md".into()),
+                ("skills".into(), "2 selected".into()),
+            ],
+            writes: vec!["/work — this session's worktree".into()],
+            argv: vec!["docker".into(), "run".into(), "--rm".into()],
+        };
+
+        let human = emit(&report, Format::Human, &Palette::plain());
+        for want in [
+            "claude on omh/s01",
+            "omh/claude:abc",
+            "omh-proj",
+            "composed with your AGENTS.md",
+            "2 selected",
+            "/work",
+        ] {
+            assert!(human.contains(want), "no `{want}` in the plan: {human}");
+        }
+        assert!(
+            !human.contains("--rm"),
+            "the argv is the mechanism, and it is in --json: {human}"
+        );
+
+        assert_eq!(
+            report.json()["argv"],
+            json!(["docker", "run", "--rm"]),
+            "and it is whole there, because that is where it was being read from"
+        );
+    }
+
+    /// What is in your catalogue is not what this repo declined.
+    ///
+    /// The parenthetical read `(4 not selected: go-format, go-test,
+    /// python-format, python-test)` in a rust repo. Nobody declined those:
+    /// they name ecosystems this repo is not, and `catalogue_names` filters
+    /// them out of what `omh use` will even accept — so *not selected* claims a
+    /// decision where there was never a choice.
+    ///
+    /// `init` was corrected for this in #88 and reads `N more in your
+    /// catalogue`. Two reports, one fact, and they said it two ways.
+    #[test]
+    fn what_is_in_your_catalogue_is_not_what_this_repo_declined() {
+        let report = Repo {
+            dir: "/r/.omh".into(),
+            settings: vec![],
+            features: vec![],
+            using: vec![Using {
+                capability: "hooks".into(),
+                selected: Some(vec!["rust-test".into()]),
+                unselected: vec!["go-test".into(), "python-test".into()],
+                from_a_feature: vec![],
+            }],
+            notices: vec![],
+        };
+        let human = emit(&report, Format::Human, &Palette::plain());
+        assert!(
+            !human.contains("not selected"),
+            "nobody declined a hook for an ecosystem this repo is not: {human}"
+        );
+        assert!(
+            human.contains("2 more in your catalogue"),
+            "and the same wording `init` settled on, for the same fact: {human}"
+        );
+    }
+
+    /// `nothing` is not what a repo running two MCP servers is using.
+    ///
+    /// `omh info --repo` said `mcp  nothing` in a repo whose `omh's features`
+    /// block two lines above reported `codegraph on` and `memory on`, and whose
+    /// `omh info` listed both servers in the catalogue. All three are true at
+    /// once: a feature owns its server, so it is excluded from `[use]`, and
+    /// `[use]` is what this row reads.
+    ///
+    /// `nothing` is still the right word for a capability where a feature is
+    /// not supplying one — the distinction is between *you chose nothing* and
+    /// *you chose nothing and omh brings some anyway*, and only the second one
+    /// was being misreported.
+    #[test]
+    fn a_capability_a_feature_supplies_does_not_report_nothing() {
+        let report = Repo {
+            dir: "/r/.omh".into(),
+            settings: vec![],
+            features: vec![],
+            using: vec![
+                Using {
+                    capability: "mcp".into(),
+                    selected: Some(vec![]),
+                    unselected: vec![],
+                    from_a_feature: vec!["codegraph".into(), "memory".into()],
+                },
+                Using {
+                    capability: "skills".into(),
+                    selected: Some(vec![]),
+                    unselected: vec![],
+                    from_a_feature: vec![],
+                },
+            ],
+            notices: vec![],
+        };
+        let human = emit(&report, Format::Human, &Palette::plain());
+        let mcp = human
+            .lines()
+            .find(|l| l.trim_start().starts_with("mcp"))
+            .unwrap_or_else(|| panic!("no mcp row: {human}"));
+        assert!(
+            mcp.contains("codegraph") && mcp.contains("memory"),
+            "two servers are running here and the row said otherwise: {mcp:?}"
+        );
+        let skills = human
+            .lines()
+            .find(|l| l.trim_start().starts_with("skills"))
+            .unwrap_or_else(|| panic!("no skills row: {human}"));
+        assert!(
+            skills.contains("nothing"),
+            "and where nothing supplies one, `nothing` is the answer: {skills:?}"
+        );
+    }
+
+    /// A capability holding nothing is nothing to report.
+    ///
+    /// `omh info`'s catalogue block and `omh use --all`'s summary both printed
+    /// a row per capability whether or not there was anything in it, so a fresh
+    /// install read `rules 0 / skills 0 / mcp 2 … / commands 0 / subagents 0`.
+    /// Four of the six rows taught the reader only that omh has six
+    /// capabilities, which is not what either command was asked.
+    ///
+    /// The same cut `Init` already makes, for the same reason.
+    #[test]
+    fn a_capability_holding_nothing_is_not_a_row() {
+        let report = Inventory {
+            harnesses: vec![],
+            adapters_dir: "/h/.omh/adapters".into(),
+            editors: vec![],
+            sessions: vec![],
+            base: "2026.08".into(),
+            catalogue_dir: "/h/.omh".into(),
+            catalogue: vec![
+                Catalogue {
+                    capability: "rules".into(),
+                    entries: vec![],
+                },
+                Catalogue {
+                    capability: "skills".into(),
+                    entries: vec!["review-diff".into()],
+                },
+            ],
+        };
+        let human = emit(&report, Format::Human, &Palette::plain());
+        assert!(
+            human.contains("skills") && human.contains("review-diff"),
+            "what you have is the answer: {human}"
+        );
+        assert!(
+            !human.contains("rules"),
+            "and a capability you have nothing in is not part of it: {human}"
+        );
+    }
+
     /// What `init` reports, without a container in sight.
     ///
     /// Nearly all of this report's coverage rides on `#[ignore]`, because
@@ -4272,16 +4544,19 @@ mod tests {
                     capability: "rules".into(),
                     selected: None,
                     unselected: vec![],
+                    from_a_feature: vec![],
                 },
                 Using {
                     capability: "skills".into(),
                     selected: Some(vec!["review-diff".into()]),
                     unselected: vec!["refactor".into()],
+                    from_a_feature: vec![],
                 },
                 Using {
                     capability: "hooks".into(),
                     selected: Some(vec![]),
                     unselected: vec![],
+                    from_a_feature: vec![],
                 },
             ],
             notices: vec!["warning: [use] names an entry nothing answers to: skills/nope".into()],
@@ -4427,11 +4702,13 @@ mod tests {
                     capability: "rules".into(),
                     selected: None,
                     unselected: vec![],
+                    from_a_feature: vec![],
                 },
                 Using {
                     capability: "skills".into(),
                     selected: Some(vec!["a".into(), "b".into()]),
                     unselected: vec![],
+                    from_a_feature: vec![],
                 },
             ],
             notices: vec![],

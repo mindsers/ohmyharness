@@ -90,18 +90,20 @@ pub fn target_arch(host_arch: &str) -> Result<&'static str> {
 /// session — but both say so first. Discarding them silently leaves a session
 /// with no memory server and no explanation, including under `omh doctor`,
 /// which is the one command whose job is to notice.
-pub fn available(paths: &crate::profile::Paths) -> Option<PathBuf> {
+pub fn available(paths: &crate::profile::Paths, ctx: &crate::out::Ctx) -> Option<PathBuf> {
     let arch = match target_arch(std::env::consts::ARCH) {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("omh: no memory server here — {e:#}");
+            ctx.warn(&format!("no memory server here — {e:#}"));
             return None;
         }
     };
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("omh: no memory server here — cannot locate the running omh: {e}");
+            ctx.warn(&format!(
+                "no memory server here — cannot locate the running omh: {e}"
+            ));
             return None;
         }
     };
@@ -119,7 +121,12 @@ pub fn available(paths: &crate::profile::Paths) -> Option<PathBuf> {
 }
 
 /// Build it if it is not there yet. Called before launch, like `image::ensure`.
-pub fn ensure(program: &str, paths: &crate::profile::Paths, crate_dir: &Path) -> Result<PathBuf> {
+pub fn ensure(
+    program: &str,
+    paths: &crate::profile::Paths,
+    crate_dir: &Path,
+    ctx: &crate::out::Ctx,
+) -> Result<PathBuf> {
     let arch = target_arch(std::env::consts::ARCH)?;
     let exe = std::env::current_exe().context("locating the running omh")?;
     match plan_delivery(
@@ -141,7 +148,7 @@ pub fn ensure(program: &str, paths: &crate::profile::Paths, crate_dir: &Path) ->
                     crate_dir.display()
                 );
             }
-            build(program, crate_dir, &out, arch)?;
+            build(program, crate_dir, &out, arch, ctx)?;
             Ok(out)
         }
     }
@@ -149,13 +156,23 @@ pub fn ensure(program: &str, paths: &crate::profile::Paths, crate_dir: &Path) ->
 
 /// Cross-build `omh` for Linux, inside a container, into the cache.
 ///
-/// Progress goes straight to the terminal for the same reason `image::build`
-/// does it: a multi-minute silent step reads as a hang.
-pub fn build(program: &str, crate_dir: &Path, out: &Path, arch: &str) -> Result<()> {
+/// The announcement goes through `Ctx`, not to the terminal: a bare `eprintln!`
+/// carries no palette and is not suppressed under `--json`, which is the whole
+/// of what `progress` is for. It said so on stderr while cargo owned the
+/// terminal underneath it, which is the second half of the same problem.
+pub fn build(
+    program: &str,
+    crate_dir: &Path,
+    out: &Path,
+    arch: &str,
+    ctx: &crate::out::Ctx,
+) -> Result<()> {
     std::fs::create_dir_all(out.parent().context("cache has no parent")?)?;
     let target = format!("{arch}-unknown-linux-gnu");
 
-    eprintln!("omh: cross-building the memory server for linux/{arch} (first run only)");
+    ctx.progress(&format!(
+        "cross-building the memory server for linux/{arch} — first run only…"
+    ));
     let status = std::process::Command::new(program)
         .args([
             "run",
@@ -169,8 +186,16 @@ pub fn build(program: &str, crate_dir: &Path, out: &Path, arch: &str) -> Result<
         .arg(format!("{}:/out", out.parent().unwrap().display()))
         // A named volume for the build cache, so a second build is incremental
         // rather than a second cold compile.
+        //
+        // **Both variables, and that is the whole of it.** `CARGO_HOME` alone
+        // caches the registry and nothing else: the compiled artifacts live in
+        // `target/`, inside a `--rm` container, so every interrupted or failed
+        // build started again from the first crate. Measured before the fix —
+        // three launches, three cold compiles from `proc-macro2` — under a
+        // comment claiming the opposite.
         .args(["-v", "omh-selfbuild:/cargo"])
         .args(["-e", "CARGO_HOME=/cargo"])
+        .args(["-e", "CARGO_TARGET_DIR=/cargo/target"])
         .args(["-w", "/build"])
         .arg("rust:1-bookworm")
         .args([
@@ -179,7 +204,7 @@ pub fn build(program: &str, crate_dir: &Path, out: &Path, arch: &str) -> Result<
             &format!(
                 "cp -r /src/src /src/Cargo.toml /src/Cargo.lock /build/ 2>/dev/null; \
                  cd /build && cargo build --release --locked \
-                 && cp target/release/omh /out/{}",
+                 && cp \"$CARGO_TARGET_DIR\"/release/omh /out/{}",
                 out.file_name().unwrap().to_string_lossy()
             ),
         ])
@@ -299,7 +324,7 @@ mod tests {
         if std::env::consts::OS == "linux" {
             return;
         }
-        let err = ensure("docker", &paths, dir.path())
+        let err = ensure("docker", &paths, dir.path(), &crate::out::Ctx::plain())
             .unwrap_err()
             .to_string();
         assert!(err.contains("published linux binary"), "got: {err}");
