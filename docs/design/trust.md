@@ -18,8 +18,10 @@ Every value says where it came from and what it beat.
 
 ```console
 $ omh info --repo
+this repo /Users/you/proj/.omh
+
 settings
-  carry_in   [".env.local"]   ← local (overrides shared)
+  carry_in  [".env.local"]  ← local (overrides shared)
 ```
 
 No competitor does this. It is what makes layered settings debuggable instead of
@@ -34,7 +36,7 @@ does not, and which of omh's features are off:
 
 ```console
 using
-  skills      review-diff   (1 not selected: refactor)
+  skills     review-diff             (1 not selected: refactor)
 ```
 
 See [Configuration](../configuration.md#two-scopes-two-commands).

@@ -1193,7 +1193,7 @@ pub struct Editor {
     pub installed: bool,
 }
 
-/// What `omh info` found: harnesses, editors, sessions.
+/// What `omh info` found: harnesses, editors, sessions, your catalogue.
 #[derive(Debug, Clone)]
 pub struct Inventory {
     pub harnesses: Vec<Harness>,

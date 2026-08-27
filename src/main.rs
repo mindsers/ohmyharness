@@ -8461,6 +8461,314 @@ mod tests {
         );
     }
 
+    /// The command lines the **docs** print are lines omh accepts.
+    ///
+    /// A synopsis block in `docs/commands.md` is the one artefact in this repo
+    /// that is neither compiled nor parsed nor grepped for arity, and it is the
+    /// first thing a migrating reader looks at. The 0.7.0 rename left four
+    /// wrong lines in a five-line block, under a heading naming the command
+    /// that replaced the deleted one: two byte-identical lines that had lost
+    /// the argument telling them apart, a flag removed a release earlier, and a
+    /// write target stated as the opposite of what omh does.
+    ///
+    /// **The notation is expanded rather than skipped**, because a rule that
+    /// declines to read the hard lines is a rule that reads the ones already
+    /// right:
+    ///
+    /// - `<key>` and `{id}` become a value, by [`regex_lite_fill`]
+    /// - `a|b` becomes `a`; one alternative is enough to check an arity
+    /// - `[…]` loses its brackets and **keeps its contents**, because dropping
+    ///   the group would hide exactly the defect that occurred — `[--shared]`
+    ///   named a flag clap refuses, and a rule that checks only the required
+    ///   core never asks
+    /// - a bare word inside brackets is a hole too: `[n]`, `[name]`
+    ///
+    /// **What is not a command.** The first word has to be one clap knows, or
+    /// the line is omh talking — `omh: …`, `omh has no record …`, and the
+    /// prose in every fence that shows output. The line stops at the gutter,
+    /// at a `#`, at `--`, and at the first word carrying a character no
+    /// command line has, which is how the box-drawing in a diagram ends a
+    /// reading rather than failing one.
+    ///
+    /// A comment saying **an error** inverts the assertion: `omh new claude
+    /// --resume x` is documented *because* omh refuses it, and a doc that
+    /// promises a refusal has to be checked in that direction or the sentence
+    /// beneath it stops being true.
+    #[test]
+    fn the_lines_the_docs_print_are_lines_omh_accepts() {
+        let mut pages: Vec<std::path::PathBuf> = std::fs::read_dir("docs")
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "md"))
+            .collect();
+        pages.extend(
+            std::fs::read_dir("docs/design")
+                .unwrap()
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "md")),
+        );
+        pages.push("README.md".into());
+        pages.sort();
+        // Named, not counted: a walk that stopped early and a walk that found
+        // nothing look the same from a total.
+        for must in [
+            "docs/commands.md",
+            "docs/configuration.md",
+            "docs/design/profile.md",
+            "README.md",
+        ] {
+            assert!(
+                pages.iter().any(|p| p == std::path::Path::new(must)),
+                "the scan never read {must}, so its silence says nothing"
+            );
+        }
+
+        // What a hole stands for, read off the name the docs gave it. The
+        // sibling scan fills the *first* hole with a session id because that
+        // is what omh's own messages mean by one; a page writes `<id>` when it
+        // means that and `<n>` when it means a checkpoint, and filling
+        // `omh s diff <n>` with `s01` refuses a line that is correct.
+        fn hole(name: &str) -> &'static str {
+            match name.trim_matches(['<', '>', '[', ']', '{', '}']) {
+                "id" | "session" | "sNN" => "s01",
+                "n" | "m-o" | "checkpoint" | "turns" => "1",
+                _ => "x",
+            }
+        }
+
+        let vocab = vocabulary();
+        let mut checked: std::collections::BTreeMap<String, usize> = Default::default();
+        let mut refused: Vec<String> = Vec::new();
+        for page in &pages {
+            let body = std::fs::read_to_string(page).unwrap();
+            let name = page.file_name().unwrap().to_string_lossy().to_string();
+            let mut fenced = false;
+            // A shell continuation is one line to the reader and to omh.
+            let mut joined: Vec<(usize, String)> = Vec::new();
+            let mut carry: Option<(usize, String)> = None;
+            for (n, raw) in body.lines().enumerate() {
+                match carry.take() {
+                    Some((at, mut held)) => {
+                        held.push(' ');
+                        held.push_str(raw.trim());
+                        match held.strip_suffix('\\') {
+                            Some(head) => carry = Some((at, head.trim_end().to_string())),
+                            None => joined.push((at, held)),
+                        }
+                        continue;
+                    }
+                    None => match raw.trim_end().strip_suffix('\\') {
+                        Some(head) => carry = Some((n, head.trim_end().to_string())),
+                        None => joined.push((n, raw.to_string())),
+                    },
+                }
+            }
+            for (n, raw) in &joined {
+                let (n, raw) = (*n, raw.as_str());
+                if raw.trim_start().starts_with("```") {
+                    fenced = !fenced;
+                    continue;
+                }
+                if !fenced {
+                    // Prose names a command mid-clause, in the middle of a
+                    // sentence about what it used to do. Reading those would
+                    // make this a guard against writing about omh's history.
+                    continue;
+                }
+                let line = raw.trim_start();
+                let line = line.strip_prefix("$ ").unwrap_or(line);
+                let Some(rest) = line.strip_prefix("omh ") else {
+                    continue;
+                };
+                // A refusal the page is *showing*. Inverted rather than
+                // skipped: a documented error that quietly starts working is a
+                // paragraph that has stopped being true.
+                let inverted = rest
+                    .split_once('#')
+                    .is_some_and(|(_, note)| note.contains("an error"));
+                // Where the line ends and the page resumes.
+                // The gutter, but not one inside a quoted value: a synopsis
+                // separates a command from its explanation with two spaces,
+                // and `--observed "a  b"` holds two of its own. Tracked rather
+                // than tested for, because an apostrophe in the *explanation*
+                // — "the agent's own commits" — is not a quote opening
+                // anything, and a rule that read it as one put the whole
+                // sentence back into the command.
+                let mut rest = rest;
+                let mut quote: Option<char> = None;
+                let mut gutter = None;
+                let bytes: Vec<char> = rest.chars().collect();
+                let mut at = 0;
+                for (i, c) in bytes.iter().enumerate() {
+                    match quote {
+                        Some(mark) if *c == mark => quote = None,
+                        Some(_) => {}
+                        None if "\"'".contains(*c) => quote = Some(*c),
+                        None if *c == ' ' && bytes.get(i + 1) == Some(&' ') => {
+                            gutter = Some(at);
+                            break;
+                        }
+                        None => {}
+                    }
+                    at += c.len_utf8();
+                }
+                if let Some(at) = gutter {
+                    rest = &rest[..at];
+                }
+                for stop in [" #", " -- "] {
+                    if let Some(at) = rest.find(stop) {
+                        rest = &rest[..at];
+                    }
+                }
+                let mut words: Vec<String> = Vec::new();
+                let mut quote: Option<char> = None;
+                let mut owed = false;
+                let mut judgeable = true;
+                for word in rest.split_whitespace() {
+                    // A quoted value is one argument however many spaces it
+                    // holds — `omh s01 commit -m "Fix the tap guard"`.
+                    if let Some(mark) = quote {
+                        if word.ends_with(mark) {
+                            quote = None;
+                        }
+                        continue;
+                    }
+                    let bare = word.trim_matches(['[', ']']);
+                    if let Some(mark) = bare.chars().next().filter(|c| "\"'".contains(*c)) {
+                        words.push("x".into());
+                        owed = false;
+                        if !(bare.len() > 1 && bare.ends_with(mark)) {
+                            quote = Some(mark);
+                        }
+                        continue;
+                    }
+                    // `…` is *whatever you were typing*. As a flag's value it
+                    // is one word; on its own it is the rest of a line this
+                    // scan cannot see, and a line it cannot see is one it must
+                    // not judge — reading `omh memory remember --if-exists
+                    // override …` as complete would refuse a correct page.
+                    if let Some(head) = bare.strip_suffix('…') {
+                        // `<key>…` is one-or-more of the hole it is glued to,
+                        // and one is enough to check an arity.
+                        if !head.is_empty() {
+                            words.push(hole(head).to_string());
+                            owed = false;
+                            continue;
+                        }
+                        // On its own it is the rest of a line this scan cannot
+                        // see, and a line it cannot see is one it must not
+                        // judge — reading `omh memory remember --if-exists
+                        // override …` as complete would refuse a correct page.
+                        match owed {
+                            true => {
+                                words.push("x".into());
+                                owed = false;
+                            }
+                            false => judgeable = false,
+                        }
+                        continue;
+                    }
+                    // Nothing a command line can carry. In a diagram this is
+                    // the box-drawing; in a captured report it is the em dash
+                    // omh writes a summary with. Either way the command is
+                    // whole before it.
+                    let typeable =
+                        |c: char| c.is_ascii_alphanumeric() || "-_./,:=@+~$|".contains(c);
+                    if bare.is_empty() || !bare.chars().all(typeable) {
+                        let held = bare.trim_matches(['<', '>', '{', '}']);
+                        if !held.is_empty() && held.chars().all(typeable) {
+                            words.push(hole(bare).to_string());
+                            owed = false;
+                            continue;
+                        }
+                        break;
+                    }
+                    let word = match bare.split_once('|') {
+                        Some((first, _)) => first,
+                        None => bare,
+                    };
+                    // A bracketed word that is not a flag, and does not follow
+                    // one, is a hole the reader fills: `[n]`, `[name]`.
+                    let optional = raw.contains(&format!("[{word}]"));
+                    words.push(match optional && !word.starts_with('-') && !owed {
+                        true => hole(word).to_string(),
+                        false => word.to_string(),
+                    });
+                    owed = word.starts_with('-') && !word.contains('=');
+                }
+                let Some(first) = words.first() else {
+                    continue;
+                };
+                if !judgeable || !vocab.contains(first.as_str()) {
+                    // omh's own voice: `omh: …`, `omh has no record …`, and
+                    // every sentence in a captured report that opens with the
+                    // program's name.
+                    continue;
+                }
+                *checked.entry(name.clone()).or_insert(0) += 1;
+                let argv: Vec<String> = std::iter::once("omh".to_string())
+                    .chain(words.iter().cloned())
+                    .collect();
+                let (_, argv) = session_prefix(argv);
+                let read = Cli::try_parse_from(&argv);
+                if read.is_err() != inverted {
+                    refused.push(format!(
+                        "{}:{}: `omh {}` {}",
+                        page.display(),
+                        n + 1,
+                        words.join(" "),
+                        match read {
+                            Err(e) => format!("→ {}", e.to_string().lines().next().unwrap_or("")),
+                            Ok(_) => "parses, and the page says it is an error".into(),
+                        }
+                    ));
+                }
+            }
+        }
+        assert!(
+            refused.is_empty(),
+            "the docs print lines omh refuses: {refused:#?}\ncounts: {checked:#?}"
+        );
+        // An exact map, for the reason the sibling guard keeps one: a floor
+        // notices a fall and nothing else, and the way a scan like this fails
+        // is by quietly ceasing to recognise a shape. Every count below was
+        // read off a run, and the two big ones are the pages a rename touches
+        // first.
+        //
+        // The edit this costs is the point: it is where somebody reads what
+        // the scan now sees. A page dropping out is loud, a page appearing is
+        // loud, and a shape leaving one page while another gains lines is
+        // loud — none of which a total or a floor can say.
+        let expected: std::collections::BTreeMap<String, usize> = [
+            ("README.md", 32),
+            ("accounts.md", 2),
+            ("adapters.md", 1),
+            ("code-graph.md", 1),
+            ("commands.md", 121),
+            ("configuration.md", 42),
+            ("decisions.md", 1),
+            ("editors.md", 4),
+            ("getting-started.md", 11),
+            ("git.md", 18),
+            ("memory.md", 5),
+            ("profile.md", 3),
+            ("sessions.md", 11),
+            ("troubleshooting.md", 6),
+            ("trust.md", 2),
+        ]
+        .into_iter()
+        .map(|(f, n)| (f.to_string(), n))
+        .collect();
+        assert_eq!(
+            checked, expected,
+            "the set of documented command lines this scan reads has changed. \
+             If you added or removed one, update the map. If you did not, a \
+             cut stopped admitting a shape it used to."
+        );
+    }
+
     /// No doc comment has been spliced onto itself.
     ///
     /// A specific accident with a specific cause: these files are edited by

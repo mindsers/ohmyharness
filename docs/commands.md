@@ -3,21 +3,24 @@
 ```
 omh init                          set this repo up
 omh new <harness> [-- args…]      start a session, run an agent in it
-omh sessions <id> resume [harness]  rejoin one · claude · omp · opencode
+omh s01 resume [harness]          rejoin one · claude · omp · opencode
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
-omh doctor [--harness <name>] d   verify a harness really sees your profile
+omh doctor [--harness <name>]     verify a harness sees your profile · d
 omh why <thing>                   who put this here, and on what grounds
-omh info                          harnesses, editors, sessions
-omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] s  omh s, omh s01 log
-omh settings [set|unset|edit|mcp]  you: your defaults, and what you have
-omh info --repo      this checkout: what it uses, and why
-omh use|unuse <capability> <name>     omh use skills tdd · omh use --all
+omh info                          harnesses, editors, sessions, your catalogue
+omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] …
+                                  omh s · omh s01 log
+omh settings [set|unset|edit|mcp] …
+                                  you: your defaults
+omh info --repo                   this checkout: what it uses, and why
+omh use|unuse <capability> <name>
+                                  omh use skills tdd · omh use --all
 ```
 
 ## The shape of the CLI
 
-Noun-verb groups with single-letter aliases: `omh s log`, `omh c mcp ls`,
+Noun-verb groups with single-letter aliases: `omh s log`, `omh s01 commit`,
 `omh d claude`. The noun on its own is the listing — `omh s` is every session,
 and `omh s01` is that one.
 
@@ -265,9 +268,12 @@ rule as `omh s attach emacs`.
 
 ## `omh info`
 
-Everything omh knows about here: harnesses, editors, and which sessions
-exist. What each session is *doing* is `omh s` — this one never asks git,
-so it costs no subprocess per session.
+Everything omh knows about here: harnesses, editors, which sessions exist, and
+what your catalogue holds per capability. What each session is *doing* is
+`omh s` — this one never asks git, so it costs no subprocess per session.
+
+`--repo` narrows the same question from the machine to this checkout; the two
+are one command because *what you have* is one question asked at two scopes.
 
 ## `omh sessions …` · `s`
 
@@ -914,9 +920,9 @@ Change a setting, or switch one of omh's features. **Which file it lands in
 follows from the key**, not from a flag you have to remember.
 
 ```
-omh set <key> <value> [--local] [--save]
+omh set <key> <value> [--local|--save]
 omh set <feature> on|off
-omh unset <key> [--local] [--save]
+omh unset <key> [--local|--save]
 omh unset <feature>                   let omh's own default decide again
 ```
 
@@ -1020,7 +1026,14 @@ launch.
 ```
 omh settings                          your defaults, and what omh reads
 omh settings set <key> <value>        → ~/.omh/default.toml
-omh settings unset <key>
+omh settings unset <key>              remove one of your defaults
+omh settings edit [<capability> [name]]
+                                      $EDITOR on your defaults, or on one entry
+
+omh settings mcp ls
+omh settings mcp add <name> <cmd> [args…] [--env K=V]
+omh settings mcp rm <name>
+omh settings mcp import <harness> [--file <path>] [--force]
 ```
 
 ```console
@@ -1053,37 +1066,13 @@ server's environment can be a token and the file `init` writes is committed. It
 already has a home — `omh settings mcp add <name> <command> --env KEY=value` puts
 it on the server in `~/.omh/mcp.json`, where servers live.
 
-## `omh settings …`
+MCP lives under `omh settings` because MCP servers **are** configuration. They
+live in your catalogue; a repo overrides a server's environment without
+redeclaring it. See [Configuration](configuration.md).
 
-**You**, everywhere. Your defaults and your catalogue.
-
-```
-omh settings                          your defaults
-omh settings set <key> <value>          → ~/.omh/default.toml  (older spelling of `omh settings set`)
-omh settings unset <key>                remove one of your defaults
-omh settings edit [<capability> [name]] $EDITOR on your settings, or on one entry
-
-omh settings mcp ls
-omh settings mcp add <name> <cmd> [args…] [--env K=V]
-omh settings mcp rm <name>
-omh settings mcp import <harness> [--file] [--force]
-```
-
-```console
-$ omh settings
-your defaults /Users/you/.omh/default.toml
-  idle_timeout  30m
-
-omh also reads
-  carry_in     Files a session gets that git does not carry — see `src/carry.rs`.
-  account      Which captured login a session is launched with, by name.
-  runtime      Which runtime builds and runs the sandbox. Unset means `auto`.
-  persistence  How a session's terminal survives detaching. Unset means `dtach`.
-```
-
-MCP lives under `config` because MCP servers **are** configuration. They live in your
-catalogue; a repo overrides a server's environment without redeclaring it. See
-[Configuration](configuration.md).
+**Your catalogue is `omh info`.** This command is your *defaults* — the four
+verbs above all act on `~/.omh`, and what you have in it is part of what
+`omh info` means by *what you have here*.
 
 `edit` takes a name, so it validates one: `omh settings edit skills ../../.ssh/id_rsa`
 is refused before `$EDITOR` sees it. Past that there is no fence to draw —
@@ -1097,10 +1086,32 @@ elsewhere: every catalogue directory omh mounts into a sandbox is mounted
 
 ```
 omh info --repo                       effective here, with provenance
-omh set <feature>             → [omh] in <repo>/.omh/settings.toml
-omh set <feature>            off here; nothing is uninstalled
-omh set <key> <value> [--shared] → settings.local.toml, gitignored
-omh unset <key> [--shared]       lets the layer beneath resurface
+omh info --repo --json                the same, for a script
+```
+
+It reports rather than writes. What changes a value here is `omh set` and
+`omh unset`, and what changes a selection is `omh use` and `omh unuse` — both
+above.
+
+```console
+$ omh info --repo
+this repo /Users/you/proj/.omh
+
+settings
+  (nothing set)
+
+omh's features
+  codegraph   off here
+  git-notice  on
+  memory      on
+
+using
+  rules      everything
+  skills     everything
+  mcp        everything
+  commands   everything
+  subagents  everything
+  hooks      everything
 ```
 
 ## `omh use` · `omh unuse`
@@ -1115,10 +1126,11 @@ omh use --all                         resync every list to the whole catalogue
 
 Capabilities: `rules`, `skills`, `mcp`, `commands`, `subagents`, `hooks`.
 
-The write target is the **committed** file, the opposite of `omh set` —
-what a project uses is a fact about the project, while what it overrides holds
-`carry_in` paths and MCP env. One flag could not express two opposite defaults,
-which is why `--layer` became two commands.
+The write target is the **committed** file — what a project uses is a fact
+about the project, and a teammate cloning it should get the same selection.
+`omh set` has the same default for the same reason; what must *not* be
+committable by accident is decided per key, in `src/key.rs`, rather than by
+which command you reached for.
 
 A capability with no list is following the whole catalogue, so the first
 `omh use` on it writes the catalogue out rather than narrowing to one name, and

@@ -316,13 +316,13 @@ codegraph = false
 or `omh set codegraph off`. Nothing is uninstalled and the next repo gets
 it back.
 
-### `--layer is going away`
+### `unexpected argument '--layer' found`
 
-`omh settings set --layer shared` still works and prints the form that replaced
-it: `omh set`. You no longer pick the file — the key does. `carry_in` is kept
-out of git because a value there can name a credential; everything else is
-committed, because it is a fact about the project a teammate cloning should
-get. `omh why <key>` says which a key is. See
+`--layer` was removed in 0.7.0 along with the command that carried it. You no
+longer pick the file — the key does. `carry_in` is kept out of git because a
+value there can name a credential; everything else is committed, because it is
+a fact about the project a teammate cloning should get. `omh why <key>` says
+which a key is, and `--save` or `--local` overrides it for one write. See
 [Configuration](configuration.md#two-scopes-two-commands).
 
 ### `your catalogue has no skills called …`
