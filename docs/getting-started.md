@@ -71,7 +71,7 @@ omh init — decided, asked nothing
   image      omh/claude:b4edd8fd15d4d669 (already built)
   image      omh/claude:8eae0d5c1511fa89 (this repo's toolchain)
   stack      rust (from Cargo.toml)
-  hooks      2 selected  (4 in your catalogue, not here)
+  hooks      2 selected  (4 more in your catalogue)
   provision  rust/linker
   provision  rust/toolchain
   memory     2 notes written, 0 already there
@@ -87,9 +87,9 @@ omh init — decided, asked nothing
   omh why <name>  what it costs, what was considered instead, how to remove it
 
   next
-    omh new claude      start a session
-    omh s resume        rejoin it later
-    omh s01 attach zed  open it in your editor
+    omh new claude  start a session
+    omh s resume    rejoin it later
+    omh s attach    open it in your editor
 ```
 
 The base set is [a versioned file](design/base-set.md), not something buried in
@@ -112,8 +112,9 @@ cleared it yet: see [derive, never interrogate](#derive-never-interrogate).
 7  index the code graph            background, resumable
 ```
 
-The report is not a final step. It prints from 5 onward as each decision is
-made, which is why the image and graph lines appear inside it.
+The report **is** the final step. Every decision above is collected and printed
+once, which is why the image and graph lines — made at 6 and 7 — are in it, and
+why `--json` can be one object rather than six unrelated ones.
 
 `[use]` is written **expanded**, with every catalogue entry named, because a
 list you curate by deleting lines beats a wildcard you cannot review. Anything
