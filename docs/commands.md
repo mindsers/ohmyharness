@@ -18,6 +18,23 @@ omh use|unuse <capability> <name>
                                   omh use skills tdd · omh use --all
 ```
 
+## `--dry-run`
+
+**Everything runs; nothing is written.** Not a description of what would happen
+— the real code path, with persistence withheld. So the layers a write would
+reach, the list a selection would become and the refusals a bad name would earn
+all happen exactly as they would for real, and the only difference is that the
+file is left alone.
+
+A command that cannot yet answer it **refuses the flag** rather than running.
+`init` builds images, and the session verbs stop containers, replant commits
+and delete worktrees; each has to compute what it *would* do, and a preview
+that guessed would be worse than none. Read-only commands refuse it too, for
+the opposite reason: `omh info` is its own dry run.
+
+That rule exists because the flag used to be accepted and discarded —
+`omh --dry-run use --all` wrote the file and printed `wrote →`.
+
 ## The shape of the CLI
 
 Noun-verb groups with single-letter aliases: `omh s log`, `omh s01 commit`,

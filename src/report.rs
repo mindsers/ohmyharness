@@ -1788,6 +1788,10 @@ impl Report for Repo {
 pub struct Resynced {
     /// The files written — one per repo layer that has a say.
     pub wrote: Vec<String>,
+    /// Withheld, so the sentence is in the tense it happened in. The write was
+    /// skipped under `--dry-run` and this line was not, which left the file
+    /// untouched and the output reading `wrote →`.
+    pub dry_run: bool,
     /// `(capability, how many entries)`.
     pub counts: Vec<(String, usize)>,
 }
@@ -1796,7 +1800,10 @@ impl Report for Resynced {
     fn human(&self, p: &out::Palette) -> String {
         let mut s = String::new();
         for path in &self.wrote {
-            s.push_str(&format!("resynced to your catalogue — wrote → {path}\n"));
+            s.push_str(&match self.dry_run {
+                true => format!("would resync to your catalogue — would write → {path}\n"),
+                false => format!("resynced to your catalogue — wrote → {path}\n"),
+            });
         }
         let mut t = Table::new();
         for (capability, count) in self.counts.iter().filter(|(_, n)| *n > 0) {

@@ -910,6 +910,42 @@ fn main() -> std::process::ExitCode {
 /// cannot be skipped, and a list that rots cannot be the thing that protects
 /// this. `the_reads_and_the_refusals_agree_with_the_dispatch` checks the
 /// answers here against what the arms actually pass.
+/// Whether this command can show you what it would do without doing it.
+///
+/// **A `--dry-run` that is accepted and discarded is a lie**, and it was one on
+/// most of the surface: ten commands read the flag and the rest took it and
+/// carried on, so `omh --dry-run use --all` wrote the file and printed
+/// `wrote →`. The rule is that no command silently ignores it — either it
+/// previews, or it says it cannot.
+///
+/// Exhaustive and matched by variant, like `consumes_session`, so a command
+/// added without deciding this is a compile error rather than a silent `false`.
+///
+/// The ones answering `false` are the ones whose preview is real work: `init`
+/// builds images, and the session verbs stop containers, replant commits and
+/// delete worktrees — each has to compute what it *would* do, and a preview
+/// that guessed would be worse than none. They refuse the flag until they can
+/// answer it.
+fn previews(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::Set { .. }
+        | Cmd::Unset { .. }
+        | Cmd::Use { .. }
+        | Cmd::Unuse { .. }
+        | Cmd::Import { .. }
+        | Cmd::New { .. }
+        | Cmd::Doctor { .. } => true,
+        Cmd::Settings { cmd } => !matches!(cmd, Some(SettingsCmd::Edit { .. })),
+        Cmd::Memory { cmd } => matches!(cmd, Some(MemoryCmd::Rm { .. })),
+        Cmd::Sessions { cmd } => matches!(cmd, Some(SessionsCmd::Resume { .. })),
+        // Read-only: the command *is* its own dry run, so there is nothing to
+        // withhold and nothing to describe. Refusing says that, where accepting
+        // would imply a preview it never gives.
+        Cmd::Info { .. } | Cmd::Why { .. } => false,
+        Cmd::Init | Cmd::Auth { .. } | Cmd::Graph { .. } => false,
+    }
+}
+
 fn consumes_session(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::Sessions { .. } => true,
@@ -1009,6 +1045,16 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             "`{id}` names a session, and this command does not act on one:\n  omh <command>    without the session"
         );
     }
+
+    // Same shape, same reason. A flag this command cannot honour is refused
+    // where it was typed, rather than accepted and dropped at whatever depth
+    // stopped reading it — which is what made `omh --dry-run use --all` write
+    // the file and then say `wrote →`.
+    anyhow::ensure!(
+        !cli.dry_run || previews(&cli.cmd),
+        "`--dry-run` is not something this command can answer yet:\n  \
+         omh <command>    to run it"
+    );
 
     match &cli.cmd {
         Cmd::Init => init(&cwd, ctx),
@@ -1265,14 +1311,21 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             capability,
             name,
             all,
-        } => use_cmd(&cwd, capability.as_deref(), name.as_deref(), *all, ctx),
-        Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name, ctx),
+        } => use_cmd(
+            &cwd,
+            capability.as_deref(),
+            name.as_deref(),
+            *all,
+            cli.dry_run,
+            ctx,
+        ),
+        Cmd::Unuse { capability, name } => unuse_cmd(&cwd, capability, name, cli.dry_run, ctx),
 
         Cmd::Import {
             capability,
             harness,
             from,
-        } => import_cmd(&cwd, capability, harness, from.as_deref(), ctx),
+        } => import_cmd(&cwd, capability, harness, from.as_deref(), cli.dry_run, ctx),
 
         Cmd::Memory { cmd } => match cmd {
             None => memory_ls(&cwd, ctx),
@@ -1285,7 +1338,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 session,
             }) => memory_serve(team.clone(), local.clone(), session.clone()),
             Some(MemoryCmd::Rm { key, layer, at }) => {
-                memory_rm(&cwd, key, *layer, at.as_deref(), ctx)
+                memory_rm(&cwd, key, *layer, at.as_deref(), cli.dry_run, ctx)
             }
             Some(MemoryCmd::Remember {
                 expected,
@@ -2725,20 +2778,25 @@ fn memory_rm(
     key: &str,
     layer: Option<memory::Layer>,
     at: Option<&str>,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let removed = memory::remove(&paths, layer, key, at)?;
+    let removed = memory::remove(&paths, layer, key, at, dry_run)?;
 
-    let mut action =
-        report::Action::new("note-removed", format!("removed {key} ({})", removed.layer)).data(
-            serde_json::json!({
-                "key": key,
-                "layer": removed.layer.to_string(),
-                "committed": removed.layer.is_committed(),
-                "inbound": removed.inbound,
-            }),
-        );
+    let mut action = report::Action::new(
+        "note-removed",
+        match dry_run {
+            true => format!("would remove {key} ({})", removed.layer),
+            false => format!("removed {key} ({})", removed.layer),
+        },
+    )
+    .data(serde_json::json!({
+        "key": key,
+        "layer": removed.layer.to_string(),
+        "committed": removed.layer.is_committed(),
+        "inbound": removed.inbound,
+    }));
     // The file is gone here, but a teammate still has it until the deletion is
     // committed. Saying so beats letting someone believe a shared note
     // disappeared for everybody.
@@ -2783,6 +2841,16 @@ fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Result<()>
                 args: args.clone(),
                 env: env.iter().cloned().collect(),
             };
+            // The server is built and the destination resolved either way;
+            // only the write is withheld. `mcp_import` in the same enum has
+            // read `dry_run` since it was written, and these two did not.
+            if dry_run {
+                ctx.say(&report::Action::new(
+                    "mcp-planned",
+                    format!("would add {name} → {}", config::mcp_path(paths).display()),
+                ));
+                return Ok(());
+            }
             let w = config::mcp_add(paths, name, server)?;
             let mut action =
                 report::Action::new("mcp-added", format!("wrote → {}", w.path.display())).data(
@@ -2809,6 +2877,18 @@ fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Result<()>
             // `memory rm` and `memory promote` all refuse the same mistake, and
             // a script cannot tell a removal from a misspelling when both come
             // back green.
+            if dry_run {
+                let known = config::servers(paths)?;
+                anyhow::ensure!(
+                    known.iter().any(|s| s.key == *name),
+                    "no server `{name}` in your catalogue."
+                );
+                ctx.say(&report::Action::new(
+                    "mcp-planned",
+                    format!("would remove {name} from your catalogue"),
+                ));
+                return Ok(());
+            }
             if !config::mcp_remove(paths, name)? {
                 let known = config::servers(paths)?
                     .into_iter()
@@ -2944,6 +3024,7 @@ fn use_cmd(
     capability: Option<&str>,
     name: Option<&str>,
     all: bool,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -2953,7 +3034,8 @@ fn use_cmd(
         }
         let lists = catalogue_lists(&paths)?;
         ctx.say(&report::Resynced {
-            wrote: write_lists(&paths, &lists)?
+            dry_run,
+            wrote: write_lists(&paths, &lists, dry_run)?
                 .into_iter()
                 .map(|w| w.path.display().to_string())
                 .collect(),
@@ -3032,31 +3114,54 @@ fn use_cmd(
     let written = write_lists(
         &paths,
         &std::collections::BTreeMap::from([(cap, names.clone())]),
+        dry_run,
     )?;
     // Said out loud, because this is the moment a capability turns from
     // "follows the catalogue" into "this list" — everything is still selected,
     // but from now on by name, and an entry added later will not be.
+    // The tense the write actually happened in. Withholding it and printing
+    // `wrote →` is the same lie one layer up from the one this flag was fixed
+    // for: the file is untouched and the report says otherwise, which is the
+    // part somebody reads.
+    let did = |past: String, future: String| match dry_run {
+        true => future,
+        false => past,
+    };
     let froze = was_open.then(|| {
-        format!(
-            "{cap} was following your whole catalogue; wrote its {} entries as the list",
-            names.len()
+        did(
+            format!(
+                "{cap} was following your whole catalogue; wrote its {} entries as the list",
+                names.len()
+            ),
+            format!(
+                "{cap} follows your whole catalogue; its {} entries would become the list",
+                names.len()
+            ),
         )
     });
     let paths = written_paths(&written);
-    let mut action = report::Action::new("capability-used", format!("using {cap}/{name}")).data(
-        serde_json::json!({
-            "capability": cap.to_string(),
-            "name": name,
-            "changed": true,
-            "froze_selection": was_open,
-            "paths": paths,
-        }),
-    );
+    let mut action = report::Action::new(
+        "capability-used",
+        did(
+            format!("using {cap}/{name}"),
+            format!("would use {cap}/{name}"),
+        ),
+    )
+    .data(serde_json::json!({
+        "capability": cap.to_string(),
+        "name": name,
+        "changed": true,
+        "froze_selection": was_open,
+        "paths": paths,
+    }));
     if let Some(line) = &froze {
         action = action.note(line);
     }
     for path in &paths {
-        action = action.note(format!("wrote → {path}"));
+        action = action.note(did(
+            format!("wrote → {path}"),
+            format!("would write → {path}"),
+        ));
     }
     ctx.say(&action);
     Ok(())
@@ -3080,7 +3185,13 @@ fn written_paths(written: &[config::Written]) -> Vec<String> {
 }
 
 /// Stop using a catalogue entry here.
-fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Result<()> {
+fn unuse_cmd(
+    cwd: &std::path::Path,
+    key: &str,
+    name: &str,
+    dry_run: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let (cap, mut names, was_open) = current_list(&paths, key, name)?;
     if !names.iter().any(|n| n == name) {
@@ -3109,23 +3220,42 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Re
         )
     });
     let remaining = names.len();
-    let written = write_lists(&paths, &std::collections::BTreeMap::from([(cap, names)]))?;
+    let written = write_lists(
+        &paths,
+        &std::collections::BTreeMap::from([(cap, names)]),
+        dry_run,
+    )?;
     let paths = written_paths(&written);
-    let mut action =
-        report::Action::new("capability-unused", format!("no longer using {cap}/{name}")).data(
-            serde_json::json!({
-                "capability": cap.to_string(),
-                "name": name,
-                "froze_selection": was_open,
-                "remaining": remaining,
-                "paths": paths,
-            }),
-        );
+    // **Said in the tense it happened in.** The write is withheld under
+    // `--dry-run` and the sentence was not, so the file was left untouched and
+    // the output still read `wrote →` — the same lie one layer up from the one
+    // this flag was fixed for.
+    let did = |past: String, future: String| match dry_run {
+        true => future,
+        false => past,
+    };
+    let mut action = report::Action::new(
+        "capability-unused",
+        did(
+            format!("no longer using {cap}/{name}"),
+            format!("would stop using {cap}/{name}"),
+        ),
+    )
+    .data(serde_json::json!({
+        "capability": cap.to_string(),
+        "name": name,
+        "froze_selection": was_open,
+        "remaining": remaining,
+        "paths": paths,
+    }));
     if let Some(line) = &froze {
         action = action.note(line);
     }
     for path in &paths {
-        action = action.note(format!("wrote → {path}"));
+        action = action.note(did(
+            format!("wrote → {path}"),
+            format!("would write → {path}"),
+        ));
     }
     ctx.say(&action);
     Ok(())
@@ -3140,11 +3270,25 @@ fn unuse_cmd(cwd: &std::path::Path, key: &str, name: &str, ctx: &out::Ctx) -> Re
 fn write_lists(
     paths: &Paths,
     lists: &std::collections::BTreeMap<adapter::Capability, Vec<String>>,
+    dry_run: bool,
 ) -> Result<Vec<config::Written>> {
     let mut out = Vec::new();
     for (cap, names) in lists {
         let one = std::collections::BTreeMap::from([(*cap, names.clone())]);
         for layer in config::declaring(paths, config::USE, &cap.to_string())? {
+            // **Everything but the write.** The layers are resolved, the list
+            // is built, and the record the report reads is the same one — only
+            // persistence is skipped. A `--dry-run` that took a shortcut here
+            // would be describing a different command from the one it claims
+            // to be previewing.
+            if dry_run {
+                out.push(config::Written {
+                    path: layer.file(paths),
+                    layer,
+                    committed: layer.is_committed(),
+                });
+                continue;
+            }
             out.push(config::write_selection(paths, layer, &one)?);
         }
     }
@@ -3180,6 +3324,7 @@ fn import_cmd(
     capability: &str,
     harness: &str,
     from: Option<&std::path::Path>,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let cap = adapter::Capability::from_key(capability).with_context(|| {
@@ -3226,7 +3371,9 @@ fn import_cmd(
     match cap {
         // Hooks are translated rather than copied — they are the one capability
         // whose format is omh's own — and they land in the repo.
-        adapter::Capability::Hooks => import_hooks(&paths, &adapter, binding, &source, ctx),
+        adapter::Capability::Hooks => {
+            import_hooks(&paths, &adapter, binding, &source, dry_run, ctx)
+        }
         adapter::Capability::Mcp => anyhow::bail!(
             "MCP servers are `omh settings mcp import {harness}` — a server is a \
              record in one file, not an entry with its own"
@@ -3585,6 +3732,7 @@ fn import_hooks(
     adapter: &Adapter,
     binding: &adapter::Binding,
     source: &std::path::Path,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let harness = &adapter.name;
@@ -3651,7 +3799,7 @@ fn import_hooks(
         names.sort();
         names.dedup();
         let lists = std::collections::BTreeMap::from([(cap, names)]);
-        for w in write_lists(paths, &lists)? {
+        for w in write_lists(paths, &lists, dry_run)? {
             selected_in.push(w.path.display().to_string());
         }
     }
@@ -5811,7 +5959,7 @@ fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             names.sort();
             names.dedup();
             let lists = std::collections::BTreeMap::from([(cap, names)]);
-            write_lists(&paths, &lists)?;
+            write_lists(&paths, &lists, false)?;
         }
     }
 
@@ -9655,7 +9803,7 @@ mod tests {
             ("container.rs", 4),
             ("doctor.rs", 1),
             ("ingest.rs", 2),
-            ("main.rs", 85),
+            ("main.rs", 86),
             ("memory.rs", 2),
             ("notice.rs", 2),
             ("render.rs", 1),

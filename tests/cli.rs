@@ -4096,6 +4096,212 @@ fn the_committed_warning_is_kept_for_what_it_is_for() {
     );
 }
 
+/// A command that cannot preview says so, rather than running.
+///
+/// The other half of the rule. `--dry-run` is global, so clap accepts it
+/// everywhere — and where nothing read it, the command ran and the flag
+/// evaporated. Refusing is what makes "no command silently ignores it" true
+/// today, for the ones whose preview is real work: `init` builds images, and
+/// the session verbs stop containers, replant commits and delete worktrees.
+///
+/// Read-only commands are here for a different reason: they *are* their own
+/// dry run, so there is nothing to withhold, and accepting the flag would
+/// promise a preview they never give.
+#[test]
+fn a_command_that_cannot_preview_refuses_the_flag() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for argv in [
+        vec!["init"],
+        vec!["info"],
+        vec!["why", "account"],
+        vec!["settings", "edit"],
+        vec!["memory", "promote", "x"],
+        vec!["s", "down"],
+        vec!["s", "rm"],
+        vec!["s", "commit"],
+    ] {
+        let mut dry = vec!["--dry-run"];
+        dry.extend(argv.iter().copied());
+        let out = sb.omh(&dry);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "`omh {}` took a flag it does not honour",
+            dry.join(" ")
+        );
+        assert!(
+            said.contains("--dry-run"),
+            "and the refusal names the flag, not whatever it hit next: {said}"
+        );
+    }
+}
+
+/// `--dry-run` writes nothing, on every command that writes.
+///
+/// It was a global flag that ten commands read and the rest accepted and
+/// discarded — so on the ones that change things it was not inert, it was a
+/// **lie**:
+///
+///     $ omh --dry-run use --all
+///     resynced to your catalogue — wrote → …/.omh/settings.toml
+///
+/// Accepted, ignored, and the output says it wrote. The same shape as the
+/// `feature_switch` defect this codebase already fixed once and wrote a comment
+/// about, reproduced across `use`, `unuse`, `import`, `settings edit` and the
+/// session verbs — including the ones that delete.
+///
+/// The rule is the whole of it: **run as usual, withhold the writes.** Not a
+/// second description of what would happen, free to drift from what does — the
+/// real code path, with persistence the only thing removed. So the test is a
+/// fingerprint of the tree before and after, and the assertion is that they
+/// match.
+#[test]
+fn a_dry_run_writes_nothing() {
+    // `(argv, what it needs first)`. Every command here changes something when
+    // run for real; the read-only ones are a different question and are covered
+    // by refusing the flag, below.
+    let cases: Vec<Vec<&str>> = vec![
+        vec!["use", "--all"],
+        vec!["use", "skills", "review-diff"],
+        vec!["unuse", "hooks", "rust-test"],
+        vec!["set", "idle_timeout", "45m"],
+        vec!["set", "codegraph", "off"],
+        vec!["unset", "carry_in"],
+        vec!["settings", "set", "idle_timeout", "45m"],
+        vec!["settings", "unset", "idle_timeout"],
+        vec!["settings", "mcp", "add", "srv", "echo"],
+        vec!["settings", "mcp", "rm", "srv0"],
+        vec!["memory", "rm", "proj"],
+    ];
+
+    // Two identical sandboxes per case: one runs the command dry, the other
+    // runs it for real. Both are asserted — the dry one must change nothing,
+    // and **the wet one must change something**, because a case that would not
+    // have written anyway proves nothing about withholding writes. The first
+    // draft of this test had two such cases and passed them.
+    for argv in cases {
+        let dry_sb = ready();
+        let wet_sb = ready();
+        let before = fingerprint(&dry_sb);
+
+        let mut dry = vec!["--dry-run"];
+        dry.extend(argv.iter().copied());
+        let said = dry_sb.omh(&dry);
+        assert_eq!(
+            before,
+            fingerprint(&dry_sb),
+            "`omh {}` changed the tree under --dry-run\n  said: {}",
+            dry.join(" "),
+            String::from_utf8_lossy(&said.stdout)
+        );
+        // And says so. Withholding the write while printing `wrote →` is the
+        // same lie one layer up — the file is untouched and the report claims
+        // otherwise, which is what somebody reads.
+        let printed = String::from_utf8_lossy(&said.stdout).to_string();
+        assert!(
+            !printed.lines().any(|l| l.contains("wrote →")),
+            "`omh {}` withheld the write and reported one: {printed}",
+            dry.join(" ")
+        );
+
+        let wet = wet_sb.omh(&argv);
+        assert!(
+            wet.status.success(),
+            "`omh {}` has to work for the dry half to mean anything: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&wet.stderr)
+        );
+        assert_ne!(
+            fingerprint_at(&wet_sb, &before),
+            before,
+            "`omh {}` writes nothing even without --dry-run, so it is not a \
+             case this test can learn from",
+            argv.join(" ")
+        );
+    }
+}
+
+/// A sandbox with something to change and something to remove.
+fn ready() -> Sandbox {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "hooks", "stacks"]);
+    sb.catalogue(&["skills/review-diff/SKILL.md"]);
+    std::fs::write(
+        sb.repo.join("Cargo.toml"),
+        "[package]\nname = \"p\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    assert!(sb.omh(&["set", "carry_in", "[\".env\"]"]).status.success());
+    assert!(sb
+        .omh(&["settings", "set", "idle_timeout", "9m"])
+        .status
+        .success());
+    assert!(sb
+        .omh(&["settings", "mcp", "add", "srv0", "echo"])
+        .status
+        .success());
+    sb.seed("proj.md", &note("proj", WHOLE));
+    sb
+}
+
+/// The same fingerprint, with the other sandbox's temporary directory swapped
+/// in — two sandboxes have different roots, and comparing the paths would
+/// differ for that reason alone.
+fn fingerprint_at(sb: &Sandbox, like: &[(String, Vec<u8>)]) -> Vec<(String, Vec<u8>)> {
+    let (Some(mine), Some(theirs)) = (
+        sb.home.parent().map(|p| p.display().to_string()),
+        like.first()
+            .and_then(|(p, _)| p.rsplit_once("/home/"))
+            .map(|(root, _)| root.to_string()),
+    ) else {
+        return fingerprint(sb);
+    };
+    fingerprint(sb)
+        .into_iter()
+        .map(|(p, b)| (p.replace(&mine, &theirs), b))
+        .collect()
+}
+
+/// Every file below the sandbox's home and repo, with its bytes.
+///
+/// A fingerprint rather than a list of paths: `--dry-run` writing the *same*
+/// files with different contents is the failure this is looking for as much as
+/// creating new ones.
+fn fingerprint(sb: &Sandbox) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    for root in [&sb.home, &sb.repo] {
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                let p = e.path();
+                // `.git` churns on its own — index mtimes, gc state — and none
+                // of it is a write omh made.
+                if p.file_name().is_some_and(|n| n == ".git") {
+                    continue;
+                }
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    out.push((
+                        p.display().to_string(),
+                        std::fs::read(&p).unwrap_or_default(),
+                    ));
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// The account is the setting, and there is no second way to say it.
 ///
 /// `-a` was a global that overrode the setting for one invocation and recorded

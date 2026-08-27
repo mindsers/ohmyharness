@@ -1537,7 +1537,17 @@ fn disambiguate<'a>(
 ///
 /// A dangling link is visible and the lint already finds it; a silently pruned
 /// neighbourhood is neither. Fail toward the recoverable mistake.
-pub fn remove(paths: &Paths, layer: Option<Layer>, key: &str, at: Option<&str>) -> Result<Removed> {
+/// `dry_run` resolves the note and counts what pointed at it, then leaves the
+/// file alone. Everything that decides *which* note — the layer filter, `--at`,
+/// the ambiguity refusal — runs either way, because a preview that skipped them
+/// would be previewing a different deletion.
+pub fn remove(
+    paths: &Paths,
+    layer: Option<Layer>,
+    key: &str,
+    at: Option<&str>,
+    dry_run: bool,
+) -> Result<Removed> {
     let notes = load(paths)?;
     let matching: Vec<&Note> = notes
         .iter()
@@ -1562,8 +1572,10 @@ pub fn remove(paths: &Paths, layer: Option<Layer>, key: &str, at: Option<&str>) 
     inbound.sort();
     inbound.dedup();
 
-    std::fs::remove_file(&note.path)
-        .with_context(|| format!("removing {}", note.path.display()))?;
+    if !dry_run {
+        std::fs::remove_file(&note.path)
+            .with_context(|| format!("removing {}", note.path.display()))?;
+    }
 
     Ok(Removed {
         path: note.path.clone(),
@@ -3111,7 +3123,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let (_d, paths) = fixture();
         seed(&paths, Layer::Local, "solo", &surprise_body());
 
-        let err = remove(&paths, None, "solo", Some("some-other-file.md"))
+        let err = remove(&paths, None, "solo", Some("some-other-file.md"), false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("some-other-file.md"), "got: {err}");
@@ -3135,13 +3147,13 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             std::fs::write(&note.path, render(&note)).unwrap();
         }
 
-        let missed = remove(&paths, Some(Layer::Local), "dup", Some("absent.md"))
+        let missed = remove(&paths, Some(Layer::Local), "dup", Some("absent.md"), false)
             .unwrap_err()
             .to_string();
         assert!(missed.contains("absent.md"), "got: {missed}");
 
         // `dup.md` is a component-suffix of both paths, so it names neither.
-        let ambiguous = remove(&paths, Some(Layer::Local), "dup", Some("dup.md"))
+        let ambiguous = remove(&paths, Some(Layer::Local), "dup", Some("dup.md"), false)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3166,7 +3178,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         seed(&paths, Layer::Local, "shared", &surprise_body());
         seed(&paths, Layer::Team, "shared", &surprise_body());
 
-        let err = remove(&paths, None, "shared", Some("shared.md"))
+        let err = remove(&paths, None, "shared", Some("shared.md"), false)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3190,7 +3202,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             std::fs::write(&note.path, render(&note)).unwrap();
         }
 
-        let err = remove(&paths, Some(Layer::Local), "dup", None)
+        let err = remove(&paths, Some(Layer::Local), "dup", None, false)
             .unwrap_err()
             .to_string();
         assert!(
@@ -3203,7 +3215,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         );
 
         // And the store must be repairable through omh itself.
-        let removed = remove(&paths, Some(Layer::Local), "dup", Some("ns/dup.md"))
+        let removed = remove(&paths, Some(Layer::Local), "dup", Some("ns/dup.md"), false)
             .expect("a duplicated key must still be removable");
         assert!(
             removed.path.ends_with("ns/dup.md"),
@@ -3232,7 +3244,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             .filter(|(p, _)| !p.ends_with("b.md"))
             .collect();
 
-        remove(&paths, None, "b", None).unwrap();
+        remove(&paths, None, "b", None, false).unwrap();
 
         assert_eq!(
             files_under(dir.path()),
@@ -3249,7 +3261,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         seed(&paths, Layer::Team, "c", &pointing);
         seed(&paths, Layer::Local, "b", &surprise_body());
 
-        let removed = remove(&paths, None, "b", None).unwrap();
+        let removed = remove(&paths, None, "b", None, false).unwrap();
         assert_eq!(
             removed.inbound,
             ["a", "c"],
@@ -3265,13 +3277,13 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         seed(&paths, Layer::Team, "deploy", &surprise_body());
         seed(&paths, Layer::Local, "deploy", &surprise_body());
 
-        let err = remove(&paths, None, "deploy", None)
+        let err = remove(&paths, None, "deploy", None, false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("team") && err.contains("local"), "got: {err}");
         assert_eq!(load(&paths).unwrap().len(), 2, "and removed neither");
 
-        remove(&paths, Some(Layer::Local), "deploy", None).unwrap();
+        remove(&paths, Some(Layer::Local), "deploy", None, false).unwrap();
         let left = load(&paths).unwrap();
         assert_eq!(left.len(), 1);
         assert_eq!(left[0].layer, Layer::Team);
@@ -3286,11 +3298,11 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         seed(&paths, Layer::Team, "shared", &surprise_body());
         seed(&paths, Layer::Local, "mine", &surprise_body());
 
-        assert!(remove(&paths, None, "shared", None)
+        assert!(remove(&paths, None, "shared", None, false)
             .unwrap()
             .layer
             .is_committed());
-        assert!(!remove(&paths, None, "mine", None)
+        assert!(!remove(&paths, None, "mine", None, false)
             .unwrap()
             .layer
             .is_committed());
@@ -3299,7 +3311,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
     #[test]
     fn rm_on_an_absent_key_says_so_rather_than_succeeding_quietly() {
         let (_d, paths) = fixture();
-        let err = remove(&paths, None, "never-existed", None)
+        let err = remove(&paths, None, "never-existed", None, false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("never-existed"), "got: {err}");
