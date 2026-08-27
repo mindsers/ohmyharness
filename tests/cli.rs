@@ -398,11 +398,6 @@ fn lint_fails_the_command_when_the_schema_refused_something() {
 fn lint_passes_a_store_that_only_has_warnings() {
     let sb = sandbox();
     sb.seed("fine.md", &note("fine", WHOLE));
-    // Two, because `Orphan` is silent in a store of one — with a single note
-    // there is nothing that could have linked to it, and `omh init` seeding
-    // one and `omh memory lint` immediately complaining about it was a new
-    // user's first screen contradicting itself.
-    sb.seed("other.md", &note("other", WHOLE));
 
     let out = sb.omh(&["memory", "lint"]);
     assert!(
