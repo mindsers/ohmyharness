@@ -261,7 +261,7 @@ enum Cmd {
     },
     /// Open the code graph in your browser.
     ///
-    /// **Not per session**, and `omh s01 graph` is refused rather than
+    /// Not per session, and `omh s01 graph` is refused rather than
     /// answered: every session's graph lives in one volume, so a per-session
     /// server showed every other session's graph anyway. It had its own
     /// positional until the prefix arrived, and for one commit it had both —
@@ -302,16 +302,17 @@ enum Cmd {
     },
     /// Your defaults — what a repo starts from, and how to change them.
     ///
-    /// **Not `omh set`**, which is this checkout. The two are one letter apart
+    /// Not `omh set`, which is this checkout. The two are one letter apart
     /// with opposite scopes, and clap is deliberately not told to accept
     /// unambiguous prefixes: `omh setting` is refused rather than guessed at.
     Settings {
         #[command(subcommand)]
         cmd: Option<SettingsCmd>,
     },
-    /// Select a catalogue entry for this repo. Writes the committed file: what
-    /// a project uses is a fact about the project, and a teammate cloning it
-    /// should get the same one.
+    /// Select a catalogue entry for this repo.
+    ///
+    /// Writes the committed file: what a project uses is a fact about the
+    /// project, and a teammate cloning it should get the same one.
     Use {
         /// One of rules, skills, mcp, commands, subagents, hooks.
         capability: Option<String>,
@@ -457,18 +458,6 @@ enum McpCmd {
 /// in their fingers gets somewhere to point.
 #[derive(Subcommand)]
 enum SessionsCmd {
-    /// Remove a session — its container and its worktree. A branch holding
-    /// commits is kept.
-    Rm {
-        /// Remove it even though the sandbox holds work no branch has — or
-        /// omh could not tell whether it does.
-        ///
-        /// The refusal without this is the whole point: those commits and
-        /// those edits exist nowhere else, and `rm` is what deletes the
-        /// repository holding them. This says *I know, and I want them gone*.
-        #[arg(long)]
-        force: bool,
-    },
     // Deleting the bare-name slot took `omh s01 claude` with it, and that was
     // the only way to say *run this harness in this session*. `resume` with a
     // name is that sentence: without one it reads the record, with one it
@@ -544,9 +533,11 @@ enum SessionsCmd {
         #[arg(long, short = 'p')]
         patch: bool,
     },
-    /// Commit a session's work onto its branch. Run on the host: the sandbox's
-    /// git is its own repository and cannot reach yours, and the worktree omh
-    /// keeps out of your way is not somewhere you should have to go.
+    /// Commit a session's work onto its branch.
+    ///
+    /// Run on the host: the sandbox's git is its own repository and cannot
+    /// reach yours, and the worktree omh keeps out of your way is not
+    /// somewhere you should have to go.
     Commit {
         /// The message, verbatim. Without it, git opens your editor.
         #[arg(short = 'm', long)]
@@ -577,6 +568,21 @@ enum SessionsCmd {
         /// Open a pull request with `gh` once it is pushed.
         #[arg(long)]
         pr: bool,
+    },
+    // Last, because a command list is read top to bottom and this is the
+    // one that deletes a container and a worktree. It was first, above
+    // `attach`, for no reason anybody wrote down.
+    /// Remove a session — its container and its worktree. A branch holding
+    /// commits is kept.
+    Rm {
+        /// Remove it even though the sandbox holds work no branch has — or
+        /// omh could not tell whether it does.
+        ///
+        /// The refusal without this is the whole point: those commits and
+        /// those edits exist nowhere else, and `rm` is what deletes the
+        /// repository holding them. This says *I know, and I want them gone*.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -9061,6 +9067,66 @@ mod tests {
         );
     }
 
+    /// A command list is scannable, and none of it is markdown.
+    ///
+    /// Two shapes, both read off clap's own rendering rather than off the doc
+    /// comments, because what matters is what a person sees:
+    ///
+    /// - **One line per entry.** `omh use` and `omh sessions commit` carried
+    ///   paragraph-length descriptions, so `omh --help` and `omh s --help` each
+    ///   had one entry sprawling over four lines while every sibling was a
+    ///   scannable line. The reasoning belongs in that command's own `--help`,
+    ///   where somebody has asked for it.
+    /// - **No markdown.** `omh settings --help` printed its emphasis markers
+    ///   literally, asterisks and all. A doc comment on a clap item is rustdoc
+    ///   *and* terminal output, and only one of them renders emphasis.
+    #[test]
+    fn a_command_list_is_scannable_and_none_of_it_is_markdown() {
+        use clap::CommandFactory;
+
+        fn walk(cmd: &clap::Command, path: &str, wide: &mut Vec<String>, marked: &mut Vec<String>) {
+            for sub in cmd.get_subcommands() {
+                let here = format!("{path} {}", sub.get_name());
+                // The line clap puts in the parent's command list.
+                if let Some(about) = sub.get_about() {
+                    let about = about.to_string();
+                    // Measured, not guessed: on the tree where this was
+                    // written the longest entry that reads as a line is
+                    // `omh sessions rm` at 85 characters, and the two that
+                    // read as paragraphs are 155 and 200. 100 sits in the gap
+                    // with room either side.
+                    if about.len() > 100 || about.contains('\n') {
+                        wide.push(format!("{here}: {about}"));
+                    }
+                }
+                for text in [sub.get_about(), sub.get_long_about()]
+                    .into_iter()
+                    .flatten()
+                    .map(|t| t.to_string())
+                {
+                    if text.contains("**") || text.contains("*`") {
+                        marked.push(format!("{here}: {text}"));
+                    }
+                }
+                walk(sub, &here, wide, marked);
+            }
+        }
+
+        let cmd = Cli::command();
+        let (mut wide, mut marked) = (Vec::new(), Vec::new());
+        walk(&cmd, "omh", &mut wide, &mut marked);
+        assert!(
+            wide.is_empty(),
+            "a command list is read by scanning it, and these entries are \
+             paragraphs — move the reasoning into their own --help: {wide:#?}"
+        );
+        assert!(
+            marked.is_empty(),
+            "a doc comment is terminal output as well as rustdoc, and the \
+             terminal does not render emphasis: {marked:#?}"
+        );
+    }
+
     /// Every command line omh prints is one omh accepts.
     ///
     /// Deleting the positionals broke three printed suggestions at once, in
@@ -13095,33 +13161,45 @@ because = "a fixture"
         // in scope. That is its own change; doing it inside a release fix would
         // be a large diff in the wrong week. The list is here so it cannot grow
         // quietly in the meantime — an eighth entry fails this test.
+        // Named by what the line *is*, not by where it sits. The first draft
+        // pinned `file:line` and went stale the moment anything above it grew,
+        // which is a guard failing for a reason that has nothing to do with
+        // what it guards.
         let named = [
             // The two real exemptions.
-            "src/main.rs:890",
-            "src/mcp.rs:187",
+            ("src/main.rs", "out::problem"),
+            ("src/mcp.rs", "omh-mcp: ignoring unparseable line"),
             // Owed a `Ctx`. See above.
-            "src/facts.rs:68",
-            "src/facts.rs:75",
-            "src/image.rs:266",
-            "src/image.rs:444",
-            "src/image.rs:449",
-            "src/image.rs:505",
-            "src/image.rs:527",
+            ("src/facts.rs", "could not read"),
+            // Wrapped, so the macro line carries no text of its own — the
+            // only one of these where the file alone has to do it.
+            ("src/facts.rs", "eprintln!("),
+            ("src/image.rs", "this repo's toolchain, first run only"),
+            ("src/image.rs", "(first run only)"),
+            ("src/image.rs", "omh: building {t}"),
+            ("src/image.rs", "could not list images to reap"),
+            ("src/image.rs", "this build replaced"),
         ];
         let unexpected: Vec<&String> = offenders
             .iter()
-            .filter(|o| !named.iter().any(|a| o.starts_with(a)))
+            .filter(|o| {
+                !named
+                    .iter()
+                    .any(|(file, what)| o.starts_with(file) && o.contains(what))
+            })
             .collect();
         assert!(
             unexpected.is_empty(),
             "every write goes through out::Ctx but the sites named in this test — \
              found {unexpected:#?}"
         );
-        for site in named {
+        for (file, what) in named {
             assert!(
-                offenders.iter().any(|o| o.starts_with(site)),
-                "{site} is named here and writes nothing — a stale exemption is a \
-                 hole this test says is not there"
+                offenders
+                    .iter()
+                    .any(|o| o.starts_with(file) && o.contains(what)),
+                "{file} no longer writes `{what}` — a stale exemption is a hole \
+                 this test says is not there"
             );
         }
     }
