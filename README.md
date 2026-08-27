@@ -7,36 +7,23 @@
 [![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
 
 ```console
-$ omh init         # detects your stack, decides, reports. no questions.
-$ omh new claude       # sandboxed, curated, your setup already inside
-$ omh s attach     # open that same session in your editor
-$ omh graph        # browse your codebase as a graph
+$ omh init              # detects your stack, decides, reports. no questions.
+$ omh new claude        # sandboxed, curated, your setup already inside
+$ omh sessions attach   # open that same session in your editor
+$ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early.** `0.6.0`, one harness verified end to end. This release is the
-work loop: reading a session's work, landing it in stages and staying current
-with trunk, without typing `git`. Useful today if you want a sandboxed agent with
-your config in it; not yet the finished distribution [the docs](docs/) describe —
-[What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
+**Status: early.** `0.7.0`, one harness verified end to end. This release is the
+command surface: a bare word is no longer a harness, so nothing you install can
+shadow a command; scope lives in the verb rather than in a flag you have to
+remember; `omh init` reports what it did to your repo instead of what your
+machine already had; and `--dry-run` runs everything and writes nothing, on
+every command that can answer it. Useful today if you want a sandboxed agent
+with your config in it; not yet the finished distribution [the docs](docs/)
+describe — [What isn't done](#what-isnt-done) is a real list, not a modesty
+ritual.
 
 ---
-
-## The problem
-
-A good agentic setup in 2026 is a pile of parts: a harness, rules, skills, MCP
-servers, a sandbox, a code index, hooks, credentials. Each is a rabbit hole, so
-most people stop at *"installed Claude Code, wrote a CLAUDE.md"* — not from
-inability, but because assembling the rest is a research project nobody has
-budget for.
-
-The ecosystem's answer has been catalogues: [23,600+ skills and 12,700+ MCP
-servers](https://claudemarketplaces.com/). That is a **problem statement**, not
-an opinion. Nobody can evaluate 23,600 of anything.
-
-omh is a **distribution**. Debian didn't write the kernel; oh-my-zsh didn't write
-zsh — their genius was that installing them gave you a good system *immediately*.
-The value is curation, integration and defaults, and the metric is **decisions
-removed**, targeting zero.
 
 ## What you actually get
 
@@ -44,8 +31,13 @@ Running `omh new claude` instead of `claude` buys five things:
 
 **A sandbox that protects your repo, not just your host.** The agent works in a
 git worktree on its own branch. Your checkout is never mounted. Review with
-`omh s diff`, ship with `omh s commit` and `omh s push`, discard by deleting a
-branch. You never go near the worktree directory itself.
+`omh sessions diff`, ship with `omh sessions commit` and `omh sessions push`,
+discard by deleting a branch. You never go near the worktree directory itself.
+
+> **`sessions` is the command; `s` is its alias, and a session id can lead the
+> line.** So `omh sessions --session s01 diff`, `omh s -s s01 diff` and
+> `omh s01 diff` are three spellings of one thing. The short ones are used from
+> here on.
 
 The agent gets git too — its own repository, holding one commit and none of your
 history, so `stash` and `reset --hard` are its to use. `omh s commit --keep`
@@ -160,29 +152,112 @@ $ omh auth claude --name personal   # runs the harness's own login, captures it
 $ omh new claude                    # sandboxed, logged in, configured
 ```
 
+`omh new` hands you the harness. Close the terminal whenever you like — it runs
+under `dtach`, so the agent keeps going and `omh s01 resume` puts you back.
+
+### Getting the work back
+
+When the agent has done something, you are on the host looking at a branch:
+
+```console
+$ omh s
+  s01  omh/s01  up  2 uncommitted
+
+$ omh s01 diff
+ README.md   | 2 +-
+ src/main.rs | 6 +++++-
+ 2 files changed, 6 insertions(+), 2 deletions(-)
+
+$ omh s01 commit -m "Add a greeting"
+committed to omh/s01 (1 commit on the branch)
+
+$ omh s
+  s01  omh/s01  up  1 to push
+```
+
+`omh s01 diff -p` is the patch, `omh s01 log` is what the agent committed inside
+the sandbox, and `omh s01 push` puts the branch on origin under a name a
+reviewer can read. Nothing here touches your checkout — the work is on
+`omh/s01` until you merge it, and `omh s01 rm` throws the whole session away.
+
+## The problem
+
+A good agentic setup in 2026 is a pile of parts: a harness, rules, skills, MCP
+servers, a sandbox, a code index, hooks, credentials. Each is a rabbit hole, so
+most people stop at *"installed Claude Code, wrote a CLAUDE.md"* — not from
+inability, but because assembling the rest is a research project nobody has
+budget for.
+
+The ecosystem's answer has been catalogues: [23,600+ skills and 12,700+ MCP
+servers](https://claudemarketplaces.com/). That is a **problem statement**, not
+an opinion. Nobody can evaluate 23,600 of anything.
+
+omh is a **distribution**. Debian didn't write the kernel; oh-my-zsh didn't write
+zsh — their genius was that installing them gave you a good system *immediately*.
+The value is curation, integration and defaults, and the metric is **decisions
+removed**, targeting zero.
+
 ## Commands
 
 ```
 omh init                          set this repo up
 omh new <harness> [-- args…]      start a session, run an agent in it
-omh s01 resume [harness]          rejoin it · claude · omp · opencode
-omh graph [--stop]                browse the code graph in a browser
-omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
-omh doctor [--harness <name>]     verify a harness sees your profile · d
-omh why <thing>                   who put this here, and on what grounds
-omh info                          harnesses, editors, sessions, your catalogue
-omh sessions [attach|resume|log|diff|commit|push|sync|down|rm] …
-                                  omh s · omh s01 diff
-omh settings [set|unset|edit|mcp] …
-                                  you: your defaults
-omh info --repo                   this checkout: what it uses and why
+omh auth <harness> [-n <name>]    log in once; repeat for several accounts
+
+omh set <key> <value>             a setting, or a feature on|off — this repo
+omh unset <key>                   drop it, or hand the feature back to omh
 omh use|unuse <capability> <name>
                                   omh use skills tdd · omh use --all
+omh settings [set|unset|edit|mcp] …
+                                  you: your defaults, and your MCP servers
+
+omh info [--repo]                 this machine · --repo, this checkout
+omh why <thing>                   who put this here, and on what grounds
+omh doctor [--harness <name>]     prove a harness really sees your profile
+omh graph [--stop]                browse the code graph in a browser
+
+omh memory [remember|stale|lint|rm|promote] …
+                                  notes that outlive a session
+omh import <capability> <harness>
+                                  bring a setup you already have into omh
 ```
 
-Noun-verb groups with single-letter aliases. Every command is named — a bare
-word is not a launch, so no adapter can shadow one. Harnesses and editors each
-live under their own verb: `omh new claude`, `omh s attach zed`.
+### Sessions
+
+The loop the rest of it exists for. `sessions` is the noun, and everything below
+takes the session id in front of it:
+
+```
+omh s                             every session: state, drift, collisions
+omh s01                           that one, and what to run next
+
+omh s01 log [--turns]             what the agent committed in the sandbox — or,
+                                  if it committed nothing, what omh photographed
+omh s01 diff [n] [-p]             what changed: the whole session, or checkpoint n
+omh s01 commit [-m …]             land its work as one commit on the branch
+omh s01 commit --keep [n,m-o]     or replant the agent's own commits, with the
+                                  messages it wrote — all, or the ones you name
+omh s01 push [name]               that branch to origin, named for a reviewer
+omh s01 sync                      bring trunk in, merged on the host
+
+omh s01 resume [harness]          rejoin it, running the harness it ran before
+omh s01 attach [editor]           open it in your editor, over SSH
+omh s01 down                      stop the sandbox; the worktree and branch stay
+omh s01 rm                        remove it — container, worktree and staging
+```
+
+Three shorthands, and they compose: `sessions` is `s`, a leading session id
+replaces `-s`, and every session verb takes one. So `omh sessions -s s01 diff`,
+`omh s -s s01 diff` and `omh s01 diff` are the same line — use the last.
+
+Everything after `--` belongs to the harness: `omh new claude -- --verbose`
+passes `--verbose` to claude, not to omh.
+
+`--dry-run` runs everything and writes nothing; a command that cannot yet
+answer it refuses the flag rather than running.
+
+**[Commands](docs/commands.md) is the full reference** — every flag, and what
+each command prints.
 
 ## How it works
 
@@ -192,17 +267,17 @@ A session is a running container, a git worktree, and a branch — which many
 harnesses take turns inhabiting.
 
 ```
-       omh new claude ──┐
-       omh new opencode ┼── exec ──┐
-       omh s attach ────┘  (ssh)   │
-                               ▼
- ┌──────────────────────────────────────────────────────┐
+    omh new claude ───────┐
+    omh new opencode ─────┼── exec ──┐
+    omh s attach ─────────┘  (ssh)   │
+                                     ▼
+ ┌───────────────────────────────────────────────────────┐
  │ SESSION  omh-<repo>-s01          detached, long-lived │
  │  sshd 127.0.0.1 ──── your editor attaches here        │
  │  /work  ← worktree, the code you get back             │
  │  staged profile, read-only                            │
- │  graph cache ← volume keyed by REPO, not harness       │
- └──────────────────────────────────────────────────────┘
+ │  graph cache ← volume keyed by REPO, not harness      │
+ └───────────────────────────────────────────────────────┘
 ```
 
 Harnesses run under `dtach`, so closing your terminal doesn't kill the agent —
@@ -220,12 +295,11 @@ Harnesses run under `dtach`, so closing your terminal doesn't kill the agent —
 A repo holds configuration, and one kind of content:
 
 ```
-<repo>/.omh/
-  settings.toml        committed: settings, and which of omh's features are on
-  settings.local.toml  gitignored: your overrides, and the secrets the other must not hold
-  memory.toml          committed: how the note store keys and expires
-  hooks/               committed: hooks that only make sense in this repo
-<repo>/AGENTS.md       the project's own rules — tracked, and actually read
+<repo>/.omh/settings.toml        committed: settings, and which of omh's features are on
+<repo>/.omh/settings.local.toml  gitignored: your overrides, and the secrets the other must not hold
+<repo>/.omh/memory.toml          committed: how the note store keys and expires
+<repo>/.omh/hooks/               committed: hooks that only make sense in this repo
+<repo>/AGENTS.md                 the project's own rules — tracked, and actually read
 ```
 
 A project cannot declare a skill, an MCP server, a command or a subagent; it
@@ -264,7 +338,8 @@ codegraph — omh's choice, in the base set since 2026.06
   costs       0.46s to index this repo, cold   measured 2026-08-06
               index_repository --mode fast, 821 nodes / 3813 edges, in the sandbox
   instead of  gitnexus            PolyForm-Noncommercial licence
-  remove      omh settings mcp rm codegraph
+  remove      omh set codegraph off — the feature, its server and its hooks
+              together. Nothing is uninstalled and the next repo gets it back
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```
@@ -282,18 +357,10 @@ none. Telling those apart is the entire point.
 
 ### Adapters are data
 
-Adding a harness is a TOML file, not a code change:
+Adding a harness is a TOML file, not a code change — where each capability
+lands, how it is rendered, and the command that proves it loaded:
 
 ```toml
-name    = "claude"
-bin     = "claude"
-install = "npm install -g @anthropic-ai/claude-code"
-
-[capabilities.rules]
-path   = "/work/CLAUDE.md"
-also   = ["/work/AGENTS.md"]
-render = "concat"
-
 [capabilities.mcp]
 path   = "/work/.mcp.json"
 render = "mcp-json"
@@ -312,6 +379,7 @@ omh: opencode on omh/s01 — dropped hooks: graph-first (no `search` tool),
 ```
 
 Editors work the same way — `~/.omh/editors/zed.toml` is four lines.
+[Adapters](docs/design/adapters.md) is the whole schema.
 
 ### The code graph
 
@@ -332,8 +400,9 @@ lookup would genuinely be cheaper.
 
 ```console
 $ omh graph
-omh: graph at http://127.0.0.1:56286
-  every session's graph for this repo, in one place
+graph at http://127.0.0.1:50257
+  omh graph --stop
+every session's graph for this repo, in one place
 ```
 
 ### Credentials
@@ -372,21 +441,26 @@ travels. omh says so at launch and does not copy it.
 
 `omh doctor` is the only thing that can prove an adapter is right. It launches
 the real image with the real mounts and inspects the paths the harness actually
-reads:
+reads — including asking `claude mcp list` whether the servers loaded, rather
+than trusting that a file landed:
 
 ```console
 $ omh doctor
-omh doctor: claude (in omh/claude:2133265d, account personal)
-
-  ✓ rules      /work/CLAUDE.md
-  ✓ skills     /home/agent/.claude/skills
-  ✓ mcp        /home/agent/.mcp.json
-  ✓ commands   /home/agent/.claude/commands
-  ✓ hooks      /home/agent/.claude/settings.json
-  ✓ token      /home/agent/.claude/.credentials.json (atomic write)
-
-  all 6 checks passed — claude's adapter paths are verified
+checking claude in omh/claude:8eae0d5c1511fa89 — no account, so credentials go unchecked…
+  ✓  rules            /work/CLAUDE.md
+  ✓  skills           /home/agent/.claude/skills
+  ✓  mcp              /work/.mcp.json
+  ✓  mcp-loaded       /work (claude mcp list)
+  ✓  commands         /home/agent/.claude/commands
+  ✓  subagents        /home/agent/.claude/agents
+  ✓  hooks            /home/agent/.claude/settings.json
+  …
 ```
+
+A clean run ends `all 9 checks passed — claude's adapter paths are verified`;
+anything else fails the command and the tally goes to stderr. With an account
+chosen there is a credential check too, and the header names which account it
+used.
 
 A green unit suite proves omh mounts a path faithfully; it proves nothing about
 whether anything reads it. That gap is what `doctor` closes.
@@ -400,6 +474,7 @@ whether anything reads it. That gap is what `doctor` closes.
 | **`omh eject`** | a credible exit: write out the raw per-harness config and step aside. |
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |
 | **Egress allowlist** | designed, not wired. |
+| **`--dry-run` everywhere** | it runs everything and writes nothing on the commands that can answer it. `init` and the session verbs refuse the flag instead — each has to compute what it *would* do, and a preview that guessed would be worse than none. |
 | **Other harnesses** | `opencode` and `omp` pass `doctor`, but only `claude` has been driven for real work. |
 
 Known rough edges: the graph store is shared across sessions of one repo, so an

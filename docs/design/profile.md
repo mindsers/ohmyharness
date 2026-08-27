@@ -203,9 +203,9 @@ feature = "codegraph"
 
 | Feature | What it is | Removed by |
 |---|---|---|
-| `codegraph` | the MCP server, plus `graph-orient`, `graph-first`, `graph-read`, `graph-refresh` | `omh settings mcp rm codegraph` — takes all five |
+| `codegraph` | the MCP server, plus `graph-orient`, `graph-first`, `graph-read`, `graph-refresh` | `omh set codegraph off` — takes all five |
 | `git-notice` | the rules section telling the agent whose repository the sandbox's git is, plus `git-note` — the hook that tells it a sync moved its tree | nothing to uninstall; `[omh]` or not at all |
-| `memory` | the MCP server, plus the note-taking rules section | `omh settings mcp rm memory` |
+| `memory` | the MCP server, plus the note-taking rules section | `omh set memory off` |
 
 **A feature is not a group of hooks. It is a group of entries across kinds** — a
 server, some hooks, a section of the rules — and that is why it is the unit that
@@ -217,7 +217,7 @@ is not a smaller version of it.
 Three things follow that were previously convention.
 
 **Removal is symmetric with installation, and feature-level.**
-`omh settings mcp rm codegraph` takes the server and all four of its hooks
+`omh set codegraph off` takes the server and all four of its hooks
 together; installing it brings all four back. Today removing the server leaves
 four hooks nudging the agent toward something that is gone. There is deliberately
 no way to delete `graph-refresh` while keeping the graph, because that is the one
@@ -1031,9 +1031,13 @@ What the old layout held, and where it went by hand:
 P2 rewrote five `remove` fields in the manifest. Each currently reads
 `rm .omh/profile/hooks/<name>.json`, which will name a path that no longer
 exists — and a `remove` instruction that silently does nothing is worse than
-none, because `omh why` presents it as the way out. The four graph hooks point at
-`omh settings mcp rm codegraph`; `git-rules` points at `[omh] git-notice`,
-since there is nothing to uninstall.
+none, because `omh why` presents it as the way out. The four graph hooks point
+at `omh set codegraph off`, and so does `git-rules` — 0.7.0 made a feature
+switchable by command, so *nothing to uninstall* is a note beside the command
+rather than a reason to omit one. For a release the graph hooks named
+`omh settings mcp rm codegraph`, which removes the server and leaves the
+feature on; a test runs every `remove` command now and asserts the feature ends
+up off.
 
 `feature` lands in the same phase, and it needs the test the other fields have:
 **every entry names the feature it serves**, hooks and MCP servers and rules
@@ -1062,8 +1066,8 @@ because they are the ones that would ship silently:
   a **manifest** name is an **error naming both**
 - a stack detected with no hook for it is reported, and a hook whose stack is
   gone is reported — `init` writes once, so the launcher is what keeps noticing
-- `omh settings mcp rm codegraph` leaves **no** graph hooks behind — today it
-  leaves four, nudging the agent toward a server that is gone
+- switching a feature off leaves **no** hooks of it behind — before this,
+  removal left four, nudging the agent toward a server that is gone
 - the repo's hooks are named at launch, and a new or changed one is called out
 - `edit` refuses a name that escapes its directory — `..`, a leading `/`, a
   backslash — the way `validate_key` and `validate_pattern` already do

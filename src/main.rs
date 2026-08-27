@@ -9227,7 +9227,7 @@ mod tests {
         // loud, and a shape leaving one page while another gains lines is
         // loud — none of which a total or a floor can say.
         let expected: std::collections::BTreeMap<String, usize> = [
-            ("README.md", 37),
+            ("README.md", 54),
             ("accounts.md", 4),
             ("adapters.md", 1),
             ("code-graph.md", 1),

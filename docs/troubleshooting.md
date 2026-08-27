@@ -316,6 +316,21 @@ codegraph = false
 or `omh set codegraph off`. Nothing is uninstalled and the next repo gets
 it back.
 
+### `--dry-run is not something this command can answer yet`
+
+`--dry-run` runs everything and withholds the writes, so it only means anything
+on a command that writes. `init`, `auth`, `graph`, `settings edit`,
+`memory promote` and the session verbs except `resume` refuse it instead of
+running: each would have to compute what it *would* do — which container to
+stop, which commits to replant, which worktree to delete — and a preview that
+guessed would be worse than none.
+
+Read-only commands refuse it too, for the opposite reason. `omh info` is its own
+dry run; accepting the flag would promise a preview it never gives.
+
+Run the command without the flag, or read what it would touch with
+`omh info --repo`.
+
 ### `unexpected argument '-a' found`
 
 `-a`/`--account` was removed in 0.7.0. It overrode the account for one
