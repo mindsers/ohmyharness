@@ -2799,17 +2799,29 @@ fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) -> Result<()>
         }
 
         McpCmd::Rm { name } => {
-            let removed = config::mcp_remove(paths, name)?;
-            ctx.say(
-                &report::Action::new(
-                    if removed { "mcp-removed" } else { "mcp-absent" },
-                    if removed {
-                        format!("removed {name} from your catalogue")
+            // **Refused, not reported.** A name that was not there is a typo
+            // far more often than a plan, and this arm used to exit 0 saying so
+            // — the one command in the group that did. `use`, `unuse`,
+            // `memory rm` and `memory promote` all refuse the same mistake, and
+            // a script cannot tell a removal from a misspelling when both come
+            // back green.
+            if !config::mcp_remove(paths, name)? {
+                let known = config::servers(paths)?
+                    .into_iter()
+                    .map(|s| s.key)
+                    .collect::<Vec<_>>();
+                anyhow::bail!(
+                    "no server `{name}` in your catalogue.\n  servers: {}",
+                    if known.is_empty() {
+                        "(none)".to_string()
                     } else {
-                        format!("{name} is not in your catalogue")
-                    },
-                )
-                .data(serde_json::json!({ "server": name, "removed": removed })),
+                        known.join(", ")
+                    }
+                );
+            }
+            ctx.say(
+                &report::Action::new("mcp-removed", format!("removed {name} from your catalogue"))
+                    .data(serde_json::json!({ "server": name, "removed": true })),
             );
             Ok(())
         }
@@ -3889,10 +3901,27 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 fn using_here(paths: &Paths, manifest: &base::Manifest) -> Result<Vec<report::Using>> {
     let profile = Profile::resolve(paths);
     let policy = settings::resolve(paths, manifest)?;
+    // What omh's own features bring, which `[use]` never names — a feature owns
+    // its entries, so they are excluded from the selection. Reported beside the
+    // selection rather than folded into it: they are here because a feature is
+    // on, and `omh set <feature> off` is what takes them away.
+    let owned = manifest.owns();
     let mut using = Vec::new();
     for cap in adapter::Capability::ALL {
         let entries = profile.entries(cap)?;
         let unselected = policy.selection.unselected(cap, &entries);
+        let from_a_feature: Vec<String> = owned
+            .get(&cap)
+            .map(|names| {
+                let mut on: Vec<String> = names
+                    .iter()
+                    .filter(|(_, feature)| !policy.off.contains(*feature))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                on.sort();
+                on
+            })
+            .unwrap_or_default();
         // `None` rather than a list identical to the catalogue's, because the
         // two are different states: one follows the catalogue as it grows and
         // the other is a list that happens to be complete today.
@@ -3913,6 +3942,7 @@ fn using_here(paths: &Paths, manifest: &base::Manifest) -> Result<Vec<report::Us
                     .collect()
             }),
             unselected,
+            from_a_feature,
         });
     }
     Ok(using)
@@ -4780,13 +4810,18 @@ fn feature_switch(
     // still switching it is what you just typed. That sentence answers "why did
     // nothing change", which is a question a *removal* raises and a write does
     // not.
-    if written.iter().any(|w| w.committed) {
-        ctx.warn(&format!(
-            "the committed file is COMMITTED — a teammate cloning this repo gets \
-             `{feature}` {}",
-            if on { "on" } else { "off" }
-        ));
-    }
+    // **No COMMITTED warning here.** `Why` was built to keep that sentence
+    // rare, and its own doc gives the reason: it is nearly every write now that
+    // the committed file is the default, and a sentence that fires on almost
+    // every invocation is one people stop reading — which this codebase has
+    // already watched happen once, to this same sentence.
+    //
+    // `set <key> <value>` got the narrowing and this arm did not, so it fired
+    // on every feature switch. A switch is *always* a committed write, and
+    // committing it is the point: what a repo does with omh's features is a
+    // fact about the repo, and a teammate cloning it should get the same one.
+    // The line below already says so, in the voice of an outcome rather than a
+    // warning about a secret.
     Ok(())
 }
 
@@ -5351,9 +5386,14 @@ fn seed_settings(paths: &Paths) -> Result<(String, Vec<String>)> {
             took.push(k.name.to_string());
         }
     }
-    if !took.iter().any(|t| t == "carry_in") {
-        out.insert("carry_in", toml_edit::value(toml_edit::Array::new()));
-    }
+    // **No empty `carry_in`.** Seeding `carry_in = []` made the first thing
+    // `omh info --repo` said about a fresh repo a setting nobody had set —
+    // `carry_in  []  ← shared`, which reads as somebody's decision. The header
+    // above already carries the commented example that teaches the key, and a
+    // commented line is what a setting you are not setting looks like.
+    //
+    // A template that *does* name `carry_in` still travels: the loop above
+    // takes it, because then somebody did choose it.
 
     // `[use]` and `[omh]` travel too: which entries a project takes and which
     // of omh's features it runs with are exactly the answers you do not want to

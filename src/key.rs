@@ -83,7 +83,9 @@ pub const KEYS: &[Key] = &[
     // in a committed file is a map to one.
     Key {
         name: "carry_in",
-        does: "Files a session gets that git does not carry — see `src/carry.rs`.",
+        does: "Untracked files a session needs — a worktree holds tracked files \
+               only. The one path by which a secret reaches the agent, so keep \
+               it short.",
         shape: Shape::Paths,
         secret: Secret::Yes,
     },
@@ -149,6 +151,29 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    /// A key's description is written for the person who typed `omh settings`.
+    ///
+    /// One of them read *"Files a session gets that git does not carry — see
+    /// `src/carry.rs`."* and shipped that to the terminal. A source path is a
+    /// note between maintainers; it tells somebody configuring a tool to go and
+    /// read a file they do not have, in a language they may not write.
+    ///
+    /// The rule is about the audience, not that one path, so it is stated as
+    /// the audience: nothing in a description names a file in this repository.
+    #[test]
+    fn no_key_description_sends_the_reader_to_the_source() {
+        for key in super::KEYS {
+            for pointer in ["src/", ".rs`", "crate::"] {
+                assert!(
+                    !key.does.contains(pointer),
+                    "`{}` tells whoever ran `omh settings` to read `{pointer}`: {}",
+                    key.name,
+                    key.does
+                );
+            }
+        }
+    }
+
     use super::*;
 
     /// Every key says what omh reads it for.

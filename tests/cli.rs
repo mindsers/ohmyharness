@@ -398,6 +398,11 @@ fn lint_fails_the_command_when_the_schema_refused_something() {
 fn lint_passes_a_store_that_only_has_warnings() {
     let sb = sandbox();
     sb.seed("fine.md", &note("fine", WHOLE));
+    // Two, because `Orphan` is silent in a store of one — with a single note
+    // there is nothing that could have linked to it, and `omh init` seeding
+    // one and `omh memory lint` immediately complaining about it was a new
+    // user's first screen contradicting itself.
+    sb.seed("other.md", &note("other", WHOLE));
 
     let out = sb.omh(&["memory", "lint"]);
     assert!(
@@ -3997,6 +4002,128 @@ fn a_template_omh_cannot_seed_is_refused_before_anything_is_written() {
             !sb.repo.join(".omh/settings.toml").exists(),
             "`{template}` left a settings.toml behind; `write_if_absent` never \
              revisits, so that repo cannot be repaired by re-running init"
+        );
+    }
+}
+
+/// A repo nobody has configured reports nothing configured.
+///
+/// `init` wrote `carry_in = []` into every new `settings.toml`, so the first
+/// thing `omh info --repo` said about a fresh repo was
+///
+///     settings
+///       carry_in  []  ← shared
+///
+/// which reads as a decision somebody made. Nobody made it. The file already
+/// carries the commented example that teaches the key — `# carry_in =
+/// [".env.local", "certs/"]` — and a commented line is the honest way to show
+/// a setting you are not setting.
+///
+/// Ignored because `init` builds an image.
+#[test]
+#[ignore]
+fn a_repo_nobody_has_configured_reports_nothing_configured() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    assert!(sb.omh(&["init"]).status.success());
+
+    let said = String::from_utf8_lossy(&sb.omh(&["info", "--repo"]).stdout).to_string();
+    let settings = said
+        .split("omh's features")
+        .next()
+        .unwrap_or_else(|| panic!("no settings section: {said}"));
+    assert!(
+        !settings.contains("carry_in"),
+        "nobody set this — the template teaches the key with a commented \
+         example, which is what a setting you are not setting looks like: {said}"
+    );
+
+    // The teaching line survives, because dropping the value must not drop the
+    // explanation with it.
+    let file = sb.settings();
+    assert!(
+        file.contains("# carry_in"),
+        "the commented example is how somebody learns the key exists: {file}"
+    );
+}
+
+/// The COMMITTED warning fires where a secret could land, not on every write.
+///
+/// `Why` exists to keep this sentence rare, and its doc says why: the warning
+/// *"was rare and deliberate while a flag was the only way to reach one and is
+/// nearly every write now that the committed file is the default. A sentence
+/// that fires on almost every invocation is one people stop reading, and this
+/// codebase has already watched that happen once, to this same sentence."*
+///
+/// `set <key> <value>` got that narrowing. `set <feature> on|off` did not — and
+/// a feature switch is **always** a committed write, so the warning fired every
+/// single time, on the most ordinary action the command has. That is the
+/// crying-wolf the narrowing was built to stop, one arm over.
+///
+/// The line still has to appear where it matters, so both directions are here.
+#[test]
+fn the_committed_warning_is_kept_for_what_it_is_for() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    let switch = sb.omh(&["set", "codegraph", "off"]);
+    assert!(switch.status.success());
+    assert!(
+        !String::from_utf8_lossy(&switch.stderr).contains("COMMITTED"),
+        "switching a feature off for this repo is what the committed file is \
+         for: {}",
+        String::from_utf8_lossy(&switch.stderr)
+    );
+
+    // A key nothing classified, sent to the committed file because that is what
+    // omh does with one it has never heard of. Still worth saying out loud.
+    let unknown = sb.omh(&["set", "somekey", "somevalue"]);
+    assert!(unknown.status.success());
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("COMMITTED"),
+        "a key omh cannot classify reaching a file git carries is the case this \
+         sentence exists for: {}",
+        String::from_utf8_lossy(&unknown.stderr)
+    );
+}
+
+/// A name nothing answers to is refused, whichever command you typed.
+///
+/// `omh settings mcp rm nope` exited **0** and said *"nope is not in your
+/// catalogue"* — a typo reported as success, which is the one thing every
+/// sibling already refuses to do. `use`, `unuse`, `memory rm` and
+/// `memory promote` all exit 1 on the same mistake, and one of them carries a
+/// comment saying why: a name this repo never used is a typo, and reporting
+/// success for it is how the typo survives.
+///
+/// A script cannot tell a removal from a misspelling when the exit code is the
+/// same, and a person reads a green exit as *done*.
+#[test]
+fn a_name_nothing_answers_to_is_refused_whichever_command_you_typed() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.catalogue(&["skills/real/SKILL.md"]);
+
+    for argv in [
+        vec!["settings", "mcp", "rm", "nope"],
+        vec!["unuse", "skills", "nope"],
+        vec!["use", "skills", "nope"],
+        vec!["memory", "rm", "nope"],
+        vec!["memory", "promote", "nope"],
+    ] {
+        let out = sb.omh(&argv);
+        assert!(
+            !out.status.success(),
+            "`omh {}` reported a typo as success",
+            argv.join(" ")
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("nope"),
+            "and names the word it could not find: {}",
+            String::from_utf8_lossy(&out.stderr)
         );
     }
 }

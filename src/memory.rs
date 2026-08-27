@@ -854,6 +854,15 @@ pub fn hygiene(notes: &[Note]) -> Vec<Violation> {
     }
 
     for note in notes {
+        // **Not in a store of one.** With a single note there is nothing that
+        // could have linked to it, so this reports the size of the store and
+        // calls it a finding — which is what `omh init` seeding one note and
+        // `omh memory lint` immediately complaining about it looked like, on a
+        // repo nobody had touched. A new user's first screen contradicting
+        // itself.
+        if notes.len() < 2 {
+            break;
+        }
         // An orphan is a note *nothing links to*. Inverting this flags every
         // leaf, which is the opposite of what the count is for.
         if !pointed_at.contains(&note.key) {
@@ -3602,7 +3611,11 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         let root = Layer::Local.dir(&paths);
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("broken.md"), "no frontmatter here\n").unwrap();
-        seed(&paths, Layer::Local, "fine", &surprise_body());
+        // Judged and *found wanting*, so "the rest of the store is still
+        // judged" rests on a schema finding rather than on orphanhood — which
+        // is silent in a store this small, and which is not what this test is
+        // about anyway.
+        seed(&paths, Layer::Local, "fine", "# F\n\n## Expected\na\n");
 
         let found = lint(&paths).unwrap();
         let unreadable: Vec<_> = found
@@ -3706,6 +3719,50 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         assert_eq!(refused(&[warning, refusal]), 1);
     }
 
+    /// The only note in a store is not stranded in it.
+    ///
+    /// `omh init` seeds the store, and `omh memory lint` immediately answered
+    /// *"nothing in the store links to `proj`"* — omh criticising a note omh
+    /// had just written, on a repo nobody had touched yet. That is a new user's
+    /// first screen contradicting itself, the same shape as the `not yet done:
+    /// recall` line deleted in #88.
+    ///
+    /// The rule is arithmetic rather than a special case: with one note there
+    /// is nothing that *could* have linked to it, so `Orphan` is reporting the
+    /// size of the store and calling it a finding. The rule's own comment
+    /// already concedes it "fires on every note nothing links to", which is why
+    /// it warns rather than refuses; this is the case where it says nothing at
+    /// all instead.
+    #[test]
+    fn the_only_note_in_a_store_is_not_an_orphan() {
+        let (_d, paths) = fixture();
+        seed(
+            &paths,
+            Layer::Team,
+            "proj",
+            "# T\n\n## Expected\na\n\n## Observed\nb\n",
+        );
+
+        let alone = lint(&paths).unwrap();
+        assert!(
+            !alone.iter().any(|v| v.rule == Rule::Orphan),
+            "one note is the whole store, and nothing could have linked to it: {alone:?}"
+        );
+
+        // A second, unlinked note is a real one: now something could have.
+        seed(
+            &paths,
+            Layer::Team,
+            "other",
+            "# O\n\n## Expected\na\n\n## Observed\nb\n",
+        );
+        let together = lint(&paths).unwrap();
+        assert!(
+            together.iter().any(|v| v.rule == Rule::Orphan),
+            "and once there is a store to be disconnected from, it says so: {together:?}"
+        );
+    }
+
     /// The two guards answer different questions, and a `lint` wired to only
     /// one of them reports a clean store while half the checks never ran.
     #[test]
@@ -3716,6 +3773,16 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             Layer::Local,
             "broken",
             "# T\n\n## Expected\na\n\n## Related\n\nprose, not bullets\n",
+        );
+        // A second note, so the link half has something to say. `Orphan` is
+        // silent in a store of one — with a single note there is nothing that
+        // could have linked to it — and this test used that silence as its
+        // evidence that the half runs at all.
+        seed(
+            &paths,
+            Layer::Local,
+            "other",
+            "# O\n\n## Expected\na\n\n## Observed\nb\n",
         );
 
         let found = lint(&paths).unwrap();
