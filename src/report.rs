@@ -4252,6 +4252,163 @@ mod tests {
     /// **Following the catalogue is not the same as listing everything in it.**
     ///
     /// A capability with no selection tracks the catalogue as it grows; a
+    /// What `init` reports, without a container in sight.
+    ///
+    /// Nearly all of this report's coverage rides on `#[ignore]`, because
+    /// `init` builds an image — so a plain `cargo test`, and every macOS run,
+    /// was blind to the whole of `Init::human` and `Init::json`. These are
+    /// decisions the renderer makes on its own, and they need no runtime at
+    /// all: mutation found the `using` loop, the `notices` loop, the JSON keys
+    /// for both, the empty-capability skip and every one of the three rows
+    /// `init` *kept* to be deletable with the suite green.
+    fn an_init() -> Init {
+        Init {
+            harness: Some("claude".into()),
+            harness_on_host: true,
+            image: Some("omh/claude:abc".into()),
+            stacks: vec![("rust".into(), "Cargo.toml".into())],
+            using: vec![
+                Using {
+                    capability: "rules".into(),
+                    selected: None,
+                    unselected: vec![],
+                },
+                Using {
+                    capability: "skills".into(),
+                    selected: Some(vec!["review-diff".into()]),
+                    unselected: vec!["refactor".into()],
+                },
+                Using {
+                    capability: "hooks".into(),
+                    selected: Some(vec![]),
+                    unselected: vec![],
+                },
+            ],
+            notices: vec!["warning: [use] names an entry nothing answers to: skills/nope".into()],
+            next: vec![("omh new claude".into(), "start a session".into())],
+            hooks: Hooks::Measured(vec![("rust-test".into(), "`cargo`".into())]),
+            ..Default::default()
+        }
+    }
+
+    /// Every row `init` keeps is a row somebody reads, and each was deletable.
+    ///
+    /// The report guarded what it *removed* — `harnesses`, `editors`,
+    /// `not yet done` — and nothing it retained. Deleting the harness row, the
+    /// image rows or the stack rows left the suite green, which is the shape
+    /// of a report that can be hollowed out one line per commit.
+    #[test]
+    fn init_keeps_the_rows_it_kept() {
+        let human = emit(&an_init(), Format::Human, &Palette::plain());
+        for row in [
+            "harness",
+            "claude",
+            "image",
+            "omh/claude:abc",
+            "stack",
+            "rust",
+        ] {
+            assert!(human.contains(row), "no `{row}` row: {human}");
+        }
+    }
+
+    /// A capability with nothing in it is skipped; one following the whole
+    /// catalogue is not.
+    ///
+    /// Both directions, because both were free. Widening the skip deletes the
+    /// `everything in your catalogue` rows — the state `Using`'s own doc
+    /// argues is distinct from a complete list — and dropping it restores the
+    /// five `0 selected` rows a fresh install has no use for.
+    #[test]
+    fn an_empty_capability_is_skipped_and_an_unpinned_one_is_not() {
+        let human = emit(&an_init(), Format::Human, &Palette::plain());
+        assert!(
+            human.contains("rules") && human.contains("everything in your catalogue"),
+            "following the catalogue is something to say: {human}"
+        );
+        assert!(
+            !human.contains("hooks"),
+            "nothing selected and nothing left over is nothing to report: {human}"
+        );
+        assert!(
+            human.contains("1 more in your catalogue"),
+            "and what is left over is counted, not called declined: {human}"
+        );
+    }
+
+    /// The notices reach both reports, or the two disagree.
+    ///
+    /// `init` took half of `omh info --repo`'s answer: it shared the
+    /// derivation and not the reporting, so a `[use]` entry naming something
+    /// nothing answers to vanished from one and was warned about by name in
+    /// the other. Dropping the loop or the JSON key left the suite green.
+    #[test]
+    fn init_carries_the_notices_the_repo_report_carries() {
+        let init = an_init();
+        let human = emit(&init, Format::Human, &Palette::plain());
+        assert!(
+            human.contains("nothing answers to: skills/nope"),
+            "the warning is on the page somebody reads first: {human}"
+        );
+        assert_eq!(
+            init.json()["notices"],
+            json!(["warning: [use] names an entry nothing answers to: skills/nope"]),
+            "and a script reads the same fact"
+        );
+    }
+
+    /// A sandbox that answered says what it found; one that was never asked
+    /// says so instead.
+    ///
+    /// Both arms, because pinning only the unhealthy one leaves the whole
+    /// `Measured` arm — the held-back rows, which are the feature — deletable
+    /// in silence.
+    #[test]
+    fn a_measured_sandbox_and_an_unasked_one_do_not_read_alike() {
+        let measured = emit(&an_init(), Format::Human, &Palette::plain());
+        assert!(
+            measured.contains("rust-test") && measured.contains("`cargo`"),
+            "what is held back is named, with what it needs: {measured}"
+        );
+        assert!(
+            !measured.contains("not measured"),
+            "the sandbox answered: {measured}"
+        );
+        assert!(
+            an_init().json()["hooks_unchecked"].is_null(),
+            "and a script reads these as answers"
+        );
+
+        let unasked = Init {
+            hooks: Hooks::Unchecked("the sandbox could not be asked".into()),
+            ..an_init()
+        };
+        let human = emit(&unasked, Format::Human, &Palette::plain());
+        assert!(
+            human.contains("not measured — the sandbox could not be asked"),
+            "and an empty list is not a clean bill of health: {human}"
+        );
+        assert_eq!(unasked.json()["held_back"], json!([]));
+        assert_eq!(
+            unasked.json()["hooks_unchecked"],
+            json!("the sandbox could not be asked"),
+            "the one key that tells the two empties apart"
+        );
+    }
+
+    /// What `init` says to run next reaches both forms.
+    #[test]
+    fn the_next_block_is_in_the_report_and_in_the_json() {
+        let init = an_init();
+        let human = emit(&init, Format::Human, &Palette::plain());
+        assert!(
+            human.contains("next") && human.contains("omh new claude"),
+            "{human}"
+        );
+        assert_eq!(init.json()["next"][0]["run"], json!("omh new claude"));
+        assert_eq!(init.json()["next"][0]["does"], json!("start a session"));
+    }
+
     /// selection that happens to name all of today's entries does not. They
     /// look identical the moment you print them as a list of names, and they
     /// diverge the first time somebody adds a skill — one repo gets it, the

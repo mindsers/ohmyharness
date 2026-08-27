@@ -9251,6 +9251,15 @@ mod tests {
                     // `s01` rather than a pattern: the fill above has already
                     // turned every hole into that id, so a line naming any
                     // session names this one.
+                    //
+                    // **A literal id in a printed line is a trap.** `s01` is
+                    // in the vocabulary, so `omh s01 attach zed` was admitted;
+                    // written `s02` it is not a command's first word, the line
+                    // leaves the scan entirely, and the map below drops by one
+                    // — under a message inviting the reader to update the
+                    // number. Nothing in the tree writes a literal id into a
+                    // printed line today, which is the only reason this is a
+                    // note and not a defect.
                     let names_a_session =
                         matches!(words.first(), Some(&"s" | &"sessions" | &"s01"));
                     let names_a_command = words.first().is_some_and(|w| vocab.contains(*w));
