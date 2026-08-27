@@ -154,20 +154,36 @@ impl Cli {
 /// given, `main` refuses a line that names the session twice rather than
 /// choosing between them.
 fn session_prefix(argv: Vec<String>) -> (Option<String>, Vec<String>) {
-    let Some(first) = argv.get(1) else {
+    // Where the id sits, once the globals in front of it are stepped over.
+    //
+    // This was `argv.get(1)`, so the id had to be the literal first word — and
+    // every global is declared `global = true`, so clap takes them anywhere.
+    // `omh --json s01 log`, which is exactly what a script wants, got clap's
+    // `unrecognized subcommand 's01'` and a tip pointing at `s`, which is a
+    // different command. Same reading `retired` needs one function over, and
+    // the same helper: three of the globals take a value, and that value is
+    // not a verb.
+    let words: Vec<&str> = argv.iter().skip(1).map(String::as_str).collect();
+    let Some(at) = verb_position(&words).map(|i| i + 1) else {
         return (None, argv);
     };
+    let first = &argv[at];
     let looks_like_a_session =
         first.len() > 1 && first.starts_with('s') && first[1..].chars().all(|c| c.is_ascii_digit());
     if !looks_like_a_session {
         return (None, argv);
     }
 
-    let as_written: Vec<String> = std::iter::once(argv[0].clone())
-        .chain(argv.iter().skip(2).cloned())
+    // The flags in front of the id keep their place. They are omh's either
+    // way, and moving them would change what `--` means to the harness.
+    let as_written: Vec<String> = argv
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != at)
+        .map(|(_, w)| w.clone())
         .collect();
     let mut through_sessions = as_written.clone();
-    through_sessions.insert(1, "s".to_string());
+    through_sessions.insert(at, "s".to_string());
 
     // Which reading is meant, decided by what each one parses to rather than by
     // whether it parses at all. `omh s01 commit --keep 1,3` proved the weaker
@@ -9496,6 +9512,64 @@ mod tests {
         }
         out.push_str(rest);
         out
+    }
+
+    /// A leading session id is found wherever the globals leave it.
+    ///
+    /// It was `argv.get(1)` and nothing else, so the id had to be the literal
+    /// first word. Every global is declared `global = true` and clap takes them
+    /// anywhere — so `omh --json s01 log`, which is precisely what a script
+    /// wants, got clap's `unrecognized subcommand 's01'` and the actively wrong
+    /// tip *a similar subcommand exists: 's'*.
+    ///
+    /// Three of the five globals take a value, and that value must not be read
+    /// as the verb — `-s s02` is a session named the other way, not a prefix.
+    ///
+    /// A unit test rather than a CLI one: `session_prefix` is pure, and this is
+    /// a question about argv rather than about a session existing.
+    #[test]
+    fn a_leading_session_id_survives_the_flags_in_front_of_it() {
+        for front in [
+            vec!["--json"],
+            vec!["--dry-run"],
+            vec!["--color", "never"],
+            vec!["--color=never"],
+            vec!["--json", "--dry-run"],
+            vec!["--dry-run", "--color", "always", "--json"],
+        ] {
+            let line: Vec<&str> = front.iter().copied().chain(["s01", "diff"]).collect();
+            let want: Vec<&str> = front.iter().copied().chain(["s", "diff"]).collect();
+            assert_eq!(
+                session_prefix(cli_argv(&line)),
+                (Some("s01".to_string()), cli_argv(&want)),
+                "`omh {}` names a session",
+                line.join(" ")
+            );
+        }
+    }
+
+    /// A flag's value is not the verb, and not a session either.
+    ///
+    /// The reason the step over the globals has to know which of them take a
+    /// value: read naively, `omh -s s02 diff` has `s02` where the prefix would
+    /// be. It is the flag's argument, `the_one_session` already reconciles the
+    /// two spellings, and treating it as a prefix would hand that function two
+    /// names for one session on every ordinary invocation.
+    #[test]
+    fn a_value_belonging_to_a_flag_is_not_a_session_prefix() {
+        for line in [
+            vec!["-s", "s02", "diff"],
+            vec!["--session", "s02", "diff"],
+            vec!["-a", "s02", "info"],
+            vec!["--account", "s02", "info"],
+        ] {
+            assert_eq!(
+                session_prefix(cli_argv(&line)),
+                (None, cli_argv(&line)),
+                "`omh {}` names its session through the flag",
+                line.join(" ")
+            );
+        }
     }
 
     /// Anything that is not `sNN` is left exactly as it was.
