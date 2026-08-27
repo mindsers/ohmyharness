@@ -38,6 +38,22 @@ fn sandbox() -> Sandbox {
     std::fs::create_dir_all(repo.join(".git")).unwrap();
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
+    // `$EDITOR`, for every run. `edit` spawns it and falls back to `vi`,
+    // which in a test harness waits forever — and the developer's own
+    // `$EDITOR` leaking in made every `edit` test a different test on every
+    // machine. This one records the path it was asked to open, so *which
+    // file* is a thing a test can assert rather than something only the
+    // person watching their screen finds out.
+    let editor = bin.join("fake-editor");
+    std::fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexit 0\n",
+            bin.join("editor.log").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     Sandbox {
         _dir: dir,
         repo,
@@ -63,11 +79,7 @@ impl Sandbox {
             .current_dir(cwd)
             .env("HOME", &self.home)
             .env("PATH", path)
-            // `edit` spawns `$EDITOR`, falling back to `vi` — which, given a
-            // test harness for a terminal, waits forever. `true` exits 0 and
-            // touches nothing, so a test can assert *that* omh got as far as
-            // opening a file without asserting anything about the editor.
-            .env("EDITOR", "true")
+            .env("EDITOR", self.bin.join("fake-editor"))
             .output()
             .expect("the binary under test must run")
     }
@@ -227,6 +239,11 @@ impl Sandbox {
         for entry in std::fs::read_dir(src).unwrap().flatten() {
             std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
         }
+    }
+
+    /// What `$EDITOR` was asked to open, across every run in this sandbox.
+    fn opened_in_the_editor(&self) -> String {
+        std::fs::read_to_string(self.bin.join("editor.log")).unwrap_or_default()
     }
 
     fn settings(&self) -> String {
@@ -2152,10 +2169,11 @@ fn a_dry_run_names_the_catalogue_entries_this_repo_is_not_using() {
 // ── selection, and the two scopes ───────────────────────────────────────────
 
 /// `omh use` writes the **committed** file. What a project uses is a fact about
-/// the project, and a teammate cloning it should get the same selection — the
-/// opposite default from `omh set`, which holds `carry_in` paths and MCP
-/// env and must not be committable by accident. One flag could not express both,
-/// which is why `--layer` split into two commands.
+/// the project, and a teammate cloning it should get the same selection —
+/// which is the same default `omh set` now has, for the same reason. The
+/// values that must *not* be committable by accident are `carry_in` paths and
+/// MCP env, and since 0.7.0 that is a property of the key rather than of
+/// which command you reached for.
 #[test]
 fn use_writes_the_committed_file_and_unuse_takes_a_name_back_out() {
     let sb = sandbox();
@@ -2172,7 +2190,8 @@ fn use_writes_the_committed_file_and_unuse_takes_a_name_back_out() {
     );
     assert!(
         !sb.repo.join(".omh/settings.local.toml").exists(),
-        "the gitignored file is `omh set`'s, not this command's"
+        "the gitignored file is where `--local` and a credential-bearing key \
+         go, and a selection is neither"
     );
 
     assert!(sb.omh(&["unuse", "skills", "refactor"]).status.success());
@@ -2208,7 +2227,7 @@ fn use_is_idempotent_and_unuse_refuses_a_name_this_repo_never_used() {
 /// `[use]` names *your* entries; a feature is `[omh]`'s business, and the CLI
 /// has to teach that rather than leave it in the docs.
 #[test]
-fn use_refuses_a_feature_and_disable_refuses_an_entry() {
+fn use_refuses_a_feature_and_set_refuses_a_catalogue_entry() {
     let sb = sandbox();
     sb.seed_base();
     sb.catalogue(&["skills/review-diff/SKILL.md"]);
@@ -2224,7 +2243,10 @@ fn use_refuses_a_feature_and_disable_refuses_an_entry() {
 
     // And the other direction, so the distinction is not one-way.
     let out = sb.omh(&["set", "review-diff", "off"]);
-    assert!(!out.status.success(), "a skill is not a feature");
+    assert!(
+        !out.status.success(),
+        "a catalogue entry is selected, not set"
+    );
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("omh use"), "point back the other way: {err}");
 }
@@ -2257,10 +2279,15 @@ fn switching_a_feature_off_here_uninstalls_nothing() {
     );
 }
 
-/// The two opposite defaults, side by side. `omh set` must not be able to
-/// put a token in a file git will commit unless asked in so many words.
+/// The key decides the file, and asking for the other one says so out loud.
+///
+/// It read *two opposite defaults, side by side* when the two halves were two
+/// commands. They are one command now, and the first half passes for a
+/// different reason than it used to: `carry_in` reaches the gitignored file
+/// because the registry classifies it, not because this spelling defaults
+/// there.
 #[test]
-fn repo_set_is_gitignored_and_shared_says_it_is_not() {
+fn the_key_picks_the_file_and_save_says_when_it_is_overridden() {
     let sb = sandbox();
     sb.seed_base();
 
@@ -2496,6 +2523,14 @@ fn unset_removes_a_credential_key_from_the_committed_file_too() {
 
     // The claim is about what omh *reads*, not about two files' bytes.
     let after = sb.omh(&["info", "--repo"]);
+    // The status first, because everything below it is a *negative* on this
+    // command's stdout — and a command that failed has no stdout at all, so
+    // an argv this test spelled wrong would read as a removal that worked.
+    assert!(
+        after.status.success(),
+        "the report this claim is read from must run: {}",
+        String::from_utf8_lossy(&after.stderr)
+    );
     assert!(
         !String::from_utf8_lossy(&after.stdout).contains("carry_in"),
         "a removal that leaves the value effective is not a removal: {}",
@@ -2802,7 +2837,7 @@ fn why_answers_for_a_settings_key() {
 
 /// One command switches a feature, the same one that sets a value.
 ///
-/// `omh set`/`disable` are two more verbs for *write a thing to the
+/// `enable`/`disable` were two more verbs for *write a thing to the
 /// settings file*, and which of omh's features a project runs with is as much
 /// a fact about the project as which runtime it wants. What the two halves do
 /// not share is the file format — a feature lives in the `[omh]` table, a
@@ -3397,12 +3432,31 @@ fn settings_refuses_a_feature_name() {
     sb.git_init();
     sb.seed_base();
 
-    let out = sb.omh(&["settings", "set", "codegraph", "off"]);
-    assert!(!out.status.success(), "a feature is not a default");
+    // **Both verbs.** The guard was written for four doors and four commands
+    // were routed through it; two of those commands were retired, and the
+    // test went with them — leaving `unset` alone behind, where deleting the
+    // guard call outright passed the whole suite.
+    for argv in [
+        vec!["settings", "set", "codegraph", "off"],
+        vec!["settings", "unset", "codegraph"],
+    ] {
+        let out = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "`omh {}`: a feature is not a default",
+            argv.join(" ")
+        );
+        assert!(
+            said.contains("omh set codegraph"),
+            "and it names the spelling that works: {said}"
+        );
+    }
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("omh set codegraph"),
-        "and it names the spelling that works: {}",
-        String::from_utf8_lossy(&out.stderr)
+        !std::fs::read_to_string(sb.home.join(".omh/default.toml"))
+            .unwrap_or_default()
+            .contains("codegraph"),
+        "and neither verb left the bare key behind"
     );
 }
 
@@ -3932,7 +3986,12 @@ fn the_rename_is_silent_when_the_old_file_is_gone() {
     sb.git_init();
     sb.seed_base();
 
-    let said = String::from_utf8_lossy(&sb.omh(&["info", "--repo"]).stderr).to_string();
+    let out = sb.omh(&["info", "--repo"]);
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    // The only assertion here is a negative on stderr, and a command that
+    // refused writes a *different* sentence to the same stream — so without
+    // this the test passes hardest when the line does not run at all.
+    assert!(out.status.success(), "the command must run: {said}");
     assert!(
         !said.contains("not read any more"),
         "no retired file exists, so there is nothing to report: {said}"
@@ -4237,19 +4296,44 @@ fn every_retired_spelling_is_refused_and_names_a_replacement() {
     );
 }
 
-/// The retired command is gone; everything under it answers to `omh settings`.
+/// The retired command is gone; everything under it answers to `omh settings`,
+/// and each verb is asked for an **effect** rather than an exit code.
 ///
 /// `set` and `unset` were already there. `edit` and `mcp` move rather than
 /// retire: opening your settings in `$EDITOR` and curating your MCP servers
 /// are both things you do to `~/.omh`, which is what `omh settings` now means.
+///
+/// Exit 0 was the whole of this test once, and it proved only that clap had
+/// routed the line somewhere: replacing the entire `mcp` arm with `Ok(())`
+/// left the suite green while the compiler reported `mcp_add`, `mcp_remove`,
+/// `mcp_import` and `report::Servers` all dead.
 #[test]
 fn what_config_held_answers_to_settings() {
     let sb = sandbox();
     sb.git_init();
     sb.seed_base();
 
+    let added = sb.omh(&["settings", "mcp", "add", "srv1", "echo"]);
+    assert!(
+        added.status.success(),
+        "adding a server: {}",
+        String::from_utf8_lossy(&added.stderr)
+    );
+    let listed = sb.omh(&["settings", "mcp", "ls"]);
+    assert!(listed.status.success());
+    assert!(
+        String::from_utf8_lossy(&listed.stdout).contains("srv1"),
+        "what `mcp add` wrote is what `mcp ls` reads: {}",
+        String::from_utf8_lossy(&listed.stdout)
+    );
+    let removed = sb.omh(&["settings", "mcp", "rm", "srv1"]);
+    assert!(removed.status.success());
+    assert!(
+        !String::from_utf8_lossy(&sb.omh(&["settings", "mcp", "ls"]).stdout).contains("srv1"),
+        "and `rm` is read by the same listing"
+    );
+
     for argv in [
-        vec!["settings", "mcp", "ls"],
         vec!["settings", "set", "idle_timeout", "45m"],
         vec!["settings", "unset", "idle_timeout"],
     ] {
@@ -4261,6 +4345,16 @@ fn what_config_held_answers_to_settings() {
             String::from_utf8_lossy(&out.stderr)
         );
     }
+
+    // **Which file**, not merely that something was opened. The layer is a
+    // constant at the call site, so `Personal` → `Shared` there changes what
+    // `$EDITOR` opens and nothing else — and nothing noticed.
+    assert!(sb.omh(&["settings", "edit"]).status.success());
+    let opened = sb.opened_in_the_editor();
+    assert!(
+        opened.contains("default.toml"),
+        "`omh settings edit` opens your defaults, not a repo file: {opened:?}"
+    );
 }
 
 /// The retired spelling says what replaced it, for every verb it held.
@@ -4295,8 +4389,9 @@ fn the_retired_config_spelling_names_what_replaced_it() {
 /// `--layer` goes with the command that needed it.
 ///
 /// It existed because two commands wanted opposite write defaults. One rule
-/// across four commands replaced that, and the flag has been printing its own
-/// replacement for a release.
+/// across four commands replaced that, and the command that carried the flag
+/// went with it — so this is clap's refusal, not a deprecation notice, and
+/// the docs that promised one more release have been corrected.
 #[test]
 fn the_layer_flag_is_gone() {
     let sb = sandbox();
@@ -4309,7 +4404,7 @@ fn the_layer_flag_is_gone() {
 
 /// `omh info --repo` answers what this checkout resolved.
 ///
-/// `omh info --repo` was deleted, and its report is the only place that says which
+/// `repo` was deleted, and this report is the only place that says which
 /// file decided a value, which of omh's features are on here, and which
 /// catalogue entries this project takes. `omh info` already means *what you
 /// have*; `--repo` narrows that from the machine to the checkout.
@@ -4479,11 +4574,11 @@ fn edit_refuses_a_name_that_climbs_out_of_the_catalogue() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("never a path"));
 }
 
-/// Bare `omh info --repo` is where the reporting this design keeps promising surfaces:
-/// with a curated list the useful question stops being "what is this set to" and
-/// becomes "why is this skill not here".
+/// `omh info --repo` is where the reporting this design keeps promising
+/// surfaces: with a curated list the useful question stops being "what is this
+/// set to" and becomes "why is this skill not here".
 #[test]
-fn bare_repo_reports_what_is_used_what_is_not_and_what_decided_it() {
+fn info_repo_reports_what_is_used_what_is_not_and_what_decided_it() {
     let sb = sandbox();
     sb.seed_base();
     sb.catalogue(&["skills/review-diff/SKILL.md", "skills/refactor/SKILL.md"]);

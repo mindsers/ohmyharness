@@ -344,7 +344,7 @@ guards in `cargo test`; the rest are honest about not being.
 **Invariant 9 was overstated, corrected during M2.** `doctor` *cannot* enforce
 it: it replaces the launch command with its probe, so no harness ever starts,
 and a tool description is consumed by a model rather than written anywhere
-inspectable. What `doctor` does prove is that the server omh set up
+inspectable. What `doctor` does prove is that the server omh provisioned
 actually starts where the harness will spawn it, answers `tools/list`, and
 names both tools — reporting the store's own census, because `0 notes` is what
 a wrong mount looks like and a blank detail hides it. Whether a *harness*

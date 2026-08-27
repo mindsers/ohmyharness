@@ -2872,8 +2872,9 @@ fn show_servers(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
 /// Select a catalogue entry for this repo, or resync the whole list.
 ///
 /// Writes the **committed** file. What a project uses is a fact about the
-/// project, and a teammate cloning it should get the same selection — the
-/// opposite default from the gitignored file, which holds secrets.
+/// project, and a teammate cloning it should get the same selection — never
+/// the gitignored file, which is where a value that must not be published
+/// goes.
 ///
 /// A capability with no list is following the whole catalogue, so adding one
 /// name to it has to write the catalogue out first. Writing `["tdd"]` alone
@@ -3844,8 +3845,8 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 
 /// Where a key belongs when nothing else has an opinion — the registry alone.
 ///
-/// **The default is the committed file**, which is the opposite of what
-/// `omh set` did, and the reversal is the point: what runtime a project
+/// **The default is the committed file**, which is the opposite of what the
+/// repo-scoped write did before 0.7.0, and the reversal is the point: what runtime a project
 /// wants, and how long its sessions idle, are facts about the project, and a
 /// teammate cloning it should get them. Until this table existed that default
 /// was unavailable, because *every* value went to the gitignored file and the

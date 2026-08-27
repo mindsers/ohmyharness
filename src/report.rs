@@ -1202,12 +1202,13 @@ pub struct Inventory {
     pub editors: Vec<Editor>,
     pub sessions: Vec<Session>,
     pub base: String,
+    /// Where your catalogue lives, so the listing below can be found on disk.
+    pub catalogue_dir: String,
     /// What your catalogue holds, per capability.
     ///
     /// It lived under the command 0.7.0 deleted. `omh info` means
     /// *what you have here*, and a catalogue is exactly that — dropping it
     /// with the command would have lost the only listing of it.
-    pub catalogue_dir: String,
     pub catalogue: Vec<Catalogue>,
 }
 
