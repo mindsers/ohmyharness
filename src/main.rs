@@ -1461,6 +1461,7 @@ fn session_up(
         backend.program(),
         paths,
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        ctx,
     ) {
         Ok(bin) => opts.memory_bin = Some(bin),
         Err(e) => {
@@ -1651,7 +1652,7 @@ fn attach(
             persist: persist::Mode::None,
             tty: false,
             account_dir: account,
-            memory_bin: memory::deliver::available(&paths),
+            memory_bin: memory::deliver::available(&paths, ctx),
             base: Some(session::default_branch(&paths.repo)),
             omh: own,
             repo,
@@ -2067,7 +2068,7 @@ fn doctor_cmd(
         persist: persist::Mode::None,
         tty: false,
         account_dir: account.clone(),
-        memory_bin: memory::deliver::available(&paths),
+        memory_bin: memory::deliver::available(&paths, ctx),
         // The probe has to compose the same rules a launch would, or it proves
         // the harness reads a document nobody will be given.
         base: Some(session::default_branch(&paths.repo)),
@@ -5047,7 +5048,7 @@ fn run(
             .parse()?,
         tty: true,
         account_dir: account,
-        memory_bin: memory::deliver::available(&paths),
+        memory_bin: memory::deliver::available(&paths, ctx),
         base: Some(base.clone()),
         omh: own,
         repo,
@@ -6678,7 +6679,7 @@ fn auth_cmd(cwd: &std::path::Path, harness: &str, account: &str, ctx: &out::Ctx)
             persist: persist::Mode::None,
             tty: true,
             account_dir: Some(account_dir.clone()),
-            memory_bin: memory::deliver::available(&paths),
+            memory_bin: memory::deliver::available(&paths, ctx),
             // Empty, like the base this scratch session was created with at
             // `session.ensure(&paths.repo, "")`: a login is not work on the
             // project, so there are no project rules to look up.
@@ -12992,32 +12993,97 @@ because = "a fixture"
     /// lint and catches the same mistake at the same moment.
     #[test]
     fn no_command_writes_to_a_stream_behind_the_output_layer() {
-        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
-            .expect("this file is readable from its own test");
+        // **The whole tree, not `main.rs`.** This read one file for as long as
+        // it existed, which is why `memory/deliver.rs` could write straight to
+        // stderr — bypassing `--json` and `--color` — and dump a cargo build
+        // log as the first thing a new user sees after `init` tells them to run
+        // `omh new`. A guard that reads one file makes a claim about one file
+        // and was cited as a claim about the program.
+        let files = rust_sources(&["src"]);
+        the_whole_tree(&files);
 
-        let offenders: Vec<(usize, &str)> = source
-            .lines()
-            .enumerate()
-            .map(|(i, line)| (i + 1, line.trim()))
-            // Only calls, never the word in a doc comment or a string that
-            // talks *about* the rule — this very comment mentions `println!`.
-            .filter(|(_, line)| {
-                ["println!", "print!(", "eprintln!", "eprint!("]
+        let mut offenders: Vec<String> = Vec::new();
+        for file in &files {
+            // `out.rs` **is** the output layer. Every macro in it is the
+            // implementation of the methods this rule is about, so exempting
+            // the file is exempting the thing rather than making a hole in it.
+            if file.file_name().is_some_and(|n| n == "out.rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(file).expect("a source this crate compiles");
+            let name = file
+                .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                .unwrap_or(file)
+                .display()
+                .to_string();
+            // Below the test module is fixture and assertion text, not
+            // anything omh prints — the same cut the printed-line scan makes,
+            // and for the same reason.
+            let source = match source.find("\nmod tests {") {
+                Some(at) => source[..at].to_string(),
+                None => source,
+            };
+            for (i, line) in source.lines().enumerate() {
+                let line = line.trim();
+                // Only calls, never the word in a doc comment or a string that
+                // talks *about* the rule — this very comment mentions
+                // `println!`.
+                if ["println!", "print!(", "eprintln!", "eprint!("]
                     .iter()
                     .any(|m| line.starts_with(m))
-            })
-            .collect();
+                {
+                    offenders.push(format!("{name}:{}: {line}", i + 1));
+                }
+            }
+        }
 
-        assert_eq!(
-            offenders.len(),
-            1,
-            "every write goes through out::Ctx but the error sink in `main` — found {offenders:#?}"
-        );
+        // **Declared, not counted.** Widening this scan from one file to the
+        // tree turned up ten sites, and the honest thing is to name every one
+        // rather than assert a number that goes stale the first time somebody
+        // moves a line.
+        //
+        // Two are the exemptions this rule has always had: the error renderer
+        // in `main`, which cannot report through the thing it is reporting
+        // about, and the MCP line reader, which speaks protocol.
+        //
+        // The other seven are **owed a fix, not excused one**. They predate the
+        // scan reading their files at all, and every one writes an `omh: ` line
+        // straight to stderr — no palette, and not suppressed under `--json`,
+        // which is what `progress` and `announce` exist to do. Routing them
+        // means threading a `Ctx` through `image`, `facts` and the delivery
+        // path, roughly sixteen call sites, one of which (`sandbox`) has none
+        // in scope. That is its own change; doing it inside a release fix would
+        // be a large diff in the wrong week. The list is here so it cannot grow
+        // quietly in the meantime — an eighth entry fails this test.
+        let named = [
+            // The two real exemptions.
+            "src/main.rs:890",
+            "src/mcp.rs:187",
+            // Owed a `Ctx`. See above.
+            "src/facts.rs:68",
+            "src/facts.rs:75",
+            "src/image.rs:266",
+            "src/image.rs:444",
+            "src/image.rs:449",
+            "src/image.rs:505",
+            "src/image.rs:527",
+        ];
+        let unexpected: Vec<&String> = offenders
+            .iter()
+            .filter(|o| !named.iter().any(|a| o.starts_with(a)))
+            .collect();
         assert!(
-            offenders[0].1.contains("out::problem"),
-            "and the one exemption is the error renderer, not something new — got {:?}",
-            offenders[0]
+            unexpected.is_empty(),
+            "every write goes through out::Ctx but the sites named in this test — \
+             found {unexpected:#?}"
         );
+        for site in named {
+            assert!(
+                offenders.iter().any(|o| o.starts_with(site)),
+                "{site} is named here and writes nothing — a stale exemption is a \
+                 hole this test says is not there"
+            );
+        }
     }
 
     // ── candidate guards (mutation testing) ─────────────────────────────────
