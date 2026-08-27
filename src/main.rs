@@ -5137,9 +5137,56 @@ fn run(
     };
 
     if dry_run {
+        // What the agent is given, read off the plan's own mounts — so the
+        // report cannot describe a launch other than the one that would happen.
+        let mut reads: Vec<(String, String)> = Vec::new();
+        if let Some(name) = &plan.rules.composed {
+            reads.push((
+                "rules".to_string(),
+                format!("composed with this project's {name}"),
+            ));
+        }
+        // The names, not a count of mounts. Counting mounts said `skills 2
+        // mounted` on a repo using no skills at all — each capability takes a
+        // layer mount and a rendered one, so the number measured omh's
+        // plumbing rather than anything the agent gets. This is the same
+        // answer `omh info --repo` gives, from the same function.
+        for u in using_here(&paths, &base::Manifest::load_dir(&paths.base())?)? {
+            let summary = u.summary();
+            if summary != "nothing" {
+                reads.push((u.capability, summary));
+            }
+        }
+        for (cap, n) in &plan.dropped {
+            reads.push((
+                cap.to_string(),
+                format!("{n} dropped — {} cannot take them", adapter.name),
+            ));
+        }
+
+        // Everything omh mounts is read-only but these, so naming them names
+        // the whole of what a session can reach. The worktree *is* `/work`, so
+        // it is named once, by the path you would go and look at.
+        let workdir = container_workdir();
+        let writes: Vec<String> = std::iter::once(format!(
+            "{}  — this session's worktree, as {workdir}",
+            session.worktree.display()
+        ))
+        .chain(
+            plan.mounts
+                .iter()
+                .filter(|m| !m.read_only && m.guest != std::path::Path::new(workdir))
+                .map(|m| m.guest.display().to_string()),
+        )
+        .collect();
+
         ctx.say(&report::DryRun {
             status: status_line,
             worktree: session.worktree.display().to_string(),
+            image: plan.image.clone(),
+            network: plan.network.clone(),
+            reads,
+            writes,
             argv: std::iter::once(backend.program().to_string())
                 .chain(backend.args(&plan))
                 .collect(),

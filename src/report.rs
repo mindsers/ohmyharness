@@ -1637,7 +1637,7 @@ pub struct Using {
 }
 
 impl Using {
-    fn summary(&self) -> String {
+    pub fn summary(&self) -> String {
         // What a feature brings is named beside what you chose, because it is
         // here either way and `[use]` never mentions it. Without this the row
         // read `mcp  nothing` in a repo whose features block said `codegraph
@@ -2415,14 +2415,27 @@ impl Age {
 
 /// The launch that would have happened.
 ///
-/// `--dry-run` is the one place the runtime command line is the *product*, so
-/// it goes to **stdout** where it can be redirected into a script, and it is
-/// printed as one argv per line — the shape you can read, diff, and paste
-/// behind a `docker` you are debugging.
+/// **The plan, not the command line.** This printed 55 lines of `docker run`
+/// argv, one token per line, and nothing else — no image, no summary, nothing
+/// a person could read. The argument was that the argv *is* the product,
+/// pasteable behind a docker you are debugging, and that reader is real; they
+/// are just not the reader `--dry-run` exists for. Somebody deciding whether to
+/// let this tool near their repository asks *what will it do*, and got bind
+/// mounts.
+///
+/// So the argv keeps its home in `--json`, whole and in order, which is where
+/// a script was reading it from anyway — and the human form answers the
+/// question.
 #[derive(Debug, Clone)]
 pub struct DryRun {
     pub status: String,
     pub worktree: String,
+    pub image: String,
+    pub network: String,
+    /// `(capability, what it contributes)` — what the agent will be given.
+    pub reads: Vec<(String, String)>,
+    /// What the session can change, which is the short list that matters.
+    pub writes: Vec<String>,
     /// The program and its arguments, program first.
     pub argv: Vec<String>,
 }
@@ -2430,14 +2443,38 @@ pub struct DryRun {
 impl Report for DryRun {
     fn human(&self, p: &out::Palette) -> String {
         let mut s = format!("{}\n", p.paint(out::HEAD, &self.status));
+        let mut t = Table::new();
+        t = t.row(vec![Cell::plain("image"), Cell::plain(&self.image)]);
+        t = t.row(vec![Cell::plain("network"), Cell::plain(&self.network)]);
+        t = t.row(vec![Cell::plain("worktree"), Cell::plain(&self.worktree)]);
+        s.push_str(&t.render(p));
+
+        if !self.reads.is_empty() {
+            s.push_str(&format!(
+                "\n  {}\n",
+                p.paint(out::HEAD, "the agent is given")
+            ));
+            let mut r = Table::new().indent(4);
+            for (what, detail) in &self.reads {
+                r = r.row(vec![Cell::styled(what, out::NAME), Cell::plain(detail)]);
+            }
+            s.push_str(&r.render(p));
+        }
+
+        // The short list, and the reason this report exists. Everything omh
+        // mounts is read-only but these, so naming them is naming the whole of
+        // what a session can reach.
+        s.push_str(&format!("\n  {}\n", p.paint(out::HEAD, "it can write")));
+        let mut w = Table::new().indent(4);
+        for line in &self.writes {
+            w = w.row(vec![Cell::plain(line)]);
+        }
+        s.push_str(&w.render(p));
+
         s.push_str(&format!(
-            "worktree {}\n\n",
-            p.paint(out::DIM, &self.worktree)
+            "\n  {}\n",
+            p.paint(out::DIM, "the runtime command line is in --json")
         ));
-        // Continued with `\` so the whole thing is one pasteable command, which
-        // is the only reason anybody reads this output rather than `omh doctor`.
-        s.push_str(&self.argv.join(" \\\n       "));
-        s.push('\n');
         s
     }
 
@@ -2445,6 +2482,13 @@ impl Report for DryRun {
         json!({
             "status": self.status,
             "worktree": self.worktree,
+            "image": self.image,
+            "network": self.network,
+            "reads": self.reads.iter().map(|(what, detail)| json!({
+                "what": what,
+                "detail": detail,
+            })).collect::<Vec<_>>(),
+            "writes": self.writes,
             "argv": self.argv,
         })
     }
@@ -4295,6 +4339,56 @@ mod tests {
     /// **Following the catalogue is not the same as listing everything in it.**
     ///
     /// A capability with no selection tracks the catalogue as it grows; a
+    /// `--dry-run` answers what the session gets, not how docker is spelled.
+    ///
+    /// It printed 55 lines of `docker run` argv, one token per line, and
+    /// nothing else — no image, no summary, nothing a person could read. The
+    /// doc argued the argv *is* the product, pasteable behind a docker you are
+    /// debugging, and that reader is real. They are not the reader deciding
+    /// whether to let this tool near their repository, and that reader is the
+    /// one `--dry-run` exists for: it is the trust surface, and it answered
+    /// with bind mounts.
+    ///
+    /// So the plan is the human form and the argv stays whole in `--json`,
+    /// which is where a script was reading it from anyway.
+    #[test]
+    fn a_dry_run_says_what_the_session_gets() {
+        let report = DryRun {
+            status: "claude on omh/s01".into(),
+            worktree: "/h/.omh/worktrees/proj/s01".into(),
+            image: "omh/claude:abc".into(),
+            network: "omh-proj".into(),
+            reads: vec![
+                ("rules".into(), "composed with your AGENTS.md".into()),
+                ("skills".into(), "2 selected".into()),
+            ],
+            writes: vec!["/work — this session's worktree".into()],
+            argv: vec!["docker".into(), "run".into(), "--rm".into()],
+        };
+
+        let human = emit(&report, Format::Human, &Palette::plain());
+        for want in [
+            "claude on omh/s01",
+            "omh/claude:abc",
+            "omh-proj",
+            "composed with your AGENTS.md",
+            "2 selected",
+            "/work",
+        ] {
+            assert!(human.contains(want), "no `{want}` in the plan: {human}");
+        }
+        assert!(
+            !human.contains("--rm"),
+            "the argv is the mechanism, and it is in --json: {human}"
+        );
+
+        assert_eq!(
+            report.json()["argv"],
+            json!(["docker", "run", "--rm"]),
+            "and it is whole there, because that is where it was being read from"
+        );
+    }
+
     /// What is in your catalogue is not what this repo declined.
     ///
     /// The parenthetical read `(4 not selected: go-format, go-test,
