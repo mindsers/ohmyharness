@@ -83,8 +83,9 @@ moment it is choosing.
 
 They are **generated from the base manifest at launch**, not files you can edit
 — which is what lets omh ship a fix to one. Switching them off means switching
-off the graph: `omh settings mcp rm codegraph` to remove it, or
-`[omh] codegraph = false` in `.omh/settings.toml` for one repo. There is
+off the graph: `omh set codegraph off` for one repo, or
+`omh settings mcp rm codegraph` to take the server out of your catalogue for
+every repo. There is
 deliberately no way to keep the graph and drop `graph-refresh`, because that is
 the combination that manufactures confident wrong answers.
 

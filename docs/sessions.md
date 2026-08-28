@@ -170,8 +170,10 @@ moved. Two real failures came from never asking:
 
 - `omh s01 resume opencode` on a session started by `omh new claude` execed a binary that image
   does not contain.
-- `--account work` on a session started as `personal` went on quietly using
-  `personal` — the exact thing `omh auth` refuses to guess about elsewhere.
+- changing the account between launches went on quietly using the old one — the
+  exact thing `omh auth` refuses to guess about elsewhere. It was `--account
+  work` then; the account is `omh set account <name>` now, and the mount it
+  resolves to is part of the stamp either way.
 
 The harness's own arguments are deliberately **not** part of the comparison.
 `claude --resume x` is the same session as `claude`, and a stamp that moved would

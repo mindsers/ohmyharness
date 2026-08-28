@@ -3,9 +3,13 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.6.0`. This release is the [work loop](design/git.md) —
-reading a session's work, landing it in stages, staying current with trunk, and
-reaching several sessions of one repo from one place. One harness (`claude`) has
+**Status: early.** `0.7.0`. This release is the
+[command surface](design/profile.md) — one migration, after which a command name
+cannot collide with a harness name, which file a write lands in follows from the
+key rather than from the command, `omh init` answers *what did you do to my
+repo*, and `--dry-run` withholds the writes rather than being quietly dropped.
+The [work loop](design/git.md) it sits on landed in 0.6.0.
+One harness (`claude`) has
 been driven for real work; `opencode` passes `omh doctor` but has not. Docker is
 the only verified runtime. Several design pages describe work that is **partly
 built** — each says which parts, at the top. See the [roadmap](design/roadmap.md).
@@ -39,7 +43,7 @@ change — most of them record something that was tried and cost something.
 | [Decisions](design/decisions.md) | every load-bearing choice with its reasoning |
 | [The base set](design/base-set.md) | omh's opinion as a versioned data file, and the test that makes an entry earn its place |
 | [Architecture](design/architecture.md) | images, runtime backends, on-disk layout |
-| [The profile](design/profile.md) | partly built — rules composed with the repo's own, omh's hooks and sections generated from the base set; the catalogue and per-project selection are not |
+| [The profile](design/profile.md) | built — one catalogue, `[use]` per repo, rules composed with the repo's own, omh's hooks and sections generated from the base set, and the command surface 0.7.0 settled on top of it |
 | [Adapters](design/adapters.md) | harnesses and editors as data, and how to add one |
 | [Adoption](design/adoption.md) | partly built — what `init` decides when it meets a repo, the toolchain probe, and what `omh import` still has to migrate |
 | [Git](design/git.md) | built in 0.6.0 — the loop around the sandbox's repository: reading a session's work, landing it in stages, staying current with trunk, and reaching several sessions from one place. Twelve steps, each naming the pull request that landed it |

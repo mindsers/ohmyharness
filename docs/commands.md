@@ -248,13 +248,14 @@ codegraph — omh's choice, in the base set since 2026.06
               codegraphcontext    needs a Neo4j service running
               @sdsrs/code-graph   close second; needs a node runtime rather than a static binary
   installed   this repo
-  remove      omh settings mcp rm codegraph — the feature, server and hooks together
+  remove      omh set codegraph off — the feature, its server and its hooks
+              together. Nothing is uninstalled and the next repo gets it back
 
   answered from ~/.omh/base/2026.08.toml · 2026.08
 ```
 
 **Everything omh ships belongs to a feature**, and removal follows the feature:
-`omh settings mcp rm codegraph` takes the server and its four hooks together.
+`omh set codegraph off` takes the server and its four hooks together.
 `omh why graph-first` answers "part of codegraph" from the other direction, and
 says `(off here)` when this repo has switched the feature off in
 `.omh/settings.toml`.
@@ -998,7 +999,6 @@ $ omh set codegraph off
 codegraph is off here
   nothing was uninstalled; the next repo gets it back
   wrote → /Users/you/proj/.omh/settings.toml (committed)
-omh: the committed file is COMMITTED — a teammate cloning this repo gets `codegraph` off
 
 $ omh unset codegraph
 this checkout no longer switches codegraph
@@ -1063,7 +1063,7 @@ your defaults /Users/you/.omh/default.toml
   idle_timeout  45m
 
 omh also reads
-  carry_in     Files a session gets that git does not carry — see `src/carry.rs`.
+  carry_in      Untracked files a session needs — a worktree holds tracked files only. The one path by which a secret reaches the agent, so keep it short.
   account      Which captured login a session is launched with, by name.
   runtime      Which runtime builds and runs the sandbox. Unset means `auto`.
   persistence  How a session's terminal survives detaching. Unset means `dtach`.

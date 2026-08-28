@@ -1643,9 +1643,15 @@ impl Using {
         // read `mcp  nothing` in a repo whose features block said `codegraph
         // on` and `memory on` two lines above — three true statements, one of
         // which a reader takes as *there is no MCP here*.
-        let theirs = match self.from_a_feature.as_slice() {
-            [] => String::new(),
-            names => format!("{} (omh's)", names.join(", ")),
+        // A count, not the names. Naming them fixed `mcp  nothing` in a repo
+        // running two servers, and cost the width of six hook names in the
+        // `hooks` row — which every other row then pads out to, so
+        // `skills  review-diff` was followed by a hundred spaces. The fact
+        // worth carrying is *omh brings some here*; which ones is
+        // `omh why <feature>`.
+        let theirs = match self.from_a_feature.len() {
+            0 => String::new(),
+            n => format!("+{n} from omh's features"),
         };
         let yours = match &self.selected {
             None => "everything".to_string(),
@@ -1735,12 +1741,15 @@ impl Report for Repo {
                     // Calling those "not selected" claims a decision where
                     // there was never a choice. `init` was corrected for the
                     // same fact and reads the same way.
+                    // The count, not the names. Naming what a feature
+                    // supplies made the middle column as wide as its longest
+                    // row — `hooks` carries six of omh's own — and this column
+                    // aligns to that, so `skills  review-diff` was followed by
+                    // a hundred spaces before its parenthetical. `init` says
+                    // this the same way, and what is applicable and unselected
+                    // is named on its own line below.
                     Cell::styled(
-                        format!(
-                            "({} more in your catalogue: {})",
-                            u.unselected.len(),
-                            u.unselected.join(", ")
-                        ),
+                        format!("({} more in your catalogue)", u.unselected.len()),
                         out::DIM,
                     )
                 },
@@ -4396,6 +4405,43 @@ mod tests {
         );
     }
 
+    /// The leftover count does not name the leftovers.
+    ///
+    /// Naming what a feature supplies — the fix for `mcp  nothing` — made the
+    /// middle column as wide as its longest row, and `hooks` carries six of
+    /// omh's own. The third column aligns to that, so `skills  review-diff`
+    /// was followed by a hundred spaces before its parenthetical, which wraps
+    /// on any real terminal.
+    ///
+    /// `init` already says `(4 more in your catalogue)` with no names, and the
+    /// two reports should not word one fact two ways. What is *applicable* and
+    /// unselected is named on its own line below, by `notices`, which is the
+    /// half worth reading.
+    #[test]
+    fn the_leftover_count_does_not_name_the_leftovers() {
+        let report = Repo {
+            dir: "/r/.omh".into(),
+            settings: vec![],
+            features: vec![],
+            using: vec![Using {
+                capability: "hooks".into(),
+                selected: Some(vec!["rust-test".into()]),
+                unselected: vec!["go-test".into(), "python-test".into()],
+                from_a_feature: vec![],
+            }],
+            notices: vec![],
+        };
+        let human = emit(&report, Format::Human, &Palette::plain());
+        assert!(
+            human.contains("2 more in your catalogue"),
+            "the count is the fact worth carrying: {human}"
+        );
+        assert!(
+            !human.contains("go-test"),
+            "and the names are what made the row unreadable: {human}"
+        );
+    }
+
     /// What is in your catalogue is not what this repo declined.
     ///
     /// The parenthetical read `(4 not selected: go-format, go-test,
@@ -4471,7 +4517,7 @@ mod tests {
             .find(|l| l.trim_start().starts_with("mcp"))
             .unwrap_or_else(|| panic!("no mcp row: {human}"));
         assert!(
-            mcp.contains("codegraph") && mcp.contains("memory"),
+            mcp.contains("2 from omh's features"),
             "two servers are running here and the row said otherwise: {mcp:?}"
         );
         let skills = human

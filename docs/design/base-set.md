@@ -18,7 +18,7 @@ kind    = "mcp"                 # mcp | hook | rules
 feature = "codegraph"           # what it is part of; `[omh]` switches features, not entries
 since   = "2026.06"
 because = "structural queries instead of re-grepping the repo every task"
-remove  = "omh settings mcp rm codegraph — the feature, server and hooks together"
+remove  = "omh set codegraph off — the feature, its server and its hooks together…"
 command = "codebase-memory-mcp" # what init seeds; also the baseline `why` compares against
 
   [[entry.measured]]
@@ -48,7 +48,7 @@ So the feature is the unit that matters:
 
 | | |
 |---|---|
-| **removal** | `omh settings mcp rm codegraph` takes the server and its four hooks together. Before this it left them behind, nudging the agent toward something that was gone |
+| **removal** | `omh set codegraph off` takes the feature, its server and its hooks together. Before this it left them behind, nudging the agent toward something that was gone — and for a release the field named `omh settings mcp rm codegraph`, which removes the server alone and leaves the feature on. A test runs every `remove` command now and asserts the feature ends up off |
 | **disabling** | `[omh] codegraph = false` in `<repo>/.omh/settings.toml`. Per repo, and nothing is uninstalled — your `mcp.json` is untouched and the next repo gets it back |
 | **explaining** | `omh why graph-first` answers "part of codegraph"; `omh why codegraph` lists what it brought |
 

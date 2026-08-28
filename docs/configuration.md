@@ -485,12 +485,12 @@ omh's features
   memory      on
 
 using
-  rules      commit-style, tdd
-  skills     review-diff             (1 not selected: refactor)
-  mcp        everything
-  commands   everything
-  subagents  everything
-  hooks      rust-format, rust-test
+  rules      commit-style, tdd · +3 from omh's features
+  skills     review-diff                                      (1 more in your catalogue)
+  mcp        +2 from omh's features
+  commands   nothing
+  subagents  nothing
+  hooks      rust-format, rust-test · +6 from omh's features  (4 more in your catalogue)
 
 1 catalogue entry is not selected here: skills/refactor
 
@@ -646,7 +646,8 @@ The classification is a table in the binary, so a settings file cannot show it:
 $ omh why carry_in
 `carry_in` is a setting omh reads.
 
-  Files a session gets that git does not carry — see `src/carry.rs`.
+  Untracked files a session needs — a worktree holds tracked files only. The one
+  path by which a secret reaches the agent, so keep it short.
   takes  a TOML array of paths, e.g. [".env"]
   kept   /Users/you/proj/.omh/settings.local.toml (gitignored)
 
@@ -689,9 +690,10 @@ off" is a graph that quietly stops tracking the code.
 
 Disabling is not removal: your `mcp.json` is untouched, the server is left out
 of the document *this* session is given, and the next repo gets it back.
-**Removing the server is the other door** — `omh settings mcp rm codegraph` takes
-the feature with it, hooks and rules section included, because a hook nudging
-the agent toward a server that is gone is worse than no hook.
+**`omh set codegraph off` is the other door** — it takes the feature here,
+hooks and rules section included, because a hook nudging the agent toward a
+server that is gone is worse than no hook. `omh settings mcp rm codegraph` is a
+third: it takes the server out of your *catalogue*, for every repo.
 
 It layers like every other setting — this file, then
 `<repo>/.omh/settings.local.toml`, which `omh set` adds to `.omh/.gitignore`

@@ -386,7 +386,7 @@ removed s03 (2 commits, merged)
 
 [`base-set.md`](base-set.md) requires a measured cost, a stated benefit,
 alternatives, and a removal command before this ships as an entry. The removal
-command is `omh settings mcp rm memory`; the alternatives are in
+command is `omh set memory off`; the alternatives are in
 [the survey](memory-rationale.md#survey-what-already-exists).
 
 The measurement is **this repo's own history** as a question set — `EBUSY` on a
