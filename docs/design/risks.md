@@ -93,17 +93,42 @@ session entirely. A guard whose reach depends on the user's dotfiles is not a
 guard; `-F` pins it. The content half was always a literal pickaxe and was never
 affected.
 
-**4d. What the carried-secret scan still cannot see.** It works from *needles* —
-the lines of the files you carried in — and three kinds of line never become
-one. A file that is not UTF-8 yields **no needles at all**, so a carried
-keystore, `.p12` or DER key is protected only by its path: copy it under another
-name and nothing catches it, and `certs/` is the second example `carry_in`'s own
-documentation gives. A line shorter than 12 characters, or one starting with `#`
-or `//`, is dropped silently. And a carried file deleted or renamed in your
-checkout between launch and harvest yields nothing either, which is strictly
-worse than the rotation caveat already documented in the code: rotation leaves a
-needle at the new value, deletion leaves none. All three fail open, none is
-reported.
+**4d. What the carried-secret scan cannot see, it now says.** It works from
+*needles* — the lines of the files you carried in — and three kinds of line
+never become one. A file that is not UTF-8 yields **no needles at all**, so a
+carried keystore, `.p12` or DER key is protected only by its path: copy it under
+another name and nothing catches it, and `certs/` is the second example
+`carry_in`'s own documentation gives. A line shorter than 12 characters, or one
+starting with `#` or `//`, is dropped. And a carried file deleted or renamed in
+your checkout between launch and harvest yields nothing either, which is
+strictly worse than the rotation caveat already documented in the code:
+rotation leaves a needle at the new value, deletion leaves none.
+
+**Narrowed, not closed.** All three still fail open, and that is deliberate:
+refusing a harvest because omh could not read a file would be a worse trade
+than the gap. What changed is that they no longer fail *silent*. `Shadow::needles`
+returns what it could not read alongside what it could, and both moments report
+it — at launch, where you can still carry the file under a name the scan can
+read, and at harvest, where the count would otherwise be the same sentence
+whether omh had looked or not. Each file is named with its cause, directories
+resolve to the file inside them rather than to the entry, and the warning says
+the path check still stands so nobody reads it as *unguarded*:
+
+```console
+omh: the carried-file scan could not read these, so it cannot tell you whether
+     their contents reached a commit:
+    certs/deploy.p12 — it is not text, so there are no lines to search for
+    certs/short.env — every line in it is too short or is a comment
+  the path itself is still checked — what is not is a copy under another name
+```
+
+An empty carried file is deliberately not reported: it yields no needles like
+the other three, but there is nothing in it to have been copied anywhere, and a
+warning that fires on every empty `.env` placeholder is one nobody reads.
+
+What remains is the gap itself. A copy of `deploy.p12` under another name still
+reaches the branch unremarked — omh now tells you it cannot see that, rather
+than implying it looked.
 
 **4c. Closed.** The sandbox's exclude list was frozen at the first launch. omh
 derives what that repository must not track from the mounts it is about to

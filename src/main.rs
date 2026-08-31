@@ -5198,6 +5198,20 @@ fn carry_in(paths: &Paths, session: &Session, ctx: &out::Ctx) -> Result<()> {
             carry::Action::Unchanged => {}
         }
     }
+
+    // Said at launch as well as at harvest, because this is the moment the
+    // user can still do something about it — carry the file under a name the
+    // scan can read, or accept that its path is its only protection. By
+    // harvest the commits already exist.
+    //
+    // `Missing` is dropped here and only here: `Action::Missing` above says
+    // the same thing about the same path a few lines earlier, and one gap
+    // reported twice in one launch reads as two problems.
+    let unscannable: Vec<_> = shadow::unscannable(&paths.repo, &patterns)?
+        .into_iter()
+        .filter(|u| u.why != shadow::Unreadable::Missing)
+        .collect();
+    say_what_went_unscanned(&unscannable, ctx);
     Ok(())
 }
 
@@ -7953,6 +7967,17 @@ enum Landing<'a> {
     },
 }
 
+/// Say which carried files the content scan could not read.
+///
+/// A thin wrapper over `shadow::unscanned_warning` so the wording lives beside
+/// the type that produces it rather than here — see that function for why
+/// there is only one copy of this sentence.
+fn say_what_went_unscanned(unscanned: &[shadow::Unscanned], ctx: &out::Ctx) {
+    if let Some(msg) = shadow::unscanned_warning(unscanned) {
+        ctx.warn(&msg);
+    }
+}
+
 fn commit(
     cwd: &std::path::Path,
     id: Option<&str>,
@@ -8000,7 +8025,13 @@ fn commit(
                 shadow::Keep::These(ids) => Some(ids.len()),
                 _ => None,
             };
-            let landed = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, keep)?;
+            let harvest = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, keep)?;
+            let landed = harvest.landed;
+            // Said before the count, not after. This is the sentence that stops
+            // "nothing carried reached the branch" from being read as "every
+            // carried file was checked", and a caveat printed under the result
+            // it qualifies is one people skip.
+            say_what_went_unscanned(&harvest.unscanned, ctx);
             // Named four, landed three. git drops a commit whose patch is already
             // on the branch — measured, it says `patch contents already upstream`
             // on stderr and exits 0, and the helper that runs it keeps only stdout
@@ -10458,7 +10489,8 @@ mod tests {
                 &[],
                 shadow::Keep::All,
             )
-            .unwrap();
+            .unwrap()
+            .landed;
         let on_branch = repo_git(&["log", "--format=%s", &format!("{onto}..omh/s01")]);
         assert!(landed > 0, "the harvest took something: {on_branch}");
         assert!(
