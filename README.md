@@ -485,7 +485,7 @@ drops a session branch only when it has no commits.
 ## Contributing
 
 ```console
-$ cargo test -- --include-ignored   # the ignored set needs a container runtime
+$ ./scripts/check.sh --all         # format, lints, suite — `--all` needs a container runtime
 $ omh doctor                       # the only thing that verifies an adapter
 ```
 

@@ -7,6 +7,13 @@
 #
 # rustup reads this file. A Homebrew or distro-packaged rust ignores it, so if
 # `rustc --version` disagrees with the channel below, that is why.
+#
+# Which means this pin is not the fix, and saying so cost a while: a pin only
+# binds the tool that agreed to be bound, and the machine where the incident
+# above happened has no rustup at all. `scripts/check.sh` is the fix — it
+# compares the rustc clippy was built against with the rustc you have and
+# refuses when they differ, so the absent lint is loud instead of silent. Run
+# it rather than `cargo clippy`; `scripts/test-check.sh` covers it.
 
 [toolchain]
 channel = "stable"

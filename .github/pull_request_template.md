@@ -9,9 +9,10 @@ it was earned by a bug that shipped.
 
 ## Checklist
 
-- [ ] `cargo test`
-- [ ] `cargo fmt`
-- [ ] `cargo clippy --all-targets -- -D warnings`
+- [ ] `./scripts/check.sh` — format, lints and the suite. Run this rather than
+      `cargo clippy`: it first checks that the clippy answering you was built
+      against the rustc you have, because a stale shim refuses on the crate's
+      `rust-version` and prints a dependency wall instead of a lint.
 - [ ] `omh doctor` — **required if you touched an adapter, an image, or a mount.**
       `cargo test` passing tells you nothing about those; they assert facts
       about external software and break silently.
