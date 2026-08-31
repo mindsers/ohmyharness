@@ -220,6 +220,7 @@ omh memory [remember|stale|lint|rm|promote] …
                                   notes that outlive a session
 omh import <capability> <harness>
                                   bring a setup you already have into omh
+omh eject <harness> --to <dir>    write out the raw config and step aside
 ```
 
 ### Sessions

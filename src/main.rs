@@ -242,6 +242,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 cmd::inspect::info(&cwd, ctx)
             }
         }
+        Cmd::Eject { harness, to } => cmd::eject::eject(&cwd, harness, to, cli.dry_run, ctx),
         Cmd::Doctor { harness } => {
             cmd::inspect::doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx)
         }
@@ -1540,11 +1541,11 @@ mod tests {
         // loud, and a shape leaving one page while another gains lines is
         // loud — none of which a total or a floor can say.
         let expected: std::collections::BTreeMap<String, usize> = [
-            ("README.md", 54),
+            ("README.md", 55),
             ("accounts.md", 4),
             ("adapters.md", 1),
             ("code-graph.md", 1),
-            ("commands.md", 121),
+            ("commands.md", 125),
             ("configuration.md", 42),
             ("decisions.md", 1),
             ("editors.md", 4),

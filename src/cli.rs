@@ -327,6 +327,23 @@ pub(crate) enum Cmd {
         #[command(subcommand)]
         cmd: Option<MemoryCmd>,
     },
+    /// Write out this repo's config for a harness, and step aside.
+    ///
+    /// The exit. Everything omh renders on a launch, written as ordinary
+    /// files a harness reads without a container — so leaving omh is a
+    /// command rather than an afternoon of reconstruction, and adopting it is
+    /// a default rather than a cage.
+    Eject {
+        /// Which harness's shapes to render into.
+        harness: String,
+        /// Where to write. Deliberately required and deliberately not the
+        /// checkout: eject exists to *show* you the files, and writing them
+        /// over a working tree by default is how a command meant to reassure
+        /// people becomes one they are afraid of.
+        #[arg(long)]
+        to: std::path::PathBuf,
+    },
+
     /// Bring a setup you already have into omh.
     Import {
         /// What to bring over: `hooks`, `skills`, `mcp`, `rules`.
@@ -848,6 +865,9 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
         | Cmd::Use { .. }
         | Cmd::Unuse { .. }
         | Cmd::Import { .. }
+        // Its whole effect is writing a directory tree, so it is exactly the
+        // shape of command that has to answer this rather than refuse it.
+        | Cmd::Eject { .. }
         | Cmd::New { .. }
         | Cmd::Doctor { .. } => true,
         Cmd::Settings { cmd } => !matches!(cmd, Some(SettingsCmd::Edit { .. })),
@@ -894,6 +914,7 @@ pub(crate) fn consumes_session(cmd: &Cmd) -> bool {
         | Cmd::Use { .. }
         | Cmd::Unuse { .. }
         | Cmd::Import { .. }
+        | Cmd::Eject { .. }
         // A fresh session's id is generated, so there is nothing for a named
         // one to mean. A global `--new` used to refuse the same contradiction,
         // but only when the session was spelled `--session`: clap checks

@@ -4989,3 +4989,118 @@ mod tests {
         );
     }
 }
+
+/// What `omh eject` wrote, and what it could not.
+///
+/// The point of the report is the last line rather than the list: a command
+/// whose purpose is *you can leave* has to end by saying that the files are
+/// yours and omh is no longer in the path. Listing what it wrote is how that
+/// claim is checkable.
+#[derive(Debug, Clone)]
+pub struct Ejected {
+    pub harness: String,
+    pub to: String,
+    pub wrote: Vec<EjectedFile>,
+    /// Capabilities this harness has no binding for. Named, because a reader
+    /// comparing the output to their omh setup will otherwise assume omh lost
+    /// something — an absent key means the harness cannot do that thing.
+    pub dropped: Vec<String>,
+    /// Files that still name a path only omh's sandbox has. Reported rather
+    /// than rewritten: omh cannot know where you want your notes, and a guess
+    /// written into a file you are about to depend on is worse than being
+    /// told to look.
+    pub sandboxed: Vec<String>,
+    pub dry_run: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct EjectedFile {
+    pub capability: String,
+    pub at: String,
+    /// How many entries a directory received. `1` for a single document.
+    pub entries: usize,
+}
+
+impl Report for Ejected {
+    fn human(&self, p: &out::Palette) -> String {
+        let mut s = format!(
+            "{} {}\n",
+            p.paint(out::HEAD, &format!("eject {}", self.harness)),
+            p.paint(out::DIM, &self.to)
+        );
+        s.push('\n');
+
+        if self.wrote.is_empty() {
+            s.push_str(&out::nothing(p, "nothing to write"));
+            return s;
+        }
+
+        let mut t = Table::new();
+        for f in &self.wrote {
+            t = t.row(vec![
+                Cell::styled(&f.capability, out::NAME),
+                Cell::plain(&f.at),
+                Cell::styled(
+                    &match f.entries {
+                        1 => String::new(),
+                        n => format!("{n} entries"),
+                    },
+                    out::DIM,
+                ),
+            ]);
+        }
+        s.push_str(&t.render(p));
+
+        if !self.dropped.is_empty() {
+            s.push('\n');
+            s.push_str(&out::hint(
+                p,
+                &format!(
+                    "  {} has no binding for {} — nothing was lost, that harness \
+                     cannot read it",
+                    self.harness,
+                    self.dropped.join(", ")
+                ),
+            ));
+        }
+
+        if !self.sandboxed.is_empty() {
+            s.push('\n');
+            s.push_str(&out::warning(
+                p,
+                &format!(
+                    "these still name paths only omh's sandbox has — `/omh`, `/work`, \
+                     `$OMH_*` — so they need editing before a harness reads them \
+                     outside one:\n    {}",
+                    self.sandboxed.join("\n    ")
+                ),
+            ));
+        }
+
+        s.push('\n');
+        s.push_str(&out::hint(
+            p,
+            match self.dry_run {
+                true => "  --dry-run: rendered, nothing written",
+                // The whole reason the command exists, said plainly.
+                false => "  these are yours now — omh is not in the path",
+            },
+        ));
+        s
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "harness": self.harness,
+            "to": self.to,
+            "wrote": self.wrote.iter().map(|f| json!({
+                "capability": f.capability,
+                "at": f.at,
+                "entries": f.entries,
+            })).collect::<Vec<_>>(),
+            "dropped": self.dropped,
+            "sandboxed": self.sandboxed,
+            "dry_run": self.dry_run,
+        })
+    }
+}

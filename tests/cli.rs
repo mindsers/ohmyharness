@@ -7604,3 +7604,167 @@ fn a_build_asks_docker_to_remove_the_tags_it_replaced() {
         "a container still references it: {removals:?}"
     );
 }
+
+// ── omh eject ───────────────────────────────────────────────────────────────
+
+/// The exit. Write out the raw per-harness config and step aside.
+///
+/// For an opinionated tool, a credible exit is what makes adoption safe: you
+/// are handing omh your rules, your credentials and your sandbox policy, and
+/// being able to leave with all of it is the difference between a default and
+/// a cage. It is also nearly free, because omh already renders exactly these
+/// files on every launch — the only new thing is writing them somewhere a
+/// harness can read without a container.
+///
+/// Asserted **by capability**, not against a list of filenames. The point is
+/// that everything the profile carries comes out; which file each harness
+/// wants is the adapter's business and changes without this test being wrong.
+#[test]
+fn eject_writes_what_each_capability_renders_to() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::create_dir_all(sb.home.join(".omh/skills/refactor")).unwrap();
+    std::fs::write(sb.home.join(".omh/skills/refactor/SKILL.md"), "how\n").unwrap();
+    std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n\nBe careful.\n").unwrap();
+    // A server in the catalogue, because the profile has to actually *carry*
+    // each capability for "everything it carries comes out" to mean anything.
+    // Without this the mcp assertion below passes or fails on whether the
+    // fixture happens to have one, which is not the property under test.
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"demo":{"command":"demo-server"}}}"#,
+    )
+    .unwrap();
+
+    let out = sb.repo.join("ejected");
+    let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
+    assert!(
+        ran.status.success(),
+        "eject failed: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let wrote = |name: &str| {
+        fn walk(at: &Path, into: &mut Vec<String>) {
+            for e in std::fs::read_dir(at).into_iter().flatten().flatten() {
+                if e.path().is_dir() {
+                    walk(&e.path(), into);
+                } else {
+                    into.push(e.path().display().to_string());
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(&out, &mut found);
+        found.iter().any(|p| p.contains(name))
+    };
+
+    // The project's own rules reach the harness — the capability omh exists to
+    // get right, and the one a hand-rolled setup most often loses.
+    assert!(wrote("CLAUDE.md"), "rules: {:?}", std::fs::read_dir(&out));
+    assert!(wrote("SKILL.md"), "skills came out as real files");
+    assert!(wrote(".mcp.json"), "mcp servers were rendered");
+
+    // And it says what it did, naming the directory, because a command whose
+    // whole purpose is "you can leave" has to show you what you are leaving
+    // with.
+    let said = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        said.contains("ejected") || said.contains(out.file_name().unwrap().to_str().unwrap()),
+        "it has to say where the files went: {said}"
+    );
+}
+
+/// `--dry-run` runs everything and writes nothing.
+///
+/// The 0.7.0 rule: a command either answers the flag or refuses it, and one
+/// whose entire effect is writing a directory tree has to answer it. The
+/// rendering still happens, so a malformed document is reported here rather
+/// than deferred to the run that meant it.
+#[test]
+fn eject_writes_nothing_on_a_dry_run() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n").unwrap();
+
+    let out = sb.repo.join("ejected");
+    let ran = sb.omh(&[
+        "eject",
+        "claude",
+        "--to",
+        out.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert!(
+        ran.status.success(),
+        "a dry run still succeeds: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        !out.exists() || std::fs::read_dir(&out).into_iter().flatten().count() == 0,
+        "a dry run wrote files: {:?}",
+        std::fs::read_dir(&out).map(|d| d.count())
+    );
+}
+
+/// A harness omh has no adapter for is refused by name.
+///
+/// The same rule every other harness-taking command follows: a name omh
+/// cannot answer for is an error that says which name, not a silent empty
+/// directory the user discovers is useless three commands later.
+#[test]
+fn eject_refuses_a_harness_it_has_no_adapter_for() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base"]);
+
+    let out = sb.repo.join("ejected");
+    let ran = sb.omh(&["eject", "nosuch", "--to", out.to_str().unwrap()]);
+    assert!(!ran.status.success(), "an unknown harness must be refused");
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert!(said.contains("nosuch"), "and named: {said}");
+    assert!(!out.exists(), "and nothing written for it");
+}
+
+/// Ejected documents that name sandbox paths say so.
+///
+/// The uncomfortable half of the exit, and the half that makes it honest.
+/// omh renders these documents for a container: the memory server is invoked
+/// with `--local /omh/notes/local`, hooks reference `$OMH_GRAPH_PROJECT`, and
+/// rules point at `/work`. None of those exist on a host. Handing somebody a
+/// directory and saying *these are yours now* while several of the files
+/// silently do not work is the exact shape of failure this release spent
+/// itself closing — a thing that cannot be relied on, spelled the same as a
+/// thing that can.
+///
+/// Not rewritten, because omh cannot know where you want your notes or
+/// whether you will run the harness in a container of your own. Named, so the
+/// decision is yours and you know it is there to make.
+#[test]
+fn eject_names_the_files_that_still_point_into_a_sandbox() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"demo":{"command":"demo","args":["--at","/omh/notes/local"]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n").unwrap();
+
+    let out = sb.repo.join("ejected");
+    let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
+    assert!(
+        ran.status.success(),
+        "eject failed: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let said = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        said.contains(".mcp.json"),
+        "the file holding a sandbox path has to be named: {said}"
+    );
+    assert!(
+        said.contains("/omh") || said.contains("sandbox"),
+        "and the reason given: {said}"
+    );
+}

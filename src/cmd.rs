@@ -17,6 +17,7 @@
 
 pub mod auth;
 pub mod catalogue;
+pub mod eject;
 pub mod harvest;
 pub mod init;
 pub mod inspect;
