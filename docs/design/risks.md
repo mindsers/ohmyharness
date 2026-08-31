@@ -1,5 +1,7 @@
 # Risks
 
+**Status: current, and deliberately not tidied.** Closed risks stay on the page struck through, with the pull request that closed them, because a risk that vanishes teaches nobody what it cost.
+
 Stated plainly, because a tool that asks for your credentials and runs an agent
 against your code should not make you go looking.
 
@@ -139,8 +141,25 @@ tracked nor excluded, so the agent's own `git add -A` swept omh's rendered file 
 MCP environment included — into a history `omh s commit --keep` replays onto your
 branch. The list is rewritten on every launch now, which touches no commit.
 
-**5. Egress is unrestricted.** The allowlist is designed and not wired. An agent
-in a session can reach the network freely.
+**5. Egress is unrestricted, and on Docker that is the design.** An agent in a
+session can reach the network freely.
+
+This page used to read *"the allowlist is designed and not wired"*, which
+implied an omh feature somebody had failed to finish.
+[Decisions](decisions.md) has recorded egress as **inherited from the runtime**
+throughout, and [architecture](architecture.md#runtime-backends) puts egress
+policy in the `sbx` backend beside its keychain-backed credential injection.
+Those two were right and this one was out of step — worth naming, because a
+risk page that misattributes a gap sends the reader looking for the wrong fix.
+
+So it is not on omh's list to wire. It arrives with a backend that has it, or
+it does not arrive. That also means it shares a fix with **risk 1** — `sbx`
+injects secrets at the egress proxy, so the agent never holds its own token —
+and the two are one piece of work rather than two, gated on the
+[v0.5 spike](roadmap.md).
+
+Until then: a Docker session has unrestricted egress, and omh does not claim
+otherwise.
 
 **5b. `refs/omh/turn` is a place the guards do not look.** The sandbox's gitdir
 is a read-write mount, and since 2026.08 three of omh's own queries skip that

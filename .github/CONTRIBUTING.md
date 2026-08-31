@@ -23,6 +23,19 @@ Four more used to be ignored because they shell out to git, which could not run
 inside an omh sandbox. That stopped being true in 2026.08 — see
 [adoption](../docs/design/adoption.md) — and they run with everything else now.
 
+## Proposing a base-set entry
+
+omh's opinion is [data, not code](../docs/design/base-set.md), and
+[what an entry has to say](../docs/design/base-set.md#proposing-an-entry) is
+the bar for adding to it. Four fields, enforced by a test rather than by
+review: what it buys, what it costs, what was considered instead, and how to
+remove it.
+
+Curation is the part of a distribution that never finishes, and
+[risks](../docs/design/risks.md) names a solo one as the thing most likely to
+kill this project. That standard already exists in the build — publishing it
+is what turns proposing an entry into something anybody can do.
+
 ## Read this first
 
 **Adapters assert facts about external software**, and those facts break

@@ -1,6 +1,6 @@
 # Git
 
-**Built, in 0.6.0.** This page is the design for what goes *around* the worktree
+**Status: built, in 0.6.0.** This page is the design for what goes *around* the worktree
 model and the sandbox's own repository: the loop a developer works in, and the
 way several sandboxes of one repo are reached from one place. All twelve steps
 in [Order](#order) have landed — each names the pull request that did it, and

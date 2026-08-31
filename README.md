@@ -1,6 +1,6 @@
-# omh — oh-my-zsh for agentic coding
+# omh — the safe way to run an agent against your repo
 
-> Launch any coding harness, in a sandbox, with your setup already there.
+> A sandboxed session, your setup already in it, and a branch you can review.
 
 [![verify](https://github.com/mindsers/ohmyharness/actions/workflows/ci.yml/badge.svg)](https://github.com/mindsers/ohmyharness/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/mindsers/ohmyharness)](https://github.com/mindsers/ohmyharness/releases)
@@ -13,15 +13,21 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early.** `0.7.0`, one harness verified end to end. This release is the
-command surface: a bare word is no longer a harness, so nothing you install can
-shadow a command; scope lives in the verb rather than in a flag you have to
-remember; `omh init` reports what it did to your repo instead of what your
-machine already had; and `--dry-run` runs everything and writes nothing, on
-every command that can answer it. Useful today if you want a sandboxed agent
-with your config in it; not yet the finished distribution [the docs](docs/)
-describe — [What isn't done](#what-isnt-done) is a real list, not a modesty
-ritual.
+**Status: early, and one harness deep.** `0.8.0`. **Claude Code is the only
+harness anyone has done real work through.** `opencode` and `omp` pass
+`omh doctor`, which proves their paths are right and nothing whatever about
+their behaviour — so *declare once, switch harness* is the shape the
+architecture is built for and not yet a thing anybody has done.
+
+What is verified is the loop below: a sandboxed session with your config
+already inside it, and a branch you can read before it touches your checkout.
+This release closes the two silent failures that would have got worse with
+every user — two checkouts of the same name no longer share sessions, and the
+carried-file scan now says what it could not read — and adds
+[`omh eject`](docs/commands.md#omh-eject-harness---to-dir), which writes the
+config out and steps aside.
+
+[What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
 
 ---
 
@@ -64,9 +70,13 @@ to land a file that still holds them. An agent that commits nothing leaves a
 timeline anyway: omh photographs the worktree at the end of every turn, and
 `omh s01 log --turns` reads them back.
 
-**Your setup, in any harness.** Rules, skills, MCP servers, commands, subagents
-and hooks are declared once and rendered into whatever shape each harness reads.
-Switch from Claude Code to opencode and everything follows.
+**Your setup, declared once.** Rules, skills, MCP servers, commands, subagents
+and hooks live in one place and are rendered into whatever shape each harness
+reads — a harness is a TOML file, not a code change. Whether that survives
+switching harness is the claim this project has not yet earned: `opencode` and
+`omp` render and pass `omh doctor`, and nobody has worked in them. Believe the
+part you can check, which is that your setup is in one place and
+[`omh eject`](docs/commands.md#omh-eject-harness---to-dir) hands it back.
 
 **A code graph that is current and actually used.** Indexed per session,
 refreshed after every turn (0.14s), with hooks that point the agent at it when
@@ -192,10 +202,23 @@ The ecosystem's answer has been catalogues: [23,600+ skills and 12,700+ MCP
 servers](https://claudemarketplaces.com/). That is a **problem statement**, not
 an opinion. Nobody can evaluate 23,600 of anything.
 
-omh is a **distribution**. Debian didn't write the kernel; oh-my-zsh didn't write
-zsh — their genius was that installing them gave you a good system *immediately*.
-The value is curation, integration and defaults, and the metric is **decisions
-removed**, targeting zero.
+## Where this is going
+
+omh is built to be a **distribution**. Debian didn't write the kernel;
+oh-my-zsh didn't write zsh — their genius was that installing them gave you a
+good system *immediately*. The value is curation, integration and defaults,
+and the metric is **decisions removed**, targeting zero.
+
+That is the intent, and it is why the architecture looks the way it does:
+adapters are data so a harness is a TOML file, the base set is a versioned
+manifest so `omh why` and `omh init` cannot disagree, and every entry has to
+say what it costs. **It is not yet a description of what you get.** The
+curated set is eleven entries across three features, with five rejections
+recorded beside them, and one person picks all of it —
+[risks](docs/design/risks.md) names that, rather than any technical problem,
+as the thing most likely to kill this project. The submission
+standard is [published](docs/design/base-set.md#proposing-an-entry) so it does
+not have to stay that way.
 
 ## Commands
 
@@ -472,9 +495,8 @@ whether anything reads it. That gap is what `doctor` closes.
 |---|---|
 | **Memory** | mostly [built](docs/commands.md#omh-memory-) — the store, its schemas, retrieval, the team layer and `remember` / `recall` as MCP tools all ship. What remains is hub pages, whose lint needs a threshold the design refuses to let anyone guess. |
 | **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
-| **`omh eject`** | a credible exit: write out the raw per-harness config and step aside. |
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |
-| **Egress allowlist** | designed, not wired. |
+| **Egress allowlist** | **unrestricted by design on Docker.** Egress policy is the backend's, not omh's — [decisions](docs/design/decisions.md) has recorded it as inherited from the runtime throughout, and `sbx` carries it. It arrives with that backend or not at all, together with the credential weakness it shares a fix with. |
 | **`--dry-run` everywhere** | it runs everything and writes nothing on the commands that can answer it. `init` and the session verbs refuse the flag instead — each has to compute what it *would* do, and a preview that guessed would be worse than none. |
 | **Other harnesses** | `opencode` and `omp` pass `doctor`, but only `claude` has been driven for real work. |
 
@@ -491,7 +513,9 @@ $ omh doctor                       # the only thing that verifies an adapter
 ```
 
 Two rules do most of the work, and [`CONTRIBUTING.md`](.github/CONTRIBUTING.md)
-has the rest with the invariant list. **[TDD,
+has the rest with the invariant list. To propose something for the base set,
+[what an entry has to say](docs/design/base-set.md#proposing-an-entry) is the
+bar — four fields, enforced by the build rather than by review. **[TDD,
 always](.github/CONTRIBUTING.md#tdd-always)** — a green suite is not evidence on
 its own, so a bug fix's test goes red before the fix lands. And **adapters
 assert facts about external software**: almost every bug this project has

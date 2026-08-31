@@ -1,5 +1,7 @@
 # Trust
 
+**Status: built, except cost accounting.** `omh why` ships and answers for what omh installed, what it rejected and what you added, and [`omh eject`](../commands.md#omh-eject-harness---to-dir) ships as of 0.8.0. What does not is the rollup that would measure what the whole set injects — the one thing here that would give the base set a reason to shrink.
+
 The standard complaint about oh-my-zsh is opacity: a slow shell nobody can
 diagnose. *"Without the hassle of understanding"* curdles into *"unable to
 understand."*

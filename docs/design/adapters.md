@@ -1,5 +1,7 @@
 # Adapters
 
+**Status: built.** Adapters are data and three ship — `claude`, `opencode`, `omp`. Only `claude` has been driven for real work; the other two pass `omh doctor`, which proves their paths and nothing about their behaviour.
+
 A harness is a TOML file, not a code change. So is an editor.
 
 ## Capabilities are optional keys

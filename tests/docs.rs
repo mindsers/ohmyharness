@@ -313,3 +313,54 @@ fn the_readme_points_into_the_docs_tree() {
         "README should route readers into docs/"
     );
 }
+
+/// Every design page opens by saying whether it describes something built.
+///
+/// These pages are the project's memory: most record something that was
+/// tried, what it cost, and what was decided. That makes them worth keeping
+/// and also makes them dangerous, because a page describing a design reads
+/// exactly like a page describing a system — and the difference is the whole
+/// value of reading one.
+///
+/// `adoption.md` had opened `**Status: built.**` for a while and nothing else
+/// did, in three different spellings between them. A convention the build does
+/// not check is one that decays: the pages that drift are the ones nobody is
+/// editing, which are also the ones most likely to be describing something
+/// that changed underneath them.
+///
+/// The rule is deliberately weak about *content* and strict about
+/// *presence*. It cannot tell whether "built" is true — nothing can, from
+/// here — only that somebody was made to answer the question when they added
+/// the page.
+#[test]
+fn every_design_page_states_its_status() {
+    let dir = repo().join("docs/design");
+    let mut silent = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "md") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).unwrap();
+        // Near the top, or it is not a status — a sentence about state
+        // buried on line 200 is prose, and the reader who needed it has
+        // already believed the page.
+        let stated = body.lines().take(10).any(|l| {
+            l.trim_start()
+                .trim_start_matches("> ")
+                .starts_with("**Status:")
+        });
+        if !stated {
+            silent.push(path.file_name().unwrap().to_string_lossy().to_string());
+        }
+    }
+    silent.sort();
+    assert!(
+        silent.is_empty(),
+        "these design pages do not say whether they describe something built, \
+         so a reader cannot tell a design from a system:\n  {}\n\nOpen with a \
+         line like `**Status: built.**` or `**Status: designed, not wired.**` \
+         in the first ten lines.",
+        silent.join("\n  ")
+    );
+}
