@@ -201,12 +201,7 @@ pub fn build(
         .args([
             "sh",
             "-c",
-            &format!(
-                "cp -r /src/src /src/Cargo.toml /src/Cargo.lock /build/ 2>/dev/null; \
-                 cd /build && cargo build --release --locked \
-                 && cp \"$CARGO_TARGET_DIR\"/release/omh /out/{}",
-                out.file_name().unwrap().to_string_lossy()
-            ),
+            &build_script(&out.file_name().unwrap().to_string_lossy()),
         ])
         .status()
         .with_context(|| format!("running {program} for the cross-build"))?;
@@ -216,6 +211,45 @@ pub fn build(
     }
     let _ = target; // named for the error message above, not passed to cargo
     Ok(())
+}
+
+/// The shell the cross-build runs inside the container.
+///
+/// A function rather than a `format!` at the call site for `image::digest_command`'s
+/// reason: a test can read what will actually run, and the thing that broke
+/// here was not a decision the planner made but a literal in the command
+/// nothing could see.
+/// What the container needs is **derived**, not listed. A literal list is
+/// exactly what went stale: `build.rs` was added to the repo and not to the
+/// list, and `bundled::ALL` is the same set `build.rs` itself walks — so a
+/// seventh shipped directory arrives here without anybody remembering it.
+///
+/// `set -e` and no `2>/dev/null`: a copy that cannot find a file says which,
+/// and stops. Swallowing it is what turned one missing path into a compile
+/// error five steps away that read as a bug in cargo.
+fn build_script(out_name: &str) -> String {
+    let mut sources = vec![
+        "/src/src".to_string(),
+        "/src/Cargo.toml".to_string(),
+        "/src/Cargo.lock".to_string(),
+        // Without it cargo runs no build script, sets no `OUT_DIR`, and
+        // `bundled.rs`'s `include!` does not compile.
+        "/src/build.rs".to_string(),
+    ];
+    // The data `build.rs` reads at compile time. It panics naming the
+    // directory if one is unreadable, which is the right failure — but only
+    // once the directory is there to be read.
+    sources.extend(
+        crate::bundled::ALL
+            .iter()
+            .map(|kind| format!("/src/{}", kind.dir())),
+    );
+    format!(
+        "set -e; cp -r {} /build/; \
+         cd /build && cargo build --release --locked \
+         && cp \"$CARGO_TARGET_DIR\"/release/omh /out/{out_name}",
+        sources.join(" ")
+    )
 }
 
 fn docker_arch(arch: &str) -> &str {
@@ -231,6 +265,68 @@ mod tests {
 
     const NEVER: &dyn Fn(&Path) -> bool = &|_: &Path| false;
     const ALWAYS: &dyn Fn(&Path) -> bool = &|_: &Path| true;
+
+    /// The cross-build copies in everything a build of omh needs.
+    ///
+    /// It did not, and had not since 2026-08-11. The copy list was written on
+    /// 2026-08-10 (#3) naming `src`, `Cargo.toml` and `Cargo.lock`; `build.rs`
+    /// arrived the next day (#7) and nothing updated it. Without the build
+    /// script cargo sets no `OUT_DIR`, so `bundled.rs`'s `include!` fails to
+    /// compile and the run dies in a wall of `cannot find Shipped in bundled`
+    /// — five steps downstream of the missing file, because `2>/dev/null` on
+    /// the `cp` swallowed the only message that named it.
+    ///
+    /// It went unseen for three weeks because a cached `omh-linux-aarch64`
+    /// from 2026-08-08 predates the breakage: any machine holding one skips
+    /// the build. A new macOS user has no cache, and this is the memory
+    /// server's delivery — so it was the *first* `omh new` that failed.
+    ///
+    /// **Derived from `bundled::ALL` rather than listed.** A literal list is
+    /// what broke, and a test asserting a literal list would have to be
+    /// remembered in the same breath as the fix it guards. A seventh shipped
+    /// directory now fails this test until the cross-build carries it.
+    ///
+    /// Every test in this module asserted `plan_delivery`'s decision — which
+    /// mode, which cache path, which error. None read the command, and the
+    /// defect was entirely inside it: the shape the 0.7.0 retrospective names,
+    /// where the suite asserts what the code returns and the bug is in what
+    /// the command does.
+    #[test]
+    fn the_cross_build_copies_in_everything_a_build_needs() {
+        let script = build_script("omh-linux-aarch64");
+
+        // Without this, no build script runs and `OUT_DIR` is never set.
+        assert!(
+            script.contains("/src/build.rs"),
+            "the build script itself has to reach the container: {script}"
+        );
+        for kind in crate::bundled::ALL {
+            assert!(
+                script.contains(&format!("/src/{}", kind.dir())),
+                "build.rs reads {}/ and panics without it: {script}",
+                kind.dir()
+            );
+        }
+        // The manifest, lockfile and sources were always there; asserted so a
+        // rewrite of the copy cannot drop one while adding the others.
+        for needed in ["/src/src", "/src/Cargo.toml", "/src/Cargo.lock"] {
+            assert!(script.contains(needed), "{needed} is missing: {script}");
+        }
+    }
+
+    /// A missing source is a message, not a compile error five steps later.
+    ///
+    /// `2>/dev/null` is why the real failure read as a compiler bug. The copy
+    /// either succeeds or says which path it could not find, and `set -e`
+    /// stops there rather than compiling a tree that is missing a file.
+    #[test]
+    fn the_cross_build_does_not_hide_a_failed_copy() {
+        let script = build_script("omh-linux-aarch64");
+        assert!(
+            !script.contains("2>/dev/null"),
+            "a swallowed cp error is what made this take a week to find: {script}"
+        );
+    }
 
     /// On Linux the running binary already *is* the thing the sandbox needs.
     /// Cross-building there would be a container spun up to produce a copy of
