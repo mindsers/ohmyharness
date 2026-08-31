@@ -156,19 +156,46 @@ fn say_if_the_template_was_renamed(cwd: &std::path::Path, ctx: &out::Ctx) {
 /// stop the command they typed. Both are reported and stepped over — though a
 /// refusal is a warning, because the state it names stays invisible to every
 /// command until it is dealt with.
+/// The sentence for state under the old key that nothing will read again.
+///
+/// One function because two arms say it: a run where nothing could move, and
+/// a run where something else did. The second used to say nothing at all.
+fn say_what_was_stranded(paths: &Paths, from: &str, kinds: &[String]) -> String {
+    format!(
+        "this checkout's {} under `{from}` are from before omh keyed them by checkout, \
+         and it already has newer ones — so nothing reads them now. omh will not merge \
+         two sets of sessions together; they are in {}, to keep or delete by hand",
+        kinds.join(", "),
+        paths.root.display()
+    )
+}
+
 fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
     let Ok(paths) = Paths::discover(cwd) else {
         return;
     };
     // Sessions under the *old* key, since those are what would be moved. A
-    // runtime that cannot be asked counts as running: this is the check that
-    // stops a live container's mounts being renamed underneath it, and
+    // runtime that cannot be asked counts as **running**: this is the check
+    // that stops a live container's mounts being renamed underneath it, and
     // "cannot tell" must not spell the same as "no".
-    let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
+    //
+    // Both halves of that, and the first version only had one. The inner
+    // `!matches!(…, Running::No)` was right — `Running::Unknown` counts as
+    // running. But the backend itself was resolved with `.ok()` and read
+    // through `is_some_and`, so *no runtime at all* — Docker's CLI missing
+    // from a GUI-launched shell's PATH, a typo'd `runtime =` — came back
+    // `false`, meaning not running, and the rename went ahead over live
+    // mounts. `is_none_or` is the fix, and it is one word.
+    //
+    // Resolved **inside** the closure, which is only called when `migrate`
+    // has something pending. `runtime::select` shells out to `command -v`
+    // once per candidate, and `auto` has two — so eagerly, every `omh info`
+    // and `omh why` forked two shells to answer a question almost no run asks.
     let running = |legacy: &str| {
         let dir = paths.root.join("worktrees").join(legacy);
+        let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
         session::list(&dir).into_iter().any(|id| {
-            backend.as_ref().is_some_and(|b| {
+            backend.as_ref().is_none_or(|b| {
                 !matches!(
                     image::container_running(b.as_ref(), &format!("omh-{legacy}-{id}")),
                     image::Running::No
@@ -179,19 +206,28 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
 
     match profile::migrate(&paths, &running) {
         Ok(profile::Migration::NothingToDo) => {}
-        Ok(profile::Migration::Moved { from, kinds }) => ctx.progress(&format!(
-            "moved this checkout's {} off `{from}` — keyed by checkout now, so two \
-             projects of the same name no longer share them",
-            kinds.join(", ")
-        )),
-        Ok(profile::Migration::Stranded { from, kinds }) => ctx.warn(&format!(
-            "this checkout's {} under `{from}` are from before omh keyed them by \
-             checkout, and it already has newer ones — so nothing reads them now. \
-             omh will not merge two sets of sessions together; they are in \
-             {}, to keep or delete by hand",
-            kinds.join(", "),
-            paths.root.display()
-        )),
+        Ok(profile::Migration::Moved {
+            from,
+            kinds,
+            stranded,
+        }) => {
+            // `warn`, not `progress`. `progress` is suppressed under `--json`
+            // — correctly, for a launcher narrating a routine step — and this
+            // renamed six directories of the user's state, once, irreversibly.
+            // It was the only arm of this match that a scripted consumer
+            // could not see.
+            ctx.warn(&format!(
+                "moved this checkout's {} off `{from}` — keyed by checkout now, so two \
+                 projects of the same name no longer share them",
+                kinds.join(", ")
+            ));
+            if !stranded.is_empty() {
+                ctx.warn(&say_what_was_stranded(&paths, &from, &stranded));
+            }
+        }
+        Ok(profile::Migration::Stranded { from, kinds }) => {
+            ctx.warn(&say_what_was_stranded(&paths, &from, &kinds))
+        }
         Ok(profile::Migration::Refused(why)) => ctx.warn(&why),
         Err(e) => ctx.warn(&format!(
             "omh could not move this checkout's state off its old location, so \

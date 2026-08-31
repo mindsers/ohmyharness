@@ -19,7 +19,7 @@
 
 use crate::adapter::{Adapter, Binding, Capability, Render};
 use crate::out;
-use crate::profile::{Paths, Profile};
+use crate::profile::{settled, Paths, Profile};
 use crate::{render, report};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -39,6 +39,8 @@ pub(crate) fn eject(
     // would be discovered three commands later with nothing to explain it.
     let adapter = Adapter::find(&paths.adapters(), harness)
         .with_context(|| format!("`{harness}` is not a harness omh has an adapter for"))?;
+
+    refuse_the_checkout(cwd, &paths, to)?;
 
     let (own, repo) = crate::cmd::session::resolved(&paths)?;
 
@@ -163,6 +165,41 @@ fn names_a_sandbox_path(body: &str) -> bool {
     ["/omh/", "/work/", "$OMH_"]
         .iter()
         .any(|marker| body.contains(marker))
+}
+
+/// A destination inside the checkout is refused.
+///
+/// The module doc, `cli.rs` and `docs/commands.md` all promised this and
+/// nothing enforced it. `write_file` is an unconditional `fs::write`, so
+/// `omh eject claude --to .` wrote over the working tree — and because the
+/// claude adapter renders rules to both `/work/CLAUDE.md` and
+/// `/work/AGENTS.md`, **eject's own input file is one of its destinations**:
+/// the composed document lands on top of the project rules it was composed
+/// from, which are read at the top of `eject` a moment earlier.
+///
+/// Compared after `settled`, so `.`, a relative path and a symlink into the
+/// checkout all resolve to the same answer as the checkout itself. A claim
+/// three documents make is either enforced or deleted; this is the enforcing.
+fn refuse_the_checkout(cwd: &Path, paths: &Paths, to: &Path) -> Result<()> {
+    let repo = settled(&paths.repo);
+    // Absolute first, then `settled`. `settled` canonicalises the longest
+    // *existing* prefix, and a relative path naming nothing that exists yet —
+    // `--to sub/dir` — has none, so it came back relative and could not
+    // possibly start with an absolute repo path. The guard passed it straight
+    // through, which is the same hole in miniature as the one it closes.
+    let target = match to.is_absolute() {
+        true => to.to_path_buf(),
+        false => cwd.join(to),
+    };
+    anyhow::ensure!(
+        !settled(&target).starts_with(&repo),
+        "`{}` is inside your checkout ({}), and eject will not write there — it \
+         renders `AGENTS.md` and `CLAUDE.md`, which are the files it just read. \
+         Point `--to` somewhere outside, and copy in what you want",
+        to.display(),
+        repo.display()
+    );
+    Ok(())
 }
 
 /// Where a guest path lands under the eject root.

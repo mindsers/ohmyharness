@@ -7636,7 +7636,9 @@ fn eject_writes_what_each_capability_renders_to() {
     )
     .unwrap();
 
-    let out = sb.repo.join("ejected");
+    // Outside the checkout: eject refuses to write into one, and these
+    // tests were themselves demonstrating the bug that guard now closes.
+    let out = sb.home.join("ejected");
     let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
     assert!(
         ran.status.success(),
@@ -7687,7 +7689,9 @@ fn eject_writes_nothing_on_a_dry_run() {
     sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
     std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n").unwrap();
 
-    let out = sb.repo.join("ejected");
+    // Outside the checkout: eject refuses to write into one, and these
+    // tests were themselves demonstrating the bug that guard now closes.
+    let out = sb.home.join("ejected");
     let ran = sb.omh(&[
         "eject",
         "claude",
@@ -7717,7 +7721,9 @@ fn eject_refuses_a_harness_it_has_no_adapter_for() {
     let sb = sandbox();
     sb.seed_catalogue(&["adapters", "base"]);
 
-    let out = sb.repo.join("ejected");
+    // Outside the checkout: eject refuses to write into one, and these
+    // tests were themselves demonstrating the bug that guard now closes.
+    let out = sb.home.join("ejected");
     let ran = sb.omh(&["eject", "nosuch", "--to", out.to_str().unwrap()]);
     assert!(!ran.status.success(), "an unknown harness must be refused");
     let said = String::from_utf8_lossy(&ran.stderr);
@@ -7750,7 +7756,9 @@ fn eject_names_the_files_that_still_point_into_a_sandbox() {
     .unwrap();
     std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n").unwrap();
 
-    let out = sb.repo.join("ejected");
+    // Outside the checkout: eject refuses to write into one, and these
+    // tests were themselves demonstrating the bug that guard now closes.
+    let out = sb.home.join("ejected");
     let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
     assert!(
         ran.status.success(),
@@ -7766,5 +7774,44 @@ fn eject_names_the_files_that_still_point_into_a_sandbox() {
     assert!(
         said.contains("/omh") || said.contains("sandbox"),
         "and the reason given: {said}"
+    );
+}
+
+/// `--to` inside the checkout is refused, because three places promise it.
+///
+/// `src/cmd/eject.rs`, `src/cli.rs` and `docs/commands.md` all say eject
+/// "deliberately does not write into your checkout". Nothing enforced it, and
+/// `write_file` is an unconditional `fs::write` — so `omh eject claude --to .`
+/// overwrote the working tree. The claude adapter renders rules to both
+/// `/work/CLAUDE.md` and `/work/AGENTS.md`, which means **eject's own input
+/// file is one of its destinations**: the composed document lands on top of
+/// the project rules it was composed from.
+///
+/// Recoverable only if `AGENTS.md` happens to be tracked. A command whose
+/// entire purpose is reassurance should not need `git checkout` to undo.
+#[test]
+fn eject_refuses_to_write_into_the_checkout() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base"]);
+    std::fs::write(sb.repo.join("AGENTS.md"), "# The project's own rules\n").unwrap();
+
+    for target in [".", "sub/dir"] {
+        let ran = sb.omh(&["eject", "claude", "--to", target]);
+        let said = String::from_utf8_lossy(&ran.stderr);
+        assert!(
+            !ran.status.success(),
+            "`--to {target}` is inside the checkout and must be refused: {}",
+            String::from_utf8_lossy(&ran.stdout)
+        );
+        assert!(
+            said.contains("checkout"),
+            "`--to {target}`: and the refusal says why: {said}"
+        );
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join("AGENTS.md")).unwrap(),
+        "# The project's own rules\n",
+        "the file eject composes *from* must not be a file it writes over"
     );
 }
