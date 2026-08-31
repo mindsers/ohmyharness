@@ -1671,6 +1671,16 @@ impl Using {
 #[derive(Debug, Clone)]
 pub struct Repo {
     pub dir: String,
+    /// What omh keys this checkout's state by — the name in
+    /// `~/.omh/worktrees/<id>`, in the cache volume, and in every container
+    /// this checkout starts.
+    ///
+    /// Reported because risk 8d makes it a question people have: two projects
+    /// called `api` are two ids now, and the way to see which container
+    /// belongs to which checkout is to be told. It is also the only supported
+    /// way to ask, which the CLI tests rely on rather than spelling the rule
+    /// out a second time and watching the copy go stale.
+    pub repo_id: String,
     pub settings: Vec<Effective>,
     pub features: Vec<Feature>,
     pub using: Vec<Using>,
@@ -1681,9 +1691,14 @@ pub struct Repo {
 impl Report for Repo {
     fn human(&self, p: &out::Palette) -> String {
         let mut s = format!(
-            "{} {}\n",
+            "{} {}\n{}\n",
             p.paint(out::HEAD, "this repo"),
-            p.paint(out::DIM, &self.dir)
+            p.paint(out::DIM, &self.dir),
+            // What omh keys this checkout's worktrees, sessions and containers
+            // by. Printed because two checkouts of the same name are two ids
+            // now, and `docker ps` is otherwise a list of names with no way
+            // back to the project each belongs to.
+            p.paint(out::DIM, &format!("  keyed as {}", self.repo_id))
         );
 
         s.push('\n');
@@ -1767,6 +1782,7 @@ impl Report for Repo {
     fn json(&self) -> serde_json::Value {
         json!({
             "dir": self.dir,
+            "repo_id": self.repo_id,
             "settings": self.settings.iter().map(|e| json!({
                 "key": e.key,
                 "value": e.value,
@@ -4420,6 +4436,7 @@ mod tests {
     #[test]
     fn the_leftover_count_does_not_name_the_leftovers() {
         let report = Repo {
+            repo_id: "repo-deadbeef".into(),
             dir: "/r/.omh".into(),
             settings: vec![],
             features: vec![],
@@ -4455,6 +4472,7 @@ mod tests {
     #[test]
     fn what_is_in_your_catalogue_is_not_what_this_repo_declined() {
         let report = Repo {
+            repo_id: "repo-deadbeef".into(),
             dir: "/r/.omh".into(),
             settings: vec![],
             features: vec![],
@@ -4492,6 +4510,7 @@ mod tests {
     #[test]
     fn a_capability_a_feature_supplies_does_not_report_nothing() {
         let report = Repo {
+            repo_id: "repo-deadbeef".into(),
             dir: "/r/.omh".into(),
             settings: vec![],
             features: vec![],
@@ -4740,6 +4759,7 @@ mod tests {
     #[test]
     fn following_the_catalogue_is_not_a_list_that_happens_to_be_complete() {
         let report = Repo {
+            repo_id: "repo-deadbeef".into(),
             dir: "/r/.omh".into(),
             settings: vec![],
             features: vec![],
@@ -4786,6 +4806,7 @@ mod tests {
     #[test]
     fn an_overridden_setting_names_what_it_overrode() {
         let report = Repo {
+            repo_id: "repo-deadbeef".into(),
             dir: "/r/.omh".into(),
             settings: vec![Effective {
                 key: "account".into(),

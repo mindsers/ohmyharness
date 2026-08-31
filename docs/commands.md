@@ -1111,9 +1111,18 @@ It reports rather than writes. What changes a value here is `omh set` and
 `omh unset`, and what changes a selection is `omh use` and `omh unuse` — both
 above.
 
+**`keyed as`** is what omh calls this checkout's state: the directory under
+`~/.omh/worktrees`, the cache volume, and the name of every container it
+starts. It is the checkout's basename plus a digest of where the checkout is,
+because two projects called `api` are two projects — before 2026.08 they shared
+one key, and the second one's `omh new` resumed into the first one's session.
+`--json` reports it as `repo_id`, which is how to find out which `docker ps`
+row belongs to which project.
+
 ```console
 $ omh info --repo
 this repo /Users/you/proj/.omh
+  keyed as proj-561662ee
 
 settings
   (nothing set)

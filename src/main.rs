@@ -1030,6 +1030,65 @@ fn say_if_the_template_was_renamed(cwd: &std::path::Path, ctx: &out::Ctx) {
     ));
 }
 
+/// Move this checkout's state off the pre-2026.08 key, and say so.
+///
+/// Runs before every command that is not a preview, because there is no
+/// natural moment for it: the state it rescues is read by `omh s`, by a
+/// launch, by `omh memory` and by `why`, and a migration wired into one of
+/// them leaves the others reading an empty directory. It is a handful of
+/// `exists()` calls once the move has happened, which is the ordinary case
+/// for ever after.
+///
+/// **Never fatal.** A checkout that is not a git repository has no paths to
+/// migrate and no business failing `omh settings` over it, and a refusal is
+/// something the user must decide about rather than something that should
+/// stop the command they typed. Both are reported and stepped over — though a
+/// refusal is a warning, because the state it names stays invisible to every
+/// command until it is dealt with.
+fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
+    let Ok(paths) = Paths::discover(cwd) else {
+        return;
+    };
+    // Sessions under the *old* key, since those are what would be moved. A
+    // runtime that cannot be asked counts as running: this is the check that
+    // stops a live container's mounts being renamed underneath it, and
+    // "cannot tell" must not spell the same as "no".
+    let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
+    let running = |legacy: &str| {
+        let dir = paths.root.join("worktrees").join(legacy);
+        session::list(&dir).into_iter().any(|id| {
+            backend.as_ref().is_some_and(|b| {
+                !matches!(
+                    image::container_running(b.as_ref(), &format!("omh-{legacy}-{id}")),
+                    image::Running::No
+                )
+            })
+        })
+    };
+
+    match profile::migrate(&paths, &running) {
+        Ok(profile::Migration::NothingToDo) => {}
+        Ok(profile::Migration::Moved { from, kinds }) => ctx.progress(&format!(
+            "moved this checkout's {} off `{from}` — keyed by checkout now, so two \
+             projects of the same name no longer share them",
+            kinds.join(", ")
+        )),
+        Ok(profile::Migration::Stranded { from, kinds }) => ctx.warn(&format!(
+            "this checkout's {} under `{from}` are from before omh keyed them by \
+             checkout, and it already has newer ones — so nothing reads them now. \
+             omh will not merge two sets of sessions together; they are in \
+             {}, to keep or delete by hand",
+            kinds.join(", "),
+            paths.root.display()
+        )),
+        Ok(profile::Migration::Refused(why)) => ctx.warn(&why),
+        Err(e) => ctx.warn(&format!(
+            "omh could not move this checkout's state off its old location, so \
+             anything under it is invisible to omh until this is resolved: {e}"
+        )),
+    }
+}
+
 fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
     let cwd = std::env::current_dir()?;
     say_if_the_template_was_renamed(&cwd, ctx);
@@ -1055,6 +1114,12 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         "`--dry-run` is not something this command can answer yet:\n  \
          omh <command>    to run it"
     );
+
+    // Before any command reads per-repo state, and after `--dry-run` has been
+    // settled — a preview writes nothing, and a migration is a write.
+    if !cli.dry_run {
+        say_what_moved_off_the_old_key(&cwd, ctx);
+    }
 
     match &cli.cmd {
         Cmd::Init => init(&cwd, ctx),
@@ -4036,6 +4101,7 @@ fn show_repo(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     let using = using_here(&paths, &manifest)?;
 
     ctx.say(&report::Repo {
+        repo_id: paths.repo_name(),
         dir: paths.repo.join(".omh").display().to_string(),
         settings,
         features,
@@ -9837,6 +9903,9 @@ mod tests {
             ("main.rs", 86),
             ("memory.rs", 2),
             ("notice.rs", 2),
+            // `omh s down`, in the refusal when a live sandbox blocks the move
+            // off the pre-2026.08 repo key.
+            ("profile.rs", 1),
             ("render.rs", 1),
             ("report.rs", 14),
             ("rules.rs", 1),

@@ -213,12 +213,43 @@ directories and not at these — the most valuable of the three, since a
 container is re-creatable and a run directory holds a timestamp, while this
 holds every commit an agent made.
 
-**8d. Two checkouts with the same directory name share everything.** Worktrees,
-sandbox repositories, container names, the cache volume and the network are all
-keyed by the checkout's basename, so `~/work/api` and `~/oss/api` are one repo
-as far as omh is concerned — and the second one resumes into the first one's
-session. Fixing it changes a path scheme with live sessions underneath it, so it
-needs a migration rather than a patch and is scheduled on its own.
+**8d. ~~Two checkouts with the same directory name share everything.~~**
+*(Closed in 0.8.0.)* Worktrees, run state, ssh keys, sandbox repositories, the
+note store, the cache volume, the network and container names were all keyed by
+the checkout's basename, so `~/work/api` and `~/oss/api` were one repo as far
+as omh was concerned — and the second one resumed into the first one's session:
+a live container holding another project's code, reached by typing an ordinary
+command in an ordinary checkout.
+
+The key is now the basename **and** a digest of the canonical path —
+`api-3f9a2c1b` — composed in `Paths::repo_id`, which all nine accessors route
+through. The name stays in front because people read these: `omh s` prints them
+and `docker ps` lists them, and `omh-3f9a2c1b-s01` says nothing about which
+checkout it is. `omh info --repo` reports it, so the question the collision used
+to create has an answer.
+
+The digest is FNV-1a written out rather than `DefaultHasher`, and the reasoning
+is the same one `container::labels` already records: std does not guarantee that
+hasher's output across releases, and this value names directories holding an
+agent's commits. Drift would not break loudly, it would strand every session and
+open an empty one where the work used to be. A test pins it to FNV's published
+vectors rather than to its own output, so a rewrite has something to fail
+against.
+
+**The migration reads ownership rather than assuming it.** A worktree's `.git`
+is a file naming the checkout it belongs to, so omh does not have to guess which
+of two `api`s owns `~/.omh/worktrees/api`. A pointer naming this checkout moves
+everything; a pointer naming another one refuses, says whose it is, and leaves
+it for that checkout to claim on its next run; no worktrees at all moves the
+rest, since there is no session to collide over and stranding an `init`-only
+repo's notes would be worse. A running sandbox refuses outright — its mounts
+point at the directory being renamed. And state under the old key that *cannot*
+move, because the new key is already in use, is reported rather than passed over
+in silence: nothing reads it again, and silence is what let this survive.
+
+What remains is that the cache volume and the network are recreated rather than
+renamed — they are derivable, docker cannot rename either, and the old pair is
+left for `omh s` to report.
 
 ## Operational
 
