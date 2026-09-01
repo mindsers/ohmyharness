@@ -539,7 +539,7 @@ fn owning_checkout(worktrees: &Path) -> Result<Ownership> {
         // is the one thing it must never spell as "nobody is there".
         let pointer = entry.join(".git");
         match std::fs::read_to_string(&pointer) {
-            Ok(body) => match owner_of(body.trim()) {
+            Ok(body) => match owner_of(body.trim(), &entry) {
                 Some(owner) if !owners.contains(&owner) => owners.push(owner),
                 Some(_) => {}
                 None => unreadable.push(format!(
@@ -570,9 +570,24 @@ fn owning_checkout(worktrees: &Path) -> Result<Ownership> {
 /// `<checkout>/.git/worktrees/<name>` — everything before `/.git/` is the
 /// checkout. Matched on the component rather than by counting parents,
 /// because a bare or relocated gitdir has a different depth.
-fn owner_of(body: &str) -> Option<PathBuf> {
-    let gitdir = body.strip_prefix("gitdir:")?;
-    let mut at = Path::new(gitdir.trim());
+///
+/// **`beside` is the directory holding the pointer, and a relative body is
+/// resolved against it.** git ≥ 2.48 writes relative pointers under
+/// `worktree.useRelativePaths` and `git worktree add --relative-paths`, and
+/// the first version handed those straight to `settled` — which canonicalises
+/// a relative path against the *omh process's working directory*. Ownership
+/// was therefore computed from wherever the user ran the command, and the
+/// answer moved with the shell. It refused rather than adopting, but only
+/// because a cwd-derived path happens not to match; the point of this
+/// function is that ownership is read rather than inferred, and being right
+/// by coincidence is not reading.
+fn owner_of(body: &str, beside: &Path) -> Option<PathBuf> {
+    let gitdir = Path::new(body.strip_prefix("gitdir:")?.trim());
+    let absolute = match gitdir.is_absolute() {
+        true => gitdir.to_path_buf(),
+        false => beside.join(gitdir),
+    };
+    let mut at = absolute.as_path();
     while let Some(parent) = at.parent() {
         if at.file_name().is_some_and(|n| n == ".git") {
             return Some(settled(parent));
@@ -1177,6 +1192,50 @@ mod tests {
         assert!(
             home.join("worktrees/api/s01").is_dir() && home.join("worktrees/api/s02").is_dir(),
             "and both sessions stay where they are"
+        );
+    }
+
+    /// A relative `gitdir:` pointer resolves against the worktree, not the cwd.
+    ///
+    /// git ≥ 2.48 writes relative pointers under `worktree.useRelativePaths`
+    /// and `git worktree add --relative-paths` — `gitdir: ../../../.git/…`.
+    /// `owner_of` walked those to `.git` and handed the parent to `settled`,
+    /// which canonicalises a relative path against **the omh process's
+    /// working directory**. So ownership was computed from wherever the user
+    /// happened to run `omh`, and the answer changed with the shell.
+    ///
+    /// It failed closed by accident rather than by design — a cwd-derived
+    /// owner does not match this checkout, so it refused — and the whole
+    /// argument for this function is that ownership is *read* rather than
+    /// inferred. A guard that is right by coincidence is the shape this
+    /// release exists to remove.
+    #[test]
+    fn a_relative_gitdir_pointer_names_the_checkout_it_actually_points_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(repo.join(".git/worktrees/s01")).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+
+        // Exactly what git writes with relative paths on: the pointer is
+        // relative to the directory holding it.
+        let wt = paths.root.join("worktrees/api/s01");
+        std::fs::create_dir_all(&wt).unwrap();
+        let up = "../".repeat(wt.components().count() - dir.path().components().count());
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {up}work/api/.git/worktrees/s01\n"),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(
+                migrate(&paths, NOT_RUNNING).unwrap(),
+                Migration::Moved { .. }
+            ),
+            "the pointer names this checkout, however it spells the path"
         );
     }
 

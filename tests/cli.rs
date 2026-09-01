@@ -7814,4 +7814,24 @@ fn eject_refuses_to_write_into_the_checkout() {
         "# The project's own rules\n",
         "the file eject composes *from* must not be a file it writes over"
     );
+
+    // A symlink pointing into the checkout at something that does not exist
+    // yet. `settled` canonicalises the longest *existing* prefix, and a
+    // dangling link is not itself existing — so the guard resolved it to its
+    // own path, outside the checkout, and let it through. It happened not to
+    // write anything (`create_dir_all` then fails `EEXIST`), so the user saw
+    // `File exists (os error 17)` rather than the refusal: passing, for the
+    // wrong reason, which is the shape that later becomes a bug.
+    let link = sb.home.join("into-the-checkout");
+    std::os::unix::fs::symlink(sb.repo.join("not-yet"), &link).unwrap();
+    let ran = sb.omh(&["eject", "claude", "--to", link.to_str().unwrap()]);
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        !ran.status.success(),
+        "a link into the checkout is still into it"
+    );
+    assert!(
+        said.contains("checkout"),
+        "and it is refused for that reason, not by accident: {said}"
+    );
 }

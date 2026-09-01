@@ -191,6 +191,18 @@ fn refuse_the_checkout(cwd: &Path, paths: &Paths, to: &Path) -> Result<()> {
         true => to.to_path_buf(),
         false => cwd.join(to),
     };
+    // Follow the destination itself if it is a symlink. `settled`
+    // canonicalises the longest *existing* prefix, and a link pointing at
+    // something that does not exist yet is not itself existing — so a link
+    // into the checkout resolved to its own path, outside it, and passed.
+    // Nothing was written (`create_dir_all` meets `EEXIST` on the link), so
+    // the user got `File exists (os error 17)` instead of the refusal: the
+    // guard holding by accident, which is how it stops holding later.
+    let target = match std::fs::read_link(&target) {
+        Ok(via) if via.is_absolute() => via,
+        Ok(via) => target.parent().unwrap_or(&target).join(via),
+        Err(_) => target,
+    };
     anyhow::ensure!(
         !settled(&target).starts_with(&repo),
         "`{}` is inside your checkout ({}), and eject will not write there — it \
