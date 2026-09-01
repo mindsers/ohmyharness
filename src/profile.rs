@@ -996,7 +996,11 @@ mod tests {
             repo: dir.path().join("oss/api"),
         };
 
-        let both_ways: [(&str, fn(&Paths) -> String); 9] = [
+        // Named, because clippy reads the inline form as a complex type and
+        // it is genuinely easier to read this way: nine ways of asking one
+        // `Paths` what it calls something.
+        type Accessor = (&'static str, fn(&Paths) -> String);
+        let both_ways: [Accessor; 9] = [
             ("container", |p| p.container("s01")),
             ("cache_volume", |p| p.cache_volume()),
             ("network", |p| p.network()),

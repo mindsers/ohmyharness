@@ -58,10 +58,22 @@ EOF
 }
 
 # Runs check.sh under the stub PATH and reports "<exit>|<combined output>".
+#
+# **Executed, not handed to `sh`.** `check.sh` declares `#!/usr/bin/env bash`
+# and uses `set -o pipefail`, which is not POSIX. Running it as `sh "$script"`
+# worked here and failed on CI: macOS `sh` is bash in POSIX mode and accepts
+# `pipefail`, Ubuntu `sh` is dash and answers `Illegal option -o pipefail`. All
+# five cases went green locally and all five failed on the runner.
+#
+# `test-install.sh` does use `sh`, correctly — `install.sh` is POSIX on
+# purpose, because it runs from `curl | sh` on a machine nobody has checked.
+# Copying that line into a test for a bash script is what broke this.
+#
+# Executing it also tests what a person actually types, shebang included.
 attempt() {
   local out status
   set +e
-  out="$(PATH="$stubs" sh "$script" 2>&1)"
+  out="$(PATH="$stubs" "$script" 2>&1)"
   status=$?
   set -e
   printf '%s|%s' "$status" "$out"

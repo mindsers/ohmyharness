@@ -2075,7 +2075,7 @@ mod tests {
                         .collect();
                     let (_, argv) = cli::session_prefix(argv);
                     checked
-                        .entry(under_src(&file))
+                        .entry(under_src(file))
                         .and_modify(|n| *n += 1)
                         .or_insert(1usize);
                     // A command named without the argument the reader supplies
@@ -2116,7 +2116,7 @@ mod tests {
                         if !excused.contains(&e.kind()) {
                             refused.push(format!(
                                 "{}: `omh {line}` — {:?}",
-                                under_src(&file),
+                                under_src(file),
                                 e.kind()
                             ));
                         }
