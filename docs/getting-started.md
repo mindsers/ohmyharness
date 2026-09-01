@@ -75,7 +75,7 @@ omh init — decided, asked nothing
   provision  rust/linker
   provision  rust/toolchain
   memory     2 notes written, 0 already there
-  graph      indexing in background → omh-cache-your-project
+  graph      indexing in background → omh-cache-your-project-a8c4d1cd
 
   catalogue  /Users/you/.omh
   this repo  /Users/you/code/your-project/.omh  (committed)

@@ -247,6 +247,100 @@ Worktree registration and the directory on disk disagreed. omh prunes before
 adding and falls back to removing the directory outright; if you hit this,
 `git worktree prune` in the main checkout clears it.
 
+### `moved this checkout's … off ` — upgrading to 0.8.0
+
+Expected, once, and nothing is lost.
+
+Before 0.8.0 omh keyed a checkout's state by its **directory name**, so
+`~/work/api` and `~/oss/api` were one repo: they shared worktrees, sandbox
+repositories, the note store, the cache volume and container names, and the
+second one's `omh new` resumed into the first one's session. That is
+[risk 8d](design/risks.md), and 0.8.0 closes it by keying on the name *and* a
+digest of where the checkout is.
+
+The first omh command you run in each checkout after upgrading moves its state
+onto the new key and says so:
+
+```console
+$ omh s
+omh: moved this checkout's worktrees off `proj` — keyed by checkout now, so two projects of the same name no longer share them
+  s01  omh/s01  stopped
+```
+
+`omh info --repo` shows the key it chose, as `keyed as proj-561662ee`. That is
+also the answer to *which `docker ps` row belongs to this project*.
+
+The cache volume and network are **not** moved — they are derivable, docker
+cannot rename either, and the old pair is left behind. Nothing reports them;
+`docker volume ls | grep omh-cache-` finds them if you want the disk back.
+
+### `omh will not move … — it cannot establish that it is this checkout's`
+
+Two checkouts with the same directory name shared one worktrees directory, and
+omh will not decide which of them gets it:
+
+```console
+$ omh s
+omh: omh will not move `~/.omh/worktrees/api` — it cannot establish that it is this checkout's:
+    ~/oss/api owns one
+    ~/work/api owns one
+  Two checkouts named `api` shared one directory before this version, and sessions from both can be in there. Move the ones you want by hand, or remove what you do not.
+no sessions
+```
+
+This is the normal shape of the collision rather than an exotic one: session
+ids were handed out by scanning that shared directory, so the first checkout
+took `s01` and the second took `s02` — **in the same directory**. Whichever
+checkout omh sampled would have taken the other's sessions with it, including
+work no branch has.
+
+Each session's `.git` file names the checkout it belongs to. Read them, move
+the ones you want into `~/.omh/worktrees/<name>-<digest>/` for the checkout
+that owns them — `omh info --repo` prints that name — and delete the rest.
+The same message appears if a pointer cannot be read at all, naming the file:
+omh treats *cannot look* as a refusal rather than as permission.
+
+### `a sandbox from before this version is still running`
+
+The move renames the directory a live container has mounted. `omh s down`
+first, then run any omh command again.
+
+### `… are from before omh keyed them by checkout, and it already has newer ones`
+
+State under the old key that cannot move, because this checkout already has
+state under the new one. Nothing reads it again. omh will not merge two sets
+of sessions together, so it names them and leaves them in `~/.omh` for you to
+keep or delete.
+
+### `the carried-file scan could not read these`
+
+At launch and at harvest, omh searches the agent's commits for lines from the
+files you [carried in](configuration.md#carry_in) — and this says which of
+those files it could not turn into lines:
+
+```console
+omh: the carried-file scan could not read these, so it cannot tell you whether
+     their contents reached a commit:
+    certs/deploy.p12 — it is not text, so there are no lines to search for
+    certs/short.env — every line in it is too short or is a comment
+  the path itself is still checked — what is not is a copy under another name
+```
+
+Not an error, and the harvest still lands. It is the difference between *no
+carried secret reached the branch* and *omh could not check*, which used to be
+the same sentence. The path check still applies; what it cannot see is the
+same content copied to a different name.
+
+Nothing to do about it in most cases. If a file matters, carrying it in a form
+the scan can read — text, lines of twelve characters or more — is what buys
+the content check.
+
+### `is inside your checkout, and eject will not write there`
+
+`omh eject` renders `AGENTS.md` and `CLAUDE.md`, which are files it *reads* to
+compose the rules document — so writing into the checkout would overwrite its
+own input. Point `--to` somewhere outside and copy in what you want.
+
 ### `no usable base manifest` or `declares no base-set entries`
 
 omh could not find a readable [base set](design/base-set.md) in `~/.omh/base`,

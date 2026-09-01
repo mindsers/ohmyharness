@@ -16,6 +16,7 @@ omh settings [set|unset|edit|mcp] …
 omh info --repo                   this checkout: what it uses, and why
 omh use|unuse <capability> <name>
                                   omh use skills tdd · omh use --all
+omh import <capability> <harness>  bring a setup you already have into omh
 omh eject <harness> --to <dir>    write out the raw config and step aside
 ```
 
@@ -175,13 +176,13 @@ Opens the session in an editor over SSH. With no argument it resolves
 $ omh s attach
 session s01 is up
 
-  ssh://omh-ohmyharness-s01/work
-  ssh omh-ohmyharness-s01
+  ssh://omh-ohmyharness-3f9a2c1b-s01/work
+  ssh omh-ohmyharness-3f9a2c1b-s01
 
-  code    code --remote ssh-remote+omh-ohmyharness-s01 /work
-  cursor  cursor --remote ssh-remote+omh-ohmyharness-s01 /work
-  nvim    ssh -t omh-ohmyharness-s01 cd /work && nvim
-  zed     zed ssh://omh-ohmyharness-s01/work
+  code    code --remote ssh-remote+omh-ohmyharness-3f9a2c1b-s01 /work
+  cursor  cursor --remote ssh-remote+omh-ohmyharness-3f9a2c1b-s01 /work
+  nvim    ssh -t omh-ohmyharness-3f9a2c1b-s01 cd /work && nvim
+  zed     zed ssh://omh-ohmyharness-3f9a2c1b-s01/work
 ```
 
 One row per editor omh has, keyed by the name it knows it under —
@@ -1064,7 +1065,7 @@ your defaults /Users/you/.omh/default.toml
   idle_timeout  45m
 
 omh also reads
-  carry_in      Untracked files a session needs — a worktree holds tracked files only. The one path by which a secret reaches the agent, so keep it short.
+  carry_in     Untracked files a session needs — a worktree holds tracked files only. The one path by which a secret reaches the agent, so keep it short.
   account      Which captured login a session is launched with, by name.
   runtime      Which runtime builds and runs the sandbox. Unset means `auto`.
   persistence  How a session's terminal survives detaching. Unset means `dtach`.
@@ -1134,13 +1135,19 @@ omh's features
   memory      on
 
 using
-  rules      everything
+  rules      everything · +2 from omh's features
   skills     everything
-  mcp        everything
+  mcp        everything · +1 from omh's features
   commands   everything
   subagents  everything
-  hooks      everything
+  hooks      everything · +2 from omh's features
 ```
+
+`everything` is an absent `[use]` list — a new checkout follows your catalogue
+as it grows. `· +N from omh's features` is what the base set adds on top, and
+it is counted separately because those are not yours to select: `omh set
+<feature> off` is their switch. With `codegraph` off here, its rules section,
+its server and its hooks are the ones missing from those counts.
 
 ## `omh use` · `omh unuse`
 
@@ -1178,6 +1185,63 @@ omh's own — `codegraph`, `memory`, the five generated hooks and their rules
 sections — are not selectable in either direction. `omh set <feature> on|off`
 is their switch, because a feature is all or nothing. See
 [Configuration](configuration.md#a-feature-is-not-selectable).
+
+## `omh import <capability> <harness>`
+
+**The way in.** Bring a setup you already have into your catalogue, rather
+than rebuilding it.
+
+```
+omh import <capability> <harness>     read it out of where that harness keeps it
+omh import <capability> <harness> --from <path>
+                                      read it out of somewhere else
+```
+
+Capabilities: `skills`, `commands`, `subagents`, `rules`, `hooks`, `mcp`.
+
+```console
+$ omh import skills claude
+import from claude skills (~/.claude/skills)
+  imported  tdd
+
+wrote → ~/.omh/skills
+```
+
+It **never overwrites**. An entry whose name you already have is kept and
+said so, so running it twice is safe and tells you nothing changed:
+
+```console
+$ omh import skills claude
+import from claude skills (~/.claude/skills)
+  kept  tdd  already in your catalogue
+```
+
+`--dry-run` reads everything and writes nothing, which is worth using first
+if you are not sure what a harness has:
+
+```console
+$ omh import skills claude --dry-run
+import from claude skills (~/.claude/skills)
+  imported  tdd
+
+--dry-run: nothing written
+```
+
+**Hooks land in the repo, not the catalogue** — a hook binds to a project's
+own commands, so `cargo test` here and `pnpm test` next door is one name and
+two bodies. They go to `<repo>/.omh/hooks/` and into `[use]`, or they would
+arrive dead. Everything else is yours across projects and goes to `~/.omh`.
+
+A symlink is refused at any depth, as is a name that is a path — an imported
+entry is content omh will mount read-only into a sandbox, and neither of
+those is content.
+
+`--from` reads a config from somewhere other than where the adapter says that
+harness keeps it. Useful for a setup in an unusual place, and for seeing what
+omh would take without pointing it at your own.
+
+This is the other half of [`omh eject`](#omh-eject-harness---to-dir): one
+brings a setup in, the other hands it back.
 
 ## `omh eject <harness> --to <dir>`
 

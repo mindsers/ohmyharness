@@ -7921,3 +7921,51 @@ fn eject_says_one_entry_for_a_directory_holding_one() {
          single document: {row:?}"
     );
 }
+
+/// `omh import --dry-run` writes nothing, like every other command.
+///
+/// It wrote. `import_entries` was called without `dry_run` at all — the
+/// parameter was never threaded past the dispatcher — so
+/// `omh import skills claude --dry-run` copied the skills into the catalogue
+/// and then printed `wrote → …`, which is the preview's own wording for what
+/// it would have done.
+///
+/// This is the exact class 0.7.0's release notes describe as fixed: *"a flag
+/// said one thing and did another… `omh --dry-run use --all` wrote the file
+/// and printed `wrote →`"*. One command was missed, and
+/// [Commands](../docs/commands.md) has been promising **"everything runs;
+/// nothing is written"** on its behalf ever since.
+#[test]
+fn import_writes_nothing_on_a_dry_run() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base"]);
+    let their_skills = sb.home.join(".claude/skills/tdd");
+    std::fs::create_dir_all(&their_skills).unwrap();
+    std::fs::write(their_skills.join("SKILL.md"), "how\n").unwrap();
+
+    let mine = sb.home.join(".omh/skills");
+    let count = || {
+        std::fs::read_dir(&mine)
+            .map(|d| d.flatten().count())
+            .unwrap_or(0)
+    };
+    assert_eq!(count(), 0, "the catalogue starts empty");
+
+    let ran = sb.omh(&["import", "skills", "claude", "--dry-run"]);
+    assert!(
+        ran.status.success(),
+        "a dry run still succeeds: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert_eq!(
+        count(),
+        0,
+        "a dry run copied into the catalogue: {:?}",
+        std::fs::read_dir(&mine).map(|d| d.flatten().count())
+    );
+
+    // And the real run still works, which is what makes the guard about the
+    // flag rather than about the copy.
+    sb.omh(&["import", "skills", "claude"]);
+    assert_eq!(count(), 1, "without the flag it imports");
+}

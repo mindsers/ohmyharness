@@ -865,6 +865,41 @@ work the worktree model exists to protect.
 `node_modules` is deliberately not carried. It is built in the sandbox, for the
 sandbox's platform.
 
+### What stops a carried secret coming back
+
+A carried file is not on the branch, so the agent can put it there — by
+`git add -f`, by copying it under another name, or by pasting a value into
+source. `omh s commit` refuses a harvest that did any of those, and it checks
+two ways: the **path**, and the **content**, by searching the agent's commits
+for lines out of the files you carried.
+
+The content half works from lines, and three kinds of file never become any:
+
+| | |
+|---|---|
+| not text | a keystore, a `.p12`, a DER key — there are no lines to search for |
+| not there | deleted or renamed in your checkout since the launch |
+| nothing long enough | every line under twelve characters, or a comment |
+
+**All three are reported rather than passed over.** They do not refuse a
+harvest — omh will not lose an agent's work because it could not read a file —
+but they no longer spell the same as *nothing carried reached the branch*:
+
+```console
+omh: the carried-file scan could not read these, so it cannot tell you whether
+     their contents reached a commit:
+    certs/deploy.p12 — it is not text, so there are no lines to search for
+  the path itself is still checked — what is not is a copy under another name
+```
+
+`certs/` is the second example above, so this is the ordinary case rather than
+the exotic one: a carried keystore is protected by its **path** and nothing
+else. Copy it under another name in the sandbox and nothing catches it.
+
+The same warning appears at launch, which is the moment you can still act on
+it — carry the file in a form the scan can read, or accept that its path is
+the whole guard.
+
 ### Keeping the agent's `git status` clean
 
 Carried files must not show up as untracked, or the agent is invited to commit
