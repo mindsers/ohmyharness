@@ -1,6 +1,6 @@
 # Measuring retrieval
 
-**Status: designed, not run.** The harness exists as `scripts/bench-recall.sh`; the comparison it was written to settle has not been performed, so nothing on this page is yet a measurement.
+**Status: run once, not settled.** The harness is `scripts/bench-recall.sh` and [Results so far](#results-so-far) records what it measured on 2026-08-09 — 40 notes, 40 queries, `McNemar p = 0.51`. That p-value is the point: the comparison ran and did not separate the two, so the question it was written to answer is still open.
 
 > `./scripts/bench-recall.sh [--with-iwe] [--answers DIR]`
 

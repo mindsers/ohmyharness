@@ -1874,14 +1874,34 @@ impl Shadow {
         if at.is_dir() {
             let mut out = Vec::new();
             let mut unscanned = Vec::new();
+            // A directory omh may not read is reported, not fatal — the same
+            // rule as the files inside it, and it was `?` before. `certs/` is
+            // `carry_in`'s own second example, and a mode that excludes omh
+            // is a reasonable thing to have done to it.
+            let listing = match std::fs::read_dir(at) {
+                Ok(listing) => listing,
+                Err(_) => {
+                    return Ok((
+                        Vec::new(),
+                        vec![Unscanned::new(named, Unreadable::CouldNotRead)],
+                    ))
+                }
+            };
             // Sorted, because `read_dir` order is the filesystem's and a
             // warning that lists two files in a different order on each run
             // reads as churn rather than as the same standing gap.
-            let mut entries: Vec<_> = std::fs::read_dir(at)
-                .with_context(|| format!("reading carried directory {}", at.display()))?
-                .flatten()
-                .map(|e| e.path())
-                .collect();
+            //
+            // **Not `.flatten()`.** A per-entry error dropped there yielded no
+            // needles *and* no `Unscanned` — the one outcome this function was
+            // rewritten to make impossible, reintroduced by the tidiest
+            // available spelling.
+            let mut entries: Vec<PathBuf> = Vec::new();
+            for entry in listing {
+                match entry {
+                    Ok(entry) => entries.push(entry.path()),
+                    Err(_) => unscanned.push(Unscanned::new(named, Unreadable::CouldNotRead)),
+                }
+            }
             entries.sort();
             for entry in entries {
                 let child = match entry.file_name() {
@@ -1905,8 +1925,15 @@ impl Shadow {
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
                 return Ok((Vec::new(), vec![Unscanned::new(named, Unreadable::NotText)]))
             }
-            Err(e) => {
-                return Err(e).with_context(|| format!("reading carried file {}", at.display()))
+            // Fail open, as the doc above promises. Only `InvalidData` was
+            // caught before, so `PermissionDenied` on a carried `.env` —
+            // which is what a careful person does to one — took the whole
+            // harvest down and the agent's commits with it.
+            Err(_) => {
+                return Ok((
+                    Vec::new(),
+                    vec![Unscanned::new(named, Unreadable::CouldNotRead)],
+                ))
             }
         };
         let found: Vec<String> = body
@@ -2329,6 +2356,17 @@ pub enum Unreadable {
     /// worse than the rotation caveat `refuse_carried` already documents:
     /// rotation leaves a needle at the new value, deletion leaves none.
     Missing,
+    /// omh was not allowed to read it, or the read failed for some other
+    /// reason that is not "this is not text".
+    ///
+    /// The gap that made `needles` fail **closed** on the one shape most
+    /// literally described by its own doc. Only `InvalidData` was caught;
+    /// everything else propagated, so a `chmod 600` on a carried `.env` —
+    /// the ordinary state of a secret — aborted `omh s commit --keep` and the
+    /// agent's commits did not land. A scan that will not refuse a harvest
+    /// over a file it cannot read must not refuse it over a file it may not
+    /// read either.
+    CouldNotRead,
     /// Read as text, and every line was dropped as too short or as a comment.
     /// A file of nothing but short assignments matches nothing, and says so
     /// here rather than passing for scanned.
@@ -2341,6 +2379,7 @@ impl Unreadable {
         match self {
             Unreadable::NotText => "it is not text, so there are no lines to search for",
             Unreadable::Missing => "it is not there now, so there was nothing to read",
+            Unreadable::CouldNotRead => "omh was not allowed to read it",
             Unreadable::NothingToMatch => "every line in it is too short or is a comment",
         }
     }
@@ -4831,6 +4870,84 @@ mod tests {
                 "{name}: the harvest has to say it could not read this"
             );
         }
+    }
+
+    /// A carried file omh may not read is named, and the harvest still lands.
+    ///
+    /// `needles` documented itself as failing open — "refusing a harvest
+    /// because a file could not be read would be worse" — and then caught
+    /// only `InvalidData`. Every other `io::Error` propagated, so the one
+    /// shape that most literally *is* "a file omh could not read" was the one
+    /// shape that failed **closed**: `omh s commit --keep` aborted and the
+    /// agent's commits did not land, over a `chmod 600` that is the ordinary
+    /// state of a carried secret.
+    #[test]
+    #[cfg(unix)]
+    fn a_carried_file_omh_may_not_read_is_named_rather_than_fatal() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[".env".to_string()]).unwrap();
+
+        let secret = checkout.join(".env");
+        std::fs::write(&secret, "API_TOKEN=ghp_abc123def456\n").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        std::fs::write(wt.join("work.rs"), "fn work() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qm", "Ordinary work"]).unwrap();
+
+        let got = s.harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], Keep::All);
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let got = got.expect("a file omh may not read is not a reason to lose the work");
+        assert_eq!(got.landed, 1, "the agent's commit still lands");
+        assert_eq!(
+            got.unscanned,
+            vec![Unscanned {
+                path: ".env".into(),
+                why: Unreadable::CouldNotRead,
+            }],
+            "and omh says it could not look, rather than saying nothing"
+        );
+    }
+
+    /// A carried directory omh may not read is named, not fatal either.
+    ///
+    /// The same gap one level up: `read_dir` was `?`-ed, so an unreadable
+    /// `certs/` took the launch and the harvest down. `carry_in`'s own
+    /// documentation gives `certs/` as its second example.
+    #[test]
+    #[cfg(unix)]
+    fn a_carried_directory_omh_may_not_read_is_named_rather_than_fatal() {
+        use std::os::unix::fs::PermissionsExt;
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &["certs".to_string()]).unwrap();
+
+        let certs = checkout.join("certs");
+        std::fs::create_dir_all(&certs).unwrap();
+        std::fs::write(certs.join("deploy.key"), "PRIVATE KEY MATERIAL HERE\n").unwrap();
+        std::fs::set_permissions(&certs, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        std::fs::write(wt.join("work.rs"), "fn work() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qm", "Ordinary work"]).unwrap();
+
+        let got = s.harvest(&checkout, &wt, "omh/s01", &["certs".to_string()], Keep::All);
+        std::fs::set_permissions(&certs, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let got = got.expect("a directory omh may not read is not a reason to lose the work");
+        assert_eq!(
+            got.unscanned,
+            vec![Unscanned {
+                path: "certs".into(),
+                why: Unreadable::CouldNotRead,
+            }],
+            "the directory is named, and the harvest stands"
+        );
     }
 
     /// A directory carried in reports the file inside it, not the entry.

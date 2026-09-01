@@ -1,6 +1,6 @@
 # Decisions
 
-**Status: a ledger, not a design.** Every row records a choice already made and the reason it was made; the status of the thing each row decides is on that thing's own page.
+**Status: a ledger, not a design.** Every row records a choice already made and the reason it was made. The Status column here is the component's; the *design* for each lives on its own page.
 
 Every load-bearing choice, with the reason. If you are about to change one of
 these, the reason is what you need to argue with.
@@ -57,10 +57,10 @@ omh settings mcp add …
 | `omh s attach` | ✅ | IDE attach |
 | **`codegraph`** | ✅ | structural queries instead of re-grepping every task |
 | test-on-stop + format-on-edit hooks | ✅ | `init` detects the commands and wires them |
-| memory | ⬜ | survives harness switches |
+| memory | ✅ | survives harness switches — the store, retrieval and the team layer ship; hub pages do not |
 | egress allowlist | ⬜ | inherited from the runtime |
 
-**If an eighth entry needs a paragraph to justify, it belongs in a profile, not
+**If a further entry needs a paragraph to justify, it belongs in a profile, not
 the base set.**
 
 The set lives in a versioned manifest rather than in the binary, and the

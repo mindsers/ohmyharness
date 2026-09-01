@@ -60,6 +60,7 @@ pub(crate) fn eject(
     let mut wrote = Vec::new();
     let mut dropped = Vec::new();
     let mut sandboxed = Vec::new();
+    let mut unreadable = Vec::new();
     for cap in Capability::ALL {
         let Some(binding) = adapter.supports(cap) else {
             // An absent key means the harness cannot do that thing. Degradation
@@ -89,9 +90,25 @@ pub(crate) fn eject(
                 // dangling links is worse than nothing because it looks like it
                 // worked.
                 Render::Dir => {
-                    let n = copy_selected(&sources, cap, &repo, &out_path, dry_run)?;
-                    if n > 0 {
-                        wrote.push((cap, out_path.clone(), n));
+                    let mut could_not_read = Vec::new();
+                    let n = copy_selected(
+                        &sources,
+                        cap,
+                        &repo,
+                        &out_path,
+                        dry_run,
+                        &mut could_not_read,
+                    )?;
+                    for src in could_not_read {
+                        unreadable.push(format!("{cap}: {src}"));
+                    }
+                    // Zero means nothing reached it: either the selection is
+                    // empty — ordinary, and a row saying so would be noise —
+                    // or omh could not read a source, which `copy_selected`
+                    // has already recorded above. The second is the one that
+                    // used to be silent, and it is silent no longer.
+                    if let Some(n) = std::num::NonZeroUsize::new(n) {
+                        wrote.push((cap, out_path.clone(), report::Wrote::Entries(n)));
                     }
                 }
                 Render::Concat => {
@@ -99,7 +116,7 @@ pub(crate) fn eject(
                     if names_a_sandbox_path(&rules_doc) {
                         sandboxed.push(out_path.display().to_string());
                     }
-                    wrote.push((cap, out_path.clone(), 1));
+                    wrote.push((cap, out_path.clone(), report::Wrote::Document));
                 }
                 _ => {
                     // Rendered even on a dry run, so a document that will not
@@ -122,7 +139,7 @@ pub(crate) fn eject(
                     if names_a_sandbox_path(&doc.body) {
                         sandboxed.push(out_path.display().to_string());
                     }
-                    wrote.push((cap, out_path.clone(), 1));
+                    wrote.push((cap, out_path.clone(), report::Wrote::Document));
                 }
             }
         }
@@ -133,14 +150,15 @@ pub(crate) fn eject(
         to: to.display().to_string(),
         wrote: wrote
             .into_iter()
-            .map(|(cap, at, n)| report::EjectedFile {
+            .map(|(cap, at, wrote)| report::EjectedFile {
                 capability: cap.to_string(),
                 at: at.display().to_string(),
-                entries: n,
+                wrote,
             })
             .collect(),
         dropped,
         sandboxed,
+        unreadable,
         dry_run,
     });
     Ok(())
@@ -257,11 +275,24 @@ fn copy_selected(
     repo: &crate::settings::RepoPolicy,
     into: &Path,
     dry_run: bool,
+    unreadable: &mut Vec<String>,
 ) -> Result<usize> {
     let mut n = 0;
     for src in sources {
-        let Ok(entries) = std::fs::read_dir(src) else {
-            continue;
+        // **Reported, not skipped.** This was `let Ok(..) else { continue }`,
+        // and because the caller only recorded a directory when `n > 0`, a
+        // capability whose sources omh could not read appeared in neither
+        // `wrote` nor `dropped` — `dropped` is only for capabilities the
+        // *harness* has no binding for. `omh eject` exited 0, listed rules and
+        // hooks, and mentioned skills nowhere. For a command whose whole
+        // promise is that you can leave with your setup, leaving with less of
+        // it and saying nothing is the worst failure available.
+        let entries = match std::fs::read_dir(src) {
+            Ok(entries) => entries,
+            Err(e) => {
+                unreadable.push(format!("{} ({e})", src.display()));
+                continue;
+            }
         };
         for entry in entries.flatten() {
             let name = entry.file_name();

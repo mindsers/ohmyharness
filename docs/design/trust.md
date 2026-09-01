@@ -8,7 +8,7 @@ understand."*
 
 That is the failure mode omh is most exposed to, because it makes more decisions
 on your behalf than oh-my-zsh ever did — and some of them are security
-decisions. Four commands exist to prevent it. Three are built.
+decisions. Four commands exist to prevent it, and all four are built as of 0.8.0.
 
 The shape of the answer matters as much as the commands: omh's curation is
 legitimate because it is **stated, visible, and reversible**, not because it is
@@ -175,7 +175,7 @@ by transparency rather than by proof. That is the honest position, and claiming
 otherwise would need the benchmark to be trustworthy — which is where this
 started.
 
-## `omh eject` — the exit ⬜
+## `omh eject` — the exit ✅
 
 Write out the raw per-harness config and step aside.
 

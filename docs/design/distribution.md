@@ -1,6 +1,6 @@
 # Why a distribution
 
-**Status: an argument, not a system.** This page says what kind of thing omh is and why that shape was chosen. Nothing here is a claim about what has been built — [the roadmap](roadmap.md) is that, and [risks](risks.md) is what is still weak.
+**Status: an argument, not a system.** This page says what kind of thing omh is and why that shape was chosen. Where it counts what ships, [the base set](base-set.md) is the source of truth — [the roadmap](roadmap.md) is what is planned, and [risks](risks.md) is what is still weak.
 
 The single most useful thing to understand about omh: it is a **distribution**.
 Not a framework, not an abstraction layer, not a marketplace.
@@ -71,7 +71,7 @@ already produced a casualty.
 ## The honest weak spot
 
 The em-dash in that table is not a typo. **omh's curation column is currently
-unearned** — the base set is one MCP server plus four hooks, justified by
+unearned** — the base set is two MCP servers, six hooks and three rules sections, justified by
 argument rather than measurement.
 
 The name promises curation. The verified, defensible half of the product today
