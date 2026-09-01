@@ -7,12 +7,14 @@
 silent: two checkouts with the same directory name no longer share sessions
 ([risks](design/risks.md) 8d), and the carried-file scan says which files it
 could not read instead of reporting a clean harvest either way (4d). It adds
-[`omh eject`](commands.md#omh-eject-harness---to-dir), the exit. The
-[command surface](design/profile.md) landed in 0.7.0 and the
+[`omh eject`](commands.md#omh-eject-harness---to-dir), the exit, and closes a
+`--dry-run` that had been writing on [`omh import`](commands.md#omh-import-capability-harness).
+The [command surface](design/profile.md) landed in 0.7.0 and the
 [work loop](design/git.md) in 0.6.0.
-One harness (`claude`) has
-been driven for real work; `opencode` passes `omh doctor` but has not. Docker is
-the only verified runtime. Several design pages describe work that is **partly
+
+One harness (`claude`) has been driven for real work; `opencode` and `omp` pass
+`omh doctor`, which proves their paths and nothing about their behaviour.
+Docker is the only verified runtime. Several design pages describe work that is **partly
 built** — each says which parts, at the top. See the [roadmap](design/roadmap.md).
 
 ## Start here

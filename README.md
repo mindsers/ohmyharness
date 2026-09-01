@@ -134,7 +134,7 @@ omh init — decided, asked nothing
   provision  rust/linker
   provision  rust/toolchain
   memory     2 notes written, 0 already there
-  graph      indexing in background → omh-cache-your-project
+  graph      indexing in background → omh-cache-your-project-a8c4d1cd
 
   catalogue  /Users/you/.omh
   this repo  /Users/you/code/your-project/.omh  (committed)
@@ -503,7 +503,11 @@ whether anything reads it. That gap is what `doctor` closes.
 Known rough edges: the graph store is shared across sessions of one repo, so an
 agent can query another session's graph (mitigated, not prevented);
 `.claude.json` is a file mount that cannot be atomically replaced; `omh s rm`
-drops a session branch only when it has no commits.
+drops a session branch only when it has no commits; upgrading to 0.8.0 leaves
+the old `omh-cache-<name>` volume and `omh-<name>` network behind and nothing
+reports them (`docker volume ls | grep omh-cache-` finds them); and `omh s`
+lists any directory under a session's worktree root as a session, so stray
+clutter there shows up as one.
 
 ## Contributing
 

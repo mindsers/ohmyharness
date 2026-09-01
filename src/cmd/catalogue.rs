@@ -383,7 +383,7 @@ pub(crate) fn import_cmd(
             "MCP servers are `omh settings mcp import {harness}` — a server is a \
              record in one file, not an entry with its own"
         ),
-        _ => import_entries(&paths, harness, cap, binding.render, &source, ctx),
+        _ => import_entries(&paths, harness, cap, binding.render, &source, dry_run, ctx),
     }
 }
 
@@ -408,6 +408,7 @@ pub(crate) fn import_entries(
     cap: adapter::Capability,
     render: adapter::Render,
     source: &std::path::Path,
+    dry_run: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let dest = paths.root.join(cap.source());
@@ -465,6 +466,21 @@ pub(crate) fn import_entries(
             });
             continue;
         }
+        // **The flag reaches the copy.** It did not: `dry_run` was never
+        // threaded past the dispatcher, so `omh import skills claude
+        // --dry-run` copied into the catalogue and then printed `wrote → …`,
+        // which is the preview's own wording for what it *would* have done.
+        // That is the shape 0.7.0 records as fixed — one command was missed,
+        // and `docs/commands.md` promised "everything runs; nothing is
+        // written" on its behalf for a release.
+        if dry_run {
+            considered.push(report::Considered {
+                name: stem,
+                verdict: report::Verdict::Took,
+                detail: String::new(),
+            });
+            continue;
+        }
         considered.push(match copy_entry(&from, &to) {
             Ok(()) => report::Considered {
                 name: stem,
@@ -491,7 +507,7 @@ pub(crate) fn import_entries(
         source: source.display().to_string(),
         considered,
         noun: cap.to_string(),
-        dry_run: false,
+        dry_run,
         wrote: took.then(|| dest.display().to_string()),
         selected_in: Vec::new(),
     });

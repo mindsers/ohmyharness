@@ -155,6 +155,57 @@ command does*, and the suite asserted what the code returns. The guards added
 since assert effects: what `remove` leaves behind, what a launch leaves in the
 worktree, what a dry run leaves on disk.
 
+## The silent failures — done (0.8.0, #91–#92)
+
+Not a milestone either. An audit of 0.7.0 found the engineering sound and the
+weaknesses concentrated in things that **did not fail** — which is why they had
+survived. Two were already written down on [risks](risks.md) and unfixed.
+
+**Two checkouts of the same name shared everything** (8d). Worktrees, run
+state, keys, sandbox repositories, the note store, the cache volume, the
+network and container names were all keyed by the checkout's directory name,
+so `~/work/api` and `~/oss/api` were one repo and the second one's `omh new`
+resumed into the first one's session. Keyed by name *and* a digest of the path
+now, with a one-time migration that reads ownership off each worktree's `.git`
+pointer rather than assuming it.
+
+**The carried-file scan said nothing when it could not look** (4d). Three
+shapes yield no needles — not text, not there, nothing long enough — and all
+three returned the same value as *searched and found nothing clean*. They
+still fail open, deliberately; they are reported now, at launch and at
+harvest. A fourth was worse than silent: `PermissionDenied` on a `chmod 600`
+`.env` aborted the harvest entirely, losing the agent's commits over a file
+mode that is the ordinary state of a secret.
+
+**A lint that had not run for an unknown length of time.** `cargo clippy`
+resolved to a stale shim and refused on the crate's `rust-version`, printing a
+dependency wall instead of a lint. Nothing failed; the lint simply never ran.
+`scripts/check.sh` compares the rustc clippy was built against with the one
+you have, and the crate's MSRV with both.
+
+**`omh eject`** ships — the exit [trust](trust.md) has argued for since it was
+written. It also names the files it wrote that still reference `/omh`, `/work`
+or `$OMH_*`, because handing somebody a directory and saying *these are yours
+now* while several of the files silently do not work is the same defect in a
+new place.
+
+**And `main.rs` stopped being where everything lived**: 8,434 lines of
+production code down to 628, across `cli.rs` and nine modules under `cmd/`,
+with a budget test that keeps it that way. The tests have not moved with it,
+which is recorded as a debt rather than described as finished.
+
+**Success criterion:** the two risks the page had named for weeks are closed,
+and nothing omh cannot check reads the same as something it checked. **Met.**
+
+What it cost is the part worth keeping. The fix for 8d **reopened 8d one line
+down** — a `!entry.is_dir()` filter added while closing it, and `is_dir()`
+answers `false` for every error, so a dangling symlink took the accounting
+with it. Three of the guards written alongside these fixes passed against a
+broken implementation, one of them the whole `profile` suite green against a
+digest that re-collides the two paths it exists to separate. Both were found
+by review rather than by the suite, which is the same lesson 0.7.0 recorded
+and did not transfer.
+
 ## v2 — portability
 
 Second adapter driven for real work, ✅ [`omh eject`](trust.md) (0.8.0), full `omh import`

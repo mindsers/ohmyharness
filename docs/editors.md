@@ -36,12 +36,19 @@ Host omh-s01
 Everything downstream then works without omh knowing it exists:
 
 ```console
-$ code --remote ssh-remote+omh-ohmyharness-s01 /work
-$ zed ssh://omh-ohmyharness-s01/work
-$ ssh omh-ohmyharness-s01
+$ code --remote ssh-remote+omh-ohmyharness-3f9a2c1b-s01 /work
+$ zed ssh://omh-ohmyharness-3f9a2c1b-s01/work
+$ ssh omh-ohmyharness-3f9a2c1b-s01
 ```
 
 JetBrains Gateway works through the same alias.
+
+The alias is `omh-<repo id>-<session>`, and the repo id is the checkout's
+directory name plus a short digest of where it is —
+`omh info --repo` prints it. The digest is there because two checkouts called
+`api` would otherwise be one host: before 0.8.0 they shared an alias, and
+attaching from either landed you in whichever session existed. It is stable
+for a given checkout, so a bookmark keeps working.
 
 Choosing an include over a plugin is what makes "any editor" true rather than
 aspirational — the editors omh ships descriptions for are a convenience, not the
@@ -76,13 +83,13 @@ $ omh s attach emacs
 omh: no editor named `emacs` — see `omh info`
 session s01 is up
 
-  ssh://omh-ohmyharness-s01/work
-  ssh omh-ohmyharness-s01
+  ssh://omh-ohmyharness-3f9a2c1b-s01/work
+  ssh omh-ohmyharness-3f9a2c1b-s01
 
-  code    code --remote ssh-remote+omh-ohmyharness-s01 /work
-  cursor  cursor --remote ssh-remote+omh-ohmyharness-s01 /work
-  nvim    ssh -t omh-ohmyharness-s01 cd /work && nvim
-  zed     zed ssh://omh-ohmyharness-s01/work
+  code    code --remote ssh-remote+omh-ohmyharness-3f9a2c1b-s01 /work
+  cursor  cursor --remote ssh-remote+omh-ohmyharness-3f9a2c1b-s01 /work
+  nvim    ssh -t omh-ohmyharness-3f9a2c1b-s01 cd /work && nvim
+  zed     zed ssh://omh-ohmyharness-3f9a2c1b-s01/work
 ```
 
 Guessing would launch the wrong thing, which is harder to diagnose than being
@@ -111,5 +118,5 @@ Keys are per-repo, and password auth is off.
 
 ## Verified
 
-`ssh omh-ohmyharness-s01` lands as `agent` (uid 1000) inside the sandbox, with
+`ssh omh-ohmyharness-3f9a2c1b-s01` lands as `agent` (uid 1000) inside the sandbox, with
 the worktree at `/work` and the profile in place.

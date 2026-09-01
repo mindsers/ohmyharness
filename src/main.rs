@@ -1581,7 +1581,7 @@ mod tests {
             ("accounts.md", 4),
             ("adapters.md", 1),
             ("code-graph.md", 1),
-            ("commands.md", 125),
+            ("commands.md", 131),
             ("configuration.md", 42),
             ("decisions.md", 1),
             ("editors.md", 4),
@@ -1590,7 +1590,7 @@ mod tests {
             ("memory.md", 5),
             ("profile.md", 3),
             ("sessions.md", 11),
-            ("troubleshooting.md", 6),
+            ("troubleshooting.md", 8),
             ("trust.md", 2),
         ]
         .into_iter()
