@@ -1,6 +1,6 @@
 # Roadmap
 
-**Status: intent.** Nothing on this page is built by virtue of being here — the ✅ marks say which milestones have landed, and every other line is a plan that has not.
+**Status: intent, with ✅ for what landed.** Nothing here is built by virtue of being written down. The ✅ marks are the claim; anything unmarked is a plan. Sections headed *done* record work that shipped outside a milestone.
 
 Ordered by what gates what, not by what is most fun.
 
@@ -157,7 +157,7 @@ worktree, what a dry run leaves on disk.
 
 ## v2 — portability
 
-Second adapter driven for real work, [`omh eject`](trust.md), full `omh import`
+Second adapter driven for real work, ✅ [`omh eject`](trust.md) (0.8.0), full `omh import`
 covering rules, skills, hooks and commands rather than MCP alone.
 
 None of these were ever gated on evidence — an earlier version of this roadmap

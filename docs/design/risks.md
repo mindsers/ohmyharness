@@ -267,8 +267,18 @@ move, because the new key is already in use, is reported rather than passed over
 in silence: nothing reads it again, and silence is what let this survive.
 
 What remains is that the cache volume and the network are recreated rather than
-renamed — they are derivable, docker cannot rename either, and the old pair is
-left for `omh s` to report.
+renamed — they are derivable and docker cannot rename either — and **nothing
+reports the old pair.** An earlier draft of this page said `omh s` did.
+It does not: `leftovers` reads the shadow directory, the run directory and
+`docker ps -a` filtered by the *new* container prefix, and omh issues no
+`volume ls` or `network ls` anywhere. A stopped container under the old key
+is missed for the same reason — the migration only refuses over *running*
+ones.
+
+So after a migration `omh-cache-<basename>`, `omh-<basename>` and any stopped
+`omh-<basename>-sNN` are orphaned and unmentioned. They cost disk and a name,
+not correctness, and `docker volume ls | grep omh-cache-` finds them. Recorded
+rather than fixed, because the honest version of this page is what it is for.
 
 ## Operational
 

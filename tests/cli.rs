@@ -7766,14 +7766,19 @@ fn eject_names_the_files_that_still_point_into_a_sandbox() {
         String::from_utf8_lossy(&ran.stderr)
     );
 
+    // Asserted against the **warning block**, not the whole output. Every
+    // file eject writes is listed in the table above it, so `contains(".mcp.json")`
+    // over all of stdout is satisfied whether or not the file was ever
+    // flagged — a guard the passing case answers for you.
     let said = String::from_utf8_lossy(&ran.stdout);
+    let warning = said
+        .split_once("could not read")
+        .map(|(_, tail)| tail)
+        .or_else(|| said.split_once("still name paths").map(|(_, tail)| tail))
+        .unwrap_or_else(|| panic!("no sandbox-path warning at all in: {said}"));
     assert!(
-        said.contains(".mcp.json"),
-        "the file holding a sandbox path has to be named: {said}"
-    );
-    assert!(
-        said.contains("/omh") || said.contains("sandbox"),
-        "and the reason given: {said}"
+        warning.contains(".mcp.json"),
+        "the file holding a sandbox path has to be named in the warning: {warning}"
     );
 }
 

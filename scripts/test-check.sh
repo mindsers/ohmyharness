@@ -42,12 +42,14 @@ done
 # so a run that gets past the guard finishes immediately instead of building.
 stub() {
   local clippy_version="$1" rustc_version="$2"
+  : > "$work/argv.log"
   cat > "$stubs/cargo" <<EOF
 #!/bin/sh
 if [ "\$1" = clippy ] && [ "\$2" = --version ]; then
   echo "$clippy_version"
   exit 0
 fi
+echo "\$*" >> "$work/argv.log"
 exit 0
 EOF
   cat > "$stubs/rustc" <<EOF
@@ -117,6 +119,53 @@ if [ "${res%%|*}" = 0 ]; then
   ok "an agreeing toolchain runs the checks"
 else
   bad "an agreeing toolchain runs the checks" "${res#*|}"
+fi
+
+# The checks themselves ran, and not just the guard in front of them.
+#
+# Without this the case above passes against a check.sh with `cargo fmt`,
+# `cargo clippy` and `cargo test` **all deleted**: the stub answers `clippy
+# --version`, the guard agrees, the script prints `all checks passed` and
+# exits 0. A test that cannot tell a working script from an empty one is the
+# same fail-open shape this file exists to close, one level up — and this is
+# the second time that lesson has had to be applied here, after the
+# `$status` fix above.
+for want in "fmt --check" "clippy --locked --all-targets -- -D warnings" "test --locked"; do
+  if grep -qF -- "$want" "$work/argv.log"; then
+    ok "runs cargo $want"
+  else
+    bad "runs cargo $want" "not in: $(cat "$work/argv.log")"
+  fi
+done
+
+# `--all` is the flag that adds the container and node tests, and nothing
+# asserted it reached cargo.
+stub "clippy 0.1.98 (88d9e12ae 2026-08-18)" "rustc 1.98.0 (88d9e12ae 2026-08-18) (Homebrew)"
+set +e; PATH="$stubs" "$script" --all >/dev/null 2>&1; set -e
+if grep -qF -- "test --locked -- --include-ignored" "$work/argv.log"; then
+  ok "--all adds the ignored tests"
+else
+  bad "--all adds the ignored tests" "not in: $(cat "$work/argv.log")"
+fi
+
+# A failing check has to fail the script. `set -euo pipefail` is what does it,
+# and nothing asserted the exit status propagates.
+cat > "$stubs/cargo" <<'EOF'
+#!/bin/sh
+if [ "$1" = clippy ] && [ "$2" = --version ]; then
+  echo "clippy 0.1.98 (88d9e12ae 2026-08-18)"
+  exit 0
+fi
+[ "$1" = fmt ] && exit 1
+exit 0
+EOF
+chmod +x "$stubs/cargo"
+res="$(attempt)"
+status="${res%%|*}"; out="${res#*|}"
+if [ "$status" != 0 ] && ! printf '%s' "$out" | grep -qF "all checks passed"; then
+  ok "a failing check fails the script"
+else
+  bad "a failing check fails the script" "exit $status: $out"
 fi
 
 # --- agreeing, and both too old ---------------------------------------------

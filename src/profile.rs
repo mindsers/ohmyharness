@@ -1020,6 +1020,36 @@ mod tests {
         }
     }
 
+    /// The digest reads the **whole** path, not the tail of it.
+    ///
+    /// Every other fixture in this file distinguishes its two checkouts by
+    /// the *parent directory's name* — `work/api` against `oss/api` — so a
+    /// digest that hashed only that name satisfied all of them. Measured: the
+    /// entire `profile` suite, 32 tests, green against an implementation that
+    /// re-collides `~/a/work/api` with `~/b/work/api`. Risk 8d, reopened,
+    /// with nothing to say so.
+    ///
+    /// These two differ only *above* the parent, which is the one shape that
+    /// forces the digest to read past the tail.
+    #[test]
+    fn two_checkouts_differing_only_above_the_parent_are_not_one_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let one = dir.path().join("one/work/api");
+        let two = dir.path().join("two/work/api");
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+
+        let of = |repo: std::path::PathBuf| Paths {
+            root: dir.path().join("home"),
+            repo,
+        };
+        assert_ne!(
+            of(one).container("s01"),
+            of(two).container("s01"),
+            "same basename and same parent name is still two checkouts"
+        );
+    }
+
     /// The same checkout is the same repo, every time.
     ///
     /// The other half, and the more dangerous one to get wrong: an id that
