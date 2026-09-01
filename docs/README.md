@@ -3,12 +3,13 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.7.0`. This release is the
-[command surface](design/profile.md) — one migration, after which a command name
-cannot collide with a harness name, which file a write lands in follows from the
-key rather than from the command, `omh init` answers *what did you do to my
-repo*, and `--dry-run` withholds the writes rather than being quietly dropped.
-The [work loop](design/git.md) it sits on landed in 0.6.0.
+**Status: early.** `0.8.0`. This release closes the two failures that were
+silent: two checkouts with the same directory name no longer share sessions
+([risks](design/risks.md) 8d), and the carried-file scan says which files it
+could not read instead of reporting a clean harvest either way (4d). It adds
+[`omh eject`](commands.md#omh-eject-harness---to-dir), the exit. The
+[command surface](design/profile.md) landed in 0.7.0 and the
+[work loop](design/git.md) in 0.6.0.
 One harness (`claude`) has
 been driven for real work; `opencode` passes `omh doctor` but has not. Docker is
 the only verified runtime. Several design pages describe work that is **partly

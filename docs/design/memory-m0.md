@@ -1,5 +1,8 @@
 # Memory M0 — running iwe, instead of reading about it
 
+> **Status: a measurement, not a design.** Nothing here is a plan; it is what
+> running the thing showed.
+>
 > **Measured 2026-08-08**, iwe `v0.19.0`, on `aarch64`. **§1 was measured in a
 > container built from omh's own base recipe, and is the finding that the binary
 > does not execute there** — so every later section that required *executing* it

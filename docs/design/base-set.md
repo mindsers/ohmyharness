@@ -1,5 +1,7 @@
 # The base set
 
+**Status: built.** The set lives in a versioned manifest, `init` seeds from it and `omh why` explains from it, and the four-field test is enforced by the build. What is not built is cost accounting — the rollup that would give the set a reason to shrink.
+
 This is the product. Everything else in omh is a place to put it.
 
 It lives in a versioned TOML file — `~/.omh/base/2026.08.toml`, shipped with the
@@ -237,6 +239,45 @@ itself — two sources describing one base set, which can drift. A test
 asserts the name sets match exactly **in both directions**, because the drift is
 silent in the worst way: `omh why` confidently explaining an entry that is no
 longer installed, or an entry shipping with no explanation at all.
+
+## Proposing an entry
+
+The four fields are the bar, and they are enforced by
+`every_base_set_entry_states_its_case` in `src/base.rs` rather than by a
+reviewer's patience. An entry that cannot fill them in fails the build.
+
+| Field | What it has to say | What makes one fail |
+|---|---|---|
+| `because` | what it buys, in one sentence | a restatement of what the thing is |
+| `measured` | a value, the method, and the date it was taken | a number with no method, or an estimate |
+| `instead_of` | what was considered and why it lost | an empty list where alternatives obviously exist |
+| `remove` | the command that takes it out, and what survives | "uninstall it" |
+
+**Costs are measured; benefits are argued.** They are different kinds of claim
+and the output never blurs them, so a proposal should not either. `0.46s to
+index this repo, cold — index_repository --mode fast, 821 nodes / 3813 edges,
+in the sandbox, 2026-08-06` is a cost. *"Structural queries instead of
+re-grepping the repo every task"* is a benefit, and you are free to reject it.
+
+If the cost can be computed in-process, compute it in a test rather than
+typing it — one entry's already is, and that is the shape the rest should
+take. A typed number is a claim nobody will re-check.
+
+**Rejections are entries too.** `omh why` answers for things omh turned down,
+so a candidate refused over its licence is not re-litigated every time
+somebody rediscovers it. If you evaluated something and it lost, that belongs
+in `[[rejected]]` rather than in a pull-request comment nobody will find.
+
+### Why this is published
+
+Curation is the part of a distribution that never finishes, and
+[risks](risks.md) names it — not any technical problem — as the thing most
+likely to kill this project. A base set only one person can extend has a
+ceiling set by that person's afternoons.
+
+The standard above already existed; it was just never written down as one. Put
+plainly, it turns proposing an entry from research into review, which is the
+only version of curation a project this size can sustain.
 
 ## Adding an entry
 

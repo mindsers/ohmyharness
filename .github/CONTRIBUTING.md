@@ -1,11 +1,18 @@
 # Contributing
 
 ```console
-$ cargo test                    # the suite
-$ cargo clippy --all-targets -- -D warnings
+$ ./scripts/check.sh            # format, lints and the suite — what CI runs
 $ ./scripts/test-install.sh     # install.sh, and every refusal it should make
 $ omh doctor                    # the only thing that verifies an adapter
 ```
+
+**Run `check.sh` rather than `cargo clippy` directly.** It checks first that the
+clippy answering you was built against the rustc you have, because that is a
+failure this project has actually had: a stale `clippy 0.1.81` shim on `PATH`
+against `rustc 1.98` refuses on `rust-version = 1.85` and prints a dependency
+wall instead of a lint, so nothing fails and the lint simply never runs.
+`rust-toolchain.toml` records the incident and cannot prevent it — rustup reads
+that file, a Homebrew or distro cargo does not.
 
 A few tests are `#[ignore]`d because they need `node` on `PATH`: they run the
 JavaScript omh generates through `node --check`, which is the only thing that
@@ -15,6 +22,19 @@ and so does CI.
 Four more used to be ignored because they shell out to git, which could not run
 inside an omh sandbox. That stopped being true in 2026.08 — see
 [adoption](../docs/design/adoption.md) — and they run with everything else now.
+
+## Proposing a base-set entry
+
+omh's opinion is [data, not code](../docs/design/base-set.md), and
+[what an entry has to say](../docs/design/base-set.md#proposing-an-entry) is
+the bar for adding to it. Four fields, enforced by a test rather than by
+review: what it buys, what it costs, what was considered instead, and how to
+remove it.
+
+Curation is the part of a distribution that never finishes, and
+[risks](../docs/design/risks.md) names a solo one as the thing most likely to
+kill this project. That standard already exists in the build — publishing it
+is what turns proposing an entry into something anybody can do.
 
 ## Read this first
 
@@ -157,11 +177,10 @@ on the difference between those two, and the moment a doc claims more than
 
 ## Before opening a PR
 
-1. `cargo test`
-2. `cargo fmt`
-3. `cargo clippy --all-targets -- -D warnings`
-4. `omh doctor` if you touched anything a harness reads
-5. Reintroduce the bug your new test guards; confirm it goes red
+1. `./scripts/check.sh` — format, lints and the suite, with the toolchain checked
+2. `./scripts/check.sh --all` if you touched anything the ignored tests cover
+3. `omh doctor` if you touched anything a harness reads
+4. Reintroduce the bug your new test guards; confirm it goes red
 
-Step 5 is the one people skip. It is also the one that catches tests that assert
+Step 4 is the one people skip. It is also the one that catches tests that assert
 nothing.

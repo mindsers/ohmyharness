@@ -1,5 +1,7 @@
 # Memory — how the design got here
 
+**Status: history, not a plan.** What was tried on the way to [the specification](memory.md), including the parts that were wrong. Read it to argue with a decision, not to find out what exists.
+
 Companion to [the specification](memory.md). That page says **what to build**;
 this one says **why**, what was tried, and what this design got wrong on the way.
 

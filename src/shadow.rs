@@ -1322,7 +1322,7 @@ impl Shadow {
         branch: &str,
         carried: &[String],
         keep: Keep,
-    ) -> Result<usize> {
+    ) -> Result<Harvest> {
         self.preflight(worktree)?;
 
         // Whatever the agent has not checkpointed yet is still its work, and a
@@ -1422,9 +1422,14 @@ impl Shadow {
             .with_context(|| format!("counting what {} has to hand over", self.branch))?;
         if count == 0 {
             git_in(repo, &["update-ref", "-d", &scratch])?;
-            return Ok(0);
+            // Nothing to hand over means nothing to have scanned, so there is
+            // no caveat to report either.
+            return Ok(Harvest {
+                landed: 0,
+                unscanned: Vec::new(),
+            });
         }
-        self.refuse_carried(repo, &range, carried)?;
+        let unscanned = self.refuse_carried(repo, &range, carried)?;
 
         // The guard `Session::commit` makes and this did not: "omh will not
         // commit to a branch it did not open". Without it a session worktree
@@ -1585,7 +1590,7 @@ impl Shadow {
         // deleted that are sitting on disk.
         git_in(worktree, &["reset", "-q", "--mixed"])
             .with_context(|| landed_on("omh could not refresh the session's index"))?;
-        Ok(landed)
+        Ok(Harvest { landed, unscanned })
     }
 
     /// The curation pass: the agent's commits onto the branch, the user's shape.
@@ -1788,7 +1793,13 @@ impl Shadow {
     /// reads them from the checkout *now*, so a secret rotated mid-session is
     /// matched at its new value and an agent commit holding the old one goes
     /// through.
-    fn refuse_carried(&self, repo: &Path, range: &str, carried: &[String]) -> Result<()> {
+    fn refuse_carried(
+        &self,
+        repo: &Path,
+        range: &str,
+        carried: &[String],
+    ) -> Result<Vec<Unscanned>> {
+        let mut unscanned = Vec::new();
         for rel in carried {
             let rel = rel.trim().trim_end_matches('/');
             // Sanitised where it is read, not where it is printed. What comes
@@ -1807,7 +1818,9 @@ impl Shadow {
                      history with `omh s commit -m`"
                 );
             }
-            for needle in Self::needles(&repo.join(rel))? {
+            let (found, could_not_read) = Self::needles(&repo.join(rel), rel)?;
+            unscanned.extend(could_not_read);
+            for needle in found {
                 for (how, args) in [
                     ("contains", vec!["log", "--oneline", "-S", &needle, range]),
                     (
@@ -1826,7 +1839,7 @@ impl Shadow {
                 }
             }
         }
-        Ok(())
+        Ok(unscanned)
     }
 
     /// Lines worth searching for: long enough to mean something, and not a
@@ -1844,35 +1857,75 @@ impl Shadow {
     /// spell the same as "clean" in the one module whose subject is the user's
     /// secrets. Binary files are the exception the loop takes deliberately:
     /// they decode-fail, and a byte sequence is not a line to search for.
-    fn needles(at: &Path) -> Result<Vec<String>> {
+    ///
+    /// **The second return value is the point of risk 4d.** Three shapes yield
+    /// no needles — not text, not there, and nothing in it long enough to
+    /// match — and all three used to return `Ok(vec![])`, which is the same
+    /// value a file full of needles that matched nothing returns. So the
+    /// verdict said "no carried secret reached the branch" whether omh had
+    /// looked or not. They still fail open, which is right: refusing a harvest
+    /// because a file could not be read would be worse. They no longer fail
+    /// *silent*, which is the whole change.
+    ///
+    /// `named` is how the user's `carry_in` entry spells this path, extended
+    /// per directory level, because a warning that says `certs/` does not tell
+    /// anybody which of eight files went unread.
+    fn needles(at: &Path, named: &str) -> Result<(Vec<String>, Vec<Unscanned>)> {
         if at.is_dir() {
             let mut out = Vec::new();
-            for entry in std::fs::read_dir(at)
+            let mut unscanned = Vec::new();
+            // Sorted, because `read_dir` order is the filesystem's and a
+            // warning that lists two files in a different order on each run
+            // reads as churn rather than as the same standing gap.
+            let mut entries: Vec<_> = std::fs::read_dir(at)
                 .with_context(|| format!("reading carried directory {}", at.display()))?
                 .flatten()
-            {
-                out.extend(Self::needles(&entry.path())?);
+                .map(|e| e.path())
+                .collect();
+            entries.sort();
+            for entry in entries {
+                let child = match entry.file_name() {
+                    Some(n) => format!("{named}/{}", n.to_string_lossy()),
+                    None => named.to_string(),
+                };
+                let (n, u) = Self::needles(&entry, &child)?;
+                out.extend(n);
+                unscanned.extend(u);
             }
-            return Ok(out);
+            return Ok((out, unscanned));
         }
         if !at.exists() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), vec![Unscanned::new(named, Unreadable::Missing)]));
         }
         let body = match std::fs::read_to_string(at) {
             Ok(body) => body,
             // Not text. Nothing to search for line-wise, and the path check
-            // still covers it.
-            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => return Ok(Vec::new()),
+            // still covers it — which is what the report says, so nobody reads
+            // this as the file being wholly unguarded.
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                return Ok((Vec::new(), vec![Unscanned::new(named, Unreadable::NotText)]))
+            }
             Err(e) => {
                 return Err(e).with_context(|| format!("reading carried file {}", at.display()))
             }
         };
-        Ok(body
+        let found: Vec<String> = body
             .lines()
             .map(str::trim)
             .filter(|l| l.len() >= 12 && !l.starts_with('#') && !l.starts_with("//"))
             .map(str::to_string)
-            .collect())
+            .collect();
+        // An *empty* file is not a gap. There is no content in it to have been
+        // copied anywhere, so nothing went unchecked and reporting it would be
+        // a false positive on the one warning that has to stay worth reading.
+        // A file with content whose every line was filtered is the opposite:
+        // there is something there and omh is not looking at it.
+        let unscanned = if found.is_empty() && !body.trim().is_empty() {
+            vec![Unscanned::new(named, Unreadable::NothingToMatch)]
+        } else {
+            Vec::new()
+        };
+        Ok((found, unscanned))
     }
 
     /// omh's own view of what this repository's config may say.
@@ -2215,6 +2268,126 @@ pub enum Keep {
     These(Vec<String>),
     /// The todo, in the user's own editor. The only path that needs a terminal.
     Edit,
+}
+
+/// What a harvest did, and what it could not see while doing it.
+///
+/// A bare count was the whole answer until the carried-secret scan turned out
+/// to have three ways of finding nothing that spell the same as finding
+/// nothing wrong — [`Unscanned`] below. Returning them together is the point:
+/// a caller cannot read the count without the caveat being in its hand, which
+/// a sibling function it had to remember to call would not achieve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Harvest {
+    /// Commits that reached the branch.
+    pub landed: usize,
+    /// Carried paths the content scan could not turn into needles. Empty is
+    /// the ordinary case and means every carried file was read.
+    pub unscanned: Vec<Unscanned>,
+}
+
+/// A carried path the content scan could not read, and why.
+///
+/// `refuse_carried` works from *needles* — the lines of the files you carried
+/// in — and a file that yields none is indistinguishable, at the point of the
+/// verdict, from a file that yielded plenty and matched nothing. All three
+/// causes below fail open, which is correct: omh will not refuse a harvest
+/// because it could not read a file. What was wrong is that they failed
+/// **open and silent**, so "no carried secret found" was also what omh said
+/// when it had not looked.
+///
+/// Named rather than counted, because the action differs per file: a
+/// keystore's protection is its path, and the user is the only one who knows
+/// whether a copy went out under another name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Unscanned {
+    /// The `carry_in` entry, as the user wrote it, or a path beneath one when
+    /// the entry was a directory.
+    pub path: String,
+    pub why: Unreadable,
+}
+
+impl Unscanned {
+    fn new(path: &str, why: Unreadable) -> Self {
+        Self {
+            path: path.to_string(),
+            why,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unreadable {
+    /// Not UTF-8, so there are no lines to search for. A carried keystore,
+    /// `.p12` or DER key lands here — and `certs/` is the second example
+    /// `carry_in`'s own documentation gives, so this is the common case
+    /// rather than the exotic one. Such a file is protected by its path
+    /// alone: copied under another name, nothing catches it.
+    NotText,
+    /// Named in `carry_in` and not on disk when the scan ran. Deleted or
+    /// renamed in the checkout between launch and harvest, which is strictly
+    /// worse than the rotation caveat `refuse_carried` already documents:
+    /// rotation leaves a needle at the new value, deletion leaves none.
+    Missing,
+    /// Read as text, and every line was dropped as too short or as a comment.
+    /// A file of nothing but short assignments matches nothing, and says so
+    /// here rather than passing for scanned.
+    NothingToMatch,
+}
+
+impl Unreadable {
+    /// One clause, for a line that already names the file.
+    pub fn because(self) -> &'static str {
+        match self {
+            Unreadable::NotText => "it is not text, so there are no lines to search for",
+            Unreadable::Missing => "it is not there now, so there was nothing to read",
+            Unreadable::NothingToMatch => "every line in it is too short or is a comment",
+        }
+    }
+}
+
+/// Which carried paths the content scan will not be able to read.
+///
+/// The launch-time view of what [`Shadow::needles`] reports at harvest, over
+/// the same function rather than beside it — two implementations of "can this
+/// be scanned" would drift, and the launch answer is the one the user can
+/// still act on. `repo` is the checkout, because that is where omh reads the
+/// bytes it carried.
+pub fn unscannable(repo: &Path, carried: &[String]) -> Result<Vec<Unscanned>> {
+    let mut out = Vec::new();
+    for pattern in carried {
+        let rel = pattern.trim().trim_end_matches('/');
+        let (_, could_not_read) = Shadow::needles(&repo.join(rel), rel)?;
+        out.extend(could_not_read);
+    }
+    Ok(out)
+}
+
+/// The warning both callers print, worded once.
+///
+/// Here rather than at each site because there are two — `carry.rs` at launch,
+/// where the user can still act, and the harvest, where the count would
+/// otherwise read as a clean bill. Two sites wording this differently is how
+/// one of them ends up sounding like a note rather than a gap, and it is the
+/// same argument `image::GUEST_HOME` makes about consistency by copying.
+///
+/// Empty in, `None` out: nothing to say is said by saying nothing, not by
+/// printing a reassuring line about zero problems.
+pub fn unscanned_warning(unscanned: &[Unscanned]) -> Option<String> {
+    if unscanned.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "the carried-file scan could not read these, so it cannot tell you whether \
+         their contents reached a commit:",
+    );
+    for u in unscanned {
+        out.push_str(&format!("\n    {} — {}", u.path, u.why.because()));
+    }
+    // The path check is not nothing and saying so keeps the warning honest:
+    // what remains is the weaker guard, not no guard.
+    out.push_str("\n  the path itself is still checked — what is not is a copy under another name");
+    Some(out)
 }
 
 /// Which checkpoints a `--keep 1,3-4` names, in the order it names them.
@@ -4388,7 +4561,8 @@ mod tests {
 
         let landed = s
             .harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
-            .unwrap();
+            .unwrap()
+            .landed;
 
         let log = git_in(&checkout, &["log", "--format=%an|%s", "main..omh/s01"]).unwrap();
         let lines: Vec<&str> = log.lines().collect();
@@ -4571,8 +4745,244 @@ mod tests {
 
         let landed = s
             .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], Keep::All)
-            .expect("a carried line nobody committed is not a reason to refuse");
+            .expect("a carried line nobody committed is not a reason to refuse")
+            .landed;
         assert_eq!(landed, 1, "the agent's commit still has to land");
+    }
+
+    /// A carried file the scan could not read is **named**, not passed over.
+    ///
+    /// This is risk 4d, and the point is narrow: none of these three is a
+    /// refusal, and none should be — omh will not block a harvest because it
+    /// could not read a file. What was wrong is that they failed open and
+    /// *silent*, so `omh s commit --keep` reported a clean landing in exactly
+    /// the same words whether it had scanned the carried files or not.
+    ///
+    /// The `NotText` row is the one that matters most in practice. `carry_in`'s
+    /// own documentation gives `certs/` as its second example, so a carried
+    /// keystore, `.p12` or DER key is the common case rather than the exotic
+    /// one — and its only remaining protection is its path, which a copy under
+    /// another name walks straight around.
+    ///
+    /// Asserted by cause and by path rather than against the sentence, so
+    /// rewording the warning does not fail this.
+    #[test]
+    fn a_carried_file_the_scan_could_not_read_is_named() {
+        for (name, plant, want) in [
+            (
+                "a keystore, or anything else that is not UTF-8",
+                "binary",
+                Unreadable::NotText,
+            ),
+            (
+                "a file deleted from the checkout mid-session",
+                "delete",
+                Unreadable::Missing,
+            ),
+            (
+                "a file of nothing but short lines and comments",
+                "unmatchable",
+                Unreadable::NothingToMatch,
+            ),
+        ] {
+            let (d, wt, shadow_dir) = fixture();
+            let checkout = d.path().join("checkout");
+            let s = Shadow::new(&shadow_dir, "s01");
+            s.ensure(&wt, &["secret.bin".to_string()]).unwrap();
+
+            match plant {
+                // Invalid UTF-8 rather than merely unusual bytes: a lone 0x80
+                // is a continuation byte with nothing to continue, which is
+                // what `read_to_string` rejects. Random high bytes that happen
+                // to decode would make this test pass for the wrong reason.
+                "binary" => {
+                    std::fs::write(checkout.join("secret.bin"), [0x80, 0x81, 0xfe, 0xff]).unwrap();
+                }
+                "delete" => { /* never written: the scan finds nothing there */ }
+                _ => {
+                    std::fs::write(checkout.join("secret.bin"), "k=1\n# a note\n//x\n").unwrap();
+                }
+            }
+
+            // Something for the harvest to actually do. With nothing to hand
+            // over, `harvest` returns before the carried scan runs at all and
+            // this would assert against a path it never took.
+            std::fs::write(wt.join("work.rs"), "fn work() {}").unwrap();
+            git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+            git(&s.gitdir, &wt, &["commit", "-qm", "Ordinary work"]).unwrap();
+
+            let got = s
+                .harvest(
+                    &checkout,
+                    &wt,
+                    "omh/s01",
+                    &["secret.bin".to_string()],
+                    Keep::All,
+                )
+                .expect("an unreadable carried file is not a reason to refuse a harvest");
+
+            assert_eq!(got.landed, 1, "{name}: the work still lands");
+            assert_eq!(
+                got.unscanned,
+                vec![Unscanned {
+                    path: "secret.bin".into(),
+                    why: want,
+                }],
+                "{name}: the harvest has to say it could not read this"
+            );
+        }
+    }
+
+    /// A directory carried in reports the file inside it, not the entry.
+    ///
+    /// `carry_in`'s documented example is `certs/`, and a warning naming
+    /// `certs/` tells the user nothing about which of eight files it could not
+    /// read. `needles` already walks the directory; the report has to arrive at
+    /// the same resolution.
+    #[test]
+    fn a_carried_directory_names_the_file_it_could_not_read() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &["certs".to_string()]).unwrap();
+
+        std::fs::create_dir_all(checkout.join("certs")).unwrap();
+        std::fs::write(checkout.join("certs/deploy.p12"), [0x80, 0xfe]).unwrap();
+        std::fs::write(
+            checkout.join("certs/notes.txt"),
+            "this line is long enough to be a needle\n",
+        )
+        .unwrap();
+
+        std::fs::write(wt.join("work.rs"), "fn work() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qm", "Ordinary work"]).unwrap();
+
+        let got = s
+            .harvest(&checkout, &wt, "omh/s01", &["certs".to_string()], Keep::All)
+            .expect("an unreadable carried file is not a reason to refuse a harvest");
+
+        assert_eq!(
+            got.unscanned,
+            vec![Unscanned {
+                path: "certs/deploy.p12".into(),
+                why: Unreadable::NotText,
+            }],
+            "the readable sibling is not a gap and the unreadable one is named in full"
+        );
+    }
+
+    /// The launch-time answer is the harvest-time answer.
+    ///
+    /// Two ways to ask "can this be scanned" would drift, and the drift would
+    /// be invisible: the launch would promise a scan the harvest then did not
+    /// perform, or warn about a file it read perfectly well. So this asserts
+    /// they agree rather than asserting `unscannable`'s output on its own —
+    /// the property is the agreement, and a test of either half alone would
+    /// survive the two coming apart.
+    #[test]
+    fn what_launch_says_is_unscannable_is_what_the_harvest_could_not_read() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        let carried = vec!["certs".to_string(), "gone.key".to_string()];
+        s.ensure(&wt, &carried).unwrap();
+
+        std::fs::create_dir_all(checkout.join("certs")).unwrap();
+        std::fs::write(checkout.join("certs/deploy.p12"), [0x80, 0xfe]).unwrap();
+        std::fs::write(checkout.join("certs/short.env"), "k=1\n").unwrap();
+        // `gone.key` is never written: named in carry_in, not on disk.
+
+        let at_launch = unscannable(&checkout, &carried).unwrap();
+
+        std::fs::write(wt.join("work.rs"), "fn work() {}").unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(&s.gitdir, &wt, &["commit", "-qm", "Ordinary work"]).unwrap();
+        let at_harvest = s
+            .harvest(&checkout, &wt, "omh/s01", &carried, Keep::All)
+            .unwrap()
+            .unscanned;
+
+        assert_eq!(
+            at_launch, at_harvest,
+            "the two moments must give the same answer about the same files"
+        );
+        assert_eq!(
+            at_launch,
+            vec![
+                Unscanned {
+                    path: "certs/deploy.p12".into(),
+                    why: Unreadable::NotText
+                },
+                Unscanned {
+                    path: "certs/short.env".into(),
+                    why: Unreadable::NothingToMatch
+                },
+                Unscanned {
+                    path: "gone.key".into(),
+                    why: Unreadable::Missing
+                },
+            ],
+            "each cause, named, in a stable order"
+        );
+    }
+
+    /// An empty carried file is not a gap.
+    ///
+    /// It yields no needles, like the three causes above, and reporting it
+    /// would be a false positive: there is no content in it to have been
+    /// copied anywhere, so nothing went unchecked. The distinction is worth a
+    /// test because it is one character of implementation — the
+    /// `!body.trim().is_empty()` in `needles` — and losing it would put a line
+    /// in the warning for every empty `.env` placeholder anyone carries, which
+    /// is how a warning stops being read.
+    #[test]
+    fn an_empty_carried_file_is_not_reported_as_unscanned() {
+        let (d, _wt, _shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        std::fs::write(checkout.join("empty.env"), "").unwrap();
+        std::fs::write(checkout.join("blank.env"), "\n\n   \n").unwrap();
+
+        assert_eq!(
+            unscannable(
+                &checkout,
+                &["empty.env".to_string(), "blank.env".to_string()]
+            )
+            .unwrap(),
+            vec![],
+            "nothing in it means nothing went unchecked"
+        );
+    }
+
+    /// The warning says which file and why, and does not overstate the gap.
+    ///
+    /// Separate from the guards above because those assert the *data* and this
+    /// asserts the *sentence* — the one a user acts on. Both matter and they
+    /// break independently: a correct `Vec<Unscanned>` rendered as
+    /// "1 file skipped" would pass every assertion above.
+    #[test]
+    fn the_unscanned_warning_names_the_file_and_keeps_the_path_check_honest() {
+        assert_eq!(
+            unscanned_warning(&[]),
+            None,
+            "nothing to report is reported by saying nothing"
+        );
+
+        let msg = unscanned_warning(&[Unscanned {
+            path: "certs/deploy.p12".into(),
+            why: Unreadable::NotText,
+        }])
+        .expect("something to report");
+
+        assert!(msg.contains("certs/deploy.p12"), "names the file: {msg}");
+        assert!(msg.contains("not text"), "says why: {msg}");
+        // The path check survives all three causes, and a warning that let the
+        // reader believe the file was wholly unguarded would send them looking
+        // for a problem they do not have.
+        assert!(
+            msg.contains("path itself is still checked"),
+            "says what is still guarded: {msg}"
+        );
     }
 
     /// Landing the same work twice is not landing it twice.
@@ -4599,14 +5009,16 @@ mod tests {
 
         assert_eq!(
             s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
-                .unwrap(),
+                .unwrap()
+                .landed,
             2
         );
         let tip = git_in(&checkout, &["rev-parse", "omh/s01"]).unwrap();
 
         assert_eq!(
             s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
-                .unwrap(),
+                .unwrap()
+                .landed,
             0,
             "there is nothing new to keep, and saying so is the whole job"
         );
@@ -4646,7 +5058,8 @@ mod tests {
         git(&s.gitdir, &wt, &["commit", "-qam", "The first round"]).unwrap();
         assert_eq!(
             s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
-                .unwrap(),
+                .unwrap()
+                .landed,
             1
         );
 
@@ -4655,7 +5068,8 @@ mod tests {
 
         assert_eq!(
             s.harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
-                .unwrap(),
+                .unwrap()
+                .landed,
             1,
             "only the round that has not landed yet"
         );
@@ -5206,7 +5620,7 @@ mod tests {
             .collect();
 
         // `--keep 3,1` — the third checkpoint, then the first.
-        let landed = s
+        let harvest = s
             .harvest(
                 &checkout,
                 &wt,
@@ -5223,7 +5637,7 @@ mod tests {
             vec!["one", "three"],
             "newest first from `git log`, so `three` was applied first: {log}"
         );
-        assert_eq!(landed, 2, "and the count is what arrived: {log}");
+        assert_eq!(harvest.landed, 2, "and the count is what arrived: {log}");
     }
 
     /// What a selection leaves out stays out.
@@ -5382,7 +5796,8 @@ mod tests {
         // …and then the rest.
         let landed = s
             .harvest(&checkout, &wt, "omh/s01", &[], Keep::All)
-            .unwrap();
+            .unwrap()
+            .landed;
         let log = git_in(&checkout, &["log", "--format=%s", "main..omh/s01"]).unwrap();
         for m in ["one", "two", "three", "four"] {
             assert!(
@@ -5443,7 +5858,8 @@ mod tests {
 
         let landed = s
             .harvest(&checkout, &wt, "omh/s01", &[], Keep::Edit)
-            .unwrap();
+            .unwrap()
+            .landed;
 
         let log = git_in(&checkout, &["log", "--format=%s", "main..omh/s01"]).unwrap();
         let on_branch = log.lines().count();

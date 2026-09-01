@@ -1,8 +1,10 @@
 # Roadmap
 
+**Status: intent.** Nothing on this page is built by virtue of being here — the ✅ marks say which milestones have landed, and every other line is a plan that has not.
+
 Ordered by what gates what, not by what is most fun.
 
-**These are milestones, not crate versions.** The crate is at `0.7.0` and
+**These are milestones, not crate versions.** The crate is at `0.8.0` and
 milestone v1.5 is roughly what 0.6.0 contained. They are deliberately not
 kept in lockstep — v0 has spanned eight releases already: a milestone moves when
 a body of work lands, semver moves on every release, and calling the crate `1.0`

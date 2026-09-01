@@ -1,5 +1,7 @@
 # Risks
 
+**Status: current, and deliberately not tidied.** Closed risks stay on the page struck through, with the pull request that closed them, because a risk that vanishes teaches nobody what it cost.
+
 Stated plainly, because a tool that asks for your credentials and runs an agent
 against your code should not make you go looking.
 
@@ -93,17 +95,42 @@ session entirely. A guard whose reach depends on the user's dotfiles is not a
 guard; `-F` pins it. The content half was always a literal pickaxe and was never
 affected.
 
-**4d. What the carried-secret scan still cannot see.** It works from *needles* —
-the lines of the files you carried in — and three kinds of line never become
-one. A file that is not UTF-8 yields **no needles at all**, so a carried
-keystore, `.p12` or DER key is protected only by its path: copy it under another
-name and nothing catches it, and `certs/` is the second example `carry_in`'s own
-documentation gives. A line shorter than 12 characters, or one starting with `#`
-or `//`, is dropped silently. And a carried file deleted or renamed in your
-checkout between launch and harvest yields nothing either, which is strictly
-worse than the rotation caveat already documented in the code: rotation leaves a
-needle at the new value, deletion leaves none. All three fail open, none is
-reported.
+**4d. What the carried-secret scan cannot see, it now says.** It works from
+*needles* — the lines of the files you carried in — and three kinds of line
+never become one. A file that is not UTF-8 yields **no needles at all**, so a
+carried keystore, `.p12` or DER key is protected only by its path: copy it under
+another name and nothing catches it, and `certs/` is the second example
+`carry_in`'s own documentation gives. A line shorter than 12 characters, or one
+starting with `#` or `//`, is dropped. And a carried file deleted or renamed in
+your checkout between launch and harvest yields nothing either, which is
+strictly worse than the rotation caveat already documented in the code:
+rotation leaves a needle at the new value, deletion leaves none.
+
+**Narrowed, not closed.** All three still fail open, and that is deliberate:
+refusing a harvest because omh could not read a file would be a worse trade
+than the gap. What changed is that they no longer fail *silent*. `Shadow::needles`
+returns what it could not read alongside what it could, and both moments report
+it — at launch, where you can still carry the file under a name the scan can
+read, and at harvest, where the count would otherwise be the same sentence
+whether omh had looked or not. Each file is named with its cause, directories
+resolve to the file inside them rather than to the entry, and the warning says
+the path check still stands so nobody reads it as *unguarded*:
+
+```console
+omh: the carried-file scan could not read these, so it cannot tell you whether
+     their contents reached a commit:
+    certs/deploy.p12 — it is not text, so there are no lines to search for
+    certs/short.env — every line in it is too short or is a comment
+  the path itself is still checked — what is not is a copy under another name
+```
+
+An empty carried file is deliberately not reported: it yields no needles like
+the other three, but there is nothing in it to have been copied anywhere, and a
+warning that fires on every empty `.env` placeholder is one nobody reads.
+
+What remains is the gap itself. A copy of `deploy.p12` under another name still
+reaches the branch unremarked — omh now tells you it cannot see that, rather
+than implying it looked.
 
 **4c. Closed.** The sandbox's exclude list was frozen at the first launch. omh
 derives what that repository must not track from the mounts it is about to
@@ -114,8 +141,25 @@ tracked nor excluded, so the agent's own `git add -A` swept omh's rendered file 
 MCP environment included — into a history `omh s commit --keep` replays onto your
 branch. The list is rewritten on every launch now, which touches no commit.
 
-**5. Egress is unrestricted.** The allowlist is designed and not wired. An agent
-in a session can reach the network freely.
+**5. Egress is unrestricted, and on Docker that is the design.** An agent in a
+session can reach the network freely.
+
+This page used to read *"the allowlist is designed and not wired"*, which
+implied an omh feature somebody had failed to finish.
+[Decisions](decisions.md) has recorded egress as **inherited from the runtime**
+throughout, and [architecture](architecture.md#runtime-backends) puts egress
+policy in the `sbx` backend beside its keychain-backed credential injection.
+Those two were right and this one was out of step — worth naming, because a
+risk page that misattributes a gap sends the reader looking for the wrong fix.
+
+So it is not on omh's list to wire. It arrives with a backend that has it, or
+it does not arrive. That also means it shares a fix with **risk 1** — `sbx`
+injects secrets at the egress proxy, so the agent never holds its own token —
+and the two are one piece of work rather than two, gated on the
+[v0.5 spike](roadmap.md).
+
+Until then: a Docker session has unrestricted egress, and omh does not claim
+otherwise.
 
 **5b. `refs/omh/turn` is a place the guards do not look.** The sandbox's gitdir
 is a read-write mount, and since 2026.08 three of omh's own queries skip that
@@ -188,12 +232,43 @@ directories and not at these — the most valuable of the three, since a
 container is re-creatable and a run directory holds a timestamp, while this
 holds every commit an agent made.
 
-**8d. Two checkouts with the same directory name share everything.** Worktrees,
-sandbox repositories, container names, the cache volume and the network are all
-keyed by the checkout's basename, so `~/work/api` and `~/oss/api` are one repo
-as far as omh is concerned — and the second one resumes into the first one's
-session. Fixing it changes a path scheme with live sessions underneath it, so it
-needs a migration rather than a patch and is scheduled on its own.
+**8d. ~~Two checkouts with the same directory name share everything.~~**
+*(Closed in 0.8.0.)* Worktrees, run state, ssh keys, sandbox repositories, the
+note store, the cache volume, the network and container names were all keyed by
+the checkout's basename, so `~/work/api` and `~/oss/api` were one repo as far
+as omh was concerned — and the second one resumed into the first one's session:
+a live container holding another project's code, reached by typing an ordinary
+command in an ordinary checkout.
+
+The key is now the basename **and** a digest of the canonical path —
+`api-3f9a2c1b` — composed in `Paths::repo_id`, which all nine accessors route
+through. The name stays in front because people read these: `omh s` prints them
+and `docker ps` lists them, and `omh-3f9a2c1b-s01` says nothing about which
+checkout it is. `omh info --repo` reports it, so the question the collision used
+to create has an answer.
+
+The digest is FNV-1a written out rather than `DefaultHasher`, and the reasoning
+is the same one `container::labels` already records: std does not guarantee that
+hasher's output across releases, and this value names directories holding an
+agent's commits. Drift would not break loudly, it would strand every session and
+open an empty one where the work used to be. A test pins it to FNV's published
+vectors rather than to its own output, so a rewrite has something to fail
+against.
+
+**The migration reads ownership rather than assuming it.** A worktree's `.git`
+is a file naming the checkout it belongs to, so omh does not have to guess which
+of two `api`s owns `~/.omh/worktrees/api`. A pointer naming this checkout moves
+everything; a pointer naming another one refuses, says whose it is, and leaves
+it for that checkout to claim on its next run; no worktrees at all moves the
+rest, since there is no session to collide over and stranding an `init`-only
+repo's notes would be worse. A running sandbox refuses outright — its mounts
+point at the directory being renamed. And state under the old key that *cannot*
+move, because the new key is already in use, is reported rather than passed over
+in silence: nothing reads it again, and silence is what let this survive.
+
+What remains is that the cache volume and the network are recreated rather than
+renamed — they are derivable, docker cannot rename either, and the old pair is
+left for `omh s` to report.
 
 ## Operational
 

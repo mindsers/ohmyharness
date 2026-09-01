@@ -16,6 +16,7 @@ omh settings [set|unset|edit|mcp] …
 omh info --repo                   this checkout: what it uses, and why
 omh use|unuse <capability> <name>
                                   omh use skills tdd · omh use --all
+omh eject <harness> --to <dir>    write out the raw config and step aside
 ```
 
 ## `--dry-run`
@@ -1111,9 +1112,18 @@ It reports rather than writes. What changes a value here is `omh set` and
 `omh unset`, and what changes a selection is `omh use` and `omh unuse` — both
 above.
 
+**`keyed as`** is what omh calls this checkout's state: the directory under
+`~/.omh/worktrees`, the cache volume, and the name of every container it
+starts. It is the checkout's basename plus a digest of where the checkout is,
+because two projects called `api` are two projects — before 2026.08 they shared
+one key, and the second one's `omh new` resumed into the first one's session.
+`--json` reports it as `repo_id`, which is how to find out which `docker ps`
+row belongs to which project.
+
 ```console
 $ omh info --repo
 this repo /Users/you/proj/.omh
+  keyed as proj-561662ee
 
 settings
   (nothing set)
@@ -1168,6 +1178,68 @@ omh's own — `codegraph`, `memory`, the five generated hooks and their rules
 sections — are not selectable in either direction. `omh set <feature> on|off`
 is their switch, because a feature is all or nothing. See
 [Configuration](configuration.md#a-feature-is-not-selectable).
+
+## `omh eject <harness> --to <dir>`
+
+**The exit.** Everything omh renders on a launch, written as ordinary files a
+harness reads without a container.
+
+```
+omh eject <harness> --to <dir>        write it out and step aside
+omh eject <harness> --to <dir> --dry-run
+                                      render everything, write nothing
+```
+
+For an opinionated tool, a credible exit is what makes adoption safe. You are
+handing omh your rules, your credentials and your sandbox policy, and being
+able to leave with all of it is the difference between a default and a cage.
+
+It is nearly free to build because omh already renders exactly these documents
+every time it launches. The only difference here is the destination: a launch
+stages them for a container, mounts them read-only at guest paths and links
+directories at layer paths that exist nowhere but inside the sandbox. Eject
+renders the same content through the same functions and writes real files.
+
+```console
+$ omh eject claude --to /tmp/ejtest
+eject claude /tmp/ejtest
+
+  rules  /tmp/ejtest/CLAUDE.md
+  rules  /tmp/ejtest/AGENTS.md
+  mcp    /tmp/ejtest/.mcp.json
+  hooks  /tmp/ejtest/home/.claude/settings.json
+
+omh: these still name paths only omh's sandbox has — `/omh`, `/work`, `$OMH_*` — so they need editing before a harness reads them outside one:
+    /tmp/ejtest/CLAUDE.md
+    /tmp/ejtest/AGENTS.md
+    /tmp/ejtest/.mcp.json
+    /tmp/ejtest/home/.claude/settings.json
+
+  these are yours now — omh is not in the path
+```
+
+Two things in that output are the whole design.
+
+**`/work` lands at the root, everything else under `home/`.** An adapter
+declares where the *container* expects a file, and neither `/work/CLAUDE.md`
+nor `$HOME/.claude/settings.json` is a host path. Keeping them apart is what
+lets you tell "this belongs in my repo" from "this belongs in my dotfiles"
+without knowing omh's mount layout.
+
+**The warning is not a caveat, it is the honest half.** omh renders these for
+a sandbox: the memory server is invoked with `--local /omh/notes/local`, hooks
+read `$OMH_GRAPH_PROJECT`, rules point at `/work`. On your host none of that
+resolves. omh names the files rather than rewriting them, because it does not
+know where you want your notes or whether you will run the harness in a
+container of your own — and a guess written into a file you are about to
+depend on is worse than being told to look.
+
+A capability the harness has no binding for is named too, so a reader
+comparing the output to their omh setup does not assume something was lost.
+
+`--to` is required and deliberately not the checkout: the command exists to
+*show* you what you would be keeping, and one that overwrote a working tree by
+default would be the opposite of reassuring.
 
 ## `omh memory …`
 

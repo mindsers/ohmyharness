@@ -267,11 +267,61 @@ impl Sandbox {
         }
     }
 
+    /// One of omh's per-repo directories, **asked rather than derived**.
+    ///
+    /// `~/.omh/<kind>/<repo id>`, where the id is `Paths::repo_id`'s business
+    /// and deliberately not spelled out here. Two copies of it used to live in
+    /// this file — one for worktrees, one for the note store — and both said
+    /// "the checkout's basename". When the real rule gained a digest, so that
+    /// two checkouts called `api` stopped sharing a directory, every session
+    /// and memory test failed at once against a path omh no longer used.
+    ///
+    /// `omh info` resolves the same `Paths` the command under test will and
+    /// creates the directory on the way through. There is exactly one, because
+    /// a sandbox is one checkout.
+    fn keyed(&self, kind: &str) -> PathBuf {
+        self.home.join(".omh").join(kind).join(self.repo_id())
+    }
+
+    /// The name omh is currently keying this checkout's state by — **asked**.
+    ///
+    /// `omh info --repo --json` reports it, which is the only supported way to
+    /// know and exists partly for this: risk 8d makes two checkouts named
+    /// `api` two ids, so "which container is mine" became a question with a
+    /// real answer that has to be gettable.
+    ///
+    /// Three earlier attempts here were all the same mistake in different
+    /// clothes — spell the rule out, glob for a directory, glob across every
+    /// directory — and each broke on a test whose state omh had not created
+    /// yet. A copy of a keying rule goes stale; asking cannot.
+    fn repo_id(&self) -> String {
+        let ask = || {
+            let out = self.omh(&["info", "--repo", "--json"]);
+            serde_json::from_str::<serde_json::Value>(&String::from_utf8_lossy(&out.stdout))
+                .ok()
+                .and_then(|v| v["repo_id"].as_str().map(str::to_string))
+        };
+        if let Some(id) = ask() {
+            return id;
+        }
+        // `info --repo` reads the base manifest, and `sandbox()` deliberately
+        // leaves the catalogue empty so a test can say what an unseeded one
+        // does. Seeding the one directory the answer needs is cheaper than
+        // making every caller remember to, and `base/` is omh's own opinion
+        // data — nothing that asks for a repo id has an assertion about it.
+        self.seed_catalogue(&["base"]);
+        ask().unwrap_or_else(|| {
+            let out = self.omh(&["info", "--repo", "--json"]);
+            panic!(
+                "omh could not say what it keys this checkout by:\nstdout: {}\nstderr: {}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        })
+    }
+
     fn local_store(&self) -> PathBuf {
-        self.home
-            .join(".omh/notes")
-            .join(self.repo.file_name().unwrap())
-            .join("local")
+        self.keyed("notes").join("local")
     }
 
     fn seed(&self, at: &str, body: &str) {
@@ -305,10 +355,7 @@ impl Sandbox {
     /// proved nothing, which is the failure mode that kept shadows out of this
     /// file until now.
     fn sandbox_repo_with_unkept_work(&self, id: &str, worktree: &std::path::Path) {
-        let shadow = self
-            .home
-            .join(".omh/shadow")
-            .join(self.repo.file_name().unwrap());
+        let shadow = self.keyed("shadow");
         std::fs::create_dir_all(&shadow).unwrap();
         let gitdir = shadow.join(format!("{id}.git"));
         let git = |args: &[&str]| {
@@ -652,6 +699,24 @@ fn stale_never_files_what_it_cannot_tell_under_stale() {
 // ── getting work out of a session ───────────────────────────────────────────
 
 impl Sandbox {
+    fn worktrees(&self) -> PathBuf {
+        self.keyed("worktrees")
+    }
+
+    /// What omh calls this checkout's container for `id`.
+    ///
+    /// The third place this file spelled out a keying rule, after the worktree
+    /// root and the note store — here as the literal `omh-repo-s03` handed to
+    /// the fake docker. A test that tells the runtime about a container omh
+    /// will never ask for is a test asserting on an empty list, and it passes
+    /// or fails for reasons unrelated to what it is about.
+    ///
+    /// Still not derived: the directory `keyed` finds **is** the repo id, so
+    /// this reads the name omh chose rather than computing one alongside it.
+    fn container(&self, id: &str) -> String {
+        format!("omh-{}-{id}", self.repo_id())
+    }
+
     /// A session as omh would have left one: a real worktree on `omh/<id>`.
     ///
     /// Built with plain git rather than by launching a container, because what
@@ -694,20 +759,31 @@ impl Sandbox {
             git(&["remote", "add", "origin", origin.to_str().unwrap()]);
         }
 
-        let worktree = self
-            .home
-            .join(".omh/worktrees")
-            .join(self.repo.file_name().unwrap())
-            .join(id);
-        std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
+        // Built where omh is looking *now*, and asked again afterwards.
+        //
+        // The second ask is not belt and braces. Until some command has needed
+        // this directory, omh has not created it and `keyed` has nothing to
+        // glob, so the first answer is a guess at the pre-digest key — which
+        // is also, exactly, what an install upgrading into digest keying has
+        // on disk. Adding the worktree gives omh something to find, and the
+        // next command migrates it; asking again returns where it actually
+        // went rather than where we put it.
+        let provisional = self.worktrees().join(id);
+        std::fs::create_dir_all(provisional.parent().unwrap()).unwrap();
         git(&[
             "worktree",
             "add",
             "-q",
-            worktree.to_str().unwrap(),
+            provisional.to_str().unwrap(),
             "-b",
             &format!("omh/{id}"),
         ]);
+        let worktree = self.worktrees().join(id);
+        assert!(
+            worktree.is_dir(),
+            "the session has to end up somewhere omh will look: {}",
+            worktree.display()
+        );
         worktree
     }
 }
@@ -744,11 +820,7 @@ fn rm_names_the_snapshots_it_takes_and_force_still_removes() {
     let sb = sandbox();
     let worktree = sb.session("s01");
     sb.sandbox_repo_with_unkept_work("s01", &worktree);
-    let gitdir = sb
-        .home
-        .join(".omh/shadow")
-        .join(sb.repo.file_name().unwrap())
-        .join("s01.git");
+    let gitdir = sb.keyed("shadow").join("s01.git");
 
     std::fs::write(worktree.join("in-flight.rs"), "fn later() {}\n").unwrap();
     Command::new("sh")
@@ -788,11 +860,7 @@ fn log_turns_reads_the_snapshots_and_the_default_view_does_not() {
     let sb = sandbox();
     let worktree = sb.session("s01");
     sb.sandbox_repo_with_unkept_work("s01", &worktree);
-    let gitdir = sb
-        .home
-        .join(".omh/shadow")
-        .join(sb.repo.file_name().unwrap())
-        .join("s01.git");
+    let gitdir = sb.keyed("shadow").join("s01.git");
 
     std::fs::write(worktree.join("in-flight.rs"), "fn later() {}\n").unwrap();
     let ran = Command::new("sh")
@@ -1132,11 +1200,7 @@ fn a_sandbox_repository_with_no_session_is_reported() {
     // to filter. Without it this test passed with the filter deleted: `s01`
     // had no shadow, so it was never in the list to be removed from.
     sb.sandbox_repo_with_unkept_work("s01", &worktree);
-    let orphan = sb
-        .home
-        .join(".omh/shadow")
-        .join(sb.repo.file_name().unwrap())
-        .join("s09.git");
+    let orphan = sb.keyed("shadow").join("s09.git");
     std::fs::create_dir_all(&orphan).unwrap();
 
     let out = sb.omh(&["s"]);
@@ -1179,17 +1243,9 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
     sb.sandbox_repo_with_unkept_work("s01", &worktree);
 
     let log = sb.fake_docker();
-    let run = sb
-        .home
-        .join(".omh/run")
-        .join(sb.repo.file_name().unwrap())
-        .join("s01");
+    let run = sb.keyed("run").join("s01");
     std::fs::create_dir_all(&run).unwrap();
-    let gitdir = sb
-        .home
-        .join(".omh/shadow")
-        .join(sb.repo.file_name().unwrap())
-        .join("s01.git");
+    let gitdir = sb.keyed("shadow").join("s01.git");
 
     let out = sb.omh(&["s01", "rm"]);
     let said = String::from_utf8_lossy(&out.stderr);
@@ -1707,11 +1763,7 @@ fn a_dry_run_discloses_the_repos_hooks_and_records_nothing() {
         "a launch has to name the executable content it was handed: {said}"
     );
 
-    let snapshot = sb
-        .home
-        .join(".omh/run")
-        .join(sb.repo.file_name().unwrap())
-        .join("hooks.json");
+    let snapshot = sb.keyed("run").join("hooks.json");
     assert!(
         !snapshot.exists(),
         "a dry run recorded {} — the next real launch would be silent about a change",
@@ -1804,7 +1856,7 @@ fn asking_for_a_fresh_session_while_naming_one_is_refused() {
     // And the session it was pointed at is untouched — a refusal that had
     // already launched would be worse than the silence it replaces.
     assert!(
-        !sb.home.join(".omh/run/repo/s01/.harness").exists(),
+        !sb.keyed("run").join("s01/.harness").exists(),
         "it launched anyway"
     );
 }
@@ -1860,7 +1912,7 @@ fn a_launch_records_the_harness_it_started_and_a_dry_run_does_not() {
     let _log = sb.fake_docker();
     sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
     sb.session("s01");
-    let marker = sb.home.join(".omh/run/repo/s01/.harness");
+    let marker = sb.keyed("run").join("s01/.harness");
 
     // The launch is allowed to fail after the write — what is under test
     // happened before it got there. Asserting the file rather than the exit
@@ -1887,7 +1939,7 @@ fn a_launch_records_the_harness_it_started_and_a_dry_run_does_not() {
     dry.session("s01");
     let _ = dry.omh(&["s01", "--dry-run", "resume", "opencode"]);
     assert!(
-        !dry.home.join(".omh/run/repo/s01/.harness").exists(),
+        !dry.keyed("run").join("s01/.harness").exists(),
         "a dry run recorded a harness, so the next resume rejoins a session \
          that never ran"
     );
@@ -1955,7 +2007,7 @@ fn resuming_as_another_harness_records_it_only_if_it_launched() {
     let _log = sb.fake_docker();
     sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
     sb.session("s01");
-    let marker = sb.home.join(".omh/run/repo/s01/.harness");
+    let marker = sb.keyed("run").join("s01/.harness");
 
     let _ = sb.omh(&["s01", "resume", "claude"]);
     assert_eq!(
@@ -5083,7 +5135,7 @@ fn attach_refuses_a_session_that_does_not_exist() {
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        !sb.home.join(".omh/worktrees/repo/s42").exists(),
+        !sb.worktrees().join("s42").exists(),
         "nothing was built for it"
     );
 }
@@ -5854,9 +5906,9 @@ fn a_feature_switch_reaches_the_layer_that_decides() {
 fn rm_takes_the_session_container_down_with_the_worktree() {
     let sb = sandbox();
     let log = sb.fake_docker();
-    let worktree = sb.home.join(".omh/worktrees/repo/s01");
+    let worktree = sb.worktrees().join("s01");
     std::fs::create_dir_all(&worktree).unwrap();
-    let run = sb.home.join(".omh/run/repo/s01");
+    let run = sb.keyed("run").join("s01");
     std::fs::create_dir_all(&run).unwrap();
 
     let out = sb.omh(&["s01", "rm"]);
@@ -5875,7 +5927,7 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
     assert!(
         calls
             .iter()
-            .any(|c| c.starts_with("rm ") && c.contains("omh-repo-s01")),
+            .any(|c| c.starts_with("rm ") && c.contains(&sb.container("s01"))),
         "the container outlived the worktree it mounts: {calls:?}"
     );
 }
@@ -6057,7 +6109,11 @@ fn a_wide_down_with_nobody_to_ask_stops_nothing() {
     sb.session("s01");
     sb.session("s02");
     // What omh's probe reads: the shim's `ps` prints this file.
-    std::fs::write(sb.bin.join("containers"), "omh-repo-s01\nomh-repo-s02\n").unwrap();
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n{}\n", sb.container("s01"), sb.container("s02")),
+    )
+    .unwrap();
 
     // stdin is closed — `Command::output` nulls it — so this is the CI case.
     let out = sb.omh(&["s", "down"]);
@@ -6604,7 +6660,11 @@ fn a_launch_that_cannot_read_the_probe_removes_nothing() {
     sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
     sb.session("s01");
     // Running, so the launch takes the reuse path rather than building.
-    std::fs::write(sb.bin.join("containers"), "omh-repo-s01\n").unwrap();
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s01")),
+    )
+    .unwrap();
     // …and then will not let omh in, for a reason that is neither of the two
     // omh may act on: the daemon died between the two calls.
     //
@@ -6765,12 +6825,16 @@ fn down_over_an_unreachable_runtime_still_names_the_session() {
 fn the_listing_names_what_removed_sessions_left_behind() {
     let sb = sandbox();
     let _log = sb.fake_docker();
-    std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s03")),
+    )
+    .unwrap();
 
-    let launched = sb.home.join(".omh/run/repo/s02");
+    let launched = sb.keyed("run").join("s02");
     std::fs::create_dir_all(&launched).unwrap();
     std::fs::write(launched.join("last-used"), "").unwrap();
-    std::fs::create_dir_all(sb.home.join(".omh/run/repo/doctor")).unwrap();
+    std::fs::create_dir_all(sb.keyed("run").join("doctor")).unwrap();
 
     let out = sb.omh(&["s"]);
     // On **stderr**: a leftover is something wrong, not what `omh s` was asked
@@ -6803,8 +6867,12 @@ fn a_focused_listing_leaves_other_sessions_leftovers_to_the_wide_one() {
     let sb = sandbox();
     let _log = sb.fake_docker();
     sb.session("s01");
-    std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
-    let launched = sb.home.join(".omh/run/repo/s02");
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s03")),
+    )
+    .unwrap();
+    let launched = sb.keyed("run").join("s02");
     std::fs::create_dir_all(&launched).unwrap();
     std::fs::write(launched.join("last-used"), "").unwrap();
 
@@ -6834,7 +6902,11 @@ fn a_focused_listing_leaves_other_sessions_leftovers_to_the_wide_one() {
 fn a_redirected_listing_collects_the_sessions_and_nothing_else() {
     let sb = sandbox();
     let _log = sb.fake_docker();
-    std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s03")),
+    )
+    .unwrap();
 
     let out = sb.omh(&["s"]);
     let answer = String::from_utf8_lossy(&out.stdout);
@@ -6863,7 +6935,11 @@ fn a_redirected_listing_collects_the_sessions_and_nothing_else() {
 fn json_carries_leftovers_as_a_field_and_says_nothing_about_them() {
     let sb = sandbox();
     let _log = sb.fake_docker();
-    std::fs::write(sb.bin.join("containers"), "omh-repo-s03\n").unwrap();
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s03")),
+    )
+    .unwrap();
 
     let out = sb.omh(&["s", "--json"]);
     let doc: serde_json::Value =
@@ -7526,5 +7602,236 @@ fn a_build_asks_docker_to_remove_the_tags_it_replaced() {
     assert!(
         !removals.iter().any(|c| c.ends_with("omh/base:held")),
         "a container still references it: {removals:?}"
+    );
+}
+
+// ── omh eject ───────────────────────────────────────────────────────────────
+
+/// The exit. Write out the raw per-harness config and step aside.
+///
+/// For an opinionated tool, a credible exit is what makes adoption safe: you
+/// are handing omh your rules, your credentials and your sandbox policy, and
+/// being able to leave with all of it is the difference between a default and
+/// a cage. It is also nearly free, because omh already renders exactly these
+/// files on every launch — the only new thing is writing them somewhere a
+/// harness can read without a container.
+///
+/// Asserted **by capability**, not against a list of filenames. The point is
+/// that everything the profile carries comes out; which file each harness
+/// wants is the adapter's business and changes without this test being wrong.
+#[test]
+fn eject_writes_what_each_capability_renders_to() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::create_dir_all(sb.home.join(".omh/skills/refactor")).unwrap();
+    std::fs::write(sb.home.join(".omh/skills/refactor/SKILL.md"), "how\n").unwrap();
+    std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n\nBe careful.\n").unwrap();
+    // A server in the catalogue, because the profile has to actually *carry*
+    // each capability for "everything it carries comes out" to mean anything.
+    // Without this the mcp assertion below passes or fails on whether the
+    // fixture happens to have one, which is not the property under test.
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"demo":{"command":"demo-server"}}}"#,
+    )
+    .unwrap();
+
+    // Outside the checkout: eject refuses to write into one, and these
+    // tests were themselves demonstrating the bug that guard now closes.
+    let out = sb.home.join("ejected");
+    let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
+    assert!(
+        ran.status.success(),
+        "eject failed: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let wrote = |name: &str| {
+        fn walk(at: &Path, into: &mut Vec<String>) {
+            for e in std::fs::read_dir(at).into_iter().flatten().flatten() {
+                if e.path().is_dir() {
+                    walk(&e.path(), into);
+                } else {
+                    into.push(e.path().display().to_string());
+                }
+            }
+        }
+        let mut found = Vec::new();
+        walk(&out, &mut found);
+        found.iter().any(|p| p.contains(name))
+    };
+
+    // The project's own rules reach the harness — the capability omh exists to
+    // get right, and the one a hand-rolled setup most often loses.
+    assert!(wrote("CLAUDE.md"), "rules: {:?}", std::fs::read_dir(&out));
+    assert!(wrote("SKILL.md"), "skills came out as real files");
+    assert!(wrote(".mcp.json"), "mcp servers were rendered");
+
+    // And it says what it did, naming the directory, because a command whose
+    // whole purpose is "you can leave" has to show you what you are leaving
+    // with.
+    let said = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        said.contains("ejected") || said.contains(out.file_name().unwrap().to_str().unwrap()),
+        "it has to say where the files went: {said}"
+    );
+}
+
+/// `--dry-run` runs everything and writes nothing.
+///
+/// The 0.7.0 rule: a command either answers the flag or refuses it, and one
+/// whose entire effect is writing a directory tree has to answer it. The
+/// rendering still happens, so a malformed document is reported here rather
+/// than deferred to the run that meant it.
+#[test]
+fn eject_writes_nothing_on_a_dry_run() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n").unwrap();
+
+    // Outside the checkout: eject refuses to write into one, and these
+    // tests were themselves demonstrating the bug that guard now closes.
+    let out = sb.home.join("ejected");
+    let ran = sb.omh(&[
+        "eject",
+        "claude",
+        "--to",
+        out.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    assert!(
+        ran.status.success(),
+        "a dry run still succeeds: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        !out.exists() || std::fs::read_dir(&out).into_iter().flatten().count() == 0,
+        "a dry run wrote files: {:?}",
+        std::fs::read_dir(&out).map(|d| d.count())
+    );
+}
+
+/// A harness omh has no adapter for is refused by name.
+///
+/// The same rule every other harness-taking command follows: a name omh
+/// cannot answer for is an error that says which name, not a silent empty
+/// directory the user discovers is useless three commands later.
+#[test]
+fn eject_refuses_a_harness_it_has_no_adapter_for() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base"]);
+
+    // Outside the checkout: eject refuses to write into one, and these
+    // tests were themselves demonstrating the bug that guard now closes.
+    let out = sb.home.join("ejected");
+    let ran = sb.omh(&["eject", "nosuch", "--to", out.to_str().unwrap()]);
+    assert!(!ran.status.success(), "an unknown harness must be refused");
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert!(said.contains("nosuch"), "and named: {said}");
+    assert!(!out.exists(), "and nothing written for it");
+}
+
+/// Ejected documents that name sandbox paths say so.
+///
+/// The uncomfortable half of the exit, and the half that makes it honest.
+/// omh renders these documents for a container: the memory server is invoked
+/// with `--local /omh/notes/local`, hooks reference `$OMH_GRAPH_PROJECT`, and
+/// rules point at `/work`. None of those exist on a host. Handing somebody a
+/// directory and saying *these are yours now* while several of the files
+/// silently do not work is the exact shape of failure this release spent
+/// itself closing — a thing that cannot be relied on, spelled the same as a
+/// thing that can.
+///
+/// Not rewritten, because omh cannot know where you want your notes or
+/// whether you will run the harness in a container of your own. Named, so the
+/// decision is yours and you know it is there to make.
+#[test]
+fn eject_names_the_files_that_still_point_into_a_sandbox() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    std::fs::write(
+        sb.home.join(".omh/mcp.json"),
+        r#"{"mcpServers":{"demo":{"command":"demo","args":["--at","/omh/notes/local"]}}}"#,
+    )
+    .unwrap();
+    std::fs::write(sb.repo.join("AGENTS.md"), "# House rules\n").unwrap();
+
+    // Outside the checkout: eject refuses to write into one, and these
+    // tests were themselves demonstrating the bug that guard now closes.
+    let out = sb.home.join("ejected");
+    let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
+    assert!(
+        ran.status.success(),
+        "eject failed: {}",
+        String::from_utf8_lossy(&ran.stderr)
+    );
+
+    let said = String::from_utf8_lossy(&ran.stdout);
+    assert!(
+        said.contains(".mcp.json"),
+        "the file holding a sandbox path has to be named: {said}"
+    );
+    assert!(
+        said.contains("/omh") || said.contains("sandbox"),
+        "and the reason given: {said}"
+    );
+}
+
+/// `--to` inside the checkout is refused, because three places promise it.
+///
+/// `src/cmd/eject.rs`, `src/cli.rs` and `docs/commands.md` all say eject
+/// "deliberately does not write into your checkout". Nothing enforced it, and
+/// `write_file` is an unconditional `fs::write` — so `omh eject claude --to .`
+/// overwrote the working tree. The claude adapter renders rules to both
+/// `/work/CLAUDE.md` and `/work/AGENTS.md`, which means **eject's own input
+/// file is one of its destinations**: the composed document lands on top of
+/// the project rules it was composed from.
+///
+/// Recoverable only if `AGENTS.md` happens to be tracked. A command whose
+/// entire purpose is reassurance should not need `git checkout` to undo.
+#[test]
+fn eject_refuses_to_write_into_the_checkout() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base"]);
+    std::fs::write(sb.repo.join("AGENTS.md"), "# The project's own rules\n").unwrap();
+
+    for target in [".", "sub/dir"] {
+        let ran = sb.omh(&["eject", "claude", "--to", target]);
+        let said = String::from_utf8_lossy(&ran.stderr);
+        assert!(
+            !ran.status.success(),
+            "`--to {target}` is inside the checkout and must be refused: {}",
+            String::from_utf8_lossy(&ran.stdout)
+        );
+        assert!(
+            said.contains("checkout"),
+            "`--to {target}`: and the refusal says why: {said}"
+        );
+    }
+
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join("AGENTS.md")).unwrap(),
+        "# The project's own rules\n",
+        "the file eject composes *from* must not be a file it writes over"
+    );
+
+    // A symlink pointing into the checkout at something that does not exist
+    // yet. `settled` canonicalises the longest *existing* prefix, and a
+    // dangling link is not itself existing — so the guard resolved it to its
+    // own path, outside the checkout, and let it through. It happened not to
+    // write anything (`create_dir_all` then fails `EEXIST`), so the user saw
+    // `File exists (os error 17)` rather than the refusal: passing, for the
+    // wrong reason, which is the shape that later becomes a bug.
+    let link = sb.home.join("into-the-checkout");
+    std::os::unix::fs::symlink(sb.repo.join("not-yet"), &link).unwrap();
+    let ran = sb.omh(&["eject", "claude", "--to", link.to_str().unwrap()]);
+    let said = String::from_utf8_lossy(&ran.stderr);
+    assert!(
+        !ran.status.success(),
+        "a link into the checkout is still into it"
+    );
+    assert!(
+        said.contains("checkout"),
+        "and it is refused for that reason, not by accident: {said}"
     );
 }

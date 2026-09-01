@@ -1,5 +1,7 @@
 # Measuring retrieval
 
+**Status: designed, not run.** The harness exists as `scripts/bench-recall.sh`; the comparison it was written to settle has not been performed, so nothing on this page is yet a measurement.
+
 > `./scripts/bench-recall.sh [--with-iwe] [--answers DIR]`
 
 Every remaining question about [memory](memory.md) is empirical — is our

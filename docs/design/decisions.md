@@ -1,5 +1,7 @@
 # Decisions
 
+**Status: a ledger, not a design.** Every row records a choice already made and the reason it was made; the status of the thing each row decides is on that thing's own page.
+
 Every load-bearing choice, with the reason. If you are about to change one of
 these, the reason is what you need to argue with.
 

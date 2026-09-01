@@ -198,12 +198,438 @@ impl Paths {
         self.repo_id()
     }
 
+    /// What every piece of per-repo state is keyed by.
+    ///
+    /// The checkout's basename, and a digest of where it actually is. It was
+    /// the basename alone until 2026.08, which made `~/work/api` and
+    /// `~/oss/api` one repo — sharing worktrees, sandbox repositories, the
+    /// note store, the cache volume, the network and the container name, so
+    /// the second checkout's `omh new` resumed into the first one's session.
+    /// That is risk 8d, and this function is the whole of it: nine accessors
+    /// route through here and nothing else composes a repo key.
+    ///
+    /// **The name stays in front** because these are read by people. `omh s`
+    /// prints them and `docker ps` lists them, and `omh-3f9a2c1b-s01` tells
+    /// nobody which checkout it belongs to. The digest disambiguates; the name
+    /// is what makes the answer legible.
+    ///
+    /// Canonicalised, so a checkout reached through a symlink is the same repo
+    /// as the checkout itself rather than a second one with its own sessions.
     fn repo_id(&self) -> String {
-        self.repo
+        let name = self
+            .repo
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "repo".into())
+            .unwrap_or_else(|| "repo".into());
+        let full = settled(&self.repo);
+        format!("{name}-{:08x}", stable_digest(&full.to_string_lossy()))
     }
+}
+
+/// The canonical form of a path, whether or not all of it exists yet.
+///
+/// A plain `canonicalize()` here was wrong in a way worth recording, because
+/// it looked right and the guard written for it passed. It fails for a path
+/// that does not exist, so the fallback was the path as given — which meant
+/// **the answer changed the moment the directory came into being**. A repo id
+/// computed before `mkdir` and again after was two different ids, and since
+/// that id names the note store, the worktrees and the sandbox repository, the
+/// state written under the first one simply stopped being found.
+///
+/// The suite caught it and the new test did not: seven memory tests failed
+/// because seeding a team note creates `<repo>/.omh/notes`, which creates
+/// `<repo>` — so notes seeded before and after that line landed in two
+/// different stores. The guard that was supposed to cover this asserted an id
+/// twice over a directory that existed both times, which is the easy half.
+///
+/// So: canonicalise the longest prefix that does exist and re-attach the rest.
+/// `/tmp/x/repo` and `/private/tmp/x/repo` agree before `repo` is created and
+/// after, and a symlinked checkout still resolves to the thing it points at.
+pub(crate) fn settled(path: &Path) -> PathBuf {
+    let mut suffix = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(real) = at.canonicalize() {
+            let mut out = real;
+            for part in suffix.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (at.file_name(), at.parent()) {
+            (Some(name), Some(parent)) => {
+                suffix.push(name.to_os_string());
+                at = parent;
+            }
+            // Nothing on this path resolves — a relative path with no existing
+            // ancestor, or the root itself refusing. The path as given is the
+            // only deterministic answer left, and it is still a stable one.
+            _ => return path.to_path_buf(),
+        }
+    }
+}
+
+/// Every kind of per-repo state, as `<root>/<kind>/<repo id>`.
+///
+/// The list the migration walks, and the reason `repo_id` is worth getting
+/// right: these are the six directories a checkout's identity names. Kept
+/// beside the accessors that build them so adding a seventh is a change in one
+/// place — `worktrees`, `runs`, `keys`, `shadows`, `notes` and `scratch` each
+/// join one of these.
+const KEYED: [&str; 6] = ["worktrees", "run", "keys", "shadow", "notes", "scratch"];
+
+/// What the one-time move from basename keying to digest keying did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Migration {
+    /// No directory under the old key, or it has already run.
+    NothingToDo,
+    /// These kinds moved from the old key to the new one.
+    ///
+    /// `stranded` is what could **not** move in the same run, because the new
+    /// key already holds it. Carried here rather than reported on some later
+    /// run because it was: `blocked` used to be read only when nothing could
+    /// move, so a mixed run said "moved this checkout's notes" and never
+    /// mentioned the worktrees that had just become unreachable.
+    Moved {
+        from: String,
+        kinds: Vec<String>,
+        stranded: Vec<String>,
+    },
+    /// Something is under the old key that nothing will ever look at, because
+    /// the new key is already in use and omh will not merge two directories
+    /// of sessions together.
+    ///
+    /// Reported rather than ignored, and rather than tidied away. Ignoring it
+    /// is how state becomes invisible instead of absent — the shape of every
+    /// other defect this release closed — and merging it is a guess about
+    /// which of two directories a session belongs to, made silently, in the
+    /// one place where being wrong costs an agent's unharvested commits.
+    Stranded { from: String, kinds: Vec<String> },
+    /// Something is there and omh will not touch it. Says why, in a sentence
+    /// meant for the person who has to decide.
+    Refused(String),
+}
+
+/// Move a checkout's state from basename keying onto its own id.
+///
+/// omh keyed everything by the checkout's directory name until 2026.08, so an
+/// install upgrading into this has `~/.omh/worktrees/api` where it now looks
+/// for `~/.omh/worktrees/api-3f9a2c1b`. Without this the sessions, notes and
+/// sandbox repositories under the old name become unreachable — not lost, but
+/// invisible, which for a directory holding an agent's commits is close
+/// enough.
+///
+/// **Ownership is read, never assumed.** A worktree's `.git` is a file saying
+/// `gitdir: <checkout>/.git/worktrees/<id>`, so the old directory names the
+/// checkout it belongs to and omh does not have to guess. The whole point of
+/// risk 8d is that two checkouts can answer to one old key; adopting on
+/// proximity would hand one of them the other's sessions, which is the bug
+/// rather than the fix.
+///
+/// Three answers, and the middle one is the one worth stating:
+///
+/// - a pointer naming **this** checkout — move everything.
+/// - a pointer naming **another** checkout — refuse and say so. The other
+///   checkout will claim it when it next runs, and taking it here would be
+///   the collision, performed deliberately.
+/// - **no worktrees at all** — move the rest. There is no session to collide
+///   over, and the realistic case is a repo that ran `init` and never `new`:
+///   stranding its notes silently is worse than adopting a directory nothing
+///   else is asking for.
+///
+/// `is_running` is injected rather than read here so this stays a pure
+/// filesystem function with no runtime behind it — the same reason
+/// `Runtime::running_args` returns arguments instead of running them.
+pub fn migrate(paths: &Paths, is_running: &dyn Fn(&str) -> bool) -> Result<Migration> {
+    let new = paths.repo_id();
+    let old = paths
+        .repo
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repo".into());
+    if old == new {
+        return Ok(Migration::NothingToDo);
+    }
+
+    let here = |kind: &str, id: &str| paths.root.join(kind).join(id);
+    let under_old: Vec<&str> = KEYED
+        .into_iter()
+        .filter(|kind| here(kind, &old).is_dir())
+        .collect();
+    let (pending, blocked): (Vec<&str>, Vec<&str>) = under_old
+        .into_iter()
+        .partition(|kind| !here(kind, &new).exists());
+
+    if pending.is_empty() {
+        // Nothing can move. If something is still sitting under the old key,
+        // say so — it is invisible to every command from here on, and silence
+        // is what made the collision this whole change is about survive three
+        // weeks of use.
+        return Ok(match blocked.is_empty() {
+            true => Migration::NothingToDo,
+            false => Migration::Stranded {
+                from: old,
+                kinds: blocked.into_iter().map(str::to_string).collect(),
+            },
+        });
+    }
+
+    // Before anything moves. A running container's mounts point at the
+    // worktree path about to change underneath it, and docker would keep
+    // serving the old inode while omh reported a successful move — a session
+    // live on a directory neither of them can name. Refusing is a sentence;
+    // the alternative is a class of bug nobody could reproduce.
+    if is_running(&old) {
+        return Ok(Migration::Refused(format!(
+            "a sandbox from before this version is still running under `{old}`. \
+             omh will not move a session's worktree out from under a live container — \
+             `omh s down` first, then run this again"
+        )));
+    }
+
+    let worktrees = paths.root.join("worktrees").join(&old);
+    match owning_checkout(&worktrees)? {
+        // Nothing there claims an owner, so there is no session to collide
+        // over — the `init`-only repo, whose notes would otherwise strand.
+        Ownership::Unclaimed => {}
+        Ownership::All(owner) if owner == settled(&paths.repo) => {}
+        Ownership::All(owner) => {
+            return Ok(Migration::Refused(format!(
+                "`{}` holds sessions belonging to {}, not this checkout. Two checkouts \
+                 named `{old}` shared one directory before this version, and omh will not \
+                 decide which of them gets it — that other checkout claims it the next \
+                 time it runs omh",
+                worktrees.display(),
+                owner.display()
+            )));
+        }
+        // Two checkouts' sessions in one directory is the *ordinary* shape of
+        // risk 8d, not the exotic one: `next_id` scanned the shared directory,
+        // so the second checkout took `s02` rather than its own `s01`. Moving
+        // the directory would hand one of them the other's work.
+        Ownership::Disputed(why) => {
+            return Ok(Migration::Refused(format!(
+                "omh will not move `{}` — it cannot establish that it is this \
+                 checkout's:\n    {}\n  Two checkouts named `{old}` shared one \
+                 directory before this version, and sessions from both can be in \
+                 there. Move the ones you want by hand, or remove what you do not.",
+                worktrees.display(),
+                why.join("\n    ")
+            )));
+        }
+    }
+
+    // Renamed one at a time, and a failure has to say what already moved.
+    // Without `moved` in the message the caller reports "omh could not move
+    // this checkout's state, so anything under it is invisible" — which is
+    // false for every kind that did move, and sends the user to look under
+    // the old key for state that is no longer there.
+    let mut moved: Vec<&str> = Vec::new();
+    for kind in &pending {
+        let from = paths.root.join(kind).join(&old);
+        let to = paths.root.join(kind).join(&new);
+        std::fs::create_dir_all(to.parent().context("a keyed root has a parent")?)?;
+        std::fs::rename(&from, &to).with_context(|| {
+            format!(
+                "moving {} to {}{}",
+                from.display(),
+                to.display(),
+                match moved.is_empty() {
+                    true => String::new(),
+                    false => format!(
+                        " — this checkout's {} did move, and are on the new key;                          its state is split across both until this is resolved",
+                        moved.join(", ")
+                    ),
+                }
+            )
+        })?;
+        moved.push(kind);
+    }
+    Ok(Migration::Moved {
+        from: old,
+        kinds: pending.into_iter().map(str::to_string).collect(),
+        // Said in the same breath as what did move. Reported on a later run
+        // is not good enough: the run that says "moved your notes" is the one
+        // the user reads.
+        stranded: blocked.into_iter().map(str::to_string).collect(),
+    })
+}
+
+/// Who owns the sessions under an old-key worktrees directory.
+///
+/// Three answers, and keeping them apart is the whole of what stops this
+/// migration doing the thing it exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Ownership {
+    /// Nothing there claims an owner — an empty directory, or one a hand
+    /// `git worktree remove` already emptied. Nothing to collide over.
+    Unclaimed,
+    /// Every session that said, said this checkout.
+    All(PathBuf),
+    /// More than one checkout, or a pointer omh could not read. Either way
+    /// omh does not get to decide; the reasons are for the person who does.
+    Disputed(Vec<String>),
+}
+
+/// Read every worktree's `.git` pointer and say who owns them.
+///
+/// `git worktree add` writes a `.git` **file** holding
+/// `gitdir: <checkout>/.git/worktrees/<name>`, so the answer is on disk and
+/// does not have to be inferred.
+///
+/// **Every pointer, not the first.** The first version returned on the first
+/// one it could read, which is sampling: pre-2026.08 `next_id` scanned the
+/// shared directory, so two checkouts named `api` took `s01` and `s02` *in
+/// one directory*, and `read_dir` order decided which of them adopted the
+/// other's sessions. Measured against the release binary — `oss/api` took
+/// `work/api`'s `s01`, `work/api` was left reporting `no sessions`.
+///
+/// **A pointer omh cannot read is `Disputed`, never `Unclaimed`.** Read
+/// failures used to collapse onto "nobody owns this", which `migrate` reads
+/// as permission to proceed — so an unreadable directory belonging to another
+/// checkout was adopted. "Cannot look" must not spell the same as "nobody is
+/// there" in the one place where being wrong moves somebody else's commits.
+fn owning_checkout(worktrees: &Path) -> Result<Ownership> {
+    let entries = match std::fs::read_dir(worktrees) {
+        Ok(entries) => entries,
+        // Absent is genuinely nobody. Anything else is omh unable to look,
+        // and that is a refusal.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Ownership::Unclaimed),
+        Err(e) => {
+            return Ok(Ownership::Disputed(vec![format!(
+                "{} could not be read ({e})",
+                worktrees.display()
+            )]))
+        }
+    };
+
+    let mut owners: Vec<PathBuf> = Vec::new();
+    let mut unreadable: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry.path(),
+            Err(e) => {
+                unreadable.push(format!("an entry could not be read ({e})"));
+                continue;
+            }
+        };
+        // **Stat failures are evidence, not silence.** The first version of
+        // this filtered with `if !entry.is_dir()`, and `Path::is_dir()`
+        // answers `false` for every error — a dangling symlink, EACCES, a
+        // racing removal. So an entry omh could not look at contributed to
+        // neither list and vanished before the accounting, and a directory
+        // holding another checkout's session was adopted with nothing said.
+        // Measured, and it is how this function reintroduced the bug it was
+        // written to fix.
+        match std::fs::metadata(&entry) {
+            // Not a directory, so not a worktree, so not evidence either way.
+            Ok(meta) if !meta.is_dir() => continue,
+            Ok(_) => {}
+            Err(e) => {
+                unreadable.push(format!("{} could not be examined ({e})", entry.display()));
+                continue;
+            }
+        }
+
+        // Absent is not unreadable, and the difference decides the answer.
+        // A directory with no `.git` claims nothing — an emptied worktree, an
+        // editor's scratch folder — and blocking on those would strand the
+        // notes of every repo with clutter in its worktrees directory. A
+        // `.git` that exists and cannot be read is omh unable to look, which
+        // is the one thing it must never spell as "nobody is there".
+        let pointer = entry.join(".git");
+        match std::fs::read_to_string(&pointer) {
+            Ok(body) => match owner_of(body.trim(), &entry) {
+                Some(owner) if !owners.contains(&owner) => owners.push(owner),
+                Some(_) => {}
+                None => unreadable.push(format!(
+                    "{} is not a `gitdir:` pointer, so it does not name a checkout",
+                    pointer.display()
+                )),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => unreadable.push(format!("{} could not be read ({e})", pointer.display())),
+        }
+    }
+
+    Ok(match (owners.len(), unreadable.is_empty()) {
+        (0, true) => Ownership::Unclaimed,
+        (1, true) => Ownership::All(owners.remove(0)),
+        _ => Ownership::Disputed(
+            owners
+                .into_iter()
+                .map(|o| format!("{} owns one", o.display()))
+                .chain(unreadable)
+                .collect(),
+        ),
+    })
+}
+
+/// The checkout a `gitdir:` pointer names.
+///
+/// `<checkout>/.git/worktrees/<name>` — everything before `/.git/` is the
+/// checkout. Matched on the component rather than by counting parents,
+/// because a bare or relocated gitdir has a different depth.
+///
+/// **`beside` is the directory holding the pointer, and a relative body is
+/// resolved against it.** git ≥ 2.48 writes relative pointers under
+/// `worktree.useRelativePaths` and `git worktree add --relative-paths`, and
+/// the first version handed those straight to `settled` — which canonicalises
+/// a relative path against the *omh process's working directory*. Ownership
+/// was therefore computed from wherever the user ran the command, and the
+/// answer moved with the shell. It refused rather than adopting, but only
+/// because a cwd-derived path happens not to match; the point of this
+/// function is that ownership is read rather than inferred, and being right
+/// by coincidence is not reading.
+fn owner_of(body: &str, beside: &Path) -> Option<PathBuf> {
+    let gitdir = Path::new(body.strip_prefix("gitdir:")?.trim());
+    let absolute = match gitdir.is_absolute() {
+        true => gitdir.to_path_buf(),
+        false => beside.join(gitdir),
+    };
+    let mut at = absolute.as_path();
+    while let Some(parent) = at.parent() {
+        if at.file_name().is_some_and(|n| n == ".git") {
+            return Some(settled(parent));
+        }
+        at = parent;
+    }
+    None
+}
+
+/// A digest that will still be the same digest in five years.
+///
+/// FNV-1a, written out, for a reason worth stating: this value **names
+/// directories on disk** — the worktrees a session lives in, the sandbox
+/// repository holding every commit an agent made. A digest that changed would
+/// not corrupt anything, it would do something worse and quieter: strand the
+/// lot, and open a fresh empty session where the user's work used to be.
+///
+/// So the two obvious choices are both wrong here.
+///
+/// `DefaultHasher` is what `ssh::port` and `base::ui_port` use, and it is
+/// right for them — those derive a *port*, recomputed every run, where drift
+/// costs a moved bookmark. std explicitly does not guarantee its output across
+/// releases, which `container::labels` already refuses it for on exactly this
+/// reasoning: it would restart every running session on the day somebody
+/// upgrades Rust. Here it would strand them instead.
+///
+/// `image::recipe_digest` is stable — `git hash-object` is a fixed SHA-1 for
+/// ever — but it spawns a process, and `repo_id` is called from nine path
+/// accessors many times per command. Correct and unaffordable.
+///
+/// Written out, the algorithm is ours and cannot move under us. The test
+/// pinning a known vector is not ceremony: it is the only thing standing
+/// between a tidy-up of this function and every existing session becoming
+/// unreachable.
+fn stable_digest(s: &str) -> u32 {
+    // FNV-1a, 32-bit. The constants are the specification's.
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in s.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 pub struct Profile {
@@ -540,11 +966,685 @@ mod tests {
         assert!(f.paths.worktrees().starts_with(&f.paths.root));
     }
 
+    /// Two checkouts with the same directory name are two repos.
+    ///
+    /// Risk 8d. `repo_id` was the checkout's basename, and **every** piece of
+    /// per-repo state hangs off it — worktrees, run directories, ssh keys,
+    /// sandbox repositories, the note store, the cache volume, the network and
+    /// the container name. So `~/work/api` and `~/oss/api` were one repo as
+    /// far as omh was concerned, and the second one's `omh new` resumed into
+    /// the first one's session: a live container holding another project's
+    /// code, reached by typing an ordinary command in an ordinary checkout.
+    ///
+    /// Asserted over every accessor by name rather than over a chosen few.
+    /// The failure mode is that somebody adds a tenth piece of per-repo state
+    /// and keys it the old way, and a test naming three of nine would not see
+    /// it — this at least fails the moment an existing one regresses.
+    #[test]
+    fn two_checkouts_with_the_same_name_are_not_one_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("home");
+        std::fs::create_dir_all(dir.path().join("work/api")).unwrap();
+        std::fs::create_dir_all(dir.path().join("oss/api")).unwrap();
+
+        let work = Paths {
+            root: root.clone(),
+            repo: dir.path().join("work/api"),
+        };
+        let oss = Paths {
+            root,
+            repo: dir.path().join("oss/api"),
+        };
+
+        // Named, because clippy reads the inline form as a complex type and
+        // it is genuinely easier to read this way: nine ways of asking one
+        // `Paths` what it calls something.
+        type Accessor = (&'static str, fn(&Paths) -> String);
+        let both_ways: [Accessor; 9] = [
+            ("container", |p| p.container("s01")),
+            ("cache_volume", |p| p.cache_volume()),
+            ("network", |p| p.network()),
+            ("worktrees", |p| p.worktrees().display().to_string()),
+            ("runs", |p| p.runs().display().to_string()),
+            ("keys", |p| p.keys().display().to_string()),
+            ("shadows", |p| p.shadows().display().to_string()),
+            ("notes", |p| p.notes().display().to_string()),
+            ("scratch", |p| p.scratch("login").display().to_string()),
+        ];
+        for (name, of) in both_ways {
+            assert_ne!(
+                of(&work),
+                of(&oss),
+                "{name}: two checkouts named `api` must not share it"
+            );
+        }
+    }
+
+    /// The same checkout is the same repo, every time.
+    ///
+    /// The other half, and the more dangerous one to get wrong: an id that
+    /// varied between two constructions — or between two runs — would strand
+    /// every session the previous id created, which is worse than the
+    /// collision it replaced.
+    ///
+    /// **The directory is created halfway through on purpose.** Without that
+    /// this test passes against a `repo_id` built on a bare `canonicalize()`,
+    /// which fails for a path that does not exist and so returns a different
+    /// answer before and after `mkdir`. That is not hypothetical: it is what
+    /// the first version of this did, and seven memory tests found it because
+    /// seeding a team note creates `<repo>/.omh/notes` — and therefore
+    /// `<repo>` — between two writes to a store keyed by this id. Asserting an
+    /// id twice over a directory that exists both times is the easy half of
+    /// the property and misses the whole defect.
+    #[test]
+    fn the_same_checkout_answers_to_the_same_id_before_and_after_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let of = || Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("work/api"),
+        };
+
+        let before = of().container("s01");
+        let before_worktrees = of().worktrees();
+        assert_eq!(before, of().container("s01"), "stable while absent");
+
+        std::fs::create_dir_all(dir.path().join("work/api")).unwrap();
+
+        assert_eq!(
+            before,
+            of().container("s01"),
+            "a checkout that comes into existence is the same checkout"
+        );
+        assert_eq!(before_worktrees, of().worktrees());
+    }
+
+    /// A symlinked checkout is not a second repo.
+    ///
+    /// The reason the id resolves the path at all rather than hashing it as
+    /// typed. Someone reaching the same checkout through a symlink — a
+    /// `~/code` that points elsewhere, a `/tmp` that is really `/private/tmp`
+    /// — must land in the session they already have, not open a parallel one
+    /// over the same files.
+    #[test]
+    #[cfg(unix)]
+    fn a_checkout_reached_through_a_symlink_is_the_same_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real/api");
+        std::fs::create_dir_all(&real).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+
+        let direct = Paths {
+            root: dir.path().join("home"),
+            repo: real,
+        };
+        let through = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("link/api"),
+        };
+        assert_eq!(
+            direct.container("s01"),
+            through.container("s01"),
+            "one checkout, however it was reached"
+        );
+    }
+
+    /// A worktree left by an older omh, at the old key.
+    fn legacy_session(root: &Path, old: &str, id: &str, owner: &Path) {
+        let wt = root.join("worktrees").join(old).join(id);
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}/.git/worktrees/{id}\n", owner.display()),
+        )
+        .unwrap();
+    }
+
+    const NOT_RUNNING: &dyn Fn(&str) -> bool = &|_: &str| false;
+    const RUNNING: &dyn Fn(&str) -> bool = &|_: &str| true;
+
+    /// An upgrade finds the state the old key left behind.
+    ///
+    /// Without this, everything an existing install has — sessions, notes,
+    /// sandbox repositories holding commits an agent made — is still on disk
+    /// and no longer anywhere omh looks. Not lost, but invisible, which for
+    /// unharvested work is the same afternoon.
+    #[test]
+    fn state_under_the_old_key_moves_to_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+
+        legacy_session(&paths.root, "api", "s01", &repo);
+        std::fs::create_dir_all(paths.root.join("notes/api/local")).unwrap();
+        std::fs::write(paths.root.join("notes/api/local/a.md"), "a note").unwrap();
+        std::fs::create_dir_all(paths.root.join("shadow/api")).unwrap();
+
+        let moved = migrate(&paths, NOT_RUNNING).unwrap();
+        assert!(
+            matches!(&moved, Migration::Moved { kinds, .. }
+                if kinds.contains(&"worktrees".to_string())
+                    && kinds.contains(&"notes".to_string())
+                    && kinds.contains(&"shadow".to_string())),
+            "got: {moved:?}"
+        );
+
+        assert!(
+            paths.worktrees().join("s01").is_dir(),
+            "the session arrived"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths.notes().join("local/a.md")).unwrap(),
+            "a note",
+            "and so did the notes, contents intact"
+        );
+        assert!(
+            !paths.root.join("worktrees/api").exists(),
+            "and the old key is gone, so this does not run again"
+        );
+    }
+
+    /// A directory holding sessions from **both** checkouts is refused.
+    ///
+    /// The realistic shape of risk 8d, and the one the first version of this
+    /// migration got wrong. Pre-2026.08 `next_id` scanned the shared
+    /// directory, so two checkouts named `api` did not each get an `s01` —
+    /// the first took `s01` and the second took `s02`, **in one directory**.
+    /// A migration that reads one pointer and stops is therefore sampling,
+    /// and `read_dir` order decides which checkout wins.
+    ///
+    /// Measured against the release binary before this was fixed: `oss/api`
+    /// migrated the shared directory onto its own key and took `work/api`'s
+    /// `s01` with it. `work/api` then reported `no sessions`, and `oss/api`
+    /// listed `s01` with `?  (how far behind main?)` — because that branch
+    /// lives in the other checkout's repository. Risk 8d performed
+    /// deliberately, by the code written to end it, with the owner's
+    /// unharvested commits inside.
+    ///
+    /// The guard that missed it planted a **single** legacy session, which is
+    /// why it passed. `AGENTS.md`: the original defect is the best mutation
+    /// you will ever get.
+    #[test]
+    fn a_directory_holding_two_checkouts_sessions_is_refused_to_both() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir.path().join("oss/api");
+        let theirs = dir.path().join("work/api");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&theirs).unwrap();
+
+        let home = dir.path().join("home");
+        legacy_session(&home, "api", "s01", &theirs);
+        legacy_session(&home, "api", "s02", &mine);
+
+        // Asked from both sides, because whichever one `read_dir` happens to
+        // sample first must not be the one that decides.
+        for (name, repo) in [("oss", &mine), ("work", &theirs)] {
+            let paths = Paths {
+                root: home.clone(),
+                repo: repo.clone(),
+            };
+            let out = migrate(&paths, NOT_RUNNING).unwrap();
+            assert!(
+                matches!(out, Migration::Refused(_)),
+                "{name}: a directory holding both checkouts' sessions must go to \
+                 neither, got: {out:?}"
+            );
+        }
+        assert!(
+            home.join("worktrees/api/s01").is_dir() && home.join("worktrees/api/s02").is_dir(),
+            "and both sessions stay where they are"
+        );
+    }
+
+    /// A relative `gitdir:` pointer resolves against the worktree, not the cwd.
+    ///
+    /// git ≥ 2.48 writes relative pointers under `worktree.useRelativePaths`
+    /// and `git worktree add --relative-paths` — `gitdir: ../../../.git/…`.
+    /// `owner_of` walked those to `.git` and handed the parent to `settled`,
+    /// which canonicalises a relative path against **the omh process's
+    /// working directory**. So ownership was computed from wherever the user
+    /// happened to run `omh`, and the answer changed with the shell.
+    ///
+    /// It failed closed by accident rather than by design — a cwd-derived
+    /// owner does not match this checkout, so it refused — and the whole
+    /// argument for this function is that ownership is *read* rather than
+    /// inferred. A guard that is right by coincidence is the shape this
+    /// release exists to remove.
+    #[test]
+    fn a_relative_gitdir_pointer_names_the_checkout_it_actually_points_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(repo.join(".git/worktrees/s01")).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+
+        // Exactly what git writes with relative paths on: the pointer is
+        // relative to the directory holding it.
+        let wt = paths.root.join("worktrees/api/s01");
+        std::fs::create_dir_all(&wt).unwrap();
+        let up = "../".repeat(wt.components().count() - dir.path().components().count());
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {up}work/api/.git/worktrees/s01\n"),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(
+                migrate(&paths, NOT_RUNNING).unwrap(),
+                Migration::Moved { .. }
+            ),
+            "the pointer names this checkout, however it spells the path"
+        );
+    }
+
+    /// An entry omh cannot even stat is evidence, not silence.
+    ///
+    /// The first fix for the mixed-directory bug introduced this one. It
+    /// filtered entries with `if !entry.is_dir() { continue }`, and
+    /// `Path::is_dir()` returns `false` for **every** error — a dangling
+    /// symlink, EACCES, a racing removal. So the entry contributed to neither
+    /// `owners` nor `unreadable` and vanished before the accounting.
+    ///
+    /// Measured against the release binary: with `s01` a symlink whose target
+    /// had gone and `s02` genuinely owned by the other checkout, `omh s`
+    /// reported `moved this checkout's worktrees off `api`` and took the
+    /// directory. Risk 8d, performed, by the commit that fixed risk 8d being
+    /// performed. The lesson is the one this whole release is about, and it
+    /// arrived through a one-line filter added while closing it.
+    #[test]
+    fn an_entry_omh_cannot_stat_stops_the_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s02", &repo);
+        // A worktree that was moved or deleted out from under omh.
+        std::os::unix::fs::symlink(
+            dir.path().join("gone"),
+            paths.root.join("worktrees/api/s01"),
+        )
+        .unwrap();
+
+        let out = migrate(&paths, NOT_RUNNING).unwrap();
+        assert!(
+            matches!(out, Migration::Refused(_)),
+            "an entry omh cannot look at is not an entry it may ignore: {out:?}"
+        );
+    }
+
+    /// A directory that is not a worktree does not block the move.
+    ///
+    /// `Unclaimed`'s doc says it covers "an empty directory, or one a hand
+    /// `git worktree remove` already emptied" — and the first version
+    /// refused those, because a directory with no `.git` fell into the same
+    /// bucket as one whose `.git` could not be read. An editor's `.idea`, a
+    /// prune leftover, or an emptied worktree would strand a repo's notes
+    /// for ever with a message about two checkouts that do not exist.
+    ///
+    /// **Absent is not unreadable.** That distinction is the whole discipline
+    /// of this release, applied here: nothing claiming ownership is evidence
+    /// of nothing; a claim omh cannot read is evidence it must not decide.
+    #[test]
+    fn a_directory_that_is_not_a_worktree_does_not_block_the_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s01", &repo);
+        std::fs::create_dir_all(paths.root.join("worktrees/api/.idea")).unwrap();
+        std::fs::create_dir_all(paths.root.join("worktrees/api/s09")).unwrap();
+
+        assert!(
+            matches!(
+                migrate(&paths, NOT_RUNNING).unwrap(),
+                Migration::Moved { .. }
+            ),
+            "one owner and some clutter is still one owner"
+        );
+    }
+
+    /// A pointer omh cannot read says so, rather than blaming the file.
+    ///
+    /// `read_to_string(..).ok()` threw the `io::Error` away and every failure
+    /// landed on "does not say which checkout it belongs to" — a claim about
+    /// the file's *contents*, printed when omh had been denied permission to
+    /// look at them. The two neighbouring failure sites both append `({e})`;
+    /// only this one, the one that fires most often, did not. The user was
+    /// sent to inspect a file when the fix was `chmod`.
+    #[test]
+    #[cfg(unix)]
+    fn a_pointer_omh_may_not_read_says_that_rather_than_blaming_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s01", &repo);
+        let pointer = paths.root.join("worktrees/api/s01/.git");
+        std::fs::set_permissions(&pointer, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let out = migrate(&paths, NOT_RUNNING).unwrap();
+        std::fs::set_permissions(&pointer, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let Migration::Refused(why) = &out else {
+            panic!("must refuse, got: {out:?}");
+        };
+        assert!(
+            why.contains("could not be read"),
+            "the message has to name the read failure, not the file's contents: {why}"
+        );
+    }
+
+    /// A pointer omh cannot read is a refusal, not an adoption.
+    ///
+    /// `owning_checkout` collapsed every read failure onto "nobody owns
+    /// this", and `migrate` reads that as permission to proceed. So an
+    /// unreadable directory belonging to *another* checkout named `api` was
+    /// adopted — worktrees, notes, keys, shadow and scratch renamed under this
+    /// checkout's id. "Cannot look" spelled exactly like "nobody is there", in
+    /// the one place where being wrong moves somebody else's commits.
+    #[test]
+    fn a_session_pointer_omh_cannot_read_stops_the_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        // A worktree whose `.git` is a directory rather than a pointer file —
+        // a hand-made clone parked there. `read_to_string` fails on it.
+        let wt = paths.root.join("worktrees/api/s01");
+        std::fs::create_dir_all(wt.join(".git")).unwrap();
+
+        let out = migrate(&paths, NOT_RUNNING).unwrap();
+        assert!(
+            matches!(out, Migration::Refused(_)),
+            "omh cannot tell whose this is and must not decide: {out:?}"
+        );
+        assert!(wt.is_dir(), "and it stays put");
+    }
+
+    /// What could not move is reported even when something else did.
+    ///
+    /// `blocked` was computed and then only ever read inside the
+    /// `pending.is_empty()` branch, so a mixed run printed a cheerful "moved
+    /// this checkout's notes" and said nothing about the worktrees that had
+    /// just become unreachable — the exact silence `Stranded`'s own doc
+    /// comment says it exists to break.
+    #[test]
+    fn what_could_not_move_is_reported_alongside_what_did() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s01", &repo);
+        std::fs::create_dir_all(paths.root.join("notes/api/local")).unwrap();
+        // The new key already holds worktrees, so that kind cannot move…
+        std::fs::create_dir_all(paths.worktrees().join("s02")).unwrap();
+
+        let out = migrate(&paths, NOT_RUNNING).unwrap();
+        let Migration::Moved {
+            kinds, stranded, ..
+        } = &out
+        else {
+            panic!("notes can still move, so this is a Moved: {out:?}");
+        };
+        assert_eq!(kinds, &vec!["notes".to_string()], "…and notes did");
+        assert_eq!(
+            stranded,
+            &vec!["worktrees".to_string()],
+            "and the sessions nothing will read again are named in the same breath"
+        );
+    }
+
+    /// Sessions belonging to another checkout are left where they are.
+    ///
+    /// The whole of risk 8d in one test. Two checkouts named `api` shared one
+    /// directory, and exactly one of them owns it — a migration that adopted
+    /// on proximity would perform the collision it exists to end, handing this
+    /// checkout the other one's sessions. The worktree pointer says whose they
+    /// are, so omh does not have to guess.
+    #[test]
+    fn sessions_belonging_to_another_checkout_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mine = dir.path().join("oss/api");
+        let theirs = dir.path().join("work/api");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::create_dir_all(&theirs).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: mine,
+        };
+
+        legacy_session(&paths.root, "api", "s01", &theirs);
+
+        let out = migrate(&paths, NOT_RUNNING).unwrap();
+        let Migration::Refused(why) = &out else {
+            panic!("must refuse, got: {out:?}");
+        };
+        assert!(
+            why.contains(&theirs.display().to_string()),
+            "and name whose they are: {why}"
+        );
+        assert!(
+            paths.root.join("worktrees/api/s01").is_dir(),
+            "and leave them for that checkout to claim"
+        );
+    }
+
+    /// A live sandbox stops the move rather than having it done underneath.
+    ///
+    /// A running container's mounts point at the worktree directory being
+    /// renamed. Docker goes on serving the old inode while omh reports
+    /// success, which leaves a session running on a path neither of them can
+    /// name — a state with no error message and no way back except finding
+    /// the container by hand.
+    #[test]
+    fn a_running_sandbox_refuses_the_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s01", &repo);
+
+        let out = migrate(&paths, RUNNING).unwrap();
+        let Migration::Refused(why) = &out else {
+            panic!("must refuse, got: {out:?}");
+        };
+        assert!(why.contains("omh s down"), "and say the way out: {why}");
+        assert!(
+            paths.root.join("worktrees/api/s01").is_dir(),
+            "and move nothing"
+        );
+    }
+
+    /// A repo that only ever ran `init` keeps its notes.
+    ///
+    /// No worktrees means no session to collide over, and the pointer that
+    /// decides ownership everywhere else does not exist. Refusing here would
+    /// strand the notes of every user who set a repo up and had not yet
+    /// started a session — the common case, penalised for a collision that
+    /// cannot occur.
+    #[test]
+    fn state_with_no_sessions_still_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo,
+        };
+        std::fs::create_dir_all(paths.root.join("notes/api/local")).unwrap();
+
+        assert!(matches!(
+            migrate(&paths, NOT_RUNNING).unwrap(),
+            Migration::Moved { .. }
+        ));
+        assert!(paths.notes().join("local").is_dir());
+    }
+
+    /// Running it twice is not running it twice.
+    ///
+    /// It fires on every command, so the second call has to be free and
+    /// harmless — and must never merge a fresh directory into an old one it
+    /// half-recognises.
+    #[test]
+    fn a_second_migration_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s01", &repo);
+
+        assert!(matches!(
+            migrate(&paths, NOT_RUNNING).unwrap(),
+            Migration::Moved { .. }
+        ));
+        assert_eq!(
+            migrate(&paths, NOT_RUNNING).unwrap(),
+            Migration::NothingToDo,
+            "the second run has nothing left to find"
+        );
+    }
+
+    /// A new key already in use is never merged into.
+    ///
+    /// If both keys hold a directory, something already migrated or the user
+    /// has been running two versions. Renaming onto it would either fail or —
+    /// worse, on some platforms — merge two repos' state silently.
+    #[test]
+    fn an_existing_new_key_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s01", &repo);
+        std::fs::create_dir_all(paths.worktrees().join("s02")).unwrap();
+
+        let out = migrate(&paths, NOT_RUNNING).unwrap();
+        assert_eq!(
+            out,
+            Migration::Stranded {
+                from: "api".into(),
+                kinds: vec!["worktrees".into()],
+            },
+            "not merged — and not passed over in silence either"
+        );
+        assert!(paths.worktrees().join("s02").is_dir(), "the new one stands");
+        assert!(
+            paths.root.join("worktrees/api/s01").is_dir(),
+            "and the old one is still there to be dealt with"
+        );
+    }
+
+    /// The digest is pinned to published vectors, not to itself.
+    ///
+    /// A test asserting `stable_digest(x) == stable_digest(x)` would pass
+    /// against any implementation, including a rewritten one — and a rewrite
+    /// is precisely the event this has to survive, because the value names
+    /// directories holding an agent's commits. If it moves, those sessions do
+    /// not break loudly; they become unreachable while omh opens a fresh empty
+    /// one where the user's work used to be.
+    ///
+    /// So the numbers below are FNV-1a/32's own published test vectors rather
+    /// than output read off a run of this code. Reading them off a run would
+    /// pin whatever this function does today, bug included, which is the
+    /// mistake `image::recipe_digest`'s doc warns about in the other
+    /// direction.
+    #[test]
+    fn the_digest_matches_the_published_fnv_vectors() {
+        // From the FNV reference test vectors for the 32-bit 1a variant.
+        assert_eq!(stable_digest(""), 0x811c_9dc5, "the offset basis");
+        assert_eq!(stable_digest("a"), 0xe40c_292c);
+        assert_eq!(stable_digest("foobar"), 0xbf9c_f968);
+    }
+
+    /// A repo id still reads as the directory it belongs to.
+    ///
+    /// The point of not simply hashing the whole path: `omh s` prints these,
+    /// `docker ps` lists them, and a user has to be able to tell which of
+    /// their checkouts a container belongs to at a glance. The digest
+    /// disambiguates; the name is what makes the result legible.
+    #[test]
+    fn a_repo_id_still_names_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("work/api")).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("work/api"),
+        };
+        let container = paths.container("s01");
+        assert!(
+            container.starts_with("omh-api-"),
+            "a person has to recognise this: {container}"
+        );
+    }
+
     /// Keyed by repo, not harness — this is what lets memory survive a switch.
+    ///
+    /// Asserted as the property rather than as the string. It read
+    /// `assert_eq!(cache_volume(), "omh-cache-repo")`, which names no harness
+    /// and so could not have failed if the volume had become harness-specific
+    /// — the sentence above was carried entirely by the literal happening not
+    /// to contain one. It also broke on the repo id gaining a digest, which is
+    /// the tell: a guard that a keying change breaks, while the thing it
+    /// claims to protect is untouched, was asserting shape and not invariant.
+    ///
+    /// What actually holds it up is that `cache_volume` takes no harness
+    /// argument, and no test can say that. What a test can say is that the
+    /// volume follows the repo: same checkout, same volume across any number
+    /// of resolutions; different checkout, different volume.
     #[test]
     fn cache_volume_is_harness_independent() {
         let f = fixture(&[]);
-        assert_eq!(f.paths.cache_volume(), "omh-cache-repo");
+        assert_eq!(
+            f.paths.cache_volume(),
+            f.paths.cache_volume(),
+            "one checkout keeps one cache, however often it is asked"
+        );
+        assert!(
+            f.paths.cache_volume().starts_with("omh-cache-repo"),
+            "and it names the repo: {}",
+            f.paths.cache_volume()
+        );
+
+        let other = Paths {
+            root: f.paths.root.clone(),
+            repo: f.paths.repo.parent().unwrap().join("elsewhere/repo"),
+        };
+        assert_ne!(
+            f.paths.cache_volume(),
+            other.cache_volume(),
+            "and a different checkout of the same name does not share it"
+        );
     }
 
     #[test]
