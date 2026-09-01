@@ -419,12 +419,31 @@ pub fn migrate(paths: &Paths, is_running: &dyn Fn(&str) -> bool) -> Result<Migra
         }
     }
 
+    // Renamed one at a time, and a failure has to say what already moved.
+    // Without `moved` in the message the caller reports "omh could not move
+    // this checkout's state, so anything under it is invisible" — which is
+    // false for every kind that did move, and sends the user to look under
+    // the old key for state that is no longer there.
+    let mut moved: Vec<&str> = Vec::new();
     for kind in &pending {
         let from = paths.root.join(kind).join(&old);
         let to = paths.root.join(kind).join(&new);
         std::fs::create_dir_all(to.parent().context("a keyed root has a parent")?)?;
-        std::fs::rename(&from, &to)
-            .with_context(|| format!("moving {} to {}", from.display(), to.display()))?;
+        std::fs::rename(&from, &to).with_context(|| {
+            format!(
+                "moving {} to {}{}",
+                from.display(),
+                to.display(),
+                match moved.is_empty() {
+                    true => String::new(),
+                    false => format!(
+                        " — this checkout's {} did move, and are on the new key;                          its state is split across both until this is resolved",
+                        moved.join(", ")
+                    ),
+                }
+            )
+        })?;
+        moved.push(kind);
     }
     Ok(Migration::Moved {
         from: old,
@@ -494,22 +513,42 @@ fn owning_checkout(worktrees: &Path) -> Result<Ownership> {
                 continue;
             }
         };
-        // A worktree is a directory; anything else under here is not one and
-        // is not evidence about ownership either way.
-        if !entry.is_dir() {
-            continue;
+        // **Stat failures are evidence, not silence.** The first version of
+        // this filtered with `if !entry.is_dir()`, and `Path::is_dir()`
+        // answers `false` for every error — a dangling symlink, EACCES, a
+        // racing removal. So an entry omh could not look at contributed to
+        // neither list and vanished before the accounting, and a directory
+        // holding another checkout's session was adopted with nothing said.
+        // Measured, and it is how this function reintroduced the bug it was
+        // written to fix.
+        match std::fs::metadata(&entry) {
+            // Not a directory, so not a worktree, so not evidence either way.
+            Ok(meta) if !meta.is_dir() => continue,
+            Ok(_) => {}
+            Err(e) => {
+                unreadable.push(format!("{} could not be examined ({e})", entry.display()));
+                continue;
+            }
         }
+
+        // Absent is not unreadable, and the difference decides the answer.
+        // A directory with no `.git` claims nothing — an emptied worktree, an
+        // editor's scratch folder — and blocking on those would strand the
+        // notes of every repo with clutter in its worktrees directory. A
+        // `.git` that exists and cannot be read is omh unable to look, which
+        // is the one thing it must never spell as "nobody is there".
         let pointer = entry.join(".git");
-        let named = std::fs::read_to_string(&pointer)
-            .ok()
-            .and_then(|body| owner_of(body.trim()));
-        match named {
-            Some(owner) if !owners.contains(&owner) => owners.push(owner),
-            Some(_) => {}
-            None => unreadable.push(format!(
-                "{} does not say which checkout it belongs to",
-                entry.display()
-            )),
+        match std::fs::read_to_string(&pointer) {
+            Ok(body) => match owner_of(body.trim()) {
+                Some(owner) if !owners.contains(&owner) => owners.push(owner),
+                Some(_) => {}
+                None => unreadable.push(format!(
+                    "{} is not a `gitdir:` pointer, so it does not name a checkout",
+                    pointer.display()
+                )),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => unreadable.push(format!("{} could not be read ({e})", pointer.display())),
         }
     }
 
@@ -1138,6 +1177,113 @@ mod tests {
         assert!(
             home.join("worktrees/api/s01").is_dir() && home.join("worktrees/api/s02").is_dir(),
             "and both sessions stay where they are"
+        );
+    }
+
+    /// An entry omh cannot even stat is evidence, not silence.
+    ///
+    /// The first fix for the mixed-directory bug introduced this one. It
+    /// filtered entries with `if !entry.is_dir() { continue }`, and
+    /// `Path::is_dir()` returns `false` for **every** error — a dangling
+    /// symlink, EACCES, a racing removal. So the entry contributed to neither
+    /// `owners` nor `unreadable` and vanished before the accounting.
+    ///
+    /// Measured against the release binary: with `s01` a symlink whose target
+    /// had gone and `s02` genuinely owned by the other checkout, `omh s`
+    /// reported `moved this checkout's worktrees off `api`` and took the
+    /// directory. Risk 8d, performed, by the commit that fixed risk 8d being
+    /// performed. The lesson is the one this whole release is about, and it
+    /// arrived through a one-line filter added while closing it.
+    #[test]
+    fn an_entry_omh_cannot_stat_stops_the_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s02", &repo);
+        // A worktree that was moved or deleted out from under omh.
+        std::os::unix::fs::symlink(
+            dir.path().join("gone"),
+            paths.root.join("worktrees/api/s01"),
+        )
+        .unwrap();
+
+        let out = migrate(&paths, NOT_RUNNING).unwrap();
+        assert!(
+            matches!(out, Migration::Refused(_)),
+            "an entry omh cannot look at is not an entry it may ignore: {out:?}"
+        );
+    }
+
+    /// A directory that is not a worktree does not block the move.
+    ///
+    /// `Unclaimed`'s doc says it covers "an empty directory, or one a hand
+    /// `git worktree remove` already emptied" — and the first version
+    /// refused those, because a directory with no `.git` fell into the same
+    /// bucket as one whose `.git` could not be read. An editor's `.idea`, a
+    /// prune leftover, or an emptied worktree would strand a repo's notes
+    /// for ever with a message about two checkouts that do not exist.
+    ///
+    /// **Absent is not unreadable.** That distinction is the whole discipline
+    /// of this release, applied here: nothing claiming ownership is evidence
+    /// of nothing; a claim omh cannot read is evidence it must not decide.
+    #[test]
+    fn a_directory_that_is_not_a_worktree_does_not_block_the_move() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s01", &repo);
+        std::fs::create_dir_all(paths.root.join("worktrees/api/.idea")).unwrap();
+        std::fs::create_dir_all(paths.root.join("worktrees/api/s09")).unwrap();
+
+        assert!(
+            matches!(
+                migrate(&paths, NOT_RUNNING).unwrap(),
+                Migration::Moved { .. }
+            ),
+            "one owner and some clutter is still one owner"
+        );
+    }
+
+    /// A pointer omh cannot read says so, rather than blaming the file.
+    ///
+    /// `read_to_string(..).ok()` threw the `io::Error` away and every failure
+    /// landed on "does not say which checkout it belongs to" — a claim about
+    /// the file's *contents*, printed when omh had been denied permission to
+    /// look at them. The two neighbouring failure sites both append `({e})`;
+    /// only this one, the one that fires most often, did not. The user was
+    /// sent to inspect a file when the fix was `chmod`.
+    #[test]
+    #[cfg(unix)]
+    fn a_pointer_omh_may_not_read_says_that_rather_than_blaming_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("work/api");
+        std::fs::create_dir_all(&repo).unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: repo.clone(),
+        };
+        legacy_session(&paths.root, "api", "s01", &repo);
+        let pointer = paths.root.join("worktrees/api/s01/.git");
+        std::fs::set_permissions(&pointer, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let out = migrate(&paths, NOT_RUNNING).unwrap();
+        std::fs::set_permissions(&pointer, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let Migration::Refused(why) = &out else {
+            panic!("must refuse, got: {out:?}");
+        };
+        assert!(
+            why.contains("could not be read"),
+            "the message has to name the read failure, not the file's contents: {why}"
         );
     }
 

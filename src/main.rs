@@ -141,6 +141,20 @@ fn say_if_the_template_was_renamed(cwd: &std::path::Path, ctx: &out::Ctx) {
     ));
 }
 
+/// The sentence for state under the old key that nothing will read again.
+///
+/// One function because two arms say it: a run where nothing could move, and
+/// a run where something else did. The second used to say nothing at all.
+fn say_what_was_stranded(paths: &Paths, from: &str, kinds: &[String]) -> String {
+    format!(
+        "this checkout's {} under `{from}` are from before omh keyed them by checkout, \
+         and it already has newer ones — so nothing reads them now. omh will not merge \
+         two sets of sessions together; they are in {}, to keep or delete by hand",
+        kinds.join(", "),
+        paths.root.display()
+    )
+}
+
 /// Move this checkout's state off the pre-2026.08 key, and say so.
 ///
 /// Runs before every command that is not a preview, because there is no
@@ -156,20 +170,6 @@ fn say_if_the_template_was_renamed(cwd: &std::path::Path, ctx: &out::Ctx) {
 /// stop the command they typed. Both are reported and stepped over — though a
 /// refusal is a warning, because the state it names stays invisible to every
 /// command until it is dealt with.
-/// The sentence for state under the old key that nothing will read again.
-///
-/// One function because two arms say it: a run where nothing could move, and
-/// a run where something else did. The second used to say nothing at all.
-fn say_what_was_stranded(paths: &Paths, from: &str, kinds: &[String]) -> String {
-    format!(
-        "this checkout's {} under `{from}` are from before omh keyed them by checkout, \
-         and it already has newer ones — so nothing reads them now. omh will not merge \
-         two sets of sessions together; they are in {}, to keep or delete by hand",
-        kinds.join(", "),
-        paths.root.display()
-    )
-}
-
 fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
     let Ok(paths) = Paths::discover(cwd) else {
         return;
