@@ -119,6 +119,25 @@ else
   bad "an agreeing toolchain runs the checks" "${res#*|}"
 fi
 
+# --- agreeing, and both too old ---------------------------------------------
+# The hole the first version left. The guard compared clippy against rustc and
+# nothing against the crate, so a toolchain where the two agree at 1.81 sailed
+# through — and then cargo produced the dependency wall this script exists to
+# make legible, one layer further down, exactly as unhelpfully.
+#
+# Not hypothetical: it is what a fresh `brew install rustup` gave on the
+# author's machine, whose `stable` was a 2024 build.
+stub "clippy 0.1.81 (eeb90cda 2024-09-04)" "rustc 1.81.0 (eeb90cda1 2024-09-04)"
+res="$(attempt)"
+status="${res%%|*}"; out="${res#*|}"
+if [ "$status" = 0 ]; then
+  bad "refuses a toolchain below the crate's rust-version" "expected a refusal, got success"
+elif ! printf '%s' "$out" | grep -qF "omh needs rustc"; then
+  bad "refuses a toolchain below the crate's rust-version" "message did not say so: $out"
+else
+  ok "refuses a toolchain below the crate's rust-version"
+fi
+
 # --- a version string neither parse recognises ------------------------------
 # Added because deleting check.sh's unreadable-version refusal left every case
 # above green: the comparison it guards is between two empty strings, which

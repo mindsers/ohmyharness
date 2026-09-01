@@ -81,6 +81,24 @@ if [ -z "$clippy_minor" ] || [ -z "$rustc_minor" ]; then
      check.sh's parse needs updating — see scripts/test-check.sh"
 fi
 
+# Agreeing with each other is not the same as being new enough. The first
+# version of this checked only clippy against rustc, so a toolchain where both
+# sat at 1.81 passed — and cargo then produced the dependency wall this script
+# exists to make legible, one layer down and just as unhelpfully. Measured: a
+# fresh `brew install rustup` whose `stable` was a 2024 build.
+#
+# Read from Cargo.toml rather than typed, because a duplicated MSRV is a
+# second thing to keep in step and this file already carries one of those.
+needed="$(sed -n 's/^rust-version *= *"1\.\([0-9][0-9]*\).*/\1/p' "$here/Cargo.toml")"
+if [ -n "$needed" ] && [ "$rustc_minor" -lt "$needed" ]; then
+  die "omh needs rustc 1.$needed and $toolchain has 1.$rustc_minor.
+     $rustc_version
+     cargo will refuse to build the dependency tree and print a wall of
+     'requires rustc 1.$needed' lines, which is the failure this script exists
+     to name rather than repeat.
+     rustup update stable"
+fi
+
 if [ "$clippy_minor" != "$rustc_minor" ]; then
   die "clippy is built against rustc 1.$clippy_minor but rustc here is 1.$rustc_minor.
      $clippy_version
