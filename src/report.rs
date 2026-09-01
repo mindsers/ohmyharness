@@ -5010,15 +5010,35 @@ pub struct Ejected {
     /// written into a file you are about to depend on is worse than being
     /// told to look.
     pub sandboxed: Vec<String>,
+    /// Sources omh could not read, so the capability came out incomplete or
+    /// not at all. Distinct from `dropped`, which is the harness having no
+    /// binding — that is omh working; this is omh unable to look.
+    pub unreadable: Vec<String>,
     pub dry_run: bool,
+}
+
+/// What eject put at a path.
+///
+/// A `usize` with `1` meaning "a single document" was the first shape, and it
+/// produced wrong output on the day it shipped: `copy_selected` returns the
+/// number of *selected* entries, so a directory holding exactly one rendered
+/// a blank cell — visually identical to `CLAUDE.md`. The type made the two
+/// states unspellable-apart and the renderer duly conflated them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wrote {
+    /// One rendered document.
+    Document,
+    /// A directory, and how many entries reached it. Never zero: eject does
+    /// not report a directory it wrote nothing to, and `NonZeroUsize` keeps
+    /// that a property of the type rather than an `if` at the call site.
+    Entries(std::num::NonZeroUsize),
 }
 
 #[derive(Debug, Clone)]
 pub struct EjectedFile {
     pub capability: String,
     pub at: String,
-    /// How many entries a directory received. `1` for a single document.
-    pub entries: usize,
+    pub wrote: Wrote,
 }
 
 impl Report for Ejected {
@@ -5041,15 +5061,32 @@ impl Report for Ejected {
                 Cell::styled(&f.capability, out::NAME),
                 Cell::plain(&f.at),
                 Cell::styled(
-                    &match f.entries {
-                        1 => String::new(),
-                        n => format!("{n} entries"),
+                    &match &f.wrote {
+                        Wrote::Document => String::new(),
+                        Wrote::Entries(n) => format!(
+                            "{n} {}",
+                            match n.get() {
+                                1 => "entry",
+                                _ => "entries",
+                            }
+                        ),
                     },
                     out::DIM,
                 ),
             ]);
         }
         s.push_str(&t.render(p));
+
+        if !self.unreadable.is_empty() {
+            s.push('\n');
+            s.push_str(&out::warning(
+                p,
+                &format!(
+                    "omh could not read these, so what came out is not all of it:\n    {}",
+                    self.unreadable.join("\n    ")
+                ),
+            ));
+        }
 
         if !self.dropped.is_empty() {
             s.push('\n');
@@ -5096,10 +5133,14 @@ impl Report for Ejected {
             "wrote": self.wrote.iter().map(|f| json!({
                 "capability": f.capability,
                 "at": f.at,
-                "entries": f.entries,
+                "entries": match &f.wrote {
+                    Wrote::Document => 1,
+                    Wrote::Entries(n) => n.get(),
+                },
             })).collect::<Vec<_>>(),
             "dropped": self.dropped,
             "sandboxed": self.sandboxed,
+            "unreadable": self.unreadable,
             "dry_run": self.dry_run,
         })
     }

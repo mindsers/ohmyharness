@@ -7835,3 +7835,84 @@ fn eject_refuses_to_write_into_the_checkout() {
         "and it is refused for that reason, not by accident: {said}"
     );
 }
+
+/// A capability omh could not read is named, not omitted.
+///
+/// `copy_selected` skipped an unreadable source directory with
+/// `let Ok(entries) = read_dir(src) else { continue }`, and the `if n > 0`
+/// gate then kept the capability out of `wrote`. It was not in `dropped`
+/// either — that list is only for capabilities the *harness* has no binding
+/// for. So `omh eject` exited 0, printed a report naming rules and hooks, and
+/// mentioned skills nowhere at all.
+///
+/// The user walks away believing they have their skills. For a command whose
+/// entire purpose is *you can leave with your setup*, silently leaving with
+/// less of it is the worst failure available.
+#[test]
+#[cfg(unix)]
+fn eject_names_a_capability_it_could_not_read() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base"]);
+    std::fs::write(sb.repo.join("AGENTS.md"), "# rules\n").unwrap();
+    let skills = sb.home.join(".omh/skills");
+    std::fs::create_dir_all(skills.join("refactor")).unwrap();
+    std::fs::write(skills.join("refactor/SKILL.md"), "how\n").unwrap();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        "[use]\nskills = [\"refactor\"]\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&skills, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let out = sb.home.join("ejected");
+    let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
+    std::fs::set_permissions(&skills, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ran.stdout),
+        String::from_utf8_lossy(&ran.stderr)
+    );
+    assert!(
+        said.contains("skills"),
+        "a capability omh could not read must be named somewhere: {said}"
+    );
+}
+
+/// One entry reads as one entry, not as a rendered document.
+///
+/// `EjectedFile.entries` overloaded a count with a sentinel — the renderer
+/// mapped `1` to an empty cell, meaning "a single document" — while
+/// `copy_selected` returns the number of *selected* entries. So a skills
+/// directory with exactly one selected entry rendered a blank cell,
+/// indistinguishable from `CLAUDE.md`. Measured: one entry printed nothing,
+/// two printed `2 entries`.
+#[test]
+fn eject_says_one_entry_for_a_directory_holding_one() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters", "base"]);
+    std::fs::write(sb.repo.join("AGENTS.md"), "# rules\n").unwrap();
+    std::fs::create_dir_all(sb.home.join(".omh/skills/refactor")).unwrap();
+    std::fs::write(sb.home.join(".omh/skills/refactor/SKILL.md"), "how\n").unwrap();
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        "[use]\nskills = [\"refactor\"]\n",
+    )
+    .unwrap();
+
+    let out = sb.home.join("ejected");
+    let ran = sb.omh(&["eject", "claude", "--to", out.to_str().unwrap()]);
+    let said = String::from_utf8_lossy(&ran.stdout);
+    let row = said
+        .lines()
+        .find(|l| l.contains("skills"))
+        .unwrap_or_else(|| panic!("no skills row in: {said}"));
+    assert!(
+        row.contains("1 entry"),
+        "a directory holding one entry must say so rather than reading as a \
+         single document: {row:?}"
+    );
+}
