@@ -50,11 +50,14 @@ pub(crate) fn session_up(
     adapter: &Adapter,
     session: &Session,
     opts: container::Options,
-    // The recipe behind `opts.image`. Handed in beside it rather than derived
-    // here, so the tag a session runs and the layer that gets built come from
-    // one `crate::cmd::init::sandbox()` call and cannot describe different images — the split
-    // that let `init` build a layer no launch ever ran.
-    recipe: &[&str],
+    // The resolution behind `opts.image` — the recipe *and* the certificate the
+    // tag was computed with. Handed in whole rather than derived here, so
+    // everything about the layer a launch builds comes from one
+    // `crate::cmd::init::sandbox()` call and cannot name a different image than
+    // it builds. That split is what let `init` build a layer no launch ever
+    // ran, and taking the two apart into separate arguments is how it reopened
+    // — this PR read `ca_cert` a second time here — so they arrive together.
+    sandbox: &crate::cmd::init::Sandbox,
     ctx: &out::Ctx,
 ) -> Result<(Box<dyn runtime::Runtime>, String)> {
     let backend = runtime::select(&crate::runtime_preference(paths), &|p| {
@@ -152,8 +155,8 @@ pub(crate) fn session_up(
     image::ensure_stack(
         backend.program(),
         adapter,
-        recipe,
-        image::ca_for(paths)?.as_deref(),
+        &sandbox.recipe(),
+        sandbox.ca.as_deref(),
         &paths.repo,
     )?;
     image::ensure_network(backend.program(), &plan.network)?;
@@ -290,7 +293,7 @@ pub(crate) fn attach(
             image: sandbox.tag.clone(),
             resolves: sandbox.resolves.clone(),
         },
-        &sandbox.recipe(),
+        &sandbox,
         ctx,
     )?;
 
@@ -1199,7 +1202,7 @@ pub(crate) fn run(
             tty: false,
             ..opts.clone()
         },
-        &sandbox.recipe(),
+        &sandbox,
         ctx,
     )?;
     // The container is up, so the launch happened and the call-out is spent.

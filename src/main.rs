@@ -4364,6 +4364,7 @@ mod tests {
             resolves: BTreeMap::new(),
             owed: owed.iter().map(|s| (*s).to_string()).collect(),
             unmeasured: Some("not asked yet".into()),
+            ca: None,
         }
     }
 

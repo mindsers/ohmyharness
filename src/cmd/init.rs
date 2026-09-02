@@ -1389,6 +1389,13 @@ pub(crate) struct Sandbox {
     /// says what is held back has to be able to say *nothing was asked*, and
     /// `resolves` alone cannot: an empty map is what both outcomes look like.
     pub(crate) unmeasured: Option<String>,
+    /// The corporate root `tag` was computed with, for the same reason
+    /// `installs` is carried: the layer a launch builds and the tag it runs
+    /// must come from one resolution. `session_up` read the setting a second
+    /// time, which is the split its own doc comment warns about — a second read
+    /// can differ from the first, and then omh builds one image and names
+    /// another.
+    pub(crate) ca: Option<String>,
 }
 
 impl Sandbox {
@@ -1494,10 +1501,15 @@ pub(crate) fn sandbox(
         .into_iter()
         .map(str::to_string)
         .collect();
+    // Once, and carried. Every later question about this image — the tag, the
+    // layer that gets built, the digest a note pins — is answered from this
+    // one read, so a PEM edited between two of them cannot produce two
+    // different images.
+    let ca = image::ca_for(paths)?;
     let tag = image::stack_tag(
         adapter,
         &installs.iter().map(String::as_str).collect::<Vec<_>>(),
-        image::ca_for(paths)?.as_deref(),
+        ca.as_deref(),
     );
     let resolves = facts::Facts::load(paths).about(&tag);
     let owed = needs_of(&detected, &repo.provision);
@@ -1509,5 +1521,6 @@ pub(crate) fn sandbox(
         // Nothing has been asked yet — this reads the cache and never the
         // container. `top_up` is what turns it into an answer.
         unmeasured: Some("the sandbox has not been asked".into()),
+        ca,
     })
 }
