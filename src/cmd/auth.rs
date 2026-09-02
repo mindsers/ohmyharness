@@ -41,7 +41,11 @@ pub(crate) fn auth_cmd(
         runtime::installed(p)
     })?;
     let ca = image::ca_for(&paths)?;
-    image::ensure(backend.program(), &adapter, ca.as_deref())?;
+    image::ensure(
+        backend.program(),
+        &adapter,
+        ca.as_ref().map(image::Root::pem),
+    )?;
 
     // A throwaway: logging in must not leave a branch behind.
     let session = Session::scratch(paths.scratch("auth"), "auth".into());
@@ -71,7 +75,7 @@ pub(crate) fn auth_cmd(
             // toolchain to type a password would spend minutes on a container
             // that is thrown away, and the credential paths a login writes are
             // the same in both images.
-            image: image::tag_for(&adapter, ca.as_deref()),
+            image: image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
             // So nothing has been measured about it here, and nothing is
             // suppressed. That is the safe direction — a login session running
             // one hook too many costs nothing, and this container exists for

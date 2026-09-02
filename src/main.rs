@@ -4676,11 +4676,11 @@ because = "a fixture"
         );
         assert_ne!(
             sb.tag,
-            image::tag_for(&adapter, ca.as_deref()),
+            image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
             "this fixture must provision something or it proves nothing"
         );
         assert_eq!(
-            image::stack_tag(&adapter, &sb.recipe(), ca.as_deref()),
+            image::stack_tag(&adapter, &sb.recipe(), ca.as_ref().map(image::Root::pem)),
             sb.tag,
             "the recipe handed to `ensure_stack` must build the tag `plan` runs, \
              or a session runs an image nothing built"

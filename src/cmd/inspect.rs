@@ -70,11 +70,15 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
             .context("no adapters installed — run `omh init`")?;
         let adapter = Adapter::find(&paths.adapters(), &harness)?;
         let ca = image::ca_for(&paths)?;
-        image::ensure(backend.program(), &adapter, ca.as_deref())?;
+        image::ensure(
+            backend.program(),
+            &adapter,
+            ca.as_ref().map(image::Root::pem),
+        )?;
 
         let out = Command::new(backend.program())
             .args(base::ui_run_args(
-                &image::tag_for(&adapter, ca.as_deref()),
+                &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
                 &container,
                 &paths.cache_volume(),
                 port,
@@ -226,7 +230,7 @@ pub(crate) fn doctor_cmd(
     }
     // The one claim about this image no test can settle: whether the root
     // omh embedded actually got into the store the toolchains read.
-    checks.extend(doctor::ca_check(sandbox.ca.as_deref()));
+    checks.extend(doctor::ca_check(sandbox.ca.as_ref().map(image::Root::pem)));
     // Only if the resolved profile actually declares it: a check for a server
     // nobody configured would fail honestly and mean nothing.
     //
@@ -303,7 +307,7 @@ pub(crate) fn doctor_cmd(
         // The sandbox's own reading. A fresh `ca_for` here would be a second
         // resolution, and `sandbox.tag` — which `opts.image` runs and
         // `ca_check` asserts against — came from the first.
-        sandbox.ca.as_deref(),
+        sandbox.ca.as_ref().map(image::Root::pem),
         &paths.repo,
     )?;
     image::ensure_network(backend.program(), &plan.network)?;

@@ -156,7 +156,7 @@ pub(crate) fn session_up(
         backend.program(),
         adapter,
         &sandbox.recipe(),
-        sandbox.ca.as_deref(),
+        sandbox.ca.as_ref().map(crate::image::Root::pem),
         &paths.repo,
     )?;
     image::ensure_network(backend.program(), &plan.network)?;

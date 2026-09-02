@@ -143,163 +143,183 @@ fn ca_setting(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBuf
         .map(|s| std::path::PathBuf::from(s.value)))
 }
 
-/// Read the file `ca_cert` names, refusing anything that is not exactly
-/// certificates. Every refusal this setting makes lives here.
-fn ca_read(at: &std::path::Path) -> Result<String> {
-    // The loop below binds its own `at` for a line number, so the path gets a
-    // name of its own rather than being shadowed halfway through.
-    let path_for_msg = at;
-    // Bytes, not `read_to_string`. A real DER `.crt` is binary, so reading it
-    // as text failed on the UTF-8 boundary and the reader got an encoding
-    // error — while the message written for exactly that file, the one naming
-    // the `openssl` conversion, sat below an `ensure!` it could never reach.
-    let raw = anyhow::Context::with_context(std::fs::read(at), || {
-        format!(
-            "reading the certificate named by `ca_cert` ({})",
-            path_for_msg.display()
-        )
-    })?;
-    anyhow::ensure!(
-        !raw.is_empty(),
-        "`ca_cert` names {}, which is empty. Nothing was converted wrongly — \
+/// A corporate root omh has already refused if it could not be used.
+///
+/// **The only way to hold one is `Root::read`**, which is what makes every
+/// claim the rest of this module used to make in a comment — "already refused
+/// upstream", "safe by construction rather than by care" — a fact the compiler
+/// keeps. Before this, `ca_for` answered a bare `String` and `ca_path` a bare
+/// `PathBuf`, resolved separately: the pem that got hashed into the tag and the
+/// path that got mounted into the cross-build were two readings that nothing
+/// held together, and `ca_layer` accepted any `&str` in the program.
+///
+/// It carries the path as well as the text because both are needed and they
+/// must agree. The recipe embeds the *content*; `memory::deliver` mounts the
+/// *file*. Splitting them is what made `ca_path` exist, and `ca_path` is what
+/// re-read the settings behind `ca_for`'s back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Root {
+    path: std::path::PathBuf,
+    pem: String,
+}
+
+impl Root {
+    /// Read the file `ca_cert` names, refusing anything that is not exactly
+    /// certificates. **Every refusal this setting makes lives here**, which is
+    /// the point: there is no other constructor.
+    fn read(at: std::path::PathBuf) -> Result<Self> {
+        // **Absolute, or docker invents a volume.** A relative `ca_cert`
+        // resolves against the process CWD, so it reads fine and the image is
+        // correct — while `docker run -v` treats a non-absolute source as a
+        // *named volume* and mounts an empty directory where the certificate
+        // should be. It is also meaningless as a committed value: this key is
+        // `Secret::No`, so it arrives with a clone, where "the directory omh
+        // happened to be run from" is not a shared fact.
+        anyhow::ensure!(
+            at.is_absolute(),
+            "`ca_cert` names `{}`, which is not an absolute path. Docker reads \
+             a relative `-v` source as a named volume, so the cross-build would \
+             mount an empty directory where the certificate should be, and a \
+             teammate who clones this repo resolves it somewhere else entirely. \
+             Give the full path.",
+            at.display()
+        );
+        // Cloned for the messages below, because `at` is moved into the
+        // `Root` at the end and the refusals all want to name the file.
+        let path_for_msg = at.clone();
+
+        // The loop below binds its own `at` for a line number, so the path gets a
+        // name of its own rather than being shadowed halfway through.
+        // Bytes, not `read_to_string`. A real DER `.crt` is binary, so reading it
+        // as text failed on the UTF-8 boundary and the reader got an encoding
+        // error — while the message written for exactly that file, the one naming
+        // the `openssl` conversion, sat below an `ensure!` it could never reach.
+        let raw = anyhow::Context::with_context(std::fs::read(&at), || {
+            format!(
+                "reading the certificate named by `ca_cert` ({})",
+                path_for_msg.display()
+            )
+        })?;
+        anyhow::ensure!(
+            !raw.is_empty(),
+            "`ca_cert` names {}, which is empty. Nothing was converted wrongly — \
          there is no certificate in that file to convert.",
-        path_for_msg.display()
-    );
-    let der_advice = || {
-        format!(
-            "`ca_cert` names {}, which is not a PEM certificate — a \
+            path_for_msg.display()
+        );
+        let der_advice = || {
+            format!(
+                "`ca_cert` names {}, which is not a PEM certificate — a \
              `BEGIN CERTIFICATE` block is what this reads. A `.crt` in DER form \
              converts with `openssl x509 -inform der -in <file> -out <file>.pem`",
-            path_for_msg.display()
-        )
-    };
-    let pem = String::from_utf8(raw).map_err(|_| anyhow::anyhow!(der_advice()))?;
-    anyhow::ensure!(pem.contains("BEGIN CERTIFICATE"), "{}", der_advice());
-
-    // **Exactly certificates, and nothing else.** The docs promise a file
-    // carrying `pkcs12` preamble is refused rather than rewritten, and for a
-    // while only a quote or a backslash was refused — so a clean
-    // `friendlyName: Acme Root CA` was accepted and `ca_layer` dropped it on
-    // the way past, which is the rewrite the promise rules out.
-    //
-    // Anchored on the whole delimiter, not the substring: a CSR opens
-    // `-----BEGIN CERTIFICATE REQUEST-----`, which contains `BEGIN
-    // CERTIFICATE` and used to pass. And a block must close, because a clipped
-    // paste of `security find-certificate -a` leaves one open — `ca_layer`
-    // silently dropped the unterminated block and emitted a recipe with no
-    // certificate in it at all, which builds green and trusts nothing.
-    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
-    const END: &str = "-----END CERTIFICATE-----";
-    let mut open_at: Option<usize> = None;
-    let mut blocks = 0usize;
-    for (n, line) in pem.lines().enumerate() {
-        let line = line.trim();
-        let at = n + 1;
-        if line == BEGIN {
-            anyhow::ensure!(
-                open_at.is_none(),
-                "line {at} of {} opens a certificate while the one at line {} \
-                 is still open — that file is not a sequence of PEM blocks.",
-                path_for_msg.display(),
-                open_at.unwrap_or(0)
-            );
-            open_at = Some(at);
-        } else if line == END {
-            anyhow::ensure!(
-                open_at.is_some(),
-                "line {at} of {} closes a certificate that was never opened.",
                 path_for_msg.display()
-            );
-            open_at = None;
-            blocks += 1;
-        } else if open_at.is_none() {
-            anyhow::ensure!(
-                line.is_empty(),
-                "line {at} of {} sits outside any `BEGIN CERTIFICATE` / `END \
+            )
+        };
+        let pem = String::from_utf8(raw).map_err(|_| anyhow::anyhow!(der_advice()))?;
+        anyhow::ensure!(pem.contains("BEGIN CERTIFICATE"), "{}", der_advice());
+
+        // **Exactly certificates, and nothing else.** The docs promise a file
+        // carrying `pkcs12` preamble is refused rather than rewritten, and for a
+        // while only a quote or a backslash was refused — so a clean
+        // `friendlyName: Acme Root CA` was accepted and `ca_layer` dropped it on
+        // the way past, which is the rewrite the promise rules out.
+        //
+        // Anchored on the whole delimiter, not the substring: a CSR opens
+        // `-----BEGIN CERTIFICATE REQUEST-----`, which contains `BEGIN
+        // CERTIFICATE` and used to pass. And a block must close, because a clipped
+        // paste of `security find-certificate -a` leaves one open — `ca_layer`
+        // silently dropped the unterminated block and emitted a recipe with no
+        // certificate in it at all, which builds green and trusts nothing.
+        const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+        const END: &str = "-----END CERTIFICATE-----";
+        let mut open_at: Option<usize> = None;
+        let mut blocks = 0usize;
+        for (n, line) in pem.lines().enumerate() {
+            let line = line.trim();
+            let at = n + 1;
+            if line == BEGIN {
+                anyhow::ensure!(
+                    open_at.is_none(),
+                    "line {at} of {} opens a certificate while the one at line {} \
+                 is still open — that file is not a sequence of PEM blocks.",
+                    path_for_msg.display(),
+                    open_at.unwrap_or(0)
+                );
+                open_at = Some(at);
+            } else if line == END {
+                anyhow::ensure!(
+                    open_at.is_some(),
+                    "line {at} of {} closes a certificate that was never opened.",
+                    path_for_msg.display()
+                );
+                open_at = None;
+                blocks += 1;
+            } else if open_at.is_none() {
+                anyhow::ensure!(
+                    line.is_empty(),
+                    "line {at} of {} sits outside any `BEGIN CERTIFICATE` / `END \
                  CERTIFICATE` block: `{}`. A `pkcs12` export carries `Bag \
                  Attributes` and `friendlyName:` preamble, and a `.pem` from a \
                  browser can carry a `subject=` line — omh will not drop them \
                  to make the file fit, because dropping is rewriting. Strip \
                  the file to the blocks and nothing else.",
-                path_for_msg.display(),
-                if line.len() > 60 { &line[..60] } else { line }
-            );
+                    path_for_msg.display(),
+                    if line.len() > 60 { &line[..60] } else { line }
+                );
+            }
         }
-    }
-    anyhow::ensure!(
-        open_at.is_none(),
-        "{} is truncated: the certificate opened at line {} has no matching \
+        anyhow::ensure!(
+            open_at.is_none(),
+            "{} is truncated: the certificate opened at line {} has no matching \
          `END CERTIFICATE`. A clipped copy-paste does this, and omh will not \
          embed part of a certificate.",
-        path_for_msg.display(),
-        open_at.unwrap_or(0)
-    );
-    anyhow::ensure!(
-        blocks > 0,
-        "`ca_cert` names {}, which has no `-----BEGIN CERTIFICATE-----` block. \
+            path_for_msg.display(),
+            open_at.unwrap_or(0)
+        );
+        anyhow::ensure!(
+            blocks > 0,
+            "`ca_cert` names {}, which has no `-----BEGIN CERTIFICATE-----` block. \
          A certificate *request* is not a certificate, and neither is a \
          private key.",
-        path_for_msg.display()
-    );
-    // Refused here, not neutralised in the recipe. `ca_layer` writes each line
-    // as a single-quoted `printf` argument, and the first version dropped any
-    // quote or backslash before writing — which mangles a file the user named
-    // while the comment above it claimed to refuse one. Neither character can
-    // appear in a PEM body; both appear in `openssl pkcs12` preamble lines,
-    // and a company name with an apostrophe is not rare.
-    for (n, line) in pem.lines().enumerate() {
-        anyhow::ensure!(
-            !line.contains(['\'', '\\']),
-            "line {} of {} contains a quote or backslash, which cannot appear \
+            path_for_msg.display()
+        );
+        // Refused here, not neutralised in the recipe. `ca_layer` writes each line
+        // as a single-quoted `printf` argument, and the first version dropped any
+        // quote or backslash before writing — which mangles a file the user named
+        // while the comment above it claimed to refuse one. Neither character can
+        // appear in a PEM body; both appear in `openssl pkcs12` preamble lines,
+        // and a company name with an apostrophe is not rare.
+        for (n, line) in pem.lines().enumerate() {
+            anyhow::ensure!(
+                !line.contains(['\'', '\\']),
+                "line {} of {} contains a quote or backslash, which cannot appear \
              in a PEM body. omh will not rewrite a certificate to make it fit \
              the recipe — strip the file down to the `BEGIN CERTIFICATE` / \
              `END CERTIFICATE` blocks and nothing else.",
-            n + 1,
-            path_for_msg.display()
-        );
+                n + 1,
+                path_for_msg.display()
+            );
+        }
+        Ok(Self { path: at, pem })
     }
-    Ok(pem)
+
+    /// The certificate text. What the recipe embeds, and therefore what the
+    /// image tag is a digest of.
+    pub fn pem(&self) -> &str {
+        &self.pem
+    }
+
+    /// The file on this host. What the cross-build mounts read-only, because
+    /// upstream's `rust:1-bookworm` has no recipe to bake it into.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
 }
 
-pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
+pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<Root>> {
     let Some(at) = ca_setting(paths)? else {
         return Ok(None);
     };
-    Ok(Some(ca_read(&at)?))
-}
-
-/// Where the corporate root lives on this host, if one is set and readable.
-///
-/// The content is what the image recipe embeds; the *path* is what the
-/// cross-build container mounts. Both go through `ca_for` first, so a caller
-/// that only wants the path still gets the refusals — an unreadable or
-/// mangling-prone certificate is an error in both directions.
-pub fn ca_path(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBuf>> {
-    // **One reading.** This called `ca_for` for its refusals and then read the
-    // settings *again* for the value, so the path handed to `docker run -v`
-    // was never the one whose PEM had been validated — the same split this
-    // branch closed twice elsewhere, sitting inside the function whose own doc
-    // says both go through `ca_for` first.
-    let Some(at) = ca_setting(paths)? else {
-        return Ok(None);
-    };
-    ca_read(&at)?;
-    // **Absolute, or docker invents a volume.** A relative `ca_cert` resolves
-    // against the process CWD, so the PEM reads fine and the image is correct
-    // — while docker reads a non-absolute `-v` source as a *named volume* and
-    // mounts an empty directory where the certificate should be, with
-    // `SSL_CERT_FILE` pointing at it. `key::quarrel` warns at `omh set` time,
-    // but this key is `Secret::No`: it lands in the committed layer and
-    // arrives with a clone, and a hand-edited `settings.toml` never passes
-    // through `set` at all. That warning is advice; this is the refusal.
-    anyhow::ensure!(
-        at.is_absolute(),
-        "`ca_cert` names `{}`, which is not an absolute path. Docker reads a \
-         relative `-v` source as a named volume, so the cross-build would mount \
-         an empty directory where the certificate should be. Give the full path.",
-        at.display()
-    );
-    Ok(Some(at))
+    Ok(Some(Root::read(at)?))
 }
 
 /// The lines that teach the image to trust a corporate root, or nothing.
@@ -2545,7 +2565,7 @@ mod tests {
         let at = dir.path().join("corp.pem");
         std::fs::write(&at, PEM).unwrap();
         let (_d5, paths) = ca_fixture(Some(&at.display().to_string()));
-        assert_eq!(ca_for(&paths).unwrap().as_deref(), Some(PEM));
+        assert_eq!(ca_for(&paths).unwrap().as_ref().map(Root::pem), Some(PEM));
     }
 
     /// **A settings file omh cannot read is not a settings file with nothing
@@ -2691,48 +2711,44 @@ mod tests {
 
     /// **The path that gets mounted is the path that was validated.**
     ///
-    /// `ca_path` called `ca_for` for its refusals and then read the settings a
-    /// second time for the value, so nothing tied the two together — the
-    /// refusals were about one reading and `docker run -v` got another. Its
-    /// own doc claimed both went through `ca_for` first. One reading now, via
-    /// `ca_setting`.
+    /// There used to be a `ca_path` beside `ca_for`: it called `ca_for` for the
+    /// refusals and then read the settings a *second* time for the value, so
+    /// nothing tied the two together — `docker run -v` got a path that had not
+    /// been checked, from a reading `ca_for` never saw. `Root` carries both, so
+    /// the pair cannot disagree and there is no second function to keep in
+    /// step.
     ///
-    /// And it refuses a relative path, which `ca_for` cannot: a relative
-    /// `ca_cert` *resolves* against the process CWD, so the PEM reads fine and
-    /// the image is correct, while docker reads a non-absolute `-v` source as
-    /// a **named volume** and mounts an empty directory where the certificate
-    /// should be. `key::quarrel` warns at `omh set` time, but this key is
-    /// `Secret::No` — it lands in the committed layer and arrives with a
+    /// It also refuses a relative path, which the old `ca_for` could not: a
+    /// relative `ca_cert` *resolves* against the process CWD, so the PEM reads
+    /// fine and the image is correct, while docker reads a non-absolute `-v`
+    /// source as a **named volume** and mounts an empty directory where the
+    /// certificate should be. `key::quarrel` warns at `omh set` time, but this
+    /// key is `Secret::No` — it lands in the committed layer and arrives with a
     /// clone, and a hand-edited `settings.toml` never passes through `set` at
     /// all. The warning is advice; this is the refusal.
     #[test]
-    fn a_relative_certificate_is_refused_where_it_would_be_mounted() {
+    fn a_root_carries_the_path_its_certificate_came_from() {
         let (dir, _) = ca_fixture(None);
         let at = dir.path().join("corp.pem");
         std::fs::write(&at, PEM).unwrap();
 
-        // Absolute: both answers agree, and the path is the validated one.
         let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
+        let root = ca_for(&paths).unwrap().expect("a certificate is set");
+        assert_eq!(root.pem(), PEM, "the text the recipe embeds");
         assert_eq!(
-            ca_path(&paths).unwrap().as_deref(),
-            Some(at.as_path()),
-            "the path handed to `docker run -v` is the one whose PEM was read"
+            root.path(),
+            at.as_path(),
+            "and the file the cross-build mounts — one reading, so they agree"
         );
 
-        // Relative: readable from this directory, so `ca_for` is happy — and
-        // that is exactly why the refusal has to live where the mount does.
+        // Relative: readable from this directory, which is what made it silent.
         let cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(dir.path()).unwrap();
         let (_d2, paths) = ca_fixture(Some("corp.pem"));
-        let read = ca_for(&paths);
-        let mounted = ca_path(&paths);
+        let got = ca_for(&paths);
         std::env::set_current_dir(cwd).unwrap();
 
-        assert!(
-            read.is_ok(),
-            "a relative path still *reads*, which is what makes this silent"
-        );
-        let e = format!("{:#}", mounted.unwrap_err());
+        let e = format!("{:#}", got.unwrap_err());
         assert!(
             e.contains("absolute"),
             "the refusal must say what is wrong with it: {e}"
@@ -2842,25 +2858,25 @@ mod tests {
         );
     }
 
-    /// **One resolution of `ca_cert` per command.** A second read can differ
-    /// from the first, and then omh builds one image and names another — the
-    /// split `0af80b9` closed in `session_up` and `top_up`, and which a review
-    /// found still open in two places: `doctor` used `sandbox.ca` for its
-    /// check and a fresh `ca_for` for the layer it built, and `init` compared
-    /// `sandbox.tag` against a tag derived from its own separate read.
+    /// **One resolution of `ca_cert` per command, and one way to hold it.**
     ///
-    /// Two rules make "once per command" true rather than hoped for:
+    /// A second read can differ from the first, and then omh builds one image
+    /// and names another — the split `0af80b9` closed in `session_up`, and
+    /// which a review found still open in `doctor` and `init`.
+    ///
+    /// Two rules, and `Root` is what makes the second one cheap to check:
     ///
     /// 1. No function resolves twice.
     /// 2. `cmd::init::sandbox` does not resolve **at all** — it is handed the
-    ///    caller's reading. It is the one function every command funnels
-    ///    through, so while it resolved independently, any caller that also
-    ///    needed the certificate for a harness image (which `init` does, at
-    ///    the `tag_for` calls above its `sandbox()` call) resolved twice by
-    ///    construction and no per-function count could see it.
+    ///    caller's reading. Every command funnels through it, so while it
+    ///    resolved independently, any caller that also needed the certificate
+    ///    for a harness image resolved twice by construction.
     ///
-    /// A text scan over top-level `fn` blocks is a proxy for a call graph. It
-    /// is the shape that catches the defect that actually happened.
+    /// The scan no longer exempts `image.rs`. It used to, and that was a hole:
+    /// `ca_path` lived there and called `ca_for`, so `omh s run` and
+    /// `omh s attach` each resolved twice through `deliver`, invisibly. `Root`
+    /// deleted `ca_path` — the path and the pem come off one reading now — so
+    /// the exemption is gone with it and the scan can see the whole tree.
     #[test]
     fn no_command_resolves_the_certificate_twice() {
         let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
@@ -2878,9 +2894,6 @@ mod tests {
                 if path.extension().is_none_or(|e| e != "rs") {
                     continue;
                 }
-                if path.file_name().is_some_and(|n| n == "image.rs") {
-                    continue;
-                }
                 let whole = std::fs::read_to_string(&path).unwrap();
                 // Production code only. A test may resolve as often as it likes.
                 let body = whole.split("#[cfg(test)]").next().unwrap_or("");
@@ -2889,27 +2902,23 @@ mod tests {
                     .unwrap_or(&path)
                     .display()
                     .to_string();
-
-                // Top-level `fn` blocks: a line at column zero that declares
-                // one, up to the next such line.
+                let lines: Vec<&str> = body.lines().collect();
                 let opens = |l: &str| {
                     let l = l.trim_end();
-                    (l.starts_with("fn ")
+                    l.starts_with("fn ")
                         || l.starts_with("pub fn ")
                         || l.starts_with("pub(crate) fn ")
                         || l.starts_with("async fn ")
                         || l.starts_with("pub async fn ")
-                        || l.starts_with("pub(crate) async fn "))
-                    .then(|| l.to_string())
+                        || l.starts_with("pub(crate) async fn ")
                 };
-                let lines: Vec<&str> = body.lines().collect();
-                let heads: Vec<usize> = (0..lines.len())
-                    .filter(|&n| opens(lines[n]).is_some())
-                    .collect();
+                let heads: Vec<usize> = (0..lines.len()).filter(|&n| opens(lines[n])).collect();
                 for (k, &head) in heads.iter().enumerate() {
                     let end = heads.get(k + 1).copied().unwrap_or(lines.len());
                     let block = lines[head..end].join("\n");
-                    let n = block.matches("image::ca_for(").count();
+                    // `ca_for` is the resolver; `Root::read` is its constructor
+                    // and is private, so counting the resolver is enough.
+                    let n = block.matches("ca_for(").count();
                     let sig = lines[head].trim_end();
                     if sig.contains(" sandbox(") {
                         saw_sandbox_fn = true;
@@ -2944,13 +2953,47 @@ mod tests {
         // **Liveness by name.** A scan keyed on a spelling goes quiet the
         // moment the spelling changes, and an empty result would read as a
         // pass. These are the entry points that legitimately resolve once.
-        for must in ["src/cmd/init.rs", "src/cmd/inspect.rs"] {
+        for must in [
+            "src/cmd/init.rs",
+            "src/cmd/inspect.rs",
+            "src/memory/deliver.rs",
+        ] {
             assert!(
                 resolvers.iter().any(|f| f.starts_with(must)),
                 "{must} no longer resolves `ca_cert` under a spelling this \
                  scan can see — it reads less than it did: {resolvers:#?}"
             );
         }
+    }
+
+    /// **`Root::read` is the only way to hold one.** That is the whole of what
+    /// the type buys: three comments in this file used to claim a value had
+    /// "already been refused upstream", and none of them could be true of a
+    /// function taking `&str`. A second constructor — or a `pub` field, or a
+    /// `Root { .. }` literal anywhere else — would quietly restore that.
+    #[test]
+    fn nothing_builds_a_root_except_its_one_constructor() {
+        let src = std::fs::read_to_string(file!()).unwrap();
+        let body = src.split("#[cfg(test)]").next().unwrap_or("");
+        // `Root {` also opens the `struct` and its `impl`; neither builds one.
+        let literals = body.matches("Root {").count()
+            - body.matches("struct Root {").count()
+            - body.matches("impl Root {").count();
+        assert_eq!(
+            literals, 0,
+            "a `Root {{ .. }}` literal outside `read` is a way to build one \
+             that skipped the refusals"
+        );
+        assert_eq!(
+            body.matches("Self { path: at, pem }").count(),
+            1,
+            "and one construction, inside `read`"
+        );
+        assert!(
+            !body.contains("pub path:") && !body.contains("pub pem:"),
+            "the fields stay private, or the pem and the path can be swapped \
+             for ones nothing validated"
+        );
     }
 
     /// **The failure doctor's guest-side checks cannot reach.** Behind a

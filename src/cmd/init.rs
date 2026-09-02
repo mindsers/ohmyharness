@@ -571,20 +571,27 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // Without it the headline command cannot run, so init is not finished
         // until this exists — and until it exists there is no sandbox to ask
         // about a toolchain.
-        if image::exists(backend.program(), &image::tag_for(&adapter, ca.as_deref())) {
+        if image::exists(
+            backend.program(),
+            &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
+        ) {
             summary.image = Some(format!(
                 "{} (already built)",
-                image::tag_for(&adapter, ca.as_deref())
+                image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
             ));
         } else {
             // Progress, not report: this is the minutes-long step, and
             // somebody watching a blank terminal needs to know it is alive.
             ctx.progress(&format!(
                 "building {} — first run only…",
-                image::tag_for(&adapter, ca.as_deref())
+                image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
             ));
-            image::ensure(backend.program(), &adapter, ca.as_deref())?;
-            summary.image = Some(image::tag_for(&adapter, ca.as_deref()));
+            image::ensure(
+                backend.program(),
+                &adapter,
+                ca.as_ref().map(image::Root::pem),
+            )?;
+            summary.image = Some(image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)));
         }
 
         // Which provides apply here. Evaluated **in the sandbox**, with the repo
@@ -617,7 +624,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             } else {
                 match Command::new(backend.program())
                     .args(stack::predicate_args(
-                        &image::tag_for(&adapter, ca.as_deref()),
+                        &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
                         &paths.repo,
                         &stack::predicate_script(&candidates),
                     ))
@@ -701,14 +708,16 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     &sandbox.recipe(),
                     // The sandbox's own reading, not a fresh one. `sandbox.tag`
                     // was computed from it, and two reads of a file can differ.
-                    sandbox.ca.as_deref(),
+                    sandbox.ca.as_ref().map(image::Root::pem),
                     &paths.repo,
                 )?;
                 // `sandbox.ca`, not `ca` — the same reading `sandbox.tag`
                 // was computed from. They are one value now, and comparing a
                 // tag against one derived from a different read is what made
                 // this comparison meaningless when they could differ.
-                if sandbox.tag != image::tag_for(&adapter, sandbox.ca.as_deref()) {
+                if sandbox.tag
+                    != image::tag_for(&adapter, sandbox.ca.as_ref().map(image::Root::pem))
+                {
                     summary.stack_image = Some(sandbox.tag.clone());
                 }
 
@@ -843,7 +852,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
         let args = base::index_args(
-            &image::tag_for(&adapter, ca.as_deref()),
+            &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
             &paths.cache_volume(),
             &paths.repo,
             &paths.repo_name(),
@@ -1405,7 +1414,7 @@ pub(crate) struct Sandbox {
     /// time, which is the split its own doc comment warns about — a second read
     /// can differ from the first, and then omh builds one image and names
     /// another.
-    pub(crate) ca: Option<String>,
+    pub(crate) ca: Option<crate::image::Root>,
 }
 
 impl Sandbox {
@@ -1467,7 +1476,7 @@ impl Sandbox {
         // more place to forget — but the value was already on `self`, and a
         // second read of a file that has moved builds a layer the tag beside
         // it does not name.
-        let ca = self.ca.as_deref();
+        let ca = self.ca.as_ref().map(crate::image::Root::pem);
         image::ensure_stack(
             program,
             adapter,
@@ -1505,7 +1514,7 @@ pub(crate) fn sandbox(
     paths: &Paths,
     adapter: &Adapter,
     repo: &settings::RepoPolicy,
-    ca: Option<String>,
+    ca: Option<crate::image::Root>,
 ) -> Result<Sandbox> {
     let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let detected = stack::detected(&defs, &paths.repo);
@@ -1522,7 +1531,7 @@ pub(crate) fn sandbox(
     let tag = image::stack_tag(
         adapter,
         &installs.iter().map(String::as_str).collect::<Vec<_>>(),
-        ca.as_deref(),
+        ca.as_ref().map(image::Root::pem),
     );
     let resolves = facts::Facts::load(paths).about(&tag);
     let owed = needs_of(&detected, &repo.provision);

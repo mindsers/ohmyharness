@@ -90,7 +90,9 @@ impl Recipe {
                 "the image recipe depends on `ca_cert`, which could not be read: {e:#}"
             )),
             Ok(ca) => {
-                match crate::image::recipe_digest(&crate::image::base_dockerfile(ca.as_deref())) {
+                match crate::image::recipe_digest(&crate::image::base_dockerfile(
+                    ca.as_ref().map(crate::image::Root::pem),
+                )) {
                     Ok(d) => Self::Digest(d),
                     Err(e) => Self::Unknowable(format!("could not digest the image recipe: {e:#}")),
                 }

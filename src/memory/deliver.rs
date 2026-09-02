@@ -150,8 +150,12 @@ pub fn ensure(
             }
             // The proxy that made `ca_cert` necessary is in front of
             // crates.io too, and this container is not omh's image.
-            let ca = crate::image::ca_path(paths)?;
-            build(program, crate_dir, &out, arch, ca.as_deref(), ctx)?;
+            // The path off the same `Root` whose pem was validated. This
+            // used to be `ca_path`, a second resolution of the setting that
+            // could name a different file than the one `ca_for` had read.
+            let root = crate::image::ca_for(paths)?;
+            let ca = root.as_ref().map(crate::image::Root::path);
+            build(program, crate_dir, &out, arch, ca, ctx)?;
             Ok(out)
         }
     }
