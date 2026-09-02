@@ -1162,6 +1162,29 @@ mod tests {
     #[test]
     #[ignore]
     fn a_private_root_reads_as_private_and_a_public_one_does_not() {
+        // **This check is macOS-only, and the test has to say so.** It rests on
+        // Apple keeping its shipped roots in a keychain separate from anything
+        // an administrator installed; Linux has no such line —
+        // `update-ca-certificates` merges both into /etc/ssl/certs — so
+        // `public_roots` refuses to answer there, deliberately. Asserting
+        // `Private` on Linux asserted a bug. CI runs the ignored set on linux,
+        // which is what caught it; a macOS-only run cannot.
+        if !cfg!(target_os = "macos") {
+            let (verdict, named) = inspected_hosts();
+            let Inspection::Unknown(why) = verdict else {
+                panic!("off macOS this must not reach a verdict: {verdict:?}")
+            };
+            assert!(
+                why.contains("macOS") || why.contains("Linux"),
+                "and it must say which platform it cannot answer for: {why}"
+            );
+            assert!(
+                named.is_empty(),
+                "nothing was measured, so nothing is named"
+            );
+            return;
+        }
+
         let d = tempfile::tempdir().unwrap();
         let at = |n: &str| d.path().join(n).display().to_string();
         let sh = |c: &str| {
