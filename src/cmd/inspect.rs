@@ -169,6 +169,9 @@ pub(crate) fn doctor_cmd(
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
+    // The one claim about this image no test can settle: whether the root
+    // omh embedded actually got into the store the toolchains read.
+    checks.extend(doctor::ca_check(sandbox.ca.as_deref()));
     // Only if the resolved profile actually declares it: a check for a server
     // nobody configured would fail honestly and mean nothing.
     //

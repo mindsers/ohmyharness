@@ -281,6 +281,37 @@ pub fn credential_checks(adapter: &Adapter) -> Vec<Check> {
 }
 
 /// What must be true inside the sandbox, given this profile and adapter.
+/// Whether the corporate root actually reached the sandbox's trust store.
+///
+/// **Not whether the recipe says so.** `update-ca-certificates` prints
+/// `WARNING: Skipping ...` and exits 0 for a certificate it cannot parse, so a
+/// truncated or half-pasted PEM produces a green build and a sandbox that
+/// verifies nothing — and the failure then surfaces in the next `pip install`,
+/// a command away from the setting that caused it.
+///
+/// The check reads `/etc/ssl/certs/ca-certificates.crt`, which is what
+/// `SSL_CERT_FILE`, `PIP_CERT`, `CARGO_HTTP_CAINFO` and `GIT_SSL_CAINFO` all
+/// point at. Reading the file omh wrote instead would only confirm omh wrote
+/// it, which the suite already does.
+///
+/// The needle is a body line rather than the marker: every certificate in the
+/// store has a `BEGIN CERTIFICATE`, and a check that any of them is present
+/// passes on an image that skipped this one.
+pub fn ca_check(ca: Option<&str>) -> Option<Check> {
+    let body = ca?
+        .lines()
+        .skip_while(|l| !l.contains("BEGIN CERTIFICATE"))
+        .skip(1)
+        .find(|l| l.len() > 16 && !l.contains("END CERTIFICATE"))?
+        .to_string();
+    Some(Check {
+        name: "corporate root (ca_cert)".into(),
+        guest: PathBuf::from("/etc/ssl/certs/ca-certificates.crt"),
+        expect: Expect::Mentions(vec![body]),
+        dir: false,
+    })
+}
+
 pub fn checks(
     profile: &Profile,
     adapter: &Adapter,
@@ -1045,6 +1076,47 @@ mod tests {
             names.iter().any(|n| n == "hooks"),
             "omh's own hooks are mounted with no hooks layer to source them: {names:?}"
         );
+    }
+
+    /// **The one thing about `ca_cert` a green suite cannot say.**
+    ///
+    /// Every other guard for this feature asserts what is in the recipe. None
+    /// of them can say the root reached the trust store, and the gap is not
+    /// theoretical: `update-ca-certificates` prints a warning and **exits 0**
+    /// when it skips a certificate it cannot parse, so a truncated or
+    /// half-pasted PEM gives a green build and a sandbox that trusts nothing.
+    /// AGENTS.md puts exactly this case on `doctor`.
+    ///
+    /// Asserting on the *bundle* rather than on the file omh wrote is what
+    /// makes it a real check: the file omh wrote is omh's own output, and the
+    /// bundle is what the toolchains read.
+    #[test]
+    fn a_corporate_root_is_checked_in_the_store_that_reads_it() {
+        assert!(
+            ca_check(None).is_none(),
+            "nothing to check when nothing is set"
+        );
+
+        // A realistic body line: a PEM wraps base64 at 64 characters, and the
+        // needle has to be long enough that finding it in a store of a hundred
+        // certificates means something.
+        let pem = "-----BEGIN CERTIFICATE-----\n\
+                   DISTINCTIVEBODYaGVyZUlzU2l4dHlGb3VyQ2hhcmFjdGVyc09mQmFzZTY0RGF0\n\
+                   -----END CERTIFICATE-----\n";
+        let check = ca_check(Some(pem)).expect("a certificate is set, so it is checked");
+        assert_eq!(
+            check.guest,
+            std::path::PathBuf::from("/etc/ssl/certs/ca-certificates.crt"),
+            "the check has to read the bundle the toolchains read, not the \
+             file omh itself wrote"
+        );
+        match &check.expect {
+            Expect::Mentions(what) => assert!(
+                what.iter().any(|w| w.contains("DISTINCTIVEBODY")),
+                "the check must look for this certificate, not any certificate: {what:?}"
+            ),
+            other => panic!("a trust store is read, not {other:?}"),
+        }
     }
 
     /// A server whose feature is off here is deliberately absent from the

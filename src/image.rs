@@ -138,7 +138,8 @@ pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
     else {
         return Ok(None);
     };
-    let at = std::path::Path::new(&at);
+    let at = std::path::PathBuf::from(at);
+    let at = at.as_path();
     // Bytes, not `read_to_string`. A real DER `.crt` is binary, so reading it
     // as text failed on the UTF-8 boundary and the reader got an encoding
     // error — while the message written for exactly that file, the one naming
@@ -183,6 +184,26 @@ pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
         );
     }
     Ok(Some(pem))
+}
+
+/// Where the corporate root lives on this host, if one is set and readable.
+///
+/// The content is what the image recipe embeds; the *path* is what the
+/// cross-build container mounts. Both go through `ca_for` first, so a caller
+/// that only wants the path still gets the refusals — an unreadable or
+/// mangling-prone certificate is an error in both directions.
+pub fn ca_path(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBuf>> {
+    if ca_for(paths)?.is_none() {
+        return Ok(None);
+    }
+    let settings = anyhow::Context::context(
+        crate::config::policy(paths),
+        "reading this repo's settings to resolve `ca_cert`",
+    )?;
+    Ok(settings
+        .into_iter()
+        .find(|s| s.key == "ca_cert")
+        .map(|s| std::path::PathBuf::from(s.value)))
 }
 
 /// The lines that teach the image to trust a corporate root, or nothing.
@@ -272,6 +293,21 @@ fn ca_layer(ca: Option<&str>) -> String {
     // at build time, which is where the failure this fixes actually happens.
     out.push_str(&format!(
         "ENV SSL_CERT_FILE={BUNDLE} \\\n         \x20   SSL_CERT_DIR=/etc/ssl/certs \\\n         \x20   NODE_EXTRA_CA_CERTS={NODE_AT} \\\n         \x20   REQUESTS_CA_BUNDLE={BUNDLE} \\\n         \x20   PIP_CERT={BUNDLE} \\\n         \x20   CARGO_HTTP_CAINFO={BUNDLE} \\\n         \x20   GIT_SSL_CAINFO={BUNDLE}\n"
+    ));
+
+    // And again where an ssh login will find them. `ENV` covers the image and
+    // everything `docker exec` starts — which is `omh s run` and `attach` — but
+    // sshd does not pass its own environment to a session: it builds one from
+    // PAM, and `PermitUserEnvironment` is off by default. A session reached
+    // from VS Code, Zed or JetBrains Gateway (`src/ssh.rs`) therefore gets the
+    // system store, which `update-ca-certificates` fixed, and none of the
+    // variables — so `curl` and `git` work there and `npm install`, `pip
+    // install` and `cargo add` do not. The build succeeds and the session
+    // half-works, which is the worst of the three outcomes.
+    //
+    // `/etc/environment` is read by `pam_env`, which sshd runs.
+    out.push_str(&format!(
+        "RUN printf '%s\\n' \\\n      \'SSL_CERT_FILE={BUNDLE}\' \\\n      \'SSL_CERT_DIR=/etc/ssl/certs\' \\\n      \'NODE_EXTRA_CA_CERTS={NODE_AT}\' \\\n      \'REQUESTS_CA_BUNDLE={BUNDLE}\' \\\n      \'PIP_CERT={BUNDLE}\' \\\n      \'CARGO_HTTP_CAINFO={BUNDLE}\' \\\n      \'GIT_SSL_CAINFO={BUNDLE}\' \\\n      >> /etc/environment\n"
     ));
     out
 }
@@ -1882,6 +1918,30 @@ mod tests {
             "the certificate must be written where update-ca-certificates \
              scans, under a name it will not skip: {commands}"
         );
+
+        // **`ENV` does not reach an ssh login.** `omh s run` and `attach` go
+        // through `docker exec`, which inherits the image environment, so they
+        // were fine. Editor attach does not: `src/ssh.rs` hands VS Code, Zed
+        // and JetBrains an `ssh://` target, and sshd builds a session
+        // environment from PAM rather than passing its own — so node, pip and
+        // cargo, the three that need telling separately from the system store,
+        // lose their variables in an editor terminal while `curl` and `git`
+        // keep working. The build succeeds, the session half-works, and the
+        // docs promise both.
+        //
+        // `/etc/environment` is what `pam_env` reads, and sshd runs it.
+        for var in [
+            "SSL_CERT_FILE",
+            "NODE_EXTRA_CA_CERTS",
+            "PIP_CERT",
+            "CARGO_HTTP_CAINFO",
+        ] {
+            assert!(
+                commands.contains(&format!("{var}=")) && commands.contains("/etc/environment"),
+                "{var} is set for `docker exec` but not written where an ssh \
+                 login will find it"
+            );
+        }
 
         // **Order, not just presence.** The first version put the certificate
         // at the top, before `apt-get install ca-certificates` — so
