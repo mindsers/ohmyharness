@@ -2161,13 +2161,22 @@ mod tests {
             ("src/config.rs", 3),
             ("src/container.rs", 4),
             ("src/doctor.rs", 1),
-            // The `# `omh set --local ca_cert`` line `ca_layer` writes into
-            // the generated Dockerfile, telling whoever reads the recipe where
-            // the certificate came from. **Not** either of `ca_for`'s refusals:
-            // neither contains a command line, so neither is what this scan
-            // sees — which is what this comment said before, about a reading
-            // nobody had taken.
-            ("src/image.rs", 1),
+            // Three. One is the `# `omh set --local ca_cert`` line `ca_layer`
+            // writes into the generated Dockerfile, telling whoever reads the
+            // recipe where the certificate came from. **Not** either of
+            // `ca_for`'s refusals: neither contains a command line, so neither
+            // is what this scan sees — which is what this comment said before,
+            // about a reading nobody had taken.
+            //
+            // The other two are `why_the_build_failed`'s, and they are the
+            // reason this scan matters: they are printed to somebody whose
+            // build just died, who is behind a corporate proxy, and who has no
+            // reason to suspect a setting exists. A command line that does not
+            // parse would send them nowhere. `omh settings set` is the
+            // spelling that looks right and writes a template nothing
+            // re-reads, so the scan proving `--local` is what omh accepts is
+            // load-bearing here rather than decorative.
+            ("src/image.rs", 3),
             ("src/main.rs", 8),
             ("src/memory.rs", 2),
             ("src/memory/ingest.rs", 2),
@@ -5858,11 +5867,25 @@ because = "a fixture"
             ("src/image.rs", "could not list images to reap"),
             ("src/image.rs", "this build replaced"),
         ];
+        // **A relay is not a message.** These do not write anything omh
+        // composed — they hand a child process's stream back to the terminal
+        // verbatim, which is what `Stdio::inherit` did before omh needed to
+        // read the stream as well as show it. So they are not debts and are
+        // counted separately: the seven above stay seven, and this list may
+        // not quietly become a second way in.
+        //
+        // `build` reads docker's stderr so it can say *why* a build failed —
+        // behind a TLS-inspecting proxy the answer is `ca_cert`, and doctor
+        // cannot answer it because there is no image to inspect. Reading it
+        // means relaying it, or a multi-minute build goes silent.
+        let relayed = [("src/image.rs", "eprint!(\"{line}\")")];
+
         let unexpected: Vec<&String> = offenders
             .iter()
             .filter(|o| {
                 !named
                     .iter()
+                    .chain(relayed.iter())
                     .any(|(file, what)| o.starts_with(file) && o.contains(what))
             })
             .collect();
@@ -5871,7 +5894,7 @@ because = "a fixture"
             "every write goes through out::Ctx but the sites named in this test — \
              found {unexpected:#?}"
         );
-        for (file, what) in named {
+        for (file, what) in named.iter().chain(relayed.iter()) {
             assert!(
                 offenders
                     .iter()
@@ -5880,6 +5903,12 @@ because = "a fixture"
                  this test says is not there"
             );
         }
+        assert_eq!(
+            named.len(),
+            9,
+            "the debt register grew. Two exemptions and seven sites owed a \
+             `Ctx` — an eighth owed site is a fix, not an entry"
+        );
     }
 
     // ── candidate guards (mutation testing) ─────────────────────────────────

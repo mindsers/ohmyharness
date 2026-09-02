@@ -343,6 +343,12 @@ own input. Point `--to` somewhere outside and copy in what you want.
 
 ### an unknown-issuer error when omh builds an image
 
+**omh now says this for you.** A build that dies on an unverifiable
+certificate ends by naming `ca_cert` and the command that sets it, because
+`omh doctor` cannot help here: doctor works by launching the image and
+inspecting it from the inside, and behind an inspecting proxy there is no image
+to launch. The diagnosis has to come from the build, so it does.
+
 The wording depends on which tool reaches the network first — `unable to get
 local issuer certificate` from curl, `CERTIFICATE_VERIFY_FAILED` from python,
 `UNABLE_TO_VERIFY_LEAF_SIGNATURE` from node — but the cause is one thing: your

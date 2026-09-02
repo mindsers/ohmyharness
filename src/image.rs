@@ -776,6 +776,73 @@ pub fn ensure(program: &str, adapter: &Adapter, ca: Option<&str>) -> Result<()> 
     Ok(())
 }
 
+/// What a TLS-inspecting proxy looks like in a failed build, per toolchain.
+///
+/// **Measured, not guessed.** These are the exact strings each tool produced
+/// against an `openssl s_server` presenting a leaf signed by a private root,
+/// on an image with no root installed — the control arm of the measurement in
+/// `ca_layer`'s doc. omh only says "this looks like a corporate proxy" about
+/// text it actually saw.
+const INSPECTED: &[&str] = &[
+    // curl, and the `apt` and rustup fetches that go through it.
+    "unable to get local issuer certificate",
+    "self-signed certificate in certificate chain",
+    "self signed certificate in certificate chain",
+    "SSL certificate problem",
+    // node — the one measured to ignore the system store.
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    // python, pip.
+    "CERTIFICATE_VERIFY_FAILED",
+    // go.
+    "x509: certificate signed by unknown authority",
+    // cargo, through libgit2.
+    "the SSL certificate is invalid",
+    // git.
+    "server certificate verification failed",
+];
+
+/// Why a build died, when omh can tell — and what to do about it.
+///
+/// `doctor` cannot answer this one. It launches the real image and inspects
+/// guest paths, and behind a TLS-inspecting proxy there **is** no image: the
+/// build dies on an unknown issuer, so every guest-side check is unreachable.
+/// The diagnosis has to live where the failure does.
+///
+/// Before this, a build behind a corporate proxy ended in `failed to build
+/// omh/base:…` with the reason scrolled past in the docker log — a user with
+/// no idea that a setting existed to fix it. That is the case `ca_cert` was
+/// written for, and the one omh was silent about.
+///
+/// Two answers, because they are different problems. With no `ca_cert` set,
+/// the fix is to set one. With one already set, the certificate is present and
+/// did not work — the likely causes are a chain missing its intermediate, or a
+/// root that is not the one this proxy actually presents.
+pub fn why_the_build_failed(log: &str, ca_set: bool) -> Option<String> {
+    let hit = INSPECTED.iter().find(|needle| log.contains(**needle))?;
+    Some(if ca_set {
+        format!(
+            "The build failed on an unverifiable certificate ({hit}), and \
+             `ca_cert` is already set — so the root omh embedded is not the one \
+             this connection needs. Corporate IT usually hands out a chain: \
+             check the file holds every certificate in it, and that it is the \
+             root your proxy actually presents. `omh doctor` reports whether \
+             the one omh embedded reached the trust store."
+        )
+    } else {
+        format!(
+            "The build failed on an unverifiable certificate ({hit}). That is \
+             what a TLS-inspecting proxy looks like — Zscaler, Netskope and the \
+             like re-sign every connection with the company's own root, which \
+             this machine trusts and a container does not.\n\
+             \n    omh set --local ca_cert /path/to/corp-root.pem\n\n\
+             On macOS the root is in the keychain rather than on disk:\n\
+             \n    security find-certificate -a -c \"Zscaler\" -p > ~/corp-root.pem\n\n\
+             See `docs/troubleshooting.md`. If you are not behind a proxy, this \
+             was a different certificate problem and the log above has it."
+        )
+    })
+}
+
 fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind) -> Result<()> {
     use anyhow::Context;
     use std::io::Write;
@@ -788,16 +855,42 @@ fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind) -> Result<()> 
     let mut child = std::process::Command::new(program)
         .args(build_args(tag, &context, kind))
         .stdin(Stdio::piped())
+        // Piped so omh can read the reason it failed, then written straight
+        // back out line by line — a build is minutes long and watching it is
+        // how you know it is alive, so capturing must not mean swallowing.
+        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("running {program} build"))?;
-    child
-        .stdin
-        .as_mut()
-        .context("build stdin")?
-        .write_all(dockerfile.as_bytes())?;
+
+    // **Closed before reading, not by `wait`.** omh sends the recipe on `-f -`,
+    // so docker reads stdin until EOF. `Child::wait` closes stdin for you, but
+    // the tee below runs *before* the wait — leaving it open here deadlocks
+    // the build against a reader that will never see the end of its recipe.
+    {
+        let mut stdin = child.stdin.take().context("build stdin")?;
+        stdin.write_all(dockerfile.as_bytes())?;
+    }
+
+    let mut log = String::new();
+    if let Some(err) = child.stderr.take() {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(err);
+        let mut line = String::new();
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            eprint!("{line}");
+            log.push_str(&line);
+            line.clear();
+        }
+    }
 
     let status = child.wait()?;
     if !status.success() {
+        // The recipe omh just sent is the authority on whether this build had
+        // a certificate in it — a setting read again here could have changed.
+        let ca_set = dockerfile.contains("update-ca-certificates");
+        if let Some(why) = why_the_build_failed(&log, ca_set) {
+            anyhow::bail!("failed to build {tag}\n\n{why}");
+        }
         anyhow::bail!("failed to build {tag}");
     }
     reap(program, tag, kind);
@@ -2712,6 +2805,131 @@ mod tests {
                  scan can see — it reads less than it did: {resolvers:#?}"
             );
         }
+    }
+
+    /// **The failure `doctor` cannot reach.** Behind a TLS-inspecting proxy
+    /// there is no image to inspect — the build dies on an unknown issuer, so
+    /// every guest-side check doctor makes is unreachable and the user is left
+    /// with `failed to build omh/base:…` and a docker log they did not read.
+    /// That is the exact case `ca_cert` exists for, and omh said nothing about
+    /// it.
+    ///
+    /// The needles are the control arm of the measurement in `ca_layer`'s doc,
+    /// verbatim: each is what that tool actually printed against a leaf signed
+    /// by a private root with no root installed. A needle omh invented would
+    /// be a guess presented as a diagnosis.
+    #[test]
+    fn a_build_that_died_on_an_unknown_issuer_names_the_setting() {
+        // Measured, one per toolchain, in the control image.
+        for (tool, said) in [
+            ("curl", "curl: (60) SSL certificate problem: unable to get local issuer certificate"),
+            ("node", "Error: unable to verify the first certificate ... UNABLE_TO_VERIFY_LEAF_SIGNATURE"),
+            ("python", "ssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"),
+            ("pip", "Could not fetch URL https://pypi.org/simple/: CERTIFICATE_VERIFY_FAILED"),
+            ("go", "tls: failed to verify certificate: x509: certificate signed by unknown authority"),
+            ("cargo", "error: the SSL certificate is invalid; class=Ssl (16)"),
+            ("git", "fatal: unable to access: server certificate verification failed"),
+        ] {
+            let said = why_the_build_failed(said, false)
+                .unwrap_or_else(|| panic!("{tool}'s failure was not recognised"));
+            assert!(
+                said.contains("ca_cert"),
+                "{tool}: the diagnosis must name the setting that fixes it: {said}"
+            );
+            assert!(
+                said.contains("omh set --local"),
+                "{tool}: and the spelling that works — `omh settings set` writes \
+                 a template nothing re-reads: {said}"
+            );
+        }
+
+        // **A certificate already set is a different problem.** Telling
+        // somebody to set `ca_cert` when they have is how a diagnosis becomes
+        // noise; the likely cause is a chain missing its intermediate.
+        let already = why_the_build_failed("x509: certificate signed by unknown authority", true)
+            .expect("still recognised");
+        assert!(
+            !already.contains("omh set --local"),
+            "do not tell somebody to set what they have already set: {already}"
+        );
+        assert!(
+            already.contains("chain") || already.contains("doctor"),
+            "it must say what to check instead: {already}"
+        );
+
+        // **Silence is the default.** An ordinary build failure must not be
+        // dressed up as a proxy problem — the setting would be a red herring
+        // and the real error is in the log.
+        for ordinary in [
+            "ERROR: failed to solve: process \"/bin/sh -c apt-get install -y nosuchpkg\" did not complete successfully: exit code: 100",
+            "no space left on device",
+            "",
+        ] {
+            assert_eq!(
+                why_the_build_failed(ordinary, false),
+                None,
+                "an ordinary failure must not be diagnosed as a proxy: {ordinary}"
+            );
+        }
+    }
+
+    /// **The tee must not deadlock, and only a real build can say so.**
+    ///
+    /// omh sends the recipe on `-f -`, so docker reads stdin until EOF.
+    /// `Child::wait` closes stdin for you — but reading stderr happens
+    /// *before* the wait, so a version of `build` that leaves stdin open hangs
+    /// forever against a docker that is still waiting for the end of its
+    /// recipe. No unit test sees that: it is a property of two real pipes.
+    ///
+    /// Also asserts the diagnosis reaches the error, using a recipe that fails
+    /// while printing what a proxy prints. That is a real non-zero build, not
+    /// a string handed to `why_the_build_failed`.
+    ///
+    /// `#[ignore]` because it needs a container runtime. `./scripts/check.sh
+    /// --all` runs it.
+    #[test]
+    #[ignore]
+    fn a_real_build_streams_its_log_and_diagnoses_a_proxy() {
+        let docker = "docker";
+        // A build that succeeds: proves the tee does not deadlock.
+        let ok = build(
+            docker,
+            "omh-test/tee-ok:1",
+            "FROM alpine:3\nRUN echo built-fine\n",
+            &Kind::Base,
+        );
+        assert!(ok.is_ok(), "a trivial build must succeed: {ok:?}");
+
+        // A build that fails the way a TLS-inspecting proxy makes it fail.
+        let said = build(
+            docker,
+            "omh-test/tee-fail:1",
+            "FROM alpine:3\nRUN echo 'x509: certificate signed by unknown authority' >&2 && exit 1\n",
+            &Kind::Base,
+        )
+        .expect_err("that recipe must fail");
+        let said = format!("{said:#}");
+        assert!(
+            said.contains("ca_cert"),
+            "a build that died on an unknown issuer must name the setting: {said}"
+        );
+        assert!(
+            said.contains("omh set --local"),
+            "and the spelling that works: {said}"
+        );
+
+        // And an ordinary failure stays ordinary.
+        let plain = build(
+            docker,
+            "omh-test/tee-plain:1",
+            "FROM alpine:3\nRUN exit 1\n",
+            &Kind::Base,
+        )
+        .expect_err("that recipe must fail");
+        assert!(
+            !format!("{plain:#}").contains("ca_cert"),
+            "an ordinary failure must not be dressed up as a proxy problem"
+        );
     }
 
     /// A repo whose stacks install nothing runs the harness image itself.
