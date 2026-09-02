@@ -344,10 +344,10 @@ own input. Point `--to` somewhere outside and copy in what you want.
 ### an unknown-issuer error when omh builds an image
 
 **omh now says this for you, from both ends.** A build that dies on an
-unverifiable certificate ends by naming `ca_cert` and the command that sets it
-— doctor cannot answer that one, because it works by launching the image and
-inspecting it from the inside, and behind an inspecting proxy there is no image
-to launch.
+unverifiable certificate ends by naming `ca_cert` and the command that sets it.
+Doctor's *guest-side* checks cannot answer that one — they work by launching
+the image and inspecting it from the inside, and behind an inspecting proxy
+there is no image to launch — so the diagnosis lives in the build itself.
 
 And `omh doctor` now says it *before* anything fails. With no `ca_cert` set, it
 asks whether a container would accept the certificates this network serves, by
@@ -356,10 +356,15 @@ machine trusts — which is the same question a container asks. That catches the
 case the build cannot: an image cached from before the proxy appeared still
 builds, and only the sessions fail.
 
-It asks about both hosts a build fetches from — `github.com`, where the graph
-binary comes from in the base layer, and `registry.npmjs.org`, where the
-harness does — because a proxy can inspect selectively, and one host is a coin
-flip. Either one being re-signed is enough, and the warning names which.
+It asks about two of the hosts a build fetches from — `github.com`, where the
+graph binary comes from in the base layer, and `registry.npmjs.org`, where the
+harness does — sampled rather than exhaustive, because a proxy can inspect
+selectively and one host is a coin flip. Either one being re-signed is enough,
+and the warning names which.
+
+It needs an `openssl` that restricts verification to the file it is given.
+Stock macOS ships LibreSSL, which does not, so omh checks that first and says
+it cannot tell rather than reporting a clean network it did not measure.
 
 It reports only when the answer is yes. Offline, or anywhere omh cannot tell a
 shipped root from an installed one, it says nothing rather than guessing —

@@ -119,7 +119,13 @@ pub fn recipe_digest(recipe: &str) -> Result<String> {
 /// because their builds are failing; resolving a typo'd path to "no
 /// certificate" would rebuild exactly the image that was already failing and
 /// report success.
-pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
+/// Where `ca_cert` points, if anywhere.
+///
+/// Split out so there is exactly **one** reading of the settings behind both
+/// `ca_for` and `ca_path`. `ca_path` used to call `ca_for` for its refusals and
+/// then read the settings again for the value, so the path it handed to
+/// `docker run -v` was not the path whose PEM had been validated.
+fn ca_setting(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBuf>> {
     // `config::policy` rather than `policy_value`, which answers `Option` and
     // so spells "this repo sets no certificate" and "omh could not read this
     // repo's settings" the same way. `config::read_layer` deliberately
@@ -131,15 +137,18 @@ pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
         crate::config::policy(paths),
         "reading this repo's settings to resolve `ca_cert`",
     )?;
-    let Some(at) = settings
+    Ok(settings
         .into_iter()
         .find(|s| s.key == "ca_cert")
-        .map(|s| s.value)
-    else {
-        return Ok(None);
-    };
-    let at = std::path::PathBuf::from(at);
-    let at = at.as_path();
+        .map(|s| std::path::PathBuf::from(s.value)))
+}
+
+/// Read the file `ca_cert` names, refusing anything that is not exactly
+/// certificates. Every refusal this setting makes lives here.
+fn ca_read(at: &std::path::Path) -> Result<String> {
+    // The loop below binds its own `at` for a line number, so the path gets a
+    // name of its own rather than being shadowed halfway through.
+    let path_for_msg = at;
     // Bytes, not `read_to_string`. A real DER `.crt` is binary, so reading it
     // as text failed on the UTF-8 boundary and the reader got an encoding
     // error — while the message written for exactly that file, the one naming
@@ -147,24 +156,23 @@ pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
     let raw = anyhow::Context::with_context(std::fs::read(at), || {
         format!(
             "reading the certificate named by `ca_cert` ({})",
-            at.display()
+            path_for_msg.display()
         )
     })?;
     anyhow::ensure!(
         !raw.is_empty(),
         "`ca_cert` names {}, which is empty. Nothing was converted wrongly — \
          there is no certificate in that file to convert.",
-        at.display()
+        path_for_msg.display()
     );
     let der_advice = || {
         format!(
             "`ca_cert` names {}, which is not a PEM certificate — a \
              `BEGIN CERTIFICATE` block is what this reads. A `.crt` in DER form \
              converts with `openssl x509 -inform der -in <file> -out <file>.pem`",
-            at.display()
+            path_for_msg.display()
         )
     };
-    let path_for_msg = at;
     let pem = String::from_utf8(raw).map_err(|_| anyhow::anyhow!(der_advice()))?;
     anyhow::ensure!(pem.contains("BEGIN CERTIFICATE"), "{}", der_advice());
 
@@ -247,10 +255,17 @@ pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
              the recipe — strip the file down to the `BEGIN CERTIFICATE` / \
              `END CERTIFICATE` blocks and nothing else.",
             n + 1,
-            at.display()
+            path_for_msg.display()
         );
     }
-    Ok(Some(pem))
+    Ok(pem)
+}
+
+pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
+    let Some(at) = ca_setting(paths)? else {
+        return Ok(None);
+    };
+    Ok(Some(ca_read(&at)?))
 }
 
 /// Where the corporate root lives on this host, if one is set and readable.
@@ -260,17 +275,31 @@ pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
 /// that only wants the path still gets the refusals — an unreadable or
 /// mangling-prone certificate is an error in both directions.
 pub fn ca_path(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBuf>> {
-    if ca_for(paths)?.is_none() {
+    // **One reading.** This called `ca_for` for its refusals and then read the
+    // settings *again* for the value, so the path handed to `docker run -v`
+    // was never the one whose PEM had been validated — the same split this
+    // branch closed twice elsewhere, sitting inside the function whose own doc
+    // says both go through `ca_for` first.
+    let Some(at) = ca_setting(paths)? else {
         return Ok(None);
-    }
-    let settings = anyhow::Context::context(
-        crate::config::policy(paths),
-        "reading this repo's settings to resolve `ca_cert`",
-    )?;
-    Ok(settings
-        .into_iter()
-        .find(|s| s.key == "ca_cert")
-        .map(|s| std::path::PathBuf::from(s.value)))
+    };
+    ca_read(&at)?;
+    // **Absolute, or docker invents a volume.** A relative `ca_cert` resolves
+    // against the process CWD, so the PEM reads fine and the image is correct
+    // — while docker reads a non-absolute `-v` source as a *named volume* and
+    // mounts an empty directory where the certificate should be, with
+    // `SSL_CERT_FILE` pointing at it. `key::quarrel` warns at `omh set` time,
+    // but this key is `Secret::No`: it lands in the committed layer and
+    // arrives with a clone, and a hand-edited `settings.toml` never passes
+    // through `set` at all. That warning is advice; this is the refusal.
+    anyhow::ensure!(
+        at.is_absolute(),
+        "`ca_cert` names `{}`, which is not an absolute path. Docker reads a \
+         relative `-v` source as a named volume, so the cross-build would mount \
+         an empty directory where the certificate should be. Give the full path.",
+        at.display()
+    );
+    Ok(Some(at))
 }
 
 /// The lines that teach the image to trust a corporate root, or nothing.
@@ -308,8 +337,8 @@ pub fn ca_path(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBu
 /// | curl | `unable to get local issuer` | verifies | verifies |
 /// | node | `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | **`UNABLE_TO_VERIFY_LEAF_SIGNATURE`** | verifies |
 /// | python | `CERTIFICATE_VERIFY_FAILED` | verifies | verifies |
-/// | git | `unable to access` | verifies | verifies |
-/// | go | `x509: signed by unknown authority` | verifies | verifies |
+/// | git | `server certificate verification failed` | verifies | verifies |
+/// | go | `x509: certificate signed by unknown authority` | verifies | verifies |
 /// | pip | `CERTIFICATE_VERIFY_FAILED` | verifies | verifies |
 /// | cargo | `SSL certificate is invalid; class=Ssl` | verifies | verifies |
 ///
@@ -780,17 +809,23 @@ pub fn ensure(program: &str, adapter: &Adapter, ca: Option<&str>) -> Result<()> 
 
 /// What a TLS-inspecting proxy looks like in a failed build, per toolchain.
 ///
-/// **Measured, not guessed.** These are the exact strings each tool produced
-/// against an `openssl s_server` presenting a leaf signed by a private root,
-/// on an image with no root installed — the control arm of the measurement in
-/// `ca_layer`'s doc. omh only says "this looks like a corporate proxy" about
-/// text it actually saw.
+/// **Measured, except where marked.** Most of these are the exact strings each
+/// tool produced against an `openssl s_server` presenting a leaf signed by a
+/// private root, on an image with no root installed — the control arm of the
+/// table in `ca_layer`'s doc. Two are not, and are labelled: they are
+/// openssl's own wording for verify code 19, added because the same failure
+/// reaches a build through tools that were not in the control, and it would be
+/// dishonest to file them under "measured".
 const INSPECTED: &[&str] = &[
     // curl, and the `apt` and rustup fetches that go through it.
     "unable to get local issuer certificate",
+    "SSL certificate problem",
+    // **Not measured.** openssl's wording for verify code 19, both spellings
+    // it has used across versions. No tool in the control arm printed these;
+    // they are here because the same proxy produces them through an openssl
+    // that was not one of the seven.
     "self-signed certificate in certificate chain",
     "self signed certificate in certificate chain",
-    "SSL certificate problem",
     // node — the one measured to ignore the system store.
     "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
     // python, pip.
@@ -805,10 +840,12 @@ const INSPECTED: &[&str] = &[
 
 /// Why a build died, when omh can tell — and what to do about it.
 ///
-/// `doctor` cannot answer this one. It launches the real image and inspects
-/// guest paths, and behind a TLS-inspecting proxy there **is** no image: the
-/// build dies on an unknown issuer, so every guest-side check is unreachable.
-/// The diagnosis has to live where the failure does.
+/// `doctor`'s **guest-side** checks cannot answer this one. They launch the
+/// real image and inspect paths inside it, and behind a TLS-inspecting proxy
+/// there is no image: the build dies on an unknown issuer, so every one of
+/// them is unreachable. That is why doctor asks the question host-side instead
+/// — `doctor::inspected_hosts` — and why the diagnosis *also* lives here,
+/// where a build that got past the cache still dies.
 ///
 /// Before this, a build behind a corporate proxy ended in `failed to build
 /// omh/base:…` with the reason scrolled past in the docker log — a user with
@@ -2639,6 +2676,60 @@ mod tests {
         );
     }
 
+    /// **The path that gets mounted is the path that was validated.**
+    ///
+    /// `ca_path` called `ca_for` for its refusals and then read the settings a
+    /// second time for the value, so nothing tied the two together — the
+    /// refusals were about one reading and `docker run -v` got another. Its
+    /// own doc claimed both went through `ca_for` first. One reading now, via
+    /// `ca_setting`.
+    ///
+    /// And it refuses a relative path, which `ca_for` cannot: a relative
+    /// `ca_cert` *resolves* against the process CWD, so the PEM reads fine and
+    /// the image is correct, while docker reads a non-absolute `-v` source as
+    /// a **named volume** and mounts an empty directory where the certificate
+    /// should be. `key::quarrel` warns at `omh set` time, but this key is
+    /// `Secret::No` — it lands in the committed layer and arrives with a
+    /// clone, and a hand-edited `settings.toml` never passes through `set` at
+    /// all. The warning is advice; this is the refusal.
+    #[test]
+    fn a_relative_certificate_is_refused_where_it_would_be_mounted() {
+        let (dir, _) = ca_fixture(None);
+        let at = dir.path().join("corp.pem");
+        std::fs::write(&at, PEM).unwrap();
+
+        // Absolute: both answers agree, and the path is the validated one.
+        let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
+        assert_eq!(
+            ca_path(&paths).unwrap().as_deref(),
+            Some(at.as_path()),
+            "the path handed to `docker run -v` is the one whose PEM was read"
+        );
+
+        // Relative: readable from this directory, so `ca_for` is happy — and
+        // that is exactly why the refusal has to live where the mount does.
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let (_d2, paths) = ca_fixture(Some("corp.pem"));
+        let read = ca_for(&paths);
+        let mounted = ca_path(&paths);
+        std::env::set_current_dir(cwd).unwrap();
+
+        assert!(
+            read.is_ok(),
+            "a relative path still *reads*, which is what makes this silent"
+        );
+        let e = format!("{:#}", mounted.unwrap_err());
+        assert!(
+            e.contains("absolute"),
+            "the refusal must say what is wrong with it: {e}"
+        );
+        assert!(
+            e.contains("named volume") || e.contains("empty directory"),
+            "and what docker would otherwise do: {e}"
+        );
+    }
+
     /// **A bundle is what corporate IT hands out, and it half-worked.**
     ///
     /// Measured against a real build: `update-ca-certificates` treats each
@@ -2849,12 +2940,12 @@ mod tests {
         }
     }
 
-    /// **The failure `doctor` cannot reach.** Behind a TLS-inspecting proxy
-    /// there is no image to inspect — the build dies on an unknown issuer, so
-    /// every guest-side check doctor makes is unreachable and the user is left
-    /// with `failed to build omh/base:…` and a docker log they did not read.
-    /// That is the exact case `ca_cert` exists for, and omh said nothing about
-    /// it.
+    /// **The failure doctor's guest-side checks cannot reach.** Behind a
+    /// TLS-inspecting proxy there is no image to inspect — the build dies on
+    /// an unknown issuer, so every check that runs *inside* the sandbox is
+    /// unreachable and the user is left with `failed to build omh/base:…` and
+    /// a docker log they did not read. Doctor asks host-side too, since
+    /// `3971fc6`; this is the half that fires when a build actually runs.
     ///
     /// The needles are the control arm of the measurement in `ca_layer`'s doc,
     /// verbatim: each is what that tool actually printed against a leaf signed

@@ -2174,14 +2174,14 @@ mod tests {
             // is what this scan sees — which is what this comment said before,
             // about a reading nobody had taken.
             //
-            // The other two are `why_the_build_failed`'s, and they are the
-            // reason this scan matters: they are printed to somebody whose
-            // build just died, who is behind a corporate proxy, and who has no
-            // reason to suspect a setting exists. A command line that does not
-            // parse would send them nowhere. `omh settings set` is the
-            // spelling that looks right and writes a template nothing
-            // re-reads, so the scan proving `--local` is what omh accepts is
-            // load-bearing here rather than decorative.
+            // The other two are `why_the_build_failed`'s, one per arm.
+            // `omh set --local ca_cert …` goes to somebody whose build just
+            // died and who has no reason to suspect a setting exists, so a
+            // command that does not parse would send them nowhere — and
+            // `omh settings set` is the spelling that looks right while
+            // writing a template nothing re-reads. `omh doctor` goes to
+            // somebody who set one that did not work; it carries no `--local`
+            // and is the shorter claim.
             ("src/image.rs", 3),
             ("src/main.rs", 8),
             ("src/memory.rs", 2),
@@ -5844,6 +5844,9 @@ because = "a fixture"
         // Two are the exemptions this rule has always had: the error renderer
         // in `main`, which cannot report through the thing it is reporting
         // about, and the MCP line reader, which speaks protocol.
+        //
+        // The tenth is neither: it is a relay of a child's stream, listed
+        // separately below.
         //
         // The other seven are **owed a fix, not excused one**. They predate the
         // scan reading their files at all, and every one writes an `omh: ` line

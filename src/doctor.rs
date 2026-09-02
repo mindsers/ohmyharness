@@ -286,15 +286,18 @@ pub enum Inspection {
     /// omh could not tell, and says so. **Offline is this, never `Private`.**
     /// A laptop on a plane must not be told it is behind a corporate proxy.
     Unknown(String),
-    /// The chain terminates in a root this platform ships, so a container —
-    /// which trusts the same public set — will accept it too.
+    /// The chain terminates in a root this platform ships, so a container is
+    /// very likely to accept it too. Apple's set and Debian's `ca-certificates`
+    /// (Mozilla's) overlap heavily rather than being the same list — the
+    /// property this relies on is narrower and solid: neither contains a root
+    /// somebody installed locally.
     Public,
     /// The chain terminates in a root this platform does *not* ship. The host
     /// trusts it because somebody installed it; a container will not.
     Private,
 }
 
-/// Read `openssl s_client -CAfile <the platform's public roots>`.
+/// Read what `openssl s_client -CAfile <the platform's public roots>` said.
 ///
 /// The question is not "is this certificate valid" — on the host it always is,
 /// which is why nothing noticed. It is "would a container accept it", and the
@@ -341,11 +344,18 @@ pub fn inspection(output: Option<&str>) -> Inspection {
 
 /// The hosts omh fetches from during a build, in the order they are reached.
 ///
-/// Two, because a proxy can inspect selectively — by category, or by an
-/// allowlist that happens to include one of these. Asking only `npmjs` would
-/// miss a policy that inspects code hosts and not package registries, and
-/// `github.com` is where the graph binary comes from in the **base** layer,
-/// which is the earliest fetch a build makes and so the first to die.
+/// **Two of them, sampled rather than exhaustive.** A build also pulls its base
+/// image (the daemon's fetch, using the *host* store), reaches `deb.debian.org`
+/// over plain HTTP, and — depending on the stack — `pypi` and
+/// `static.rust-lang.org`. These two are chosen because a proxy can inspect
+/// selectively, by category or by an allowlist, so one host is a coin flip:
+/// asking only `npmjs` would miss a policy that inspects code hosts and not
+/// package registries.
+///
+/// `github.com` is where the graph binary comes from in the **base** layer —
+/// the earliest *in-container HTTPS* fetch, and so the first that a container's
+/// own trust store governs. Not the earliest fetch outright: the `FROM` pull is
+/// the daemon's and Debian's apt sources are plain HTTP.
 pub const FETCHES: &[&str] = &["github.com", "registry.npmjs.org"];
 
 /// One answer from several, because "some of your traffic is inspected" is
@@ -356,9 +366,14 @@ pub const FETCHES: &[&str] = &["github.com", "registry.npmjs.org"];
 /// to care about — though it is named, because a selective proxy is a
 /// surprising thing to be told about and the evidence should travel.
 ///
-/// `Public` beats `Unknown`: if one host answered cleanly the network is
-/// reachable, so the others being unreadable is not "omh cannot tell whether
-/// you are proxied", it is those hosts being unavailable.
+/// `Public` beats `Unknown` because a plane must not read as a proxy, and one
+/// clean answer makes "no route" the likelier reading of the rest. It is
+/// deliberately the **quiet** direction, and that costs something: a host whose
+/// verify code is not one of `RESIGNED` — code 2, a chain missing its
+/// intermediate — is masked by a clean answer elsewhere, and a proxy that
+/// blocks the host it inspects looks the same as that host being down.
+/// Widening `RESIGNED` is how that gets narrower; changing this order would
+/// trade it for the cry-wolf the type exists to prevent.
 pub fn combined(answers: &[(&str, Inspection)]) -> Inspection {
     if answers.iter().any(|(_, i)| *i == Inspection::Private) {
         return Inspection::Private;
@@ -389,13 +404,14 @@ pub fn inspected_hosts() -> (Inspection, Vec<&'static str>) {
     // **Ask the tool what it does before believing anything it says.** Costs
     // one extra handshake per `omh doctor`, against the first host that would
     // be asked anyway.
-    let trustworthy = match std::env::temp_dir().join("omh-ca-canary.pem") {
-        at if std::fs::write(&at, CANARY).is_ok() => {
-            let host = FETCHES[0];
-            honours_ca_file(probe(&format!("{host}:443"), host, &at).as_deref())
-        }
-        _ => false,
-    };
+    let trustworthy =
+        match std::env::temp_dir().join(format!("omh-ca-canary-{}.pem", std::process::id())) {
+            at if std::fs::write(&at, CANARY).is_ok() => {
+                let host = FETCHES[0];
+                honours_ca_file(probe(&format!("{host}:443"), host, &at).as_deref())
+            }
+            _ => false,
+        };
     if !trustworthy {
         return (
             Inspection::Unknown(
@@ -484,29 +500,48 @@ pub fn honours_ca_file(output: Option<&str>) -> bool {
 /// `None` rather than a guess anywhere it cannot be answered — on Linux the
 /// system store *is* the public set plus whatever was added, with no line
 /// between them, so this check does not apply there and says so.
-fn public_roots() -> Option<std::path::PathBuf> {
+fn public_roots() -> Result<std::path::PathBuf, String> {
     if !cfg!(target_os = "macos") {
-        return None;
+        return Err(
+            "omh can only tell a shipped root from an installed one on macOS — \
+             on Linux `update-ca-certificates` merges both into /etc/ssl/certs \
+             with no line between them"
+                .into(),
+        );
     }
+    let keychain = "/System/Library/Keychains/SystemRootCertificates.keychain";
     let out = std::process::Command::new("security")
-        .args([
-            "find-certificate",
-            "-a",
-            "-p",
-            "/System/Library/Keychains/SystemRootCertificates.keychain",
-        ])
+        .args(["find-certificate", "-a", "-p", keychain])
         .output()
-        .ok()?;
+        .map_err(|e| format!("`security` did not run: {e}"))?;
     if !out.status.success() {
-        return None;
+        return Err(format!(
+            "`security find-certificate` failed on {keychain}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
-    let pem = String::from_utf8(out.stdout).ok()?;
-    if !pem.contains("BEGIN CERTIFICATE") {
-        return None;
+    let pem = String::from_utf8(out.stdout)
+        .map_err(|_| format!("{keychain} did not read back as text"))?;
+    // A liveness floor, not a presence check. An empty or near-empty answer
+    // would make every host fail to verify and read as `Private` — the
+    // cry-wolf this check is built to avoid, arriving through the door marked
+    // "the roots loaded fine". macOS ships on the order of 150.
+    let roots = pem.matches("BEGIN CERTIFICATE").count();
+    if roots < 20 {
+        return Err(format!(
+            "{keychain} yielded {roots} roots, which is too few to be the \
+             shipped set — verifying against it would report a clean network \
+             as re-signed"
+        ));
     }
-    let at = std::env::temp_dir().join("omh-public-roots.pem");
-    std::fs::write(&at, pem).ok()?;
-    Some(at)
+    // **Not a fixed name.** One path shared by every caller meant two omh
+    // processes — or the two hosts of a single run — could truncate the file
+    // while another's `openssl` was reading it. An empty root set verifies
+    // nothing, so that race produced `Private` for both hosts on an ordinary
+    // network.
+    let at = std::env::temp_dir().join(format!("omh-public-roots-{}.pem", std::process::id()));
+    std::fs::write(&at, pem).map_err(|e| format!("could not write {}: {e}", at.display()))?;
+    Ok(at)
 }
 
 /// Ask whether a container would accept what this host is being served.
@@ -521,10 +556,9 @@ pub fn inspection_of(host: &str) -> Inspection {
 /// `inspection_of` with the endpoint spelled out, so a test can point it at a
 /// server it controls rather than at the internet.
 pub fn inspection_at(endpoint: &str, servername: &str) -> Inspection {
-    let Some(roots) = public_roots() else {
-        return Inspection::Unknown(
-            "omh can only tell a shipped root from an installed one on macOS".into(),
-        );
+    let roots = match public_roots() {
+        Ok(at) => at,
+        Err(why) => return Inspection::Unknown(why),
     };
     inspection(probe(endpoint, servername, &roots).as_deref())
 }
@@ -534,7 +568,8 @@ pub fn inspection_at(endpoint: &str, servername: &str) -> Inspection {
 /// Shared by the real probe and the canary that checks whether `-CAfile` is
 /// honoured at all, so the two cannot drift into asking differently.
 fn probe(endpoint: &str, servername: &str, roots: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("openssl")
+    use std::io::Read;
+    let mut child = std::process::Command::new("openssl")
         .args([
             "s_client",
             "-connect",
@@ -547,10 +582,43 @@ fn probe(endpoint: &str, servername: &str, roots: &std::path::Path) -> Option<St
         // EOF at once: `s_client` waits for something to send otherwise, and a
         // check that hangs is a check nobody runs twice.
         .stdin(std::process::Stdio::null())
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .ok()?;
-    let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
-    said.push_str(&String::from_utf8_lossy(&out.stderr));
+
+    // **A deadline, because the networks this asks about are the ones that
+    // drop rather than refuse.** A refused connection comes back at once; a
+    // blackholed SYN sits in the kernel for around 75 seconds on macOS, and
+    // this runs before doctor has printed anything, so a corporate network
+    // that drops direct 443 made `omh doctor` look hung. `.output()` cannot be
+    // given a deadline, so the child is polled and killed.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let timed_out = loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break false,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break true;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(_) => break true,
+        }
+    };
+    if timed_out {
+        return None;
+    }
+
+    // Small and bounded — `s_client` without `-showcerts` prints a few KB — so
+    // reading after the wait cannot fill a pipe and stall the child.
+    let mut said = String::new();
+    if let Some(mut out) = child.stdout.take() {
+        let _ = out.read_to_string(&mut said);
+    }
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut said);
+    }
     Some(said)
 }
 
@@ -1274,6 +1342,102 @@ mod tests {
         );
     }
 
+    /// **A server that accepts and then says nothing must not hang doctor.**
+    ///
+    /// The comment on `probe` used to handle only one hang — `s_client`
+    /// waiting on stdin — and missed the one that matters: a network that
+    /// *drops* rather than refuses. A refused connection returns at once; a
+    /// blackholed or half-open one sits until the OS gives up, around 75
+    /// seconds on macOS, and this check runs before doctor prints anything.
+    /// Corporate networks that force a proxy and drop direct 443 are exactly
+    /// the population the check was written for.
+    ///
+    /// Driven against a real listener that accepts the TCP connection and then
+    /// never completes the handshake, which is the shape a timeout has to
+    /// survive — a closed port would return immediately and prove nothing.
+    #[test]
+    fn a_server_that_never_answers_does_not_hang_the_probe() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        // Accept and hold. Never write, never close.
+        let held = std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            while let Ok((sock, _)) = listener.accept() {
+                kept.push(sock);
+                if kept.len() > 4 {
+                    break;
+                }
+            }
+        });
+
+        let roots = std::env::temp_dir().join("omh-probe-timeout-test.pem");
+        std::fs::write(&roots, CANARY).unwrap();
+
+        let began = std::time::Instant::now();
+        let said = probe(&format!("127.0.0.1:{port}"), "testserver", &roots);
+        let took = began.elapsed();
+
+        assert!(
+            took < std::time::Duration::from_secs(20),
+            "the probe must give up on a server that never answers; it took {took:?}"
+        );
+        assert!(
+            said.is_none(),
+            "a probe that timed out has measured nothing and must say so, not \
+             hand back a partial transcript to be read as a verdict"
+        );
+        // And that "nothing measured" reads as `Unknown`, never a verdict.
+        assert!(matches!(
+            inspection(said.as_deref()),
+            Inspection::Unknown(_)
+        ));
+
+        drop(held);
+        let _ = std::fs::remove_file(&roots);
+    }
+
+    /// **Six ways of failing told the user the same false thing.**
+    ///
+    /// `public_roots` answered `Option`, so "not macOS", "`security` is not
+    /// there", "`security` failed", "the keychain did not read back as text"
+    /// and "the file could not be written" all became one message saying omh
+    /// only works on macOS — which is a lie for five of them, and the kind of
+    /// lie somebody stops investigating because the stated reason is not
+    /// fixable.
+    ///
+    /// It also carries a liveness floor now. An empty or near-empty root set
+    /// verifies nothing, so every host would fail and read as `Private` — the
+    /// cry-wolf this check exists to avoid, arriving through the door marked
+    /// "the roots loaded fine".
+    #[test]
+    fn the_shipped_root_set_is_read_or_says_why_not() {
+        let got = public_roots();
+        if cfg!(target_os = "macos") {
+            let at = got.expect("macOS ships a root keychain omh can read");
+            let pem = std::fs::read_to_string(&at).expect("written");
+            let roots = pem.matches("BEGIN CERTIFICATE").count();
+            assert!(
+                roots >= 20,
+                "the shipped set should be substantial, got {roots}"
+            );
+            // Per-process, so two runs cannot truncate each other's file while
+            // the other's openssl is reading it — that race read as `Private`
+            // for every host on an ordinary network.
+            let name = at.file_name().unwrap().to_string_lossy().into_owned();
+            assert!(
+                name.contains(&std::process::id().to_string()),
+                "the roots file must be this process's own: {name}"
+            );
+            let _ = std::fs::remove_file(&at);
+        } else {
+            let why = got.expect_err("only macOS separates shipped from installed");
+            assert!(
+                why.contains("Linux") || why.contains("macOS"),
+                "the reason must say why this platform cannot answer: {why}"
+            );
+        }
+    }
+
     /// **Offline must never read as "you are behind a proxy".** That is the
     /// whole difficulty of asking this question before anything has failed: a
     /// check that cries wolf on a plane is worse than no check, because the
@@ -1298,8 +1462,9 @@ mod tests {
             Inspection::Public
         );
 
-        // The two shapes a re-signing proxy produces, measured in the control
-        // arm behind `image::ca_layer`'s table.
+        // The three verify codes a re-signing proxy produces. openssl's own
+        // wording for 20, 19 and 21 — not the per-tool messages in
+        // `image::ca_layer`'s table, which were measured differently.
         for said in [
             "Verify return code: 20 (unable to get local issuer certificate)",
             "Verify return code: 19 (self signed certificate in certificate chain)",
