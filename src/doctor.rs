@@ -386,6 +386,29 @@ pub fn combined(answers: &[(&str, Inspection)]) -> Inspection {
 /// thing to be told about, and a warning that names the host it measured is
 /// one somebody can check rather than take on faith.
 pub fn inspected_hosts() -> (Inspection, Vec<&'static str>) {
+    // **Ask the tool what it does before believing anything it says.** Costs
+    // one extra handshake per `omh doctor`, against the first host that would
+    // be asked anyway.
+    let trustworthy = match std::env::temp_dir().join("omh-ca-canary.pem") {
+        at if std::fs::write(&at, CANARY).is_ok() => {
+            let host = FETCHES[0];
+            honours_ca_file(probe(&format!("{host}:443"), host, &at).as_deref())
+        }
+        _ => false,
+    };
+    if !trustworthy {
+        return (
+            Inspection::Unknown(
+                "this `openssl` does not restrict verification to `-CAfile` — \
+                 stock macOS ships LibreSSL, which falls back to the system \
+                 store, and the system store is where a corporate root lives, \
+                 so every answer would be `Public`. Install OpenSSL (`brew \
+                 install openssl`) for this check"
+                    .into(),
+            ),
+            Vec::new(),
+        );
+    }
     let answers: Vec<(&'static str, Inspection)> =
         FETCHES.iter().map(|h| (*h, inspection_of(h))).collect();
     let named: Vec<&'static str> = answers
@@ -394,6 +417,60 @@ pub fn inspected_hosts() -> (Inspection, Vec<&'static str>) {
         .map(|(h, _)| *h)
         .collect();
     (combined(&answers), named)
+}
+
+/// A root that has never signed anything on the internet.
+///
+/// Used to ask one question of the `openssl` on this machine: *do you actually
+/// restrict verification to `-CAfile`?* Self-signed, valid to 2126, and its
+/// only job is to be the wrong issuer for every host in `FETCHES`.
+const CANARY: &str = "-----BEGIN CERTIFICATE-----
+MIIDXzCCAkegAwIBAgIUW+IhWVw85spPochudTrkw2YQDPMwDQYJKoZIhvcNAQEL
+BQAwPjEuMCwGA1UEAwwlb21oIGNhbmFyeSDDosKAwpQgbmV2ZXIgYSByZWFsIGlz
+c3VlcjEMMAoGA1UECgwDb21oMCAXDTI2MDkwMjIwMTUxNFoYDzIxMjYwODA5MjAx
+NTE0WjA+MS4wLAYDVQQDDCVvbWggY2FuYXJ5IMOiwoDClCBuZXZlciBhIHJlYWwg
+aXNzdWVyMQwwCgYDVQQKDANvbWgwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEK
+AoIBAQCozSJKOBRO642uXIOkDpU/Mn9M9ahl3u/aLm6ORJ1fzQpEmg7svu25LdnC
+aU129OPsAOpejXjWKG8F6BoL/ixE3ciuIEcLVAU+q5cihpHNAHwmqqoHZXGyXcuY
+xaJ01PnskRTK968pt/guNme+uSM/Fgr4ZfGeVXsi/D8oLG5JA865jRnAnbblvcyc
+w4DwB6153lFORo6eqaaALd0ONtTOd47OKWuuq5k0jOpWihFL5Dp4nKJ1ivKxL01K
+twowatmtBg/7uT1mWzumKDZVl2zHRq+oXdKgwJ8/ojALnUJGgsKijTuBA6XsMLWe
+pdjJH1t6cR2wlaph/mL2VelasA2ZAgMBAAGjUzBRMB0GA1UdDgQWBBQHT9RImRQt
+XEYCv7WXShYMkGO7HDAfBgNVHSMEGDAWgBQHT9RImRQtXEYCv7WXShYMkGO7HDAP
+BgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQCms7mBfAFaIH6H2r4h
+f+rnhtbOnyTWQY61iqb/hBN+WfMMq7JC9XgsaL1coNBmdo0kbS13ZO2U+eEG+Ijw
+cSwS7ag1AialvrK/Lim1p7rCfj2e0dpENn9hPkMaO9sa4seAhX11kGMv1JX78izH
+CchVVDrMfwGRQiT6H5rQJbvKiiXWfUnMVqFQmB5Uvr8EJa886lpvmALFz+r7b6gG
+2d90UjdNLPknojWHStOZGW0lJ8YGERQ2R9ErIGBl32k53lDsX9qM9o/3UoDed3MM
+w4TucAB0nZQ++n9Yx6quNtBXjNDodLJc1cfGY9pI6/rSB8FNJ1BHOpn5LiFGfgSH
+cQRq
+-----END CERTIFICATE-----
+";
+
+/// Does this `openssl` restrict verification to `-CAfile`, or fall back?
+///
+/// **The whole check rests on this and it is not universal.** Stock macOS
+/// ships LibreSSL at `/usr/bin/openssl`, and LibreSSL ignores `-CAfile`
+/// exclusivity: handed a file that does not exist, or one holding an
+/// unrelated root, it verifies against the system store anyway and answers
+/// `0 (ok)`. Measured on LibreSSL 3.3.6 against `github.com` — with a
+/// nonexistent path *and* with a valid-but-irrelevant root, both `0 (ok)`,
+/// where OpenSSL 3.6.4 answers `20`.
+///
+/// That is not cry-wolf, it is the opposite and worse: the system store is
+/// exactly where a corporate root lives, so every answer would be `Public` and
+/// the check would report a clean network to precisely the users it exists for
+/// — silently, forever, while appearing to run.
+///
+/// So the tool is asked rather than version-sniffed: verify a real host
+/// against `CANARY`, which signed nothing. An implementation that honours
+/// `-CAfile` must fail; one that answers `0 (ok)` is telling us it consulted
+/// something else, and its verdicts are worthless.
+pub fn honours_ca_file(output: Option<&str>) -> bool {
+    // Anything other than a clean verify means the tool refused the canary,
+    // which is the behaviour being checked for. No answer proves nothing, and
+    // "proves nothing" must not read as "trustworthy".
+    matches!(inspection(output), Inspection::Private)
 }
 
 /// The platform's **public** root set, as a file openssl can verify against.
@@ -449,6 +526,14 @@ pub fn inspection_at(endpoint: &str, servername: &str) -> Inspection {
             "omh can only tell a shipped root from an installed one on macOS".into(),
         );
     };
+    inspection(probe(endpoint, servername, &roots).as_deref())
+}
+
+/// One `openssl s_client` handshake, verified against `roots` and nothing else.
+///
+/// Shared by the real probe and the canary that checks whether `-CAfile` is
+/// honoured at all, so the two cannot drift into asking differently.
+fn probe(endpoint: &str, servername: &str, roots: &std::path::Path) -> Option<String> {
     let out = std::process::Command::new("openssl")
         .args([
             "s_client",
@@ -462,15 +547,11 @@ pub fn inspection_at(endpoint: &str, servername: &str) -> Inspection {
         // EOF at once: `s_client` waits for something to send otherwise, and a
         // check that hangs is a check nobody runs twice.
         .stdin(std::process::Stdio::null())
-        .output();
-    match out {
-        Ok(out) => {
-            let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
-            said.push_str(&String::from_utf8_lossy(&out.stderr));
-            inspection(Some(&said))
-        }
-        Err(e) => Inspection::Unknown(format!("openssl did not run: {e}")),
-    }
+        .output()
+        .ok()?;
+    let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
+    said.push_str(&String::from_utf8_lossy(&out.stderr));
+    Some(said)
 }
 
 /// Whether the corporate root actually reached the sandbox's trust store.
@@ -1104,6 +1185,93 @@ mod tests {
         let (verdict, named) = inspected_hosts();
         assert_eq!(verdict, Inspection::Public);
         assert!(named.is_empty(), "nothing here is re-signed: {named:?}");
+
+        // **And the canary, against both implementations that exist here.**
+        // The whole check rests on `-CAfile` being exclusive, and it is not on
+        // stock macOS. This asserts the property directly rather than trusting
+        // whichever `openssl` happens to be first on PATH — which is how the
+        // gap survived: Homebrew's OpenSSL 3 shadows LibreSSL on a developer's
+        // machine, so the check worked here and would not have on a stock Mac.
+        let canary = d.path().join("canary.pem");
+        std::fs::write(&canary, CANARY).unwrap();
+        for (tool, exclusive) in [
+            ("/opt/homebrew/bin/openssl", true),
+            ("/usr/bin/openssl", false),
+        ] {
+            if !std::path::Path::new(tool).exists() {
+                continue;
+            }
+            let out = std::process::Command::new(tool)
+                .args([
+                    "s_client",
+                    "-connect",
+                    "github.com:443",
+                    "-servername",
+                    "github.com",
+                    "-CAfile",
+                    &canary.display().to_string(),
+                ])
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("openssl");
+            let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
+            said.push_str(&String::from_utf8_lossy(&out.stderr));
+            assert_eq!(
+                honours_ca_file(Some(&said)),
+                exclusive,
+                "{tool} was expected to {} `-CAfile`; if this flipped, the \
+                 gate in `inspected_hosts` is now reading the wrong tools",
+                if exclusive { "honour" } else { "ignore" }
+            );
+        }
+    }
+
+    /// **A tool that ignores `-CAfile` reports every network as clean.**
+    ///
+    /// This is the failure mode that is worse than crying wolf, because it is
+    /// invisible: stock macOS ships LibreSSL at `/usr/bin/openssl`, LibreSSL
+    /// falls back to the system store when `-CAfile` does not resolve, and the
+    /// system store is exactly where the corporate root lives. Every host then
+    /// answers `0 (ok)`, `combined` says `Public`, doctor prints nothing, and
+    /// the users this check was written for are the ones it cannot see.
+    ///
+    /// Measured: LibreSSL 3.3.6 against `github.com` answers `0 (ok)` both for
+    /// a `-CAfile` that does not exist and for one holding an unrelated root;
+    /// OpenSSL 3.6.4 answers `20` for the second. So the tool is asked what it
+    /// does rather than asked what version it is.
+    #[test]
+    fn an_openssl_that_ignores_ca_file_is_not_trusted() {
+        // What OpenSSL 3 says when the canary is the only root offered: the
+        // real chain cannot be built from it. That is a tool doing its job.
+        for honest in [
+            "Verify return code: 20 (unable to get local issuer certificate)",
+            "Verify return code: 19 (self signed certificate in certificate chain)",
+            "Verify return code: 21 (unable to verify the first certificate)",
+        ] {
+            assert!(
+                honours_ca_file(Some(honest)),
+                "refusing the canary is what honouring `-CAfile` looks like: {honest}"
+            );
+        }
+
+        // What LibreSSL says: it verified against something else entirely.
+        assert!(
+            !honours_ca_file(Some("Verify return code: 0 (ok)")),
+            "a chain that verifies against a root which signed nothing means \
+             the tool consulted the system store, so every verdict it gives is \
+             worthless"
+        );
+
+        // No answer is not a pass. If the canary probe itself could not run,
+        // omh has not established the tool is trustworthy.
+        assert!(
+            !honours_ca_file(None),
+            "no answer must not read as trustworthy"
+        );
+        assert!(
+            !honours_ca_file(Some("connect: Connection refused")),
+            "an unreachable canary probe proves nothing about `-CAfile`"
+        );
     }
 
     /// **Offline must never read as "you are behind a proxy".** That is the

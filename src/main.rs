@@ -5884,7 +5884,10 @@ because = "a fixture"
         // behind a TLS-inspecting proxy the answer is `ca_cert`, and doctor
         // cannot answer it because there is no image to inspect. Reading it
         // means relaying it, or a multi-minute build goes silent.
-        let relayed = [("src/image.rs", "eprint!(\"{line}\")")];
+        let relayed = [
+            ("src/image.rs", "eprint!(\"{text}\")"),
+            ("src/image.rs", "omh: lost the rest of the build log"),
+        ];
 
         let unexpected: Vec<&String> = offenders
             .iter()
@@ -5914,6 +5917,18 @@ because = "a fixture"
             9,
             "the debt register grew. Two exemptions and seven sites owed a \
              `Ctx` — an eighth owed site is a fix, not an entry"
+        );
+        // The comment above `relayed` says it "may not quietly become a second
+        // way in", and nothing made that true: only `named` was counted, so
+        // appending a bare `eprintln!` here was green with no number moving.
+        // A claim about containment that is not measured is the shape this
+        // whole guard exists to catch.
+        assert_eq!(
+            relayed.len(),
+            2,
+            "a relay is a child's stream handed back verbatim — the two are \
+             `build`'s log line and the one note it prints when that log ends \
+             early. A third is a claim somebody has to justify, not a line to add"
         );
     }
 

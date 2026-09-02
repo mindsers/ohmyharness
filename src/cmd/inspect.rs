@@ -170,6 +170,21 @@ pub(crate) fn doctor_cmd(
     // whole three-valued shape exists to avoid.
     if ca.is_none() {
         let (verdict, hosts) = doctor::inspected_hosts();
+        // **`Unknown` is not `Public` and must not look like it.** It was
+        // silent, which made "omh could not measure this" identical at the
+        // terminal to "omh measured it and it is fine" — and the reasons are
+        // reachable: no `openssl`, no network, an `openssl` that ignores
+        // `-CAfile`. A check that quietly did not run is the shape doctor
+        // exists to eliminate, not to add.
+        if let doctor::Inspection::Unknown(why) = &verdict {
+            ctx.say(
+                &report::Action::new(
+                    "tls-inspection-unknown",
+                    format!("could not check whether this network re-signs TLS: {why}"),
+                )
+                .data(serde_json::json!({ "reason": why })),
+            );
+        }
         if verdict == doctor::Inspection::Private {
             // Named, because a proxy that re-signs one host and not another is
             // a surprising thing to be told and the reader should be able to

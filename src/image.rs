@@ -588,6 +588,7 @@ pub fn ensure_stack(
             &tag,
             &stack_dockerfile(adapter, installs, ca),
             &Kind::Stack(adapter, repo),
+            ca,
         )?;
     }
     Ok(tag)
@@ -761,7 +762,7 @@ pub fn ensure(program: &str, adapter: &Adapter, ca: Option<&str>) -> Result<()> 
     let base = base_tag(ca);
     if !exists(program, &base) {
         eprintln!("omh: building {base} (first run only)");
-        build(program, &base, &base_dockerfile(ca), &Kind::Base)?;
+        build(program, &base, &base_dockerfile(ca), &Kind::Base, ca)?;
     }
     let t = tag_for(adapter, ca);
     if !exists(program, &t) {
@@ -771,6 +772,7 @@ pub fn ensure(program: &str, adapter: &Adapter, ca: Option<&str>) -> Result<()> 
             &t,
             &harness_dockerfile(adapter, ca),
             &Kind::Harness(adapter),
+            ca,
         )?;
     }
     Ok(())
@@ -843,7 +845,49 @@ pub fn why_the_build_failed(log: &str, ca_set: bool) -> Option<String> {
     })
 }
 
-fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind) -> Result<()> {
+/// Hand a child's stderr back to the terminal, and keep a copy.
+///
+/// **Bytes, not lines.** This was `read_line(..).unwrap_or(0)`, which folds
+/// `InvalidData` — what `read_line` answers for any byte sequence that is not
+/// UTF-8 — into "the stream ended". One such byte and the relay stopped
+/// mid-build, so a build went silent where `Stdio::inherit` would have shown
+/// every byte; the captured log was truncated, so a certificate error arriving
+/// after it went undiagnosed; and nothing was left draining a pipe the child
+/// was still writing to, which is a hang rather than a wrong answer.
+///
+/// `read_until` with `from_utf8_lossy` cannot fail on encoding at all, which
+/// removes the class rather than handling it. A real I/O error on the read end
+/// means the pipe is gone and the child is about to get `EPIPE`, so that one is
+/// reported and ends the relay rather than passing silently as EOF.
+fn relay(err: std::process::ChildStderr) -> String {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(err);
+    let mut log = String::new();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {
+                // `eprint!`, not a direct `write_all` to the handle. Both put
+                // the same bytes on stderr, but only this spelling is one the
+                // output-layer scan in `main.rs` can see — and a relay that
+                // the guard cannot see is a hole in it, whatever the intent.
+                // It is listed there, in `relayed`, as exactly this line.
+                let text = String::from_utf8_lossy(&buf);
+                eprint!("{text}");
+                log.push_str(&text);
+            }
+            Err(e) => {
+                eprintln!("omh: lost the rest of the build log ({e})");
+                break;
+            }
+        }
+    }
+    log
+}
+
+fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind, ca: Option<&str>) -> Result<()> {
     use anyhow::Context;
     use std::io::Write;
     use std::process::Stdio;
@@ -871,24 +915,22 @@ fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind) -> Result<()> 
         stdin.write_all(dockerfile.as_bytes())?;
     }
 
-    let mut log = String::new();
-    if let Some(err) = child.stderr.take() {
-        use std::io::BufRead;
-        let mut reader = std::io::BufReader::new(err);
-        let mut line = String::new();
-        while reader.read_line(&mut line).unwrap_or(0) > 0 {
-            eprint!("{line}");
-            log.push_str(&line);
-            line.clear();
-        }
-    }
+    let log = match child.stderr.take() {
+        Some(err) => relay(err),
+        None => String::new(),
+    };
 
     let status = child.wait()?;
     if !status.success() {
-        // The recipe omh just sent is the authority on whether this build had
-        // a certificate in it — a setting read again here could have changed.
-        let ca_set = dockerfile.contains("update-ca-certificates");
-        if let Some(why) = why_the_build_failed(&log, ca_set) {
+        // **Carried, not sniffed.** This read
+        // `dockerfile.contains("update-ca-certificates")`, which is true only
+        // of the *base* recipe: `harness_dockerfile` and `stack_dockerfile`
+        // are `FROM <tag>` and fold the certificate into an opaque digest. So
+        // the two layers that run `npm install -g` and `pip3 install` — the
+        // fetches a proxy actually kills — always looked like "no certificate
+        // set", and a user whose chain was missing an intermediate was told to
+        // set the setting they had already set.
+        if let Some(why) = why_the_build_failed(&log, ca.is_some()) {
             anyhow::bail!("failed to build {tag}\n\n{why}");
         }
         anyhow::bail!("failed to build {tag}");
@@ -2897,6 +2939,7 @@ mod tests {
             "omh-test/tee-ok:1",
             "FROM alpine:3\nRUN echo built-fine\n",
             &Kind::Base,
+            None,
         );
         assert!(ok.is_ok(), "a trivial build must succeed: {ok:?}");
 
@@ -2906,6 +2949,7 @@ mod tests {
             "omh-test/tee-fail:1",
             "FROM alpine:3\nRUN echo 'x509: certificate signed by unknown authority' >&2 && exit 1\n",
             &Kind::Base,
+            None,
         )
         .expect_err("that recipe must fail");
         let said = format!("{said:#}");
@@ -2918,17 +2962,86 @@ mod tests {
             "and the spelling that works: {said}"
         );
 
+        // **A harness layer, with a certificate already set.** This is the
+        // case the derivation got wrong: only the *base* recipe carries
+        // `update-ca-certificates`, so sniffing the recipe text called every
+        // harness and stack build "no certificate" — and the harness layer is
+        // the `npm install -g` that a chain missing its intermediate actually
+        // breaks. Telling that user to set `ca_cert` is the noise the second
+        // message exists to prevent. The unit test above cannot see it,
+        // because it hands the flag in by hand.
+        let pem = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n";
+        let adapter = claude();
+        let already = build(
+            docker,
+            "omh-test/tee-harness:1",
+            // Harness-shaped: `FROM`, a `RUN`, and no `ca_layer` anywhere.
+            "FROM alpine:3\nRUN echo 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' >&2 && exit 1\n",
+            &Kind::Harness(&adapter),
+            Some(pem),
+        )
+        .expect_err("that recipe must fail");
+        let already = format!("{already:#}");
+        assert!(
+            !already.contains("omh set --local"),
+            "the certificate is set; do not tell them to set it: {already}"
+        );
+        assert!(
+            already.contains("chain") || already.contains("doctor"),
+            "it must say what to check instead: {already}"
+        );
+
         // And an ordinary failure stays ordinary.
         let plain = build(
             docker,
             "omh-test/tee-plain:1",
             "FROM alpine:3\nRUN exit 1\n",
             &Kind::Base,
+            None,
         )
         .expect_err("that recipe must fail");
         assert!(
             !format!("{plain:#}").contains("ca_cert"),
             "an ordinary failure must not be dressed up as a proxy problem"
+        );
+    }
+
+    /// **One byte that is not UTF-8 must not end the build log.**
+    ///
+    /// `read_line` answers `InvalidData` for such a byte, and the first
+    /// version folded that into "the stream ended" with `unwrap_or(0)`. Three
+    /// things followed, all silent: the relay stopped, so a multi-minute build
+    /// went quiet where `Stdio::inherit` had shown everything; the captured log
+    /// was truncated, so a certificate error after that byte was never
+    /// diagnosed; and nothing drained a pipe the child was still filling.
+    ///
+    /// Driven through a real child process rather than a `Cursor`, because the
+    /// thing under test is a pipe. **Not** through docker: BuildKit re-encodes
+    /// what a `RUN` step writes, so a recipe emitting `\377` arrives as valid
+    /// UTF-8 and passes either way — a test that cannot fail.
+    #[test]
+    fn a_byte_that_is_not_utf8_does_not_truncate_the_log() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf 'step 1/3\\n' >&2; printf '\\377\\n' >&2; printf 'x509: certificate signed by unknown authority\\n' >&2")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh");
+        let log = relay(child.stderr.take().expect("piped"));
+        let _ = child.wait();
+
+        assert!(
+            log.contains("step 1/3"),
+            "the lines before the bad byte are kept: {log:?}"
+        );
+        assert!(
+            log.contains("x509: certificate signed by unknown authority"),
+            "and so is everything after it — this is the assertion that was red \
+             before `read_until`: {log:?}"
+        );
+        assert!(
+            why_the_build_failed(&log, false).is_some(),
+            "so the diagnosis still fires on a log with an ugly byte in it"
         );
     }
 
