@@ -1216,7 +1216,7 @@ pub enum Wrote {
 /// where it is read, and `other => other.render()` silently opts each new kind
 /// out of exactly that — writing it through un-normalised, which is the bug
 /// this was added to prevent.
-fn normalise_trigger(raw: &str, repo: &Path, ca: Option<&str>) -> Result<String> {
+fn normalise_trigger(raw: &str, repo: &Path, recipe: &expiry::Recipe) -> Result<String> {
     Ok(match expiry::Trigger::parse(raw)? {
         // Recorded from inside the sandbox, read from outside it.
         expiry::Trigger::File { path, hash } => expiry::Trigger::File {
@@ -1228,8 +1228,19 @@ fn normalise_trigger(raw: &str, repo: &Path, ca: Option<&str>) -> Result<String>
         // holding the recipe, so what lands on disk is a digest a later `stale`
         // can compare against.
         expiry::Trigger::Image { digest } if digest == expiry::IMAGE_NOW => {
-            let now = crate::image::recipe_digest(&crate::image::base_dockerfile(ca))
-                .context("recording what the image recipe is right now")?;
+            let now = match recipe {
+                expiry::Recipe::Digest(d) => d.clone(),
+                // Refusing only the notes that ask. A writer that pins nothing
+                // is unaffected, so an agent in a sandbox that was handed no
+                // recipe can still record — it just cannot pin an expiry
+                // against an image nobody here can describe.
+                expiry::Recipe::Unknowable(why) => bail!(
+                    "`image:{}` cannot be resolved here: {why}. Record the note \
+                     without `invalidated_by`, or pin a `file:` or `symbol:` \
+                     trigger instead.",
+                    expiry::IMAGE_NOW
+                ),
+            };
             expiry::Trigger::Image { digest: now }.render()
         }
         t @ (expiry::Trigger::Image { .. }
@@ -1283,6 +1294,7 @@ pub fn remember(paths: &Paths, input: &Remembered, if_exists: IfExists) -> Resul
         &templates(paths)?,
         input,
         if_exists,
+        &expiry::Recipe::here(paths),
     )
 }
 
@@ -1298,17 +1310,14 @@ pub fn remember_in(
     templates: &BTreeMap<Kind, String>,
     input: &Remembered,
     if_exists: IfExists,
+    recipe: &expiry::Recipe,
 ) -> Result<Wrote> {
-    // `root` and `repo` are exactly what a `Paths` is, so the certificate can
-    // be resolved here — and it has to be, because the digest a note pins is
-    // the digest of the image omh would actually build. Reading a recipe
-    // without the certificate while building one with it would mark every
-    // image-pinned note stale on a machine that has one.
-    let ca = crate::image::ca_for(&crate::profile::Paths {
-        root: root.to_path_buf(),
-        repo: repo.to_path_buf(),
-    })
-    .unwrap_or(None);
+    // `recipe` is handed in rather than resolved here, and that is the whole
+    // point: this function's only caller runs *inside* the sandbox, where the
+    // base recipe cannot be computed at all. It depends on the PEM `ca_cert`
+    // names, which is a host path nothing mounts into the guest. Resolving it
+    // here read a recipe with no certificate while the host built one with it,
+    // so every note the agent recorded was born stale — see `expiry::Recipe`.
     non_blank(&input.expected, "expected")?;
     non_blank(&input.observed, "observed")?;
     non_blank(&input.evidence, "evidence")?;
@@ -1412,7 +1421,7 @@ pub fn remember_in(
         invalidated_by: input
             .invalidated_by
             .as_deref()
-            .map(|raw| normalise_trigger(raw, repo, ca.as_deref()))
+            .map(|raw| normalise_trigger(raw, repo, recipe))
             .transpose()?,
         body: body_of(input),
         layer,
@@ -4017,6 +4026,103 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
             expiry::Trigger::parse(&recorded).is_ok(),
             "and what lands is a pin omh can evaluate"
         );
+    }
+
+    /// **A digest a note pins must be one omh would actually build.**
+    ///
+    /// `remember_in` runs inside the sandbox, against a mount point, and the
+    /// base recipe now depends on host state: `ca_cert` names a PEM on the
+    /// *host*, which nothing mounts into the guest. So the read that resolves
+    /// `image:current` fails there and only there — and swallowing it pins the
+    /// digest of a recipe with no certificate, while every host-side `stale`
+    /// computes one with it. Every note the agent records is then born stale,
+    /// on exactly the machines the setting exists for.
+    ///
+    /// The guard is the *negative*, because two answers are acceptable and one
+    /// is not: refusing is fine, pinning the real digest is fine, and pinning
+    /// the digest omh would build if nobody had set a certificate is the bug.
+    #[test]
+    fn a_note_never_pins_a_recipe_omh_would_not_build() {
+        let (dir, paths) = fixture();
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        // The host path, as the guest sees it: named, and not there.
+        std::fs::write(
+            paths.repo.join(".omh/settings.toml"),
+            format!(
+                "ca_cert = \"{}\"\n",
+                dir.path().join("nowhere/corp.pem").display()
+            ),
+        )
+        .unwrap();
+        let root = dir.path().join("mnt/notes");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let mut input = observation();
+        input.invalidated_by = Some(format!("image:{}", expiry::IMAGE_NOW));
+        // The guest, faithfully: told nothing, because the host is the side
+        // that can resolve this.
+        let wrote = remember_in(
+            &root,
+            &paths.repo,
+            &shipped_templates(),
+            &input,
+            IfExists::Error,
+            &expiry::Recipe::Unknowable("nobody told this sandbox".into()),
+        );
+
+        let without = crate::image::recipe_digest(&crate::image::base_dockerfile(None)).unwrap();
+        // The returned path, not a scan of `root` — the note lands in a
+        // kind-named subdirectory, so a top-level `read_dir` finds nothing and
+        // the assertion below never runs. This test was green that way.
+        let path = match wrote {
+            // Refusing is a correct answer: the digest is genuinely unknowable
+            // here, and a writer that is told so can act on it.
+            Err(_) => return,
+            Ok(Wrote::Created(path)) => path,
+            Ok(other) => panic!("expected a note, got {other:?}"),
+        };
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains(&without),
+            "the note pinned {without}, the digest of a recipe with no \
+             certificate, while `ca_cert` names one — every host-side `stale` \
+             will call this note stale forever and blame the note"
+        );
+    }
+
+    /// The other half, and not decoration: without it `Recipe::here` could
+    /// answer `Unknowable` for everything and the negative guard above would
+    /// stay green while `image:current` stopped resolving for anybody.
+    ///
+    /// On the host the certificate *is* readable, so a pin must land on the
+    /// digest of the recipe omh would actually build — the one with the
+    /// certificate in it, not the one without.
+    #[test]
+    fn on_the_host_a_pin_lands_on_the_recipe_that_includes_the_certificate() {
+        let (dir, paths) = fixture();
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        let pem = dir.path().join("corp.pem");
+        std::fs::write(
+            &pem,
+            "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        std::fs::write(
+            paths.repo.join(".omh/settings.toml"),
+            format!("ca_cert = \"{}\"\n", pem.display()),
+        )
+        .unwrap();
+
+        let mut input = observation();
+        input.invalidated_by = Some(format!("image:{}", expiry::IMAGE_NOW));
+        remember(&paths, &input, IfExists::Error).unwrap();
+
+        let recorded = load(&paths).unwrap()[0].invalidated_by.clone().unwrap();
+        let ca = std::fs::read_to_string(&pem).unwrap();
+        let with = crate::image::recipe_digest(&crate::image::base_dockerfile(Some(&ca))).unwrap();
+        let without = crate::image::recipe_digest(&crate::image::base_dockerfile(None)).unwrap();
+        assert_ne!(with, without, "or this fixture proves nothing");
+        assert_eq!(recorded, format!("image:{with}"));
     }
 
     /// **The shape of the vendor's bug, guarded on omh's own renderer.**

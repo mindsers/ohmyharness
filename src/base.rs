@@ -1787,6 +1787,7 @@ command = "c"
             session: "s01".into(),
             client: None,
             today: || "2026-08-08".to_string(),
+            recipe: crate::memory::expiry::Recipe::Digest("deadbeef".into()),
         };
         let listed = crate::mcp::Tools::list(&mut server);
         let actual: usize = listed

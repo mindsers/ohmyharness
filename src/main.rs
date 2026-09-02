@@ -4624,6 +4624,26 @@ because = "a fixture"
             repo: dir.path().join("repo"),
         };
         provisioned_fixture(&paths);
+        // **With a certificate set**, because that is the dimension this guard
+        // was blind to. It hardcoded `None` on both sides, so reverting either
+        // `sandbox()` or `session_up` to pass `None` left the whole suite
+        // green — and what that ships is a stack layer built without the
+        // corporate root while `plan.image` names the tag that has it.
+        let pem = dir.path().join("corp.pem");
+        std::fs::write(
+            &pem,
+            "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        std::fs::write(
+            paths.repo.join(".omh/settings.toml"),
+            format!("ca_cert = \"{}\"\n", pem.display()),
+        )
+        .unwrap();
+        let ca = image::ca_for(&paths).unwrap();
+        assert!(ca.is_some(), "the fixture must actually set one");
+
         let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
         let sb = cmd::init::sandbox(&paths, &adapter, &fixture_policy()).unwrap();
 
@@ -4634,14 +4654,20 @@ because = "a fixture"
         );
         assert_ne!(
             sb.tag,
-            image::tag_for(&adapter, None),
+            image::tag_for(&adapter, ca.as_deref()),
             "this fixture must provision something or it proves nothing"
         );
         assert_eq!(
-            image::stack_tag(&adapter, &sb.recipe(), None),
+            image::stack_tag(&adapter, &sb.recipe(), ca.as_deref()),
             sb.tag,
             "the recipe handed to `ensure_stack` must build the tag `plan` runs, \
              or a session runs an image nothing built"
+        );
+        assert_ne!(
+            sb.tag,
+            image::stack_tag(&adapter, &sb.recipe(), None),
+            "and the certificate must be part of what the tag names, or this \
+             fixture is back to proving nothing about it"
         );
     }
 
