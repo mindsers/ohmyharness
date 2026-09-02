@@ -154,6 +154,31 @@ pub(crate) fn doctor_cmd(
     // The one reading this command makes. `ensure_stack` below takes
     // `sandbox.ca`, and `ca_check` asserts against the same value.
     let ca = image::ca_for(&paths)?;
+
+    // **Before any image work, and only when no root is set.** This is the one
+    // problem doctor could never reach: behind a TLS-inspecting proxy the
+    // build dies on an unknown issuer, so every guest-side check below is
+    // unreachable and doctor's answer was a docker error. `build` names the
+    // setting when that happens — but a build that was *cached* before the
+    // proxy appeared succeeds, and then only the sessions fail. That is the
+    // case this catches, and a cache has hidden a problem here for weeks
+    // before.
+    //
+    // Only `Private` is reported. `Public` is the ordinary answer and a row
+    // saying so is noise; `Unknown` means omh could not tell — offline, or not
+    // macOS — and a check that guesses in that state is the cry-wolf this
+    // whole three-valued shape exists to avoid.
+    if ca.is_none() && doctor::inspection_of("registry.npmjs.org") == doctor::Inspection::Private {
+        ctx.warn(
+            "this network re-signs TLS with a root your machine trusts and a \
+             container does not — a sandbox cannot verify anything it fetches. \
+             Set the corporate root:\n\n    \
+             security find-certificate -a -c \"Zscaler\" -p > ~/corp-root.pem\n    \
+             omh set --local ca_cert ~/corp-root.pem\n\n\
+             See docs/troubleshooting.md.",
+        );
+    }
+
     let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
     if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)

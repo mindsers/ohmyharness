@@ -280,6 +280,142 @@ pub fn credential_checks(adapter: &Adapter) -> Vec<Check> {
     files.chain(probe).collect()
 }
 
+/// What a TLS handshake said about who signed it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Inspection {
+    /// omh could not tell, and says so. **Offline is this, never `Private`.**
+    /// A laptop on a plane must not be told it is behind a corporate proxy.
+    Unknown(String),
+    /// The chain terminates in a root this platform ships, so a container —
+    /// which trusts the same public set — will accept it too.
+    Public,
+    /// The chain terminates in a root this platform does *not* ship. The host
+    /// trusts it because somebody installed it; a container will not.
+    Private,
+}
+
+/// Read `openssl s_client -CAfile <the platform's public roots>`.
+///
+/// The question is not "is this certificate valid" — on the host it always is,
+/// which is why nothing noticed. It is "would a container accept it", and the
+/// way to ask that is to verify against the *public* root set alone, which is
+/// what a Debian container's `ca-certificates` is.
+pub fn inspection(output: Option<&str>) -> Inspection {
+    let Some(out) = output else {
+        return Inspection::Unknown("openssl did not run".into());
+    };
+    // `Verify return code:` is the only line that answers the question. Its
+    // absence means the handshake never got far enough to have an opinion —
+    // no network, a refused connection, a tool that is not there — and that is
+    // an `Unknown`, not a verdict. A plane is not a proxy.
+    let Some(code) = out
+        .lines()
+        .rev()
+        .find_map(|l| l.trim().strip_prefix("Verify return code:"))
+    else {
+        return Inspection::Unknown(
+            "the handshake did not complete, so there is nothing to read".into(),
+        );
+    };
+    let code = code.trim();
+    if code.starts_with("0 ") || code == "0" {
+        return Inspection::Public;
+    }
+    // The verify failures a re-signing proxy produces. Anything else — an
+    // expired certificate, a hostname mismatch — is a real problem with that
+    // host and is not what this check is about, so it stays `Unknown`.
+    const RESIGNED: &[&str] = &[
+        "unable to get local issuer certificate",
+        "self signed certificate in certificate chain",
+        "self-signed certificate in certificate chain",
+        "unable to verify the first certificate",
+    ];
+    if RESIGNED.iter().any(|r| code.contains(r)) {
+        Inspection::Private
+    } else {
+        Inspection::Unknown(format!(
+            "openssl answered `{code}`, which is not a signing problem"
+        ))
+    }
+}
+
+/// The platform's **public** root set, as a file openssl can verify against.
+///
+/// macOS keeps Apple's shipped roots in their own keychain, separate from
+/// anything an administrator installed later. That separation is the whole
+/// test: a corporate root lands in the System or login keychain, never in
+/// `SystemRootCertificates`, so verifying against this file alone asks the
+/// same question a container asks.
+///
+/// `None` rather than a guess anywhere it cannot be answered — on Linux the
+/// system store *is* the public set plus whatever was added, with no line
+/// between them, so this check does not apply there and says so.
+fn public_roots() -> Option<std::path::PathBuf> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let out = std::process::Command::new("security")
+        .args([
+            "find-certificate",
+            "-a",
+            "-p",
+            "/System/Library/Keychains/SystemRootCertificates.keychain",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let pem = String::from_utf8(out.stdout).ok()?;
+    if !pem.contains("BEGIN CERTIFICATE") {
+        return None;
+    }
+    let at = std::env::temp_dir().join("omh-public-roots.pem");
+    std::fs::write(&at, pem).ok()?;
+    Some(at)
+}
+
+/// Ask whether a container would accept what this host is being served.
+///
+/// `host` is one omh actually fetches from during a build, so a proxy that
+/// inspects selectively is asked about traffic omh depends on rather than
+/// traffic in general.
+pub fn inspection_of(host: &str) -> Inspection {
+    inspection_at(&format!("{host}:443"), host)
+}
+
+/// `inspection_of` with the endpoint spelled out, so a test can point it at a
+/// server it controls rather than at the internet.
+pub fn inspection_at(endpoint: &str, servername: &str) -> Inspection {
+    let Some(roots) = public_roots() else {
+        return Inspection::Unknown(
+            "omh can only tell a shipped root from an installed one on macOS".into(),
+        );
+    };
+    let out = std::process::Command::new("openssl")
+        .args([
+            "s_client",
+            "-connect",
+            endpoint,
+            "-servername",
+            servername,
+            "-CAfile",
+            &roots.display().to_string(),
+        ])
+        // EOF at once: `s_client` waits for something to send otherwise, and a
+        // check that hangs is a check nobody runs twice.
+        .stdin(std::process::Stdio::null())
+        .output();
+    match out {
+        Ok(out) => {
+            let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
+            said.push_str(&String::from_utf8_lossy(&out.stderr));
+            inspection(Some(&said))
+        }
+        Err(e) => Inspection::Unknown(format!("openssl did not run: {e}")),
+    }
+}
+
 /// Whether the corporate root actually reached the sandbox's trust store.
 ///
 /// **Not whether the recipe says so.** `update-ca-certificates` prints
@@ -754,6 +890,162 @@ pub fn passed(outcomes: &[Outcome]) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    /// **Both arms, against real TLS.** The unit test above fixes the reading;
+    /// this one proves omh reads the right thing off a real handshake, which
+    /// is the half that can be quietly wrong — a `-CAfile` that silently does
+    /// not load leaves openssl verifying against nothing and answering `20`
+    /// for the whole internet, which would report every user as proxied.
+    ///
+    /// The private arm runs `openssl s_server` with a root this test makes, so
+    /// it is the same shape as a corporate proxy without needing one. The
+    /// public arm needs the network and is the reason this is `#[ignore]`d
+    /// along with the container tests; `./scripts/check.sh --all` runs it.
+    #[test]
+    #[ignore]
+    fn a_private_root_reads_as_private_and_a_public_one_does_not() {
+        let d = tempfile::tempdir().unwrap();
+        let at = |n: &str| d.path().join(n).display().to_string();
+        let sh = |c: &str| {
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(c)
+                .output()
+                .expect("shell")
+        };
+
+        // A root, and a leaf it signs for `testserver`.
+        sh(&format!(
+            "openssl req -x509 -newkey rsa:2048 -nodes -keyout {} -out {} -days 1 \
+             -subj '/CN=omh Test Corp Root' 2>/dev/null",
+            at("root.key"),
+            at("root.pem")
+        ));
+        sh(&format!(
+            "openssl req -newkey rsa:2048 -nodes -keyout {} -out {} \
+             -subj '/CN=testserver' 2>/dev/null",
+            at("leaf.key"),
+            at("leaf.csr")
+        ));
+        std::fs::write(d.path().join("ext"), "subjectAltName=DNS:testserver\n").unwrap();
+        sh(&format!(
+            "openssl x509 -req -in {} -CA {} -CAkey {} -CAcreateserial -out {} \
+             -days 1 -extfile {} 2>/dev/null",
+            at("leaf.csr"),
+            at("root.pem"),
+            at("root.key"),
+            at("leaf.pem"),
+            at("ext")
+        ));
+        assert!(
+            std::fs::read_to_string(d.path().join("leaf.pem"))
+                .is_ok_and(|p| p.contains("BEGIN CERTIFICATE")),
+            "the fixture must actually produce a leaf"
+        );
+
+        // Serve it, on a port nothing else is likely to hold.
+        let mut server = std::process::Command::new("openssl")
+            .args([
+                "s_server",
+                "-accept",
+                "34443",
+                "-cert",
+                &at("leaf.pem"),
+                "-key",
+                &at("leaf.key"),
+                "-www",
+                "-quiet",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("openssl s_server");
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+
+        let said = inspection_at("127.0.0.1:34443", "testserver");
+        // Killed *and* reaped: a `kill` without a `wait` leaves a zombie for
+        // as long as the test binary runs, and clippy is right to say so.
+        let _ = server.kill();
+        let _ = server.wait();
+        assert_eq!(
+            said,
+            Inspection::Private,
+            "a leaf signed by a root this platform does not ship is what a \
+             TLS-inspecting proxy serves, and must read as Private"
+        );
+
+        // And the internet, which is not proxied on a developer's own machine
+        // unless it is — in which case this test is telling the truth and the
+        // person running it already knows.
+        assert_eq!(
+            inspection_of("registry.npmjs.org"),
+            Inspection::Public,
+            "npm's registry is signed by a public root; reading it as Private \
+             means the `-CAfile` is not loading and every user would be told \
+             they are behind a proxy"
+        );
+    }
+
+    /// **Offline must never read as "you are behind a proxy".** That is the
+    /// whole difficulty of asking this question before anything has failed: a
+    /// check that cries wolf on a plane is worse than no check, because the
+    /// remedy it names — installing a corporate root — is one a person can
+    /// actually carry out and then be confused by forever.
+    ///
+    /// So the verdict is three-valued, and every way of not knowing collapses
+    /// into `Unknown` with a reason rather than into either answer.
+    ///
+    /// The question asked is deliberately not "is this certificate valid".
+    /// On the host it always is — the root is installed, which is exactly why
+    /// nothing noticed. It is "would a *container* accept this", and that is
+    /// asked by verifying against the platform's public root set alone, which
+    /// is what a Debian container's `ca-certificates` package is.
+    #[test]
+    fn only_a_completed_handshake_can_say_a_root_is_private() {
+        // Verified against the public set: a container would accept it.
+        assert_eq!(
+            inspection(Some(
+                "depth=2 C = US, O = DigiCert Inc\nVerify return code: 0 (ok)\n"
+            )),
+            Inspection::Public
+        );
+
+        // The two shapes a re-signing proxy produces, measured in the control
+        // arm behind `image::ca_layer`'s table.
+        for said in [
+            "Verify return code: 20 (unable to get local issuer certificate)",
+            "Verify return code: 19 (self signed certificate in certificate chain)",
+            "Verify return code: 21 (unable to verify the first certificate)",
+        ] {
+            assert_eq!(
+                inspection(Some(said)),
+                Inspection::Private,
+                "this is what an inspecting proxy looks like: {said}"
+            );
+        }
+
+        // **Every way of not knowing.** No connection at all, a tool that is
+        // not there, and output that says nothing about verification.
+        for nothing in [
+            None,
+            Some(""),
+            Some("connect: Connection refused"),
+            Some("s_client: unknown option"),
+            Some("depth=0 CN = example.com\n"),
+        ] {
+            assert!(
+                matches!(inspection(nothing), Inspection::Unknown(_)),
+                "not knowing must be Unknown, never a verdict: {nothing:?}"
+            );
+        }
+
+        // And the reason travels, because a check that says "unknown" without
+        // saying why is a row somebody has to investigate by hand.
+        let Inspection::Unknown(why) = inspection(None) else {
+            panic!("None is unknown")
+        };
+        assert!(!why.is_empty(), "an unknown must carry its reason");
+    }
     /// Four ways `git --version` can answer, and only one is a version.
     ///
     /// Every arm but the last was unreachable while this was inline, and two

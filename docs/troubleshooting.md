@@ -343,11 +343,22 @@ own input. Point `--to` somewhere outside and copy in what you want.
 
 ### an unknown-issuer error when omh builds an image
 
-**omh now says this for you.** A build that dies on an unverifiable
-certificate ends by naming `ca_cert` and the command that sets it, because
-`omh doctor` cannot help here: doctor works by launching the image and
+**omh now says this for you, from both ends.** A build that dies on an
+unverifiable certificate ends by naming `ca_cert` and the command that sets it
+— doctor cannot answer that one, because it works by launching the image and
 inspecting it from the inside, and behind an inspecting proxy there is no image
-to launch. The diagnosis has to come from the build, so it does.
+to launch.
+
+And `omh doctor` now says it *before* anything fails. With no `ca_cert` set, it
+asks whether a container would accept the certificate this network serves, by
+verifying against the roots the platform ships rather than the ones your
+machine trusts — which is the same question a container asks. That catches the
+case the build cannot: an image cached from before the proxy appeared still
+builds, and only the sessions fail.
+
+It reports only when the answer is yes. Offline, or anywhere omh cannot tell a
+shipped root from an installed one, it says nothing rather than guessing —
+being told to install a corporate root on a plane is worse than silence.
 
 The wording depends on which tool reaches the network first — `unable to get
 local issuer certificate` from curl, `CERTIFICATE_VERIFY_FAILED` from python,
