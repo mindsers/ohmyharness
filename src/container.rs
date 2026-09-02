@@ -1307,7 +1307,7 @@ mod tests {
     /// **A session runs the image the caller resolved**, and nothing else.
     ///
     /// The one fact this whole design turns on, and it was unguarded for a
-    /// milestone: `plan` hardcoded `image::tag_for(adapter, None)`, so `init` built a
+    /// milestone: `plan` hardcoded `image::tag_for(adapter)`, so `init` built a
     /// stack layer that no session ever ran. A mutation sweep found it — every
     /// test passed with the layer replaced by the harness image, and with the
     /// harness image replaced by the base — because nothing asserted which

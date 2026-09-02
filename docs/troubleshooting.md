@@ -341,24 +341,42 @@ the content check.
 compose the rules document — so writing into the checkout would overwrite its
 own input. Point `--to` somewhere outside and copy in what you want.
 
-### `certificate verify failed` when omh builds an image
+### an unknown-issuer error when omh builds an image
 
-Your network inspects TLS. Zscaler, Netskope and corporate MITM proxies
-terminate every HTTPS connection and re-sign it with the company's own root —
-your machine trusts it because IT installed it, and a container does not. So
-`apt-get`, the graph download and `npm install -g` the harness all fail on an
-unknown issuer, and omh cannot build an image at all.
+The wording depends on which tool reaches the network first — `unable to get
+local issuer certificate` from curl, `CERTIFICATE_VERIFY_FAILED` from python,
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE` from node — but the cause is one thing: your
+network inspects TLS. Zscaler, Netskope and corporate MITM proxies terminate
+every HTTPS connection and re-sign it with the company's own root. Your machine
+trusts it because IT installed it; a container does not. The graph download and
+`npm install -g` for the harness both fail, so no image gets built.
+
+Get the root as a PEM — on macOS it lives in the keychain rather than on disk —
+and point omh at it:
 
 ```console
-$ omh settings set ca_cert ~/corp-root.pem
+$ security find-certificate -a -c "Zscaler" -p > ~/corp-root.pem
+$ omh set --local ca_cert ~/corp-root.pem
 $ omh init
+$ omh doctor
 ```
 
-[`ca_cert`](configuration.md#ca_cert) has the detail, including the toolchains
-that need telling separately from the system store — pip and node both do.
+`--local` puts it in `.omh/settings.local.toml`, which is gitignored. **Not
+`omh settings set`** — that writes the template new repos are seeded from, and
+a repo that already exists never re-reads it.
+
+`omh doctor` is the step worth not skipping: it checks the root reached the
+sandbox's trust store, which is the one thing a successful build does not
+prove. `update-ca-certificates` exits 0 when it skips a certificate it cannot
+parse.
+
+[`ca_cert`](configuration.md#ca_cert) has the detail, including which
+toolchains need telling separately from the system store.
 
 If the file you have is a DER `.crt` rather than PEM, omh says so and gives you
-the `openssl` line that converts it.
+the `openssl` line that converts it. If it carries `Bag Attributes` or
+`friendlyName:` preamble from a `pkcs12` export, omh refuses it rather than
+editing your certificate — strip it to the `BEGIN`/`END` block.
 
 ### `no usable base manifest` or `declares no base-set entries`
 

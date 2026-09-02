@@ -700,7 +700,7 @@ mod tests {
     /// `image:` covers the base recipe only, and the obvious extension — digest
     /// `harness_dockerfile` as well — quietly reintroduces the bug
     /// `recipe_digest` was written to prevent. The harness recipe opens
-    /// `FROM {base_tag(None)}`, and `base_tag` is a `DefaultHasher` of the base
+    /// `FROM omh/base:<base_tag>`, and `base_tag` is a `DefaultHasher` of the base
     /// recipe: a value std does not guarantee across releases. Pinning a digest
     /// computed over that text marks every harness-triggered note stale for
     /// everyone the day somebody upgrades Rust — the mass false positive with no
@@ -747,14 +747,14 @@ mod tests {
             // left to protect. Read it and delete it rather than relaxing it.
             assert!(
                 carries_unstable_tag,
-                "`{}`'s recipe no longer embeds `base_tag(None)` — a harness digest \
+                "`{}`'s recipe no longer embeds the base tag — a harness digest \
                  is now safe to pin, and this test has become the obstacle",
                 adapter.name
             );
             assert!(
                 !pinned.contains(&digest),
                 "`{}`'s recipe digest is pinned while the recipe still embeds \
-                 `base_tag(None)`, a DefaultHasher value std does not guarantee \
+                 the base tag, a DefaultHasher value std does not guarantee \
                  across releases. Render it stably first — substitute the base's \
                  recipe digest for its tag — or leave `image:` base-only.",
                 adapter.name

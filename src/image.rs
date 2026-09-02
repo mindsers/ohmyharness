@@ -210,8 +210,14 @@ pub fn ca_path(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBu
 ///
 /// Behind a TLS-inspecting proxy every server the build reaches presents a
 /// certificate signed by the company's own CA. The host trusts it; a container
-/// does not, so `apt-get`, the graph download and `npm install -g` the harness
-/// all fail on an unknown issuer and no image can be built.
+/// does not, so the graph download and `npm install -g` the harness both fail
+/// on an unknown issuer and no image can be built.
+///
+/// **Not `apt-get`**, which this used to claim. This layer is placed *after*
+/// the package that provides `update-ca-certificates`, so if apt really failed
+/// on an unknown issuer nothing here could help — the recipe would die three
+/// lines above. It does not fail, because Debian's default sources are plain
+/// HTTP. Naming it sent the reader to a fix that could not apply.
 ///
 /// **Written into the recipe rather than passed as a build arg**, because the
 /// tag is a digest of the recipe text: a build arg leaves that text identical,
@@ -222,8 +228,19 @@ pub fn ca_path(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBu
 ///
 /// `NODE_EXTRA_CA_CERTS` is not belt and braces. Node does not read the system
 /// trust store, the base image is node, and the claude harness arrives through
-/// `npm install -g` — so `update-ca-certificates` alone fixes everything
-/// except the fetch most likely to be the reason somebody set this.
+/// `npm install -g` — so it is the fetch most likely to be the reason somebody
+/// set this, and the one `update-ca-certificates` cannot reach.
+///
+/// **What is claimed here is what has been measured.** Setting the system
+/// store and setting each variable were verified together against a local
+/// `openssl s_server` presenting a leaf signed by a self-signed root: the
+/// stock image fails and this image does not, for curl, node, python, pip,
+/// git, go and cargo. That says the combination works. It does **not** isolate
+/// which toolchain needed which variable — an earlier version of this comment
+/// said "three of the four do not read the system store", which was a stronger
+/// claim than the measurement supports. `omh doctor` is what checks the root
+/// arrived; nothing here can tell you what a toolchain would have done
+/// without it.
 fn ca_layer(ca: Option<&str>) -> String {
     let Some(pem) = ca else {
         return String::new();
@@ -282,15 +299,23 @@ fn ca_layer(ca: Option<&str>) -> String {
         " && cat {DIR}/omh-ca-*.crt > {NODE_AT} \\\n && update-ca-certificates\n"
     ));
 
-    // `update-ca-certificates` fixes the **system** store, and three of the
-    // four toolchains omh ships a stack for do not read it. Setting only the
-    // system store would leave `pip3 install pytest ruff` — a line in
-    // `stacks/python.toml` — failing exactly as before, and whoever set
+    // `update-ca-certificates` fixes the **system** store, and not every
+    // toolchain reads it. pip ships its own `certifi`; node reads one named
+    // file. So setting only the system store would leave the `tools` provide
+    // in `stacks/python.toml` — `pip3 install --break-system-packages
+    // --no-cache-dir pytest ruff` — failing exactly as before, and whoever set
     // `ca_cert` would reasonably conclude the setting does not work.
     //
+    // The quotation is the whole line, not a shortened one. It used to read
+    // `pip3 install pytest ruff`, which is not what that file says.
+    //
     // On the image rather than at launch, so a stack layer building *on top*
-    // of this gets them too: `rustup`, `pip3 install` and `corepack` all run
-    // at build time, which is where the failure this fixes actually happens.
+    // of this gets them too: the `curl` that fetches rustup, `pip3 install`
+    // and `corepack` all run at build time, which is where the failure this
+    // fixes actually happens. **rustup itself is not named**: what needs the
+    // root there is the `curl | sh` that downloads it, which the system store
+    // covers — `CARGO_HTTP_CAINFO` is cargo's, and whether rustup honours any
+    // of these is a fact about their software that nothing here has measured.
     out.push_str(&format!(
         "ENV SSL_CERT_FILE={BUNDLE} \\\n         \x20   SSL_CERT_DIR=/etc/ssl/certs \\\n         \x20   NODE_EXTRA_CA_CERTS={NODE_AT} \\\n         \x20   REQUESTS_CA_BUNDLE={BUNDLE} \\\n         \x20   PIP_CERT={BUNDLE} \\\n         \x20   CARGO_HTTP_CAINFO={BUNDLE} \\\n         \x20   GIT_SSL_CAINFO={BUNDLE}\n"
     ));

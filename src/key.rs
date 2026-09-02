@@ -81,8 +81,8 @@ impl Key {
 /// Every key omh reads.
 ///
 /// Six, and the scan below is what keeps it six: they are string literals at
-/// their call sites, so a sixth added to the code and not to this table would
-/// otherwise be discovered by whoever committed a token.
+/// their call sites, so a seventh added to the code and not to this table
+/// would otherwise be discovered by whoever committed a token.
 pub const KEYS: &[Key] = &[
     // The only path by which a secret reaches the agent — `src/carry.rs` says
     // so, and so does the comment `init` writes into every new settings file.
@@ -277,10 +277,23 @@ mod tests {
             "the scan read {files} sources — it stopped early, and a scan that \
              stopped early agrees with anything"
         );
+        // Tied to the table rather than typed. A floor of `5` sat here while
+        // the table held six, so a key whose call site went dark was one the
+        // floor could absorb — and a number nobody updates is a number that
+        // stops meaning anything.
+        //
+        // `- 1` because the scan reads *literals* at the two call shapes above,
+        // so a key resolved by matching on a `Setting`'s own field instead is
+        // legitimately invisible to it. `ca_cert` is read that way.
+        //
+        // Written without naming either call shape: this comment sits inside
+        // the file the scan reads, and spelling one out here made the scan
+        // match its own prose and report a key called `name`.
         assert!(
-            read.len() >= 5,
-            "the scan found only {read:?} — it is no longer finding the call \
-             sites it was written to read"
+            read.len() >= KEYS.len() - 1,
+            "the scan found only {read:?} of {} keys — it is no longer finding \
+             the call sites it was written to read",
+            KEYS.len()
         );
 
         let unclassified: Vec<&String> = read.iter().filter(|k| describes(k).is_none()).collect();
@@ -305,7 +318,7 @@ mod tests {
     /// new settings file, and the repo-scoped write defaulted away from the
     /// committed layer *because* of this key.
     ///
-    /// It protects one key. A sixth key misclassified on the day it is added
+    /// It protects one key. A seventh key misclassified on the day it is added
     /// is not caught by anything here, and cannot be — that is a judgement
     /// about what a value is for. What can be checked is that the judgement
     /// omh already made, in writing, is the one the table holds.

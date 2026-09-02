@@ -1590,7 +1590,7 @@ mod tests {
             ("memory.md", 5),
             ("profile.md", 3),
             ("sessions.md", 11),
-            ("troubleshooting.md", 10),
+            ("troubleshooting.md", 11),
             ("trust.md", 2),
         ]
         .into_iter()
@@ -2161,8 +2161,12 @@ mod tests {
             ("src/config.rs", 3),
             ("src/container.rs", 4),
             ("src/doctor.rs", 1),
-            // `omh set ca_cert`, in the refusal when the path it names is
-            // not a PEM.
+            // The `# `omh set --local ca_cert`` line `ca_layer` writes into
+            // the generated Dockerfile, telling whoever reads the recipe where
+            // the certificate came from. **Not** either of `ca_for`'s refusals:
+            // neither contains a command line, so neither is what this scan
+            // sees — which is what this comment said before, about a reading
+            // nobody had taken.
             ("src/image.rs", 1),
             ("src/main.rs", 8),
             ("src/memory.rs", 2),
