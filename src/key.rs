@@ -19,6 +19,13 @@ pub enum Shape {
     Text,
     /// A TOML array of paths.
     Paths,
+    /// One path on the host.
+    ///
+    /// Distinct from `Text` because `omh why` is where somebody finds out what
+    /// a key wants, and "one word or phrase" is the wrong answer about a
+    /// filename. `carry_in` already earned `Paths` for the plural case; this
+    /// is the singular one.
+    Path,
     /// `90s`, `30m`, `2h`, `1d`, or bare seconds.
     Duration,
     /// One of a fixed set.
@@ -114,13 +121,21 @@ pub const KEYS: &[Key] = &[
     // A path to a PEM on the host, not a credential: a CA certificate is
     // public by construction. It lands in the committed file because a team on
     // managed machines usually has the root at one path, and a teammate
-    // inheriting it is the useful outcome. `omh settings set ca_cert` is the
-    // personal spelling for a path that is only yours.
+    // inheriting it is the useful outcome.
+    //
+    // **`omh set --local` is the personal spelling, not `omh settings set`.**
+    // This said the opposite, and so did both doc pages. `omh settings set`
+    // writes `Layer::Personal`, which is a template for repos `init` has not
+    // seen yet — it is not one of `Layer::SETTINGS`, and `init` seeds from it
+    // through `write_if_absent`, which never revisits. So for anybody whose
+    // repo already exists — which is everybody hitting this, because the
+    // failure happens *during* `init` — the advice was a write nothing reads,
+    // reported as a success.
     Key {
         name: "ca_cert",
         does: "A CA certificate the sandbox must trust, as a path to a PEM — \
                for a network that inspects TLS and signs it with its own root.",
-        shape: Shape::Text,
+        shape: Shape::Path,
         secret: Secret::No,
     },
     Key {
@@ -157,7 +172,7 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
                 )
             })
         }
-        Shape::Text | Shape::Paths | Shape::Duration => None,
+        Shape::Text | Shape::Paths | Shape::Path | Shape::Duration => None,
     }
 }
 

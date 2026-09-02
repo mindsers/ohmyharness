@@ -552,6 +552,12 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // A value that exists to end a misleading silence must not replace it with
     // a misleading sentence.
     let mut hooks = report::Hooks::Unchecked("no harness, so no sandbox to ask".into());
+    // Once, above every block that needs it. `init` read this setting three
+    // times — twice in this function and again inside `sandbox()` — so a PEM
+    // edited mid-run produced two different tags for one command. Reading it
+    // here also fails early, before any image is built, which is where a
+    // certificate omh cannot read should stop.
+    let ca = image::ca_for(&paths)?;
     if let Some(h) = &harness {
         // Past the first gate, so the harness is no longer the reason. Set
         // before the probe rather than after it, because the two arms that
@@ -562,7 +568,6 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             runtime::installed(p)
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
-        let ca = image::ca_for(&paths)?;
         // Without it the headline command cannot run, so init is not finished
         // until this exists — and until it exists there is no sandbox to ask
         // about a toolchain.
@@ -694,7 +699,9 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     backend.program(),
                     &adapter,
                     &sandbox.recipe(),
-                    image::ca_for(&paths)?.as_deref(),
+                    // The sandbox's own reading, not a fresh one. `sandbox.tag`
+                    // was computed from it, and two reads of a file can differ.
+                    sandbox.ca.as_deref(),
                     &paths.repo,
                 )?;
                 if sandbox.tag != image::tag_for(&adapter, ca.as_deref()) {
@@ -831,7 +838,6 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             runtime::installed(p)
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
-        let ca = image::ca_for(&paths)?;
         let args = base::index_args(
             &image::tag_for(&adapter, ca.as_deref()),
             &paths.cache_volume(),
@@ -1452,11 +1458,12 @@ impl Sandbox {
         ctx: &out::Ctx,
     ) -> Result<()> {
         let recipe: Vec<String> = self.installs.clone();
-        // Resolved here rather than passed in: this already takes `paths`, and
-        // a parameter every caller has to remember to thread is one more place
-        // to forget it.
-        let ca = image::ca_for(paths)?;
-        let ca = ca.as_deref();
+        // The reading `self.tag` was computed from. This used to resolve the
+        // setting again here, with a comment arguing that a parameter is one
+        // more place to forget — but the value was already on `self`, and a
+        // second read of a file that has moved builds a layer the tag beside
+        // it does not name.
+        let ca = self.ca.as_deref();
         image::ensure_stack(
             program,
             adapter,

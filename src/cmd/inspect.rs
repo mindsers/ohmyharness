@@ -400,6 +400,7 @@ pub(crate) fn why_a_key(paths: &Paths, k: &key::Key) -> String {
     text.push_str(&match k.shape {
         key::Shape::Text => "  takes  one word or phrase\n".to_string(),
         key::Shape::Paths => "  takes  a TOML array of paths, e.g. [\".env\"]\n".to_string(),
+        key::Shape::Path => "  takes  one path, e.g. /etc/ssl/certs/corp.pem\n".to_string(),
         key::Shape::Duration => "  takes  90s, 30m, 2h, 1d, or bare seconds\n".to_string(),
         key::Shape::Choice(all) => format!("  takes  one of {}\n", all.join(", ")),
     });
