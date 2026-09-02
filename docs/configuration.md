@@ -878,16 +878,32 @@ root at the same path — a teammate then inherits it.
 > `.omh/settings.toml`, and that is every repo where this problem shows up,
 > it would be written and never read.
 
-**It reaches the toolchains that do not read the system store.** Running
-`update-ca-certificates` rebuilds `/etc/ssl/certs/ca-certificates.crt`, and
-the image also sets:
+**It reaches node, which the system store does not.** Running
+`update-ca-certificates` rebuilds `/etc/ssl/certs/ca-certificates.crt`, and on
+the Debian base omh builds on that is enough for curl, git, python, pip, go
+and cargo. Debian's pip vendors a `certifi` that points at the system bundle,
+so it reads the store like everything else.
+
+That is measured, not assumed. Against an `openssl s_server` presenting a leaf
+signed by a private root, three images were compared: one with no root
+installed, where all seven tools refuse; one with the root in the system store
+and **none** of the variables below set; and this recipe. The middle image is
+the isolation — six of the seven verify there.
+
+node does not. It reads one named file and nothing else, and it is the fetch
+most likely to be the reason you are here — the harness arrives through
+`npm install -g`. So the image also sets:
 
 | | |
 |---|---|
-| `NODE_EXTRA_CA_CERTS` | node reads one named file, not the store |
-| `PIP_CERT`, `REQUESTS_CA_BUNDLE` | pip bundles its own `certifi` |
-| `CARGO_HTTP_CAINFO` | cargo |
-| `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO` | git, and anything on openssl |
+| `NODE_EXTRA_CA_CERTS` | **node ignores the system store.** Measured: still fails with the root installed, succeeds with this set |
+| `PIP_CERT`, `REQUESTS_CA_BUNDLE` | belt and braces — a pip that vendors its own `certifi` rather than Debian's |
+| `CARGO_HTTP_CAINFO` | belt and braces — cargo read the system store here |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO` | belt and braces — openssl's own defaults already point here |
+
+Only the first row is load-bearing on today's base image. The rest cost
+nothing and cover a base image that patches its tools differently, which is
+why they are set rather than trusted to be unnecessary.
 
 They are set on the image rather than at launch, so a stack layer building on
 top of it gets them too — `pip3 install`, `corepack` and the `curl` that

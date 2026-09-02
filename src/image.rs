@@ -231,16 +231,33 @@ pub fn ca_path(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBu
 /// `npm install -g` — so it is the fetch most likely to be the reason somebody
 /// set this, and the one `update-ca-certificates` cannot reach.
 ///
-/// **What is claimed here is what has been measured.** Setting the system
-/// store and setting each variable were verified together against a local
-/// `openssl s_server` presenting a leaf signed by a self-signed root: the
-/// stock image fails and this image does not, for curl, node, python, pip,
-/// git, go and cargo. That says the combination works. It does **not** isolate
-/// which toolchain needed which variable — an earlier version of this comment
-/// said "three of the four do not read the system store", which was a stronger
-/// claim than the measurement supports. `omh doctor` is what checks the root
-/// arrived; nothing here can tell you what a toolchain would have done
-/// without it.
+/// **What is claimed here is what has been measured**, and the variables have
+/// now been isolated. Three arms against a local `openssl s_server` presenting
+/// a leaf signed by a self-signed root, on this recipe's `node:22-bookworm-slim`
+/// base with the python, go and rust stacks installed:
+///
+/// | | no root | root in the store, no variables | this recipe |
+/// |---|---|---|---|
+/// | curl | `unable to get local issuer` | verifies | verifies |
+/// | node | `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | **`UNABLE_TO_VERIFY_LEAF_SIGNATURE`** | verifies |
+/// | python | `CERTIFICATE_VERIFY_FAILED` | verifies | verifies |
+/// | git | `unable to access` | verifies | verifies |
+/// | go | `x509: signed by unknown authority` | verifies | verifies |
+/// | pip | `CERTIFICATE_VERIFY_FAILED` | verifies | verifies |
+/// | cargo | `SSL certificate is invalid; class=Ssl` | verifies | verifies |
+///
+/// So the middle column is the finding: on this base image
+/// `update-ca-certificates` is enough for six of the seven, Debian's pip
+/// included — its vendored certifi resolves to `/etc/ssl/certs/ca-certificates.crt`.
+/// Only `NODE_EXTRA_CA_CERTS` is load-bearing. The other six are kept because
+/// they cost nothing and cover a base image that patches its tools
+/// differently, and they are described that way rather than as each being what
+/// makes its tool work. An earlier version of this comment said "three of the
+/// four do not read the system store", which was a stronger claim than any
+/// measurement then supported.
+///
+/// `omh doctor` is what checks the root actually arrived on a given machine;
+/// the table above is what the recipe was designed against.
 fn ca_layer(ca: Option<&str>) -> String {
     let Some(pem) = ca else {
         return String::new();
@@ -1889,12 +1906,21 @@ mod tests {
             "and a command — not a comment — rebuilds the system store from it"
         );
 
-        // **Every stack, not just the one the base image happens to be.**
-        // `update-ca-certificates` fixes the system store; some of these read
-        // it and some do not, and the ones that do not are the ones a person
-        // setting `ca_cert` is most likely to be blocked by. `pip3 install
-        // pytest ruff` is a line in `stacks/python.toml`, and pip bundles its
-        // own certifi.
+        // **One of these is load-bearing and six are belt and braces**, and
+        // the difference is measured rather than assumed. Three arms against
+        // an `openssl s_server` presenting a leaf signed by a private root:
+        // with no root installed, every toolchain refuses. With the root in
+        // the system store and *none* of these variables set, curl, python,
+        // git, go, pip and cargo all verify — Debian's pip included, whose
+        // vendored certifi resolves to the system bundle. Only node still
+        // fails, with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`. With the variables
+        // set, node verifies too.
+        //
+        // So `NODE_EXTRA_CA_CERTS` is the one whose absence breaks a build on
+        // today's base image. The rest are kept because they cost nothing and
+        // cover a base image that patches its tools differently — but this
+        // test must not claim they are each what makes their tool work, which
+        // is what it used to say.
         //
         // **Values, not just names.** Asserting the name alone let two
         // mutations through: renaming the written file to `omh-ca.pem` (which
@@ -1904,26 +1930,47 @@ mod tests {
         const BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
         const NODE_AT: &str = "/usr/local/share/omh-ca.pem";
         for (var, value, why) in [
-            ("SSL_CERT_FILE", BUNDLE, "go, and anything built on openssl"),
-            (
-                "SSL_CERT_DIR",
-                "/etc/ssl/certs",
-                "openssl's by-hash lookups",
-            ),
             (
                 "NODE_EXTRA_CA_CERTS",
                 NODE_AT,
-                "node, which reads one file rather than the store",
+                "node, measured to ignore the system store — without this the \
+                 build fails where it failed before",
             ),
-            ("REQUESTS_CA_BUNDLE", BUNDLE, "python requests"),
-            ("PIP_CERT", BUNDLE, "pip, which bundles its own certifi"),
-            ("CARGO_HTTP_CAINFO", BUNDLE, "cargo"),
-            ("GIT_SSL_CAINFO", BUNDLE, "git over https"),
+            (
+                "SSL_CERT_FILE",
+                BUNDLE,
+                "openssl's default, which already points here — belt and braces",
+            ),
+            (
+                "SSL_CERT_DIR",
+                "/etc/ssl/certs",
+                "openssl's by-hash lookups — belt and braces",
+            ),
+            (
+                "REQUESTS_CA_BUNDLE",
+                BUNDLE,
+                "a requests that does not read the store — belt and braces",
+            ),
+            (
+                "PIP_CERT",
+                BUNDLE,
+                "a pip vendoring its own certifi rather than Debian's — belt \
+                 and braces",
+            ),
+            (
+                "CARGO_HTTP_CAINFO",
+                BUNDLE,
+                "cargo, measured to read the store here — belt and braces",
+            ),
+            (
+                "GIT_SSL_CAINFO",
+                BUNDLE,
+                "git, measured to read the store here — belt and braces",
+            ),
         ] {
             assert!(
                 commands.contains(&format!("{var}={value}")),
-                "{var} is not set to {value}, so {why} still cannot verify the \
-                 corporate root"
+                "{var} must be set to {value}: {why}"
             );
             assert!(
                 !without.contains(var),
@@ -2307,6 +2354,60 @@ mod tests {
             recipe_digest(&single).unwrap(),
             recipe_digest(&bundle).unwrap(),
             "and a chain is not the same trust store as its root alone"
+        );
+    }
+
+    /// **Node reads that one file and nothing else, so it must hold the whole
+    /// chain.** The split above exists for `update-ca-certificates`, which
+    /// wants one certificate per file; node wants the opposite, and gets it by
+    /// concatenation. Nothing asserted the concatenation was a glob, so
+    /// narrowing it to `omh-ca-1.crt` was green — and an intermediate-signed
+    /// leaf then fails in node alone, on the machines this setting exists for,
+    /// while curl and git keep working off the system store.
+    ///
+    /// Measured, three arms against an `openssl s_server` presenting a leaf
+    /// signed by a private root: with no root installed every toolchain
+    /// refuses; with the root in the system store and no variables set, curl,
+    /// python, git, go, pip and cargo all verify and **node alone still fails**
+    /// with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`; with the variables set node
+    /// verifies too. That is what makes this file, and not the store, node's
+    /// only source of the root.
+    #[test]
+    fn the_file_node_reads_carries_the_whole_chain() {
+        let two = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n\
+                   -----BEGIN CERTIFICATE-----\nWFla\n-----END CERTIFICATE-----\n";
+        let recipe = base_dockerfile(Some(two));
+
+        // The variable names a path; that path must be built from every file
+        // the split wrote, not from one of them.
+        let node_at = "/usr/local/share/omh-ca.pem";
+        assert!(
+            recipe.contains(&format!("NODE_EXTRA_CA_CERTS={node_at}")),
+            "node's variable must name the concatenated file: {recipe}"
+        );
+        let cat = recipe
+            .lines()
+            .find(|l| l.contains(&format!("> {node_at}")))
+            .unwrap_or_else(|| panic!("nothing builds {node_at}: {recipe}"));
+        assert!(
+            cat.contains("omh-ca-*.crt"),
+            "the file node reads is built from `{cat}`, which names one \
+             certificate rather than the chain — a root behind an intermediate \
+             then fails in node alone"
+        );
+
+        // And it is built after the files it concatenates, not before.
+        let wrote_last = recipe
+            .lines()
+            .position(|l| l.contains("> /usr/local/share/ca-certificates/omh-ca-2.crt"))
+            .expect("the second certificate is written");
+        let concatenated = recipe
+            .lines()
+            .position(|l| l.contains(&format!("> {node_at}")))
+            .expect("the chain is concatenated");
+        assert!(
+            wrote_last < concatenated,
+            "the chain is assembled before its last certificate is written"
         );
     }
 
