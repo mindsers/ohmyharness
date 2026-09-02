@@ -1226,7 +1226,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(adapter),
+                image: crate::image::tag_for(adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -1263,7 +1263,7 @@ mod tests {
                     base: None,
                     omh: decided().0,
                     repo: decided().1,
-                    image: crate::image::tag_for(&adapter),
+                    image: crate::image::tag_for(&adapter, None),
                     resolves,
                 },
             )
@@ -1293,7 +1293,7 @@ mod tests {
     /// **A session runs the image the caller resolved**, and nothing else.
     ///
     /// The one fact this whole design turns on, and it was unguarded for a
-    /// milestone: `plan` hardcoded `image::tag_for(adapter)`, so `init` built a
+    /// milestone: `plan` hardcoded `image::tag_for(adapter, None)`, so `init` built a
     /// stack layer that no session ever ran. A mutation sweep found it — every
     /// test passed with the layer replaced by the harness image, and with the
     /// harness image replaced by the base — because nothing asserted which
@@ -1334,7 +1334,7 @@ mod tests {
         );
         assert_ne!(
             p.image,
-            crate::image::tag_for(&adapter),
+            crate::image::tag_for(&adapter, None),
             "a plan that re-derives the harness tag ignores what it was handed"
         );
     }
@@ -1425,7 +1425,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -1467,7 +1467,7 @@ mod tests {
                 base: None,
                 omh: Default::default(),
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -1561,7 +1561,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -1960,7 +1960,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2608,7 +2608,7 @@ mod tests {
                 base: None,
                 omh: decided_with(["memory".to_string()].into()).0,
                 repo: decided_with(["memory".to_string()].into()).1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2664,7 +2664,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2746,7 +2746,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2822,7 +2822,7 @@ mod tests {
                 base: None,
                 omh: decided_with(["codegraph".to_string()].into()).0,
                 repo: decided_with(["codegraph".to_string()].into()).1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2850,7 +2850,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3072,7 +3072,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3213,7 +3213,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&bad),
+                image: crate::image::tag_for(&bad, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3264,7 +3264,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3303,7 +3303,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3354,7 +3354,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3374,7 +3374,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3405,7 +3405,7 @@ mod tests {
             base: None,
             omh: decided().0,
             repo: decided().1,
-            image: crate::image::tag_for(&adapter),
+            image: crate::image::tag_for(&adapter, None),
             resolves: BTreeMap::new(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
@@ -3427,7 +3427,7 @@ mod tests {
             base: None,
             omh: decided().0,
             repo: decided().1,
-            image: crate::image::tag_for(&adapter),
+            image: crate::image::tag_for(&adapter, None),
             resolves: BTreeMap::new(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
@@ -3454,7 +3454,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3479,7 +3479,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )

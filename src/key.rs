@@ -73,7 +73,7 @@ impl Key {
 
 /// Every key omh reads.
 ///
-/// Five, and the scan below is what keeps it five: they are string literals at
+/// Six, and the scan below is what keeps it six: they are string literals at
 /// their call sites, so a sixth added to the code and not to this table would
 /// otherwise be discovered by whoever committed a token.
 pub const KEYS: &[Key] = &[
@@ -109,6 +109,18 @@ pub const KEYS: &[Key] = &[
         name: "runtime",
         does: "Which runtime builds and runs the sandbox. Unset means `auto`.",
         shape: Shape::Choice(&["auto", "docker", "sbx"]),
+        secret: Secret::No,
+    },
+    // A path to a PEM on the host, not a credential: a CA certificate is
+    // public by construction. It lands in the committed file because a team on
+    // managed machines usually has the root at one path, and a teammate
+    // inheriting it is the useful outcome. `omh settings set ca_cert` is the
+    // personal spelling for a path that is only yours.
+    Key {
+        name: "ca_cert",
+        does: "A CA certificate the sandbox must trust, as a path to a PEM — \
+               for a network that inspects TLS and signs it with its own root.",
+        shape: Shape::Text,
         secret: Secret::No,
     },
     Key {

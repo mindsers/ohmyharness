@@ -330,7 +330,9 @@ pub fn gather(paths: &crate::profile::Paths, triggers: &[Trigger]) -> Facts {
 
     // The recipes omh would build right now. Cheap and pure, so always
     // available — unlike a running container.
-    facts.images = match crate::image::recipe_digest(&crate::image::base_dockerfile()) {
+    facts.images = match crate::image::recipe_digest(&crate::image::base_dockerfile(
+        crate::image::ca_for(paths).ok().flatten().as_deref(),
+    )) {
         Ok(d) => Fact::Known(BTreeSet::from([d])),
         // The recipe is compiled in, so the only way here is git. Saying "no
         // recipe available" would blame the one thing that is certainly present.
@@ -610,7 +612,7 @@ mod tests {
     #[test]
     fn judge_agrees_with_the_recipe_digest_a_note_would_pin() {
         let (_d, paths) = repo_with(&[]);
-        let now = crate::image::recipe_digest(&crate::image::base_dockerfile()).unwrap();
+        let now = crate::image::recipe_digest(&crate::image::base_dockerfile(None)).unwrap();
 
         let pinned = note_pinning(Some(&format!("image:{now}")));
         assert_eq!(
@@ -634,7 +636,7 @@ mod tests {
     /// `image:` covers the base recipe only, and the obvious extension — digest
     /// `harness_dockerfile` as well — quietly reintroduces the bug
     /// `recipe_digest` was written to prevent. The harness recipe opens
-    /// `FROM {base_tag()}`, and `base_tag` is a `DefaultHasher` of the base
+    /// `FROM {base_tag(None)}`, and `base_tag` is a `DefaultHasher` of the base
     /// recipe: a value std does not guarantee across releases. Pinning a digest
     /// computed over that text marks every harness-triggered note stale for
     /// everyone the day somebody upgrades Rust — the mass false positive with no
@@ -671,8 +673,8 @@ mod tests {
         };
 
         for adapter in &harnesses {
-            let recipe = crate::image::harness_dockerfile(adapter);
-            let carries_unstable_tag = recipe.contains(&crate::image::base_tag());
+            let recipe = crate::image::harness_dockerfile(adapter, None);
+            let carries_unstable_tag = recipe.contains(&crate::image::base_tag(None));
             let digest = crate::image::recipe_digest(&recipe).unwrap();
 
             // Pinned as well as guarded, so this cannot go quietly vacuous. If
@@ -681,14 +683,14 @@ mod tests {
             // left to protect. Read it and delete it rather than relaxing it.
             assert!(
                 carries_unstable_tag,
-                "`{}`'s recipe no longer embeds `base_tag()` — a harness digest \
+                "`{}`'s recipe no longer embeds `base_tag(None)` — a harness digest \
                  is now safe to pin, and this test has become the obstacle",
                 adapter.name
             );
             assert!(
                 !pinned.contains(&digest),
                 "`{}`'s recipe digest is pinned while the recipe still embeds \
-                 `base_tag()`, a DefaultHasher value std does not guarantee \
+                 `base_tag(None)`, a DefaultHasher value std does not guarantee \
                  across releases. Render it stably first — substitute the base's \
                  recipe digest for its tag — or leave `image:` base-only.",
                 adapter.name

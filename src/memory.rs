@@ -1216,7 +1216,7 @@ pub enum Wrote {
 /// where it is read, and `other => other.render()` silently opts each new kind
 /// out of exactly that — writing it through un-normalised, which is the bug
 /// this was added to prevent.
-fn normalise_trigger(raw: &str, repo: &Path) -> Result<String> {
+fn normalise_trigger(raw: &str, repo: &Path, ca: Option<&str>) -> Result<String> {
     Ok(match expiry::Trigger::parse(raw)? {
         // Recorded from inside the sandbox, read from outside it.
         expiry::Trigger::File { path, hash } => expiry::Trigger::File {
@@ -1228,7 +1228,7 @@ fn normalise_trigger(raw: &str, repo: &Path) -> Result<String> {
         // holding the recipe, so what lands on disk is a digest a later `stale`
         // can compare against.
         expiry::Trigger::Image { digest } if digest == expiry::IMAGE_NOW => {
-            let now = crate::image::recipe_digest(&crate::image::base_dockerfile())
+            let now = crate::image::recipe_digest(&crate::image::base_dockerfile(ca))
                 .context("recording what the image recipe is right now")?;
             expiry::Trigger::Image { digest: now }.render()
         }
@@ -1299,6 +1299,16 @@ pub fn remember_in(
     input: &Remembered,
     if_exists: IfExists,
 ) -> Result<Wrote> {
+    // `root` and `repo` are exactly what a `Paths` is, so the certificate can
+    // be resolved here — and it has to be, because the digest a note pins is
+    // the digest of the image omh would actually build. Reading a recipe
+    // without the certificate while building one with it would mark every
+    // image-pinned note stale on a machine that has one.
+    let ca = crate::image::ca_for(&crate::profile::Paths {
+        root: root.to_path_buf(),
+        repo: repo.to_path_buf(),
+    })
+    .unwrap_or(None);
     non_blank(&input.expected, "expected")?;
     non_blank(&input.observed, "observed")?;
     non_blank(&input.evidence, "evidence")?;
@@ -1402,7 +1412,7 @@ pub fn remember_in(
         invalidated_by: input
             .invalidated_by
             .as_deref()
-            .map(|raw| normalise_trigger(raw, repo))
+            .map(|raw| normalise_trigger(raw, repo, ca.as_deref()))
             .transpose()?,
         body: body_of(input),
         layer,
@@ -3997,7 +4007,7 @@ The harness rewrites in place; a file mount is one inode, so the write fails.
         remember(&paths, &input, IfExists::Error).unwrap();
 
         let recorded = load(&paths).unwrap()[0].invalidated_by.clone().unwrap();
-        let expected = crate::image::recipe_digest(&crate::image::base_dockerfile()).unwrap();
+        let expected = crate::image::recipe_digest(&crate::image::base_dockerfile(None)).unwrap();
         assert_eq!(
             recorded,
             format!("image:{expected}"),

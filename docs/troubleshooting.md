@@ -341,6 +341,25 @@ the content check.
 compose the rules document — so writing into the checkout would overwrite its
 own input. Point `--to` somewhere outside and copy in what you want.
 
+### `certificate verify failed` when omh builds an image
+
+Your network inspects TLS. Zscaler, Netskope and corporate MITM proxies
+terminate every HTTPS connection and re-sign it with the company's own root —
+your machine trusts it because IT installed it, and a container does not. So
+`apt-get`, the graph download and `npm install -g` the harness all fail on an
+unknown issuer, and omh cannot build an image at all.
+
+```console
+$ omh settings set ca_cert ~/corp-root.pem
+$ omh init
+```
+
+[`ca_cert`](configuration.md#ca_cert) has the detail, including the toolchains
+that need telling separately from the system store — pip and node both do.
+
+If the file you have is a DER `.crt` rather than PEM, omh says so and gives you
+the `openssl` line that converts it.
+
 ### `no usable base manifest` or `declares no base-set entries`
 
 omh could not find a readable [base set](design/base-set.md) in `~/.omh/base`,

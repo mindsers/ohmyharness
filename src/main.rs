@@ -1582,7 +1582,7 @@ mod tests {
             ("adapters.md", 1),
             ("code-graph.md", 1),
             ("commands.md", 131),
-            ("configuration.md", 42),
+            ("configuration.md", 44),
             ("decisions.md", 1),
             ("editors.md", 4),
             ("getting-started.md", 14),
@@ -1590,7 +1590,7 @@ mod tests {
             ("memory.md", 5),
             ("profile.md", 3),
             ("sessions.md", 11),
-            ("troubleshooting.md", 8),
+            ("troubleshooting.md", 10),
             ("trust.md", 2),
         ]
         .into_iter()
@@ -2161,6 +2161,9 @@ mod tests {
             ("src/config.rs", 3),
             ("src/container.rs", 4),
             ("src/doctor.rs", 1),
+            // `omh set ca_cert`, in the refusal when the path it names is
+            // not a PEM.
+            ("src/image.rs", 1),
             ("src/main.rs", 8),
             ("src/memory.rs", 2),
             ("src/memory/ingest.rs", 2),
@@ -3864,7 +3867,7 @@ mod tests {
 
         assert_eq!(
             nothing,
-            image::tag_for(&adapter),
+            image::tag_for(&adapter, None),
             "a repo that provisions nothing runs the harness image, not an \
              empty layer on top of it"
         );
@@ -4631,11 +4634,11 @@ because = "a fixture"
         );
         assert_ne!(
             sb.tag,
-            image::tag_for(&adapter),
+            image::tag_for(&adapter, None),
             "this fixture must provision something or it proves nothing"
         );
         assert_eq!(
-            image::stack_tag(&adapter, &sb.recipe()),
+            image::stack_tag(&adapter, &sb.recipe(), None),
             sb.tag,
             "the recipe handed to `ensure_stack` must build the tag `plan` runs, \
              or a session runs an image nothing built"

@@ -149,7 +149,13 @@ pub(crate) fn session_up(
     }
 
     say_rules(&plan, ctx);
-    image::ensure_stack(backend.program(), adapter, recipe, &paths.repo)?;
+    image::ensure_stack(
+        backend.program(),
+        adapter,
+        recipe,
+        image::ca_for(paths)?.as_deref(),
+        &paths.repo,
+    )?;
     image::ensure_network(backend.program(), &plan.network)?;
 
     let key = ssh::ensure_key(&paths.keys())?;

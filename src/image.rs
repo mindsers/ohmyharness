@@ -15,10 +15,10 @@ use std::path::Path;
 /// harness tag does: with a mutable `:latest`, `ensure` sees the tag present and
 /// skips the build, so a base change never reaches an install that already
 /// built it. Adding `socat` to the base silently did nothing until this.
-pub fn base_tag() -> String {
+pub fn base_tag(ca: Option<&str>) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    base_dockerfile().hash(&mut h);
+    base_dockerfile(ca).hash(&mut h);
     format!("omh/base:{:x}", h.finish())
 }
 
@@ -26,11 +26,11 @@ pub fn base_tag() -> String {
 /// reaches an install that already built the old one. With a fixed `:latest`,
 /// `ensure` saw the tag present and skipped the build — while `omh init`
 /// reported "already built".
-pub fn tag_for(adapter: &Adapter) -> String {
+pub fn tag_for(adapter: &Adapter, ca: Option<&str>) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    harness_dockerfile(adapter).hash(&mut h);
-    base_dockerfile().hash(&mut h);
+    harness_dockerfile(adapter, ca).hash(&mut h);
+    base_dockerfile(ca).hash(&mut h);
     format!("omh/{}:{:x}", adapter.name, h.finish())
 }
 
@@ -108,10 +108,97 @@ pub fn recipe_digest(recipe: &str) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
-pub fn base_dockerfile() -> String {
+/// The corporate root this machine's traffic is inspected by, if one is set.
+///
+/// Read from the `ca_cert` setting — a path to a PEM on the host — because omh
+/// cannot guess which of the host's trusted roots is the one doing the
+/// inspecting, and injecting all of them would quietly widen what the sandbox
+/// trusts. That is the opposite of what a sandbox is for.
+///
+/// **An unreadable path is an error, not an empty answer.** Somebody sets this
+/// because their builds are failing; resolving a typo'd path to "no
+/// certificate" would rebuild exactly the image that was already failing and
+/// report success.
+pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
+    let Some(at) = crate::policy_value(paths, "ca_cert") else {
+        return Ok(None);
+    };
+    let at = std::path::Path::new(&at);
+    let pem = anyhow::Context::with_context(std::fs::read_to_string(at), || {
+        format!(
+            "reading the certificate named by `ca_cert` ({})",
+            at.display()
+        )
+    })?;
+    anyhow::ensure!(
+        pem.contains("BEGIN CERTIFICATE"),
+        "`ca_cert` names {}, which is not a PEM certificate — a \
+         `BEGIN CERTIFICATE` block is what this reads. A `.crt` in DER form \
+         converts with `openssl x509 -inform der -in <file> -out <file>.pem`",
+        at.display()
+    );
+    Ok(Some(pem))
+}
+
+/// The lines that teach the image to trust a corporate root, or nothing.
+///
+/// Behind a TLS-inspecting proxy every server the build reaches presents a
+/// certificate signed by the company's own CA. The host trusts it; a container
+/// does not, so `apt-get`, the graph download and `npm install -g` the harness
+/// all fail on an unknown issuer and no image can be built.
+///
+/// **Written into the recipe rather than passed as a build arg**, because the
+/// tag is a digest of the recipe text: a build arg leaves that text identical,
+/// so an image built without a certificate would be reused for somebody who
+/// had set one and setting it would look like it did nothing. That is the
+/// stale-tag failure `tag_for` records. Here the certificate is part of what
+/// the image *is*.
+///
+/// `NODE_EXTRA_CA_CERTS` is not belt and braces. Node does not read the system
+/// trust store, the base image is node, and the claude harness arrives through
+/// `npm install -g` — so `update-ca-certificates` alone fixes everything
+/// except the fetch most likely to be the reason somebody set this.
+fn ca_layer(ca: Option<&str>) -> String {
+    let Some(pem) = ca else {
+        return String::new();
+    };
+    const AT: &str = "/usr/local/share/ca-certificates/omh-ca.crt";
+    const BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+
+    // One quoted argument per line of the certificate. A heredoc would be
+    // shorter and is not portable to every builder omh may meet; `printf` with
+    // the lines quoted is, and a PEM is base64 between two marker lines with
+    // no shell metacharacters in it. Any stray quote is dropped rather than
+    // escaped — it cannot appear in a valid PEM, and a certificate that needed
+    // escaping to be written is one to refuse rather than to mangle.
+    let mut out = String::from(
+        "\n# The corporate root this machine's traffic is inspected by, from\n         # `omh set ca_cert`. Placed after `ca-certificates` is installed, because that\n         # package is what creates the directory below and provides\n         # `update-ca-certificates`, and before the first fetch that needs it.\n         RUN mkdir -p /usr/local/share/ca-certificates \\\n && printf '%s\\n' \\\n",
+    );
+    for line in pem.lines() {
+        out.push_str(&format!("      '{}' \\\n", line.replace(['\'', '\\'], "")));
+    }
+    out.push_str(&format!("      > {AT} \\\n && update-ca-certificates\n"));
+
+    // `update-ca-certificates` fixes the **system** store, and three of the
+    // four toolchains omh ships a stack for do not read it. Setting only the
+    // system store would leave `pip3 install pytest ruff` — a line in
+    // `stacks/python.toml` — failing exactly as before, and whoever set
+    // `ca_cert` would reasonably conclude the setting does not work.
+    //
+    // On the image rather than at launch, so a stack layer building *on top*
+    // of this gets them too: `rustup`, `pip3 install` and `corepack` all run
+    // at build time, which is where the failure this fixes actually happens.
+    out.push_str(&format!(
+        "ENV SSL_CERT_FILE={BUNDLE} \\\n         \x20   SSL_CERT_DIR=/etc/ssl/certs \\\n         \x20   NODE_EXTRA_CA_CERTS={AT} \\\n         \x20   REQUESTS_CA_BUNDLE={BUNDLE} \\\n         \x20   PIP_CERT={BUNDLE} \\\n         \x20   CARGO_HTTP_CAINFO={BUNDLE} \\\n         \x20   GIT_SSL_CAINFO={BUNDLE}\n"
+    ));
+    out
+}
+
+pub fn base_dockerfile(ca: Option<&str>) -> String {
     // Interpolated rather than written out, so the directory the image
     // prepares and the directory the launcher mounts into cannot drift.
     let notes = crate::memory::GUEST_LOCAL_NOTES;
+    let ca_layer = ca_layer(ca);
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
     format!(
@@ -120,7 +207,7 @@ pub fn base_dockerfile() -> String {
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server socat \
  && rm -rf /var/lib/apt/lists/*
-
+{ca_layer}
 RUN usermod -l agent -d {GUEST_HOME} -m node \
  && groupmod -n agent node \
  && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent \
@@ -171,10 +258,14 @@ WORKDIR /work
     .replace("__GRAPH_INSTALL__", &crate::base::graph_install())
 }
 
-pub fn harness_dockerfile(adapter: &Adapter) -> String {
+pub fn harness_dockerfile(adapter: &Adapter, ca: Option<&str>) -> String {
     // Install as root, run as agent: an image that ends privileged would hand
     // the agent the sandbox's own escape hatch.
-    let mut df = format!("FROM {}\nUSER root\nRUN {}\n", base_tag(), adapter.install);
+    let mut df = format!(
+        "FROM {}\nUSER root\nRUN {}\n",
+        base_tag(ca),
+        adapter.install
+    );
 
     // Docker creates a missing mount parent as root, leaving the agent unable
     // to write beside its own config — atomic credential writes and transcripts
@@ -200,8 +291,8 @@ pub fn harness_dockerfile(adapter: &Adapter) -> String {
 ///
 /// Root to install, `agent` to run, exactly as the harness layer: an image that
 /// ends privileged hands the agent the sandbox's own escape hatch.
-pub fn stack_dockerfile(adapter: &Adapter, installs: &[&str]) -> String {
-    let mut df = format!("FROM {}\nUSER root\n", tag_for(adapter));
+pub fn stack_dockerfile(adapter: &Adapter, installs: &[&str], ca: Option<&str>) -> String {
+    let mut df = format!("FROM {}\nUSER root\n", tag_for(adapter, ca));
     for install in installs {
         df.push_str(&format!("RUN {install}\n"));
     }
@@ -227,15 +318,15 @@ pub fn stack_dockerfile(adapter: &Adapter, installs: &[&str]) -> String {
 /// on top of it. A provide that applies but installs nothing — the `runtime`
 /// assertion in `stacks/node.toml` — correctly does not move the tag, because
 /// it changes nothing about the image.
-pub fn stack_tag(adapter: &Adapter, installs: &[&str]) -> String {
+pub fn stack_tag(adapter: &Adapter, installs: &[&str], ca: Option<&str>) -> String {
     if installs.is_empty() {
-        return tag_for(adapter);
+        return tag_for(adapter, ca);
     }
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    stack_dockerfile(adapter, installs).hash(&mut h);
-    tag_for(adapter).hash(&mut h);
-    base_dockerfile().hash(&mut h);
+    stack_dockerfile(adapter, installs, ca).hash(&mut h);
+    tag_for(adapter, ca).hash(&mut h);
+    base_dockerfile(ca).hash(&mut h);
     format!("omh/{}:{:x}", adapter.name, h.finish())
 }
 
@@ -258,16 +349,17 @@ pub fn ensure_stack(
     program: &str,
     adapter: &Adapter,
     installs: &[&str],
+    ca: Option<&str>,
     repo: &Path,
 ) -> Result<String> {
-    ensure(program, adapter)?;
-    let tag = stack_tag(adapter, installs);
-    if tag != tag_for(adapter) && !exists(program, &tag) {
+    ensure(program, adapter, ca)?;
+    let tag = stack_tag(adapter, installs, ca);
+    if tag != tag_for(adapter, ca) && !exists(program, &tag) {
         eprintln!("omh: building {tag} — this repo's toolchain, first run only");
         build(
             program,
             &tag,
-            &stack_dockerfile(adapter, installs),
+            &stack_dockerfile(adapter, installs, ca),
             &Kind::Stack(adapter, repo),
         )?;
     }
@@ -438,19 +530,19 @@ pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
 
 /// Build the base and the harness layer if they are missing. Progress goes
 /// straight to the terminal: a multi-minute silent step reads as a hang.
-pub fn ensure(program: &str, adapter: &Adapter) -> Result<()> {
-    let base = base_tag();
+pub fn ensure(program: &str, adapter: &Adapter, ca: Option<&str>) -> Result<()> {
+    let base = base_tag(ca);
     if !exists(program, &base) {
         eprintln!("omh: building {base} (first run only)");
-        build(program, &base, &base_dockerfile(), &Kind::Base)?;
+        build(program, &base, &base_dockerfile(ca), &Kind::Base)?;
     }
-    let t = tag_for(adapter);
+    let t = tag_for(adapter, ca);
     if !exists(program, &t) {
         eprintln!("omh: building {t}");
         build(
             program,
             &t,
-            &harness_dockerfile(adapter),
+            &harness_dockerfile(adapter, ca),
             &Kind::Harness(adapter),
         )?;
     }
@@ -1606,9 +1698,126 @@ mod tests {
         Adapter::find(adapters(), "claude").unwrap()
     }
 
+    /// A corporate CA reaches the image, and changes what it is called.
+    ///
+    /// Behind a TLS-inspecting proxy — Zscaler and friends — every server the
+    /// build talks to presents a certificate signed by the company's own root.
+    /// The host trusts it, because IT put it in the system store. The
+    /// container does not, so `apt-get`, the graph download and
+    /// `npm install -g` the harness all fail on an unknown issuer, and omh
+    /// cannot build an image at all.
+    ///
+    /// **Embedded in the recipe, not passed as a build arg.** A `--build-arg`
+    /// leaves the Dockerfile text identical, so the tag — which is a digest of
+    /// that text — would not move: an image built without the certificate
+    /// would be reused for somebody who had set one, and setting it would
+    /// appear to do nothing. That is the stale-tag failure `tag_for`'s own doc
+    /// records. Embedding makes the certificate part of what the image *is*.
+    ///
+    /// Only the base needs it. The harness and stack layers are `FROM` it, so
+    /// they inherit the trust store, and both tags already hash the base
+    /// recipe — so one change moves all three.
+    #[test]
+    fn a_corporate_ca_reaches_the_image_and_moves_its_tag() {
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIBself\n-----END CERTIFICATE-----";
+        let with = base_dockerfile(Some(pem));
+        let without = base_dockerfile(None);
+
+        assert!(
+            with.contains("MIIBself"),
+            "the certificate is in the recipe"
+        );
+        assert!(
+            with.contains("update-ca-certificates"),
+            "and the system store is rebuilt from it"
+        );
+        // **Every stack, not just the one the base image happens to be.**
+        // `update-ca-certificates` fixes the system store, and three of the
+        // four toolchains omh ships a stack for do not read it:
+        //
+        //   node    reads NODE_EXTRA_CA_CERTS and nothing else
+        //   pip     bundles certifi and ignores the system store entirely
+        //   cargo   reads CARGO_HTTP_CAINFO
+        //   go      reads SSL_CERT_FILE
+        //
+        // A fix that only set the system store would leave `pip3 install
+        // pytest ruff` — a line in `stacks/python.toml` — failing exactly as
+        // before, and the person who set `ca_cert` would reasonably conclude
+        // the setting does not work.
+        for (var, why) in [
+            ("SSL_CERT_FILE", "go, and anything built on openssl"),
+            (
+                "NODE_EXTRA_CA_CERTS",
+                "node, which does not read the system store",
+            ),
+            ("REQUESTS_CA_BUNDLE", "python requests"),
+            ("PIP_CERT", "pip, which bundles its own certifi"),
+            ("CARGO_HTTP_CAINFO", "cargo"),
+            ("GIT_SSL_CAINFO", "git over https"),
+        ] {
+            assert!(
+                with.contains(var),
+                "{var} is unset, so {why} still cannot verify the corporate root"
+            );
+            assert!(
+                !without.contains(var),
+                "{var} must not be set when there is no certificate"
+            );
+        }
+        assert!(
+            !without.contains("update-ca-certificates"),
+            "and none of it appears when no certificate is set"
+        );
+
+        // **Order, not just presence.** The first version put the certificate
+        // at the top, before `apt-get install ca-certificates` — so neither
+        // `/usr/local/share/ca-certificates/` nor `update-ca-certificates`
+        // existed yet and every build died with `Directory nonexistent`. It
+        // has to land after the package that creates them and before the
+        // first fetch that needs it, which is the graph download.
+        let at = |needle: &str| {
+            with.find(needle)
+                .unwrap_or_else(|| panic!("{needle} is not in the recipe"))
+        };
+        assert!(
+            at("install -y --no-install-recommends") < at("update-ca-certificates"),
+            "the certificate must land after `ca-certificates` is installed, \
+             or the directory it writes into does not exist yet"
+        );
+        // The graph install is the first thing in the recipe that fetches
+        // over TLS, and it is substituted in, so the marker is what it
+        // downloads rather than the placeholder.
+        assert!(
+            at("update-ca-certificates") < at("codebase-memory-mcp-ui-linux"),
+            "and before the first fetch that needs it"
+        );
+        assert_ne!(
+            recipe_digest(&with).unwrap(),
+            recipe_digest(&without).unwrap(),
+            "a different trust store is a different image"
+        );
+    }
+
+    /// Two different certificates are two different images.
+    ///
+    /// The half that a `--build-arg` would have got wrong: it is not enough
+    /// that *having* a certificate moves the tag, because somebody whose
+    /// company rotates its root would otherwise keep building against the old
+    /// one and be told it was already built.
+    #[test]
+    fn changing_the_certificate_changes_the_tag() {
+        let a = base_dockerfile(Some(
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----",
+        ));
+        let b = base_dockerfile(Some(
+            "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----",
+        ));
+        assert_ne!(recipe_digest(&a).unwrap(), recipe_digest(&b).unwrap());
+    }
+
     #[test]
     fn tags_name_their_harness() {
-        assert!(tag_for(&claude()).starts_with("omh/claude:"));
+        assert!(tag_for(&claude(), None).starts_with("omh/claude:"));
     }
 
     /// Regression: with a fixed `:latest`, `ensure` saw the tag present and
@@ -1618,7 +1827,7 @@ mod tests {
     /// rebuilding it and a base change — adding `socat` — silently never shipped.
     #[test]
     fn a_changed_base_recipe_is_a_different_base_tag() {
-        let before = base_tag();
+        let before = base_tag(None);
         assert!(before.starts_with("omh/base:"));
         assert_ne!(before, "omh/base:latest", "a mutable tag never rebuilds");
     }
@@ -1627,8 +1836,8 @@ mod tests {
     /// base leaves the harness image referencing something that no longer exists.
     #[test]
     fn the_harness_layer_pins_an_exact_base() {
-        let df = harness_dockerfile(&claude());
-        assert!(df.contains(&base_tag()), "got: {df}");
+        let df = harness_dockerfile(&claude(), None);
+        assert!(df.contains(&base_tag(None)), "got: {df}");
         assert!(!df.contains("omh/base:latest"), "got: {df}");
     }
 
@@ -1640,8 +1849,8 @@ mod tests {
     /// install that already built the old one.
     #[test]
     fn the_stack_layer_pins_the_exact_harness_layer() {
-        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"]);
-        assert!(df.contains(&tag_for(&claude())), "got: {df}");
+        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"], None);
+        assert!(df.contains(&tag_for(&claude(), None)), "got: {df}");
         assert!(!df.contains(":latest"), "got: {df}");
     }
 
@@ -1652,15 +1861,15 @@ mod tests {
     #[test]
     fn a_different_set_of_fired_installs_is_a_different_tag() {
         let a = claude();
-        let pnpm = stack_tag(&a, &["corepack enable pnpm"]);
-        let yarn = stack_tag(&a, &["corepack enable yarn"]);
-        let both = stack_tag(&a, &["corepack enable pnpm", "corepack enable yarn"]);
+        let pnpm = stack_tag(&a, &["corepack enable pnpm"], None);
+        let yarn = stack_tag(&a, &["corepack enable yarn"], None);
+        let both = stack_tag(&a, &["corepack enable pnpm", "corepack enable yarn"], None);
 
         assert_ne!(pnpm, yarn, "different provides, different image");
         assert_ne!(pnpm, both, "a superset is a different image too");
         assert_eq!(
             pnpm,
-            stack_tag(&a, &["corepack enable pnpm"]),
+            stack_tag(&a, &["corepack enable pnpm"], None),
             "and an unchanged resolution must not rebuild"
         );
         // Order is part of the recipe, not a presentation detail. `corepack
@@ -1670,7 +1879,7 @@ mod tests {
         // order, which is a cache hit on a build that never happened.
         assert_ne!(
             both,
-            stack_tag(&a, &["corepack enable yarn", "corepack enable pnpm"]),
+            stack_tag(&a, &["corepack enable yarn", "corepack enable pnpm"], None),
             "a reordered recipe is a different image"
         );
     }
@@ -1680,7 +1889,7 @@ mod tests {
     /// build, a tag and a pull for no content.
     #[test]
     fn nothing_to_install_is_the_harness_image_itself() {
-        assert_eq!(stack_tag(&claude(), &[]), tag_for(&claude()));
+        assert_eq!(stack_tag(&claude(), &[], None), tag_for(&claude(), None));
     }
 
     /// File order is install order, and it is load-bearing: `corepack enable
@@ -1696,6 +1905,7 @@ mod tests {
         let df = stack_dockerfile(
             &claude(),
             &["zzz corepack enable pnpm", "aaa apt-get install nodejs"],
+            None,
         );
         let at = |needle: &str| df.find(needle).unwrap_or_else(|| panic!("missing: {df}"));
         assert!(
@@ -1708,14 +1918,18 @@ mod tests {
     #[test]
     fn a_changed_recipe_is_a_different_tag() {
         let mut a = claude();
-        let before = tag_for(&a);
+        let before = tag_for(&a, None);
         a.install = "npm install -g @anthropic-ai/claude-code@next".into();
-        assert_ne!(tag_for(&a), before, "a changed recipe must force a rebuild");
+        assert_ne!(
+            tag_for(&a, None),
+            before,
+            "a changed recipe must force a rebuild"
+        );
     }
 
     #[test]
     fn an_unchanged_recipe_keeps_its_tag() {
-        assert_eq!(tag_for(&claude()), tag_for(&claude()));
+        assert_eq!(tag_for(&claude(), None), tag_for(&claude(), None));
     }
 
     /// The four things `sbx` requires of a kit base image. Getting these wrong
@@ -1723,7 +1937,7 @@ mod tests {
     /// backend — the exact split this project exists to avoid.
     #[test]
     fn the_base_satisfies_the_sandbox_contract() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(
             df.contains("-u 1000") || df.contains("1000"),
             "UID 1000: {df}"
@@ -1742,7 +1956,7 @@ mod tests {
     /// one.
     #[test]
     fn the_image_creates_the_home_the_code_mounts_into() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(
             df.contains(&format!("usermod -l agent -d {GUEST_HOME}")),
             "the image must create the home the launcher mounts into:\n{df}"
@@ -1763,7 +1977,7 @@ mod tests {
             "graph cache {GRAPH_CACHE} is not under {GUEST_HOME}"
         );
         assert!(
-            base_dockerfile().contains(GRAPH_CACHE),
+            base_dockerfile(None).contains(GRAPH_CACHE),
             "the image must create the cache directory, or docker makes it root-owned"
         );
     }
@@ -1854,7 +2068,7 @@ mod tests {
     /// the mount without preparing its new home cannot stay green.
     #[test]
     fn the_image_creates_the_note_store_the_launcher_mounts_into() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         let notes = crate::memory::GUEST_LOCAL_NOTES;
         assert!(
             df.contains(notes),
@@ -1906,7 +2120,7 @@ mod tests {
     /// without it the persistence wrapper fails at launch, not at build.
     #[test]
     fn the_base_provides_what_every_session_needs() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         for tool in ["git", "dtach", "ripgrep"] {
             assert!(df.contains(tool), "missing {tool}: {df}");
         }
@@ -1917,7 +2131,7 @@ mod tests {
     /// the thing that makes omh more than a launcher.
     #[test]
     fn the_base_image_carries_the_base_set() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(df.contains(crate::base::GRAPH_BIN), "no code graph: {df}");
     }
 
@@ -1925,13 +2139,13 @@ mod tests {
     /// be owned by the agent, or docker creates it as root.
     #[test]
     fn the_base_owns_the_graph_cache_directory() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(df.contains(crate::base::GRAPH_CACHE), "got: {df}");
     }
 
     #[test]
     fn the_base_can_serve_ssh() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(df.contains("openssh-server"), "got: {df}");
         assert!(df.contains("omh-session"), "needs a session entrypoint");
     }
@@ -1941,7 +2155,7 @@ mod tests {
     /// read one it does not trust.
     #[test]
     fn the_session_entrypoint_installs_the_key_with_permissions_sshd_accepts() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(
             df.contains("OMH_PUBKEY"),
             "key must come from the environment"
@@ -1952,14 +2166,14 @@ mod tests {
 
     #[test]
     fn the_session_entrypoint_outlives_the_command_that_started_it() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(df.contains("sshd"), "must start sshd");
         assert!(df.contains("sleep infinity"), "PID 1 must not exit");
     }
 
     #[test]
     fn the_base_creates_the_paths_the_launcher_mounts_into() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         for dir in ["/work", "/omh/sock", "/omh/cache"] {
             assert!(df.contains(dir), "missing {dir}: {df}");
         }
@@ -1967,8 +2181,11 @@ mod tests {
 
     #[test]
     fn the_harness_layer_extends_the_base_and_installs_the_harness() {
-        let df = harness_dockerfile(&claude());
-        assert!(df.contains(&format!("FROM {}", base_tag())), "got: {df}");
+        let df = harness_dockerfile(&claude(), None);
+        assert!(
+            df.contains(&format!("FROM {}", base_tag(None))),
+            "got: {df}"
+        );
         assert!(
             df.contains("@anthropic-ai/claude-code"),
             "install command: {df}"
@@ -1987,7 +2204,7 @@ mod tests {
     /// them up front with the right owner.
     #[test]
     fn the_harness_layer_owns_the_directories_it_mounts_into() {
-        let df = harness_dockerfile(&claude());
+        let df = harness_dockerfile(&claude(), None);
         assert!(df.contains("/home/agent/.claude"), "config dir: {df}");
         assert!(
             df.contains("chown"),
@@ -2066,9 +2283,9 @@ mod tests {
         // is the newest way to end an image privileged — and an image that ends
         // privileged hands the agent the sandbox's own escape hatch.
         for df in [
-            base_dockerfile(),
-            harness_dockerfile(&claude()),
-            stack_dockerfile(&claude(), &["apt-get install -y gcc"]),
+            base_dockerfile(None),
+            harness_dockerfile(&claude(), None),
+            stack_dockerfile(&claude(), &["apt-get install -y gcc"], None),
         ] {
             let last_user = df
                 .lines()
@@ -2092,7 +2309,7 @@ mod tests {
     /// `contains` and change nothing.
     #[test]
     fn the_stack_layer_installs_as_root() {
-        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"]);
+        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"], None);
         let line = |needle: &str| {
             df.lines()
                 .position(|l| l.trim_start().starts_with(needle))

@@ -69,11 +69,12 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
         let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
             .context("no adapters installed — run `omh init`")?;
         let adapter = Adapter::find(&paths.adapters(), &harness)?;
-        image::ensure(backend.program(), &adapter)?;
+        let ca = image::ca_for(&paths)?;
+        image::ensure(backend.program(), &adapter, ca.as_deref())?;
 
         let out = Command::new(backend.program())
             .args(base::ui_run_args(
-                &image::tag_for(&adapter),
+                &image::tag_for(&adapter, ca.as_deref()),
                 &container,
                 &paths.cache_volume(),
                 port,
@@ -237,7 +238,13 @@ pub(crate) fn doctor_cmd(
         return Ok(());
     }
 
-    image::ensure_stack(backend.program(), &adapter, &sandbox.recipe(), &paths.repo)?;
+    image::ensure_stack(
+        backend.program(),
+        &adapter,
+        &sandbox.recipe(),
+        image::ca_for(&paths)?.as_deref(),
+        &paths.repo,
+    )?;
     image::ensure_network(backend.program(), &plan.network)?;
 
     let account_name = account

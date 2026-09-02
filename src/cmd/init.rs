@@ -562,20 +562,24 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             runtime::installed(p)
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
+        let ca = image::ca_for(&paths)?;
         // Without it the headline command cannot run, so init is not finished
         // until this exists — and until it exists there is no sandbox to ask
         // about a toolchain.
-        if image::exists(backend.program(), &image::tag_for(&adapter)) {
-            summary.image = Some(format!("{} (already built)", image::tag_for(&adapter)));
+        if image::exists(backend.program(), &image::tag_for(&adapter, ca.as_deref())) {
+            summary.image = Some(format!(
+                "{} (already built)",
+                image::tag_for(&adapter, ca.as_deref())
+            ));
         } else {
             // Progress, not report: this is the minutes-long step, and
             // somebody watching a blank terminal needs to know it is alive.
             ctx.progress(&format!(
                 "building {} — first run only…",
-                image::tag_for(&adapter)
+                image::tag_for(&adapter, ca.as_deref())
             ));
-            image::ensure(backend.program(), &adapter)?;
-            summary.image = Some(image::tag_for(&adapter));
+            image::ensure(backend.program(), &adapter, ca.as_deref())?;
+            summary.image = Some(image::tag_for(&adapter, ca.as_deref()));
         }
 
         // Which provides apply here. Evaluated **in the sandbox**, with the repo
@@ -608,7 +612,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             } else {
                 match Command::new(backend.program())
                     .args(stack::predicate_args(
-                        &image::tag_for(&adapter),
+                        &image::tag_for(&adapter, ca.as_deref()),
                         &paths.repo,
                         &stack::predicate_script(&candidates),
                     ))
@@ -686,8 +690,14 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // on this laptop*, which is the laptop building the image.
                 let (own, repo) = crate::cmd::session::resolved(&paths)?;
                 let sandbox = sandbox(&paths, &adapter, &repo)?;
-                image::ensure_stack(backend.program(), &adapter, &sandbox.recipe(), &paths.repo)?;
-                if sandbox.tag != image::tag_for(&adapter) {
+                image::ensure_stack(
+                    backend.program(),
+                    &adapter,
+                    &sandbox.recipe(),
+                    image::ca_for(&paths)?.as_deref(),
+                    &paths.repo,
+                )?;
+                if sandbox.tag != image::tag_for(&adapter, ca.as_deref()) {
                     summary.stack_image = Some(sandbox.tag.clone());
                 }
 
@@ -821,8 +831,9 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             runtime::installed(p)
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
+        let ca = image::ca_for(&paths)?;
         let args = base::index_args(
-            &image::tag_for(&adapter),
+            &image::tag_for(&adapter, ca.as_deref()),
             &paths.cache_volume(),
             &paths.repo,
             &paths.repo_name(),
@@ -1434,10 +1445,16 @@ impl Sandbox {
         ctx: &out::Ctx,
     ) -> Result<()> {
         let recipe: Vec<String> = self.installs.clone();
+        // Resolved here rather than passed in: this already takes `paths`, and
+        // a parameter every caller has to remember to thread is one more place
+        // to forget it.
+        let ca = image::ca_for(paths)?;
+        let ca = ca.as_deref();
         image::ensure_stack(
             program,
             adapter,
             &recipe.iter().map(String::as_str).collect::<Vec<_>>(),
+            ca,
             &paths.repo,
         )?;
         let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
@@ -1480,6 +1497,7 @@ pub(crate) fn sandbox(
     let tag = image::stack_tag(
         adapter,
         &installs.iter().map(String::as_str).collect::<Vec<_>>(),
+        image::ca_for(paths)?.as_deref(),
     );
     let resolves = facts::Facts::load(paths).about(&tag);
     let owed = needs_of(&detected, &repo.provision);
