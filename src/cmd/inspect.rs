@@ -151,7 +151,10 @@ pub(crate) fn doctor_cmd(
     // Resolved once and used for both the checks and the plan below, so the
     // probe cannot check a session different from the one it launches.
     let (own, repo) = crate::cmd::session::resolved(&paths)?;
-    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo)?;
+    // The one reading this command makes. `ensure_stack` below takes
+    // `sandbox.ca`, and `ca_check` asserts against the same value.
+    let ca = image::ca_for(&paths)?;
+    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
     if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)
     }) {
@@ -245,7 +248,10 @@ pub(crate) fn doctor_cmd(
         backend.program(),
         &adapter,
         &sandbox.recipe(),
-        image::ca_for(&paths)?.as_deref(),
+        // The sandbox's own reading. A fresh `ca_for` here would be a second
+        // resolution, and `sandbox.tag` — which `opts.image` runs and
+        // `ca_check` asserts against — came from the first.
+        sandbox.ca.as_deref(),
         &paths.repo,
     )?;
     image::ensure_network(backend.program(), &plan.network)?;

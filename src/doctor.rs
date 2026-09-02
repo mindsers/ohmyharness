@@ -280,7 +280,6 @@ pub fn credential_checks(adapter: &Adapter) -> Vec<Check> {
     files.chain(probe).collect()
 }
 
-/// What must be true inside the sandbox, given this profile and adapter.
 /// Whether the corporate root actually reached the sandbox's trust store.
 ///
 /// **Not whether the recipe says so.** `update-ca-certificates` prints
@@ -312,6 +311,7 @@ pub fn ca_check(ca: Option<&str>) -> Option<Check> {
     })
 }
 
+/// What must be true inside the sandbox, given this profile and adapter.
 pub fn checks(
     profile: &Profile,
     adapter: &Adapter,

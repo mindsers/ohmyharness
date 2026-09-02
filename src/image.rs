@@ -164,8 +164,75 @@ pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<String>> {
             at.display()
         )
     };
+    let path_for_msg = at;
     let pem = String::from_utf8(raw).map_err(|_| anyhow::anyhow!(der_advice()))?;
     anyhow::ensure!(pem.contains("BEGIN CERTIFICATE"), "{}", der_advice());
+
+    // **Exactly certificates, and nothing else.** The docs promise a file
+    // carrying `pkcs12` preamble is refused rather than rewritten, and for a
+    // while only a quote or a backslash was refused — so a clean
+    // `friendlyName: Acme Root CA` was accepted and `ca_layer` dropped it on
+    // the way past, which is the rewrite the promise rules out.
+    //
+    // Anchored on the whole delimiter, not the substring: a CSR opens
+    // `-----BEGIN CERTIFICATE REQUEST-----`, which contains `BEGIN
+    // CERTIFICATE` and used to pass. And a block must close, because a clipped
+    // paste of `security find-certificate -a` leaves one open — `ca_layer`
+    // silently dropped the unterminated block and emitted a recipe with no
+    // certificate in it at all, which builds green and trusts nothing.
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let mut open_at: Option<usize> = None;
+    let mut blocks = 0usize;
+    for (n, line) in pem.lines().enumerate() {
+        let line = line.trim();
+        let at = n + 1;
+        if line == BEGIN {
+            anyhow::ensure!(
+                open_at.is_none(),
+                "line {at} of {} opens a certificate while the one at line {} \
+                 is still open — that file is not a sequence of PEM blocks.",
+                path_for_msg.display(),
+                open_at.unwrap_or(0)
+            );
+            open_at = Some(at);
+        } else if line == END {
+            anyhow::ensure!(
+                open_at.is_some(),
+                "line {at} of {} closes a certificate that was never opened.",
+                path_for_msg.display()
+            );
+            open_at = None;
+            blocks += 1;
+        } else if open_at.is_none() {
+            anyhow::ensure!(
+                line.is_empty(),
+                "line {at} of {} sits outside any `BEGIN CERTIFICATE` / `END \
+                 CERTIFICATE` block: `{}`. A `pkcs12` export carries `Bag \
+                 Attributes` and `friendlyName:` preamble, and a `.pem` from a \
+                 browser can carry a `subject=` line — omh will not drop them \
+                 to make the file fit, because dropping is rewriting. Strip \
+                 the file to the blocks and nothing else.",
+                path_for_msg.display(),
+                if line.len() > 60 { &line[..60] } else { line }
+            );
+        }
+    }
+    anyhow::ensure!(
+        open_at.is_none(),
+        "{} is truncated: the certificate opened at line {} has no matching \
+         `END CERTIFICATE`. A clipped copy-paste does this, and omh will not \
+         embed part of a certificate.",
+        path_for_msg.display(),
+        open_at.unwrap_or(0)
+    );
+    anyhow::ensure!(
+        blocks > 0,
+        "`ca_cert` names {}, which has no `-----BEGIN CERTIFICATE-----` block. \
+         A certificate *request* is not a certificate, and neither is a \
+         private key.",
+        path_for_msg.display()
+    );
     // Refused here, not neutralised in the recipe. `ca_layer` writes each line
     // as a single-quoted `printf` argument, and the first version dropped any
     // quote or backslash before writing — which mangles a file the user named
@@ -276,10 +343,10 @@ fn ca_layer(ca: Option<&str>) -> String {
     // hash. Corporate IT hands out a chain more often than a single root, so
     // this is the common case rather than the edge one.
     //
-    // Only the marked blocks travel. A `pkcs12` export carries `Bag
-    // Attributes` and `friendlyName:` preamble that no trust store reads, and
-    // dropping it here means the file omh writes is the certificate and
-    // nothing else.
+    // Only the marked blocks travel — but nothing unmarked ever gets this far
+    // any more. This used to *drop* `pkcs12` preamble, which is a rewrite of a
+    // file the user named, while both doc pages promised a refusal; `ca_for`
+    // now refuses it, so this loop is a parser rather than an editor.
     let mut blocks: Vec<Vec<&str>> = Vec::new();
     let mut current: Option<Vec<&str>> = None;
     for line in pem.lines() {
@@ -1929,6 +1996,45 @@ mod tests {
         // Debian. Both left the suite green while the sandbox trusted nothing.
         const BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
         const NODE_AT: &str = "/usr/local/share/omh-ca.pem";
+
+        // One logical Dockerfile instruction: the line that opens it plus the
+        // `\`-continuations under it.
+        let instruction = |opens: &str| -> String {
+            let mut out = String::new();
+            let mut lines = commands
+                .lines()
+                .skip_while(|l| !l.trim_start().starts_with(opens));
+            for line in lines.by_ref() {
+                let continues = line.trim_end().ends_with('\\');
+                out.push_str(line);
+                out.push('\n');
+                if !continues {
+                    break;
+                }
+            }
+            out
+        };
+        let env_block = instruction("ENV SSL_CERT_FILE");
+        assert!(
+            !env_block.is_empty(),
+            "no `ENV` instruction sets the certificate variables: {commands}"
+        );
+
+        // The `/etc/environment` block is a `RUN`, and it is not the only
+        // `RUN printf` in the recipe — the session entrypoint is another. Find
+        // it by the redirect that makes it this one.
+        let etc_environment = {
+            let all: Vec<&str> = commands.lines().collect();
+            let end = all
+                .iter()
+                .position(|l| l.contains(">> /etc/environment"))
+                .unwrap_or_else(|| panic!("nothing writes /etc/environment: {commands}"));
+            let start = all[..=end]
+                .iter()
+                .rposition(|l| l.trim_start().starts_with("RUN "))
+                .expect("the redirect is inside a RUN");
+            all[start..=end].join("\n")
+        };
         for (var, value, why) in [
             (
                 "NODE_EXTRA_CA_CERTS",
@@ -1968,9 +2074,25 @@ mod tests {
                 "git, measured to read the store here — belt and braces",
             ),
         ] {
+            // **Each instruction on its own, never the recipe as a whole.**
+            // The `ENV` line and the `/etc/environment` block write the same
+            // seven `VAR=VALUE` substrings, so a `commands.contains(..)` was
+            // satisfied by either one — and the two blocks became each other's
+            // alibi. Deleting the whole `ENV` instruction left all 1330 tests
+            // green, which ships the original bug: `/etc/environment` is read
+            // by `pam_env` at ssh login and by nothing else, so `docker build`
+            // and `docker exec` would both lose `NODE_EXTRA_CA_CERTS` — the
+            // one variable measured to be load-bearing.
             assert!(
-                commands.contains(&format!("{var}={value}")),
-                "{var} must be set to {value}: {why}"
+                env_block.contains(&format!("{var}={value}")),
+                "{var} is missing from the `ENV` instruction, so `docker \
+                 build` and `docker exec` do not have it: {why}\n{env_block}"
+            );
+            assert!(
+                etc_environment.contains(&format!("{var}={value}")),
+                "{var} is missing from the `/etc/environment` block, so an \
+                 ssh login from an editor does not have it: {why}\n\
+                 {etc_environment}"
             );
             assert!(
                 !without.contains(var),
@@ -2002,18 +2124,12 @@ mod tests {
         // docs promise both.
         //
         // `/etc/environment` is what `pam_env` reads, and sshd runs it.
-        for var in [
-            "SSL_CERT_FILE",
-            "NODE_EXTRA_CA_CERTS",
-            "PIP_CERT",
-            "CARGO_HTTP_CAINFO",
-        ] {
-            assert!(
-                commands.contains(&format!("{var}=")) && commands.contains("/etc/environment"),
-                "{var} is set for `docker exec` but not written where an ssh \
-                 login will find it"
-            );
-        }
+        // The seven-variable loop above asserts this block by name *and*
+        // value, so there is no separate list here any more. There used to be
+        // one, over four of the seven, and it read
+        // `commands.contains("{var}=") && commands.contains("/etc/environment")`
+        // — a left half the `ENV` line satisfied and a right half independent
+        // of `var`, so deleting six of the seven lines was green.
 
         // **Order, not just presence.** The first version put the certificate
         // at the top, before `apt-get install ca-certificates` — so
@@ -2312,6 +2428,82 @@ mod tests {
         assert!(ca_for(&paths).is_err(), "a quote in a PEM body is refused");
     }
 
+    /// **"Refuses" has to mean refuses.** Both doc pages promised that a
+    /// `pkcs12` export carrying `Bag Attributes` / `friendlyName:` preamble is
+    /// refused rather than rewritten. The code refused only a quote or a
+    /// backslash, so a clean `friendlyName: Zscaler Root CA` was *accepted*
+    /// and `ca_layer` then silently dropped it — a rewrite, which is the one
+    /// thing the setting's whole design says omh will not do. The test that
+    /// looked like it covered this passed on the apostrophe in `O'Brien`, not
+    /// on the preamble.
+    ///
+    /// Three shapes, each a real way to hand omh a file that is not one
+    /// certificate:
+    ///
+    /// - preamble outside the block, which `openssl pkcs12` emits;
+    /// - a truncated block, which a clipped copy-paste of
+    ///   `security find-certificate -a` produces — `BEGIN` with no `END` was
+    ///   accepted, and `ca_layer` dropped the unterminated block, writing an
+    ///   image with *no* certificate in it and a green build;
+    /// - a CSR, whose `-----BEGIN CERTIFICATE REQUEST-----` contains the
+    ///   substring `BEGIN CERTIFICATE` and so passed the old check.
+    #[test]
+    fn a_file_that_is_not_exactly_certificates_is_refused() {
+        let (dir, _) = ca_fixture(None);
+        let refuse = |name: &str, body: &str| -> String {
+            let at = dir.path().join(name);
+            std::fs::write(&at, body).unwrap();
+            let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
+            let e = ca_for(&paths)
+                .map(|got| {
+                    panic!("{name} must be refused, got {got:?}");
+                })
+                .unwrap_err();
+            format!("{e:#}")
+        };
+
+        // Preamble, with not a quote or backslash anywhere in it.
+        let e = refuse(
+            "p12.pem",
+            "Bag Attributes\n    friendlyName: Zscaler Root CA\n    localKeyID: 01 00 00 00\nsubject=C=US, O=Zscaler Inc., CN=Zscaler Root CA\n-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n",
+        );
+        assert!(
+            e.contains("friendlyName") || e.to_lowercase().contains("outside"),
+            "the refusal must point at the preamble it will not drop: {e}"
+        );
+
+        // Truncated: a block that opens and never closes.
+        let e = refuse("clipped.pem", "-----BEGIN CERTIFICATE-----\nQUJD\nWFla\n");
+        assert!(
+            e.to_lowercase().contains("end certificate") || e.to_lowercase().contains("truncated"),
+            "a clipped paste must be named as unterminated: {e}"
+        );
+
+        // A CSR. `BEGIN CERTIFICATE REQUEST` contains `BEGIN CERTIFICATE`.
+        let e = refuse(
+            "req.pem",
+            "-----BEGIN CERTIFICATE REQUEST-----\nQUJD\n-----END CERTIFICATE REQUEST-----\n",
+        );
+        assert!(
+            !e.is_empty(),
+            "a certificate request is not a certificate: {e}"
+        );
+
+        // And the shape that must still be accepted, unchanged: blank lines
+        // around the blocks are ordinary in a PEM and are not preamble.
+        let at = dir.path().join("spaced.pem");
+        std::fs::write(
+            &at,
+            "\n-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n\n-----BEGIN CERTIFICATE-----\nWFla\n-----END CERTIFICATE-----\n\n",
+        )
+        .unwrap();
+        let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
+        assert!(
+            ca_for(&paths).unwrap().is_some(),
+            "blank lines between blocks are not preamble"
+        );
+    }
+
     /// **A bundle is what corporate IT hands out, and it half-worked.**
     ///
     /// Measured against a real build: `update-ca-certificates` treats each
@@ -2409,6 +2601,117 @@ mod tests {
             wrote_last < concatenated,
             "the chain is assembled before its last certificate is written"
         );
+    }
+
+    /// **One resolution of `ca_cert` per command.** A second read can differ
+    /// from the first, and then omh builds one image and names another — the
+    /// split `0af80b9` closed in `session_up` and `top_up`, and which a review
+    /// found still open in two places: `doctor` used `sandbox.ca` for its
+    /// check and a fresh `ca_for` for the layer it built, and `init` compared
+    /// `sandbox.tag` against a tag derived from its own separate read.
+    ///
+    /// Two rules make "once per command" true rather than hoped for:
+    ///
+    /// 1. No function resolves twice.
+    /// 2. `cmd::init::sandbox` does not resolve **at all** — it is handed the
+    ///    caller's reading. It is the one function every command funnels
+    ///    through, so while it resolved independently, any caller that also
+    ///    needed the certificate for a harness image (which `init` does, at
+    ///    the `tag_for` calls above its `sandbox()` call) resolved twice by
+    ///    construction and no per-function count could see it.
+    ///
+    /// A text scan over top-level `fn` blocks is a proxy for a call graph. It
+    /// is the shape that catches the defect that actually happened.
+    #[test]
+    fn no_command_resolves_the_certificate_twice() {
+        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut resolvers: Vec<String> = Vec::new();
+        let mut twice: Vec<String> = Vec::new();
+        let mut sandbox_resolves = false;
+        let mut saw_sandbox_fn = false;
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                if path.file_name().is_some_and(|n| n == "image.rs") {
+                    continue;
+                }
+                let whole = std::fs::read_to_string(&path).unwrap();
+                // Production code only. A test may resolve as often as it likes.
+                let body = whole.split("#[cfg(test)]").next().unwrap_or("");
+                let name = path
+                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+
+                // Top-level `fn` blocks: a line at column zero that declares
+                // one, up to the next such line.
+                let opens = |l: &str| {
+                    let l = l.trim_end();
+                    (l.starts_with("fn ")
+                        || l.starts_with("pub fn ")
+                        || l.starts_with("pub(crate) fn ")
+                        || l.starts_with("async fn ")
+                        || l.starts_with("pub async fn ")
+                        || l.starts_with("pub(crate) async fn "))
+                    .then(|| l.to_string())
+                };
+                let lines: Vec<&str> = body.lines().collect();
+                let heads: Vec<usize> = (0..lines.len())
+                    .filter(|&n| opens(lines[n]).is_some())
+                    .collect();
+                for (k, &head) in heads.iter().enumerate() {
+                    let end = heads.get(k + 1).copied().unwrap_or(lines.len());
+                    let block = lines[head..end].join("\n");
+                    let n = block.matches("image::ca_for(").count();
+                    let sig = lines[head].trim_end();
+                    if sig.contains(" sandbox(") {
+                        saw_sandbox_fn = true;
+                        if n > 0 {
+                            sandbox_resolves = true;
+                        }
+                    }
+                    if n > 0 {
+                        resolvers.push(format!("{name}: {sig}"));
+                    }
+                    if n > 1 {
+                        twice.push(format!("{name}: {sig} ({n})"));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            twice.is_empty(),
+            "these resolve `ca_cert` more than once, so the tag they name and \
+             the layer they build can describe different images: {twice:#?}"
+        );
+        assert!(saw_sandbox_fn, "the scan never found `fn sandbox` at all");
+        assert!(
+            !sandbox_resolves,
+            "`cmd::init::sandbox` resolves `ca_cert` itself. Every command \
+             funnels through it, so a caller that also needs the certificate \
+             for its harness image resolves twice — take the caller's reading \
+             as a parameter instead"
+        );
+
+        // **Liveness by name.** A scan keyed on a spelling goes quiet the
+        // moment the spelling changes, and an empty result would read as a
+        // pass. These are the entry points that legitimately resolve once.
+        for must in ["src/cmd/init.rs", "src/cmd/inspect.rs"] {
+            assert!(
+                resolvers.iter().any(|f| f.starts_with(must)),
+                "{must} no longer resolves `ca_cert` under a spelling this \
+                 scan can see — it reads less than it did: {resolvers:#?}"
+            );
+        }
     }
 
     /// A repo whose stacks install nothing runs the harness image itself.

@@ -153,8 +153,10 @@ pub fn describes(name: &str) -> Option<&'static Key> {
 
 /// What is wrong with this value for this key, if omh can tell.
 ///
-/// Only `Choice` is checkable here, and that is the whole of the claim:
-/// `Text` and `Paths` are freeform, and a `Duration` omh cannot parse is
+/// `Choice` and `Path` are what is checkable here: `Path` because docker reads
+/// a relative `-v` source as a named volume, so the mistake is silent and its
+/// symptom is far away. `Text` and `Paths` are freeform, and a `Duration` omh
+/// cannot parse is
 /// already reported where it is read, deliberately — `idle::parse_duration`
 /// returns `None` rather than erroring so a typo in one layer cannot stop you
 /// working. `None` back from here means *nothing to say*, never *this is fine*.
@@ -172,12 +174,80 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
                 )
             })
         }
-        Shape::Text | Shape::Paths | Shape::Path | Shape::Duration => None,
+        Shape::Path => {
+            // Docker reads a non-absolute `-v` source as a *named volume*, so
+            // a relative `ca_cert` builds a correct image and then mounts an
+            // empty directory into the cross-build. And this key is committed,
+            // where "the directory omh was run from" is not a shared fact.
+            let bare = value.trim().trim_matches('"');
+            if bare.is_empty() {
+                Some(format!("`{}` was given nothing to name", key.name))
+            } else if !std::path::Path::new(bare).is_absolute() {
+                Some(format!(
+                    "`{}` takes an absolute path — `{bare}` resolves against \
+                     whatever directory omh was run from, and this setting is \
+                     shared with the repo",
+                    key.name
+                ))
+            } else {
+                None
+            }
+        }
+        Shape::Text | Shape::Paths | Shape::Duration => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// **A relative `ca_cert` builds a correct image and mounts an empty
+    /// directory.** `Shape::Path` validated nothing, so
+    /// `omh set --local ca_cert corp.pem` was accepted in silence. `ca_for`
+    /// then reads it relative to the process CWD and gets the right bytes, so
+    /// the recipe and the tag are both correct — but `memory::deliver` passes
+    /// the same raw string to `docker run -v {path}:/omh-ca.crt:ro`, and
+    /// docker reads a non-absolute source as a **named volume**. The guest
+    /// gets an empty directory where the certificate should be, and
+    /// `SSL_CERT_FILE` points at it.
+    ///
+    /// It is also the one setting where relative is wrong on its face:
+    /// `ca_cert` is `Secret::No`, so it lands in the *committed* layer, where
+    /// the directory omh happened to be run from is not a shared fact.
+    ///
+    /// Warned rather than refused, because that is what `quarrel` is —
+    /// `cmd::settings` prints it and writes the value anyway. The refusal that
+    /// stops a build still lives in `ca_for`.
+    #[test]
+    fn a_path_key_says_so_when_the_path_is_not_absolute() {
+        let ca = KEYS
+            .iter()
+            .find(|k| k.name == "ca_cert")
+            .expect("ca_cert is a key");
+        assert!(
+            matches!(ca.shape, Shape::Path),
+            "this test is about the `Path` shape"
+        );
+
+        for relative in ["corp.pem", "./corp.pem", "certs/corp.pem", ""] {
+            let said = quarrel(ca, relative).unwrap_or_else(|| {
+                panic!("`{relative}` is not absolute and must be quarrelled with")
+            });
+            assert!(
+                said.contains("ca_cert"),
+                "the quarrel must name the key: {said}"
+            );
+        }
+
+        // Absolute is the shape that works, and a quoted one is the same
+        // string to a person — `Choice` already learned that lesson.
+        for absolute in ["/etc/ssl/corp.pem", "\"/etc/ssl/corp.pem\""] {
+            assert_eq!(
+                quarrel(ca, absolute),
+                None,
+                "`{absolute}` is absolute and must pass"
+            );
+        }
+    }
+
     /// A key's description is written for the person who typed `omh settings`.
     ///
     /// One of them read *"Files a session gets that git does not carry — see

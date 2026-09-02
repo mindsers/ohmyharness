@@ -3862,7 +3862,9 @@ mod tests {
             for k in keys {
                 repo.provision.insert((*k).to_string(), true);
             }
-            cmd::init::sandbox(&paths, &adapter, &repo).unwrap().tag
+            cmd::init::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap())
+                .unwrap()
+                .tag
         };
 
         let nothing = with(&[]);
@@ -4650,7 +4652,7 @@ because = "a fixture"
         assert!(ca.is_some(), "the fixture must actually set one");
 
         let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
-        let sb = cmd::init::sandbox(&paths, &adapter, &fixture_policy()).unwrap();
+        let sb = cmd::init::sandbox(&paths, &adapter, &fixture_policy(), ca.clone()).unwrap();
 
         assert_eq!(
             sb.recipe(),
@@ -4689,7 +4691,8 @@ because = "a fixture"
         let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
         let repo = fixture_policy();
 
-        let first = cmd::init::sandbox(&paths, &adapter, &repo).unwrap();
+        let first =
+            cmd::init::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
         assert_eq!(
             first.owed,
             BTreeSet::from(["zulu".to_string(), "alpha".to_string()]),
@@ -4713,7 +4716,8 @@ because = "a fixture"
         );
         facts.save(&paths).unwrap();
 
-        let second = cmd::init::sandbox(&paths, &adapter, &repo).unwrap();
+        let second =
+            cmd::init::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
         assert_eq!(
             second.resolves.get("alpha"),
             Some(&false),

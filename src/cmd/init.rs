@@ -694,7 +694,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // written it, and a `false` in `settings.local.toml` means *not
                 // on this laptop*, which is the laptop building the image.
                 let (own, repo) = crate::cmd::session::resolved(&paths)?;
-                let sandbox = sandbox(&paths, &adapter, &repo)?;
+                let sandbox = sandbox(&paths, &adapter, &repo, ca.clone())?;
                 image::ensure_stack(
                     backend.program(),
                     &adapter,
@@ -704,7 +704,11 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                     sandbox.ca.as_deref(),
                     &paths.repo,
                 )?;
-                if sandbox.tag != image::tag_for(&adapter, ca.as_deref()) {
+                // `sandbox.ca`, not `ca` — the same reading `sandbox.tag`
+                // was computed from. They are one value now, and comparing a
+                // tag against one derived from a different read is what made
+                // this comparison meaningless when they could differ.
+                if sandbox.tag != image::tag_for(&adapter, sandbox.ca.as_deref()) {
                     summary.stack_image = Some(sandbox.tag.clone());
                 }
 
@@ -1501,6 +1505,7 @@ pub(crate) fn sandbox(
     paths: &Paths,
     adapter: &Adapter,
     repo: &settings::RepoPolicy,
+    ca: Option<String>,
 ) -> Result<Sandbox> {
     let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let detected = stack::detected(&defs, &paths.repo);
@@ -1508,11 +1513,12 @@ pub(crate) fn sandbox(
         .into_iter()
         .map(str::to_string)
         .collect();
-    // Once, and carried. Every later question about this image — the tag, the
-    // layer that gets built, the digest a note pins — is answered from this
-    // one read, so a PEM edited between two of them cannot produce two
-    // different images.
-    let ca = image::ca_for(paths)?;
+    // Once, and carried — but resolved by the *caller*, not here. Every later
+    // question about this image (the tag, the layer that gets built, the
+    // digest a note pins) is answered from that one read, so a PEM edited
+    // between two of them cannot produce two different images. Resolving here
+    // instead made this the second read for any caller that had already needed
+    // the certificate for its harness image, which `init` does.
     let tag = image::stack_tag(
         adapter,
         &installs.iter().map(String::as_str).collect::<Vec<_>>(),

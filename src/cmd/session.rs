@@ -218,7 +218,8 @@ pub(crate) fn attach(
         .context("no adapters installed — run `omh init`")?;
     let adapter = Adapter::find(&paths.adapters(), &harness)?;
     let (own, repo) = resolved(&paths)?;
-    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo)?;
+    let ca = crate::image::ca_for(&paths)?;
+    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
     if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)
     }) {
@@ -1041,7 +1042,8 @@ pub(crate) fn run(
     // worktree has none of its own.
     let base = session::default_branch(&paths.repo);
     let (own, repo) = resolved(&paths)?;
-    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo)?;
+    let ca = crate::image::ca_for(&paths)?;
+    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
     // Not on a dry run, which promises to leave no trace: topping up starts a
     // container and writes `~/.omh/facts.json`. What is already cached is used,
     // so the plan it prints is the plan a real launch would build from the same
