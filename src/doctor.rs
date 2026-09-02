@@ -339,6 +339,63 @@ pub fn inspection(output: Option<&str>) -> Inspection {
     }
 }
 
+/// The hosts omh fetches from during a build, in the order they are reached.
+///
+/// Two, because a proxy can inspect selectively — by category, or by an
+/// allowlist that happens to include one of these. Asking only `npmjs` would
+/// miss a policy that inspects code hosts and not package registries, and
+/// `github.com` is where the graph binary comes from in the **base** layer,
+/// which is the earliest fetch a build makes and so the first to die.
+pub const FETCHES: &[&str] = &["github.com", "registry.npmjs.org"];
+
+/// One answer from several, because "some of your traffic is inspected" is
+/// still "you need `ca_cert`".
+///
+/// `Private` wins over everything: a proxy that re-signs one of these breaks
+/// the build that fetches from it, and which one is not a detail the user has
+/// to care about — though it is named, because a selective proxy is a
+/// surprising thing to be told about and the evidence should travel.
+///
+/// `Public` beats `Unknown`: if one host answered cleanly the network is
+/// reachable, so the others being unreadable is not "omh cannot tell whether
+/// you are proxied", it is those hosts being unavailable.
+pub fn combined(answers: &[(&str, Inspection)]) -> Inspection {
+    if answers.iter().any(|(_, i)| *i == Inspection::Private) {
+        return Inspection::Private;
+    }
+    if answers.iter().any(|(_, i)| *i == Inspection::Public) {
+        return Inspection::Public;
+    }
+    let why: Vec<String> = answers
+        .iter()
+        .map(|(host, i)| match i {
+            Inspection::Unknown(why) => format!("{host}: {why}"),
+            _ => unreachable!("the two decided answers returned above"),
+        })
+        .collect();
+    Inspection::Unknown(if why.is_empty() {
+        "no host was asked".into()
+    } else {
+        why.join("; ")
+    })
+}
+
+/// Which of `FETCHES` this network re-signs, if any.
+///
+/// Returned alongside the verdict because a *selective* proxy is a surprising
+/// thing to be told about, and a warning that names the host it measured is
+/// one somebody can check rather than take on faith.
+pub fn inspected_hosts() -> (Inspection, Vec<&'static str>) {
+    let answers: Vec<(&'static str, Inspection)> =
+        FETCHES.iter().map(|h| (*h, inspection_of(h))).collect();
+    let named: Vec<&'static str> = answers
+        .iter()
+        .filter(|(_, i)| *i == Inspection::Private)
+        .map(|(h, _)| *h)
+        .collect();
+    (combined(&answers), named)
+}
+
 /// The platform's **public** root set, as a file openssl can verify against.
 ///
 /// macOS keeps Apple's shipped roots in their own keychain, separate from
@@ -891,6 +948,58 @@ pub fn passed(outcomes: &[Outcome]) -> bool {
 #[cfg(test)]
 mod tests {
 
+    /// **Some of your traffic is inspected is still "you need `ca_cert`".**
+    ///
+    /// A proxy can inspect selectively — by category, or by an allowlist one
+    /// of these happens to sit on. Asking a single host made the check's
+    /// answer depend on which host it happened to be, which is a coin flip
+    /// dressed as a measurement.
+    ///
+    /// The two orderings that matter are `Private` over everything, and
+    /// `Public` over `Unknown` — the second because one clean answer proves
+    /// the network is reachable, so the rest being unreadable is those hosts
+    /// being down, not omh being unable to tell.
+    #[test]
+    fn one_inspected_host_is_enough_and_a_clean_one_outranks_silence() {
+        let unknown = || Inspection::Unknown("no route".into());
+
+        // Private wins from either position, and against any mix.
+        for mix in [
+            vec![("a", Inspection::Private), ("b", Inspection::Public)],
+            vec![("a", Inspection::Public), ("b", Inspection::Private)],
+            vec![("a", unknown()), ("b", Inspection::Private)],
+            vec![("a", Inspection::Private), ("b", unknown())],
+        ] {
+            assert_eq!(
+                combined(&mix),
+                Inspection::Private,
+                "one re-signed host breaks the build that fetches it: {mix:?}"
+            );
+        }
+
+        // A clean answer outranks silence: the network is up, so the quiet
+        // host is a quiet host and not evidence of anything.
+        assert_eq!(
+            combined(&[("a", unknown()), ("b", Inspection::Public)]),
+            Inspection::Public
+        );
+        assert_eq!(
+            combined(&[("a", Inspection::Public), ("b", Inspection::Public)]),
+            Inspection::Public
+        );
+
+        // Nothing answered, and no host answered cleanly — this is the plane.
+        // It must stay `Unknown`, and carry why.
+        let all_quiet = combined(&[("a", unknown()), ("b", unknown())]);
+        let Inspection::Unknown(why) = all_quiet else {
+            panic!("nothing answered, so nothing is known: {all_quiet:?}")
+        };
+        assert!(!why.is_empty(), "an unknown must still say why");
+
+        // And no hosts at all is not a pass.
+        assert!(matches!(combined(&[]), Inspection::Unknown(_)));
+    }
+
     /// **Both arms, against real TLS.** The unit test above fixes the reading;
     /// this one proves omh reads the right thing off a real handshake, which
     /// is the half that can be quietly wrong — a `-CAfile` that silently does
@@ -974,16 +1083,27 @@ mod tests {
              TLS-inspecting proxy serves, and must read as Private"
         );
 
-        // And the internet, which is not proxied on a developer's own machine
-        // unless it is — in which case this test is telling the truth and the
-        // person running it already knows.
-        assert_eq!(
-            inspection_of("registry.npmjs.org"),
-            Inspection::Public,
-            "npm's registry is signed by a public root; reading it as Private \
-             means the `-CAfile` is not loading and every user would be told \
-             they are behind a proxy"
+        // And every host omh actually fetches from, each one separately —
+        // asking only one made the answer depend on which one it happened to
+        // be. On a developer's own machine none of these is proxied, unless it
+        // is, in which case this test is telling the truth and the person
+        // running it already knows.
+        for host in FETCHES {
+            assert_eq!(
+                inspection_of(host),
+                Inspection::Public,
+                "{host} is signed by a public root; reading it as Private means \
+                 the `-CAfile` is not loading and every user would be told they \
+                 are behind a proxy"
+            );
+        }
+        assert!(
+            FETCHES.len() > 1,
+            "one host is a coin flip against a proxy that inspects selectively"
         );
+        let (verdict, named) = inspected_hosts();
+        assert_eq!(verdict, Inspection::Public);
+        assert!(named.is_empty(), "nothing here is re-signed: {named:?}");
     }
 
     /// **Offline must never read as "you are behind a proxy".** That is the

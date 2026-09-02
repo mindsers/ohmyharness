@@ -350,11 +350,16 @@ inspecting it from the inside, and behind an inspecting proxy there is no image
 to launch.
 
 And `omh doctor` now says it *before* anything fails. With no `ca_cert` set, it
-asks whether a container would accept the certificate this network serves, by
+asks whether a container would accept the certificates this network serves, by
 verifying against the roots the platform ships rather than the ones your
 machine trusts — which is the same question a container asks. That catches the
 case the build cannot: an image cached from before the proxy appeared still
 builds, and only the sessions fail.
+
+It asks about both hosts a build fetches from — `github.com`, where the graph
+binary comes from in the base layer, and `registry.npmjs.org`, where the
+harness does — because a proxy can inspect selectively, and one host is a coin
+flip. Either one being re-signed is enough, and the warning names which.
 
 It reports only when the answer is yes. Offline, or anywhere omh cannot tell a
 shipped root from an installed one, it says nothing rather than guessing —

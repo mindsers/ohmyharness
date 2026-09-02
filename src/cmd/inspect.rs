@@ -168,15 +168,27 @@ pub(crate) fn doctor_cmd(
     // saying so is noise; `Unknown` means omh could not tell — offline, or not
     // macOS — and a check that guesses in that state is the cry-wolf this
     // whole three-valued shape exists to avoid.
-    if ca.is_none() && doctor::inspection_of("registry.npmjs.org") == doctor::Inspection::Private {
-        ctx.warn(
-            "this network re-signs TLS with a root your machine trusts and a \
-             container does not — a sandbox cannot verify anything it fetches. \
-             Set the corporate root:\n\n    \
-             security find-certificate -a -c \"Zscaler\" -p > ~/corp-root.pem\n    \
-             omh set --local ca_cert ~/corp-root.pem\n\n\
-             See docs/troubleshooting.md.",
-        );
+    if ca.is_none() {
+        let (verdict, hosts) = doctor::inspected_hosts();
+        if verdict == doctor::Inspection::Private {
+            // Named, because a proxy that re-signs one host and not another is
+            // a surprising thing to be told and the reader should be able to
+            // check it rather than take it on faith.
+            ctx.warn(&format!(
+                "this network re-signs TLS for {} with a root your machine \
+                 trusts and a container does not — a sandbox cannot verify \
+                 what it fetches from {}. Set the corporate root:\n\n    \
+                 security find-certificate -a -c \"Zscaler\" -p > ~/corp-root.pem\n    \
+                 omh set --local ca_cert ~/corp-root.pem\n\n\
+                 See docs/troubleshooting.md.",
+                hosts.join(" and "),
+                if hosts.len() == doctor::FETCHES.len() {
+                    "the network"
+                } else {
+                    "there"
+                }
+            ));
+        }
     }
 
     let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
