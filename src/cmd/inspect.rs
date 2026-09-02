@@ -121,6 +121,51 @@ pub(crate) fn doctor_cmd(
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let profile = Profile::resolve(&paths);
+
+    // **The host, before anything that depends on it.** `git_checks` reaches
+    // the report through `harvest::every_check`, which runs on the probe's
+    // output — so on a machine with no container runtime this command printed
+    // nothing at all, and the facts that would have named the problem were
+    // gated behind the problem. Computed here, reported below whatever happens.
+    let chosen = runtime::select(&crate::runtime_preference(&paths), &|p| {
+        runtime::installed(p)
+    });
+    let stack_defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
+    let markers: Vec<(String, String)> = stack::detected(&stack_defs, &paths.repo)
+        .into_iter()
+        .map(|d| (d.name.clone(), d.marker.clone()))
+        .collect();
+    let host = doctor::host_checks(
+        chosen
+            .as_ref()
+            .map(|b| b.program())
+            .map_err(|e| format!("{e:#}")),
+        stack_defs.len(),
+        &markers,
+    )
+    .into_iter()
+    .chain(doctor::git_checks())
+    .collect::<Vec<_>>();
+    let host = doctor::HostRows(host);
+
+    // A runtime omh cannot find stops everything below, so say what the host
+    // *does* have and stop — rather than failing with one line and leaving the
+    // reader to discover the rest a command at a time.
+    if chosen.is_err() {
+        let report = report::Doctor {
+            harness: "the host".into(),
+            tag: "no image — the runtime is missing".into(),
+            account: None,
+            outcomes: host.0,
+        };
+        ctx.say(&report);
+        anyhow::bail!(
+            "{} of {} checks failed",
+            report.failed(),
+            report.outcomes.len()
+        );
+    }
+
     let name = match harness {
         Some(h) => h.to_string(),
         None => {
@@ -128,8 +173,23 @@ pub(crate) fn doctor_cmd(
                 .into_iter()
                 .map(|a| a.name)
                 .collect();
-            detect::preferred_harness(&names, &|h| runtime::installed(h))
-                .context("no adapters installed — run `omh init`")?
+            match detect::preferred_harness(&names, &|h| runtime::installed(h)) {
+                Some(h) => h,
+                None => {
+                    // The host rows first. Without them this command's entire
+                    // output on a fresh machine was one line about adapters,
+                    // and nothing about whether git, a runtime or a stack were
+                    // in place — which is exactly what the reader needs next.
+                    let report = report::Doctor {
+                        harness: "the host".into(),
+                        tag: "no image — no adapter to build one for".into(),
+                        account: None,
+                        outcomes: host.0,
+                    };
+                    ctx.say(&report);
+                    anyhow::bail!("no adapters installed — run `omh init`");
+                }
+            }
         }
     };
     let adapter = Adapter::find(&paths.adapters(), &name)?;
@@ -333,13 +393,12 @@ pub(crate) fn doctor_cmd(
                                                                // explanation to a cause — with an empty stderr rendering as a bare
                                                                // `omh:` and nothing after it. The sentence omh wrote stays first, and
                                                                // what the container said follows it, sanitised: it is not omh's text.
-    let outcomes =
-        crate::cmd::harvest::every_check(from_the_sandbox).map_err(
-            |e| match crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim()) {
-                said if said.is_empty() => e,
-                said => anyhow::anyhow!("{e}\n{said}"),
-            },
-        )?;
+    let outcomes = crate::cmd::harvest::every_check(from_the_sandbox, host).map_err(|e| {
+        match crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim()) {
+            said if said.is_empty() => e,
+            said => anyhow::anyhow!("{e}\n{said}"),
+        }
+    })?;
 
     let report = report::Doctor {
         harness: name,

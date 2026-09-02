@@ -513,15 +513,30 @@ pub(crate) fn what_to_keep(
 /// list, silenced the emptiness check or dropped git from the report entirely,
 /// and no test could reach either — `doctor_cmd` needs a container. Taken from
 /// `doctor::git_checks` here, none of those three mistakes compiles.
-pub(crate) fn every_check(from_the_sandbox: Vec<doctor::Outcome>) -> Result<Vec<doctor::Outcome>> {
+pub(crate) fn every_check(
+    from_the_sandbox: Vec<doctor::Outcome>,
+    host: doctor::HostRows,
+) -> Result<Vec<doctor::Outcome>> {
     anyhow::ensure!(
         !from_the_sandbox.is_empty(),
         "the probe produced no output — the sandbox did not run it"
     );
-    Ok(from_the_sandbox
-        .into_iter()
-        .chain(doctor::git_checks())
-        .collect())
+    // The other half of the guard the old shape got from not having a
+    // parameter: an empty host side is a caller that gathered nothing, not a
+    // host with nothing to say. `host_checks` always answers two rows and
+    // `git_checks` at least one.
+    anyhow::ensure!(
+        !host.0.is_empty(),
+        "no host checks were gathered — the report would say the sandbox is \
+         fine and nothing about the machine it ran on"
+    );
+    // **The host rows come in, rather than being gathered here.** They used to
+    // be `doctor::git_checks()` called on this line, which meant every
+    // host-side answer was produced *after* the probe and therefore only on a
+    // machine where the probe could run. `doctor_cmd` gathers them before the
+    // container work now and reports them either way; this keeps the ordering
+    // — host facts after the sandbox's, which is how the table has always read.
+    Ok(host.0.into_iter().chain(from_the_sandbox).collect())
 }
 
 /// Whether a commit may go ahead over what `git diff --check` found.

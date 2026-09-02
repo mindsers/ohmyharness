@@ -1392,9 +1392,16 @@ impl Report for Doctor {
                 p.paint(
                     out::OK,
                     &format!(
-                        "all {} checks passed — {}'s adapter paths are verified",
+                        // A host-only report has verified no adapter path —
+                        // it never reached a sandbox. Saying so anyway is the
+                        // kind of claim `doctor` exists to stop making.
+                        "all {} checks passed — {}",
                         self.outcomes.len(),
-                        self.harness
+                        if self.harness == "the host" {
+                            "the host is ready; nothing was run in a sandbox".into()
+                        } else {
+                            format!("{}'s adapter paths are verified", self.harness)
+                        }
                     )
                 )
             ));
