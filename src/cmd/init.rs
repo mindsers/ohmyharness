@@ -552,6 +552,12 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // A value that exists to end a misleading silence must not replace it with
     // a misleading sentence.
     let mut hooks = report::Hooks::Unchecked("no harness, so no sandbox to ask".into());
+    // Once, above every block that needs it. `init` read this setting three
+    // times — twice in this function and again inside `sandbox()` — so a PEM
+    // edited mid-run produced two different tags for one command. Reading it
+    // here also fails early, before any image is built, which is where a
+    // certificate omh cannot read should stop.
+    let ca = image::ca_for(&paths)?;
     if let Some(h) = &harness {
         // Past the first gate, so the harness is no longer the reason. Set
         // before the probe rather than after it, because the two arms that
@@ -565,17 +571,27 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // Without it the headline command cannot run, so init is not finished
         // until this exists — and until it exists there is no sandbox to ask
         // about a toolchain.
-        if image::exists(backend.program(), &image::tag_for(&adapter)) {
-            summary.image = Some(format!("{} (already built)", image::tag_for(&adapter)));
+        if image::exists(
+            backend.program(),
+            &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
+        ) {
+            summary.image = Some(format!(
+                "{} (already built)",
+                image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
+            ));
         } else {
             // Progress, not report: this is the minutes-long step, and
             // somebody watching a blank terminal needs to know it is alive.
             ctx.progress(&format!(
                 "building {} — first run only…",
-                image::tag_for(&adapter)
+                image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
             ));
-            image::ensure(backend.program(), &adapter)?;
-            summary.image = Some(image::tag_for(&adapter));
+            image::ensure(
+                backend.program(),
+                &adapter,
+                ca.as_ref().map(image::Root::pem),
+            )?;
+            summary.image = Some(image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)));
         }
 
         // Which provides apply here. Evaluated **in the sandbox**, with the repo
@@ -608,7 +624,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             } else {
                 match Command::new(backend.program())
                     .args(stack::predicate_args(
-                        &image::tag_for(&adapter),
+                        &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
                         &paths.repo,
                         &stack::predicate_script(&candidates),
                     ))
@@ -685,9 +701,23 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // written it, and a `false` in `settings.local.toml` means *not
                 // on this laptop*, which is the laptop building the image.
                 let (own, repo) = crate::cmd::session::resolved(&paths)?;
-                let sandbox = sandbox(&paths, &adapter, &repo)?;
-                image::ensure_stack(backend.program(), &adapter, &sandbox.recipe(), &paths.repo)?;
-                if sandbox.tag != image::tag_for(&adapter) {
+                let sandbox = sandbox(&paths, &adapter, &repo, ca.clone())?;
+                image::ensure_stack(
+                    backend.program(),
+                    &adapter,
+                    &sandbox.recipe(),
+                    // The sandbox's own reading, not a fresh one. `sandbox.tag`
+                    // was computed from it, and two reads of a file can differ.
+                    sandbox.ca.as_ref().map(image::Root::pem),
+                    &paths.repo,
+                )?;
+                // `sandbox.ca`, not `ca` — the same reading `sandbox.tag`
+                // was computed from. They are one value now, and comparing a
+                // tag against one derived from a different read is what made
+                // this comparison meaningless when they could differ.
+                if sandbox.tag
+                    != image::tag_for(&adapter, sandbox.ca.as_ref().map(image::Root::pem))
+                {
                     summary.stack_image = Some(sandbox.tag.clone());
                 }
 
@@ -822,7 +852,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         })?;
         let adapter = Adapter::find(&paths.adapters(), h)?;
         let args = base::index_args(
-            &image::tag_for(&adapter),
+            &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
             &paths.cache_volume(),
             &paths.repo,
             &paths.repo_name(),
@@ -1378,6 +1408,13 @@ pub(crate) struct Sandbox {
     /// says what is held back has to be able to say *nothing was asked*, and
     /// `resolves` alone cannot: an empty map is what both outcomes look like.
     pub(crate) unmeasured: Option<String>,
+    /// The corporate root `tag` was computed with, for the same reason
+    /// `installs` is carried: the layer a launch builds and the tag it runs
+    /// must come from one resolution. `session_up` read the setting a second
+    /// time, which is the split its own doc comment warns about — a second read
+    /// can differ from the first, and then omh builds one image and names
+    /// another.
+    pub(crate) ca: Option<crate::image::Root>,
 }
 
 impl Sandbox {
@@ -1434,10 +1471,17 @@ impl Sandbox {
         ctx: &out::Ctx,
     ) -> Result<()> {
         let recipe: Vec<String> = self.installs.clone();
+        // The reading `self.tag` was computed from. This used to resolve the
+        // setting again here, with a comment arguing that a parameter is one
+        // more place to forget — but the value was already on `self`, and a
+        // second read of a file that has moved builds a layer the tag beside
+        // it does not name.
+        let ca = self.ca.as_ref().map(crate::image::Root::pem);
         image::ensure_stack(
             program,
             adapter,
             &recipe.iter().map(String::as_str).collect::<Vec<_>>(),
+            ca,
             &paths.repo,
         )?;
         let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
@@ -1470,6 +1514,7 @@ pub(crate) fn sandbox(
     paths: &Paths,
     adapter: &Adapter,
     repo: &settings::RepoPolicy,
+    ca: Option<crate::image::Root>,
 ) -> Result<Sandbox> {
     let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())?;
     let detected = stack::detected(&defs, &paths.repo);
@@ -1477,9 +1522,16 @@ pub(crate) fn sandbox(
         .into_iter()
         .map(str::to_string)
         .collect();
+    // Once, and carried — but resolved by the *caller*, not here. Every later
+    // question about this image (the tag, the layer that gets built, the
+    // digest a note pins) is answered from that one read, so a PEM edited
+    // between two of them cannot produce two different images. Resolving here
+    // instead made this the second read for any caller that had already needed
+    // the certificate for its harness image, which `init` does.
     let tag = image::stack_tag(
         adapter,
         &installs.iter().map(String::as_str).collect::<Vec<_>>(),
+        ca.as_ref().map(image::Root::pem),
     );
     let resolves = facts::Facts::load(paths).about(&tag);
     let owed = needs_of(&detected, &repo.provision);
@@ -1491,5 +1543,6 @@ pub(crate) fn sandbox(
         // Nothing has been asked yet — this reads the cache and never the
         // container. `top_up` is what turns it into an answer.
         unmeasured: Some("the sandbox has not been asked".into()),
+        ca,
     })
 }

@@ -186,6 +186,11 @@ impl Sandbox {
         let log = self.bin.join("docker.log");
         let images = self.bin.join("images");
         let containers = self.bin.join("containers");
+        // The recipe omh actually hands the builder. Kept rather than
+        // discarded because the tests below are about what is *in* it — a
+        // certificate that never reaches the Dockerfile is the whole failure,
+        // and the argv log cannot see it: omh sends it on stdin.
+        let recipes = self.bin.join("recipes");
         std::fs::write(&images, format!("{}\n", tags.join("\n"))).unwrap();
         std::fs::write(&containers, format!("{}\n", in_use.join("\n"))).unwrap();
         let shim = self.bin.join("docker");
@@ -204,13 +209,14 @@ impl Sandbox {
                  # whenever the Dockerfile loses the race with this exit. That\n\
                  # is what failed this test on the linux runner three times\n\
                  # across three branches, each time saying only `init failed`.\n\
-                 if [ \"$1\" = build ]; then cat > /dev/null; fi\n\
+                 if [ \"$1\" = build ]; then cat >> {recipes}; fi\n\
                  if [ \"$1\" = images ]; then cat {images}; fi\n\
                  if [ \"$1\" = ps ]; then cat {containers}; fi\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\nexit 0\n",
                 log = log.display(),
                 images = images.display(),
                 containers = containers.display(),
+                recipes = recipes.display(),
             ),
         )
         .unwrap();
@@ -226,6 +232,11 @@ impl Sandbox {
         )
         .unwrap();
         log
+    }
+
+    /// Every Dockerfile the shim above was handed, in one string.
+    fn recipes_built(&self) -> String {
+        std::fs::read_to_string(self.bin.join("recipes")).unwrap_or_default()
     }
 
     fn docker_calls(&self, log: &Path) -> Vec<String> {
@@ -7968,4 +7979,154 @@ fn import_writes_nothing_on_a_dry_run() {
     // flag rather than about the copy.
     sb.omh(&["import", "skills", "claude"]);
     assert_eq!(count(), 1, "without the flag it imports");
+}
+
+/// **A certificate omh cannot read must stop the build, and say which file.**
+///
+/// The unit guards cover `ca_for` in isolation. This one covers the thing a
+/// person behind a proxy actually does — set the value, run `omh init` — and
+/// asserts the refusal reaches them through the CLI rather than being lost on
+/// the way. `ca_cert` appeared nowhere under `tests/` before this.
+#[test]
+fn init_refuses_a_ca_cert_it_cannot_read_and_names_the_file() {
+    let sb = sandbox();
+    sb.fake_docker_with_nothing_built(&[], &[]);
+    let missing = sb.repo.join("no-such-corp.pem");
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        format!(
+            "runtime = \"docker\"\nca_cert = \"{}\"\n",
+            missing.display()
+        ),
+    )
+    .unwrap();
+
+    let ran = sb.omh(&["init"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&ran.stderr),
+        String::from_utf8_lossy(&ran.stdout)
+    );
+    assert!(
+        !ran.status.success(),
+        "a certificate omh cannot read built an image anyway: {said}"
+    );
+    assert!(
+        said.contains("ca_cert"),
+        "the refusal must name the setting: {said}"
+    );
+    assert!(
+        said.contains("no-such-corp.pem"),
+        "and the file it could not read: {said}"
+    );
+}
+
+/// **The recipe omh hands the builder is the one carrying the certificate.**
+///
+/// The argv log cannot see this: the Dockerfile goes on stdin, so every
+/// assertion about the build had been made against the *arguments*. A shim
+/// that keeps stdin is what turns "the string exists in a function's return
+/// value" into "docker was handed it".
+///
+/// The tag comparison covers the base and harness layers, which is what `init`
+/// builds. It does **not** reach the stack layer: this fixture detects no stack,
+/// so `stack_tag` is never called here, and the guard for that one is
+/// `the_layer_a_sandbox_names_is_the_layer_its_recipe_builds`. Said plainly
+/// because a test that looks like it covers the launch path and does not is
+/// worse than one that says where it stops.
+#[test]
+fn the_recipe_docker_is_handed_carries_the_certificate_and_names_that_image() {
+    let sb = sandbox();
+    let log = sb.fake_docker_with_nothing_built(&[], &[]);
+    let pem = sb.repo.join("corp.pem");
+    std::fs::write(
+        &pem,
+        "-----BEGIN CERTIFICATE-----\nUNMISTAKABLE\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/settings.toml"),
+        format!("runtime = \"docker\"\nca_cert = \"{}\"\n", pem.display()),
+    )
+    .unwrap();
+
+    let init = sb.omh(&["init"]);
+    assert!(
+        init.status.success(),
+        "init failed, so no build ran\n--- stderr ---\n{}\n--- docker ---\n{}",
+        String::from_utf8_lossy(&init.stderr),
+        sb.docker_calls(&log).join("\n")
+    );
+
+    let built = sb.recipes_built();
+    assert!(
+        built.contains("UNMISTAKABLE"),
+        "the certificate never reached the builder: {built}"
+    );
+    assert!(
+        built.contains("&& update-ca-certificates"),
+        "and nothing in the recipe rebuilds the store from it: {built}"
+    );
+
+    let mine = built_tags(&sb.docker_calls(&log));
+    assert!(
+        !mine.is_empty(),
+        "no build happened, so this proves nothing: {:?}",
+        sb.docker_calls(&log)
+    );
+
+    // **The tag has to move with the certificate**, end to end, through
+    // whatever the command actually calls. This is the guard for the
+    // threading: a site that resolves the certificate for the *recipe* and
+    // `None` for the *tag* builds an image carrying the root and names it as
+    // though it had none — so the next run finds that tag present and skips
+    // the build, and the sandbox trusts nothing. The recipe assertions above
+    // cannot see it, because the recipe is right in both cases.
+    let other = sandbox();
+    let log2 = other.fake_docker_with_nothing_built(&[], &[]);
+    let pem2 = other.repo.join("corp.pem");
+    std::fs::write(
+        &pem2,
+        "-----BEGIN CERTIFICATE-----\nDIFFERENTROOT\n-----END CERTIFICATE-----\n",
+    )
+    .unwrap();
+    std::fs::write(
+        other.repo.join(".omh/settings.toml"),
+        format!("runtime = \"docker\"\nca_cert = \"{}\"\n", pem2.display()),
+    )
+    .unwrap();
+    assert!(other.omh(&["init"]).status.success());
+    let theirs = built_tags(&other.docker_calls(&log2));
+
+    assert_eq!(
+        mine.len(),
+        theirs.len(),
+        "the two runs did not build the same layers, so comparing them proves \
+         nothing: {mine:?} vs {theirs:?}"
+    );
+    for (a, b) in mine.iter().zip(theirs.iter()) {
+        assert_ne!(
+            a, b,
+            "two different roots produced the same image name — the tag does \
+             not carry the certificate, so a rotated root is a cache hit on a \
+             build that never happened"
+        );
+    }
+}
+
+/// The `-t <tag>` of every build in a docker argv log, in order.
+fn built_tags(calls: &[String]) -> Vec<String> {
+    calls
+        .iter()
+        .filter(|c| c.starts_with("build "))
+        .filter_map(|c| {
+            let mut it = c.split_whitespace();
+            while let Some(w) = it.next() {
+                if w == "-t" {
+                    return it.next().map(str::to_string);
+                }
+            }
+            None
+        })
+        .collect()
 }

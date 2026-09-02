@@ -341,6 +341,70 @@ the content check.
 compose the rules document — so writing into the checkout would overwrite its
 own input. Point `--to` somewhere outside and copy in what you want.
 
+### an unknown-issuer error when omh builds an image
+
+**omh now says this for you, from both ends.** A build that dies on an
+unverifiable certificate ends by naming `ca_cert` and the command that sets it.
+Doctor's *guest-side* checks cannot answer that one — they work by launching
+the image and inspecting it from the inside, and behind an inspecting proxy
+there is no image to launch — so the diagnosis lives in the build itself.
+
+And `omh doctor` now says it *before* anything fails. With no `ca_cert` set, it
+asks whether a container would accept the certificates this network serves, by
+verifying against the roots the platform ships rather than the ones your
+machine trusts — which is the same question a container asks. That catches the
+case the build cannot: an image cached from before the proxy appeared still
+builds, and only the sessions fail.
+
+It asks about two of the hosts a build fetches from — `github.com`, where the
+graph binary comes from in the base layer, and `registry.npmjs.org`, where the
+harness does — sampled rather than exhaustive, because a proxy can inspect
+selectively and one host is a coin flip. Either one being re-signed is enough,
+and the warning names which.
+
+It needs an `openssl` that restricts verification to the file it is given.
+Stock macOS ships LibreSSL, which does not, so omh checks that first and says
+it cannot tell rather than reporting a clean network it did not measure.
+
+It reports only when the answer is yes. Offline, or anywhere omh cannot tell a
+shipped root from an installed one, it says nothing rather than guessing —
+being told to install a corporate root on a plane is worse than silence.
+
+The wording depends on which tool reaches the network first — `unable to get
+local issuer certificate` from curl, `CERTIFICATE_VERIFY_FAILED` from python,
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE` from node — but the cause is one thing: your
+network inspects TLS. Zscaler, Netskope and corporate MITM proxies terminate
+every HTTPS connection and re-sign it with the company's own root. Your machine
+trusts it because IT installed it; a container does not. The graph download and
+`npm install -g` for the harness both fail, so no image gets built.
+
+Get the root as a PEM — on macOS it lives in the keychain rather than on disk —
+and point omh at it:
+
+```console
+$ security find-certificate -a -c "Zscaler" -p > ~/corp-root.pem
+$ omh set --local ca_cert ~/corp-root.pem
+$ omh init
+$ omh doctor
+```
+
+`--local` puts it in `.omh/settings.local.toml`, which is gitignored. **Not
+`omh settings set`** — that writes the template new repos are seeded from, and
+a repo that already exists never re-reads it.
+
+`omh doctor` is the step worth not skipping: it checks the root reached the
+sandbox's trust store, which is the one thing a successful build does not
+prove. `update-ca-certificates` exits 0 when it skips a certificate it cannot
+parse.
+
+[`ca_cert`](configuration.md#ca_cert) has the detail, including which
+toolchains need telling separately from the system store.
+
+If the file you have is a DER `.crt` rather than PEM, omh says so and gives you
+the `openssl` line that converts it. If it carries `Bag Attributes` or
+`friendlyName:` preamble from a `pkcs12` export, omh refuses it rather than
+editing your certificate — strip it to the `BEGIN`/`END` block.
+
 ### `no usable base manifest` or `declares no base-set entries`
 
 omh could not find a readable [base set](design/base-set.md) in `~/.omh/base`,

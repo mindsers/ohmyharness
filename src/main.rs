@@ -1582,7 +1582,7 @@ mod tests {
             ("adapters.md", 1),
             ("code-graph.md", 1),
             ("commands.md", 131),
-            ("configuration.md", 42),
+            ("configuration.md", 44),
             ("decisions.md", 1),
             ("editors.md", 4),
             ("getting-started.md", 14),
@@ -1590,7 +1590,7 @@ mod tests {
             ("memory.md", 5),
             ("profile.md", 3),
             ("sessions.md", 11),
-            ("troubleshooting.md", 8),
+            ("troubleshooting.md", 11),
             ("trust.md", 2),
         ]
         .into_iter()
@@ -2154,13 +2154,35 @@ mod tests {
             ("src/cmd/catalogue.rs", 12),
             ("src/cmd/harvest.rs", 19),
             ("src/cmd/init.rs", 6),
-            ("src/cmd/inspect.rs", 3),
+            // The fourth is `doctor`'s TLS-inspection warning. It is printed
+            // to somebody whose sandbox cannot verify anything it fetches and
+            // who has, by construction, not set `ca_cert` — so the command in
+            // it is the only thing standing between them and a broken
+            // sandbox, and `--local` being the spelling omh accepts is what
+            // this scan is for.
+            ("src/cmd/inspect.rs", 4),
             ("src/cmd/memory.rs", 1),
             ("src/cmd/session.rs", 10),
             ("src/cmd/settings.rs", 10),
             ("src/config.rs", 3),
             ("src/container.rs", 4),
             ("src/doctor.rs", 1),
+            // Three. One is the `# `omh set --local ca_cert`` line `ca_layer`
+            // writes into the generated Dockerfile, telling whoever reads the
+            // recipe where the certificate came from. **Not** either of
+            // `ca_for`'s refusals: neither contains a command line, so neither
+            // is what this scan sees — which is what this comment said before,
+            // about a reading nobody had taken.
+            //
+            // The other two are `why_the_build_failed`'s, one per arm.
+            // `omh set --local ca_cert …` goes to somebody whose build just
+            // died and who has no reason to suspect a setting exists, so a
+            // command that does not parse would send them nowhere — and
+            // `omh settings set` is the spelling that looks right while
+            // writing a template nothing re-reads. `omh doctor` goes to
+            // somebody who set one that did not work; it carries no `--local`
+            // and is the shorter claim.
+            ("src/image.rs", 3),
             ("src/main.rs", 8),
             ("src/memory.rs", 2),
             ("src/memory/ingest.rs", 2),
@@ -3855,7 +3877,9 @@ mod tests {
             for k in keys {
                 repo.provision.insert((*k).to_string(), true);
             }
-            cmd::init::sandbox(&paths, &adapter, &repo).unwrap().tag
+            cmd::init::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap())
+                .unwrap()
+                .tag
         };
 
         let nothing = with(&[]);
@@ -3864,7 +3888,7 @@ mod tests {
 
         assert_eq!(
             nothing,
-            image::tag_for(&adapter),
+            image::tag_for(&adapter, None),
             "a repo that provisions nothing runs the harness image, not an \
              empty layer on top of it"
         );
@@ -4361,6 +4385,7 @@ mod tests {
             resolves: BTreeMap::new(),
             owed: owed.iter().map(|s| (*s).to_string()).collect(),
             unmeasured: Some("not asked yet".into()),
+            ca: None,
         }
     }
 
@@ -4621,8 +4646,28 @@ because = "a fixture"
             repo: dir.path().join("repo"),
         };
         provisioned_fixture(&paths);
+        // **With a certificate set**, because that is the dimension this guard
+        // was blind to. It hardcoded `None` on both sides, so reverting either
+        // `sandbox()` or `session_up` to pass `None` left the whole suite
+        // green — and what that ships is a stack layer built without the
+        // corporate root while `plan.image` names the tag that has it.
+        let pem = dir.path().join("corp.pem");
+        std::fs::write(
+            &pem,
+            "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        std::fs::write(
+            paths.repo.join(".omh/settings.toml"),
+            format!("ca_cert = \"{}\"\n", pem.display()),
+        )
+        .unwrap();
+        let ca = image::ca_for(&paths).unwrap();
+        assert!(ca.is_some(), "the fixture must actually set one");
+
         let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
-        let sb = cmd::init::sandbox(&paths, &adapter, &fixture_policy()).unwrap();
+        let sb = cmd::init::sandbox(&paths, &adapter, &fixture_policy(), ca.clone()).unwrap();
 
         assert_eq!(
             sb.recipe(),
@@ -4631,14 +4676,20 @@ because = "a fixture"
         );
         assert_ne!(
             sb.tag,
-            image::tag_for(&adapter),
+            image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
             "this fixture must provision something or it proves nothing"
         );
         assert_eq!(
-            image::stack_tag(&adapter, &sb.recipe()),
+            image::stack_tag(&adapter, &sb.recipe(), ca.as_ref().map(image::Root::pem)),
             sb.tag,
             "the recipe handed to `ensure_stack` must build the tag `plan` runs, \
              or a session runs an image nothing built"
+        );
+        assert_ne!(
+            sb.tag,
+            image::stack_tag(&adapter, &sb.recipe(), None),
+            "and the certificate must be part of what the tag names, or this \
+             fixture is back to proving nothing about it"
         );
     }
 
@@ -4655,7 +4706,8 @@ because = "a fixture"
         let adapter = Adapter::find(std::path::Path::new(BUNDLED_ADAPTERS), "claude").unwrap();
         let repo = fixture_policy();
 
-        let first = cmd::init::sandbox(&paths, &adapter, &repo).unwrap();
+        let first =
+            cmd::init::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
         assert_eq!(
             first.owed,
             BTreeSet::from(["zulu".to_string(), "alpha".to_string()]),
@@ -4679,7 +4731,8 @@ because = "a fixture"
         );
         facts.save(&paths).unwrap();
 
-        let second = cmd::init::sandbox(&paths, &adapter, &repo).unwrap();
+        let second =
+            cmd::init::sandbox(&paths, &adapter, &repo, image::ca_for(&paths).unwrap()).unwrap();
         assert_eq!(
             second.resolves.get("alpha"),
             Some(&false),
@@ -5792,6 +5845,9 @@ because = "a fixture"
         // in `main`, which cannot report through the thing it is reporting
         // about, and the MCP line reader, which speaks protocol.
         //
+        // The tenth is neither: it is a relay of a child's stream, listed
+        // separately below.
+        //
         // The other seven are **owed a fix, not excused one**. They predate the
         // scan reading their files at all, and every one writes an `omh: ` line
         // straight to stderr — no palette, and not suppressed under `--json`,
@@ -5820,11 +5876,28 @@ because = "a fixture"
             ("src/image.rs", "could not list images to reap"),
             ("src/image.rs", "this build replaced"),
         ];
+        // **A relay is not a message.** These do not write anything omh
+        // composed — they hand a child process's stream back to the terminal
+        // verbatim, which is what `Stdio::inherit` did before omh needed to
+        // read the stream as well as show it. So they are not debts and are
+        // counted separately: the seven above stay seven, and this list may
+        // not quietly become a second way in.
+        //
+        // `build` reads docker's stderr so it can say *why* a build failed —
+        // behind a TLS-inspecting proxy the answer is `ca_cert`, and doctor
+        // cannot answer it because there is no image to inspect. Reading it
+        // means relaying it, or a multi-minute build goes silent.
+        let relayed = [
+            ("src/image.rs", "eprint!(\"{text}\")"),
+            ("src/image.rs", "omh: lost the rest of the build log"),
+        ];
+
         let unexpected: Vec<&String> = offenders
             .iter()
             .filter(|o| {
                 !named
                     .iter()
+                    .chain(relayed.iter())
                     .any(|(file, what)| o.starts_with(file) && o.contains(what))
             })
             .collect();
@@ -5833,7 +5906,7 @@ because = "a fixture"
             "every write goes through out::Ctx but the sites named in this test — \
              found {unexpected:#?}"
         );
-        for (file, what) in named {
+        for (file, what) in named.iter().chain(relayed.iter()) {
             assert!(
                 offenders
                     .iter()
@@ -5842,6 +5915,24 @@ because = "a fixture"
                  this test says is not there"
             );
         }
+        assert_eq!(
+            named.len(),
+            9,
+            "the debt register grew. Two exemptions and seven sites owed a \
+             `Ctx` — an eighth owed site is a fix, not an entry"
+        );
+        // The comment above `relayed` says it "may not quietly become a second
+        // way in", and nothing made that true: only `named` was counted, so
+        // appending a bare `eprintln!` here was green with no number moving.
+        // A claim about containment that is not measured is the shape this
+        // whole guard exists to catch.
+        assert_eq!(
+            relayed.len(),
+            2,
+            "a relay is a child's stream handed back verbatim — the two are \
+             `build`'s log line and the one note it prints when that log ends \
+             early. A third is a claim somebody has to justify, not a line to add"
+        );
     }
 
     // ── candidate guards (mutation testing) ─────────────────────────────────

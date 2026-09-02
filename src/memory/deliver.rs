@@ -148,7 +148,14 @@ pub fn ensure(
                     crate_dir.display()
                 );
             }
-            build(program, crate_dir, &out, arch, ctx)?;
+            // The proxy that made `ca_cert` necessary is in front of
+            // crates.io too, and this container is not omh's image.
+            // The path off the same `Root` whose pem was validated. This
+            // used to be `ca_path`, a second resolution of the setting that
+            // could name a different file than the one `ca_for` had read.
+            let root = crate::image::ca_for(paths)?;
+            let ca = root.as_ref().map(crate::image::Root::path);
+            build(program, crate_dir, &out, arch, ca, ctx)?;
             Ok(out)
         }
     }
@@ -165,6 +172,7 @@ pub fn build(
     crate_dir: &Path,
     out: &Path,
     arch: &str,
+    ca: Option<&Path>,
     ctx: &crate::out::Ctx,
 ) -> Result<()> {
     std::fs::create_dir_all(out.parent().context("cache has no parent")?)?;
@@ -173,7 +181,7 @@ pub fn build(
     ctx.progress(&format!(
         "cross-building the memory server for linux/{arch} — first run only…"
     ));
-    let status = std::process::Command::new(program)
+    let mut child = std::process::Command::new(program)
         .args([
             "run",
             "--rm",
@@ -197,20 +205,65 @@ pub fn build(
         .args(["-e", "CARGO_HOME=/cargo"])
         .args(["-e", "CARGO_TARGET_DIR=/cargo/target"])
         .args(["-w", "/build"])
+        .args(ca_args(ca))
         .arg("rust:1-bookworm")
         .args([
             "sh",
             "-c",
             &build_script(&out.file_name().unwrap().to_string_lossy()),
         ])
-        .status()
+        // Piped and relayed, for the same reason `image::build` does it: this
+        // runs cargo against crates.io through whatever inspects this network,
+        // and a bare "the cross-build failed" is the message `ca_cert` exists
+        // to replace. Watching it still works — `relay` writes every line back
+        // out — and it is a long build, so that matters.
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .with_context(|| format!("running {program} for the cross-build"))?;
 
+    let log = match child.stderr.take() {
+        Some(err) => crate::image::relay(err),
+        None => String::new(),
+    };
+    let status = child
+        .wait()
+        .with_context(|| format!("waiting for {program} to finish the cross-build"))?;
+
     if !status.success() {
+        // `ca.is_some()`, carried rather than derived — the caller resolved it
+        // to build the `-v` mount three lines up, so unlike the image build
+        // there was never a recipe to sniff.
+        if let Some(why) = crate::image::why_the_build_failed(&log, ca.is_some()) {
+            bail!("cross-building omh for linux/{arch} failed\n\n{why}");
+        }
         bail!("cross-building omh for linux/{arch} failed");
     }
     let _ = target; // named for the error message above, not passed to cargo
     Ok(())
+}
+
+/// What the cross-build container needs to trust a corporate root, or nothing.
+///
+/// A function rather than inline `.args(..)` for `build_script`'s reason: this
+/// container is upstream's `rust:1-bookworm`, not a recipe omh writes, so
+/// there is no recipe text a test could read and no tag that would move. The
+/// only way to assert what it is told is to build the arguments somewhere a
+/// test can see them.
+fn ca_args(ca: Option<&Path>) -> Vec<String> {
+    let Some(at) = ca else {
+        return Vec::new();
+    };
+    // Read-only, and at a fixed guest path: what the host calls it is the
+    // user's business and what cargo is told to read is omh's.
+    const GUEST: &str = "/omh-ca.crt";
+    vec![
+        "-v".into(),
+        format!("{}:{GUEST}:ro", at.display()),
+        "-e".into(),
+        format!("CARGO_HTTP_CAINFO={GUEST}"),
+        "-e".into(),
+        format!("SSL_CERT_FILE={GUEST}"),
+    ]
 }
 
 /// The shell the cross-build runs inside the container.
@@ -261,6 +314,102 @@ fn docker_arch(arch: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+
+    /// **The second command a user hits behind a proxy, and it said nothing.**
+    ///
+    /// `ca_cert` gets `omh init` working; the cross-build then runs cargo
+    /// against crates.io inside `rust:1-bookworm`, through the same inspecting
+    /// proxy, and failed with `cross-building omh for linux/… failed` — the
+    /// bare message `image::why_the_build_failed` exists to replace, with
+    /// nothing pointing back at the setting just fixed. `86c5f5b` mounted the
+    /// certificate here and stopped short of diagnosing the failure.
+    ///
+    /// Driven through a shim standing in for docker, so it needs no container:
+    /// the shim writes what a proxied cargo writes and exits non-zero.
+    #[test]
+    #[cfg(unix)]
+    fn a_cross_build_that_died_on_a_certificate_names_the_setting() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let shim = d.path().join("docker-shim");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\necho 'error: the SSL certificate is invalid; class=Ssl (16)' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let out = d.path().join("cache").join("omh-memory");
+        let crate_dir = d.path().join("crate");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+
+        // No certificate set: the user is told one exists and how to set it.
+        let e = build(
+            &shim.display().to_string(),
+            &crate_dir,
+            &out,
+            "arm64",
+            None,
+            &crate::out::Ctx::plain(),
+        )
+        .expect_err("the shim always fails");
+        let e = format!("{e:#}");
+        assert!(
+            e.contains("ca_cert"),
+            "the cross-build must name the setting too: {e}"
+        );
+        assert!(
+            e.contains("omh set --local"),
+            "and the spelling that works: {e}"
+        );
+
+        // A certificate already set: the other answer, not the same one again.
+        let pem = d.path().join("corp.pem");
+        std::fs::write(
+            &pem,
+            "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let e = build(
+            &shim.display().to_string(),
+            &crate_dir,
+            &out,
+            "arm64",
+            Some(&pem),
+            &crate::out::Ctx::plain(),
+        )
+        .expect_err("the shim always fails");
+        let e = format!("{e:#}");
+        assert!(
+            !e.contains("omh set --local"),
+            "the certificate is mounted here; do not tell them to set it: {e}"
+        );
+
+        // And an ordinary failure is left ordinary.
+        let plain = d.path().join("plain-shim");
+        std::fs::write(
+            &plain,
+            "#!/bin/sh\necho 'no space left on device' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let e = format!(
+            "{:#}",
+            build(
+                &plain.display().to_string(),
+                &crate_dir,
+                &out,
+                "arm64",
+                None,
+                &crate::out::Ctx::plain(),
+            )
+            .expect_err("the shim always fails")
+        );
+        assert!(
+            !e.contains("ca_cert"),
+            "a disk-full cross-build is not a proxy problem: {e}"
+        );
+    }
     use super::*;
 
     const NEVER: &dyn Fn(&Path) -> bool = &|_: &Path| false;
@@ -439,5 +588,36 @@ mod tests {
             !GUEST_BIN.starts_with(crate::image::GUEST_HOME),
             "a program is not state, and the home is mounted over"
         );
+    }
+
+    /// **The cross-build is the one container that is not omh's image.**
+    ///
+    /// `deliver::build` runs stock `rust:1-bookworm` and compiles omh against
+    /// crates.io — over TLS, behind the same inspecting proxy `ca_cert` exists
+    /// for, in a container that knows nothing about it. So the user who has
+    /// just got `omh init` working hits the same unknown-issuer failure in a
+    /// different command, with no entry in the troubleshooting page pointing
+    /// back at the setting they already fixed.
+    ///
+    /// The certificate is *mounted* here rather than embedded: this image is
+    /// upstream's, not a recipe omh writes, so there is nothing to bake it
+    /// into and nothing whose tag would have to move.
+    #[test]
+    fn the_cross_build_is_given_the_corporate_root_too() {
+        let none = ca_args(None);
+        assert!(none.is_empty(), "nothing is added when nothing is set");
+
+        let args = ca_args(Some(std::path::Path::new("/etc/ssl/corp.pem")));
+        let joined = args.join(" ");
+        assert!(
+            joined.contains("/etc/ssl/corp.pem:/omh-ca.crt:ro"),
+            "the certificate must be mounted, read-only: {joined}"
+        );
+        for var in ["CARGO_HTTP_CAINFO", "SSL_CERT_FILE"] {
+            assert!(
+                joined.contains(&format!("{var}=/omh-ca.crt")),
+                "{var} is unset, so cargo still cannot reach crates.io: {joined}"
+            );
+        }
     }
 }

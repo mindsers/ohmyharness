@@ -645,6 +645,20 @@ pub fn plan(
                 crate::base::PROJECT_ENV.into(),
                 crate::base::project_name(&paths.repo_name(), &session.id),
             ),
+            // The digest `image:current` pins, resolved here because here is
+            // the only side that can. The recipe depends on the PEM `ca_cert`
+            // names, a host path nothing mounts into the guest — so a sandbox
+            // left to work it out for itself pinned the no-certificate digest
+            // and every note it recorded was born stale. Empty when the host
+            // cannot resolve it either; the guest reads that as "nobody told
+            // me" rather than as a digest.
+            (
+                crate::memory::expiry::RECIPE_ENV.into(),
+                match crate::memory::expiry::Recipe::here(paths) {
+                    crate::memory::expiry::Recipe::Digest(d) => d,
+                    crate::memory::expiry::Recipe::Unknowable(_) => String::new(),
+                },
+            ),
         ],
         network: paths.network(),
         workdir: crate::container_workdir().into(),
@@ -1226,7 +1240,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(adapter),
+                image: crate::image::tag_for(adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -1263,7 +1277,7 @@ mod tests {
                     base: None,
                     omh: decided().0,
                     repo: decided().1,
-                    image: crate::image::tag_for(&adapter),
+                    image: crate::image::tag_for(&adapter, None),
                     resolves,
                 },
             )
@@ -1334,7 +1348,7 @@ mod tests {
         );
         assert_ne!(
             p.image,
-            crate::image::tag_for(&adapter),
+            crate::image::tag_for(&adapter, None),
             "a plan that re-derives the harness tag ignores what it was handed"
         );
     }
@@ -1425,7 +1439,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -1467,7 +1481,7 @@ mod tests {
                 base: None,
                 omh: Default::default(),
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -1561,7 +1575,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -1960,7 +1974,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2608,7 +2622,7 @@ mod tests {
                 base: None,
                 omh: decided_with(["memory".to_string()].into()).0,
                 repo: decided_with(["memory".to_string()].into()).1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2664,7 +2678,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2746,7 +2760,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2781,6 +2795,36 @@ mod tests {
             crate::hook::SANDBOX_VARS.len(),
             "and the sandbox sets nothing a hook is refused for naming: {set:?}"
         );
+    }
+
+    /// **The sandbox is told the recipe digest; it must not be left to guess.**
+    ///
+    /// The guest cannot compute this — the base recipe depends on the PEM
+    /// `ca_cert` names, a host path nothing mounts in. When it worked it out
+    /// for itself it got the no-certificate digest, and every note the agent
+    /// recorded was born stale on any machine with a certificate set.
+    ///
+    /// Presence is not enough: an empty value reads to the guest as "nobody
+    /// told me", which is exactly the state this is here to prevent.
+    #[test]
+    fn the_sandbox_is_handed_the_recipe_digest_it_cannot_compute() {
+        let fx = fixture();
+        let plan = plan_for(&fx, "claude");
+        let handed = plan
+            .env
+            .iter()
+            .find(|(k, _)| k == crate::memory::expiry::RECIPE_ENV)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_else(|| panic!("nothing hands the sandbox a recipe: {:?}", plan.env));
+        match crate::memory::expiry::Recipe::here(&fx.paths) {
+            crate::memory::expiry::Recipe::Digest(d) => assert_eq!(
+                handed, d,
+                "the sandbox was handed a digest the host does not compute"
+            ),
+            crate::memory::expiry::Recipe::Unknowable(why) => {
+                panic!("the fixture cannot resolve its own recipe: {why}")
+            }
+        }
     }
 
     /// Switching a feature off does not hand you its names.
@@ -2822,7 +2866,7 @@ mod tests {
                 base: None,
                 omh: decided_with(["codegraph".to_string()].into()).0,
                 repo: decided_with(["codegraph".to_string()].into()).1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -2850,7 +2894,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3072,7 +3116,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3213,7 +3257,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&bad),
+                image: crate::image::tag_for(&bad, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3264,7 +3308,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3303,7 +3347,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3354,7 +3398,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3374,7 +3418,7 @@ mod tests {
                 base: None,
                 omh: decided().0,
                 repo: decided().1,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3405,7 +3449,7 @@ mod tests {
             base: None,
             omh: decided().0,
             repo: decided().1,
-            image: crate::image::tag_for(&adapter),
+            image: crate::image::tag_for(&adapter, None),
             resolves: BTreeMap::new(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
@@ -3427,7 +3471,7 @@ mod tests {
             base: None,
             omh: decided().0,
             repo: decided().1,
-            image: crate::image::tag_for(&adapter),
+            image: crate::image::tag_for(&adapter, None),
             resolves: BTreeMap::new(),
         };
         let p = plan(&fx.paths, &fx.profile, &adapter, &fx.session, &[], opts).unwrap();
@@ -3454,7 +3498,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )
@@ -3479,7 +3523,7 @@ mod tests {
                 base: None,
                 omh: own,
                 repo,
-                image: crate::image::tag_for(&adapter),
+                image: crate::image::tag_for(&adapter, None),
                 resolves: BTreeMap::new(),
             },
         )

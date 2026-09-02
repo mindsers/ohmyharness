@@ -34,6 +34,73 @@ pub enum Trigger {
 /// lands on disk is still a concrete digest.
 pub const IMAGE_NOW: &str = "current";
 
+/// The digest `image:current` resolves to, or why it cannot be known here.
+///
+/// **Two spellings, because "cannot tell" must not resolve to a digest.** The
+/// base recipe depends on `ca_cert`, a path on the *host*. `remember_in` runs
+/// inside the sandbox, where that path is not mounted — so the guest cannot
+/// compute the recipe, and a guest that guesses pins the no-certificate digest
+/// while every host-side `stale` computes one with the certificate. Every note
+/// the agent recorded was then born stale, on exactly the machines the setting
+/// exists for.
+///
+/// The resolution still happens at the write path, for the reason
+/// [`IMAGE_NOW`] gives — storing the sentinel would compare equal to "now"
+/// forever and pin nothing. What changed is *who* supplies it: omh resolves it
+/// on the host and hands it to the sandbox, and a guest that was handed
+/// nothing says so instead of answering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recipe {
+    /// What omh would build, resolved where the recipe is knowable.
+    Digest(String),
+    /// Why it is not knowable, in the words the writer should hear.
+    Unknowable(String),
+}
+
+/// Where omh hands the sandbox a digest the guest cannot compute for itself.
+///
+/// The same road `OMH_SESSION` travels, for the same reason: the sandbox knows
+/// facts only the host holds, and an env var set at launch is how it is told.
+pub const RECIPE_ENV: &str = "OMH_IMAGE_RECIPE";
+
+impl Recipe {
+    /// What the sandbox was handed at launch, or why it has nothing.
+    ///
+    /// Absent is the honest case, not a broken one: an `omh memory serve` run
+    /// by hand outside a sandbox has no host to have told it anything.
+    pub fn from_env() -> Self {
+        match std::env::var(RECIPE_ENV) {
+            Ok(d) if !d.trim().is_empty() => Self::Digest(d),
+            _ => Self::Unknowable(format!(
+                "this omh is not the one holding the image recipe — the sandbox \
+                 is told the digest through ${RECIPE_ENV} at launch, and nothing \
+                 set it"
+            )),
+        }
+    }
+
+    /// Resolve from a real `Paths` — the host, where `ca_cert` is readable.
+    ///
+    /// An unreadable certificate is `Unknowable`, never a digest: it is the
+    /// same "the recipe is not what this would compute" case as the sandbox,
+    /// arriving by a different road.
+    pub fn here(paths: &crate::profile::Paths) -> Self {
+        match crate::image::ca_for(paths) {
+            Err(e) => Self::Unknowable(format!(
+                "the image recipe depends on `ca_cert`, which could not be read: {e:#}"
+            )),
+            Ok(ca) => {
+                match crate::image::recipe_digest(&crate::image::base_dockerfile(
+                    ca.as_ref().map(crate::image::Root::pem),
+                )) {
+                    Ok(d) => Self::Digest(d),
+                    Err(e) => Self::Unknowable(format!("could not digest the image recipe: {e:#}")),
+                }
+            }
+        }
+    }
+}
+
 /// A `git hash-object` output, or a prefix of one long enough to mean it.
 ///
 /// Seven is what `git log` abbreviates to and therefore what a writer pastes.
@@ -328,13 +395,14 @@ pub fn gather(paths: &crate::profile::Paths, triggers: &[Trigger]) -> Facts {
         }
     }
 
-    // The recipes omh would build right now. Cheap and pure, so always
-    // available — unlike a running container.
-    facts.images = match crate::image::recipe_digest(&crate::image::base_dockerfile()) {
-        Ok(d) => Fact::Known(BTreeSet::from([d])),
-        // The recipe is compiled in, so the only way here is git. Saying "no
-        // recipe available" would blame the one thing that is certainly present.
-        Err(e) => Fact::Unavailable(format!("could not digest the image recipe: {e:#}")),
+    // The recipe omh would build right now. No longer pure: it reads the PEM
+    // `ca_cert` names, so it can fail — and a failure here must reach
+    // `Unavailable` rather than a digest computed as though nobody had set a
+    // certificate, which would mark every image-pinned note stale on the one
+    // machine that has one.
+    facts.images = match Recipe::here(paths) {
+        Recipe::Digest(d) => Fact::Known(BTreeSet::from([d])),
+        Recipe::Unknowable(why) => Fact::Unavailable(why),
     };
 
     facts.base = match crate::base::Manifest::load_dir(&paths.base()) {
@@ -610,7 +678,7 @@ mod tests {
     #[test]
     fn judge_agrees_with_the_recipe_digest_a_note_would_pin() {
         let (_d, paths) = repo_with(&[]);
-        let now = crate::image::recipe_digest(&crate::image::base_dockerfile()).unwrap();
+        let now = crate::image::recipe_digest(&crate::image::base_dockerfile(None)).unwrap();
 
         let pinned = note_pinning(Some(&format!("image:{now}")));
         assert_eq!(
@@ -634,7 +702,7 @@ mod tests {
     /// `image:` covers the base recipe only, and the obvious extension — digest
     /// `harness_dockerfile` as well — quietly reintroduces the bug
     /// `recipe_digest` was written to prevent. The harness recipe opens
-    /// `FROM {base_tag()}`, and `base_tag` is a `DefaultHasher` of the base
+    /// `FROM omh/base:<base_tag>`, and `base_tag` is a `DefaultHasher` of the base
     /// recipe: a value std does not guarantee across releases. Pinning a digest
     /// computed over that text marks every harness-triggered note stale for
     /// everyone the day somebody upgrades Rust — the mass false positive with no
@@ -671,8 +739,8 @@ mod tests {
         };
 
         for adapter in &harnesses {
-            let recipe = crate::image::harness_dockerfile(adapter);
-            let carries_unstable_tag = recipe.contains(&crate::image::base_tag());
+            let recipe = crate::image::harness_dockerfile(adapter, None);
+            let carries_unstable_tag = recipe.contains(&crate::image::base_tag(None));
             let digest = crate::image::recipe_digest(&recipe).unwrap();
 
             // Pinned as well as guarded, so this cannot go quietly vacuous. If
@@ -681,14 +749,14 @@ mod tests {
             // left to protect. Read it and delete it rather than relaxing it.
             assert!(
                 carries_unstable_tag,
-                "`{}`'s recipe no longer embeds `base_tag()` — a harness digest \
+                "`{}`'s recipe no longer embeds the base tag — a harness digest \
                  is now safe to pin, and this test has become the obstacle",
                 adapter.name
             );
             assert!(
                 !pinned.contains(&digest),
                 "`{}`'s recipe digest is pinned while the recipe still embeds \
-                 `base_tag()`, a DefaultHasher value std does not guarantee \
+                 the base tag, a DefaultHasher value std does not guarantee \
                  across releases. Render it stably first — substitute the base's \
                  recipe digest for its tag — or leave `image:` base-only.",
                 adapter.name

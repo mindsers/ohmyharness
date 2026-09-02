@@ -74,6 +74,10 @@ pub(crate) fn memory_serve(
             .unwrap_or_else(|| "unknown".into()),
         client: None,
         today: memory::today,
+        // Told, never worked out. This process runs inside the sandbox, where
+        // the PEM `ca_cert` names is not mounted and the recipe cannot be
+        // computed at all.
+        recipe: memory::expiry::Recipe::from_env(),
     };
     let stdin = std::io::stdin().lock();
     let stdout = std::io::stdout().lock();

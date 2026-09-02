@@ -39,6 +39,12 @@ pub struct Server {
     pub client: Option<String>,
     /// Injected so the server is testable without a clock.
     pub today: fn() -> String,
+    /// The base recipe digest `image:current` pins, handed in by the host.
+    ///
+    /// Not resolved here, and it cannot be: the recipe depends on the PEM
+    /// `ca_cert` names, which is a host path this process has no way to read.
+    /// See `expiry::Recipe`.
+    pub recipe: crate::memory::expiry::Recipe,
 }
 
 /// Required, and in this order, because they are the three things that make an
@@ -185,6 +191,7 @@ impl Server {
             &self.templates,
             &input,
             IfExists::Error,
+            &self.recipe,
         ) {
             Ok(Wrote::Created(path)) => ToolResult::Text(format!(
                 "recorded `{}`",
@@ -283,6 +290,7 @@ mod tests {
             session: "s03".into(),
             client: Some("claude".into()),
             today: || "2026-08-07".to_string(),
+            recipe: memory::expiry::Recipe::Digest("deadbeef".into()),
         };
         Fx { dir, server }
     }
@@ -557,6 +565,7 @@ mod tests {
             session: "s01".into(),
             client: None,
             today: || "2026-08-07".to_string(),
+            recipe: memory::expiry::Recipe::Digest("deadbeef".into()),
         };
         // No templates at all is a real failure, reported rather than panicked.
         let (why, refused) = text(server.call("remember", &observation()));

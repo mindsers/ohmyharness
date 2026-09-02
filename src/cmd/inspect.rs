@@ -69,11 +69,16 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
         let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
             .context("no adapters installed — run `omh init`")?;
         let adapter = Adapter::find(&paths.adapters(), &harness)?;
-        image::ensure(backend.program(), &adapter)?;
+        let ca = image::ca_for(&paths)?;
+        image::ensure(
+            backend.program(),
+            &adapter,
+            ca.as_ref().map(image::Root::pem),
+        )?;
 
         let out = Command::new(backend.program())
             .args(base::ui_run_args(
-                &image::tag_for(&adapter),
+                &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
                 &container,
                 &paths.cache_volume(),
                 port,
@@ -150,7 +155,62 @@ pub(crate) fn doctor_cmd(
     // Resolved once and used for both the checks and the plan below, so the
     // probe cannot check a session different from the one it launches.
     let (own, repo) = crate::cmd::session::resolved(&paths)?;
-    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo)?;
+    // The one reading this command makes. `ensure_stack` below takes
+    // `sandbox.ca`, and `ca_check` asserts against the same value.
+    let ca = image::ca_for(&paths)?;
+
+    // **Before any image work, and only when no root is set.** This is the one
+    // problem doctor could never reach: behind a TLS-inspecting proxy the
+    // build dies on an unknown issuer, so every guest-side check below is
+    // unreachable and doctor's answer was a docker error. `build` names the
+    // setting when that happens — but a build that was *cached* before the
+    // proxy appeared succeeds, and then only the sessions fail. That is the
+    // case this catches, and a cache has hidden a problem here for weeks
+    // before.
+    //
+    // Only `Private` is reported. `Public` is the ordinary answer and a row
+    // saying so is noise; `Unknown` means omh could not tell — offline, or not
+    // macOS — and a check that guesses in that state is the cry-wolf this
+    // whole three-valued shape exists to avoid.
+    if ca.is_none() {
+        let (verdict, hosts) = doctor::inspected_hosts();
+        // **`Unknown` is not `Public` and must not look like it.** It was
+        // silent, which made "omh could not measure this" identical at the
+        // terminal to "omh measured it and it is fine" — and the reasons are
+        // reachable: no `openssl`, no network, an `openssl` that ignores
+        // `-CAfile`. A check that quietly did not run is the shape doctor
+        // exists to eliminate, not to add.
+        if let doctor::Inspection::Unknown(why) = &verdict {
+            ctx.say(
+                &report::Action::new(
+                    "tls-inspection-unknown",
+                    format!("could not check whether this network re-signs TLS: {why}"),
+                )
+                .data(serde_json::json!({ "reason": why })),
+            );
+        }
+        if verdict == doctor::Inspection::Private {
+            // Named, because a proxy that re-signs one host and not another is
+            // a surprising thing to be told and the reader should be able to
+            // check it rather than take it on faith.
+            ctx.warn(&format!(
+                "this network re-signs TLS for {} with a root your machine \
+                 trusts and a container does not — a sandbox cannot verify \
+                 what it fetches from {}. Set the corporate root:\n\n    \
+                 security find-certificate -a -c \"Zscaler\" -p > ~/corp-root.pem\n    \
+                 omh set --local ca_cert ~/corp-root.pem\n\n\
+                 See docs/troubleshooting.md.",
+                hosts.join(" and "),
+                if hosts.len() == doctor::FETCHES.len() {
+                    "the network"
+                } else {
+                    "there"
+                }
+            ));
+        }
+    }
+
+    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
     if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)
     }) {
@@ -168,6 +228,9 @@ pub(crate) fn doctor_cmd(
     if account.is_some() {
         checks.extend(doctor::credential_checks(&adapter));
     }
+    // The one claim about this image no test can settle: whether the root
+    // omh embedded actually got into the store the toolchains read.
+    checks.extend(doctor::ca_check(sandbox.ca.as_ref().map(image::Root::pem)));
     // Only if the resolved profile actually declares it: a check for a server
     // nobody configured would fail honestly and mean nothing.
     //
@@ -237,7 +300,16 @@ pub(crate) fn doctor_cmd(
         return Ok(());
     }
 
-    image::ensure_stack(backend.program(), &adapter, &sandbox.recipe(), &paths.repo)?;
+    image::ensure_stack(
+        backend.program(),
+        &adapter,
+        &sandbox.recipe(),
+        // The sandbox's own reading. A fresh `ca_for` here would be a second
+        // resolution, and `sandbox.tag` — which `opts.image` runs and
+        // `ca_check` asserts against — came from the first.
+        sandbox.ca.as_ref().map(image::Root::pem),
+        &paths.repo,
+    )?;
     image::ensure_network(backend.program(), &plan.network)?;
 
     let account_name = account
@@ -390,6 +462,7 @@ pub(crate) fn why_a_key(paths: &Paths, k: &key::Key) -> String {
     text.push_str(&match k.shape {
         key::Shape::Text => "  takes  one word or phrase\n".to_string(),
         key::Shape::Paths => "  takes  a TOML array of paths, e.g. [\".env\"]\n".to_string(),
+        key::Shape::Path => "  takes  one path, e.g. /etc/ssl/certs/corp.pem\n".to_string(),
         key::Shape::Duration => "  takes  90s, 30m, 2h, 1d, or bare seconds\n".to_string(),
         key::Shape::Choice(all) => format!("  takes  one of {}\n", all.join(", ")),
     });

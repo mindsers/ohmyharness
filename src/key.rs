@@ -19,6 +19,13 @@ pub enum Shape {
     Text,
     /// A TOML array of paths.
     Paths,
+    /// One path on the host.
+    ///
+    /// Distinct from `Text` because `omh why` is where somebody finds out what
+    /// a key wants, and "one word or phrase" is the wrong answer about a
+    /// filename. `carry_in` already earned `Paths` for the plural case; this
+    /// is the singular one.
+    Path,
     /// `90s`, `30m`, `2h`, `1d`, or bare seconds.
     Duration,
     /// One of a fixed set.
@@ -73,9 +80,9 @@ impl Key {
 
 /// Every key omh reads.
 ///
-/// Five, and the scan below is what keeps it five: they are string literals at
-/// their call sites, so a sixth added to the code and not to this table would
-/// otherwise be discovered by whoever committed a token.
+/// Six, and the scan below is what keeps it six: they are string literals at
+/// their call sites, so a seventh added to the code and not to this table
+/// would otherwise be discovered by whoever committed a token.
 pub const KEYS: &[Key] = &[
     // The only path by which a secret reaches the agent — `src/carry.rs` says
     // so, and so does the comment `init` writes into every new settings file.
@@ -111,6 +118,26 @@ pub const KEYS: &[Key] = &[
         shape: Shape::Choice(&["auto", "docker", "sbx"]),
         secret: Secret::No,
     },
+    // A path to a PEM on the host, not a credential: a CA certificate is
+    // public by construction. It lands in the committed file because a team on
+    // managed machines usually has the root at one path, and a teammate
+    // inheriting it is the useful outcome.
+    //
+    // **`omh set --local` is the personal spelling, not `omh settings set`.**
+    // This said the opposite, and so did both doc pages. `omh settings set`
+    // writes `Layer::Personal`, which is a template for repos `init` has not
+    // seen yet — it is not one of `Layer::SETTINGS`, and `init` seeds from it
+    // through `write_if_absent`, which never revisits. So for anybody whose
+    // repo already exists — which is everybody hitting this, because the
+    // failure happens *during* `init` — the advice was a write nothing reads,
+    // reported as a success.
+    Key {
+        name: "ca_cert",
+        does: "A CA certificate the sandbox must trust, as a path to a PEM — \
+               for a network that inspects TLS and signs it with its own root.",
+        shape: Shape::Path,
+        secret: Secret::No,
+    },
     Key {
         name: "persistence",
         does: "How a session's terminal survives detaching. Unset means `dtach`.",
@@ -126,8 +153,10 @@ pub fn describes(name: &str) -> Option<&'static Key> {
 
 /// What is wrong with this value for this key, if omh can tell.
 ///
-/// Only `Choice` is checkable here, and that is the whole of the claim:
-/// `Text` and `Paths` are freeform, and a `Duration` omh cannot parse is
+/// `Choice` and `Path` are what is checkable here: `Path` because docker reads
+/// a relative `-v` source as a named volume, so the mistake is silent and its
+/// symptom is far away. `Text` and `Paths` are freeform, and a `Duration` omh
+/// cannot parse is
 /// already reported where it is read, deliberately — `idle::parse_duration`
 /// returns `None` rather than erroring so a typo in one layer cannot stop you
 /// working. `None` back from here means *nothing to say*, never *this is fine*.
@@ -145,12 +174,80 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
                 )
             })
         }
+        Shape::Path => {
+            // Docker reads a non-absolute `-v` source as a *named volume*, so
+            // a relative `ca_cert` builds a correct image and then mounts an
+            // empty directory into the cross-build. And this key is committed,
+            // where "the directory omh was run from" is not a shared fact.
+            let bare = value.trim().trim_matches('"');
+            if bare.is_empty() {
+                Some(format!("`{}` was given nothing to name", key.name))
+            } else if !std::path::Path::new(bare).is_absolute() {
+                Some(format!(
+                    "`{}` takes an absolute path — `{bare}` resolves against \
+                     whatever directory omh was run from, and this setting is \
+                     shared with the repo",
+                    key.name
+                ))
+            } else {
+                None
+            }
+        }
         Shape::Text | Shape::Paths | Shape::Duration => None,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    /// **A relative `ca_cert` builds a correct image and mounts an empty
+    /// directory.** `Shape::Path` validated nothing, so
+    /// `omh set --local ca_cert corp.pem` was accepted in silence. `ca_for`
+    /// then reads it relative to the process CWD and gets the right bytes, so
+    /// the recipe and the tag are both correct — but `memory::deliver` passes
+    /// the same raw string to `docker run -v {path}:/omh-ca.crt:ro`, and
+    /// docker reads a non-absolute source as a **named volume**. The guest
+    /// gets an empty directory where the certificate should be, and
+    /// `SSL_CERT_FILE` points at it.
+    ///
+    /// It is also the one setting where relative is wrong on its face:
+    /// `ca_cert` is `Secret::No`, so it lands in the *committed* layer, where
+    /// the directory omh happened to be run from is not a shared fact.
+    ///
+    /// Warned rather than refused, because that is what `quarrel` is —
+    /// `cmd::settings` prints it and writes the value anyway. The refusal that
+    /// stops a build still lives in `ca_for`.
+    #[test]
+    fn a_path_key_says_so_when_the_path_is_not_absolute() {
+        let ca = KEYS
+            .iter()
+            .find(|k| k.name == "ca_cert")
+            .expect("ca_cert is a key");
+        assert!(
+            matches!(ca.shape, Shape::Path),
+            "this test is about the `Path` shape"
+        );
+
+        for relative in ["corp.pem", "./corp.pem", "certs/corp.pem", ""] {
+            let said = quarrel(ca, relative).unwrap_or_else(|| {
+                panic!("`{relative}` is not absolute and must be quarrelled with")
+            });
+            assert!(
+                said.contains("ca_cert"),
+                "the quarrel must name the key: {said}"
+            );
+        }
+
+        // Absolute is the shape that works, and a quoted one is the same
+        // string to a person — `Choice` already learned that lesson.
+        for absolute in ["/etc/ssl/corp.pem", "\"/etc/ssl/corp.pem\""] {
+            assert_eq!(
+                quarrel(ca, absolute),
+                None,
+                "`{absolute}` is absolute and must pass"
+            );
+        }
+    }
+
     /// A key's description is written for the person who typed `omh settings`.
     ///
     /// One of them read *"Files a session gets that git does not carry — see
@@ -250,10 +347,23 @@ mod tests {
             "the scan read {files} sources — it stopped early, and a scan that \
              stopped early agrees with anything"
         );
+        // Tied to the table rather than typed. A floor of `5` sat here while
+        // the table held six, so a key whose call site went dark was one the
+        // floor could absorb — and a number nobody updates is a number that
+        // stops meaning anything.
+        //
+        // `- 1` because the scan reads *literals* at the two call shapes above,
+        // so a key resolved by matching on a `Setting`'s own field instead is
+        // legitimately invisible to it. `ca_cert` is read that way.
+        //
+        // Written without naming either call shape: this comment sits inside
+        // the file the scan reads, and spelling one out here made the scan
+        // match its own prose and report a key called `name`.
         assert!(
-            read.len() >= 5,
-            "the scan found only {read:?} — it is no longer finding the call \
-             sites it was written to read"
+            read.len() >= KEYS.len() - 1,
+            "the scan found only {read:?} of {} keys — it is no longer finding \
+             the call sites it was written to read",
+            KEYS.len()
         );
 
         let unclassified: Vec<&String> = read.iter().filter(|k| describes(k).is_none()).collect();
@@ -278,7 +388,7 @@ mod tests {
     /// new settings file, and the repo-scoped write defaulted away from the
     /// committed layer *because* of this key.
     ///
-    /// It protects one key. A sixth key misclassified on the day it is added
+    /// It protects one key. A seventh key misclassified on the day it is added
     /// is not caught by anything here, and cannot be — that is a judgement
     /// about what a value is for. What can be checked is that the judgement
     /// omh already made, in writing, is the one the table holds.

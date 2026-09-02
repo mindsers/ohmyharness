@@ -141,6 +141,39 @@ tracked nor excluded, so the agent's own `git add -A` swept omh's rendered file 
 MCP environment included — into a history `omh s commit --keep` replays onto your
 branch. The list is rewritten on every launch now, which touches no commit.
 
+**4e. `ca_cert` widens what the sandbox trusts, on purpose.** Behind a
+TLS-inspecting proxy nothing in a container verifies, so no image gets built at
+all — the setting exists because the alternative is that omh does not work
+there. What it costs is real: the sandbox then trusts a root that, by
+construction, can sign a certificate for any host. That is already true of the
+machine omh runs on, so this hands the sandbox no authority the user's own
+laptop lacks, and it is the reason the setting names **one** certificate rather
+than copying the host trust store in — the difference between inheriting one
+decision IT already made and inheriting all of them.
+
+Two properties keep it honest. The certificate is written into the recipe
+rather than passed as a build argument, so the image tag is a digest of a text
+that includes it and a rotated root cannot be a cache hit on an image trusting
+the retired one. And a path omh cannot read is an error: resolving a typo to
+"no certificate" would rebuild exactly the image that was already failing and
+report success.
+
+What is *not* claimed: that every toolchain needed telling. Measured against a
+server presenting a leaf signed by a private root, in three arms — no root
+installed, the root in the system store with no variables set, and the full
+recipe. The middle arm is the one that isolates: only node still fails there,
+with `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, while curl, git, python, pip, go and
+cargo all verify off the store, Debian's pip included. So one of the seven
+variables is load-bearing and six are belt and braces; they are set anyway,
+and described that way rather than as each being what makes its tool work.
+
+The recipe splits a chain into one file per certificate for
+`update-ca-certificates`, then concatenates it back into the single file
+`NODE_EXTRA_CA_CERTS` names — because node reads that file and nothing else.
+A guard pins the concatenation to the whole chain: narrowing it to the first
+certificate used to leave the suite green while an intermediate-signed leaf
+failed in node alone.
+
 **5. Egress is unrestricted, and on Docker that is the design.** An agent in a
 session can reach the network freely.
 

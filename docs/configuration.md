@@ -833,6 +833,105 @@ something you have since edited.
 **Planned:** a `plugin` capability that reads Claude marketplace plugins and
 re-renders them for other harnesses. See [roadmap](design/roadmap.md).
 
+## `ca_cert`
+
+**For a network that inspects TLS.** Zscaler, Netskope, a corporate MITM proxy
+— they terminate every HTTPS connection and re-sign it with the company's own
+root. Your machine trusts that root because IT installed it. A container does
+not, so fetches inside the sandbox fail on an unknown issuer — the graph
+download and `npm install -g` for the harness are the two that stop an image
+being built at all. The wording of the failure depends on which tool reaches
+the network first: curl says `SSL certificate problem: unable to get local
+issuer certificate`, python says `CERTIFICATE_VERIFY_FAILED`, node says
+`UNABLE_TO_VERIFY_LEAF_SIGNATURE`.
+
+**First, get the root as a PEM file.** It is usually not sitting on disk. On
+macOS it is in the System keychain:
+
+```console
+$ security find-certificate -a -c "Zscaler" -p > ~/corp-root.pem
+```
+
+On Linux, IT has normally put it in `/usr/local/share/ca-certificates/` or
+`/etc/pki/ca-trust/source/anchors/`. A DER `.crt` converts with
+`openssl x509 -inform der -in corp.crt -out corp.pem`.
+
+Then point omh at it:
+
+```toml
+ca_cert = "/etc/ssl/certs/corp-root.pem"
+```
+
+```console
+$ omh set --local ca_cert ~/corp-root.pem    # this repo, gitignored
+$ omh set ca_cert /etc/ssl/certs/corp.pem    # this repo, committed
+```
+
+Use `--local` for a path that is only yours; it lands in
+`.omh/settings.local.toml`, which is gitignored. Plain `omh set` writes to the
+committed file, which is right when a team on managed machines all have the
+root at the same path — a teammate then inherits it.
+
+> **Not `omh settings set`.** That writes `~/.omh/default.toml`, which is the
+> template new repos are *seeded* from — `init` copies it with
+> `write_if_absent` and never revisits. In a repo that already has
+> `.omh/settings.toml`, and that is every repo where this problem shows up,
+> it would be written and never read.
+
+**It reaches node, which the system store does not.** Running
+`update-ca-certificates` rebuilds `/etc/ssl/certs/ca-certificates.crt`, and on
+the Debian base omh builds on that is enough for curl, git, python, pip, go
+and cargo. Debian's pip vendors a `certifi` that points at the system bundle,
+so it reads the store like everything else.
+
+That is measured, not assumed. Against an `openssl s_server` presenting a leaf
+signed by a private root, three images were compared: one with no root
+installed, where all seven tools refuse; one with the root in the system store
+and **none** of the variables below set; and this recipe. The middle image is
+the isolation — six of the seven verify there.
+
+node does not. It reads one named file and nothing else, and it is the fetch
+most likely to be the reason you are here — the harness arrives through
+`npm install -g`. So the image also sets:
+
+| | |
+|---|---|
+| `NODE_EXTRA_CA_CERTS` | **node ignores the system store.** Measured: still fails with the root installed, succeeds with this set |
+| `PIP_CERT`, `REQUESTS_CA_BUNDLE` | belt and braces — a pip that vendors its own `certifi` rather than Debian's |
+| `CARGO_HTTP_CAINFO` | belt and braces — cargo read the system store here |
+| `SSL_CERT_FILE`, `SSL_CERT_DIR`, `GIT_SSL_CAINFO` | belt and braces — openssl's own defaults already point here |
+
+Only the first row is load-bearing on today's base image. The rest cost
+nothing and cover a base image that patches its tools differently, which is
+why they are set rather than trusted to be unnecessary.
+
+They are set on the image rather than at launch, so a stack layer building on
+top of it gets them too — `pip3 install`, `corepack` and the `curl` that
+fetches rustup all run at build time, which is where the failure usually
+happens. They are also written to `/etc/environment`, because a session
+reached over SSH from an editor does not inherit the image's environment.
+
+A bundle with several certificates is fine: each one is written to its own
+file, because `update-ca-certificates` skips a file holding more than one.
+
+Run `omh doctor` afterwards. It is the only thing that checks the root
+actually reached the store rather than the recipe merely naming it —
+`update-ca-certificates` exits 0 when it skips a certificate it cannot parse.
+
+**Changing the certificate rebuilds the image.** The tag is a digest of the
+recipe and the certificate is part of it, so a rotated root produces a new tag
+rather than silently reusing an image that trusts the old one.
+
+The file must be PEM — a `BEGIN CERTIFICATE` block — and nothing else. A
+`pkcs12` export carrying `Bag Attributes` or `friendlyName:` preamble is
+refused rather than rewritten, because omh will not edit a certificate to make
+it fit the recipe. A path omh cannot read is an error rather than a shrug: you
+set this because builds were failing, and resolving a typo to "no certificate"
+would rebuild exactly the image that was already failing and report success.
+
+This widens what the sandbox trusts, which is why it is explicit and one
+certificate rather than omh copying your whole host trust store in.
+
 ## `carry_in`
 
 A git worktree contains only **tracked** files. No `.env`, no certs — so without

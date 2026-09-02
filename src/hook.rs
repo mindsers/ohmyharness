@@ -82,7 +82,7 @@ pub const CAPTURE_VAR: &str = "OMH_CAPTURE";
 /// has to decide whether a `$` in prose refers to something real.
 /// `container::plan` puts exactly these on the container, and
 /// `the_sandbox_sets_what_a_hook_may_name` holds the two lists together.
-pub const SANDBOX_VARS: [&str; 2] = ["OMH_SESSION", "OMH_GRAPH_PROJECT"];
+pub const SANDBOX_VARS: [&str; 3] = ["OMH_SESSION", "OMH_GRAPH_PROJECT", "OMH_IMAGE_RECIPE"];
 
 impl std::fmt::Display for Event {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
