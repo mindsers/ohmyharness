@@ -896,7 +896,7 @@ pub fn why_the_build_failed(log: &str, ca_set: bool) -> Option<String> {
 /// removes the class rather than handling it. A real I/O error on the read end
 /// means the pipe is gone and the child is about to get `EPIPE`, so that one is
 /// reported and ends the relay rather than passing silently as EOF.
-fn relay(err: std::process::ChildStderr) -> String {
+pub fn relay(err: std::process::ChildStderr) -> String {
     use std::io::BufRead;
     let mut reader = std::io::BufReader::new(err);
     let mut log = String::new();
@@ -939,6 +939,19 @@ fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind, ca: Option<&st
         // Piped so omh can read the reason it failed, then written straight
         // back out line by line — a build is minutes long and watching it is
         // how you know it is alive, so capturing must not mean swallowing.
+        //
+        // **stderr only, and that is measured rather than assumed.** A review
+        // argued the classic builder writes step output to stdout, so the
+        // diagnosis would silently not exist under `DOCKER_BUILDKIT=0`. Half
+        // right: on docker 29.7.2 the classic builder does split its output —
+        // 2 lines of the error on stdout, 3 on stderr — while BuildKit puts
+        // all 7 on stderr. The needle reaches stderr either way, so the
+        // diagnosis fires for both, and the user sees the whole log regardless
+        // because stdout stays inherited.
+        //
+        // So do not "fix" this by piping stdout as well. That means draining
+        // two pipes from one thread, which is the deadlock this function
+        // already had to have designed out of it once, for no measured gain.
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("running {program} build"))?;
