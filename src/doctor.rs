@@ -145,6 +145,89 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
     ))
 }
 
+/// What each settings file holds, and whether omh reads any of it.
+///
+/// `Ok` per layer is the file's bare keys and values; `Err` is a file omh
+/// could not read or parse at all.
+pub type SettingsRead<'a> = Vec<(&'a str, Result<Vec<(String, String)>, String>)>;
+
+/// The same, owned — what a caller builds before borrowing it as a
+/// `SettingsRead`. Named because the shape is otherwise too long to read.
+pub type SettingsHeld = Vec<(String, Result<Vec<(String, String)>, String>)>;
+
+/// **A key omh does not read, and a file omh cannot read at all.**
+///
+/// Two silent failures, one row each. A misspelled key sits in
+/// `settings.toml` doing nothing for as long as the repo lives — `settings`
+/// already refuses an unknown *table* (`settings::resolve`), and lets scalars
+/// through on purpose because `config::policy` owns those, so nothing anywhere
+/// names them. And a file that will not parse is worse: `policy_value`
+/// swallows the error to `None`, so **every** setting silently reverts to its
+/// default with no error printed anywhere.
+///
+/// The unread half is a passing row — an unread key breaks nothing, it just
+/// does nothing — and reuses `omh settings`' own wording for the same fact.
+/// The unparseable half is red, because every setting in that file is being
+/// ignored.
+///
+/// **Enumerated, never guessed.** No nearest-match suggestion: there is no
+/// distance function in this tree and the house style — `tool_hint`,
+/// `settings::validate`, `selection::apply` — is to list the valid set and let
+/// the reader see their typo.
+pub fn settings_checks(read: &SettingsRead, known: &[&str]) -> Vec<Outcome> {
+    let mut unreadable = Vec::new();
+    let mut unread = Vec::new();
+    for (file, held) in read {
+        match held {
+            Err(why) => unreadable.push(format!("{file}: {why}")),
+            Ok(pairs) => {
+                for (key, _) in pairs {
+                    // Tables are not keys. `[use]`, `[omh]` and `[provision]`
+                    // are seeded into every repo and validated elsewhere —
+                    // `config::values` renders them bracketed precisely so a
+                    // caller can tell them apart.
+                    if key.starts_with('[') {
+                        continue;
+                    }
+                    if !known.contains(&key.as_str()) {
+                        unread.push(format!("`{key}` in {file}"));
+                    }
+                }
+            }
+        }
+    }
+
+    if !unreadable.is_empty() {
+        return vec![Outcome {
+            name: "settings omh reads".into(),
+            ok: false,
+            detail: format!(
+                "{} — so every setting in it is being ignored and has silently \
+                 gone back to its default. Nothing else reports this: the \
+                 reader swallows the error and answers as though the key were \
+                 not set",
+                unreadable.join("; ")
+            ),
+        }];
+    }
+
+    vec![Outcome {
+        name: "settings omh reads".into(),
+        ok: true,
+        detail: if unread.is_empty() {
+            "every key set here is one omh reads".into()
+        } else {
+            // Enumerated, not guessed. The house style is to list the valid
+            // set and let the reader see their own typo.
+            format!(
+                "set here, and read by nothing: {}. omh reads {}",
+                unread.join(", "),
+                known.join(", ")
+            )
+        },
+    }]
+}
+
 /// The host's answers, as a type of their own.
 ///
 /// **So they cannot be swapped with the sandbox's.** `every_check` used to
@@ -1963,6 +2046,98 @@ mod tests {
         )))
         .expect_err("a probe that did not run is not an answer");
         assert!(!why.trim().is_empty(), "and says why: {why}");
+    }
+
+    /// **A key nothing reads, and a file nothing can read.**
+    ///
+    /// Both are silent today. A misspelled `ca_cerf` sits in `settings.toml`
+    /// forever doing nothing — `settings::resolve` refuses unknown *tables*
+    /// and lets scalars through on purpose, so nothing names them. And a file
+    /// that will not parse is worse than that: `policy_value` swallows the
+    /// error to `None`, so every setting in it silently reverts to its default
+    /// with no error printed anywhere.
+    ///
+    /// Unread is a passing row — it breaks nothing, it just does nothing.
+    /// Unparseable is red, because every setting in that file is ignored.
+    #[test]
+    fn a_key_omh_does_not_read_is_named_and_a_file_it_cannot_read_is_a_failure() {
+        let known = ["ca_cert", "runtime", "account"];
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+
+        // Everything recognised: one passing row that says so without listing
+        // the whole table back at the reader.
+        let clean: SettingsRead = vec![(
+            ".omh/settings.toml",
+            Ok(vec![
+                pair("ca_cert", "/etc/corp.pem"),
+                pair("runtime", "docker"),
+            ]),
+        )];
+        let rows = settings_checks(&clean, &known);
+        assert_eq!(rows.len(), 1, "one row, whatever the file holds: {rows:?}");
+        assert!(rows[0].ok);
+
+        // An unread key. Named, with the file it is in — and the valid set
+        // enumerated rather than a guess at what was meant.
+        let typo: SettingsRead = vec![(
+            ".omh/settings.toml",
+            Ok(vec![
+                pair("ca_cerf", "/etc/corp.pem"),
+                pair("runtime", "docker"),
+            ]),
+        )];
+        let rows = settings_checks(&typo, &known);
+        assert!(rows[0].ok, "an unread key breaks nothing: {:?}", rows[0]);
+        assert!(
+            rows[0].detail.contains("ca_cerf"),
+            "the row must name the key: {}",
+            rows[0].detail
+        );
+        assert!(
+            rows[0].detail.contains("settings.toml"),
+            "and the file it is in, since two layers resolve: {}",
+            rows[0].detail
+        );
+        assert!(
+            rows[0].detail.contains("ca_cert") && rows[0].detail.contains("runtime"),
+            "and enumerate what omh does read, which is how the reader sees \
+             their typo: {}",
+            rows[0].detail
+        );
+
+        // **Tables are not keys.** `[use]`, `[omh]` and `[provision]` are
+        // seeded into every repo and validated elsewhere; naming them here
+        // would report omh's own scaffolding as unread.
+        let tables: SettingsRead = vec![(
+            ".omh/settings.toml",
+            Ok(vec![
+                pair("[use]", ""),
+                pair("[omh]", ""),
+                pair("[provision]", ""),
+            ]),
+        )];
+        assert!(
+            !settings_checks(&tables, &known)[0].detail.contains("use"),
+            "omh's own tables are not unread keys"
+        );
+
+        // A file omh cannot read at all. Red, and it says what it costs.
+        let broken: SettingsRead = vec![(
+            ".omh/settings.toml",
+            Err("parsing .omh/settings.toml: expected `=`".into()),
+        )];
+        let rows = settings_checks(&broken, &known);
+        assert!(!rows[0].ok, "an unreadable settings file is a failure");
+        assert!(
+            rows[0].detail.contains("expected `=`"),
+            "carrying the parse error, which is the only actionable part: {}",
+            rows[0].detail
+        );
+        assert!(
+            rows[0].detail.contains("default"),
+            "and what it costs — every setting in it reverts silently: {}",
+            rows[0].detail
+        );
     }
 
     /// **Offline must never read as "you are behind a proxy".** That is the

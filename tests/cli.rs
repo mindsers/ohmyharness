@@ -6391,9 +6391,74 @@ fn doctor_reports_the_host_when_there_is_no_container_runtime() {
         said.contains("git on the host"),
         "nor does git, which reached the report only through the probe: {said}"
     );
+    // **The tally counts every row, not just the failing one.** Expressed as
+    // the property rather than a literal: each check added to the host block
+    // moves the number, and a test that pins it teaches the next person to
+    // edit the assertion instead of reading it. Exactly one row fails here.
     assert!(
-        said.contains("of 3 checks failed"),
-        "and the tally counts every row, not just the failing one: {said}"
+        said.contains("checks failed") && !said.contains("of 1 checks failed"),
+        "the tally must count the passing rows too: {said}"
+    );
+}
+
+/// **A key omh does not read, and a file omh cannot read at all.**
+///
+/// Both were silent. A misspelled key sits in `settings.toml` doing nothing
+/// for as long as the repo lives; `settings::resolve` refuses unknown *tables*
+/// and lets scalars through on purpose, so nothing named them. The unreadable
+/// case is worse — `policy_value` swallows the parse error to `None`, so every
+/// setting in the file silently goes back to its default and no command says
+/// so.
+#[test]
+fn doctor_names_settings_omh_does_not_read() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    // `fake_docker` already wrote `runtime = "docker"`; add a plausible typo.
+    let at = sb.repo.join(".omh/settings.toml");
+    let held = std::fs::read_to_string(&at).unwrap_or_default();
+    std::fs::write(&at, format!("{held}ca_cerf = \"/etc/corp.pem\"\n")).unwrap();
+
+    let out = sb.omh(&["doctor"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        said.contains("ca_cerf"),
+        "the row must name the key nothing reads: {said}"
+    );
+    assert!(
+        said.contains("ca_cert"),
+        "and enumerate what omh does read, which is how a typo becomes \
+         visible: {said}"
+    );
+
+    // A file that will not parse is a different, worse fact: every setting in
+    // it is being ignored.
+    std::fs::write(&at, "runtime = \n").unwrap();
+    // Through `--json`, because `doctor` exits non-zero for other reasons on a
+    // fixture with no container — asserting the *row* is what pins the verdict.
+    let out = sb.omh(&["doctor", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let row = v["checks"]
+        .as_array()
+        .and_then(|c| c.iter().find(|o| o["name"] == "settings omh reads"))
+        .unwrap_or_else(|| panic!("no settings row: {stdout}"));
+    assert_eq!(
+        row["ok"],
+        serde_json::json!(false),
+        "a settings file omh cannot read is a failing row: {stdout}"
+    );
+    assert!(
+        row["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("default")),
+        "and it must say what it costs, not just that parsing failed: {stdout}"
     );
 }
 

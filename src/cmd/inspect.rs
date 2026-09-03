@@ -159,8 +159,30 @@ pub(crate) fn doctor_cmd(
             ),
         )
     });
+    // **The two layers that actually resolve.** `omh settings` already makes
+    // this comparison for `Layer::Personal`, the template — these are the
+    // files a launch reads, and nothing has ever checked them. Not `?`: a file
+    // omh cannot parse is the single most valuable thing this row can say.
+    let held: doctor::SettingsHeld = config::Layer::SETTINGS
+        .iter()
+        .map(|layer| {
+            let at = layer.file(&paths);
+            let name = at
+                .strip_prefix(&paths.repo)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| at.display().to_string());
+            let values = config::values(&paths, *layer)
+                .map(|m| m.into_iter().collect::<Vec<_>>())
+                .map_err(|e| format!("{e:#}"));
+            (name, values)
+        })
+        .collect();
+    let files: doctor::SettingsRead = held.iter().map(|(n, h)| (n.as_str(), h.clone())).collect();
+    let known: Vec<&str> = key::KEYS.iter().map(|k| k.name).collect();
+
     let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
         .into_iter()
+        .chain(doctor::settings_checks(&files, &known))
         .chain(doctor::git_checks())
         .collect::<Vec<_>>();
     let host = doctor::HostRows(host);
