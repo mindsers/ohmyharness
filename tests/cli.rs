@@ -6401,6 +6401,24 @@ fn doctor_reports_the_host_when_there_is_no_container_runtime() {
     );
 }
 
+/// The report out of `--json`, which is the **last** document on stdout.
+///
+/// **`--json` emits a stream, not one object.** Anything omh says through
+/// `ctx.say` before the report is its own document ahead of it — on Linux,
+/// `doctor`'s TLS-inspection row reporting `Unknown`, because Linux has no
+/// line between a root the platform ships and one somebody installed. Parsing
+/// the whole of stdout works on a machine where nothing else spoke and fails
+/// where something did, which is the platform-shaped test bug this helper
+/// exists to stop repeating.
+fn report_json(stdout: &str) -> serde_json::Value {
+    serde_json::Deserializer::from_str(stdout)
+        .into_iter::<serde_json::Value>()
+        .filter_map(Result::ok)
+        .filter(|v| v.get("checks").is_some())
+        .last()
+        .unwrap_or_else(|| panic!("no report in stdout: {stdout}"))
+}
+
 /// **A checkout records which omh set it up, and the stamp is not committed.**
 ///
 /// Nothing recorded this, so the first a reader heard of a skew was a
@@ -6440,8 +6458,7 @@ fn init_records_which_omh_seeded_the_checkout() {
     std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
     let out = sb.omh(&["doctor", "--json"]);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let v: serde_json::Value =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let v = report_json(&stdout);
     let row = v["checks"]
         .as_array()
         .and_then(|c| c.iter().find(|o| o["name"] == "seeded by"))
@@ -6473,8 +6490,7 @@ fn doctor_says_a_repo_with_no_commit_has_nothing_to_fork() {
 
     let out = sb.omh(&["doctor", "--json"]);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let v: serde_json::Value =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let v = report_json(&stdout);
     let row = v["checks"]
         .as_array()
         .and_then(|c| c.iter().find(|o| o["name"] == "repo has a commit"))
@@ -6498,8 +6514,7 @@ fn doctor_says_a_repo_with_no_commit_has_nothing_to_fork() {
 
     let out = sb.omh(&["doctor", "--json"]);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let v: serde_json::Value =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let v = report_json(&stdout);
     assert!(
         v["checks"]
             .as_array()
@@ -6550,8 +6565,7 @@ fn doctor_names_settings_omh_does_not_read() {
     // fixture with no container — asserting the *row* is what pins the verdict.
     let out = sb.omh(&["doctor", "--json"]);
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-    let v: serde_json::Value =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let v = report_json(&stdout);
     let row = v["checks"]
         .as_array()
         .and_then(|c| c.iter().find(|o| o["name"] == "settings omh reads"))
@@ -6636,8 +6650,7 @@ fn doctor_without_adapters_reports_the_host_and_fails_honestly() {
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
 
     assert!(!out.status.success(), "no adapter is a failure: {stdout}");
-    let v: serde_json::Value =
-        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let v = report_json(&stdout);
 
     assert_eq!(
         v["ok"],
