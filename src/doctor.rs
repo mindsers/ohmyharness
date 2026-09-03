@@ -145,6 +145,52 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
     ))
 }
 
+/// What omh has left behind that nothing points at any more.
+///
+/// `risks.md` records this one as *"recorded rather than fixed"*: omh issues no
+/// `volume ls` anywhere, so after a migration `omh-cache-<basename>` and any
+/// stopped `omh-<basename>-sNN` are orphaned and unmentioned. They cost disk
+/// and a name, not correctness — which is exactly the shape of thing this
+/// command exists to surface rather than fail over.
+///
+/// **Never red.** A leftover breaks nothing; it is disk you can reclaim and a
+/// name that may confuse you later. A doctor that fails over it is one people
+/// stop running, and the exit code stops meaning *you cannot work*.
+pub fn leftovers_from(sessions: &[String], volumes: Result<Vec<String>, String>) -> Outcome {
+    let mut said = Vec::new();
+    if !sessions.is_empty() {
+        said.push(format!(
+            "sessions nothing points at: {} — `omh <id> rm` clears one, and says \
+             what it would take with it first",
+            sessions.join(", ")
+        ));
+    }
+    match volumes {
+        // **Could not look is not "none".** The `ps` read this row's session
+        // half goes through swallowed its failure, so a dead daemon reported
+        // *fewer* leftovers instead of saying it had not looked.
+        Err(why) => said.push(format!("omh could not list volumes: {why}")),
+        Ok(v) if !v.is_empty() => said.push(format!(
+            "volumes no checkout claims: {} — `docker volume rm` removes one. \
+             Nothing in omh has ever listed these, so a migration leaves them \
+             behind unmentioned",
+            v.join(", ")
+        )),
+        Ok(_) => {}
+    }
+    Outcome {
+        name: "leftovers".into(),
+        // Never red. This is disk to reclaim and a name that may confuse you
+        // later, not a machine that cannot work.
+        ok: true,
+        detail: if said.is_empty() {
+            "none — nothing orphaned on this machine".into()
+        } else {
+            said.join("; ")
+        },
+    }
+}
+
 /// Which omh set this checkout up, against the one running now.
 ///
 /// Nothing recorded this before, so an upgrade's mid-command migration notices
@@ -2461,6 +2507,62 @@ mod tests {
             unknown.detail.contains("omh init"),
             "and the way to start recording it: {}",
             unknown.detail
+        );
+    }
+
+    /// **What omh left behind, which nothing has ever listed.**
+    ///
+    /// `risks.md` records it as "recorded rather than fixed": omh issues no
+    /// `volume ls` anywhere, so after a migration the old cache volume and any
+    /// stopped container under the previous key are orphaned and unmentioned.
+    ///
+    /// Never red — a leftover is disk to reclaim, not a broken machine, and a
+    /// doctor that fails over one stops meaning "you cannot work".
+    #[test]
+    fn leftovers_are_reported_and_never_a_failure() {
+        // Nothing left behind: a row saying so, not silence — the reader asked.
+        let clean = leftovers_from(&[], Ok(Vec::new()));
+        assert!(clean.ok);
+        assert!(
+            clean.detail.contains("none"),
+            "a clean machine still answers: {}",
+            clean.detail
+        );
+
+        // Sessions and volumes, both named, and still not a failure.
+        let some = leftovers_from(
+            &["s01".to_string(), "s04".to_string()],
+            Ok(vec!["omh-cache-repo-1234abcd".to_string()]),
+        );
+        assert!(
+            some.ok,
+            "a leftover is disk to reclaim, not a broken machine"
+        );
+        assert!(
+            some.detail.contains("s01") && some.detail.contains("s04"),
+            "each session is named, because `omh s rm` takes one: {}",
+            some.detail
+        );
+        assert!(
+            some.detail.contains("omh-cache-repo-1234abcd"),
+            "and each volume, which nothing else in omh has ever listed: {}",
+            some.detail
+        );
+
+        // **A listing omh could not take is not an empty listing.** The `ps`
+        // read inside `leftovers` swallowed its failure, so a dead daemon
+        // reported *fewer* leftovers rather than saying it could not look.
+        let blind = leftovers_from(&[], Err("Cannot connect to the daemon".into()));
+        assert!(blind.ok, "not being able to look is not a failure either");
+        assert!(
+            blind.detail.contains("Cannot connect"),
+            "but it must say it could not look, rather than reporting none: {}",
+            blind.detail
+        );
+        assert!(
+            !blind.detail.contains("none"),
+            "an unanswered listing must not read as a clean machine: {}",
+            blind.detail
         );
     }
 

@@ -185,6 +185,36 @@ pub(crate) fn doctor_cmd(
         .chain(doctor::settings_checks(&files, &known))
         // Absent on a healthy repo: a row saying "you have a commit" on every
         // run is a line nobody reads.
+        .chain(std::iter::once(doctor::leftovers_from(
+            &crate::cmd::session::leftovers(&paths, chosen.as_deref().ok(), ctx),
+            match chosen
+                .as_ref()
+                .ok()
+                .and_then(|b| b.volume_args().map(|args| (b.program(), args)))
+            {
+                None => Ok(Vec::new()),
+                Some((program, args)) => std::process::Command::new(program)
+                    .args(&args)
+                    .output()
+                    .map_err(|e| format!("{e}"))
+                    .and_then(|out| match out.status.success() {
+                        false => Err(crate::image::unreadable(
+                            &String::from_utf8_lossy(&out.stderr),
+                            &out.status,
+                        )),
+                        // Only omh's own. Somebody else's volumes are not
+                        // omh's business to list, let alone to suggest
+                        // removing.
+                        true => Ok(String::from_utf8_lossy(&out.stdout)
+                            .lines()
+                            .map(str::trim)
+                            .filter(|n| n.starts_with("omh-"))
+                            .filter(|n| *n != paths.cache_volume())
+                            .map(str::to_string)
+                            .collect()),
+                    }),
+            },
+        )))
         .chain(std::iter::once(doctor::seeded_from(
             std::fs::read_to_string(paths.repo.join(".omh").join(crate::cmd::init::SEEDED_BY))
                 .ok()

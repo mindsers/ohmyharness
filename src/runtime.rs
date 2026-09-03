@@ -40,6 +40,16 @@ pub trait Runtime: std::fmt::Debug {
     /// Run something inside an already-running session.
     fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String>;
 
+    /// How to list this runtime's named volumes, if it has such a notion.
+    ///
+    /// `None` for anything omh has not measured, the same answer `Sbx::caps`
+    /// gives for capabilities nobody has verified. Docker's volumes are the
+    /// ones `risks.md` records as orphaned and unmentioned after a migration —
+    /// omh creates `omh-cache-<repo>` and never lists it anywhere.
+    fn volume_args(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// List the names of every container that is running.
     ///
     /// On the trait because how a runtime spells this is its business, and the
@@ -93,6 +103,15 @@ impl Runtime for Docker {
     /// which is the question; `{{.Names}}` is one name per line, and a docker
     /// container name cannot contain a newline — the legal charset is
     /// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, which docker enforces at creation.
+    fn volume_args(&self) -> Option<Vec<String>> {
+        Some(vec![
+            "volume".into(),
+            "ls".into(),
+            "--format".into(),
+            "{{.Name}}".into(),
+        ])
+    }
+
     fn running_args(&self) -> Vec<String> {
         vec!["ps".into(), "--format".into(), "{{.Names}}".into()]
     }

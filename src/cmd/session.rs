@@ -728,16 +728,29 @@ pub(crate) fn leftovers(
 
     if let Some(backend) = backend {
         let prefix = paths.container("");
-        if let Ok(out) = Command::new(backend.program())
+        // **Could not look is not "none".** This swallowed its failure, so a
+        // daemon that was down reported *fewer* leftovers rather than saying
+        // it had not looked — the same collapse `Running` exists to prevent,
+        // in the function whose whole job is to notice what is left behind.
+        match Command::new(backend.program())
             .args(["ps", "-a", "--format", "{{.Names}}"])
             .output()
         {
-            found.extend(
+            Ok(out) if out.status.success() => found.extend(
                 String::from_utf8_lossy(&out.stdout)
                     .lines()
                     .filter_map(|n| n.trim().strip_prefix(&prefix))
                     .map(str::to_string),
-            );
+            ),
+            Ok(out) => ctx.warn(&format!(
+                "omh could not list containers, so orphaned sandboxes went \
+                 unchecked: {}",
+                crate::image::unreadable(&String::from_utf8_lossy(&out.stderr), &out.status)
+            )),
+            Err(e) => ctx.warn(&format!(
+                "omh could not list containers, so orphaned sandboxes went \
+                 unchecked: {e}"
+            )),
         }
     }
 
