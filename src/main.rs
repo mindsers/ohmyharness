@@ -2689,8 +2689,7 @@ mod tests {
             &paths,
             &session,
             cmd::harvest::Snapshots::Kept(12),
-            false,
-            false,
+            cmd::harvest::Consent::CannotAsk,
         )
         .expect("snapshots alone never stop a removal")
         .expect("but they are said");
@@ -2704,8 +2703,7 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                false,
-                false
+                cmd::harvest::Consent::CannotAsk
             )
             .unwrap(),
             None,
@@ -2720,8 +2718,7 @@ mod tests {
             &paths,
             &unkept,
             cmd::harvest::Snapshots::Kept(3),
-            false,
-            false,
+            cmd::harvest::Consent::CannotAsk,
         )
         .expect_err("unharvested commits still refuse")
         .to_string();
@@ -2908,6 +2905,57 @@ mod tests {
         );
     }
 
+    /// **Three behaviours, one value.** `force` and `terminal` were adjacent
+    /// `bool`s meaning opposite things — *the user said delete it anyway* and
+    /// *there is somebody at a keyboard*. Swapping them compiles, and the two
+    /// mistakes it makes are the worst available: prompting inside a script,
+    /// or refusing a person who is standing right there.
+    #[test]
+    fn consent_is_read_from_the_flag_and_the_terminal_once() {
+        use cmd::harvest::Consent;
+
+        // Forced beats everything, terminal or not — a script must not depend
+        // on there being somebody at a keyboard.
+        use cmd::harvest::{Forced, Interactive};
+        assert_eq!(
+            Consent::read(Forced(true), Interactive(false)),
+            Consent::Given
+        );
+        assert_eq!(
+            Consent::read(Forced(true), Interactive(true)),
+            Consent::Given
+        );
+
+        // Nobody said anything: ask if there is somebody, refuse if not.
+        assert_eq!(
+            Consent::read(Forced(false), Interactive(true)),
+            Consent::MayAsk
+        );
+        assert_eq!(
+            Consent::read(Forced(false), Interactive(false)),
+            Consent::CannotAsk
+        );
+
+        // **And the two arguments cannot be transposed.** Making the pair one
+        // value at `may_remove`'s boundary only moved the swap here —
+        // measured: swapping the arguments to a `read(bool, bool)` still
+        // compiled. `Forced(x), Interactive(y)` in the other order is a type
+        // error, which is the only way this stays fixed.
+
+        // **And the three are distinct.** A shape that collapsed any two would
+        // either prompt where it must not or refuse where it need not.
+        let all = [
+            Consent::read(Forced(true), Interactive(false)),
+            Consent::read(Forced(false), Interactive(true)),
+            Consent::read(Forced(false), Interactive(false)),
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b, "each state is its own answer");
+            }
+        }
+    }
+
     /// **Silence declines, and `--force` is the only non-interactive way past.**
     ///
     /// The refusal's last line told you to retype the command with `--force`,
@@ -2930,8 +2978,7 @@ mod tests {
             &paths,
             &session,
             cmd::harvest::Snapshots::None,
-            false,
-            false,
+            cmd::harvest::Consent::CannotAsk,
         )
         .expect_err("off a terminal there is nobody to ask");
         let said = format!("{err:#}");
@@ -2945,8 +2992,13 @@ mod tests {
         // Force, no terminal: passes. This is what a script uses, and it must
         // not depend on there being somebody at a keyboard.
         assert!(
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, true, false,)
-                .is_ok(),
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::Given,
+            )
+            .is_ok(),
             "`--force` is the non-interactive way past, and stays one"
         );
     }
@@ -2965,8 +3017,7 @@ mod tests {
             &paths,
             &session,
             cmd::harvest::Snapshots::None,
-            false,
-            false,
+            cmd::harvest::Consent::CannotAsk,
         )
         .expect_err("two commits are on no branch anywhere");
         let said = err.to_string();
@@ -2997,8 +3048,13 @@ mod tests {
             "and names the branch it would go on: {said}"
         );
         assert!(
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, true, false)
-                .is_ok(),
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::Given
+            )
+            .is_ok(),
             "`--force` means it"
         );
 
@@ -3019,8 +3075,7 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                false,
-                false
+                cmd::harvest::Consent::CannotAsk
             )
             .is_ok(),
             "a session whose work is all on the branch removes quietly"
@@ -3069,8 +3124,7 @@ mod tests {
             &paths,
             &session,
             cmd::harvest::Snapshots::None,
-            false,
-            false,
+            cmd::harvest::Consent::CannotAsk,
         )
         .expect_err("two commits are still in there and on no branch");
         assert!(err.to_string().contains("2 commits"), "{err}");
@@ -3085,8 +3139,7 @@ mod tests {
             &paths,
             &session,
             cmd::harvest::Snapshots::None,
-            false,
-            false,
+            cmd::harvest::Consent::CannotAsk,
         )
         .expect_err("a record naming nothing this repository has is not an answer");
         assert!(
@@ -3105,8 +3158,7 @@ mod tests {
             &paths,
             &session,
             cmd::harvest::Snapshots::None,
-            false,
-            false,
+            cmd::harvest::Consent::CannotAsk,
         )
         .expect_err("three now");
         assert!(err.to_string().contains("3 commits"), "{err}");
@@ -3175,8 +3227,7 @@ mod tests {
             &paths,
             &session,
             cmd::harvest::Snapshots::None,
-            false,
-            false,
+            cmd::harvest::Consent::CannotAsk,
         )
         .expect_err("omh cannot tell what landed — that is a reason to ask");
         assert!(
@@ -3184,8 +3235,13 @@ mod tests {
             "it says it cannot tell, rather than naming a count it does not have: {err}"
         );
         assert!(
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, true, false)
-                .is_ok(),
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::Given
+            )
+            .is_ok(),
             "and `--force` is still the way past, so nobody is trapped"
         );
 
@@ -3199,8 +3255,7 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                false,
-                false
+                cmd::harvest::Consent::CannotAsk
             )
             .is_err(),
             "a repository omh cannot place is not an empty session"
@@ -3216,8 +3271,7 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                false,
-                false
+                cmd::harvest::Consent::CannotAsk
             )
             .is_ok(),
             "nothing there is nothing to lose"
@@ -3229,8 +3283,7 @@ mod tests {
             &paths,
             &never_ran,
             cmd::harvest::Snapshots::None,
-            false,
-            false
+            cmd::harvest::Consent::CannotAsk
         )
         .is_ok());
     }

@@ -1322,9 +1322,15 @@ pub(crate) fn rm(
             Ok(Some(n)) => crate::cmd::harvest::Snapshots::Kept(n),
             Err(e) => crate::cmd::harvest::Snapshots::Unreadable(format!("{e:#}")),
         };
-    if let Some(note) =
-        crate::cmd::harvest::may_remove(&paths, &session, snapshots, force, terminal)?
-    {
+    if let Some(note) = crate::cmd::harvest::may_remove(
+        &paths,
+        &session,
+        snapshots,
+        crate::cmd::harvest::Consent::read(
+            crate::cmd::harvest::Forced(force),
+            crate::cmd::harvest::Interactive(terminal),
+        ),
+    )? {
         ctx.warn(note.trim());
     }
 

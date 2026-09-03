@@ -621,12 +621,53 @@ pub(crate) fn must_know(running: image::Running, what: &str, doing: &str) -> Res
     }
 }
 
-/// Whether this session may be removed, or what stands in the way.
+/// Whether omh may delete work that exists nowhere else.
 ///
-/// Separate from `rm` so the decision is assertable: `rm` takes a container
-/// down, and nothing that needs one can be reached by a test here. What is
-/// left in `rm` is the single call — its absence is a line missing from a
-/// diff rather than a behaviour hiding behind a runtime.
+/// **One value, not two booleans.** `may_remove` took `force: bool, terminal:
+/// bool` — adjacent, same type, meaning opposite things: one is *the user said
+/// delete it anyway*, the other *there is somebody at a keyboard*. Swapping
+/// them is type-correct, and the two mistakes it makes are the worst available
+/// here: prompting inside a script, or refusing a person standing right there.
+///
+/// Three states because there are three behaviours, so a call site reads as
+/// the decision rather than as two flags to combine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Consent {
+    /// `--force`. Said deliberately, and the only way past without a person.
+    Given,
+    /// Nobody said anything, and there is somebody to ask.
+    MayAsk,
+    /// Nobody said anything, and there is nobody to ask — a script, a CI
+    /// runner, a closed pipe. The refusal stands.
+    CannotAsk,
+}
+
+/// `--force` was said.
+///
+/// A type rather than a `bool` because it travels beside `Interactive`, and
+/// two `bool`s next to each other is the hazard `Consent` exists to remove.
+/// Making them one value at `may_remove`'s boundary only moved the swap to the
+/// call site — measured: swapping the arguments to a `read(bool, bool)` still
+/// compiled. These cannot be transposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Forced(pub bool);
+
+/// There is somebody at a keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Interactive(pub bool);
+
+impl Consent {
+    /// Combined here rather than at each call site, so "forced beats
+    /// everything" has one spelling instead of one per caller.
+    pub(crate) fn read(forced: Forced, interactive: Interactive) -> Self {
+        match (forced.0, interactive.0) {
+            (true, _) => Self::Given,
+            (false, true) => Self::MayAsk,
+            (false, false) => Self::CannotAsk,
+        }
+    }
+}
+
 /// What omh knows about a session's turn snapshots when it is asked to remove
 /// it.
 ///
@@ -645,12 +686,21 @@ pub(crate) enum Snapshots {
     Unreadable(String),
 }
 
+/// Whether this session may be removed, or what stands in the way.
+///
+/// Separate from `rm` so the decision is assertable: `rm` takes a container
+/// down, and nothing that needs one can be reached by a test here. What is
+/// left in `rm` is the single call — its absence is a line missing from a
+/// diff rather than a behaviour hiding behind a runtime.
+///
+/// **This doc was stranded on `Snapshots`** — two well-formed blocks with no
+/// separator, so the combined comment documented the enum and this function
+/// had none. Structurally valid, suite green, and only a reader notices.
 pub(crate) fn may_remove(
     paths: &Paths,
     session: &Session,
     snapshots: Snapshots,
-    force: bool,
-    terminal: bool,
+    consent: Consent,
 ) -> Result<Option<String>> {
     let branch = format!("omh/{}", session.id);
     // Named, never the reason. A snapshot is a tree omh photographed at the
@@ -733,8 +783,8 @@ pub(crate) fn may_remove(
     // script, a CI runner, a closed pipe. `ask::confirm` treats silence and
     // anything-but-yes as no, which is what makes that safe.
     let at_stake = format!("{id} has {what} {whether}{also}", id = session.id);
-    if !force {
-        let agreed = terminal
+    if consent != Consent::Given {
+        let agreed = consent == Consent::MayAsk
             && crate::ask::confirm(
                 &format!(
                     "{at_stake}. Removing it deletes the only copy.\nremove {id} anyway?",
