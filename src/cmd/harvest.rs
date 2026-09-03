@@ -650,6 +650,7 @@ pub(crate) fn may_remove(
     session: &Session,
     snapshots: Snapshots,
     force: bool,
+    terminal: bool,
 ) -> Result<Option<String>> {
     let branch = format!("omh/{}", session.id);
     // Named, never the reason. A snapshot is a tree omh photographed at the
@@ -722,15 +723,36 @@ pub(crate) fn may_remove(
         // the only copy of work omh could not count, in silence.
         AtStake::Unknown(why) => (why, "and omh cannot say what that removes"),
     };
-    anyhow::ensure!(
-        force,
-        "{id} has {what} {whether}{also}. Removing it deletes the only copy:\n  \
-         omh {id} log                 read what is there\n  \
-         omh {id} commit --keep       put it on {branch}\n  \
-         omh {id} commit -m \"…\"       or take the files as they stand{reading}\n  \
-         omh {id} rm --force          remove it anyway",
-        id = session.id
-    );
+    // **Asked, when there is somebody to ask.** This only ever refused, and
+    // the refusal's last line told you to retype the command with `--force` —
+    // so the way to answer the safety question was to type the dangerous thing
+    // from memory, with the reasons scrolled off. `omh s down` has asked for
+    // its destructive case all along; this is the same shape.
+    //
+    // `--force` keeps its meaning for everything that is not a terminal: a
+    // script, a CI runner, a closed pipe. `ask::confirm` treats silence and
+    // anything-but-yes as no, which is what makes that safe.
+    let at_stake = format!("{id} has {what} {whether}{also}", id = session.id);
+    if !force {
+        let agreed = terminal
+            && crate::ask::confirm(
+                &format!(
+                    "{at_stake}. Removing it deletes the only copy.\nremove {id} anyway?",
+                    id = session.id
+                ),
+                &mut std::io::stdin().lock(),
+                &mut std::io::stderr(),
+            )?;
+        anyhow::ensure!(
+            agreed,
+            "{at_stake}. Removing it deletes the only copy:\n  \
+             omh {id} log                 read what is there\n  \
+             omh {id} commit --keep       put it on {branch}\n  \
+             omh {id} commit -m \"…\"       or take the files as they stand{reading}\n  \
+             omh {id} rm --force          remove it anyway",
+            id = session.id
+        );
+    }
     Ok(None)
 }
 

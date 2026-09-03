@@ -1288,7 +1288,13 @@ pub(crate) fn resolved(paths: &Paths) -> Result<(base::Own, settings::RepoPolicy
     Ok((base::own(&manifest, &repo.off, &installed)?, repo))
 }
 
-pub(crate) fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -> Result<()> {
+pub(crate) fn rm(
+    cwd: &std::path::Path,
+    id: &str,
+    force: bool,
+    terminal: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
     session::validate_id(id)?;
     let paths = Paths::discover(cwd)?;
     let session = Session::new(&paths.worktrees(), id.to_string());
@@ -1316,7 +1322,9 @@ pub(crate) fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -
             Ok(Some(n)) => crate::cmd::harvest::Snapshots::Kept(n),
             Err(e) => crate::cmd::harvest::Snapshots::Unreadable(format!("{e:#}")),
         };
-    if let Some(note) = crate::cmd::harvest::may_remove(&paths, &session, snapshots, force)? {
+    if let Some(note) =
+        crate::cmd::harvest::may_remove(&paths, &session, snapshots, force, terminal)?
+    {
         ctx.warn(note.trim());
     }
 
@@ -1384,7 +1392,20 @@ pub(crate) fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -
     // that never received a commit preserves nothing, and saying otherwise
     // trains people to ignore a namespace filling with dead refs.
     let base = session::default_branch(&paths.repo);
-    let action = match session.remove(&paths.repo, &base, &paths.shadows())? {
+    let (removed, worktree) = session.remove(&paths.repo, &base, &paths.shadows())?;
+    // **Said before the branch news, because it changes what that news means.**
+    // A worktree still on disk makes "removed session s03" false, and the
+    // command exited 0 saying it. `rm` is the command that removes everything a
+    // session owns; when one of them survives, the report has to name it and
+    // what clears it, rather than reporting a removal that did not happen.
+    if let session::Gone::No(why) = &worktree {
+        ctx.warn(&format!(
+            "{id}'s worktree is still on disk: {} — {why}\n               git worktree prune          clear the registration once it is gone\n               rm -rf {}                   remove what is left",
+            session.worktree.display(),
+            session.worktree.display()
+        ));
+    }
+    let action = match removed {
         session::Removed::BranchKept(n) => {
             // Two ways to be kept, and they are not the same news. A branch
             // kept because it holds three commits is an invitation to review

@@ -9,6 +9,18 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Whether a thing this command is named for actually went.
+///
+/// **Not a bool.** `No` carries why, because a removal that did not happen and
+/// a removal nobody could explain are the same news to a caller that only has
+/// a flag — and this is the value `rm` prints to somebody deciding what to
+/// clean up by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gone {
+    Yes,
+    No(String),
+}
+
 /// What `remove` did with the branch, so the caller can report it truthfully
 /// rather than always claiming the branch was kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -395,7 +407,7 @@ impl Session {
     ///
     /// Taken as an argument rather than reached for, so that removing a session
     /// and forgetting its shadow is not something a caller can express.
-    pub fn remove(&self, repo: &Path, base: &str, shadows: &Path) -> Result<Removed> {
+    pub fn remove(&self, repo: &Path, base: &str, shadows: &Path) -> Result<(Removed, Gone)> {
         // Decided before the worktree goes, because afterwards the branch is
         // the only thing left to ask.
         //
@@ -418,7 +430,13 @@ impl Session {
             },
         };
 
-        if git(
+        // **Asked of the disk, not of git's exit code.** The fallback used to
+        // run only when `git worktree remove` reported failure — so a git that
+        // exited 0 while leaving the directory behind (files it could not
+        // delete, an owner it is not) was taken at its word, and `rm` reported
+        // a removed session over a worktree still on disk. Nothing verified
+        // the thing this function is named for actually happened.
+        let _ = git(
             repo,
             &[
                 "worktree",
@@ -426,18 +444,17 @@ impl Session {
                 "--force",
                 &self.worktree.to_string_lossy(),
             ],
-        )
-        .is_err()
-        {
-            // git can lose the registration while the directory survives, and
-            // then refuses with "is not a working tree" — leaving a session
-            // that can never be removed. Clean up whatever is on disk.
-            if self.worktree.exists() {
-                std::fs::remove_dir_all(&self.worktree)
-                    .with_context(|| format!("removing {}", self.worktree.display()))?;
+        );
+        // git can also lose the registration while the directory survives, and
+        // then refuses with "is not a working tree" — leaving a session that
+        // can never be removed. Either way, what matters is whether it is gone.
+        let mut worktree = Gone::Yes;
+        if self.worktree.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&self.worktree) {
+                worktree = Gone::No(format!("{e}"));
             }
-            let _ = git(repo, &["worktree", "prune"]);
         }
+        let _ = git(repo, &["worktree", "prune"]);
 
         // A branch carrying commits outlives its worktree on purpose: removing
         // a session must never destroy work nobody has reviewed. A branch
@@ -466,7 +483,7 @@ impl Session {
         // is taken down unless the user said `--force`. The silence here is
         // the silence of a decision already made upstairs.
         crate::shadow::Shadow::new(shadows, &self.id).reap();
-        Ok(outcome)
+        Ok((outcome, worktree))
     }
 
     /// What this session changed, against the point it forked from.
@@ -1574,6 +1591,68 @@ mod tests {
         );
     }
 
+    /// **Whether it is gone is asked of the disk, not of git's exit code.**
+    ///
+    /// The fallback used to run only when `git worktree remove` reported
+    /// failure. A git that exits 0 while leaving the directory behind — files
+    /// it cannot delete, an owner it is not — was taken at its word, and `rm`
+    /// printed `removed session sNN` over a worktree still on disk, exiting 0.
+    /// Nothing verified the thing this function is named for.
+    ///
+    /// Driven by making the directory undeletable, which is the shape of the
+    /// real cause: something else is holding it.
+    #[test]
+    #[cfg(unix)]
+    fn a_worktree_that_could_not_be_removed_is_reported_as_still_there() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &root.display().to_string()])
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+        }
+
+        let worktrees = d.path().join("worktrees");
+        let s = Session::new(&worktrees, "s01".into());
+        s.ensure(&root, "main").unwrap();
+        assert!(s.worktree.exists(), "the fixture made a worktree");
+
+        // A directory whose parent denies writes cannot have its entries
+        // unlinked, so both git and `remove_dir_all` leave it behind.
+        let parent = s.worktree.parent().unwrap().to_path_buf();
+        let was = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let asked = s.remove(&root, "main", &d.path().join("shadows"));
+        std::fs::set_permissions(&parent, was).unwrap();
+
+        let (_outcome, gone) = asked.expect("a worktree that will not go is not an error");
+        match gone {
+            Gone::No(why) => assert!(!why.trim().is_empty(), "and it says why: {why}"),
+            Gone::Yes => panic!(
+                "the worktree is still at {} — reporting it gone is the bug",
+                s.worktree.display()
+            ),
+        }
+        assert!(s.worktree.exists(), "the fixture really did block removal");
+    }
+
     /// `rm` keeps a branch so unreviewed work is unloseable. A branch with no
     /// commits holds no work to lose — `worktree remove --force` has already
     /// discarded anything uncommitted — so keeping it preserves nothing and
@@ -1584,7 +1663,8 @@ mod tests {
         let s = Session::new(&dir.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
 
-        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
+        let (outcome, gone) = s.remove(&root, "main", &d_shadows()).unwrap();
+        assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert_eq!(outcome, Removed::BranchDropped);
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s01"]).is_err(),
@@ -1604,7 +1684,8 @@ mod tests {
         git(&s.worktree, &["add", "."]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
 
-        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
+        let (outcome, gone) = s.remove(&root, "main", &d_shadows()).unwrap();
+        assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert_eq!(outcome, Removed::BranchKept(Some(1)));
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s02"]).is_ok(),
@@ -1644,7 +1725,8 @@ mod tests {
             "the precondition is that git cannot answer; it just did"
         );
 
-        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
+        let (outcome, gone) = s.remove(&root, "main", &d_shadows()).unwrap();
+        assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s03"]).is_ok(),
             "a count omh could not take is not a branch it may delete"
@@ -1666,7 +1748,7 @@ mod tests {
         s.branch = None;
         s.ensure(&root, "main").unwrap();
         assert_eq!(
-            s.remove(&root, "main", &d_shadows()).unwrap(),
+            s.remove(&root, "main", &d_shadows()).unwrap().0,
             Removed::NoBranch
         );
     }
@@ -3246,7 +3328,7 @@ mod tests {
         );
 
         assert_eq!(
-            s.remove(&root, "main", &d_shadows()).unwrap(),
+            s.remove(&root, "main", &d_shadows()).unwrap().0,
             Removed::NoBranch,
             "a branch that does not exist was neither kept nor dropped"
         );
