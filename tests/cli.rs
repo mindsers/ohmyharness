@@ -6401,6 +6401,56 @@ fn doctor_reports_the_host_when_there_is_no_container_runtime() {
     );
 }
 
+/// **`git init` is not enough — omh forks a branch from something.**
+///
+/// `repo_root` refuses a directory that is not a repository, so that case can
+/// never reach doctor. A repository with no commit passes that gate and then
+/// has no `HEAD` for `session::default_branch`, so every session fails at
+/// `worktree add`. `sandbox()`'s own `git_init` makes exactly this state.
+#[test]
+fn doctor_says_a_repo_with_no_commit_has_nothing_to_fork() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init(); // `git init -b main`, and no commit
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+
+    let out = sb.omh(&["doctor", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let row = v["checks"]
+        .as_array()
+        .and_then(|c| c.iter().find(|o| o["name"] == "repo has a commit"))
+        .unwrap_or_else(|| panic!("no commit row: {stdout}"));
+    assert_eq!(row["ok"], serde_json::json!(false), "{stdout}");
+    assert!(
+        row["detail"]
+            .as_str()
+            .is_some_and(|d| d.contains("git commit")),
+        "the row must say what makes it go away: {stdout}"
+    );
+
+    // And once there is a commit, the row is gone — not green, absent. A line
+    // on every healthy repo is one nobody reads.
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git must be installed to run this test");
+
+    let out = sb.omh(&["doctor", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    assert!(
+        v["checks"]
+            .as_array()
+            .is_some_and(|c| !c.iter().any(|o| o["name"] == "repo has a commit")),
+        "a repo with a commit carries no row: {stdout}"
+    );
+}
+
 /// **A key omh does not read, and a file omh cannot read at all.**
 ///
 /// Both were silent. A misspelled key sits in `settings.toml` doing nothing

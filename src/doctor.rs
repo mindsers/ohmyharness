@@ -145,6 +145,36 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
     ))
 }
 
+/// **A repo with no commit has no branch to fork.**
+///
+/// `repo_root` already refuses a directory that is not a git repository at all
+/// (`profile::repo_root`), naming the cause and `git init` — so *that* is
+/// deliberately not a row here; it could never fail, because doctor cannot
+/// reach its own body without it. This is the narrower gap it leaves: `git
+/// init` with nothing committed yet is inside a repository, passes that gate,
+/// and then has no `HEAD` for `session::default_branch` to fork a worktree
+/// from.
+///
+/// Pure over the result, so "git could not be run" stays distinct from "git
+/// ran and there is no commit". The first is already the `git on the host`
+/// row's business and must not be reported twice as a different fault.
+pub fn commit_from(asked: std::io::Result<std::process::Output>) -> Option<Outcome> {
+    // A git omh could not run is the `git on the host` row's fault to report.
+    // Two rows for one cause reads as two problems.
+    let out = asked.ok()?;
+    if out.status.success() {
+        return None;
+    }
+    Some(Outcome {
+        name: "repo has a commit".into(),
+        ok: false,
+        detail: "none yet — omh runs each session on its own worktree branch, \
+                 and a branch has to fork from something. `git commit` (even \
+                 `--allow-empty`) is enough"
+            .into(),
+    })
+}
+
 /// What each settings file holds, and whether omh reads any of it.
 ///
 /// `Ok` per layer is the file's bare keys and values; `Err` is a file omh
@@ -2137,6 +2167,64 @@ mod tests {
             rows[0].detail.contains("default"),
             "and what it costs — every setting in it reverts silently: {}",
             rows[0].detail
+        );
+    }
+
+    /// **`git init` is not enough; omh forks a branch.**
+    ///
+    /// `repo_root` refuses a directory that is not a repository at all, so
+    /// doctor never runs outside one. It does run inside a repository with no
+    /// commit — and `session::default_branch` has no `HEAD` to resolve, so
+    /// every session fails at `worktree add`. Hit while building fixtures for
+    /// this very work: `git init` alone was not enough and needed
+    /// `git commit --allow-empty` before omh would work.
+    ///
+    /// A git that cannot be run is **not** this row's business — that is the
+    /// `git on the host` row, and reporting it twice as a different fault
+    /// sends the reader looking for a second problem.
+    #[test]
+    fn a_repository_with_no_commit_has_nothing_to_fork() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |code: i32, stdout: &str| {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        };
+
+        // A commit exists: no row at all. Every healthy repo would otherwise
+        // carry a line saying nothing, and a doctor of those is one nobody
+        // reads.
+        assert!(
+            commit_from(out(0, "3d38b0c1e2f\n")).is_none(),
+            "a repo with a commit needs no row"
+        );
+
+        // No commit. `rev-parse --verify HEAD` exits non-zero.
+        let row = commit_from(out(128, "")).expect("a repo with no commit is worth a row");
+        assert!(!row.ok, "omh cannot fork a branch from nothing");
+        assert!(
+            row.detail.contains("commit"),
+            "the row must name what is missing: {}",
+            row.detail
+        );
+        assert!(
+            row.detail.contains("git commit"),
+            "and what makes it go away: {}",
+            row.detail
+        );
+
+        // Git could not be run. Not this row's fault to report — `git on the
+        // host` already carries it, and two rows for one cause reads as two
+        // problems.
+        assert!(
+            commit_from(Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no git",
+            )))
+            .is_none(),
+            "a missing git is the git row's business, not this one's"
         );
     }
 

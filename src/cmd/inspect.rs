@@ -183,6 +183,15 @@ pub(crate) fn doctor_cmd(
     let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
         .into_iter()
         .chain(doctor::settings_checks(&files, &known))
+        // Absent on a healthy repo: a row saying "you have a commit" on every
+        // run is a line nobody reads.
+        .chain(doctor::commit_from(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&paths.repo)
+                .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+                .output(),
+        ))
         .chain(doctor::git_checks())
         .collect::<Vec<_>>();
     let host = doctor::HostRows(host);
