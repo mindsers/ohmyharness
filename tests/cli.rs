@@ -6789,7 +6789,18 @@ fn doctor_says_when_the_runtime_is_installed_but_not_answering() {
     let log = sb.fake_docker();
     std::fs::write(log.parent().unwrap().join("docker-refuses"), "").unwrap();
     sb.git_init();
-    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    // **No adapters, deliberately.** The row under test is a *host* row, and
+    // the host block runs before any container work — so this takes the
+    // no-adapter exit and the rows print without a build.
+    //
+    // With adapters seeded, doctor ran on into `ensure`, the refusing shim
+    // failed the build, and the rows reached the terminal only through the
+    // closure's error arm — several layers of failure between the fact and its
+    // report. That run went red once on CI's linux job and passed on a re-run,
+    // and I could not tell from the log which layer swallowed it. Asserting a
+    // host row through the shortest path that produces it is not a workaround:
+    // it is the path that matches what the row is about.
+    sb.seed_catalogue(&["base", "editors", "stacks"]);
 
     let out = sb.omh(&["doctor"]);
     let said = format!(
