@@ -660,7 +660,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         // opposite case and stays: a collision *is* a fact about this
         // session. Skipping it also saves the sweep's `ps` and its walks.
         leftovers: match only {
-            None => leftovers(&paths, backend.as_deref(), ctx),
+            // The list half; `omh s` already had the reason on stderr.
+            None => leftovers(&paths, backend.as_deref(), ctx).0,
             Some(_) => Vec::new(),
         },
         overlaps,
@@ -689,7 +690,12 @@ pub(crate) fn leftovers(
     paths: &Paths,
     backend: Option<&dyn runtime::Runtime>,
     ctx: &out::Ctx,
-) -> Vec<String> {
+) -> (Vec<String>, Option<String>) {
+    // **Why omh could not look, when it could not.** The warning goes to
+    // stderr, which `omh s` wants — but `omh doctor` puts this in a report, and
+    // a row that says "none" because nothing was listed is the collapse the
+    // whole leftovers row exists to avoid.
+    let mut unchecked: Option<String> = None;
     let live = session::list(&paths.worktrees());
     // A sandbox repository with no worktree — [risks](docs/design/risks.md) 8c.
     // The most valuable orphan of the three: a container is re-creatable and a
@@ -728,23 +734,43 @@ pub(crate) fn leftovers(
 
     if let Some(backend) = backend {
         let prefix = paths.container("");
-        if let Ok(out) = Command::new(backend.program())
+        // **Could not look is not "none".** This swallowed its failure, so a
+        // daemon that was down reported *fewer* leftovers rather than saying
+        // it had not looked — the same collapse `Running` exists to prevent,
+        // in the function whose whole job is to notice what is left behind.
+        match Command::new(backend.program())
             .args(["ps", "-a", "--format", "{{.Names}}"])
             .output()
         {
-            found.extend(
+            Ok(out) if out.status.success() => found.extend(
                 String::from_utf8_lossy(&out.stdout)
                     .lines()
                     .filter_map(|n| n.trim().strip_prefix(&prefix))
                     .map(str::to_string),
-            );
+            ),
+            Ok(out) => {
+                let why =
+                    crate::image::unreadable(&String::from_utf8_lossy(&out.stderr), &out.status);
+                ctx.warn(&format!(
+                    "omh could not list containers, so orphaned sandboxes went \
+                     unchecked: {why}"
+                ));
+                unchecked = Some(why);
+            }
+            Err(e) => {
+                ctx.warn(&format!(
+                    "omh could not list containers, so orphaned sandboxes went \
+                     unchecked: {e}"
+                ));
+                unchecked = Some(e.to_string());
+            }
         }
     }
 
     found.retain(|id| !live.contains(id));
     found.sort();
     found.dedup();
-    found
+    (found, unchecked)
 }
 
 /// Where a session is in the cycle, phrased as the next thing to do about it.

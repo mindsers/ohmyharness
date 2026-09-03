@@ -2171,11 +2171,17 @@ mod tests {
             ("src/cmd/settings.rs", 10),
             ("src/config.rs", 3),
             ("src/container.rs", 4),
-            // Two. The second is `host_checks`' answer for a profile with no
-            // stack definitions installed, which names `omh init` as what
-            // seeds them — printed to somebody whose sandbox has no toolchain
-            // and who is owed the reason it has none.
-            ("src/doctor.rs", 2),
+            // Six, and they are the reason this scan is load-bearing rather
+            // than decorative: every one goes to somebody whose next step is
+            // the command it names. `omh <id> rm` and `docker volume ls` from
+            // the leftovers row; `omh init` three times — from `host_checks`
+            // for a profile with no stack definitions, and from `seeded_from`
+            // for a checkout that never recorded which omh set it up and for
+            // one an older omh seeded; and `omh sNN sync` from the git row.
+            //
+            // One of them was written `omh s rm <id>`, which does not parse,
+            // and the scan caught it.
+            ("src/doctor.rs", 6),
             // Three. One is the `# `omh set --local ca_cert`` line `ca_layer`
             // writes into the generated Dockerfile, telling whoever reads the
             // recipe where the certificate came from. **Not** either of

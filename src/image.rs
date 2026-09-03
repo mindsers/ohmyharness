@@ -1290,7 +1290,7 @@ pub fn container_running(backend: &dyn crate::runtime::Runtime, name: &str) -> R
 /// colon. And it is the exit **code**, not the `Display` of `ExitStatus`,
 /// which renders `exit status: 1` and read as "the container runtime exited
 /// exit status: 1".
-fn unreadable(said: &str, status: &std::process::ExitStatus) -> String {
+pub(crate) fn unreadable(said: &str, status: &std::process::ExitStatus) -> String {
     let said = crate::out::untrusted(said.trim());
     match said.is_empty() {
         false => said,

@@ -4,18 +4,24 @@
 
 ```console
 $ omh doctor
-omh doctor: claude (in omh/claude:2133265d, account personal)
-
-  ✓ rules       /work/CLAUDE.md
-  ✓ skills      /home/agent/.claude/skills
-  ✓ mcp         /work/.mcp.json
-  ✓ mcp-loaded  /work (claude mcp list)
-  ✓ commands    /home/agent/.claude/commands
-  ✓ hooks       /home/agent/.claude/settings.json
-  ✓ token       /home/agent/.claude/.credentials.json (atomic write)
-
-  all 9 checks passed — claude's adapter paths are verified
+checking claude in omh/claude:8eae0d5c1511fa89 — no account, so credentials go unchecked…
+  ✓  container runtime   docker — answering, and every sandbox omh builds and runs uses it
+  ✓  stacks detected     rust (from Cargo.toml)
+  ✓  settings omh reads  every key set here is one omh reads
+  ✓  leftovers           none — nothing orphaned on this machine
+  ✓  seeded by           version 0.8.0, the one running now
+  ✓  disk                76.6 GB free on the filesystem holding /Users/you/.omh — …
+  ✓  git on the host     git version 2.55.0 — takes a `--keep` selection; syncs
+  ✓  rules               /work/CLAUDE.md
+  ✓  skills              /home/agent/.claude/skills
+  …
 ```
+
+The first seven rows are the **host's**, gathered before any container work — so
+on a machine that cannot build a sandbox they are still what you get, instead of
+a single error. The rest are the adapter paths, checked inside the sandbox, and
+they are the reason the command exists. An eighth host row appears only when
+this repo has no commit for a session branch to fork from.
 
 Run it after changing an adapter, after upgrading a harness, and any time a
 session behaves as though your profile is not there.

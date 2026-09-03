@@ -145,17 +145,112 @@ pub(crate) fn doctor_cmd(
         Ok(defs) => Ok((defs.as_slice(), stack::detected(defs, &paths.repo))),
         Err(e) => Err(format!("{e:#}")),
     };
-    let host = doctor::host_checks(
-        chosen
-            .as_ref()
-            .map(|b| b.program())
-            .map_err(|e| format!("{e:#}")),
-        stacks,
-        &provision,
-    )
-    .into_iter()
-    .chain(doctor::git_checks())
-    .collect::<Vec<_>>();
+    // **Asked, not assumed.** `runtime::installed` only proved a binary is on
+    // PATH. This is a real round-trip to whatever is on the other end.
+    //
+    // Through the trait's `running_args` so each runtime is asked in its own
+    // spelling — though today `Sbx::running_args` is still docker's, by its
+    // own admission ("PROVISIONAL … assumed rather than measured"). So for sbx
+    // this probe inherits that assumption, and a wrong spelling would report a
+    // working sbx as not answering. The trait is the right seam; the sbx
+    // measurement is the thing still owed, and its doc names `omh doctor` as
+    // where it lands.
+    let answering = chosen.as_ref().map(|b| {
+        (
+            b.program(),
+            doctor::daemon_from(
+                std::process::Command::new(b.program())
+                    .args(b.running_args())
+                    .output(),
+            ),
+        )
+    });
+    // **The two layers that actually resolve.** `omh settings` already makes
+    // this comparison for `Layer::Personal`, the template — these are the
+    // files a launch reads, and nothing has ever checked them. Not `?`: a file
+    // omh cannot parse is the single most valuable thing this row can say.
+    let held: doctor::SettingsHeld = config::Layer::SETTINGS
+        .iter()
+        .map(|layer| {
+            let at = layer.file(&paths);
+            let name = at
+                .strip_prefix(&paths.repo)
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| at.display().to_string());
+            let values = config::values(&paths, *layer)
+                .map(|m| m.into_iter().collect::<Vec<_>>())
+                .map_err(|e| format!("{e:#}"));
+            (name, values)
+        })
+        .collect();
+    let files: doctor::SettingsRead = held.iter().map(|(n, h)| (n.as_str(), h.clone())).collect();
+    let known: Vec<&str> = key::KEYS.iter().map(|k| k.name).collect();
+
+    let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
+        .into_iter()
+        .chain(doctor::settings_checks(&files, &known))
+        .chain(std::iter::once(doctor::leftovers_from(
+            match crate::cmd::session::leftovers(&paths, chosen.as_deref().ok(), ctx) {
+                (found, None) => Ok(found),
+                (_, Some(why)) => Err(why),
+            },
+            match chosen
+                .as_ref()
+                .ok()
+                .and_then(|b| b.volume_args().map(|args| (b.program(), args)))
+            {
+                // **Not `Ok(vec![])`.** No runtime, or a runtime whose volume
+                // story omh has never measured, is *omh did not look* —
+                // rendering it as an empty listing prints "none — nothing
+                // orphaned on this machine", the exact claim this row's own
+                // doc forbids, about a machine omh never asked.
+                None if chosen.is_err() => Err("there is no container runtime to ask".into()),
+                None => Err("omh has not measured how this runtime lists volumes".into()),
+                Some((program, args)) => std::process::Command::new(program)
+                    .args(&args)
+                    .output()
+                    .map_err(|e| format!("{e}"))
+                    .and_then(|out| match out.status.success() {
+                        false => Err(crate::image::unreadable(
+                            &String::from_utf8_lossy(&out.stderr),
+                            &out.status,
+                        )),
+                        // Only omh's own. Somebody else's volumes are not
+                        // omh's business to list, let alone to suggest
+                        // removing.
+                        true => Ok(String::from_utf8_lossy(&out.stdout)
+                            .lines()
+                            .map(str::trim)
+                            .filter(|n| n.starts_with("omh-"))
+                            .filter(|n| *n != paths.cache_volume())
+                            .map(str::to_string)
+                            .collect()),
+                    }),
+            },
+        )))
+        .chain(std::iter::once(doctor::seeded_from(
+            std::fs::read_to_string(paths.repo.join(".omh").join(crate::cmd::init::SEEDED_BY))
+                .ok()
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+            env!("CARGO_PKG_VERSION"),
+        )))
+        .chain(std::iter::once(doctor::disk_from(
+            &paths.root,
+            doctor::free_space,
+        )))
+        // Absent on a healthy repo: a row saying "you have a commit" on every
+        // run is a line nobody reads.
+        .chain(doctor::commit_from(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&paths.repo)
+                .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+                .output(),
+        ))
+        .chain(doctor::git_checks())
+        .collect::<Vec<_>>();
     let host = doctor::HostRows(host);
 
     // **Said on every exit below, not on the ones that remembered.** Between

@@ -117,6 +117,388 @@ pub struct Outcome {
     pub detail: String,
 }
 
+/// Whether the runtime **answered**, as opposed to merely existing on PATH.
+///
+/// `runtime::installed` is `command -v docker` and nothing more, so a machine
+/// with Docker Desktop quit — or still starting — reported a green
+/// `container runtime` row while every command failed on `Cannot connect to the
+/// Docker daemon`. Two states collapsed into one tick, with different fixes:
+/// install it, or start it.
+///
+/// Pure over the result, like `version_of`, so all four answers are a table on
+/// a machine that can only give one of them.
+///
+/// **Exit 0 with empty stdout is an answer here**, unlike `git --version`: the
+/// probe is `ps`, and a host with no containers legitimately lists none. The
+/// question asked is only whether something on the other end replied.
+pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), String> {
+    let out = asked.map_err(|e| format!("omh could not run it: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    // Through the same sanitiser `image` uses for exactly this — "why omh has
+    // no answer" — so an empty stderr and a signal death both come back as
+    // something a reader can act on rather than a blank cell.
+    Err(crate::image::unreadable(
+        &String::from_utf8_lossy(&out.stderr),
+        &out.status,
+    ))
+}
+
+/// What omh has left behind that nothing points at any more.
+///
+/// `risks.md` records this one as *"recorded rather than fixed"*: omh issues no
+/// `volume ls` anywhere, so after a migration `omh-cache-<basename>` and any
+/// stopped `omh-<basename>-sNN` are orphaned and unmentioned. They cost disk
+/// and a name, not correctness — which is exactly the shape of thing this
+/// command exists to surface rather than fail over.
+///
+/// **Never red.** A leftover breaks nothing; it is disk you can reclaim and a
+/// name that may confuse you later. A doctor that fails over it is one people
+/// stop running, and the exit code stops meaning *you cannot work*.
+pub fn leftovers_from(
+    sessions: Result<Vec<String>, String>,
+    volumes: Result<Vec<String>, String>,
+) -> Outcome {
+    let mut said = Vec::new();
+    // **Both halves can say "could not look".** Only volumes could, and the
+    // session half is the one this row's comment was written about: when
+    // `ps -a` failed, `session::leftovers` warned to stderr and returned a
+    // short list, so the row still printed "none — nothing orphaned" and
+    // `--json` carried no trace of the warning at all.
+    let sessions = match sessions {
+        Err(why) => {
+            said.push(format!("omh could not list containers: {why}"));
+            Vec::new()
+        }
+        Ok(found) => found,
+    };
+    if !sessions.is_empty() {
+        said.push(format!(
+            "sessions nothing points at: {} — `omh <id> rm` clears one, and says \
+             what it would take with it first",
+            sessions.join(", ")
+        ));
+    }
+    match volumes {
+        // **Could not look is not "none".** The `ps` read this row's session
+        // half goes through swallowed its failure, so a dead daemon reported
+        // *fewer* leftovers instead of saying it had not looked.
+        Err(why) => said.push(format!("omh could not list volumes: {why}")),
+        // **Named, never recommended for removal.** This said "volumes no
+        // checkout claims" with `docker volume rm` attached — and omh cannot
+        // establish that. A cache volume is keyed by a digest of a checkout's
+        // absolute path, so from inside one repo the others are indistinguishable
+        // from orphans: `omh doctor` in `api` was calling `web`'s live graph
+        // cache garbage and handing over the command to destroy it. omh can see
+        // that these exist; it cannot see whose they are.
+        // **Counted, not enumerated.** Driving the real binary printed 330
+        // names in a single unwrapped line — `out::Table` pads columns and
+        // never wraps, so the row was a wall nobody could read, and it pushed
+        // every other row off the screen. The count is the fact worth having;
+        // the names are recoverable with `docker volume ls`, which the row
+        // names instead of reproducing.
+        Ok(v) if !v.is_empty() => said.push(format!(
+            "{} omh volume{} on this machine — `docker volume ls | grep omh-` \
+             lists them. omh cannot tell which belong to other checkouts, \
+             because a cache is keyed by a digest of the path it was made for, \
+             so this is disk to be aware of rather than disk to reclaim",
+            v.len(),
+            if v.len() == 1 { "" } else { "s" }
+        )),
+        Ok(_) => {}
+    }
+    Outcome {
+        name: "leftovers".into(),
+        // Never red. This is disk to reclaim and a name that may confuse you
+        // later, not a machine that cannot work.
+        ok: true,
+        detail: if said.is_empty() {
+            "none — nothing orphaned on this machine".into()
+        } else {
+            said.join("; ")
+        },
+    }
+}
+
+/// Which omh set this checkout up, against the one running now.
+///
+/// Nothing recorded this before, so an upgrade's mid-command migration notices
+/// were the first a reader heard of it — `moved this checkout's … off` arrives
+/// while you are trying to do something else, and says nothing about whether
+/// anything is left to do.
+///
+/// **Absent is its own answer, not skew.** A checkout from before the stamp,
+/// or one never `init`ed, has nothing to compare — reporting that as a
+/// mismatch would invent a difference omh cannot see. That is the
+/// `installed_defs == 0` lesson from the stacks row: "nothing to compare with"
+/// and "compared, and they differ" are different facts and must read
+/// differently.
+pub fn seeded_from(stamp: Option<&str>, running: &str) -> Outcome {
+    Outcome {
+        name: "seeded by".into(),
+        // Never a failure. An older seed still runs; it is a thing to know
+        // when something behaves unlike the docs, which is what this command
+        // is for.
+        ok: true,
+        detail: match stamp {
+            None => format!(
+                "not recorded — this checkout predates the stamp, or was never \
+                 set up here. `omh init` records it, and reseeds anything \
+                 version {running} changed"
+            ),
+            Some(was) if was.trim() == running => {
+                format!("version {running}, the one running now")
+            }
+            Some(was) => format!(
+                "version {}, and you are running {running}. `omh init` reseeds \
+                 what changed, keeping anything you edited as `.yours`",
+                was.trim()
+            ),
+        },
+    }
+}
+
+/// How much room is left where omh keeps its state, and what that does *not*
+/// tell you.
+///
+/// A base image is a couple of gigabytes and a stack layer adds to it. Running
+/// out mid-build fails deep inside the runtime with a message that names a
+/// layer, not a disk, and the build is minutes gone before it says so.
+///
+/// **This measures the filesystem holding `~/.omh`, and says so.** On macOS
+/// Docker Desktop keeps images inside a VM disk image, so the number here is
+/// *not* the space a build consumes — the row states which filesystem it read
+/// rather than implying it answers "will this build fit". Being clear about
+/// what a measurement covers is the difference between a fact and a guess
+/// dressed as one.
+///
+/// Red only when there is very little left. A machine at 70% full is not
+/// broken, and a doctor that goes amber over ordinary disk use is one people
+/// stop reading.
+pub fn disk_from(
+    at: &std::path::Path,
+    measure: impl FnOnce(&std::path::Path) -> Result<u64, String>,
+) -> Outcome {
+    // **One path, measured and named.** These were two arguments — the bytes
+    // and the label — so measuring `/` while naming `~/.omh` was type-correct
+    // and green: on most machines they are the same filesystem, and no
+    // assertion can portably tell them apart. Taking the path and the prober
+    // instead makes the divergence unspellable, which is the only way this
+    // row's central claim — that it names what it measured — can be held.
+    let free = measure(at);
+    let at = at.display();
+    // A base image plus one stack layer. Below this a build is unlikely to
+    // finish; above it, omh has no business having an opinion about somebody
+    // else's disk.
+    const NEEDED: u64 = 3 * 1024 * 1024 * 1024;
+    match free {
+        Err(why) => Outcome {
+            name: "disk".into(),
+            ok: true,
+            detail: format!(
+                "omh could not measure the space at {at}: {why}. That is not a \
+                 statement about the disk — it is omh having no answer"
+            ),
+        },
+        Ok(bytes) => Outcome {
+            name: "disk".into(),
+            ok: bytes >= NEEDED,
+            detail: format!(
+                "{} free on the filesystem holding {at}{}",
+                gigabytes(bytes),
+                if bytes >= NEEDED {
+                    // The caveat rides on every reading, not only the red one:
+                    // it is just as wrong to read a green row as "the build
+                    // will fit".
+                    " — which is where omh keeps its state, not necessarily \
+                     where the runtime keeps its images"
+                } else {
+                    ". A base image is a couple of gigabytes and a stack layer \
+                     adds to it, so a build will likely fail partway, naming a \
+                     layer rather than the disk"
+                }
+            ),
+        },
+    }
+}
+
+/// Free bytes on the filesystem holding `at`, or why omh could not tell.
+///
+/// The shelling-out half, kept apart from the decision for the reason
+/// `git_checks_from` gives. `statvfs` rather than `df`: no parsing, no locale,
+/// and no second process.
+///
+/// **Available, not free.** `f_bavail` is what an unprivileged process may
+/// use; `f_bfree` includes the reserve only root can touch, and reporting that
+/// would promise room a build cannot have.
+pub fn free_space(at: &std::path::Path) -> Result<u64, String> {
+    let c_path = std::ffi::CString::new(at.as_os_str().as_encoded_bytes())
+        .map_err(|e| format!("{} is not a path omh can ask about: {e}", at.display()))?;
+    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call,
+    // and `stat` is written only on success, which the return value reports.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ok != 0 {
+        return Err(format!("{}", std::io::Error::last_os_error()));
+    }
+    // **Zero available is not an answer.** overlayfs, several FUSE mounts and
+    // some network filesystems succeed and report nothing, and `disk_from`
+    // would render that as a red "0.0 GB free" — telling somebody to clear
+    // space on a disk that is empty. It is the same question `daemon_from`
+    // asks about an empty `ps` and answers the other way, for the other
+    // reason: there, nothing is a legitimate listing; here, nothing is a
+    // filesystem declining to say.
+    match stat.f_bavail as u64 * stat.f_frsize as u64 {
+        0 => Err(format!(
+            "the filesystem holding {} does not report free space",
+            at.display()
+        )),
+        bytes => Ok(bytes),
+    }
+}
+
+/// Bytes, for a person. One decimal place, because the difference between
+/// 2.1 GB and 2.9 GB decides whether a build finishes.
+fn gigabytes(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
+/// **A repo with no commit has no branch to fork.**
+///
+/// `repo_root` already refuses a directory that is not a git repository at all
+/// (`profile::repo_root`), naming the cause and `git init` — so *that* is
+/// deliberately not a row here; it could never fail, because doctor cannot
+/// reach its own body without it. This is the narrower gap it leaves: `git
+/// init` with nothing committed yet is inside a repository, passes that gate,
+/// and then has no `HEAD` for `session::default_branch` to fork a worktree
+/// from.
+///
+/// Pure over the result, so "git could not be run" stays distinct from "git
+/// ran and there is no commit". The first is already the `git on the host`
+/// row's business and must not be reported twice as a different fault.
+pub fn commit_from(asked: std::io::Result<std::process::Output>) -> Option<Outcome> {
+    // A git omh could not run is the `git on the host` row's fault to report.
+    // Two rows for one cause reads as two problems.
+    let out = asked.ok()?;
+    if out.status.success() {
+        return None;
+    }
+    // **Only exit 1 is "no commit".** Measured, git 2.55.0: `rev-parse
+    // --verify --quiet HEAD` exits 1 when the ref does not resolve, and 128
+    // when git could not answer at all — dubious ownership, an unreadable
+    // `.git`, a gitdir pointer that moved, a bad config line. Treating those
+    // as "no commit" hands somebody `git commit --allow-empty` for a problem
+    // it will not touch, and would put a junk commit in a repo that already
+    // has hundreds. `--quiet` suppresses the ref diagnostic, so the stderr is
+    // carried instead of discarded.
+    if out.status.code() != Some(1) {
+        return Some(Outcome {
+            name: "repo has a commit".into(),
+            ok: false,
+            detail: format!(
+                "omh could not ask this repository for its HEAD: {}",
+                crate::image::unreadable(&String::from_utf8_lossy(&out.stderr), &out.status)
+            ),
+        });
+    }
+    Some(Outcome {
+        name: "repo has a commit".into(),
+        ok: false,
+        detail: "none yet — omh runs each session on its own worktree branch, \
+                 and a branch has to fork from something. `git commit` (even \
+                 `--allow-empty`) is enough"
+            .into(),
+    })
+}
+
+/// What each settings file holds, and whether omh reads any of it.
+///
+/// `Ok` per layer is the file's bare keys and values; `Err` is a file omh
+/// could not read or parse at all.
+pub type SettingsRead<'a> = Vec<(&'a str, Result<Vec<(String, String)>, String>)>;
+
+/// The same, owned — what a caller builds before borrowing it as a
+/// `SettingsRead`. Named because the shape is otherwise too long to read.
+pub type SettingsHeld = Vec<(String, Result<Vec<(String, String)>, String>)>;
+
+/// **A key omh does not read, and a file omh cannot read at all.**
+///
+/// Two silent failures, one row each. A misspelled key sits in
+/// `settings.toml` doing nothing for as long as the repo lives — `settings`
+/// already refuses an unknown *table* (`settings::resolve`), and lets scalars
+/// through on purpose because `config::policy` owns those, so nothing anywhere
+/// names them. And a file that will not parse is worse: `policy_value`
+/// swallows the error to `None`, so **every** setting silently reverts to its
+/// default with no error printed anywhere.
+///
+/// The unread half is a passing row — an unread key breaks nothing, it just
+/// does nothing — and reuses `omh settings`' own wording for the same fact.
+/// The unparseable half is red, because every setting in that file is being
+/// ignored.
+///
+/// **Enumerated, never guessed.** No nearest-match suggestion: there is no
+/// distance function in this tree and the house style — `tool_hint`,
+/// `settings::validate`, `selection::apply` — is to list the valid set and let
+/// the reader see their typo.
+pub fn settings_checks(read: &SettingsRead, known: &[&str]) -> Vec<Outcome> {
+    let mut unreadable = Vec::new();
+    let mut unread = Vec::new();
+    for (file, held) in read {
+        match held {
+            Err(why) => unreadable.push(format!("{file}: {why}")),
+            Ok(pairs) => {
+                for (key, _) in pairs {
+                    // **Any bracketed key**, which is how `config::values`
+                    // renders a table. Not the three named ones: the filter is
+                    // structural, so a mistyped `[provisoin]` is skipped here
+                    // and named by `omh settings`, which excludes `[use]` and
+                    // `[omh]` by name instead. The two readers disagree, and
+                    // the table half belongs to `settings::resolve`, which
+                    // refuses an unknown table outright.
+                    if key.starts_with('[') {
+                        continue;
+                    }
+                    if !known.contains(&key.as_str()) {
+                        unread.push(format!("`{key}` in {file}"));
+                    }
+                }
+            }
+        }
+    }
+
+    if !unreadable.is_empty() {
+        return vec![Outcome {
+            name: "settings omh reads".into(),
+            ok: false,
+            detail: format!(
+                "{} — so every scalar setting in it is being ignored and has \
+                 silently gone back to its default: `policy_value` swallows the \
+                 error and answers as though the key were never set. \
+                 `omh info --repo` refuses the file outright; nothing on the \
+                 launch path does",
+                unreadable.join("; ")
+            ),
+        }];
+    }
+
+    vec![Outcome {
+        name: "settings omh reads".into(),
+        ok: true,
+        detail: if unread.is_empty() {
+            "every key set here is one omh reads".into()
+        } else {
+            // Enumerated, not guessed. The house style is to list the valid
+            // set and let the reader see their own typo.
+            format!(
+                "set here, and read by nothing: {}. omh reads {}",
+                unread.join(", "),
+                known.join(", ")
+            )
+        },
+    }]
+}
+
 /// The host's answers, as a type of their own.
 ///
 /// **So they cannot be swapped with the sandbox's.** `every_check` used to
@@ -148,17 +530,31 @@ pub struct HostRows(pub Vec<Outcome>);
 /// "no toolchain in my sandbox" has an answer. Only a missing runtime fails,
 /// because nothing omh does works without one.
 pub fn host_checks(
-    runtime: Result<&str, String>,
+    runtime: Result<(&str, Result<(), String>), String>,
     stacks: Result<(&[crate::stack::Definition], Vec<&crate::stack::Definition>), String>,
     provision: &std::collections::BTreeMap<String, bool>,
 ) -> Vec<Outcome> {
     let mut out = Vec::new();
 
+    // **Three states, not two.** `runtime::installed` is `command -v docker`,
+    // so "on PATH" was the whole of the green tick — and Docker Desktop quit,
+    // or still starting, produced it while every command failed on `Cannot
+    // connect to the Docker daemon`. Install it and start it are different
+    // fixes, so they are different rows.
     out.push(match runtime {
-        Ok(name) => Outcome {
+        Ok((name, Ok(()))) => Outcome {
             name: "container runtime".into(),
             ok: true,
-            detail: format!("{name} — every sandbox omh builds and runs uses it"),
+            detail: format!("{name} — answering, and every sandbox omh builds and runs uses it"),
+        },
+        Ok((name, Err(why))) => Outcome {
+            name: "container runtime".into(),
+            ok: false,
+            detail: format!(
+                "{name} is installed but did not answer: {why}. It is usually \
+                 not started — nothing omh does works until it is, and nothing \
+                 was checked inside a sandbox"
+            ),
         },
         Err(why) => Outcome {
             name: "container runtime".into(),
@@ -1666,12 +2062,45 @@ mod tests {
             runtime.detail
         );
 
+        // **Installed but not answering is its own row.** It used to be the
+        // green one: `runtime::installed` is `command -v docker`, so a quit
+        // Docker Desktop ticked this box while nothing worked. The two have
+        // different fixes and must not read the same.
+        let asleep = host_checks(
+            Ok((
+                "docker",
+                Err("Cannot connect to the Docker daemon. Is the docker daemon running?".into()),
+            )),
+            Ok((&[], vec![])),
+            &BTreeMap::new(),
+        );
+        assert!(
+            !asleep[0].ok,
+            "a runtime that does not answer is not a working runtime"
+        );
+        assert!(
+            asleep[0].detail.contains("daemon running"),
+            "the runtime's own words carry the fix: {}",
+            asleep[0].detail
+        );
+        assert!(
+            asleep[0].detail.contains("installed but did not answer"),
+            "and it must not read like a missing install, which is a different \
+             fix: {}",
+            asleep[0].detail
+        );
+        assert!(
+            !asleep[0].detail.contains("install one of"),
+            "telling somebody to install what they have installed is noise: {}",
+            asleep[0].detail
+        );
+
         // **Present is a row too, and it must name the one that was picked.**
         // `detail: "docker — …"` hardcoded would satisfy a `contains("docker")`
         // on its own, so both runtimes are asked and each must exclude the
         // other — the row exists precisely for a machine with both.
         for (picked, other) in [("docker", "sbx"), ("sbx", "docker")] {
-            let ok = host_checks(Ok(picked), Ok((&[], vec![])), &BTreeMap::new());
+            let ok = host_checks(Ok((picked, Ok(()))), Ok((&[], vec![])), &BTreeMap::new());
             assert!(ok[0].ok);
             assert!(
                 ok[0].detail.contains(picked) && !ok[0].detail.contains(other),
@@ -1679,7 +2108,7 @@ mod tests {
                 ok[0].detail
             );
         }
-        let ok = host_checks(Ok("docker"), Ok((&[], vec![])), &BTreeMap::new());
+        let ok = host_checks(Ok(("docker", Ok(()))), Ok((&[], vec![])), &BTreeMap::new());
         assert!(
             ok[0].detail.contains("docker"),
             "the row must name which runtime was chosen: {}",
@@ -1703,7 +2132,11 @@ mod tests {
             def("go", "go.mod"),
             def("node", "package.json"),
         ];
-        let quiet = host_checks(Ok("docker"), Ok((&four, vec![])), &BTreeMap::new());
+        let quiet = host_checks(
+            Ok(("docker", Ok(()))),
+            Ok((&four, vec![])),
+            &BTreeMap::new(),
+        );
         let stacks = &quiet[1];
         assert!(stacks.ok, "no stack is not a failure");
         // **The two absences must be distinguishable, which is the whole
@@ -1728,7 +2161,7 @@ mod tests {
         // `omh doctor` before `omh init`, which said "none" while
         // `pyproject.toml` sat in the directory. That reads as a fact about
         // the repo and is a fact about the machine.
-        let bare = host_checks(Ok("docker"), Ok((&[], vec![])), &BTreeMap::new());
+        let bare = host_checks(Ok(("docker", Ok(()))), Ok((&[], vec![])), &BTreeMap::new());
         let stacks = &bare[1];
         assert!(stacks.ok, "an uninitialised profile is not a broken one");
         assert!(
@@ -1751,7 +2184,7 @@ mod tests {
         // Detected: name both the stack and the file that decided it, because
         // the marker is the thing a reader can check.
         let found = host_checks(
-            Ok("docker"),
+            Ok(("docker", Ok(()))),
             Ok((&four, vec![&four[0], &four[1]])),
             &BTreeMap::new(),
         );
@@ -1794,7 +2227,7 @@ mod tests {
 
         // Switched on: named plainly.
         let on = BTreeMap::from([(crate::stack::key("python", "runtime"), true)]);
-        let row = &host_checks(Ok("docker"), Ok((&defs, detected.clone())), &on)[1];
+        let row = &host_checks(Ok(("docker", Ok(()))), Ok((&defs, detected.clone())), &on)[1];
         assert_eq!(
             row.detail, "python (from pyproject.toml)",
             "a provide that installs is reported as it always was"
@@ -1802,7 +2235,7 @@ mod tests {
 
         // Switched off: the marker is still there, the toolchain is not.
         let off = BTreeMap::from([(crate::stack::key("python", "runtime"), false)]);
-        let row = &host_checks(Ok("docker"), Ok((&defs, detected.clone())), &off)[1];
+        let row = &host_checks(Ok(("docker", Ok(()))), Ok((&defs, detected.clone())), &off)[1];
         assert!(
             row.detail.contains("switched off"),
             "a stack nothing installs must not read as installed: {}",
@@ -1813,7 +2246,11 @@ mod tests {
         // nothing, so both must say so — but only one of them is a decision,
         // and calling an unconfigured repo "switched off" tells somebody they
         // turned off a toolchain they have never touched.
-        let row = &host_checks(Ok("docker"), Ok((&defs, detected)), &BTreeMap::new())[1];
+        let row = &host_checks(
+            Ok(("docker", Ok(()))),
+            Ok((&defs, detected)),
+            &BTreeMap::new(),
+        )[1];
         assert!(
             row.detail.contains("not provisioned"),
             "an unresolved provision installs nothing either, and says so in \
@@ -1824,6 +2261,473 @@ mod tests {
             !row.detail.contains("switched off"),
             "nobody switched this off — it was never decided: {}",
             row.detail
+        );
+    }
+
+    /// **On PATH is not the same as answering.** `runtime::installed` runs
+    /// `command -v docker`, which proves a binary exists and nothing else. A
+    /// machine with Docker Desktop quit, or still starting, got a green
+    /// `container runtime` row while every command failed on `Cannot connect
+    /// to the Docker daemon` — two states with different fixes collapsed into
+    /// one tick.
+    ///
+    /// Pure over the result so every answer is a table here rather than a
+    /// property of the machine the suite happens to run on.
+    #[test]
+    fn a_runtime_on_path_that_does_not_answer_is_not_a_working_runtime() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |code: i32, stdout: &str, stderr: &str| {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        };
+
+        // Answered. **Empty stdout is an answer**: the probe is `ps`, and a
+        // host with no containers legitimately lists none. Reading that as a
+        // dead daemon would fail every clean machine.
+        assert_eq!(daemon_from(out(0, "", "")), Ok(()));
+        assert_eq!(daemon_from(out(0, "omh-x-s01\n", "")), Ok(()));
+
+        // Did not answer. The daemon's own words carry the fix — "is the
+        // docker daemon running?" is the sentence somebody acts on — so they
+        // must survive into the reason.
+        let why = daemon_from(out(
+            1,
+            "",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+             Is the docker daemon running?",
+        ))
+        .expect_err("a non-zero exit is not an answer");
+        assert!(
+            why.contains("daemon running"),
+            "the runtime's own explanation is the actionable half: {why}"
+        );
+
+        // Exited non-zero and said nothing. Still not an answer, and the
+        // reason must not be empty — a blank cell is a row nobody can act on.
+        let why = daemon_from(out(125, "", "")).expect_err("still not an answer");
+        assert!(!why.trim().is_empty(), "an unanswered probe still says why");
+
+        // Could not be run at all.
+        let why = daemon_from(Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file",
+        )))
+        .expect_err("a probe that did not run is not an answer");
+        assert!(!why.trim().is_empty(), "and says why: {why}");
+    }
+
+    /// **A key nothing reads, and a file nothing can read.**
+    ///
+    /// Both are silent today. A misspelled `ca_cerf` sits in `settings.toml`
+    /// forever doing nothing — `settings::resolve` refuses unknown *tables*
+    /// and lets scalars through on purpose, so nothing names them. And a file
+    /// that will not parse is worse than that: `policy_value` swallows the
+    /// error to `None`, so every setting in it silently reverts to its default
+    /// with no error printed anywhere.
+    ///
+    /// Unread is a passing row — it breaks nothing, it just does nothing.
+    /// Unparseable is red, because every setting in that file is ignored.
+    #[test]
+    fn a_key_omh_does_not_read_is_named_and_a_file_it_cannot_read_is_a_failure() {
+        let known = ["ca_cert", "runtime", "account"];
+        let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
+
+        // Everything recognised: one passing row that says so without listing
+        // the whole table back at the reader.
+        let clean: SettingsRead = vec![(
+            ".omh/settings.toml",
+            Ok(vec![
+                pair("ca_cert", "/etc/corp.pem"),
+                pair("runtime", "docker"),
+            ]),
+        )];
+        let rows = settings_checks(&clean, &known);
+        assert_eq!(rows.len(), 1, "one row, whatever the file holds: {rows:?}");
+        assert!(rows[0].ok);
+
+        // An unread key. Named, with the file it is in — and the valid set
+        // enumerated rather than a guess at what was meant.
+        let typo: SettingsRead = vec![(
+            ".omh/settings.toml",
+            Ok(vec![
+                pair("ca_cerf", "/etc/corp.pem"),
+                pair("runtime", "docker"),
+            ]),
+        )];
+        let rows = settings_checks(&typo, &known);
+        assert!(rows[0].ok, "an unread key breaks nothing: {:?}", rows[0]);
+        assert!(
+            rows[0].detail.contains("ca_cerf"),
+            "the row must name the key: {}",
+            rows[0].detail
+        );
+        assert!(
+            rows[0].detail.contains("settings.toml"),
+            "and the file it is in, since two layers resolve: {}",
+            rows[0].detail
+        );
+        assert!(
+            rows[0].detail.contains("ca_cert") && rows[0].detail.contains("runtime"),
+            "and enumerate what omh does read, which is how the reader sees \
+             their typo: {}",
+            rows[0].detail
+        );
+
+        // **Tables are not keys.** `[use]`, `[omh]` and `[provision]` are
+        // seeded into every repo and validated elsewhere; naming them here
+        // would report omh's own scaffolding as unread.
+        let tables: SettingsRead = vec![(
+            ".omh/settings.toml",
+            Ok(vec![
+                pair("[use]", ""),
+                pair("[omh]", ""),
+                pair("[provision]", ""),
+            ]),
+        )];
+        assert!(
+            !settings_checks(&tables, &known)[0].detail.contains("use"),
+            "omh's own tables are not unread keys"
+        );
+
+        // A file omh cannot read at all. Red, and it says what it costs.
+        let broken: SettingsRead = vec![(
+            ".omh/settings.toml",
+            Err("parsing .omh/settings.toml: expected `=`".into()),
+        )];
+        let rows = settings_checks(&broken, &known);
+        assert!(!rows[0].ok, "an unreadable settings file is a failure");
+        assert!(
+            rows[0].detail.contains("expected `=`"),
+            "carrying the parse error, which is the only actionable part: {}",
+            rows[0].detail
+        );
+        assert!(
+            rows[0].detail.contains("default"),
+            "and what it costs — every setting in it reverts silently: {}",
+            rows[0].detail
+        );
+    }
+
+    /// **`git init` is not enough; omh forks a branch.**
+    ///
+    /// `repo_root` refuses a directory that is not a repository at all, so
+    /// doctor never runs outside one. It does run inside a repository with no
+    /// commit — and `session::default_branch` has no `HEAD` to resolve, so
+    /// every session fails at `worktree add`. Hit while building fixtures for
+    /// this very work: `git init` alone was not enough and needed
+    /// `git commit --allow-empty` before omh would work.
+    ///
+    /// A git that cannot be run is **not** this row's business — that is the
+    /// `git on the host` row, and reporting it twice as a different fault
+    /// sends the reader looking for a second problem.
+    #[test]
+    fn a_repository_with_no_commit_has_nothing_to_fork() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |code: i32, stdout: &str| {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+            })
+        };
+
+        // A commit exists: no row at all. Every healthy repo would otherwise
+        // carry a line saying nothing, and a doctor of those is one nobody
+        // reads.
+        assert!(
+            commit_from(out(0, "3d38b0c1e2f\n")).is_none(),
+            "a repo with a commit needs no row"
+        );
+
+        // **Exit 1 is the "no commit" answer. Measured, git 2.55.0:** a repo
+        // with no commit exits 1; a path that is not a repository, or one git
+        // cannot read, exits 128. The first version asserted on 128 — encoding
+        // the assumption rather than the measurement — so any git failure told
+        // the reader to run `git commit --allow-empty`, which would not touch
+        // their problem and would leave a junk commit behind.
+        let row = commit_from(out(1, "")).expect("a repo with no commit is worth a row");
+        assert!(!row.ok, "omh cannot fork a branch from nothing");
+        assert!(
+            row.detail.contains("commit"),
+            "the row must name what is missing: {}",
+            row.detail
+        );
+        assert!(
+            row.detail.contains("git commit"),
+            "and what makes it go away: {}",
+            row.detail
+        );
+
+        // 128 is git declining to answer — dubious ownership, an unreadable
+        // `.git`, a gitdir pointer that moved. A row, but a different one, and
+        // it carries what git said rather than a remedy that cannot apply.
+        let row = commit_from(Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(128 << 8),
+            stdout: Vec::new(),
+            stderr: b"fatal: detected dubious ownership in repository".to_vec(),
+        }))
+        .expect("git failing to answer is worth a row too");
+        assert!(!row.ok);
+        assert!(
+            row.detail.contains("dubious ownership"),
+            "what git said is the only actionable part: {}",
+            row.detail
+        );
+        assert!(
+            !row.detail.contains("git commit"),
+            "and a remedy that cannot apply is worse than none: {}",
+            row.detail
+        );
+
+        // Git could not be run. Not this row's fault to report — `git on the
+        // host` already carries it, and two rows for one cause reads as two
+        // problems.
+        assert!(
+            commit_from(Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no git",
+            )))
+            .is_none(),
+            "a missing git is the git row's business, not this one's"
+        );
+    }
+
+    /// **Room to build, and honesty about what was measured.**
+    ///
+    /// A base image is a couple of gigabytes; running out mid-build fails deep
+    /// inside the runtime naming a layer rather than a disk, minutes in.
+    ///
+    /// The harder half is not the threshold, it is the claim. On macOS Docker
+    /// Desktop keeps images inside a VM disk image, so free space on the
+    /// filesystem holding `~/.omh` is **not** the space a build consumes. The
+    /// row therefore reports what it measured and names it, rather than
+    /// answering "will this build fit" — a number presented as an answer to a
+    /// question it cannot answer is worse than no number.
+    #[test]
+    fn the_disk_row_says_which_filesystem_it_measured() {
+        const GB: u64 = 1024 * 1024 * 1024;
+
+        let at = std::path::Path::new("/Users/x/.omh");
+        let plenty = disk_from(at, |_| Ok(80 * GB));
+        assert!(plenty.ok, "80 GB free is not a problem");
+        assert!(
+            plenty.detail.contains("/Users/x/.omh"),
+            "the row names the filesystem it read: {}",
+            plenty.detail
+        );
+        assert!(
+            plenty.detail.contains("80"),
+            "and the figure: {}",
+            plenty.detail
+        );
+
+        // Nearly full: red, because a build will not finish and the failure it
+        // produces names a layer rather than a disk.
+        let tight = disk_from(at, |_| Ok(1));
+        assert!(!tight.ok, "a full disk is a failing check");
+        assert!(
+            tight.detail.contains("image"),
+            "and says what will not fit: {}",
+            tight.detail
+        );
+
+        // **Could not tell.** Never a verdict — a `statvfs` that failed says
+        // nothing about the disk, and a green tick would be a claim omh did
+        // not measure.
+        let unknown = disk_from(at, |_| Err("statvfs failed: permission denied".into()));
+        assert!(
+            unknown.detail.contains("permission denied"),
+            "the reason survives: {}",
+            unknown.detail
+        );
+        assert!(
+            unknown.ok,
+            "omh not being able to measure is not the user's fault"
+        );
+        assert!(
+            !unknown.detail.contains(" 0 "),
+            "and it must not render as zero free, which reads as a full disk: {}",
+            unknown.detail
+        );
+
+        // **The path it names is the path it measured.** The prober is given
+        // the path rather than a number taken elsewhere, so a row that names
+        // one filesystem and reads another cannot be written.
+        let asked = std::cell::Cell::new(std::path::PathBuf::new());
+        let _ = disk_from(at, |p| {
+            asked.set(p.to_path_buf());
+            Ok(80 * GB)
+        });
+        assert_eq!(asked.take(), at, "measured the path it names");
+
+        // **And the prober, on the machine running the suite.** Only what is
+        // true anywhere: `~` exists, and a filesystem with genuinely zero
+        // available bytes could not be running this test.
+        let here = free_space(std::path::Path::new("."))
+            .expect("the current directory is on a filesystem omh can ask about");
+        assert!(here > 0, "a filesystem with no room could not run this");
+        // A path that does not exist is an error, not a zero — the collapse
+        // that would have this row reporting a full disk for a typo. The same
+        // reasoning covers a filesystem that succeeds and reports nothing:
+        // overlayfs and several network mounts do, and `Ok(0)` would render as
+        // a red "0.0 GB free" telling somebody to clear an empty disk.
+        assert!(free_space(std::path::Path::new("/nonexistent/omh")).is_err());
+    }
+
+    /// **Which omh set this checkout up.**
+    ///
+    /// Nothing recorded it, so the first a reader heard of a skew was a
+    /// migration notice arriving mid-command while they were doing something
+    /// else. Three answers, and the third is the one that is easy to get
+    /// wrong.
+    #[test]
+    fn a_checkout_says_which_omh_set_it_up() {
+        // Same version: a standing fact, stated plainly.
+        let same = seeded_from(Some("0.8.0"), "0.8.0");
+        assert!(same.ok);
+        assert!(
+            same.detail.contains("0.8.0"),
+            "the row names the version either way: {}",
+            same.detail
+        );
+
+        // Older. Not a failure — omh still runs — but the thing to know when
+        // something behaves unlike the docs.
+        let older = seeded_from(Some("0.7.0"), "0.8.0");
+        assert!(older.ok, "a stale seed is not a broken repo");
+        assert!(
+            older.detail.contains("0.7.0") && older.detail.contains("0.8.0"),
+            "both versions, or the reader cannot tell which way round: {}",
+            older.detail
+        );
+        assert!(
+            older.detail.contains("omh init"),
+            "and what reseeds it: {}",
+            older.detail
+        );
+
+        // **Absent is not skew.** A checkout from before the stamp has nothing
+        // to compare, and reporting a mismatch would invent a difference omh
+        // cannot see.
+        let unknown = seeded_from(None, "0.8.0");
+        assert!(unknown.ok);
+        assert!(
+            !unknown.detail.contains("0.7") && !unknown.detail.contains("older"),
+            "nothing was compared, so nothing differs: {}",
+            unknown.detail
+        );
+        assert!(
+            unknown.detail.contains("omh init"),
+            "and the way to start recording it: {}",
+            unknown.detail
+        );
+    }
+
+    /// **What omh left behind, which nothing has ever listed.**
+    ///
+    /// `risks.md` records it as "recorded rather than fixed": omh issues no
+    /// `volume ls` anywhere, so after a migration the old cache volume and any
+    /// stopped container under the previous key are orphaned and unmentioned.
+    ///
+    /// Never red — a leftover is disk to reclaim, not a broken machine, and a
+    /// doctor that fails over one stops meaning "you cannot work".
+    #[test]
+    fn leftovers_are_reported_and_never_a_failure() {
+        // Nothing left behind: a row saying so, not silence — the reader asked.
+        let clean = leftovers_from(Ok(Vec::new()), Ok(Vec::new()));
+        assert!(clean.ok);
+        assert!(
+            clean.detail.contains("none"),
+            "a clean machine still answers: {}",
+            clean.detail
+        );
+
+        // Sessions and volumes, both named, and still not a failure.
+        let some = leftovers_from(
+            Ok(vec!["s01".to_string(), "s04".to_string()]),
+            Ok(vec!["omh-cache-repo-1234abcd".to_string()]),
+        );
+        assert!(
+            some.ok,
+            "a leftover is disk to reclaim, not a broken machine"
+        );
+        assert!(
+            some.detail.contains("s01") && some.detail.contains("s04"),
+            "each session is named, because `omh <id> rm` takes one: {}",
+            some.detail
+        );
+        // **Counted, not named.** A machine with a few omh repos has hundreds
+        // of cache volumes, and `out::Table` never wraps — driving the binary
+        // printed 330 names in one line and pushed every other row off the
+        // screen.
+        assert!(
+            some.detail.contains('1') && some.detail.contains("volume"),
+            "the count is the fact worth having: {}",
+            some.detail
+        );
+        assert!(
+            !some.detail.contains("omh-cache-repo-1234abcd"),
+            "naming them makes the row unreadable on any real machine: {}",
+            some.detail
+        );
+        assert!(
+            some.detail.contains("docker volume ls"),
+            "so it names how to see them instead: {}",
+            some.detail
+        );
+        // **And it must not tell anybody to delete one.** A cache volume is
+        // keyed by a digest of a checkout's absolute path, so from inside one
+        // repo another's is indistinguishable from an orphan. This row said
+        // "volumes no checkout claims" and offered `docker volume rm`, which
+        // on a machine with two omh repos is advice to destroy the other's
+        // working state.
+        assert!(
+            !some.detail.contains("volume rm"),
+            "omh cannot tell whose a volume is, so it must not suggest \
+             removing one: {}",
+            some.detail
+        );
+        assert!(
+            !some.detail.contains("no checkout claims"),
+            "and must not claim to know it is unclaimed: {}",
+            some.detail
+        );
+
+        // **A listing omh could not take is not an empty listing.** The `ps`
+        // read inside `leftovers` swallowed its failure, so a dead daemon
+        // reported *fewer* leftovers rather than saying it could not look.
+        let blind = leftovers_from(Ok(Vec::new()), Err("Cannot connect to the daemon".into()));
+        assert!(blind.ok, "not being able to look is not a failure either");
+        assert!(
+            blind.detail.contains("Cannot connect"),
+            "but it must say it could not look, rather than reporting none: {}",
+            blind.detail
+        );
+        assert!(
+            !blind.detail.contains("none"),
+            "an unanswered listing must not read as a clean machine: {}",
+            blind.detail
+        );
+
+        // **And the same for the session half, which had no way to say it.**
+        // `ps -a` failing warned to stderr and returned a short list, so the
+        // row printed "none — nothing orphaned" and `--json` carried no trace
+        // of the warning at all. The comment above this function described
+        // that exact failure while only the volume half could report it.
+        let deaf = leftovers_from(Err("Cannot connect to the daemon".into()), Ok(Vec::new()));
+        assert!(deaf.ok, "not being able to look is not a failure");
+        assert!(
+            deaf.detail.contains("could not list containers"),
+            "the session half must say it could not look: {}",
+            deaf.detail
+        );
+        assert!(
+            !deaf.detail.contains("none"),
+            "and must not read as a clean machine: {}",
+            deaf.detail
         );
     }
 

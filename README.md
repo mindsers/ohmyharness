@@ -481,7 +481,13 @@ checking claude in omh/claude:8eae0d5c1511fa89 — no account, so credentials go
   …
 ```
 
-A clean run ends `all 11 checks passed — claude's adapter paths are verified`;
+Above those, in the same table, are the **host's** rows: whether the container
+runtime is answering, the stacks detected here, settings omh does not read, what
+omh has left behind, which omh set this checkout up, disk, and the host's git.
+They are gathered before any container work, so a machine that cannot build a
+sandbox still gets them instead of a single error.
+
+A clean run ends `all N checks passed — claude's adapter paths are verified`;
 anything else fails the command and the tally goes to stderr. With an account
 chosen there is a credential check too, and the header names which account it
 used.
