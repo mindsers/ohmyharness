@@ -6695,6 +6695,71 @@ fn doctor_names_settings_omh_does_not_read() {
     );
 }
 
+/// **A session whose worktree survived is not a removed session.**
+///
+/// `rm` used to trust `git worktree remove`'s exit code, so a git that exited 0
+/// while leaving the directory behind was believed: `removed session s01`,
+/// exit 0, worktree still on disk. The first attempt at this fix printed a
+/// warning *and* the success line, which is the same lie with a footnote.
+///
+/// Driven by denying writes on the parent, so neither git nor `remove_dir_all`
+/// can unlink the entry — the shape of the real cause is that something else
+/// is holding it.
+#[test]
+#[cfg(unix)]
+fn rm_fails_when_the_worktree_is_still_on_disk() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git must be installed to run this test");
+
+    // A worktree omh will recognise as session s01, made directly so this test
+    // needs no container.
+    let at = sb.worktrees().join("s01");
+    std::fs::create_dir_all(sb.worktrees()).unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["worktree", "add", "-q", "-b", "omh/s01"])
+        .arg(&at)
+        .output()
+        .expect("git worktree add");
+    assert!(at.exists(), "the fixture made a worktree");
+
+    let parent = sb.worktrees();
+    let was = std::fs::metadata(&parent).unwrap().permissions();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = sb.omh(&["s01", "rm", "--force"]);
+    std::fs::set_permissions(&parent, was).unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "a session whose worktree is still there is not removed: {said}"
+    );
+    assert!(
+        !said.contains("removed session s01"),
+        "and must not say it was: {said}"
+    );
+    assert!(
+        said.contains("partly removed") && said.contains("s01"),
+        "it must name the state it left behind: {said}"
+    );
+    assert!(
+        said.contains(&at.display().to_string()),
+        "and the path that is still there: {said}"
+    );
+}
+
 /// **A runtime that is installed but asleep is not a working runtime.**
 ///
 /// `runtime::installed` is `command -v docker`, so Docker Desktop quit — or

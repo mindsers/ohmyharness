@@ -1642,8 +1642,10 @@ mod tests {
         let asked = s.remove(&root, "main", &d.path().join("shadows"));
         std::fs::set_permissions(&parent, was).unwrap();
 
-        let (_outcome, gone) = asked.expect("a worktree that will not go is not an error");
+        let (_outcome, gone) = asked.expect("`remove` itself still answers");
         match gone {
+            // The reason is what a caller prints to somebody deciding what to
+            // clean up by hand, so an empty one is a row nobody can act on.
             Gone::No(why) => assert!(!why.trim().is_empty(), "and it says why: {why}"),
             Gone::Yes => panic!(
                 "the worktree is still at {} — reporting it gone is the bug",

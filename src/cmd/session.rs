@@ -1398,13 +1398,23 @@ pub(crate) fn rm(
     // command exited 0 saying it. `rm` is the command that removes everything a
     // session owns; when one of them survives, the report has to name it and
     // what clears it, rather than reporting a removal that did not happen.
+    // **A worktree still on disk makes "removed session sNN" false**, and the
+    // command used to print both — a warning saying it is there, then a
+    // success line saying the session is gone, then exit 0. That is the shape
+    // this whole change exists to remove, so the outcome is reported once and
+    // the incomplete case is a failure rather than a footnote to a success.
     if let session::Gone::No(why) = &worktree {
-        ctx.warn(&format!(
-            "{id}'s worktree is still on disk: {} — {why}\n               git worktree prune          clear the registration once it is gone\n               rm -rf {}                   remove what is left",
-            session.worktree.display(),
-            session.worktree.display()
-        ));
+        anyhow::bail!(
+            "{id} is partly removed — its worktree is still there:\n  \
+             {at}\n  \
+             {why}\n\
+             what did go: the container, its graph entry, the run directory and \
+             the sandbox repository. The branch omh/{id} is untouched.\n  \
+             git worktree prune       clear the registration once the directory is gone",
+            at = session.worktree.display()
+        );
     }
+
     let action = match removed {
         session::Removed::BranchKept(n) => {
             // Two ways to be kept, and they are not the same news. A branch
