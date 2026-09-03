@@ -145,17 +145,24 @@ pub(crate) fn doctor_cmd(
         Ok(defs) => Ok((defs.as_slice(), stack::detected(defs, &paths.repo))),
         Err(e) => Err(format!("{e:#}")),
     };
-    let host = doctor::host_checks(
-        chosen
-            .as_ref()
-            .map(|b| b.program())
-            .map_err(|e| format!("{e:#}")),
-        stacks,
-        &provision,
-    )
-    .into_iter()
-    .chain(doctor::git_checks())
-    .collect::<Vec<_>>();
+    // **Asked, not assumed.** `runtime::installed` only proved a binary is on
+    // PATH. This is a real round-trip to whatever is on the other end, through
+    // the trait's own `running_args` so sbx is asked in sbx's spelling rather
+    // than docker's — `ps` is already what omh runs to see live sandboxes.
+    let answering = chosen.as_ref().map(|b| {
+        (
+            b.program(),
+            doctor::daemon_from(
+                std::process::Command::new(b.program())
+                    .args(b.running_args())
+                    .output(),
+            ),
+        )
+    });
+    let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
+        .into_iter()
+        .chain(doctor::git_checks())
+        .collect::<Vec<_>>();
     let host = doctor::HostRows(host);
 
     // **Said on every exit below, not on the ones that remembered.** Between

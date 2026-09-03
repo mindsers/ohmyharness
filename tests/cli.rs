@@ -6397,6 +6397,50 @@ fn doctor_reports_the_host_when_there_is_no_container_runtime() {
     );
 }
 
+/// **A runtime that is installed but asleep is not a working runtime.**
+///
+/// `runtime::installed` is `command -v docker`, so Docker Desktop quit — or
+/// still starting — produced a green `container runtime` row while every omh
+/// command failed on `Cannot connect to the Docker daemon`. Install it and
+/// start it are different fixes, and they read the same.
+///
+/// The `docker-refuses` sentinel is `fake_docker`'s existing knob for exactly
+/// this: every invocation prints that sentence and exits 1.
+#[test]
+fn doctor_says_when_the_runtime_is_installed_but_not_answering() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    std::fs::write(log.parent().unwrap().join("docker-refuses"), "").unwrap();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+
+    let out = sb.omh(&["doctor"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !out.status.success(),
+        "a runtime that cannot be reached is a failing check: {said}"
+    );
+    assert!(
+        said.contains("installed but did not answer"),
+        "the row must distinguish asleep from absent: {said}"
+    );
+    assert!(
+        !said.contains("install one of"),
+        "and must not tell somebody to install what they have: {said}"
+    );
+    // The rows that do not need a daemon are still there — the whole point of
+    // gathering the host before the container work.
+    assert!(
+        said.contains("git on the host"),
+        "the host's other answers survive: {said}"
+    );
+}
+
 /// **A fresh machine is told what it has, not only what it lacks.**
 ///
 /// `no adapters installed` was the entire output. And when this path first

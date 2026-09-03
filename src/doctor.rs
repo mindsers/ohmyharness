@@ -117,6 +117,34 @@ pub struct Outcome {
     pub detail: String,
 }
 
+/// Whether the runtime **answered**, as opposed to merely existing on PATH.
+///
+/// `runtime::installed` is `command -v docker` and nothing more, so a machine
+/// with Docker Desktop quit — or still starting — reported a green
+/// `container runtime` row while every command failed on `Cannot connect to the
+/// Docker daemon`. Two states collapsed into one tick, with different fixes:
+/// install it, or start it.
+///
+/// Pure over the result, like `version_of`, so all four answers are a table on
+/// a machine that can only give one of them.
+///
+/// **Exit 0 with empty stdout is an answer here**, unlike `git --version`: the
+/// probe is `ps`, and a host with no containers legitimately lists none. The
+/// question asked is only whether something on the other end replied.
+pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), String> {
+    let out = asked.map_err(|e| format!("omh could not run it: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    // Through the same sanitiser `image` uses for exactly this — "why omh has
+    // no answer" — so an empty stderr and a signal death both come back as
+    // something a reader can act on rather than a blank cell.
+    Err(crate::image::unreadable(
+        &String::from_utf8_lossy(&out.stderr),
+        &out.status,
+    ))
+}
+
 /// The host's answers, as a type of their own.
 ///
 /// **So they cannot be swapped with the sandbox's.** `every_check` used to
@@ -148,17 +176,31 @@ pub struct HostRows(pub Vec<Outcome>);
 /// "no toolchain in my sandbox" has an answer. Only a missing runtime fails,
 /// because nothing omh does works without one.
 pub fn host_checks(
-    runtime: Result<&str, String>,
+    runtime: Result<(&str, Result<(), String>), String>,
     stacks: Result<(&[crate::stack::Definition], Vec<&crate::stack::Definition>), String>,
     provision: &std::collections::BTreeMap<String, bool>,
 ) -> Vec<Outcome> {
     let mut out = Vec::new();
 
+    // **Three states, not two.** `runtime::installed` is `command -v docker`,
+    // so "on PATH" was the whole of the green tick — and Docker Desktop quit,
+    // or still starting, produced it while every command failed on `Cannot
+    // connect to the Docker daemon`. Install it and start it are different
+    // fixes, so they are different rows.
     out.push(match runtime {
-        Ok(name) => Outcome {
+        Ok((name, Ok(()))) => Outcome {
             name: "container runtime".into(),
             ok: true,
-            detail: format!("{name} — every sandbox omh builds and runs uses it"),
+            detail: format!("{name} — answering, and every sandbox omh builds and runs uses it"),
+        },
+        Ok((name, Err(why))) => Outcome {
+            name: "container runtime".into(),
+            ok: false,
+            detail: format!(
+                "{name} is installed but did not answer: {why}. It is usually \
+                 not started — nothing omh does works until it is, and nothing \
+                 was checked inside a sandbox"
+            ),
         },
         Err(why) => Outcome {
             name: "container runtime".into(),
@@ -1666,12 +1708,45 @@ mod tests {
             runtime.detail
         );
 
+        // **Installed but not answering is its own row.** It used to be the
+        // green one: `runtime::installed` is `command -v docker`, so a quit
+        // Docker Desktop ticked this box while nothing worked. The two have
+        // different fixes and must not read the same.
+        let asleep = host_checks(
+            Ok((
+                "docker",
+                Err("Cannot connect to the Docker daemon. Is the docker daemon running?".into()),
+            )),
+            Ok((&[], vec![])),
+            &BTreeMap::new(),
+        );
+        assert!(
+            !asleep[0].ok,
+            "a runtime that does not answer is not a working runtime"
+        );
+        assert!(
+            asleep[0].detail.contains("daemon running"),
+            "the runtime's own words carry the fix: {}",
+            asleep[0].detail
+        );
+        assert!(
+            asleep[0].detail.contains("installed but did not answer"),
+            "and it must not read like a missing install, which is a different \
+             fix: {}",
+            asleep[0].detail
+        );
+        assert!(
+            !asleep[0].detail.contains("install one of"),
+            "telling somebody to install what they have installed is noise: {}",
+            asleep[0].detail
+        );
+
         // **Present is a row too, and it must name the one that was picked.**
         // `detail: "docker — …"` hardcoded would satisfy a `contains("docker")`
         // on its own, so both runtimes are asked and each must exclude the
         // other — the row exists precisely for a machine with both.
         for (picked, other) in [("docker", "sbx"), ("sbx", "docker")] {
-            let ok = host_checks(Ok(picked), Ok((&[], vec![])), &BTreeMap::new());
+            let ok = host_checks(Ok((picked, Ok(()))), Ok((&[], vec![])), &BTreeMap::new());
             assert!(ok[0].ok);
             assert!(
                 ok[0].detail.contains(picked) && !ok[0].detail.contains(other),
@@ -1679,7 +1754,7 @@ mod tests {
                 ok[0].detail
             );
         }
-        let ok = host_checks(Ok("docker"), Ok((&[], vec![])), &BTreeMap::new());
+        let ok = host_checks(Ok(("docker", Ok(()))), Ok((&[], vec![])), &BTreeMap::new());
         assert!(
             ok[0].detail.contains("docker"),
             "the row must name which runtime was chosen: {}",
@@ -1703,7 +1778,11 @@ mod tests {
             def("go", "go.mod"),
             def("node", "package.json"),
         ];
-        let quiet = host_checks(Ok("docker"), Ok((&four, vec![])), &BTreeMap::new());
+        let quiet = host_checks(
+            Ok(("docker", Ok(()))),
+            Ok((&four, vec![])),
+            &BTreeMap::new(),
+        );
         let stacks = &quiet[1];
         assert!(stacks.ok, "no stack is not a failure");
         // **The two absences must be distinguishable, which is the whole
@@ -1728,7 +1807,7 @@ mod tests {
         // `omh doctor` before `omh init`, which said "none" while
         // `pyproject.toml` sat in the directory. That reads as a fact about
         // the repo and is a fact about the machine.
-        let bare = host_checks(Ok("docker"), Ok((&[], vec![])), &BTreeMap::new());
+        let bare = host_checks(Ok(("docker", Ok(()))), Ok((&[], vec![])), &BTreeMap::new());
         let stacks = &bare[1];
         assert!(stacks.ok, "an uninitialised profile is not a broken one");
         assert!(
@@ -1751,7 +1830,7 @@ mod tests {
         // Detected: name both the stack and the file that decided it, because
         // the marker is the thing a reader can check.
         let found = host_checks(
-            Ok("docker"),
+            Ok(("docker", Ok(()))),
             Ok((&four, vec![&four[0], &four[1]])),
             &BTreeMap::new(),
         );
@@ -1794,7 +1873,7 @@ mod tests {
 
         // Switched on: named plainly.
         let on = BTreeMap::from([(crate::stack::key("python", "runtime"), true)]);
-        let row = &host_checks(Ok("docker"), Ok((&defs, detected.clone())), &on)[1];
+        let row = &host_checks(Ok(("docker", Ok(()))), Ok((&defs, detected.clone())), &on)[1];
         assert_eq!(
             row.detail, "python (from pyproject.toml)",
             "a provide that installs is reported as it always was"
@@ -1802,7 +1881,7 @@ mod tests {
 
         // Switched off: the marker is still there, the toolchain is not.
         let off = BTreeMap::from([(crate::stack::key("python", "runtime"), false)]);
-        let row = &host_checks(Ok("docker"), Ok((&defs, detected.clone())), &off)[1];
+        let row = &host_checks(Ok(("docker", Ok(()))), Ok((&defs, detected.clone())), &off)[1];
         assert!(
             row.detail.contains("switched off"),
             "a stack nothing installs must not read as installed: {}",
@@ -1813,7 +1892,11 @@ mod tests {
         // nothing, so both must say so — but only one of them is a decision,
         // and calling an unconfigured repo "switched off" tells somebody they
         // turned off a toolchain they have never touched.
-        let row = &host_checks(Ok("docker"), Ok((&defs, detected)), &BTreeMap::new())[1];
+        let row = &host_checks(
+            Ok(("docker", Ok(()))),
+            Ok((&defs, detected)),
+            &BTreeMap::new(),
+        )[1];
         assert!(
             row.detail.contains("not provisioned"),
             "an unresolved provision installs nothing either, and says so in \
@@ -1825,6 +1908,61 @@ mod tests {
             "nobody switched this off — it was never decided: {}",
             row.detail
         );
+    }
+
+    /// **On PATH is not the same as answering.** `runtime::installed` runs
+    /// `command -v docker`, which proves a binary exists and nothing else. A
+    /// machine with Docker Desktop quit, or still starting, got a green
+    /// `container runtime` row while every command failed on `Cannot connect
+    /// to the Docker daemon` — two states with different fixes collapsed into
+    /// one tick.
+    ///
+    /// Pure over the result so every answer is a table here rather than a
+    /// property of the machine the suite happens to run on.
+    #[test]
+    fn a_runtime_on_path_that_does_not_answer_is_not_a_working_runtime() {
+        use std::os::unix::process::ExitStatusExt;
+        let out = |code: i32, stdout: &str, stderr: &str| {
+            Ok(std::process::Output {
+                status: std::process::ExitStatus::from_raw(code << 8),
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: stderr.as_bytes().to_vec(),
+            })
+        };
+
+        // Answered. **Empty stdout is an answer**: the probe is `ps`, and a
+        // host with no containers legitimately lists none. Reading that as a
+        // dead daemon would fail every clean machine.
+        assert_eq!(daemon_from(out(0, "", "")), Ok(()));
+        assert_eq!(daemon_from(out(0, "omh-x-s01\n", "")), Ok(()));
+
+        // Did not answer. The daemon's own words carry the fix — "is the
+        // docker daemon running?" is the sentence somebody acts on — so they
+        // must survive into the reason.
+        let why = daemon_from(out(
+            1,
+            "",
+            "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. \
+             Is the docker daemon running?",
+        ))
+        .expect_err("a non-zero exit is not an answer");
+        assert!(
+            why.contains("daemon running"),
+            "the runtime's own explanation is the actionable half: {why}"
+        );
+
+        // Exited non-zero and said nothing. Still not an answer, and the
+        // reason must not be empty — a blank cell is a row nobody can act on.
+        let why = daemon_from(out(125, "", "")).expect_err("still not an answer");
+        assert!(!why.trim().is_empty(), "an unanswered probe still says why");
+
+        // Could not be run at all.
+        let why = daemon_from(Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "no such file",
+        )))
+        .expect_err("a probe that did not run is not an answer");
+        assert!(!why.trim().is_empty(), "and says why: {why}");
     }
 
     /// **Offline must never read as "you are behind a proxy".** That is the
