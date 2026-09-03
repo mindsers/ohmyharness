@@ -237,8 +237,8 @@ pub(crate) fn doctor_cmd(
             env!("CARGO_PKG_VERSION"),
         )))
         .chain(std::iter::once(doctor::disk_from(
-            doctor::free_space(&paths.root),
-            &paths.root.display().to_string(),
+            &paths.root,
+            doctor::free_space,
         )))
         // Absent on a healthy repo: a row saying "you have a commit" on every
         // run is a line nobody reads.

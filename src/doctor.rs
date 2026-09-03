@@ -276,7 +276,18 @@ pub fn seeded_from(stamp: Option<&str>, running: &str) -> Outcome {
 /// Red only when there is very little left. A machine at 70% full is not
 /// broken, and a doctor that goes amber over ordinary disk use is one people
 /// stop reading.
-pub fn disk_from(free: Result<u64, String>, at: &str) -> Outcome {
+pub fn disk_from(
+    at: &std::path::Path,
+    measure: impl FnOnce(&std::path::Path) -> Result<u64, String>,
+) -> Outcome {
+    // **One path, measured and named.** These were two arguments — the bytes
+    // and the label — so measuring `/` while naming `~/.omh` was type-correct
+    // and green: on most machines they are the same filesystem, and no
+    // assertion can portably tell them apart. Taking the path and the prober
+    // instead makes the divergence unspellable, which is the only way this
+    // row's central claim — that it names what it measured — can be held.
+    let free = measure(at);
+    let at = at.display();
     // A base image plus one stack layer. Below this a build is unlikely to
     // finish; above it, omh has no business having an opinion about somebody
     // else's disk.
@@ -2499,7 +2510,8 @@ mod tests {
     fn the_disk_row_says_which_filesystem_it_measured() {
         const GB: u64 = 1024 * 1024 * 1024;
 
-        let plenty = disk_from(Ok(80 * GB), "/Users/x/.omh");
+        let at = std::path::Path::new("/Users/x/.omh");
+        let plenty = disk_from(at, |_| Ok(80 * GB));
         assert!(plenty.ok, "80 GB free is not a problem");
         assert!(
             plenty.detail.contains("/Users/x/.omh"),
@@ -2514,7 +2526,7 @@ mod tests {
 
         // Nearly full: red, because a build will not finish and the failure it
         // produces names a layer rather than a disk.
-        let tight = disk_from(Ok(1), "/Users/x/.omh");
+        let tight = disk_from(at, |_| Ok(1));
         assert!(!tight.ok, "a full disk is a failing check");
         assert!(
             tight.detail.contains("image"),
@@ -2525,7 +2537,7 @@ mod tests {
         // **Could not tell.** Never a verdict — a `statvfs` that failed says
         // nothing about the disk, and a green tick would be a claim omh did
         // not measure.
-        let unknown = disk_from(Err("statvfs failed: permission denied".into()), "/x");
+        let unknown = disk_from(at, |_| Err("statvfs failed: permission denied".into()));
         assert!(
             unknown.detail.contains("permission denied"),
             "the reason survives: {}",
@@ -2540,6 +2552,16 @@ mod tests {
             "and it must not render as zero free, which reads as a full disk: {}",
             unknown.detail
         );
+
+        // **The path it names is the path it measured.** The prober is given
+        // the path rather than a number taken elsewhere, so a row that names
+        // one filesystem and reads another cannot be written.
+        let asked = std::cell::Cell::new(std::path::PathBuf::new());
+        let _ = disk_from(at, |p| {
+            asked.set(p.to_path_buf());
+            Ok(80 * GB)
+        });
+        assert_eq!(asked.take(), at, "measured the path it names");
 
         // **And the prober, on the machine running the suite.** Only what is
         // true anywhere: `~` exists, and a filesystem with genuinely zero

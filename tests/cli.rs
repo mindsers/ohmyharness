@@ -138,6 +138,11 @@ impl Sandbox {
     /// the narrower thing the launch path needs: a runtime that answers *the
     /// container is running* and then will not let omh in. Everything
     /// destructive in a launch hangs off telling those two apart.
+    /// `<bin>/volumes` is read by `docker volume ls`, the way `<bin>/containers`
+    /// is read by `ps`. Without it the shim answered `exit 0` with no output to
+    /// anything it did not recognise, so `doctor`'s volume filter could never
+    /// be exercised — replacing it with `!n.is_empty()` was green, and would
+    /// have shipped a doctor that lists every volume on the machine.
     fn fake_docker(&self) -> PathBuf {
         let log = self.bin.join("docker.log");
         let shim = self.bin.join("docker");
@@ -151,12 +156,14 @@ impl Sandbox {
                  case \"$*\" in *--pull=never*) [ -f {probe_refuses} ] && {{ \
                  echo 'no such image' >&2; exit 125; }} ;; esac\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\n\
-                 if [ \"$1\" = ps ]; then cat {containers} 2>/dev/null; fi\nexit 0\n",
+                 if [ \"$1\" = ps ]; then cat {containers} 2>/dev/null; fi\n\
+                 if [ \"$1\" = volume ]; then cat {volumes} 2>/dev/null; fi\nexit 0\n",
                 log = log.display(),
                 refuses = self.bin.join("docker-refuses").display(),
                 exec_refuses = self.bin.join("docker-exec-refuses").display(),
                 probe_refuses = self.bin.join("docker-probe-refuses").display(),
-                containers = self.bin.join("containers").display()
+                containers = self.bin.join("containers").display(),
+                volumes = self.bin.join("volumes").display()
             ),
         )
         .unwrap();
@@ -6414,7 +6421,15 @@ fn report_json(stdout: &str) -> serde_json::Value {
     serde_json::Deserializer::from_str(stdout)
         .into_iter::<serde_json::Value>()
         .filter_map(Result::ok)
-        .filter(|v| v.get("checks").is_some())
+        // `checks` **as an array**. `report::Action::json` merges its `data`
+        // into the top level, and `doctor-nothing-to-check` already carries a
+        // scalar `"checks": 0` — matched by a bare `is_some()`, and today only
+        // ordering keeps it from being picked.
+        .filter(|v| {
+            v.get("checks")
+                .and_then(serde_json::Value::as_array)
+                .is_some()
+        })
         .last()
         .unwrap_or_else(|| panic!("no report in stdout: {stdout}"))
 }
@@ -6452,6 +6467,24 @@ fn init_records_which_omh_seeded_the_checkout() {
     assert!(
         ignored.lines().any(|l| l.trim() == "settings.local.toml"),
         "the secret-bearing layer is still ignored: {ignored}"
+    );
+
+    // **Rewritten, not `write_if_absent`.** The whole point is that the stamp
+    // moves when omh does; a review swapped `fs::write` for `write_if_absent`
+    // and all 1538 tests passed, because this test only ever ran `init` once
+    // against an absent file, where both spellings behave the same. The
+    // surviving mutation records the omh that *first* set the checkout up and
+    // then lies about every upgrade after it — in the row whose only job is
+    // detecting exactly that.
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+    sb.omh(&["init"]);
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
+            .unwrap_or_default()
+            .trim(),
+        env!("CARGO_PKG_VERSION"),
+        "a second `init` restamps; otherwise the stamp records the first omh \
+         that ever ran here and never moves again"
     );
 
     // An older stamp reads as skew, and is not a failure.
@@ -6523,6 +6556,77 @@ fn doctor_says_a_repo_with_no_commit_has_nothing_to_fork() {
     );
 }
 
+/// **The rows that could be deleted with the suite still green.**
+///
+/// A review mutated `doctor` by removing the `leftovers` and `disk` chains
+/// entirely and all 186 integration tests passed — two of the six advertised
+/// checks could vanish from the shipped command unnoticed. Neither row name
+/// was asserted anywhere.
+///
+/// It also pins the two things the rows *claim*: that the volume filter is
+/// omh's own volumes and not every volume on the machine, and that the disk
+/// row measures the filesystem it names.
+#[test]
+fn doctor_reports_leftovers_and_disk_and_says_what_it_measured() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    // What `docker volume ls` answers: one of omh's, one of somebody else's.
+    std::fs::write(
+        log.parent().unwrap().join("volumes"),
+        "omh-cache-elsewhere-1a2b3c4d\npostgres-data\nnode-modules-cache\n",
+    )
+    .unwrap();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+
+    let out = sb.omh(&["doctor", "--json"]);
+    let v = report_json(&String::from_utf8_lossy(&out.stdout));
+    let row = |name: &str| -> String {
+        v["checks"]
+            .as_array()
+            .and_then(|c| c.iter().find(|o| o["name"] == name))
+            .unwrap_or_else(|| panic!("no {name} row: {v}"))["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string()
+    };
+
+    // **omh's volumes, not the machine's.** Dropping the `omh-` filter would
+    // list `postgres-data` — somebody's database — in a diagnostic.
+    let left = row("leftovers");
+    assert!(
+        left.contains('1') && left.contains("volume"),
+        "the count of omh's own volumes: {left}"
+    );
+    assert!(
+        !left.contains("postgres") && !left.contains("node-modules"),
+        "and nothing that is not omh's: {left}"
+    );
+
+    // **The disk row names the filesystem it measured.** Measuring one path
+    // while naming another is the "a fact, not a guess dressed as one"
+    // property the row exists for, and it was unpinned.
+    let disk = row("disk");
+    assert!(
+        disk.contains(&sb.home.join(".omh").display().to_string()),
+        "the row must name the path it measured: {disk}"
+    );
+    assert!(
+        disk.contains("GB"),
+        "and report a figure, not just a path: {disk}"
+    );
+
+    // **The daemon probe asks the question it claims to.** Swapping
+    // `running_args` for any other argv left the suite green, because the shim
+    // answers `exit 0` to everything.
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.lines().any(|l| l.starts_with("ps ") || l == "ps"),
+        "the runtime is probed with `ps`, which is the round-trip omh already \
+         makes to see live sandboxes: {calls}"
+    );
+}
+
 /// **A key omh does not read, and a file omh cannot read at all.**
 ///
 /// Both were silent. A misspelled key sits in `settings.toml` doing nothing
@@ -6538,9 +6642,12 @@ fn doctor_names_settings_omh_does_not_read() {
     sb.git_init();
     sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
     // `fake_docker` already wrote `runtime = "docker"`; add a plausible typo.
-    let at = sb.repo.join(".omh/settings.toml");
-    let held = std::fs::read_to_string(&at).unwrap_or_default();
-    std::fs::write(&at, format!("{held}ca_cerf = \"/etc/corp.pem\"\n")).unwrap();
+    // **`settings.local.toml`, not the committed file.** `Layer::SETTINGS` is
+    // both, and narrowing the scan to `[Shared]` alone left the suite green —
+    // dropping the *secret-bearing* layer, where an unparseable file silently
+    // reverts every credential-adjacent setting to its default.
+    let at = sb.repo.join(".omh/settings.local.toml");
+    std::fs::write(&at, "ca_cerf = \"/etc/corp.pem\"\n").unwrap();
 
     let out = sb.omh(&["doctor"]);
     let said = format!(
@@ -6556,6 +6663,11 @@ fn doctor_names_settings_omh_does_not_read() {
         said.contains("ca_cert"),
         "and enumerate what omh does read, which is how a typo becomes \
          visible: {said}"
+    );
+
+    assert!(
+        said.contains("settings.local.toml"),
+        "and the file it is in — the scan reads both layers: {said}"
     );
 
     // A file that will not parse is a different, worse fact: every setting in
@@ -6624,6 +6736,20 @@ fn doctor_says_when_the_runtime_is_installed_but_not_answering() {
     assert!(
         said.contains("git on the host"),
         "the host's other answers survive: {said}"
+    );
+
+    // **And the halves that could not look say so.** The refusing shim makes
+    // `ps -a` fail inside `session::leftovers`, which is the exact condition
+    // the leftovers row was rewritten for: it used to warn to stderr and still
+    // print "none — nothing orphaned on this machine", with `--json` carrying
+    // no trace of the warning at all.
+    assert!(
+        said.contains("could not list containers"),
+        "a listing omh could not take must say so: {said}"
+    );
+    assert!(
+        !said.contains("nothing orphaned"),
+        "and must not read as a clean machine: {said}"
     );
 }
 
