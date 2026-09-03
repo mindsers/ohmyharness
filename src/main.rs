@@ -2154,19 +2154,28 @@ mod tests {
             ("src/cmd/catalogue.rs", 12),
             ("src/cmd/harvest.rs", 19),
             ("src/cmd/init.rs", 6),
+            // The fifth is the `adapters installed` row `doctor` adds when
+            // there is none: printed to somebody on a fresh machine whose only
+            // next step is the command it names, so a spelling omh does not
+            // accept would strand them.
+            //
             // The fourth is `doctor`'s TLS-inspection warning. It is printed
             // to somebody whose sandbox cannot verify anything it fetches and
             // who has, by construction, not set `ca_cert` — so the command in
             // it is the only thing standing between them and a broken
             // sandbox, and `--local` being the spelling omh accepts is what
             // this scan is for.
-            ("src/cmd/inspect.rs", 4),
+            ("src/cmd/inspect.rs", 5),
             ("src/cmd/memory.rs", 1),
             ("src/cmd/session.rs", 10),
             ("src/cmd/settings.rs", 10),
             ("src/config.rs", 3),
             ("src/container.rs", 4),
-            ("src/doctor.rs", 1),
+            // Two. The second is `host_checks`' answer for a profile with no
+            // stack definitions installed, which names `omh init` as what
+            // seeds them — printed to somebody whose sandbox has no toolchain
+            // and who is owed the reason it has none.
+            ("src/doctor.rs", 2),
             // Three. One is the `# `omh set --local ca_cert`` line `ca_layer`
             // writes into the generated Dockerfile, telling whoever reads the
             // recipe where the certificate came from. **Not** either of
@@ -3207,15 +3216,19 @@ mod tests {
         );
     }
 
-    /// The host's answers come after the sandbox's, so an empty probe is still
-    /// an empty probe.
+    /// The host's answers come first, and an empty probe is still an empty
+    /// probe.
     ///
-    /// The host side is not a parameter, which is the real guard — as two
-    /// arguments, swapping them silenced the emptiness check and passing an
-    /// empty list dropped git from the report, and neither mistake could be
-    /// reached by a test, because `doctor_cmd` needs a container. Now neither
-    /// compiles. What is left to assert is the ordering and that the host's
-    /// row is actually there.
+    /// The host side **is** a parameter now, because `doctor_cmd` gathers it
+    /// before the container work — that is the whole point: on a machine with
+    /// no runtime the probe never runs, and the host rows are exactly what the
+    /// reader needs. The guard the old shape got for free from not having a
+    /// parameter is kept in the type: `HostRows` cannot be swapped with the
+    /// sandbox's `Vec<Outcome>`, and an empty one is refused rather than
+    /// silently dropping the machine from the report.
+    ///
+    /// Ordering flipped with it. The host's rows are what a failing sandbox is
+    /// usually explained by, so they read first.
     #[test]
     fn host_checks_never_stand_in_for_a_probe_that_did_not_run() {
         let sandbox = vec![doctor::Outcome {
@@ -3224,19 +3237,27 @@ mod tests {
             detail: "reads".into(),
         }];
 
-        let err = cmd::harvest::every_check(Vec::new())
+        let host = || doctor::HostRows(doctor::git_checks());
+
+        let err = cmd::harvest::every_check(Vec::new(), host())
             .expect_err("a sandbox that ran nothing is not a pass");
         assert!(err.to_string().contains("did not run it"), "{err}");
 
-        let both = cmd::harvest::every_check(sandbox).unwrap();
-        assert_eq!(
-            both.first().map(|o| o.name.as_str()),
-            Some("rules"),
-            "the sandbox's answers first: {both:?}"
-        );
+        // The half the type cannot carry: a caller that gathered no host rows
+        // would report the sandbox as fine and say nothing about the machine.
+        let err = cmd::harvest::every_check(sandbox.clone(), doctor::HostRows(Vec::new()))
+            .expect_err("no host rows is a caller mistake, not a quiet host");
+        assert!(err.to_string().contains("host checks"), "{err}");
+
+        let both = cmd::harvest::every_check(sandbox, host()).unwrap();
         assert!(
             both.iter().any(|o| o.name == "git on the host"),
-            "and the host's are appended: {both:?}"
+            "the host's answers are there: {both:?}"
+        );
+        assert_eq!(
+            both.last().map(|o| o.name.as_str()),
+            Some("rules"),
+            "and the sandbox's come after them: {both:?}"
         );
     }
 

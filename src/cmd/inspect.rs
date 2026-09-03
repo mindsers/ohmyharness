@@ -121,6 +121,68 @@ pub(crate) fn doctor_cmd(
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let profile = Profile::resolve(&paths);
+
+    // **The host, before anything that depends on it.** `git_checks` reaches
+    // the report through `harvest::every_check`, which runs on the probe's
+    // output — so on a machine with no container runtime this command printed
+    // nothing at all, and the facts that would have named the problem were
+    // gated behind the problem. Computed here, reported below whatever happens.
+    let chosen = runtime::select(&crate::runtime_preference(&paths), &|p| {
+        runtime::installed(p)
+    });
+    // Not `?`. A stack definition omh cannot read is something to report, not
+    // a reason to print nothing — see `host_checks`.
+    // The same resolution `sandbox()` uses to decide what installs, so the row
+    // and the image cannot disagree about what a stack means here.
+    // Not `?`. This is one more thing that must not stop the host being
+    // reported; a policy omh cannot resolve just means the row cannot say
+    // whether a detected stack is switched on.
+    let provision = crate::cmd::session::resolved(&paths)
+        .map(|(_, repo)| repo.provision)
+        .unwrap_or_default();
+    let loaded = stack::load_all(&paths.stacks(), &paths.repo_stacks());
+    let stacks = match &loaded {
+        Ok(defs) => Ok((defs.as_slice(), stack::detected(defs, &paths.repo))),
+        Err(e) => Err(format!("{e:#}")),
+    };
+    let host = doctor::host_checks(
+        chosen
+            .as_ref()
+            .map(|b| b.program())
+            .map_err(|e| format!("{e:#}")),
+        stacks,
+        &provision,
+    )
+    .into_iter()
+    .chain(doctor::git_checks())
+    .collect::<Vec<_>>();
+    let host = doctor::HostRows(host);
+
+    // **Said on every exit below, not on the ones that remembered.** Between
+    // gathering these rows and reporting them sat sixteen `?` — adapter
+    // lookup, credentials, the sandbox, `ensure_stack` — and every one of them
+    // dropped the host's answers. `ensure_stack` is the case this feature's own
+    // doc names: a build dying behind a TLS-inspecting proxy said nothing about
+    // the machine it died on. One helper, called from one place per exit.
+    let say_host = |ctx: &out::Ctx, rows: Vec<doctor::Outcome>| -> usize {
+        let report = report::Doctor {
+            sandbox: None,
+            account: None,
+            outcomes: rows,
+        };
+        ctx.say(&report);
+        report.failed()
+    };
+
+    // A runtime omh cannot find stops everything below, so say what the host
+    // *does* have and stop — rather than failing with one line and leaving the
+    // reader to discover the rest a command at a time.
+    if chosen.is_err() {
+        let total = host.0.len();
+        let failed = say_host(ctx, host.0);
+        anyhow::bail!("{failed} of {total} checks failed");
+    }
+
     let name = match harness {
         Some(h) => h.to_string(),
         None => {
@@ -128,234 +190,273 @@ pub(crate) fn doctor_cmd(
                 .into_iter()
                 .map(|a| a.name)
                 .collect();
-            detect::preferred_harness(&names, &|h| runtime::installed(h))
-                .context("no adapters installed — run `omh init`")?
+            match detect::preferred_harness(&names, &|h| runtime::installed(h)) {
+                Some(h) => h,
+                None => {
+                    // **A failing row, not a note beside a green tally.** With
+                    // three passing host rows this printed "all 3 checks
+                    // passed" and then exited non-zero — and `--json` carried
+                    // `"ok": true` for a failed run, the inversion
+                    // `Doctor::json`'s own comment exists to prevent. A missing
+                    // adapter *is* a failed check, so it is one now.
+                    let mut rows = host.0;
+                    rows.push(doctor::Outcome {
+                        name: "adapters installed".into(),
+                        ok: false,
+                        detail: "none — `omh init` installs them. Until then \
+                                 there is no harness to check, and the rows \
+                                 above are all omh can say"
+                            .into(),
+                    });
+                    say_host(ctx, rows);
+                    anyhow::bail!("no adapters installed — run `omh init`");
+                }
+            }
         }
     };
-    let adapter = Adapter::find(&paths.adapters(), &name)?;
+    // Everything past here can fail, and every one of those failures used to
+    // take the host's answers with it. Run it, then decide what to say.
+    let host_rows = host.0.clone();
+    let ran = (|| -> Result<()> {
+        let host = doctor::HostRows(host_rows);
+        let adapter = Adapter::find(&paths.adapters(), &name)?;
 
-    // Credentials are the half no in-process test can reach: whether a token
-    // saved here survives depends on how the runtime binds the path.
-    // The same resolver `omh new` uses, asked the same way. It read `None` for
-    // the explicit account and then swallowed the answer with `.unwrap_or(None)`
-    // — so `-a work` went nowhere, and *ambiguous* became *no account*, against
-    // a function whose own doc comment reads "Ambiguity is an error, never a
-    // guess". Two accounts captured, and doctor reported credentials unchecked
-    // in exactly the words it uses for a user who has none.
-    //
-    // That mattered more here than anywhere: credentials are the half no
-    // in-process test can reach, so `credential_checks` below is the only
-    // evidence a token survives the mount, and it was being skipped for anyone
-    // with a second account. The remedy the resolver prints names `-a` — the
-    // flag this was discarding.
-    let configured = crate::policy_value(&paths, "account");
-    let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
-        .map(|a| auth::dir(&paths, &name, &a));
+        // Credentials are the half no in-process test can reach: whether a token
+        // saved here survives depends on how the runtime binds the path.
+        // The same resolver `omh new` uses, asked the same way. It read `None` for
+        // the explicit account and then swallowed the answer with `.unwrap_or(None)`
+        // — so `-a work` went nowhere, and *ambiguous* became *no account*, against
+        // a function whose own doc comment reads "Ambiguity is an error, never a
+        // guess". Two accounts captured, and doctor reported credentials unchecked
+        // in exactly the words it uses for a user who has none.
+        //
+        // That mattered more here than anywhere: credentials are the half no
+        // in-process test can reach, so `credential_checks` below is the only
+        // evidence a token survives the mount, and it was being skipped for anyone
+        // with a second account. The remedy the resolver prints names `-a` — the
+        // flag this was discarding.
+        let configured = crate::policy_value(&paths, "account");
+        let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
+            .map(|a| auth::dir(&paths, &name, &a));
 
-    // Resolved once and used for both the checks and the plan below, so the
-    // probe cannot check a session different from the one it launches.
-    let (own, repo) = crate::cmd::session::resolved(&paths)?;
-    // The one reading this command makes. `ensure_stack` below takes
-    // `sandbox.ca`, and `ca_check` asserts against the same value.
-    let ca = image::ca_for(&paths)?;
+        // Resolved once and used for both the checks and the plan below, so the
+        // probe cannot check a session different from the one it launches.
+        let (own, repo) = crate::cmd::session::resolved(&paths)?;
+        // The one reading this command makes. `ensure_stack` below takes
+        // `sandbox.ca`, and `ca_check` asserts against the same value.
+        let ca = image::ca_for(&paths)?;
 
-    // **Before any image work, and only when no root is set.** This is the one
-    // problem doctor could never reach: behind a TLS-inspecting proxy the
-    // build dies on an unknown issuer, so every guest-side check below is
-    // unreachable and doctor's answer was a docker error. `build` names the
-    // setting when that happens — but a build that was *cached* before the
-    // proxy appeared succeeds, and then only the sessions fail. That is the
-    // case this catches, and a cache has hidden a problem here for weeks
-    // before.
-    //
-    // Only `Private` is reported. `Public` is the ordinary answer and a row
-    // saying so is noise; `Unknown` means omh could not tell — offline, or not
-    // macOS — and a check that guesses in that state is the cry-wolf this
-    // whole three-valued shape exists to avoid.
-    if ca.is_none() {
-        let (verdict, hosts) = doctor::inspected_hosts();
-        // **`Unknown` is not `Public` and must not look like it.** It was
-        // silent, which made "omh could not measure this" identical at the
-        // terminal to "omh measured it and it is fine" — and the reasons are
-        // reachable: no `openssl`, no network, an `openssl` that ignores
-        // `-CAfile`. A check that quietly did not run is the shape doctor
-        // exists to eliminate, not to add.
-        if let doctor::Inspection::Unknown(why) = &verdict {
-            ctx.say(
-                &report::Action::new(
-                    "tls-inspection-unknown",
-                    format!("could not check whether this network re-signs TLS: {why}"),
-                )
-                .data(serde_json::json!({ "reason": why })),
-            );
-        }
-        if verdict == doctor::Inspection::Private {
-            // Named, because a proxy that re-signs one host and not another is
-            // a surprising thing to be told and the reader should be able to
-            // check it rather than take it on faith.
-            ctx.warn(&format!(
-                "this network re-signs TLS for {} with a root your machine \
+        // **Before any image work, and only when no root is set.** This is the one
+        // problem doctor could never reach: behind a TLS-inspecting proxy the
+        // build dies on an unknown issuer, so every guest-side check below is
+        // unreachable and doctor's answer was a docker error. `build` names the
+        // setting when that happens — but a build that was *cached* before the
+        // proxy appeared succeeds, and then only the sessions fail. That is the
+        // case this catches, and a cache has hidden a problem here for weeks
+        // before.
+        //
+        // Only `Private` is reported. `Public` is the ordinary answer and a row
+        // saying so is noise; `Unknown` means omh could not tell — offline, or not
+        // macOS — and a check that guesses in that state is the cry-wolf this
+        // whole three-valued shape exists to avoid.
+        if ca.is_none() {
+            let (verdict, hosts) = doctor::inspected_hosts();
+            // **`Unknown` is not `Public` and must not look like it.** It was
+            // silent, which made "omh could not measure this" identical at the
+            // terminal to "omh measured it and it is fine" — and the reasons are
+            // reachable: no `openssl`, no network, an `openssl` that ignores
+            // `-CAfile`. A check that quietly did not run is the shape doctor
+            // exists to eliminate, not to add.
+            if let doctor::Inspection::Unknown(why) = &verdict {
+                ctx.say(
+                    &report::Action::new(
+                        "tls-inspection-unknown",
+                        format!("could not check whether this network re-signs TLS: {why}"),
+                    )
+                    .data(serde_json::json!({ "reason": why })),
+                );
+            }
+            if verdict == doctor::Inspection::Private {
+                // Named, because a proxy that re-signs one host and not another is
+                // a surprising thing to be told and the reader should be able to
+                // check it rather than take it on faith.
+                ctx.warn(&format!(
+                    "this network re-signs TLS for {} with a root your machine \
                  trusts and a container does not — a sandbox cannot verify \
                  what it fetches from {}. Set the corporate root:\n\n    \
                  security find-certificate -a -c \"Zscaler\" -p > ~/corp-root.pem\n    \
                  omh set --local ca_cert ~/corp-root.pem\n\n\
                  See docs/troubleshooting.md.",
-                hosts.join(" and "),
-                if hosts.len() == doctor::FETCHES.len() {
-                    "the network"
-                } else {
-                    "there"
-                }
-            ));
+                    hosts.join(" and "),
+                    if hosts.len() == doctor::FETCHES.len() {
+                        "the network"
+                    } else {
+                        "there"
+                    }
+                ));
+            }
         }
-    }
 
-    let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
-    if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
-        runtime::installed(p)
-    }) {
-        sandbox.top_up(
-            &paths,
+        let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
+        if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
+            runtime::installed(p)
+        }) {
+            sandbox.top_up(
+                &paths,
+                backend.program(),
+                &adapter,
+                &profile.sources(adapter::Capability::Hooks)?,
+                &own,
+                &repo,
+                ctx,
+            )?;
+        }
+        let mut checks = doctor::checks(&profile, &adapter, &own, &repo, &sandbox.resolves)?;
+        if account.is_some() {
+            checks.extend(doctor::credential_checks(&adapter));
+        }
+        // The one claim about this image no test can settle: whether the root
+        // omh embedded actually got into the store the toolchains read.
+        checks.extend(doctor::ca_check(sandbox.ca.as_ref().map(image::Root::pem)));
+        // Only if the resolved profile actually declares it: a check for a server
+        // nobody configured would fail honestly and mean nothing.
+        //
+        // Read through `render::parse_layers` rather than `config::servers`, which
+        // returns only each server's *command* — the arguments are what say which
+        // directories it will look in, and those are the whole point of the check.
+        let declared = render::parse_layers(&profile.sources(adapter::Capability::Mcp)?)?;
+        // Not when this repo has switched the feature off: the server is left out
+        // of the document on purpose, so checking for it is checking a claim omh
+        // deliberately did not make.
+        if let Some(server) = declared
+            .get(memory::tools::SERVER_KEY)
+            .filter(|_| !repo.disabled_servers.contains(memory::tools::SERVER_KEY))
+        {
+            checks.extend(doctor::memory_checks(server));
+        }
+        if checks.is_empty() {
+            ctx.say(
+                &report::Action::new(
+                    "doctor-nothing-to-check",
+                    "nothing to check: the profile is empty",
+                )
+                .data(serde_json::json!({ "harness": name, "checks": 0 })),
+            );
+            return Ok(());
+        }
+
+        let session = Session::scratch(paths.scratch("doctor"), "doctor".into());
+        session.ensure(&paths.repo, "")?;
+
+        let opts = container::Options {
+            staging: container::Staging::Apply,
+            // No dtach and no terminal: the probe's output has to be captured.
+            persist: persist::Mode::None,
+            tty: false,
+            account_dir: account.clone(),
+            memory_bin: memory::deliver::available(&paths, ctx),
+            // The probe has to compose the same rules a launch would, or it proves
+            // the harness reads a document nobody will be given.
+            base: Some(session::default_branch(&paths.repo)),
+            omh: own,
+            repo,
+            image: sandbox.tag.clone(),
+            resolves: sandbox.resolves.clone(),
+        };
+        if let Some(account_dir) = &account {
+            auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+        }
+        crate::cmd::session::say_selection(&paths, &profile, &opts.repo, ctx);
+        let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
+        crate::cmd::session::say_rules(&plan, ctx);
+        plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
+
+        let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+            runtime::installed(p)
+        })?;
+        plan.validate(&backend.caps())?;
+
+        if dry_run {
+            // The script itself, unwrapped: this output exists to be piped into a
+            // shell or read line by line, and a report around it would have to be
+            // stripped back off. `Probe` says so in one place instead of here.
+            ctx.say(&report::Probe {
+                script: doctor::probe_script(&checks),
+                checks: checks.iter().map(|c| c.name.clone()).collect(),
+            });
+            return Ok(());
+        }
+
+        image::ensure_stack(
             backend.program(),
             &adapter,
-            &profile.sources(adapter::Capability::Hooks)?,
-            &own,
-            &repo,
-            ctx,
+            &sandbox.recipe(),
+            // The sandbox's own reading. A fresh `ca_for` here would be a second
+            // resolution, and `sandbox.tag` — which `opts.image` runs and
+            // `ca_check` asserts against — came from the first.
+            sandbox.ca.as_ref().map(image::Root::pem),
+            &paths.repo,
         )?;
-    }
-    let mut checks = doctor::checks(&profile, &adapter, &own, &repo, &sandbox.resolves)?;
-    if account.is_some() {
-        checks.extend(doctor::credential_checks(&adapter));
-    }
-    // The one claim about this image no test can settle: whether the root
-    // omh embedded actually got into the store the toolchains read.
-    checks.extend(doctor::ca_check(sandbox.ca.as_ref().map(image::Root::pem)));
-    // Only if the resolved profile actually declares it: a check for a server
-    // nobody configured would fail honestly and mean nothing.
-    //
-    // Read through `render::parse_layers` rather than `config::servers`, which
-    // returns only each server's *command* — the arguments are what say which
-    // directories it will look in, and those are the whole point of the check.
-    let declared = render::parse_layers(&profile.sources(adapter::Capability::Mcp)?)?;
-    // Not when this repo has switched the feature off: the server is left out
-    // of the document on purpose, so checking for it is checking a claim omh
-    // deliberately did not make.
-    if let Some(server) = declared
-        .get(memory::tools::SERVER_KEY)
-        .filter(|_| !repo.disabled_servers.contains(memory::tools::SERVER_KEY))
-    {
-        checks.extend(doctor::memory_checks(server));
-    }
-    if checks.is_empty() {
-        ctx.say(
-            &report::Action::new(
-                "doctor-nothing-to-check",
-                "nothing to check: the profile is empty",
-            )
-            .data(serde_json::json!({ "harness": name, "checks": 0 })),
-        );
-        return Ok(());
-    }
+        image::ensure_network(backend.program(), &plan.network)?;
 
-    let session = Session::scratch(paths.scratch("doctor"), "doctor".into());
-    session.ensure(&paths.repo, "")?;
-
-    let opts = container::Options {
-        staging: container::Staging::Apply,
-        // No dtach and no terminal: the probe's output has to be captured.
-        persist: persist::Mode::None,
-        tty: false,
-        account_dir: account.clone(),
-        memory_bin: memory::deliver::available(&paths, ctx),
-        // The probe has to compose the same rules a launch would, or it proves
-        // the harness reads a document nobody will be given.
-        base: Some(session::default_branch(&paths.repo)),
-        omh: own,
-        repo,
-        image: sandbox.tag.clone(),
-        resolves: sandbox.resolves.clone(),
-    };
-    if let Some(account_dir) = &account {
-        auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
-    }
-    crate::cmd::session::say_selection(&paths, &profile, &opts.repo, ctx);
-    let mut plan = container::plan(&paths, &profile, &adapter, &session, &[], opts)?;
-    crate::cmd::session::say_rules(&plan, ctx);
-    plan.argv = vec!["sh".into(), "-c".into(), doctor::probe_script(&checks)];
-
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
-        runtime::installed(p)
-    })?;
-    plan.validate(&backend.caps())?;
-
-    if dry_run {
-        // The script itself, unwrapped: this output exists to be piped into a
-        // shell or read line by line, and a report around it would have to be
-        // stripped back off. `Probe` says so in one place instead of here.
-        ctx.say(&report::Probe {
-            script: doctor::probe_script(&checks),
-            checks: checks.iter().map(|c| c.name.clone()).collect(),
+        let account_name = account
+            .as_ref()
+            .map(|a| a.file_name().unwrap_or_default().to_string_lossy().into());
+        ctx.progress(&match &account_name {
+            Some(a) => format!("checking {name} in {} as {a}…", sandbox.tag),
+            None => format!(
+                "checking {name} in {} — no account, so credentials go unchecked…",
+                sandbox.tag
+            ),
         });
-        return Ok(());
-    }
 
-    image::ensure_stack(
-        backend.program(),
-        &adapter,
-        &sandbox.recipe(),
-        // The sandbox's own reading. A fresh `ca_for` here would be a second
-        // resolution, and `sandbox.tag` — which `opts.image` runs and
-        // `ca_check` asserts against — came from the first.
-        sandbox.ca.as_ref().map(image::Root::pem),
-        &paths.repo,
-    )?;
-    image::ensure_network(backend.program(), &plan.network)?;
-
-    let account_name = account
-        .as_ref()
-        .map(|a| a.file_name().unwrap_or_default().to_string_lossy().into());
-    ctx.progress(&match &account_name {
-        Some(a) => format!("checking {name} in {} as {a}…", sandbox.tag),
-        None => format!(
-            "checking {name} in {} — no account, so credentials go unchecked…",
-            sandbox.tag
-        ),
-    });
-
-    let out = Command::new(backend.program())
-        .args(backend.args(&plan))
-        .output()?;
-    let from_the_sandbox = doctor::parse(&String::from_utf8_lossy(&out.stdout));
-    let _ = session.remove(&paths.repo, "", &paths.shadows()); // diagnostic: leave no session behind
-                                                               // `with_context` would make the sandbox's stderr the *outer* error, so
-                                                               // `out::problem` would print it as omh's own headline and demote omh's
-                                                               // explanation to a cause — with an empty stderr rendering as a bare
-                                                               // `omh:` and nothing after it. The sentence omh wrote stays first, and
-                                                               // what the container said follows it, sanitised: it is not omh's text.
-    let outcomes =
-        crate::cmd::harvest::every_check(from_the_sandbox).map_err(
-            |e| match crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim()) {
+        let out = Command::new(backend.program())
+            .args(backend.args(&plan))
+            .output()?;
+        let from_the_sandbox = doctor::parse(&String::from_utf8_lossy(&out.stdout));
+        let _ = session.remove(&paths.repo, "", &paths.shadows()); // diagnostic: leave no session behind
+                                                                   // `with_context` would make the sandbox's stderr the *outer* error, so
+                                                                   // `out::problem` would print it as omh's own headline and demote omh's
+                                                                   // explanation to a cause — with an empty stderr rendering as a bare
+                                                                   // `omh:` and nothing after it. The sentence omh wrote stays first, and
+                                                                   // what the container said follows it, sanitised: it is not omh's text.
+        let outcomes = crate::cmd::harvest::every_check(from_the_sandbox, host).map_err(|e| {
+            match crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim()) {
                 said if said.is_empty() => e,
                 said => anyhow::anyhow!("{e}\n{said}"),
-            },
-        )?;
+            }
+        })?;
 
-    let report = report::Doctor {
-        harness: name,
-        tag: sandbox.tag.clone(),
-        account: account_name,
-        outcomes,
-    };
-    ctx.say(&report);
-    if !report.passed() {
-        anyhow::bail!(
-            "{} of {} checks failed",
-            report.failed(),
-            report.outcomes.len()
-        );
+        let report = report::Doctor {
+            sandbox: Some(report::DoctorSandbox {
+                harness: name,
+                tag: sandbox.tag.clone(),
+            }),
+            account: account_name,
+            outcomes,
+        };
+        ctx.say(&report);
+        if !report.passed() {
+            anyhow::bail!(
+                "{} of {} checks failed",
+                report.failed(),
+                report.outcomes.len()
+            );
+        }
+        Ok(())
+    })();
+
+    match ran {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // **The host's answers survive the failure that hid them.** A
+            // build that dies on an unknown issuer, a probe that produced
+            // nothing, an adapter that cannot be found — each of these used to
+            // print one line about itself and nothing about the machine.
+            say_host(ctx, host.0);
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 /// `omh why <thing>` — who put this here, and on what grounds.

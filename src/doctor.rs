@@ -117,6 +117,161 @@ pub struct Outcome {
     pub detail: String,
 }
 
+/// The host's answers, as a type of their own.
+///
+/// **So they cannot be swapped with the sandbox's.** `every_check` used to
+/// gather these itself, and its guard comment is explicit about why: as two
+/// bare `Vec<Outcome>` arguments, swapping them silences the emptiness check
+/// and passing an empty list drops the host from the report, and neither
+/// mistake is reachable by a test because `doctor_cmd` needs a container.
+///
+/// They have to be a parameter now — `doctor_cmd` gathers them *before* the
+/// container work, so they survive a machine with no runtime — so the guard
+/// moves into the type instead of being given up.
+pub struct HostRows(pub Vec<Outcome>);
+
+/// What the host has to offer, before any of it is used.
+///
+/// **These belong before the container work, not after it.** Every other
+/// host-side answer omh produces — `git_checks` — reaches the report through
+/// `harvest::every_check`, which runs on the probe's output. So a machine with
+/// no container runtime, or one where the image cannot be built, printed
+/// nothing at all: the facts that would explain the failure were gated behind
+/// the thing that was failing.
+///
+/// Injected rather than probed, for the reason `git_checks_from` gives: the
+/// part that can be quietly wrong is the decision, and a test that probed and
+/// then compared against the same probe would be a tautology.
+///
+/// **Nothing here is red for being absent on purpose.** A repo with no stack
+/// is a repo of prose, which omh runs fine; the row says what was looked for so
+/// "no toolchain in my sandbox" has an answer. Only a missing runtime fails,
+/// because nothing omh does works without one.
+pub fn host_checks(
+    runtime: Result<&str, String>,
+    stacks: Result<(&[crate::stack::Definition], Vec<&crate::stack::Definition>), String>,
+    provision: &std::collections::BTreeMap<String, bool>,
+) -> Vec<Outcome> {
+    let mut out = Vec::new();
+
+    out.push(match runtime {
+        Ok(name) => Outcome {
+            name: "container runtime".into(),
+            ok: true,
+            detail: format!("{name} — every sandbox omh builds and runs uses it"),
+        },
+        Err(why) => Outcome {
+            name: "container runtime".into(),
+            ok: false,
+            detail: format!(
+                "{why}. Nothing omh does works without one: no image is \
+                 built, no session starts, and nothing was checked inside a \
+                 sandbox — the rows beside this one are the host's own, and \
+                 they did run"
+            ),
+        },
+    });
+
+    // **A definition omh cannot read is a row, not a death.** This used to be
+    // `stack::load_all(..)?` at the call site, inside the block that gathers
+    // these — so one malformed stack file, or a repo stack colliding with a
+    // shipped name, killed `omh doctor` before it printed anything at all.
+    // That is the exact shape this command was changed to stop: the fact that
+    // explains the problem, gated behind the problem.
+    // **The count is derived here, not supplied.** It was a separate `usize`
+    // parameter, and `host_checks(rt, markers.len(), &markers)` compiled —
+    // which collapses the "nothing to detect with" answer into "none matched"
+    // and tells a fully-seeded profile to run `omh init`. That is the bug this
+    // function's own doc says was caught by hand against the binary; passing
+    // the definitions themselves makes it unspellable.
+    let (installed, detected) = match stacks {
+        Ok(found) => found,
+        Err(why) => {
+            out.push(Outcome {
+                name: "stacks detected".into(),
+                ok: false,
+                detail: format!(
+                    "{why} — so omh cannot tell which toolchain this repo needs, \
+                     and a session would get the base image and nothing else"
+                ),
+            });
+            return out;
+        }
+    };
+    let installed_defs = installed.len();
+
+    // **"None detected" and "nothing to detect with" are different answers.**
+    // Detection filters the *installed* definitions by their marker file, so a
+    // profile that has none reports "none" for a repo full of markers — which
+    // reads as a fact about the repo and is a fact about the machine.
+    out.push(if installed_defs == 0 {
+        Outcome {
+            name: "stacks detected".into(),
+            ok: true,
+            detail: "nothing to detect with — no stack definitions are \
+                     installed, so no marker in this repo can match one. \
+                     `omh init` seeds them"
+                .into(),
+        }
+    } else if detected.is_empty() {
+        Outcome {
+            name: "stacks detected".into(),
+            ok: true,
+            detail: format!(
+                "none of the {installed_defs} installed — the sandbox gets the \
+                 base image and no toolchain. That is correct for a repo of \
+                 prose, and is the answer if a language you expected is missing \
+                 from the sandbox: omh detects a stack by a marker file in the \
+                 repo root"
+            ),
+        }
+    } else {
+        Outcome {
+            name: "stacks detected".into(),
+            ok: true,
+            // **Detected is not installed.** `stack::detected` filters by
+            // the marker file alone; what actually reaches the image is
+            // `installs_for`, which additionally requires `[provision]` to
+            // hold `true` for each provide — its own doc says "Absent is not
+            // `false`". So a repo that opted python out still had a marker,
+            // and this row said `python (from pyproject.toml)` about a sandbox
+            // with no python in it. That is a wrong answer to the one question
+            // the row exists for.
+            detail: detected
+                .iter()
+                .map(|d| {
+                    let asked = |p: &crate::stack::Provide| {
+                        provision.get(&crate::stack::key(&d.name, &p.name)).copied()
+                    };
+                    let on = d.provides.iter().any(|p| asked(p) == Some(true));
+                    // **Absent and `false` are different, and only one of them
+                    // is a decision.** Both install nothing, so the first
+                    // wording called them both "switched off" — which tells
+                    // somebody who has never configured this repo that they
+                    // turned their own toolchain off.
+                    let decided = d.provides.iter().any(|p| asked(p).is_some());
+                    if on || d.provides.is_empty() {
+                        format!("{} (from {})", d.name, d.marker)
+                    } else if decided {
+                        format!(
+                            "{} (from {} — switched off, so nothing is installed)",
+                            d.name, d.marker
+                        )
+                    } else {
+                        format!(
+                            "{} (from {} — not provisioned, so nothing is installed yet)",
+                            d.name, d.marker
+                        )
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        }
+    });
+
+    out
+}
+
 /// What must be true of **the host's** git, which is where the harvest runs.
 ///
 /// Every other check in this module runs inside the sandbox, because that is
@@ -1459,6 +1614,217 @@ mod tests {
                 "the reason must say why this platform cannot answer: {why}"
             );
         }
+    }
+
+    /// **The facts that explain a failure must not be gated behind it.**
+    ///
+    /// `git_checks` reaches the report through `harvest::every_check`, which
+    /// runs on the probe's output — so on a machine with no container runtime,
+    /// `omh doctor` printed nothing at all. Every host-side answer that would
+    /// have named the problem was behind the thing that was broken.
+    ///
+    /// So the runtime is a row, not a bail. Absent is the one red line here,
+    /// because nothing omh does works without one.
+    /// A stack definition, for the rows that report them.
+    fn def(name: &str, marker: &str) -> crate::stack::Definition {
+        crate::stack::Definition {
+            name: name.into(),
+            marker: marker.into(),
+            provides: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_host_says_what_it_has_even_when_it_has_no_runtime() {
+        let none = host_checks(
+            Err("no container runtime found".into()),
+            Ok((&[], vec![])),
+            &BTreeMap::new(),
+        );
+        let runtime = &none[0];
+        assert!(!runtime.ok, "a missing runtime is a failure, not a note");
+        assert!(
+            runtime.detail.contains("no container runtime found"),
+            "the injected reason carries the only actionable half of the line \
+             — dropping it leaves boilerplate: {}",
+            runtime.detail
+        );
+        // **And it must not contradict the table it sits in.** The first
+        // wording said "every check below this line went unrun", written when
+        // host rows came last. They come first now, so the two rows below it
+        // are the host's own — and they ran. A diagnostic that is false about
+        // its own output is worse than a missing one.
+        assert!(
+            runtime.detail.contains("inside a sandbox"),
+            "it must scope the claim to the sandbox, not to the rows beside \
+             it: {}",
+            runtime.detail
+        );
+        assert!(
+            !runtime.detail.contains("below this line"),
+            "nothing below this row went unrun — those are host rows: {}",
+            runtime.detail
+        );
+
+        // **Present is a row too, and it must name the one that was picked.**
+        // `detail: "docker — …"` hardcoded would satisfy a `contains("docker")`
+        // on its own, so both runtimes are asked and each must exclude the
+        // other — the row exists precisely for a machine with both.
+        for (picked, other) in [("docker", "sbx"), ("sbx", "docker")] {
+            let ok = host_checks(Ok(picked), Ok((&[], vec![])), &BTreeMap::new());
+            assert!(ok[0].ok);
+            assert!(
+                ok[0].detail.contains(picked) && !ok[0].detail.contains(other),
+                "the row must name {picked} and not {other}: {}",
+                ok[0].detail
+            );
+        }
+        let ok = host_checks(Ok("docker"), Ok((&[], vec![])), &BTreeMap::new());
+        assert!(
+            ok[0].detail.contains("docker"),
+            "the row must name which runtime was chosen: {}",
+            ok[0].detail
+        );
+    }
+
+    /// **A repo with no stack is not broken, and the row still has to answer.**
+    ///
+    /// "Why is there no python in my sandbox" is the question this exists for,
+    /// and it has two honest answers: the stack was detected and installed, or
+    /// nothing matched a marker. A red line for the second would be a doctor
+    /// that fails on a repo of prose, which is a doctor people stop running —
+    /// the same argument `git_checks` makes for keeping capabilities in the
+    /// detail.
+    #[test]
+    fn a_repo_with_no_stack_is_told_what_was_looked_for() {
+        let four = [
+            def("python", "pyproject.toml"),
+            def("rust", "Cargo.toml"),
+            def("go", "go.mod"),
+            def("node", "package.json"),
+        ];
+        let quiet = host_checks(Ok("docker"), Ok((&four, vec![])), &BTreeMap::new());
+        let stacks = &quiet[1];
+        assert!(stacks.ok, "no stack is not a failure");
+        // **The two absences must be distinguishable, which is the whole
+        // reason the third branch exists.** `contains("marker")` held for both
+        // — it is boilerplate in each — so `installed_defs == 0 ||
+        // markers.is_empty()` made the middle branch dead code and stayed
+        // green. Pin the sentence that only this branch says.
+        assert!(
+            stacks.detail.contains("none of the 4"),
+            "a seeded profile that matched nothing must say so, with the count: {}",
+            stacks.detail
+        );
+        assert!(
+            !stacks.detail.contains("no stack definitions are installed"),
+            "and must not tell a seeded profile to seed itself: {}",
+            stacks.detail
+        );
+
+        // **And the answer that is about the machine, not the repo.**
+        // Detection filters the *installed* definitions, so a profile with
+        // none reports "none" for a repo full of markers — driven on a real
+        // `omh doctor` before `omh init`, which said "none" while
+        // `pyproject.toml` sat in the directory. That reads as a fact about
+        // the repo and is a fact about the machine.
+        let bare = host_checks(Ok("docker"), Ok((&[], vec![])), &BTreeMap::new());
+        let stacks = &bare[1];
+        assert!(stacks.ok, "an uninitialised profile is not a broken one");
+        assert!(
+            stacks.detail.contains("no stack definitions are installed"),
+            "it must say nothing could have matched, not that nothing did: {}",
+            stacks.detail
+        );
+        assert!(
+            stacks.detail.contains("omh init"),
+            "and what seeds them: {}",
+            stacks.detail
+        );
+        assert!(
+            !stacks.detail.contains("none of the"),
+            "an empty profile did not fail to match — it had nothing to match \
+             against, and saying otherwise is a fact about the repo: {}",
+            stacks.detail
+        );
+
+        // Detected: name both the stack and the file that decided it, because
+        // the marker is the thing a reader can check.
+        let found = host_checks(
+            Ok("docker"),
+            Ok((&four, vec![&four[0], &four[1]])),
+            &BTreeMap::new(),
+        );
+        let stacks = &found[1];
+        assert!(stacks.ok);
+        // **Paired, not four loose tokens.** Asserting the names and the
+        // markers separately passes for a row that lists them as two lists —
+        // and the pairing is the claim the doc makes.
+        for want in ["python (from pyproject.toml)", "rust (from Cargo.toml)"] {
+            assert!(
+                stacks.detail.contains(want),
+                "the row must name the stack and the file that decided it: {}",
+                stacks.detail
+            );
+        }
+    }
+
+    /// **Detected is not installed, and the row must not conflate them.**
+    ///
+    /// `stack::detected` filters by the marker file alone. What actually
+    /// reaches the image is `installs_for`, which additionally requires
+    /// `[provision]` to hold `true` per provide — its own doc says "Absent is
+    /// not `false`". So a repo that switched python off still has a
+    /// `pyproject.toml`, and this row said `python (from pyproject.toml)`
+    /// about a sandbox with no python in it: a wrong answer to the one
+    /// question the row exists to answer.
+    #[test]
+    fn a_stack_that_is_switched_off_is_not_reported_as_installed() {
+        let mut python = def("python", "pyproject.toml");
+        python.provides.push(crate::stack::Provide {
+            name: "runtime".into(),
+            needs: Vec::new(),
+            when: None,
+            install: Some("apt-get install python3".into()),
+            because: "the base image ships no python".into(),
+            measured: Vec::new(),
+        });
+        let defs = [python];
+        let detected = vec![&defs[0]];
+
+        // Switched on: named plainly.
+        let on = BTreeMap::from([(crate::stack::key("python", "runtime"), true)]);
+        let row = &host_checks(Ok("docker"), Ok((&defs, detected.clone())), &on)[1];
+        assert_eq!(
+            row.detail, "python (from pyproject.toml)",
+            "a provide that installs is reported as it always was"
+        );
+
+        // Switched off: the marker is still there, the toolchain is not.
+        let off = BTreeMap::from([(crate::stack::key("python", "runtime"), false)]);
+        let row = &host_checks(Ok("docker"), Ok((&defs, detected.clone())), &off)[1];
+        assert!(
+            row.detail.contains("switched off"),
+            "a stack nothing installs must not read as installed: {}",
+            row.detail
+        );
+
+        // **Absent is not `false`, and it is not `true` either.** Both install
+        // nothing, so both must say so — but only one of them is a decision,
+        // and calling an unconfigured repo "switched off" tells somebody they
+        // turned off a toolchain they have never touched.
+        let row = &host_checks(Ok("docker"), Ok((&defs, detected)), &BTreeMap::new())[1];
+        assert!(
+            row.detail.contains("not provisioned"),
+            "an unresolved provision installs nothing either, and says so in \
+             its own words: {}",
+            row.detail
+        );
+        assert!(
+            !row.detail.contains("switched off"),
+            "nobody switched this off — it was never decided: {}",
+            row.detail
+        );
     }
 
     /// **Offline must never read as "you are behind a proxy".** That is the

@@ -14,7 +14,7 @@ omh doctor: claude (in omh/claude:2133265d, account personal)
   ✓ hooks       /home/agent/.claude/settings.json
   ✓ token       /home/agent/.claude/.credentials.json (atomic write)
 
-  all 7 checks passed — claude's adapter paths are verified
+  all 9 checks passed — claude's adapter paths are verified
 ```
 
 Run it after changing an adapter, after upgrading a harness, and any time a

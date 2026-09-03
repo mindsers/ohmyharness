@@ -1341,10 +1341,27 @@ impl Report for Inventory {
 /// the first thing anybody asks about a failed check — *which image, whose
 /// credentials* — and a header is exactly the part of the output that gets
 /// lost when somebody pastes the failing lines into a bug report.
+/// What a doctor run was *about*, when it got as far as being about anything.
 #[derive(Debug, Clone)]
-pub struct Doctor {
+pub struct DoctorSandbox {
     pub harness: String,
     pub tag: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Doctor {
+    /// The harness whose adapter paths were verified, and the image it ran in
+    /// — **`None` when nothing ran in a sandbox at all**.
+    ///
+    /// These were `String`, and a host-only report filled them with prose:
+    /// `harness: "the host"`, `tag: "no image — the runtime is missing"`. Two
+    /// costs. The human renderer keyed its wording off `harness == "the host"`,
+    /// a literal that had to stay in step across three files with nothing
+    /// pinning it — rename one and the report silently claims adapter paths
+    /// were verified again. And `--json` shipped an English sentence in
+    /// `"image"`, the field every consumer reads as a tag, which is the
+    /// parse-English failure this module's header argues against at length.
+    pub sandbox: Option<DoctorSandbox>,
     /// `None` means no account was staged, so credentials went unchecked.
     pub account: Option<String>,
     pub outcomes: Vec<crate::doctor::Outcome>,
@@ -1392,9 +1409,17 @@ impl Report for Doctor {
                 p.paint(
                     out::OK,
                     &format!(
-                        "all {} checks passed — {}'s adapter paths are verified",
+                        // A host-only report has verified no adapter path — it
+                        // never reached a sandbox. Saying so anyway is the kind
+                        // of claim `doctor` exists to stop making, and it is a
+                        // `match` on a state rather than a string compare so a
+                        // reworded literal cannot quietly restore it.
+                        "all {} checks passed — {}",
                         self.outcomes.len(),
-                        self.harness
+                        match &self.sandbox {
+                            Some(s) => format!("{}'s adapter paths are verified", s.harness),
+                            None => "the host answered; nothing was run in a sandbox".into(),
+                        }
                     )
                 )
             ));
@@ -1404,8 +1429,11 @@ impl Report for Doctor {
 
     fn json(&self) -> serde_json::Value {
         json!({
-            "harness": self.harness,
-            "image": self.tag,
+            // `null`, not a sentence. A consumer can test for absence; it
+            // cannot parse "no image — the runtime is missing" out of a field
+            // documented as a tag.
+            "harness": self.sandbox.as_ref().map(|s| s.harness.clone()),
+            "image": self.sandbox.as_ref().map(|s| s.tag.clone()),
             "account": self.account,
             // `ok` is the verdict; the other two are tallies. Named apart on
             // purpose: `"passed": 3` beside a `passed()` that returns a bool
@@ -4274,8 +4302,11 @@ mod tests {
     #[test]
     fn a_failed_check_is_legible_with_no_colour_at_all() {
         let report = Doctor {
-            harness: "claude".into(),
-            tag: "omh/claude:abc".into(),
+            sandbox: Some(DoctorSandbox {
+                harness: "claude".into(),
+
+                tag: "omh/claude:abc".into(),
+            }),
             account: None,
             outcomes: vec![check("rules", true), check("mcp", false)],
         };
@@ -4319,8 +4350,11 @@ mod tests {
     #[test]
     fn the_tally_is_the_list_counted_and_the_verdict_is_not_a_tally() {
         let report = Doctor {
-            harness: "claude".into(),
-            tag: "t".into(),
+            sandbox: Some(DoctorSandbox {
+                harness: "claude".into(),
+
+                tag: "t".into(),
+            }),
             account: Some("work".into()),
             outcomes: vec![check("a", true), check("b", false), check("c", false)],
         };
@@ -4355,8 +4389,11 @@ mod tests {
     #[test]
     fn a_probe_that_produced_nothing_is_not_reported_as_a_pass() {
         let empty = Doctor {
-            harness: "claude".into(),
-            tag: "t".into(),
+            sandbox: Some(DoctorSandbox {
+                harness: "claude".into(),
+
+                tag: "t".into(),
+            }),
             account: None,
             outcomes: vec![],
         };
