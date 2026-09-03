@@ -1404,12 +1404,23 @@ pub(crate) fn rm(
     // this whole change exists to remove, so the outcome is reported once and
     // the incomplete case is a failure rather than a footnote to a success.
     if let session::Gone::No(why) = &worktree {
+        // **What happened to the branch, not an assumption about it.** The
+        // first version said "the branch is untouched", and `remove` drops a
+        // commitless one *before* it returns — so for exactly the sessions
+        // that had nothing to review, the sentence was false.
+        let branch = match removed {
+            session::Removed::BranchKept(_) => format!("the branch omh/{id} is still there"),
+            session::Removed::BranchDropped => {
+                format!("the branch omh/{id} held no commits and is gone")
+            }
+            session::Removed::NoBranch => "there was no branch".to_string(),
+        };
         anyhow::bail!(
             "{id} is partly removed — its worktree is still there:\n  \
              {at}\n  \
              {why}\n\
-             what did go: the container, its graph entry, the run directory and \
-             the sandbox repository. The branch omh/{id} is untouched.\n  \
+             The container, its graph entry, the run directory and the sandbox \
+             repository did go, and {branch}.\n  \
              git worktree prune       clear the registration once the directory is gone",
             at = session.worktree.display()
         );

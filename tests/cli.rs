@@ -6758,6 +6758,20 @@ fn rm_fails_when_the_worktree_is_still_on_disk() {
         said.contains(&at.display().to_string()),
         "and the path that is still there: {said}"
     );
+    // **What happened to the branch, not an assumption about it.** The first
+    // version of this message said "the branch is untouched", and `remove`
+    // drops a commitless one before it returns — so for exactly the sessions
+    // that had nothing to review, the sentence was false. This fixture's
+    // branch holds no commits, which is that case.
+    assert!(
+        said.contains("held no commits and is gone"),
+        "the branch here was commitless and was dropped, so saying it survived \
+         would be a false claim about the one thing that holds work: {said}"
+    );
+    assert!(
+        !said.contains("untouched"),
+        "and nothing may claim it is untouched: {said}"
+    );
 }
 
 /// **A runtime that is installed but asleep is not a working runtime.**

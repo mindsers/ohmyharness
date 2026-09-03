@@ -331,8 +331,9 @@ omh s push [name]     push it to origin under a name a reviewer can read
 omh s resume          rejoin it, running the harness it ran before
 omh s down            stop the container, keep the worktree and branch
 omh s rm [--force]    remove the session — its container, its worktree, its staging,
-                       and the repository the sandbox had. Refuses over work
-                       no branch has.
+                       and the repository the sandbox had. Asks first over work
+                       no branch has; `--force` is for runs with nobody to ask,
+                       and does not make the removal itself try harder.
 ```
 
 **The noun on its own is the listing, and a session on its own is one row of

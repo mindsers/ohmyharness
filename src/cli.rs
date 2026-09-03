@@ -556,9 +556,16 @@ pub(crate) enum SessionsCmd {
         /// Remove it even though the sandbox holds work no branch has — or
         /// omh could not tell whether it does.
         ///
-        /// The refusal without this is the whole point: those commits and
+        /// The question without this is the whole point: those commits and
         /// those edits exist nowhere else, and `rm` is what deletes the
         /// repository holding them. This says *I know, and I want them gone*.
+        ///
+        /// **It does not make omh try harder to remove anything.** On a
+        /// terminal omh asks instead of refusing, so this exists for the runs
+        /// where there is nobody to ask — a script, a CI job, a closed pipe.
+        /// A user whose worktree would not go once read this flag as "force
+        /// the removal" and typed it to no effect; `git worktree remove
+        /// --force` is passed either way.
         #[arg(long)]
         force: bool,
     },
