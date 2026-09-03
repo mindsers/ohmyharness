@@ -154,10 +154,25 @@ pub(crate) fn ensure_ignored(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
         next.push_str(name);
         next.push('\n');
     }
-    std::fs::write(&ignore, next).with_context(|| format!("writing {}", ignore.display()))?;
+    // **Replaced, not truncated in place.** `fs::write` opens with `O_TRUNC`
+    // and then writes, so a failure between the two leaves the file empty —
+    // and the old early return meant an existing checkout never took this path
+    // at all, while now every one does on its way to gaining `seeded-by`. An
+    // ENOSPC in that window would empty the file that keeps credentials out of
+    // `git add .`, and the error omh reports would be about disk space. The
+    // rename is atomic, so the file is either the old content or the new.
+    let staged = ignore.with_extension("gitignore.omh-new");
+    std::fs::write(&staged, next).with_context(|| format!("writing {}", staged.display()))?;
+    std::fs::rename(&staged, &ignore).with_context(|| format!("replacing {}", ignore.display()))?;
+    // **What was actually added, not the first name in the list.** This
+    // hardcoded `settings::LOCAL` while `missing` is computed per name — so
+    // every existing checkout, which already ignores that file and is only
+    // gaining `seeded-by`, was told *nothing was ignoring settings.local.toml*.
+    // A false alarm about the one file the whole safety argument rests on, and
+    // the fastest way to teach somebody to disbelieve this warning.
     ctx.warn(&format!(
         "nothing was ignoring {} — added it to {}",
-        settings::LOCAL,
+        missing.join(", "),
         ignore.display()
     ));
     Ok(())
@@ -421,15 +436,6 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // template that changed under an existing store would silently re-key
     // every note in it, and every existing key would stop being derivable.
     write_if_absent(&repo_omh.join(memory::TEMPLATES), memory::SHIPPED_KEYS)?;
-    // **Not `write_if_absent`.** The stamp has to move when omh does, or it
-    // records the version that first set the checkout up and then lies about
-    // every upgrade after it. Written on every `init`, which is also the
-    // command that would reseed anything a new omh changed.
-    std::fs::write(
-        repo_omh.join(SEEDED_BY),
-        format!("{}\n", env!("CARGO_PKG_VERSION")),
-    )
-    .with_context(|| format!("writing {}", repo_omh.join(SEEDED_BY).display()))?;
     // No `AGENTS.md` is written. omh's own sections are base-set entries,
     // composed into every session from the manifest, which is what lets a fix
     // reach a repo that ran `init` a year ago. The detected stack is not prose
@@ -570,6 +576,26 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     for name in IGNORED {
         ensure_line(&gitignore, name)?;
     }
+
+    // **After the ignore line, and after everything that can fail.** This was
+    // written ~140 lines earlier, beside the other seeds — which broke this
+    // file's own rule, stated one screen up: *make sure the gitignored layer
+    // is actually gitignored before writing it*. Between the two sat
+    // `questions`, which is **interactive**, so a Ctrl-C at that prompt left an
+    // untracked, un-ignored `seeded-by` for the next `git add .` to commit.
+    //
+    // Placement also decides what the stamp means. Written early it says
+    // *init started*; the row that reads it asks whether there is anything
+    // left to do, and only *init finished* answers that.
+    //
+    // **Not `write_if_absent`**: the stamp has to move when omh does, or it
+    // records the version that first set the checkout up and then lies about
+    // every upgrade after it.
+    std::fs::write(
+        repo_omh.join(SEEDED_BY),
+        format!("{}\n", env!("CARGO_PKG_VERSION")),
+    )
+    .with_context(|| format!("writing {}", repo_omh.join(SEEDED_BY).display()))?;
 
     // Only now the image, and the question about what it turned out to hold.
     //

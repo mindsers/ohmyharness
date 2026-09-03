@@ -146,9 +146,15 @@ pub(crate) fn doctor_cmd(
         Err(e) => Err(format!("{e:#}")),
     };
     // **Asked, not assumed.** `runtime::installed` only proved a binary is on
-    // PATH. This is a real round-trip to whatever is on the other end, through
-    // the trait's own `running_args` so sbx is asked in sbx's spelling rather
-    // than docker's — `ps` is already what omh runs to see live sandboxes.
+    // PATH. This is a real round-trip to whatever is on the other end.
+    //
+    // Through the trait's `running_args` so each runtime is asked in its own
+    // spelling — though today `Sbx::running_args` is still docker's, by its
+    // own admission ("PROVISIONAL … assumed rather than measured"). So for sbx
+    // this probe inherits that assumption, and a wrong spelling would report a
+    // working sbx as not answering. The trait is the right seam; the sbx
+    // measurement is the thing still owed, and its doc names `omh doctor` as
+    // where it lands.
     let answering = chosen.as_ref().map(|b| {
         (
             b.program(),
@@ -183,16 +189,23 @@ pub(crate) fn doctor_cmd(
     let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
         .into_iter()
         .chain(doctor::settings_checks(&files, &known))
-        // Absent on a healthy repo: a row saying "you have a commit" on every
-        // run is a line nobody reads.
         .chain(std::iter::once(doctor::leftovers_from(
-            &crate::cmd::session::leftovers(&paths, chosen.as_deref().ok(), ctx),
+            match crate::cmd::session::leftovers(&paths, chosen.as_deref().ok(), ctx) {
+                (found, None) => Ok(found),
+                (_, Some(why)) => Err(why),
+            },
             match chosen
                 .as_ref()
                 .ok()
                 .and_then(|b| b.volume_args().map(|args| (b.program(), args)))
             {
-                None => Ok(Vec::new()),
+                // **Not `Ok(vec![])`.** No runtime, or a runtime whose volume
+                // story omh has never measured, is *omh did not look* —
+                // rendering it as an empty listing prints "none — nothing
+                // orphaned on this machine", the exact claim this row's own
+                // doc forbids, about a machine omh never asked.
+                None if chosen.is_err() => Err("there is no container runtime to ask".into()),
+                None => Err("omh has not measured how this runtime lists volumes".into()),
                 Some((program, args)) => std::process::Command::new(program)
                     .args(&args)
                     .output()
@@ -227,6 +240,8 @@ pub(crate) fn doctor_cmd(
             doctor::free_space(&paths.root),
             &paths.root.display().to_string(),
         )))
+        // Absent on a healthy repo: a row saying "you have a commit" on every
+        // run is a line nobody reads.
         .chain(doctor::commit_from(
             std::process::Command::new("git")
                 .arg("-C")

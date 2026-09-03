@@ -156,8 +156,23 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
 /// **Never red.** A leftover breaks nothing; it is disk you can reclaim and a
 /// name that may confuse you later. A doctor that fails over it is one people
 /// stop running, and the exit code stops meaning *you cannot work*.
-pub fn leftovers_from(sessions: &[String], volumes: Result<Vec<String>, String>) -> Outcome {
+pub fn leftovers_from(
+    sessions: Result<Vec<String>, String>,
+    volumes: Result<Vec<String>, String>,
+) -> Outcome {
     let mut said = Vec::new();
+    // **Both halves can say "could not look".** Only volumes could, and the
+    // session half is the one this row's comment was written about: when
+    // `ps -a` failed, `session::leftovers` warned to stderr and returned a
+    // short list, so the row still printed "none — nothing orphaned" and
+    // `--json` carried no trace of the warning at all.
+    let sessions = match sessions {
+        Err(why) => {
+            said.push(format!("omh could not list containers: {why}"));
+            Vec::new()
+        }
+        Ok(found) => found,
+    };
     if !sessions.is_empty() {
         said.push(format!(
             "sessions nothing points at: {} — `omh <id> rm` clears one, and says \
@@ -170,11 +185,26 @@ pub fn leftovers_from(sessions: &[String], volumes: Result<Vec<String>, String>)
         // half goes through swallowed its failure, so a dead daemon reported
         // *fewer* leftovers instead of saying it had not looked.
         Err(why) => said.push(format!("omh could not list volumes: {why}")),
+        // **Named, never recommended for removal.** This said "volumes no
+        // checkout claims" with `docker volume rm` attached — and omh cannot
+        // establish that. A cache volume is keyed by a digest of a checkout's
+        // absolute path, so from inside one repo the others are indistinguishable
+        // from orphans: `omh doctor` in `api` was calling `web`'s live graph
+        // cache garbage and handing over the command to destroy it. omh can see
+        // that these exist; it cannot see whose they are.
+        // **Counted, not enumerated.** Driving the real binary printed 330
+        // names in a single unwrapped line — `out::Table` pads columns and
+        // never wraps, so the row was a wall nobody could read, and it pushed
+        // every other row off the screen. The count is the fact worth having;
+        // the names are recoverable with `docker volume ls`, which the row
+        // names instead of reproducing.
         Ok(v) if !v.is_empty() => said.push(format!(
-            "volumes no checkout claims: {} — `docker volume rm` removes one. \
-             Nothing in omh has ever listed these, so a migration leaves them \
-             behind unmentioned",
-            v.join(", ")
+            "{} omh volume{} on this machine — `docker volume ls | grep omh-` \
+             lists them. omh cannot tell which belong to other checkouts, \
+             because a cache is keyed by a digest of the path it was made for, \
+             so this is disk to be aware of rather than disk to reclaim",
+            v.len(),
+            if v.len() == 1 { "" } else { "s" }
         )),
         Ok(_) => {}
     }
@@ -301,7 +331,20 @@ pub fn free_space(at: &std::path::Path) -> Result<u64, String> {
     if ok != 0 {
         return Err(format!("{}", std::io::Error::last_os_error()));
     }
-    Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+    // **Zero available is not an answer.** overlayfs, several FUSE mounts and
+    // some network filesystems succeed and report nothing, and `disk_from`
+    // would render that as a red "0.0 GB free" — telling somebody to clear
+    // space on a disk that is empty. It is the same question `daemon_from`
+    // asks about an empty `ps` and answers the other way, for the other
+    // reason: there, nothing is a legitimate listing; here, nothing is a
+    // filesystem declining to say.
+    match stat.f_bavail as u64 * stat.f_frsize as u64 {
+        0 => Err(format!(
+            "the filesystem holding {} does not report free space",
+            at.display()
+        )),
+        bytes => Ok(bytes),
+    }
 }
 
 /// Bytes, for a person. One decimal place, because the difference between
@@ -329,6 +372,24 @@ pub fn commit_from(asked: std::io::Result<std::process::Output>) -> Option<Outco
     let out = asked.ok()?;
     if out.status.success() {
         return None;
+    }
+    // **Only exit 1 is "no commit".** Measured, git 2.55.0: `rev-parse
+    // --verify --quiet HEAD` exits 1 when the ref does not resolve, and 128
+    // when git could not answer at all — dubious ownership, an unreadable
+    // `.git`, a gitdir pointer that moved, a bad config line. Treating those
+    // as "no commit" hands somebody `git commit --allow-empty` for a problem
+    // it will not touch, and would put a junk commit in a repo that already
+    // has hundreds. `--quiet` suppresses the ref diagnostic, so the stderr is
+    // carried instead of discarded.
+    if out.status.code() != Some(1) {
+        return Some(Outcome {
+            name: "repo has a commit".into(),
+            ok: false,
+            detail: format!(
+                "omh could not ask this repository for its HEAD: {}",
+                crate::image::unreadable(&String::from_utf8_lossy(&out.stderr), &out.status)
+            ),
+        });
     }
     Some(Outcome {
         name: "repo has a commit".into(),
@@ -377,10 +438,13 @@ pub fn settings_checks(read: &SettingsRead, known: &[&str]) -> Vec<Outcome> {
             Err(why) => unreadable.push(format!("{file}: {why}")),
             Ok(pairs) => {
                 for (key, _) in pairs {
-                    // Tables are not keys. `[use]`, `[omh]` and `[provision]`
-                    // are seeded into every repo and validated elsewhere —
-                    // `config::values` renders them bracketed precisely so a
-                    // caller can tell them apart.
+                    // **Any bracketed key**, which is how `config::values`
+                    // renders a table. Not the three named ones: the filter is
+                    // structural, so a mistyped `[provisoin]` is skipped here
+                    // and named by `omh settings`, which excludes `[use]` and
+                    // `[omh]` by name instead. The two readers disagree, and
+                    // the table half belongs to `settings::resolve`, which
+                    // refuses an unknown table outright.
                     if key.starts_with('[') {
                         continue;
                     }
@@ -397,10 +461,11 @@ pub fn settings_checks(read: &SettingsRead, known: &[&str]) -> Vec<Outcome> {
             name: "settings omh reads".into(),
             ok: false,
             detail: format!(
-                "{} — so every setting in it is being ignored and has silently \
-                 gone back to its default. Nothing else reports this: the \
-                 reader swallows the error and answers as though the key were \
-                 not set",
+                "{} — so every scalar setting in it is being ignored and has \
+                 silently gone back to its default: `policy_value` swallows the \
+                 error and answers as though the key were never set. \
+                 `omh info --repo` refuses the file outright; nothing on the \
+                 launch path does",
                 unreadable.join("; ")
             ),
         }];
@@ -2366,8 +2431,13 @@ mod tests {
             "a repo with a commit needs no row"
         );
 
-        // No commit. `rev-parse --verify HEAD` exits non-zero.
-        let row = commit_from(out(128, "")).expect("a repo with no commit is worth a row");
+        // **Exit 1 is the "no commit" answer. Measured, git 2.55.0:** a repo
+        // with no commit exits 1; a path that is not a repository, or one git
+        // cannot read, exits 128. The first version asserted on 128 — encoding
+        // the assumption rather than the measurement — so any git failure told
+        // the reader to run `git commit --allow-empty`, which would not touch
+        // their problem and would leave a junk commit behind.
+        let row = commit_from(out(1, "")).expect("a repo with no commit is worth a row");
         assert!(!row.ok, "omh cannot fork a branch from nothing");
         assert!(
             row.detail.contains("commit"),
@@ -2377,6 +2447,27 @@ mod tests {
         assert!(
             row.detail.contains("git commit"),
             "and what makes it go away: {}",
+            row.detail
+        );
+
+        // 128 is git declining to answer — dubious ownership, an unreadable
+        // `.git`, a gitdir pointer that moved. A row, but a different one, and
+        // it carries what git said rather than a remedy that cannot apply.
+        let row = commit_from(Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(128 << 8),
+            stdout: Vec::new(),
+            stderr: b"fatal: detected dubious ownership in repository".to_vec(),
+        }))
+        .expect("git failing to answer is worth a row too");
+        assert!(!row.ok);
+        assert!(
+            row.detail.contains("dubious ownership"),
+            "what git said is the only actionable part: {}",
+            row.detail
+        );
+        assert!(
+            !row.detail.contains("git commit"),
+            "and a remedy that cannot apply is worse than none: {}",
             row.detail
         );
 
@@ -2457,7 +2548,10 @@ mod tests {
             .expect("the current directory is on a filesystem omh can ask about");
         assert!(here > 0, "a filesystem with no room could not run this");
         // A path that does not exist is an error, not a zero — the collapse
-        // that would have this row reporting a full disk for a typo.
+        // that would have this row reporting a full disk for a typo. The same
+        // reasoning covers a filesystem that succeeds and reports nothing:
+        // overlayfs and several network mounts do, and `Ok(0)` would render as
+        // a red "0.0 GB free" telling somebody to clear an empty disk.
         assert!(free_space(std::path::Path::new("/nonexistent/omh")).is_err());
     }
 
@@ -2521,7 +2615,7 @@ mod tests {
     #[test]
     fn leftovers_are_reported_and_never_a_failure() {
         // Nothing left behind: a row saying so, not silence — the reader asked.
-        let clean = leftovers_from(&[], Ok(Vec::new()));
+        let clean = leftovers_from(Ok(Vec::new()), Ok(Vec::new()));
         assert!(clean.ok);
         assert!(
             clean.detail.contains("none"),
@@ -2531,7 +2625,7 @@ mod tests {
 
         // Sessions and volumes, both named, and still not a failure.
         let some = leftovers_from(
-            &["s01".to_string(), "s04".to_string()],
+            Ok(vec!["s01".to_string(), "s04".to_string()]),
             Ok(vec!["omh-cache-repo-1234abcd".to_string()]),
         );
         assert!(
@@ -2540,19 +2634,50 @@ mod tests {
         );
         assert!(
             some.detail.contains("s01") && some.detail.contains("s04"),
-            "each session is named, because `omh s rm` takes one: {}",
+            "each session is named, because `omh <id> rm` takes one: {}",
+            some.detail
+        );
+        // **Counted, not named.** A machine with a few omh repos has hundreds
+        // of cache volumes, and `out::Table` never wraps — driving the binary
+        // printed 330 names in one line and pushed every other row off the
+        // screen.
+        assert!(
+            some.detail.contains('1') && some.detail.contains("volume"),
+            "the count is the fact worth having: {}",
             some.detail
         );
         assert!(
-            some.detail.contains("omh-cache-repo-1234abcd"),
-            "and each volume, which nothing else in omh has ever listed: {}",
+            !some.detail.contains("omh-cache-repo-1234abcd"),
+            "naming them makes the row unreadable on any real machine: {}",
+            some.detail
+        );
+        assert!(
+            some.detail.contains("docker volume ls"),
+            "so it names how to see them instead: {}",
+            some.detail
+        );
+        // **And it must not tell anybody to delete one.** A cache volume is
+        // keyed by a digest of a checkout's absolute path, so from inside one
+        // repo another's is indistinguishable from an orphan. This row said
+        // "volumes no checkout claims" and offered `docker volume rm`, which
+        // on a machine with two omh repos is advice to destroy the other's
+        // working state.
+        assert!(
+            !some.detail.contains("volume rm"),
+            "omh cannot tell whose a volume is, so it must not suggest \
+             removing one: {}",
+            some.detail
+        );
+        assert!(
+            !some.detail.contains("no checkout claims"),
+            "and must not claim to know it is unclaimed: {}",
             some.detail
         );
 
         // **A listing omh could not take is not an empty listing.** The `ps`
         // read inside `leftovers` swallowed its failure, so a dead daemon
         // reported *fewer* leftovers rather than saying it could not look.
-        let blind = leftovers_from(&[], Err("Cannot connect to the daemon".into()));
+        let blind = leftovers_from(Ok(Vec::new()), Err("Cannot connect to the daemon".into()));
         assert!(blind.ok, "not being able to look is not a failure either");
         assert!(
             blind.detail.contains("Cannot connect"),
@@ -2563,6 +2688,24 @@ mod tests {
             !blind.detail.contains("none"),
             "an unanswered listing must not read as a clean machine: {}",
             blind.detail
+        );
+
+        // **And the same for the session half, which had no way to say it.**
+        // `ps -a` failing warned to stderr and returned a short list, so the
+        // row printed "none — nothing orphaned" and `--json` carried no trace
+        // of the warning at all. The comment above this function described
+        // that exact failure while only the volume half could report it.
+        let deaf = leftovers_from(Err("Cannot connect to the daemon".into()), Ok(Vec::new()));
+        assert!(deaf.ok, "not being able to look is not a failure");
+        assert!(
+            deaf.detail.contains("could not list containers"),
+            "the session half must say it could not look: {}",
+            deaf.detail
+        );
+        assert!(
+            !deaf.detail.contains("none"),
+            "and must not read as a clean machine: {}",
+            deaf.detail
         );
     }
 

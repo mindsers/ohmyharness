@@ -42,10 +42,14 @@ pub trait Runtime: std::fmt::Debug {
 
     /// How to list this runtime's named volumes, if it has such a notion.
     ///
-    /// `None` for anything omh has not measured, the same answer `Sbx::caps`
-    /// gives for capabilities nobody has verified. Docker's volumes are the
-    /// ones `risks.md` records as orphaned and unmentioned after a migration —
-    /// omh creates `omh-cache-<repo>` and never lists it anywhere.
+    /// `None` for anything omh has not measured — the same posture `Sbx::caps`
+    /// takes, which answers `false` for capabilities nobody has verified. Not
+    /// literally the same answer: `false` there refuses a plan, `None` here
+    /// skips a check.
+    ///
+    /// Docker's volumes are the ones `risks.md` recorded as orphaned and
+    /// unmentioned after a migration — omh creates `omh-cache-<repo-id>` and,
+    /// until this method, listed it nowhere.
     fn volume_args(&self) -> Option<Vec<String>> {
         None
     }
@@ -103,6 +107,12 @@ impl Runtime for Docker {
     /// which is the question; `{{.Names}}` is one name per line, and a docker
     /// container name cannot contain a newline — the legal charset is
     /// `[a-zA-Z0-9][a-zA-Z0-9_.-]*`, which docker enforces at creation.
+    fn running_args(&self) -> Vec<String> {
+        vec!["ps".into(), "--format".into(), "{{.Names}}".into()]
+    }
+
+    /// `{{.Name}}` for the reason `running_args` uses `{{.Names}}`: one
+    /// per line, and a volume name cannot contain a newline either.
     fn volume_args(&self) -> Option<Vec<String>> {
         Some(vec![
             "volume".into(),
@@ -112,9 +122,6 @@ impl Runtime for Docker {
         ])
     }
 
-    fn running_args(&self) -> Vec<String> {
-        vec!["ps".into(), "--format".into(), "{{.Names}}".into()]
-    }
     fn program(&self) -> &'static str {
         "docker"
     }
