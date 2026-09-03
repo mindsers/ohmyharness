@@ -2154,13 +2154,18 @@ mod tests {
             ("src/cmd/catalogue.rs", 12),
             ("src/cmd/harvest.rs", 19),
             ("src/cmd/init.rs", 6),
+            // The fifth is the `adapters installed` row `doctor` adds when
+            // there is none: printed to somebody on a fresh machine whose only
+            // next step is the command it names, so a spelling omh does not
+            // accept would strand them.
+            //
             // The fourth is `doctor`'s TLS-inspection warning. It is printed
             // to somebody whose sandbox cannot verify anything it fetches and
             // who has, by construction, not set `ca_cert` — so the command in
             // it is the only thing standing between them and a broken
             // sandbox, and `--local` being the spelling omh accepts is what
             // this scan is for.
-            ("src/cmd/inspect.rs", 4),
+            ("src/cmd/inspect.rs", 5),
             ("src/cmd/memory.rs", 1),
             ("src/cmd/session.rs", 10),
             ("src/cmd/settings.rs", 10),

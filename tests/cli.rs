@@ -6347,6 +6347,97 @@ fn a_session_named_first_is_never_silently_dropped() {
 ///
 /// The remedy the resolver prints — *pick one with `-a <name>`* — named the very
 /// flag `doctor` was discarding, and was swallowed before it could print.
+/// **The host's answers survive the thing that stopped the sandbox.**
+///
+/// This is the whole feature, and nothing reached it: `doctor_cmd` needs a
+/// container, so every existing doctor test hands it `fake_docker`. Deleting
+/// the no-runtime early return left the suite green — the command reverted to
+/// printing one line and nothing else, which is what the change exists to fix.
+///
+/// `PATH=/nonexistent` is how the init test next door asks the same question.
+#[test]
+fn doctor_reports_the_host_when_there_is_no_container_runtime() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    std::fs::write(sb.repo.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .arg("doctor")
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .env("PATH", "/nonexistent")
+        .output()
+        .expect("the binary under test must run");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert!(
+        !out.status.success(),
+        "a machine that cannot build a sandbox has a failing check: {said}"
+    );
+    assert!(
+        said.contains("container runtime"),
+        "the runtime must be a row, not only an error: {said}"
+    );
+    assert!(
+        said.contains("stacks detected") && said.contains("rust"),
+        "the stack it detected does not depend on a runtime: {said}"
+    );
+    assert!(
+        said.contains("git on the host"),
+        "nor does git, which reached the report only through the probe: {said}"
+    );
+    assert!(
+        said.contains("of 3 checks failed"),
+        "and the tally counts every row, not just the failing one: {said}"
+    );
+}
+
+/// **A fresh machine is told what it has, not only what it lacks.**
+///
+/// `no adapters installed` was the entire output. And when this path first
+/// gained its rows it printed *"all 3 checks passed"* immediately above a
+/// non-zero exit, with `--json` carrying `"ok": true` for a failed run — the
+/// inversion `report::Doctor::json`'s own comment exists to prevent. A missing
+/// adapter is a failed check, so it is one.
+#[test]
+fn doctor_without_adapters_reports_the_host_and_fails_honestly() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["base", "editors", "stacks"]);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_omh"))
+        .args(["doctor", "--json"])
+        .current_dir(&sb.repo)
+        .env("HOME", &sb.home)
+        .output()
+        .expect("the binary under test must run");
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+
+    assert!(!out.status.success(), "no adapter is a failure: {stdout}");
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+
+    assert_eq!(
+        v["ok"],
+        serde_json::json!(false),
+        "`ok` must never be true on a run that exits non-zero: {stdout}"
+    );
+    assert_eq!(v["image"], serde_json::Value::Null, "{stdout}");
+    assert_eq!(v["harness"], serde_json::Value::Null, "{stdout}");
+    assert!(
+        v["checks"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|o| o["name"] == "git on the host")),
+        "the host's rows are still reported: {stdout}"
+    );
+}
+
 #[test]
 fn doctor_checks_the_credentials_of_the_account_it_was_given() {
     let sb = sandbox();

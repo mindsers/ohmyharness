@@ -502,17 +502,28 @@ pub(crate) fn what_to_keep(
 
 /// What the sandbox answered, and what the host answered, in one list.
 ///
-/// The order is the point. The emptiness check is how omh notices a sandbox
-/// that never ran the probe at all, and host checks always produce something —
-/// folded in first, they would answer *yes, something ran* on behalf of a
+/// **The emptiness check runs before the concatenation, which is what lets the
+/// host rows come first.** They always produce something, so folded into the
+/// same list unchecked they would answer *yes, something ran* on behalf of a
 /// container that did nothing, and `doctor` would pass on a probe that never
-/// executed.
+/// executed. That was the original reason host rows were appended last and
+/// gathered here rather than passed in. The check is now made against
+/// `from_the_sandbox` alone, before anything is joined, so the ordering is free
+/// — and the host reads first because it is usually what explains a failing
+/// sandbox.
 ///
-/// The host's side is **not** a parameter, and that is the guard. As two
-/// arguments the order was a convention: swapping them, or passing an empty
-/// list, silenced the emptiness check or dropped git from the report entirely,
-/// and no test could reach either — `doctor_cmd` needs a container. Taken from
-/// `doctor::git_checks` here, none of those three mistakes compiles.
+/// **The host's side is a parameter now**, because `doctor_cmd` gathers it
+/// before the container work: on a machine with no runtime the probe never
+/// runs, and the host rows are the whole of what the reader needs. This doc
+/// used to argue the opposite — that not having a parameter *was* the guard,
+/// since as two bare `Vec<Outcome>` arguments the order was a convention and
+/// swapping them or passing an empty list silenced the emptiness check or
+/// dropped the host from the report, neither reachable by a test because
+/// `doctor_cmd` needs a container.
+///
+/// That reasoning was right, so the guard moved into the types rather than
+/// being given up: `HostRows` cannot be passed where the sandbox's rows go, and
+/// an empty one is refused below.
 pub(crate) fn every_check(
     from_the_sandbox: Vec<doctor::Outcome>,
     host: doctor::HostRows,
@@ -530,12 +541,9 @@ pub(crate) fn every_check(
         "no host checks were gathered — the report would say the sandbox is \
          fine and nothing about the machine it ran on"
     );
-    // **The host rows come in, rather than being gathered here.** They used to
-    // be `doctor::git_checks()` called on this line, which meant every
-    // host-side answer was produced *after* the probe and therefore only on a
-    // machine where the probe could run. `doctor_cmd` gathers them before the
-    // container work now and reports them either way; this keeps the ordering
-    // — host facts after the sandbox's, which is how the table has always read.
+    // Host first. It used to be last, when `doctor::git_checks()` was called on
+    // this line — which is why every host-side answer was produced *after* the
+    // probe and therefore only on a machine where the probe could run.
     Ok(host.0.into_iter().chain(from_the_sandbox).collect())
 }
 

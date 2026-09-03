@@ -224,12 +224,24 @@ Launches the real image with the real mounts and checks the guest paths the
 adapter claims. The only thing that can verify an adapter. See
 [Troubleshooting](troubleshooting.md).
 
-It also reports the host's git, which is where every way work leaves a session
-actually runs — the version, and whether it can take a `--keep` selection,
-asked of the binary rather than compared against a version number. Only a git
-omh cannot use at all fails the check: an older git that cannot name
-checkpoints is still a working git, and a `doctor` that goes red over something
-you never run is one you stop running.
+**It reports the host first, and reports it whatever happens next.** Three rows
+before any container work: the container runtime it picked, the stacks it
+detected in this repo and the marker file that decided each, and the host's
+git. They are computed without a sandbox on purpose — on a machine with no
+runtime, or one where the image cannot be built, they are the whole of what
+omh can tell you, and they used to be thrown away with the failure.
+
+The git row is the version, and whether it can take a `--keep` selection, asked
+of the binary rather than compared against a version number. Only a git omh
+cannot use at all fails: an older git that cannot name checkpoints is still a
+working git, and a `doctor` that goes red over something you never run is one
+you stop running. The same reasoning holds for the stacks row — a repo of prose
+has no stack and that is not a failure.
+
+A detected stack whose toolchain will not be installed says so, and says which
+of the two reasons it is: `[provision]` switched it off, or it has not been
+provisioned yet. Both install nothing; only one of them is a decision you made.
+That is the answer to "why is there no python in my sandbox".
 
 ## `omh why <thing>`
 

@@ -481,7 +481,7 @@ checking claude in omh/claude:8eae0d5c1511fa89 — no account, so credentials go
   …
 ```
 
-A clean run ends `all 9 checks passed — claude's adapter paths are verified`;
+A clean run ends `all 11 checks passed — claude's adapter paths are verified`;
 anything else fails the command and the tally goes to stderr. With an account
 chosen there is a credential check too, and the header names which account it
 used.
