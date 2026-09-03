@@ -224,10 +224,13 @@ Launches the real image with the real mounts and checks the guest paths the
 adapter claims. The only thing that can verify an adapter. See
 [Troubleshooting](troubleshooting.md).
 
-**It reports the host first, and reports it whatever happens next.** Three rows
-before any container work: the container runtime it picked, the stacks it
-detected in this repo and the marker file that decided each, and the host's
-git. They are computed without a sandbox on purpose — on a machine with no
+**It reports the host first, and reports it whatever happens next.** Seven rows
+before any container work: whether the container runtime is **answering** (not
+merely installed — a stopped Docker Desktop is on `PATH` and useless), the
+stacks it detected and the marker file that decided each, settings set here
+that omh does not read, what omh has left behind, which omh set this checkout
+up, disk free where omh keeps its state, and the host's git. An eighth appears
+only when this repo has no commit for a session branch to fork from. They are computed without a sandbox on purpose — on a machine with no
 runtime, or one where the image cannot be built, they are the whole of what
 omh can tell you, and they used to be thrown away with the failure.
 
