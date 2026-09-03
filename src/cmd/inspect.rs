@@ -185,6 +185,10 @@ pub(crate) fn doctor_cmd(
         .chain(doctor::settings_checks(&files, &known))
         // Absent on a healthy repo: a row saying "you have a commit" on every
         // run is a line nobody reads.
+        .chain(std::iter::once(doctor::disk_from(
+            doctor::free_space(&paths.root),
+            &paths.root.display().to_string(),
+        )))
         .chain(doctor::commit_from(
             std::process::Command::new("git")
                 .arg("-C")

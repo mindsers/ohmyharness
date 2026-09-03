@@ -145,6 +145,87 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
     ))
 }
 
+/// How much room is left where omh keeps its state, and what that does *not*
+/// tell you.
+///
+/// A base image is a couple of gigabytes and a stack layer adds to it. Running
+/// out mid-build fails deep inside the runtime with a message that names a
+/// layer, not a disk, and the build is minutes gone before it says so.
+///
+/// **This measures the filesystem holding `~/.omh`, and says so.** On macOS
+/// Docker Desktop keeps images inside a VM disk image, so the number here is
+/// *not* the space a build consumes — the row states which filesystem it read
+/// rather than implying it answers "will this build fit". Being clear about
+/// what a measurement covers is the difference between a fact and a guess
+/// dressed as one.
+///
+/// Red only when there is very little left. A machine at 70% full is not
+/// broken, and a doctor that goes amber over ordinary disk use is one people
+/// stop reading.
+pub fn disk_from(free: Result<u64, String>, at: &str) -> Outcome {
+    // A base image plus one stack layer. Below this a build is unlikely to
+    // finish; above it, omh has no business having an opinion about somebody
+    // else's disk.
+    const NEEDED: u64 = 3 * 1024 * 1024 * 1024;
+    match free {
+        Err(why) => Outcome {
+            name: "disk".into(),
+            ok: true,
+            detail: format!(
+                "omh could not measure the space at {at}: {why}. That is not a \
+                 statement about the disk — it is omh having no answer"
+            ),
+        },
+        Ok(bytes) => Outcome {
+            name: "disk".into(),
+            ok: bytes >= NEEDED,
+            detail: format!(
+                "{} free on the filesystem holding {at}{}",
+                gigabytes(bytes),
+                if bytes >= NEEDED {
+                    // The caveat rides on every reading, not only the red one:
+                    // it is just as wrong to read a green row as "the build
+                    // will fit".
+                    " — which is where omh keeps its state, not necessarily \
+                     where the runtime keeps its images"
+                } else {
+                    ". A base image is a couple of gigabytes and a stack layer \
+                     adds to it, so a build will likely fail partway, naming a \
+                     layer rather than the disk"
+                }
+            ),
+        },
+    }
+}
+
+/// Free bytes on the filesystem holding `at`, or why omh could not tell.
+///
+/// The shelling-out half, kept apart from the decision for the reason
+/// `git_checks_from` gives. `statvfs` rather than `df`: no parsing, no locale,
+/// and no second process.
+///
+/// **Available, not free.** `f_bavail` is what an unprivileged process may
+/// use; `f_bfree` includes the reserve only root can touch, and reporting that
+/// would promise room a build cannot have.
+pub fn free_space(at: &std::path::Path) -> Result<u64, String> {
+    let c_path = std::ffi::CString::new(at.as_os_str().as_encoded_bytes())
+        .map_err(|e| format!("{} is not a path omh can ask about: {e}", at.display()))?;
+    // SAFETY: `c_path` is a valid NUL-terminated string that outlives the call,
+    // and `stat` is written only on success, which the return value reports.
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    let ok = unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) };
+    if ok != 0 {
+        return Err(format!("{}", std::io::Error::last_os_error()));
+    }
+    Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+}
+
+/// Bytes, for a person. One decimal place, because the difference between
+/// 2.1 GB and 2.9 GB decides whether a build finishes.
+fn gigabytes(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+}
+
 /// **A repo with no commit has no branch to fork.**
 ///
 /// `repo_root` already refuses a directory that is not a git repository at all
@@ -2226,6 +2307,74 @@ mod tests {
             .is_none(),
             "a missing git is the git row's business, not this one's"
         );
+    }
+
+    /// **Room to build, and honesty about what was measured.**
+    ///
+    /// A base image is a couple of gigabytes; running out mid-build fails deep
+    /// inside the runtime naming a layer rather than a disk, minutes in.
+    ///
+    /// The harder half is not the threshold, it is the claim. On macOS Docker
+    /// Desktop keeps images inside a VM disk image, so free space on the
+    /// filesystem holding `~/.omh` is **not** the space a build consumes. The
+    /// row therefore reports what it measured and names it, rather than
+    /// answering "will this build fit" — a number presented as an answer to a
+    /// question it cannot answer is worse than no number.
+    #[test]
+    fn the_disk_row_says_which_filesystem_it_measured() {
+        const GB: u64 = 1024 * 1024 * 1024;
+
+        let plenty = disk_from(Ok(80 * GB), "/Users/x/.omh");
+        assert!(plenty.ok, "80 GB free is not a problem");
+        assert!(
+            plenty.detail.contains("/Users/x/.omh"),
+            "the row names the filesystem it read: {}",
+            plenty.detail
+        );
+        assert!(
+            plenty.detail.contains("80"),
+            "and the figure: {}",
+            plenty.detail
+        );
+
+        // Nearly full: red, because a build will not finish and the failure it
+        // produces names a layer rather than a disk.
+        let tight = disk_from(Ok(1), "/Users/x/.omh");
+        assert!(!tight.ok, "a full disk is a failing check");
+        assert!(
+            tight.detail.contains("image"),
+            "and says what will not fit: {}",
+            tight.detail
+        );
+
+        // **Could not tell.** Never a verdict — a `statvfs` that failed says
+        // nothing about the disk, and a green tick would be a claim omh did
+        // not measure.
+        let unknown = disk_from(Err("statvfs failed: permission denied".into()), "/x");
+        assert!(
+            unknown.detail.contains("permission denied"),
+            "the reason survives: {}",
+            unknown.detail
+        );
+        assert!(
+            unknown.ok,
+            "omh not being able to measure is not the user's fault"
+        );
+        assert!(
+            !unknown.detail.contains(" 0 "),
+            "and it must not render as zero free, which reads as a full disk: {}",
+            unknown.detail
+        );
+
+        // **And the prober, on the machine running the suite.** Only what is
+        // true anywhere: `~` exists, and a filesystem with genuinely zero
+        // available bytes could not be running this test.
+        let here = free_space(std::path::Path::new("."))
+            .expect("the current directory is on a filesystem omh can ask about");
+        assert!(here > 0, "a filesystem with no room could not run this");
+        // A path that does not exist is an error, not a zero — the collapse
+        // that would have this row reporting a full disk for a typo.
+        assert!(free_space(std::path::Path::new("/nonexistent/omh")).is_err());
     }
 
     /// **Offline must never read as "you are behind a proxy".** That is the
