@@ -145,6 +145,44 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
     ))
 }
 
+/// Which omh set this checkout up, against the one running now.
+///
+/// Nothing recorded this before, so an upgrade's mid-command migration notices
+/// were the first a reader heard of it — `moved this checkout's … off` arrives
+/// while you are trying to do something else, and says nothing about whether
+/// anything is left to do.
+///
+/// **Absent is its own answer, not skew.** A checkout from before the stamp,
+/// or one never `init`ed, has nothing to compare — reporting that as a
+/// mismatch would invent a difference omh cannot see. That is the
+/// `installed_defs == 0` lesson from the stacks row: "nothing to compare with"
+/// and "compared, and they differ" are different facts and must read
+/// differently.
+pub fn seeded_from(stamp: Option<&str>, running: &str) -> Outcome {
+    Outcome {
+        name: "seeded by".into(),
+        // Never a failure. An older seed still runs; it is a thing to know
+        // when something behaves unlike the docs, which is what this command
+        // is for.
+        ok: true,
+        detail: match stamp {
+            None => format!(
+                "not recorded — this checkout predates the stamp, or was never \
+                 set up here. `omh init` records it, and reseeds anything \
+                 version {running} changed"
+            ),
+            Some(was) if was.trim() == running => {
+                format!("version {running}, the one running now")
+            }
+            Some(was) => format!(
+                "version {}, and you are running {running}. `omh init` reseeds \
+                 what changed, keeping anything you edited as `.yours`",
+                was.trim()
+            ),
+        },
+    }
+}
+
 /// How much room is left where omh keeps its state, and what that does *not*
 /// tell you.
 ///
@@ -2375,6 +2413,55 @@ mod tests {
         // A path that does not exist is an error, not a zero — the collapse
         // that would have this row reporting a full disk for a typo.
         assert!(free_space(std::path::Path::new("/nonexistent/omh")).is_err());
+    }
+
+    /// **Which omh set this checkout up.**
+    ///
+    /// Nothing recorded it, so the first a reader heard of a skew was a
+    /// migration notice arriving mid-command while they were doing something
+    /// else. Three answers, and the third is the one that is easy to get
+    /// wrong.
+    #[test]
+    fn a_checkout_says_which_omh_set_it_up() {
+        // Same version: a standing fact, stated plainly.
+        let same = seeded_from(Some("0.8.0"), "0.8.0");
+        assert!(same.ok);
+        assert!(
+            same.detail.contains("0.8.0"),
+            "the row names the version either way: {}",
+            same.detail
+        );
+
+        // Older. Not a failure — omh still runs — but the thing to know when
+        // something behaves unlike the docs.
+        let older = seeded_from(Some("0.7.0"), "0.8.0");
+        assert!(older.ok, "a stale seed is not a broken repo");
+        assert!(
+            older.detail.contains("0.7.0") && older.detail.contains("0.8.0"),
+            "both versions, or the reader cannot tell which way round: {}",
+            older.detail
+        );
+        assert!(
+            older.detail.contains("omh init"),
+            "and what reseeds it: {}",
+            older.detail
+        );
+
+        // **Absent is not skew.** A checkout from before the stamp has nothing
+        // to compare, and reporting a mismatch would invent a difference omh
+        // cannot see.
+        let unknown = seeded_from(None, "0.8.0");
+        assert!(unknown.ok);
+        assert!(
+            !unknown.detail.contains("0.7") && !unknown.detail.contains("older"),
+            "nothing was compared, so nothing differs: {}",
+            unknown.detail
+        );
+        assert!(
+            unknown.detail.contains("omh init"),
+            "and the way to start recording it: {}",
+            unknown.detail
+        );
     }
 
     /// **Offline must never read as "you are behind a proxy".** That is the

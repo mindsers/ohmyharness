@@ -103,6 +103,22 @@ pub(crate) fn seed_store(paths: &Paths) -> Result<String> {
     ))
 }
 
+/// What lives in a repo's `.omh/` and must not be committed.
+///
+/// `settings::LOCAL` because it holds secrets — that is the whole safety
+/// argument. `SEEDED_BY` because it records *this checkout's* setup, and
+/// committing it would have two teammates on different omh versions
+/// overwriting each other's line for no gain.
+pub(crate) const IGNORED: &[&str] = &[settings::LOCAL, SEEDED_BY];
+
+/// The file recording which omh set this checkout up.
+///
+/// A file rather than a setting: `[omh]` keys must be manifest *features*
+/// (`settings::validate` refuses anything else), and a bare scalar in
+/// `settings.toml` would be a key nothing reads — which `doctor`'s own
+/// settings row would then correctly report as such.
+pub(crate) const SEEDED_BY: &str = "seeded-by";
+
 /// Make sure the gitignored layer is actually gitignored before writing it.
 ///
 /// The whole safety argument rests on this file being ignored, and until now
@@ -117,15 +133,27 @@ pub(crate) fn ensure_ignored(paths: &Paths, ctx: &out::Ctx) -> Result<()> {
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let ignore = dir.join(".gitignore");
     let existing = std::fs::read_to_string(&ignore).unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == settings::LOCAL) {
+    // **Each name checked on its own.** This guarded one filename with an
+    // early return, so a `.gitignore` that already had it could never gain a
+    // second — and `seeded-by` is per-checkout, so committing it is churn
+    // between teammates on different omh versions. The security argument is
+    // unchanged: `settings::LOCAL` is still ensured, and still first.
+    let missing: Vec<&str> = IGNORED
+        .iter()
+        .copied()
+        .filter(|name| !existing.lines().any(|l| l.trim() == *name))
+        .collect();
+    if missing.is_empty() {
         return Ok(());
     }
     let mut next = existing;
     if !next.is_empty() && !next.ends_with('\n') {
         next.push('\n');
     }
-    next.push_str(settings::LOCAL);
-    next.push('\n');
+    for name in &missing {
+        next.push_str(name);
+        next.push('\n');
+    }
     std::fs::write(&ignore, next).with_context(|| format!("writing {}", ignore.display()))?;
     ctx.warn(&format!(
         "nothing was ignoring {} — added it to {}",
@@ -393,6 +421,15 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // template that changed under an existing store would silently re-key
     // every note in it, and every existing key would stop being derivable.
     write_if_absent(&repo_omh.join(memory::TEMPLATES), memory::SHIPPED_KEYS)?;
+    // **Not `write_if_absent`.** The stamp has to move when omh does, or it
+    // records the version that first set the checkout up and then lies about
+    // every upgrade after it. Written on every `init`, which is also the
+    // command that would reseed anything a new omh changed.
+    std::fs::write(
+        repo_omh.join(SEEDED_BY),
+        format!("{}\n", env!("CARGO_PKG_VERSION")),
+    )
+    .with_context(|| format!("writing {}", repo_omh.join(SEEDED_BY).display()))?;
     // No `AGENTS.md` is written. omh's own sections are base-set entries,
     // composed into every session from the manifest, which is what lets a fix
     // reach a repo that ran `init` a year ago. The detected stack is not prose
@@ -527,8 +564,12 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 
     // Appended, not overwritten: re-running init must not eat a line you added.
     let gitignore = paths.repo.join(".omh/.gitignore");
-    // Left tracked, a machine-local override gets committed to the team's repo.
-    ensure_line(&gitignore, settings::LOCAL)?;
+    // Left tracked, a machine-local override gets committed to the team's
+    // repo. The stamp is per-checkout for the same reason: two teammates on
+    // different omh versions would otherwise overwrite each other's line.
+    for name in IGNORED {
+        ensure_line(&gitignore, name)?;
+    }
 
     // Only now the image, and the question about what it turned out to hold.
     //

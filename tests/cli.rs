@@ -6401,6 +6401,63 @@ fn doctor_reports_the_host_when_there_is_no_container_runtime() {
     );
 }
 
+/// **A checkout records which omh set it up, and the stamp is not committed.**
+///
+/// Nothing recorded this, so the first a reader heard of a skew was a
+/// migration notice arriving mid-command. The file is gitignored because it is
+/// a fact about *this* checkout — committing it would have two teammates on
+/// different omh versions overwriting each other's line.
+#[test]
+fn init_records_which_omh_seeded_the_checkout() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+
+    sb.omh(&["init"]);
+
+    let stamp = std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
+        .expect("init records which omh set the checkout up");
+    assert_eq!(
+        stamp.trim(),
+        env!("CARGO_PKG_VERSION"),
+        "the stamp is the omh that ran"
+    );
+
+    let ignored = std::fs::read_to_string(sb.repo.join(".omh/.gitignore")).unwrap_or_default();
+    assert!(
+        ignored.lines().any(|l| l.trim() == "seeded-by"),
+        "the stamp is per-checkout and must not be committed: {ignored}"
+    );
+    // The security-load-bearing line is still there — this file's whole
+    // argument rests on it, and generalising the check must not drop it.
+    assert!(
+        ignored.lines().any(|l| l.trim() == "settings.local.toml"),
+        "the secret-bearing layer is still ignored: {ignored}"
+    );
+
+    // An older stamp reads as skew, and is not a failure.
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+    let out = sb.omh(&["doctor", "--json"]);
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let row = v["checks"]
+        .as_array()
+        .and_then(|c| c.iter().find(|o| o["name"] == "seeded by"))
+        .unwrap_or_else(|| panic!("no seeded-by row: {stdout}"));
+    assert_eq!(
+        row["ok"],
+        serde_json::json!(true),
+        "a stale seed still runs"
+    );
+    let detail = row["detail"].as_str().unwrap_or_default();
+    assert!(
+        detail.contains("0.0.1") && detail.contains(env!("CARGO_PKG_VERSION")),
+        "both versions, or the reader cannot tell which way round: {detail}"
+    );
+}
+
 /// **`git init` is not enough — omh forks a branch from something.**
 ///
 /// `repo_root` refuses a directory that is not a repository, so that case can

@@ -185,6 +185,14 @@ pub(crate) fn doctor_cmd(
         .chain(doctor::settings_checks(&files, &known))
         // Absent on a healthy repo: a row saying "you have a commit" on every
         // run is a line nobody reads.
+        .chain(std::iter::once(doctor::seeded_from(
+            std::fs::read_to_string(paths.repo.join(".omh").join(crate::cmd::init::SEEDED_BY))
+                .ok()
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+            env!("CARGO_PKG_VERSION"),
+        )))
         .chain(std::iter::once(doctor::disk_from(
             doctor::free_space(&paths.root),
             &paths.root.display().to_string(),

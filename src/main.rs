@@ -2175,7 +2175,12 @@ mod tests {
             // stack definitions installed, which names `omh init` as what
             // seeds them — printed to somebody whose sandbox has no toolchain
             // and who is owed the reason it has none.
-            ("src/doctor.rs", 2),
+            // Four. The two `omh init` lines `host_checks` prints when a
+            // profile has no stack definitions, and the two `seeded_from`
+            // prints — one to a checkout that has never recorded which omh set
+            // it up, one to a checkout an older omh set up. All four go to
+            // somebody whose next step is the command they name.
+            ("src/doctor.rs", 4),
             // Three. One is the `# `omh set --local ca_cert`` line `ca_layer`
             // writes into the generated Dockerfile, telling whoever reads the
             // recipe where the certificate came from. **Not** either of
