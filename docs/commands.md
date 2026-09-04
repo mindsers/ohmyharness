@@ -172,6 +172,13 @@ $ omh new claude -- --resume x
 already have, `omh sNN resume` rejoins it as the harness it ran, and
 `omh sNN resume <harness>` rejoins it as a different one.
 
+`omh sNN attach` opens the same session in your editor, and it too rejoins the
+harness the session recorded — not whatever this host prefers. Attaching from a
+machine set up for one harness to a session another built would otherwise stop
+its container and start the wrong image over the same worktree. A session whose
+harness record is damaged is refused rather than reattached on a guess, and
+`omh sNN resume <harness>` is how you say which one.
+
 A bare harness name used to do both — start or reattach, depending on what was
 there. It is not a command any more: any word could be a harness, so no word
 could be a command, and `RESERVED` existed to keep nineteen names out of the

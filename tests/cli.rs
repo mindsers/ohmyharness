@@ -5185,6 +5185,82 @@ fn attach_opens_the_session_and_the_editor_it_was_given() {
     );
 }
 
+/// `attach` rejoins the harness the session recorded, not the one this host
+/// prefers.
+///
+/// It picked `detect::preferred_harness` — the host default — and built that
+/// harness's image, so attaching from a machine that prefers claude to a
+/// session opencode had built stopped the opencode container and started a
+/// claude one over the same worktree. The recorded harness is the session's;
+/// the host's preference is for a fresh `omh new`.
+#[test]
+fn attach_uses_the_harness_the_session_recorded_rather_than_the_one_on_this_host() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let log = sb.fake_docker();
+    sb.session("s01");
+    sb.fake_editor("zed");
+    // The host prefers claude — no adapter is installed, so `preferred_harness`
+    // returns the first, which is claude. The session ran opencode.
+    let marker = sb.keyed("run").join("s01/.harness");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "opencode").unwrap();
+
+    let _ = sb.omh(&["s01", "attach", "zed"]);
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    let run_line = ran
+        .lines()
+        .find(|l| l.starts_with("run "))
+        .unwrap_or_else(|| panic!("attach never ran a container:\n{ran}"));
+    assert!(
+        run_line.contains("omh/opencode:"),
+        "attach rebuilt the session on the harness it recorded: {run_line}"
+    );
+    assert!(
+        !run_line.contains("omh/claude:"),
+        "and not the one this host prefers: {run_line}"
+    );
+}
+
+/// A session whose harness record is damaged is refused, not silently
+/// reattached on the host default.
+#[test]
+fn attach_refuses_a_session_whose_harness_record_it_cannot_read() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let log = sb.fake_docker();
+    sb.session("s01");
+    sb.fake_editor("zed");
+    // Present and unreadable — an empty marker is damage, not absence.
+    let marker = sb.keyed("run").join("s01/.harness");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "").unwrap();
+
+    let out = sb.omh(&["s01", "attach", "zed"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a record it cannot read is refused: {err}"
+    );
+    assert!(
+        err.contains("resume"),
+        "and it points at the way to say which harness: {err}"
+    );
+    assert!(
+        !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("\nrun ")
+            && !std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .starts_with("run "),
+        "nothing was launched"
+    );
+}
+
 /// `omh s42 attach` refuses a session that does not exist, like every sibling.
 ///
 /// It invented one. `Start::Named` returns the id unchecked and `ensure`

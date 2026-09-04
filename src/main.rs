@@ -2205,7 +2205,9 @@ mod tests {
             ("src/cmd/inspect.rs", 5),
             ("src/cmd/memory.rs", 1),
             ("src/cmd/prune.rs", 1),
-            ("src/cmd/session.rs", 11),
+            // The twelfth is `harness_for_attach`'s refusal, which names
+            // `omh <id> resume <harness>` the way the `Resume` arm does.
+            ("src/cmd/session.rs", 12),
             ("src/cmd/settings.rs", 10),
             ("src/config.rs", 3),
             ("src/container.rs", 4),

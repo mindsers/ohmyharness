@@ -202,6 +202,32 @@ pub(crate) fn session_up(
     Ok((backend, name))
 }
 
+/// Which harness `attach` rejoins as, from the session's own record.
+///
+/// `Harness(n)` is the session's word and is taken as is — a launch already
+/// wrote it, and building any other image restarts the container on the wrong
+/// harness. `NeverRecorded` is a session from before the record existed, or
+/// one `omh s attach` itself made for an editor and never ran a harness in;
+/// the host preference is the honest default there, since there is nothing to
+/// contradict. `CouldNotTell` is damage — a marker present and unreadable —
+/// and is refused rather than papered over with the host default, pointing at
+/// `resume`, which can be told the harness outright.
+fn harness_for_attach(
+    recorded: session::Ran,
+    installed: &[String],
+    on_host: &dyn Fn(&str) -> bool,
+) -> Result<String> {
+    match recorded {
+        session::Ran::Harness(name) => Ok(name),
+        session::Ran::NeverRecorded => detect::preferred_harness(installed, on_host)
+            .context("no adapters installed — run `omh init`"),
+        session::Ran::CouldNotTell(why) => anyhow::bail!(
+            "omh recorded a harness for this session and cannot read it back:              {why}
+  omh <id> resume <harness>   rejoin it as that, which              rewrites the record"
+        ),
+    }
+}
+
 pub(crate) fn attach(
     cwd: &std::path::Path,
     id: Option<&str>,
@@ -214,8 +240,18 @@ pub(crate) fn attach(
         .into_iter()
         .map(|a| a.name)
         .collect();
-    let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
-        .context("no adapters installed — run `omh init`")?;
+
+    // The session, before anything is built for it. `attach` used to pick the
+    // *host's* preferred harness here and build that image — so attaching from
+    // a machine that prefers claude to a session opencode built stopped the
+    // opencode container and started a claude one over the same worktree. The
+    // recorded harness is the session's; the host preference is for `omh new`.
+    let session = crate::cmd::harvest::existing_session(&paths, id)?;
+    let harness = harness_for_attach(
+        session::harness_of(&paths.runs(), &session.id),
+        &names,
+        &|h| runtime::installed(h),
+    )?;
     let adapter = Adapter::find(&paths.adapters(), &harness)?;
     let (own, repo) = resolved(&paths)?;
     let ca = crate::image::ca_for(&paths)?;
@@ -246,8 +282,9 @@ pub(crate) fn attach(
     // for" — true, and the code did it anyway.
     //
     // `attach` became a session verb in 0.7.0 and did not join the discipline
-    // of the group it moved into. `existing_session` is that discipline.
-    let session = crate::cmd::harvest::existing_session(&paths, id)?;
+    // of the group it moved into. `existing_session` is that discipline, and
+    // is resolved above so the harness this session ran is known before its
+    // image is built.
     session.ensure(&paths.repo, &session::default_branch(&paths.repo))?;
     carry_in(&paths, &session, ctx)?;
     let _ = idle::touch(&paths.runs(), &session.id);
@@ -1550,4 +1587,46 @@ pub(crate) fn rm(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::Ran;
+
+    /// The harness `attach` rejoins as, decided from the record alone.
+    #[test]
+    fn attach_rejoins_the_recorded_harness_and_refuses_a_damaged_record() {
+        let names = vec!["claude".to_string(), "opencode".to_string()];
+        let none = |_: &str| false;
+
+        assert_eq!(
+            harness_for_attach(Ran::Harness("opencode".into()), &names, &none).unwrap(),
+            "opencode",
+            "the session's own record is taken as is, not the host preference"
+        );
+        // NeverRecorded falls back to the host preference — first installed,
+        // else first named.
+        assert_eq!(
+            harness_for_attach(Ran::NeverRecorded, &names, &none).unwrap(),
+            "claude",
+            "a session with no record uses the host default"
+        );
+        assert_eq!(
+            harness_for_attach(Ran::NeverRecorded, &names, &|h| h == "opencode").unwrap(),
+            "opencode",
+            "and prefers one that is actually installed"
+        );
+        let refused = harness_for_attach(Ran::CouldNotTell("empty".into()), &names, &none)
+            .expect_err("a record it cannot read is refused, not guessed at");
+        assert!(
+            refused.to_string().contains("resume"),
+            "and points at the command that can be told the harness: {refused}"
+        );
+        // No adapters at all is the only NeverRecorded failure.
+        assert!(
+            harness_for_attach(Ran::NeverRecorded, &[], &none).is_err(),
+            "with nothing installed there is no default to fall back to"
+        );
+    }
 }
