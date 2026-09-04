@@ -6593,4 +6593,192 @@ because = "a fixture"
             );
         }
     }
+
+    /// A repository whose trunk holds files before the session forks from it,
+    /// so trunk can later delete one the session also has.
+    fn a_session_forked_from_a_trunk_with_files() -> (Paths, Session, shadow::Shadow) {
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        std::fs::write(paths.repo.join("kept.rs"), "fn kept() {}\n").unwrap();
+        std::fs::write(paths.repo.join("doomed.rs"), "fn doomed() {}\n").unwrap();
+        std::fs::create_dir_all(paths.repo.join("nested")).unwrap();
+        std::fs::write(paths.repo.join("nested/deep.rs"), "fn deep() {}\n").unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["add", "-A"],
+            vec!["commit", "-q", "-m", "trunk with files"],
+        ] {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        }
+        std::fs::create_dir_all(paths.shadows()).unwrap();
+        let session = Session::new(&paths.worktrees().join("s01"), "s01".to_string());
+        session.ensure(&paths.repo, "main").unwrap();
+        let shadow = shadow::Shadow::new(&paths.shadows(), "s01");
+        shadow.ensure(&session.worktree, &[]).unwrap();
+        (paths, session, shadow)
+    }
+
+    /// After a sync the worktree holds the merged tree — no more and **no
+    /// less**. A file trunk deleted is gone from the session.
+    ///
+    /// `materialise` wrote every path the merged tree held and deleted none,
+    /// so a file trunk removed stayed in the worktree, `omh sNN diff` showed
+    /// the session re-adding it, and the next `commit` would have put it back
+    /// on the branch as the agent's work. Reproduced 2026-09-04 against
+    /// git 2.55 before this test was written.
+    #[test]
+    fn syncing_leaves_the_worktree_holding_exactly_the_merged_tree() {
+        let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+        let repo_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // Trunk deletes two files, one of them the only file in its directory.
+        repo_git(&["rm", "-q", "doomed.rs", "nested/deep.rs"]);
+        repo_git(&["commit", "-qm", "trunk deletes"]);
+
+        let synced = cmd::harvest::sync_session(&paths, &session, "main").unwrap();
+        assert!(
+            synced.conflicted.is_empty(),
+            "a deletion nobody contested merges cleanly"
+        );
+        assert!(
+            !session.worktree.join("doomed.rs").exists(),
+            "the file trunk deleted is gone from the session"
+        );
+        assert!(
+            !session.worktree.join("nested/deep.rs").exists(),
+            "so is the one in a directory of its own"
+        );
+        assert!(
+            session.worktree.join("kept.rs").exists(),
+            "and the one trunk kept is still there"
+        );
+        // The invariant, not the two names: what the session now claims to
+        // have changed against its moved base is nothing at all.
+        let claimed = session.diff("main", session::What::Summary).unwrap();
+        assert_eq!(
+            claimed.trim(),
+            "",
+            "the session claims no change after a clean sync, yet diff says:\n{claimed}"
+        );
+    }
+
+    /// The other direction of the same rule: a modification the session made
+    /// to a file trunk deleted is a conflict, and the modified file **stays**
+    /// for the agent to decide about. Removing it would be omh resolving a
+    /// conflict in trunk's favour without a word.
+    #[test]
+    fn a_file_the_session_changed_and_trunk_deleted_is_kept_and_reported() {
+        let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+        let repo_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        std::fs::write(
+            session.worktree.join("doomed.rs"),
+            "fn doomed() { changed(); }\n",
+        )
+        .unwrap();
+        repo_git(&["rm", "-q", "doomed.rs"]);
+        repo_git(&["commit", "-qm", "trunk deletes what the agent is editing"]);
+
+        let synced = cmd::harvest::sync_session(&paths, &session, "main").unwrap();
+        assert_eq!(
+            synced.conflicted,
+            vec!["doomed.rs".to_string()],
+            "modify/delete is a conflict, named"
+        );
+        assert_eq!(
+            std::fs::read_to_string(session.worktree.join("doomed.rs")).unwrap(),
+            "fn doomed() { changed(); }\n",
+            "and the agent's version is left in place to decide about"
+        );
+    }
+
+    /// What `materialise` may never unlink, whatever the trees say: the
+    /// placeholders omh mounts over on the next launch, and a file the user
+    /// carried in. Neither is the project's, so neither is trunk's to delete.
+    ///
+    /// Driven straight at `materialise` with a `was` tree that *does* hold
+    /// the placeholder — `reviewing` keeps it out of any tree `sync` computes,
+    /// so this is the guard against the function being handed a wider tree
+    /// than the one caller gives it today.
+    #[test]
+    fn materialise_never_removes_the_placeholders_omh_mounts_over() {
+        let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+        let git_in = |cwd: &std::path::Path, args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // A `was` tree holding the placeholder and a carried file, built in
+        // a scratch index of the user's repo so nothing is committed.
+        let placeholder = carry::hidden_in_the_worktree()[0];
+        std::fs::write(session.worktree.join(placeholder), "# omh's placeholder\n").unwrap();
+        // Carried the way `omh new` carries it, so the exclusion is the real
+        // one and not a stand-in for it.
+        std::fs::write(paths.repo.join(".env"), "SECRET=carried\n").unwrap();
+        carry::apply(&paths.repo, &session.worktree, &[".env".to_string()]).unwrap();
+        assert!(
+            session.worktree.join(".env").exists(),
+            "the fixture carried it"
+        );
+        // A path git may create: an existing empty file is an index git
+        // refuses as truncated.
+        let scratch = tempfile::tempdir().unwrap();
+        let index = scratch.path().join("index");
+        let with_index = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&session.worktree)
+                .env("GIT_INDEX_FILE", &index)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        with_index(&["add", "-f", "-A", "."]);
+        let was = with_index(&["write-tree"]);
+        // The merged tree is trunk's, which has neither.
+        let merged = git_in(&paths.repo, &["rev-parse", "main^{tree}"]);
+
+        session.materialise(&was, &merged).unwrap();
+        assert!(
+            session.worktree.join(placeholder).exists(),
+            "{placeholder} is omh's placeholder, not trunk's file to delete"
+        );
+        assert!(
+            session.worktree.join(".env").exists(),
+            "a carried file is the user's, not trunk's file to delete"
+        );
+        assert!(
+            session.worktree.join("kept.rs").exists(),
+            "and the ordinary case still writes the tree"
+        );
+    }
 }

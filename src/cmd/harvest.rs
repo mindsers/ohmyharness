@@ -79,7 +79,7 @@ pub(crate) fn sync_session(paths: &Paths, session: &Session, base: &str) -> Resu
     let _ = session::unname_tree(&paths.repo, &ours);
     let merged = merged?;
 
-    session.materialise(&merged.tree)?;
+    session.materialise(&tree, &merged.tree)?;
     session.move_baseline(&paths.repo, &onto, &was)?;
     shadow.record_base_moved(&session.worktree, &onto, &merged.conflicted)?;
     let moved = session.commits_between(&paths.repo, &was, &onto)?;

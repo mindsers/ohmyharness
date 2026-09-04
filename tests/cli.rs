@@ -9129,3 +9129,56 @@ fn json_is_refused_where_omh_hands_you_a_program() {
         "nothing was launched on the way to the refusal"
     );
 }
+
+/// A sync removes what trunk deleted, and the session stops claiming it.
+///
+/// Twice, because the session forks from an empty root here: the first sync
+/// brings the file in, the second takes it out again. After the second,
+/// `omh s01 diff` must not name it — it did, as a file the agent had added,
+/// which is the lie a `commit` would then have landed.
+#[test]
+fn sync_removes_a_file_trunk_deleted_and_the_session_stops_claiming_it() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(args)
+            .output()
+            .expect("git must be installed to run this test");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+
+    std::fs::write(sb.repo.join("doomed.rs"), "fn doomed() {}\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "trunk adds"]);
+    let first = sb.omh(&["s01", "sync"]);
+    assert!(
+        first.status.success(),
+        "the first sync brings the file in: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(worktree.join("doomed.rs").exists(), "and it arrived");
+
+    git(&["rm", "-q", "doomed.rs"]);
+    git(&["commit", "-qm", "trunk deletes"]);
+    let second = sb.omh(&["s01", "sync"]);
+    assert!(
+        second.status.success(),
+        "the second sync takes it out: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        !worktree.join("doomed.rs").exists(),
+        "a file trunk deleted does not survive a sync"
+    );
+    let diff = sb.omh(&["s01", "diff"]);
+    let said = String::from_utf8_lossy(&diff.stdout);
+    assert!(
+        !said.contains("doomed.rs"),
+        "and the session no longer claims it as its own change: {said}"
+    );
+}

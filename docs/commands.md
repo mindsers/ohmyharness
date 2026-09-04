@@ -782,6 +782,13 @@ harness restarts and reads the tree as it now is.
 `omh s01 diff` still shows the agent's work after a sync, not trunk's — the
 session's baseline moves with it.
 
+A file trunk deleted is deleted from the session too, so the worktree holds the
+merged tree and nothing more; a session that kept it would show it under `diff`
+as the agent's own addition and land it again at `commit`. A file the agent
+changed and trunk deleted is a conflict like any other: the agent's version
+stays, uncommitted, and is named in the report. Carried files and omh's own
+placeholders are never removed, whatever trunk did.
+
 Needs git 2.38 on the host. `omh doctor` says so if yours is older.
 
 ### `omh sNN commit` will not land a conflict

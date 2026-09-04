@@ -644,7 +644,26 @@ impl Session {
     /// placeholder omh mounts over on the next launch. Writing trunk's file
     /// there would put the project's rules where omh is about to mount, and
     /// the agent would read whichever won.
-    pub fn materialise(&self, tree: &str) -> Result<()> {
+    ///
+    /// **And removes what the merge removed.** `checkout-index -a` writes
+    /// every path the tree holds and touches nothing else, so a file trunk
+    /// deleted stayed in the worktree: `diff` then showed the session adding
+    /// it back and the next `commit` would have landed it as the agent's.
+    /// The paths to unlink are exactly those in `was` — the session's tree
+    /// before the merge — and not in `tree` after it. A file the session
+    /// changed and trunk deleted is a conflict, and `merge-tree` keeps the
+    /// changed version in the tree, so it is never on this list: omh does
+    /// not settle a conflict in trunk's favour by deleting the evidence.
+    ///
+    /// Three more never leave, whatever the trees say. omh's placeholders,
+    /// because they are omh's and not the project's. A path git ignores in
+    /// this worktree — a carried `.env` is excluded by `carry::apply`, and
+    /// a tracked file is never reported ignored — because an ignored file
+    /// is not one trunk had to delete. And nothing outside the worktree,
+    /// because a path is a string git handed back and the worktree is the
+    /// only directory this has any business in — refused rather than
+    /// joined, though `diff-tree` writes relative paths only.
+    pub fn materialise(&self, was: &str, tree: &str) -> Result<()> {
         let index = tempfile::NamedTempFile::new().context("staging a merge index")?;
         let index = index.path();
         git_with_index(&self.worktree, index, &["read-tree", tree])?;
@@ -652,6 +671,53 @@ impl Session {
         let unstage: Vec<&str> = unstage.iter().map(String::as_str).collect();
         git_with_index(&self.worktree, index, &unstage)?;
         git_with_index(&self.worktree, index, &["checkout-index", "-f", "-a"])?;
+
+        let gone = git(
+            &self.worktree,
+            &[
+                "diff-tree",
+                "-r",
+                "--name-only",
+                "--diff-filter=D",
+                "-z",
+                was,
+                tree,
+            ],
+        )?;
+        let hidden = crate::carry::hidden_in_the_worktree();
+        for path in gone.split(' ').filter(|p| !p.is_empty()) {
+            let rel = Path::new(path);
+            anyhow::ensure!(
+                rel.is_relative()
+                    && rel
+                        .components()
+                        .all(|c| matches!(c, std::path::Component::Normal(_))),
+                "refusing to remove `{}`: not a plain path inside the session",
+                crate::out::untrusted(path)
+            );
+            if hidden.contains(&path) || ignored_here(&self.worktree, path)? {
+                continue;
+            }
+            let at = self.worktree.join(rel);
+            match std::fs::remove_file(&at) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("removing {} — trunk deleted it", at.display()))
+                }
+            }
+            // The directories it leaves empty, up to the worktree, the way a
+            // checkout would. Best effort: a directory holding anything else
+            // is not empty and `remove_dir` refuses it, which is the answer.
+            let mut dir = at.parent();
+            while let Some(d) = dir {
+                if d == self.worktree || std::fs::remove_dir(d).is_err() {
+                    break;
+                }
+                dir = d.parent();
+            }
+        }
         Ok(())
     }
 
@@ -1515,6 +1581,30 @@ fn git_owned(cwd: &Path, args: &[String]) -> Result<String> {
 
 /// `git` against an index of our own, so a read-only command can stage the
 /// worktree without disturbing the one the user's git shares.
+/// Whether git ignores `path` in this worktree: `info/exclude`, where
+/// `carry::apply` lists what it carried, and the project's own ignore files.
+///
+/// Asked of git rather than read from the files, because the patterns are
+/// git's to evaluate. Tracked files are never reported — they are not
+/// subject to exclude rules — so a file the project ships is never mistaken
+/// for a carried one, whatever `.gitignore` says about its name.
+fn ignored_here(worktree: &Path, path: &str) -> Result<bool> {
+    let out = Command::new("git")
+        .current_dir(worktree)
+        .args(["check-ignore", "-q", "--", path])
+        .output()
+        .context("running git check-ignore")?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => anyhow::bail!(
+            "git check-ignore -- {}: {}",
+            crate::out::untrusted(path),
+            crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim())
+        ),
+    }
+}
+
 fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(cwd)
