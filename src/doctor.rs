@@ -157,7 +157,8 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
 /// name that may confuse you later. A doctor that fails over it is one people
 /// stop running, and the exit code stops meaning *you cannot work*.
 pub fn leftovers_from(
-    sessions: Result<Vec<String>, String>,
+    sessions: Vec<String>,
+    unchecked: Vec<String>,
     volumes: Result<Vec<String>, String>,
 ) -> Outcome {
     let mut said = Vec::new();
@@ -166,13 +167,12 @@ pub fn leftovers_from(
     // `ps -a` failed, `session::leftovers` warned to stderr and returned a
     // short list, so the row still printed "none — nothing orphaned" and
     // `--json` carried no trace of the warning at all.
-    let sessions = match sessions {
-        Err(why) => {
-            said.push(format!("omh could not list containers: {why}"));
-            Vec::new()
-        }
-        Ok(found) => found,
-    };
+    //
+    // A list rather than one reason, and separate from `sessions` rather than a
+    // `Result` over it: the session half runs three independent reads, so it can
+    // both find leftovers and fail to look somewhere. Collapsing that into
+    // `Result` meant one failed read discarded everything the other two found.
+    said.extend(unchecked);
     if !sessions.is_empty() {
         said.push(format!(
             "sessions nothing points at: {} — `omh <id> rm` clears one, and says \
@@ -2637,7 +2637,7 @@ mod tests {
     #[test]
     fn leftovers_are_reported_and_never_a_failure() {
         // Nothing left behind: a row saying so, not silence — the reader asked.
-        let clean = leftovers_from(Ok(Vec::new()), Ok(Vec::new()));
+        let clean = leftovers_from(Vec::new(), Vec::new(), Ok(Vec::new()));
         assert!(clean.ok);
         assert!(
             clean.detail.contains("none"),
@@ -2647,7 +2647,8 @@ mod tests {
 
         // Sessions and volumes, both named, and still not a failure.
         let some = leftovers_from(
-            Ok(vec!["s01".to_string(), "s04".to_string()]),
+            vec!["s01".to_string(), "s04".to_string()],
+            Vec::new(),
             Ok(vec!["omh-cache-repo-1234abcd".to_string()]),
         );
         assert!(
@@ -2699,7 +2700,11 @@ mod tests {
         // **A listing omh could not take is not an empty listing.** The `ps`
         // read inside `leftovers` swallowed its failure, so a dead daemon
         // reported *fewer* leftovers rather than saying it could not look.
-        let blind = leftovers_from(Ok(Vec::new()), Err("Cannot connect to the daemon".into()));
+        let blind = leftovers_from(
+            Vec::new(),
+            Vec::new(),
+            Err("Cannot connect to the daemon".into()),
+        );
         assert!(blind.ok, "not being able to look is not a failure either");
         assert!(
             blind.detail.contains("Cannot connect"),
@@ -2717,7 +2722,11 @@ mod tests {
         // row printed "none — nothing orphaned" and `--json` carried no trace
         // of the warning at all. The comment above this function described
         // that exact failure while only the volume half could report it.
-        let deaf = leftovers_from(Err("Cannot connect to the daemon".into()), Ok(Vec::new()));
+        let deaf = leftovers_from(
+            Vec::new(),
+            vec!["omh could not list containers, so orphaned sandboxes went unchecked: Cannot connect to the daemon".to_string()],
+            Ok(Vec::new()),
+        );
         assert!(deaf.ok, "not being able to look is not a failure");
         assert!(
             deaf.detail.contains("could not list containers"),

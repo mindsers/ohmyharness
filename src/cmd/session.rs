@@ -690,12 +690,17 @@ pub(crate) fn leftovers(
     paths: &Paths,
     backend: Option<&dyn runtime::Runtime>,
     ctx: &out::Ctx,
-) -> (Vec<String>, Option<String>) {
+) -> (Vec<String>, Vec<String>) {
     // **Why omh could not look, when it could not.** The warning goes to
     // stderr, which `omh s` wants — but `omh doctor` puts this in a report, and
     // a row that says "none" because nothing was listed is the collapse the
     // whole leftovers row exists to avoid.
-    let mut unchecked: Option<String> = None;
+    //
+    // A `Vec`, not an `Option`: there are three independent reads here and one
+    // slot held only the last of them, so the two that could not reach it —
+    // shadows and runs — had nowhere to put a failure and reported as though
+    // they had looked and found nothing. Each read appends its own reason.
+    let mut unchecked: Vec<String> = Vec::new();
     let live = session::list(&paths.worktrees());
     // A sandbox repository with no worktree — [risks](docs/design/risks.md) 8c.
     // The most valuable orphan of the three: a container is re-creatable and a
@@ -716,21 +721,55 @@ pub(crate) fn leftovers(
             .collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
-            ctx.warn(&format!(
+            let why = format!(
                 "omh could not read {}, so orphaned sandbox repositories went unchecked: {e}",
                 paths.shadows().display()
-            ));
+            );
+            ctx.warn(&why);
+            unchecked.push(why);
             Vec::new()
         }
     };
-    found.extend(
-        std::fs::read_dir(paths.runs())
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|id| idle::last_used(&paths.runs(), id).is_some()),
-    );
+    // `into_iter().flatten().flatten()` dropped the `read_dir` failure and
+    // every per-entry failure without so much as a warning, so a run directory
+    // omh could not open was indistinguishable from one that held nothing.
+    match std::fs::read_dir(paths.runs()) {
+        Ok(entries) => {
+            let mut unreadable = 0usize;
+            for entry in entries {
+                match entry {
+                    Ok(e) => {
+                        let id = e.file_name().to_string_lossy().into_owned();
+                        if idle::last_used(&paths.runs(), &id).is_some() {
+                            found.push(id);
+                        }
+                    }
+                    // Counted rather than named: the name is what omh failed to
+                    // read, so there is nothing trustworthy to print per entry.
+                    Err(_) => unreadable += 1,
+                }
+            }
+            if unreadable > 0 {
+                let why = format!(
+                    "omh could not read {unreadable} entr{} under {}, so those runs went unchecked",
+                    if unreadable == 1 { "y" } else { "ies" },
+                    paths.runs().display()
+                );
+                ctx.warn(&why);
+                unchecked.push(why);
+            }
+        }
+        // The ordinary "no run has ever been made here", exactly as for shadows.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            let why = format!(
+                "omh could not read {}, so orphaned run directories went unchecked: {e}",
+                paths.runs().display()
+            );
+            ctx.warn(&why);
+            unchecked.push(why);
+        }
+    }
 
     if let Some(backend) = backend {
         let prefix = paths.container("");
@@ -749,20 +788,19 @@ pub(crate) fn leftovers(
                     .map(str::to_string),
             ),
             Ok(out) => {
-                let why =
-                    crate::image::unreadable(&String::from_utf8_lossy(&out.stderr), &out.status);
-                ctx.warn(&format!(
-                    "omh could not list containers, so orphaned sandboxes went \
-                     unchecked: {why}"
-                ));
-                unchecked = Some(why);
+                let why = format!(
+                    "omh could not list containers, so orphaned sandboxes went unchecked: {}",
+                    crate::image::unreadable(&String::from_utf8_lossy(&out.stderr), &out.status)
+                );
+                ctx.warn(&why);
+                unchecked.push(why);
             }
             Err(e) => {
-                ctx.warn(&format!(
-                    "omh could not list containers, so orphaned sandboxes went \
-                     unchecked: {e}"
-                ));
-                unchecked = Some(e.to_string());
+                let why = format!(
+                    "omh could not list containers, so orphaned sandboxes went unchecked: {e}"
+                );
+                ctx.warn(&why);
+                unchecked.push(why);
             }
         }
     }
