@@ -16,10 +16,28 @@ use std::path::Path;
 /// skips the build, so a base change never reaches an install that already
 /// built it. Adding `socat` to the base silently did nothing until this.
 pub fn base_tag(ca: Option<&str>) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    base_dockerfile(ca).hash(&mut h);
-    format!("omh/base:{:x}", h.finish())
+    format!("omh/base:{}", tag_digest(&base_dockerfile(ca)))
+}
+
+/// A stable digest of an image recipe, for the tag that names it.
+///
+/// 64-bit FNV-1a, computed the same on every machine. It replaced
+/// `DefaultHasher`, whose output std explicitly does not guarantee across
+/// releases: a tag is `ensure`'s only record that a recipe already built, so
+/// when the digest of an unchanged recipe moved on a Rust upgrade, every image
+/// rebuilt on the next launch for no reason anybody could see. The note-pin
+/// digest above shells out to `git hash-object` for the same stability; a tag
+/// is computed far more often and per launch, so it stays in process.
+///
+/// Not for anything that must resist an adversary — a recipe is omh's own
+/// text, and a collision would at worst reuse a layer omh built itself.
+pub fn tag_digest(recipe: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in recipe.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// Tag includes a digest of the recipe, so a Dockerfile omh ships actually
@@ -27,11 +45,12 @@ pub fn base_tag(ca: Option<&str>) -> String {
 /// `ensure` saw the tag present and skipped the build — while `omh init`
 /// reported "already built".
 pub fn tag_for(adapter: &Adapter, ca: Option<&str>) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    harness_dockerfile(adapter, ca).hash(&mut h);
-    base_dockerfile(ca).hash(&mut h);
-    format!("omh/{}:{:x}", adapter.name, h.finish())
+    let recipe = format!(
+        "{}\n{}",
+        harness_dockerfile(adapter, ca),
+        base_dockerfile(ca)
+    );
+    format!("omh/{}:{}", adapter.name, tag_digest(&recipe))
 }
 
 /// The agent's home inside the sandbox.
@@ -598,12 +617,13 @@ pub fn stack_tag(adapter: &Adapter, installs: &[&str], ca: Option<&str>) -> Stri
     if installs.is_empty() {
         return tag_for(adapter, ca);
     }
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    stack_dockerfile(adapter, installs, ca).hash(&mut h);
-    tag_for(adapter, ca).hash(&mut h);
-    base_dockerfile(ca).hash(&mut h);
-    format!("omh/{}:{:x}", adapter.name, h.finish())
+    let recipe = format!(
+        "{}\n{}\n{}",
+        stack_dockerfile(adapter, installs, ca),
+        tag_for(adapter, ca),
+        base_dockerfile(ca)
+    );
+    format!("omh/{}:{}", adapter.name, tag_digest(&recipe))
 }
 
 /// Build the base, the harness layer and this repo's stack layer if missing,
@@ -2416,6 +2436,28 @@ mod tests {
             stack_tag(&h, &["corepack enable pnpm"], Some(two)),
             "a rotated root must rebuild the stack layer too, or the session \
              keeps running the image built against the retired one"
+        );
+    }
+
+    /// The tag digest is the same on every toolchain, because `ensure` uses
+    /// the tag as its only record that a recipe already built. `DefaultHasher`
+    /// was not: its output moved on a Rust upgrade, and every image rebuilt on
+    /// the next launch for a reason nobody could find.
+    ///
+    /// Pinned to FNV-1a-64's published vectors, so a change to the hash — not
+    /// just to a recipe — has to come here and say why.
+    #[test]
+    fn an_image_tag_is_stable_across_toolchains() {
+        assert_eq!(
+            tag_digest(""),
+            "cbf29ce484222325",
+            "the FNV-1a-64 offset basis"
+        );
+        assert_eq!(tag_digest("a"), "af63dc4c8601ec8c");
+        assert_eq!(tag_digest("foobar"), "85944171f73967e8");
+        assert!(
+            base_tag(None).ends_with(&tag_digest(&base_dockerfile(None))),
+            "the base tag carries the digest of its own recipe"
         );
     }
 
