@@ -6695,6 +6695,268 @@ fn doctor_names_settings_omh_does_not_read() {
     );
 }
 
+/// **A session whose worktree survived is not a removed session.**
+///
+/// `rm` used to trust `git worktree remove`'s exit code, so a git that exited 0
+/// while leaving the directory behind was believed: `removed session s01`,
+/// exit 0, worktree still on disk. The first attempt at this fix printed a
+/// warning *and* the success line, which is the same lie with a footnote.
+///
+/// Driven by denying writes on the parent, so neither git nor `remove_dir_all`
+/// can unlink the entry — the shape of the real cause is that something else
+/// is holding it.
+#[test]
+#[cfg(unix)]
+fn rm_fails_when_the_worktree_is_still_on_disk() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git must be installed to run this test");
+
+    // A worktree omh will recognise as session s01, made directly so this test
+    // needs no container.
+    let at = sb.worktrees().join("s01");
+    std::fs::create_dir_all(sb.worktrees()).unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["worktree", "add", "-q", "-b", "omh/s01"])
+        .arg(&at)
+        .output()
+        .expect("git worktree add");
+    assert!(at.exists(), "the fixture made a worktree");
+
+    let parent = sb.worktrees();
+    let was = std::fs::metadata(&parent).unwrap().permissions();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = sb.omh(&["s01", "rm", "--force"]);
+    std::fs::set_permissions(&parent, was).unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "a session whose worktree is still there is not removed: {said}"
+    );
+    assert!(
+        !said.contains("removed session s01"),
+        "and must not say it was: {said}"
+    );
+    assert!(
+        said.contains("partly removed") && said.contains("s01"),
+        "it must name the state it left behind: {said}"
+    );
+    assert!(
+        said.contains(&at.display().to_string()),
+        "and the path that is still there: {said}"
+    );
+    // **What happened to the branch, not an assumption about it.** The first
+    // version of this message said "the branch is untouched", and `remove`
+    // drops a commitless one before it returns — so for exactly the sessions
+    // that had nothing to review, the sentence was false. This fixture's
+    // branch holds no commits, which is that case.
+    assert!(
+        said.contains("the branch omh/s01, which held no commits"),
+        "the branch here was commitless and was dropped, so saying it survived \
+         would be a false claim about the one thing that holds work: {said}"
+    );
+    assert!(
+        !said.contains("untouched") && !said.contains("the branch omh/s01 is still there"),
+        "and nothing may claim it survived: {said}"
+    );
+    // It is named among what went, not asserted alongside things omh never
+    // looked at — which is what the sentence here used to do for all four.
+    assert!(
+        said.contains("what went:"),
+        "the report lists what it observed: {said}"
+    );
+    // `Gone::No` carries a reason instead of being a bool precisely so this
+    // line can exist. Asserting it inside the enum, as the unit test does, is
+    // not the same as asserting it survives into what the user reads.
+    assert!(
+        said.to_lowercase().contains("permission denied"),
+        "the reason reaches the terminal, not just the type: {said}"
+    );
+    assert!(
+        said.contains("omh s01 rm") && said.contains("once the directory is free"),
+        "and the way out is named: {said}"
+    );
+}
+
+/// A branch holding commits is the one thing a failed removal must describe
+/// correctly.
+///
+/// Every test here built a commitless `omh/s01`, so only `BranchDropped` was
+/// ever taken: setting the other two arms to the literal "the branch is
+/// untouched" — the sentence this message was rewritten to stop printing —
+/// left the whole suite green.
+#[test]
+#[cfg(unix)]
+fn a_partly_removed_session_says_the_branch_that_survived_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git must be installed to run this test");
+
+    let at = sb.worktrees().join("s01");
+    std::fs::create_dir_all(sb.worktrees()).unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["worktree", "add", "-q", "-b", "omh/s01"])
+        .arg(&at)
+        .output()
+        .expect("git worktree add");
+    // The difference from every other fixture: this branch holds work.
+    std::fs::write(at.join("kept.txt"), "work nobody has read\n").unwrap();
+    // `-am` stages modified *tracked* files only, so an untracked one commits
+    // nothing and the branch stays empty — which is the fixture silently
+    // building the case it meant to avoid.
+    std::process::Command::new("git")
+        .args(["-C", &at.display().to_string()])
+        .args(["add", "kept.txt"])
+        .output()
+        .expect("git add in the worktree");
+    std::process::Command::new("git")
+        .args(["-C", &at.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "-m", "keep me"])
+        .output()
+        .expect("git commit in the worktree");
+    let counted = std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["rev-list", "--count", "main..omh/s01"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&counted.stdout).trim(),
+        "1",
+        "the fixture has to actually put a commit on the branch"
+    );
+
+    let parent = sb.worktrees();
+    let was = std::fs::metadata(&parent).unwrap().permissions();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = sb.omh(&["s01", "rm", "--force"]);
+    std::fs::set_permissions(&parent, was).unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "still a failure: {said}");
+    assert!(
+        said.contains("the branch omh/s01 is still there"),
+        "a branch holding commits has to be named as surviving: {said}"
+    );
+    assert!(
+        !said.contains("untouched") && !said.contains("held no commits"),
+        "and never described as dropped or untouched: {said}"
+    );
+    // It survived in fact, not only in prose.
+    let alive = std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["rev-parse", "--verify", "--quiet", "omh/s01"])
+        .output()
+        .unwrap();
+    assert!(
+        alive.status.success(),
+        "the branch the message says is there must actually be there: {said}"
+    );
+}
+
+/// The partial-removal report says what happened, not what was attempted.
+///
+/// The first version asserted four removals flatly — "The container, its graph
+/// entry, the run directory and the sandbox repository did go" — and verified
+/// none of them. With no usable runtime the container block is skipped whole,
+/// so omh never looked at the container at all and said it went anyway. Run
+/// against a refusing daemon it was worse: two warnings saying the container
+/// would not stop and the graph entry was left behind, then three lines later
+/// a sentence saying both went.
+///
+/// Driven by an unusable `runtime` setting rather than an empty PATH: the
+/// sandbox only *prepends* to PATH, so "no docker installed" depends on the
+/// machine running the test, while `select` refuses an unknown name always.
+#[test]
+#[cfg(unix)]
+fn a_partly_removed_session_claims_only_what_it_did() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git must be installed to run this test");
+
+    // `fake_docker` wrote `runtime = "docker"`; overwrite it with a name
+    // `select` cannot build, so the container half is never entered.
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "runtime = \"podman\"\n",
+    )
+    .unwrap();
+
+    let at = sb.worktrees().join("s01");
+    std::fs::create_dir_all(sb.worktrees()).unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["worktree", "add", "-q", "-b", "omh/s01"])
+        .arg(&at)
+        .output()
+        .expect("git worktree add");
+    assert!(at.exists(), "the fixture made a worktree");
+
+    let parent = sb.worktrees();
+    let was = std::fs::metadata(&parent).unwrap().permissions();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = sb.omh(&["s01", "rm", "--force"]);
+    std::fs::set_permissions(&parent, was).unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "still a failure: {said}");
+    assert!(said.contains("partly removed"), "still reported: {said}");
+
+    // The claim, isolated: whatever omh says went, the container is not in it.
+    let went = said
+        .split("what went:")
+        .nth(1)
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !went.contains("container"),
+        "omh never reached the container and must not say it went — said `{went}` in: {said}"
+    );
+    assert!(
+        said.contains("could not reach") && said.contains("container"),
+        "and it must name what it did not do, so nobody has to guess: {said}"
+    );
+}
+
 /// **A runtime that is installed but asleep is not a working runtime.**
 ///
 /// `runtime::installed` is `command -v docker`, so Docker Desktop quit — or
@@ -6710,7 +6972,18 @@ fn doctor_says_when_the_runtime_is_installed_but_not_answering() {
     let log = sb.fake_docker();
     std::fs::write(log.parent().unwrap().join("docker-refuses"), "").unwrap();
     sb.git_init();
-    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    // **No adapters, deliberately.** The row under test is a *host* row, and
+    // the host block runs before any container work — so this takes the
+    // no-adapter exit and the rows print without a build.
+    //
+    // With adapters seeded, doctor ran on into `ensure`, the refusing shim
+    // failed the build, and the rows reached the terminal only through the
+    // closure's error arm — several layers of failure between the fact and its
+    // report. That run went red once on CI's linux job and passed on a re-run,
+    // and I could not tell from the log which layer swallowed it. Asserting a
+    // host row through the shortest path that produces it is not a workaround:
+    // it is the path that matches what the row is about.
+    sb.seed_catalogue(&["base", "editors", "stacks"]);
 
     let out = sb.omh(&["doctor"]);
     let said = format!(

@@ -1288,7 +1288,12 @@ pub(crate) fn resolved(paths: &Paths) -> Result<(base::Own, settings::RepoPolicy
     Ok((base::own(&manifest, &repo.off, &installed)?, repo))
 }
 
-pub(crate) fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -> Result<()> {
+pub(crate) fn rm(
+    cwd: &std::path::Path,
+    id: &str,
+    consent: crate::cmd::harvest::Consent,
+    ctx: &out::Ctx,
+) -> Result<()> {
     session::validate_id(id)?;
     let paths = Paths::discover(cwd)?;
     let session = Session::new(&paths.worktrees(), id.to_string());
@@ -1316,7 +1321,14 @@ pub(crate) fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -
             Ok(Some(n)) => crate::cmd::harvest::Snapshots::Kept(n),
             Err(e) => crate::cmd::harvest::Snapshots::Unreadable(format!("{e:#}")),
         };
-    if let Some(note) = crate::cmd::harvest::may_remove(&paths, &session, snapshots, force)? {
+    if let Some(note) = crate::cmd::harvest::may_remove(
+        &paths,
+        &session,
+        snapshots,
+        consent,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stderr(),
+    )? {
         ctx.warn(note.trim());
     }
 
@@ -1330,47 +1342,70 @@ pub(crate) fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -
     // `session_up` — seeing a container that is up — execs into it and gets
     // "current working directory is outside of container mount namespace root"
     // for every command from then on. Nothing else ever removes it.
-    if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    // What actually happened, part by part. The report below is built from
+    // these rather than asserting a list of four removals it never checked —
+    // which is what it did, including in runs whose own warnings said the
+    // opposite two lines earlier.
+    let mut went: Vec<String> = Vec::new();
+    let mut unreached: Vec<String> = Vec::new();
+    match runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)
     }) {
-        let name = paths.container(id);
-        // Best-effort already — `let _` below says so — and *could not tell*
-        // joins *not running* because the exec would fail against a runtime
-        // that will not answer anyway. Failing a removal over a tidy-up nobody
-        // asked for would be the tail wagging the dog.
-        //
-        // An earlier version of this comment claimed the graph entry is
-        // dropped on the next launch that reuses the id. It is not:
-        // `drop_graph_command` has exactly one caller, this one. What is
-        // skipped here is skipped for good, so it is said rather than
-        // swallowed.
-        let up = image::container_running(backend.as_ref(), &name);
-        if let image::Running::Unknown(why) = &up {
+        Err(e) => {
+            // Was `if let Ok(_)`, so this fell through in silence and the
+            // report went on to claim the container had gone.
             ctx.warn(&format!(
-                "could not tell whether {id}'s sandbox was up, so its graph entry \
+                "no container runtime omh can use, so {id}'s container and graph \
+                 entry were left alone: {e:#}"
+            ));
+            unreached.push("the container and its graph entry".to_string());
+        }
+        Ok(backend) => {
+            let name = paths.container(id);
+            // Best-effort already — `let _` below says so — and *could not tell*
+            // joins *not running* because the exec would fail against a runtime
+            // that will not answer anyway. Failing a removal over a tidy-up nobody
+            // asked for would be the tail wagging the dog.
+            //
+            // An earlier version of this comment claimed the graph entry is
+            // dropped on the next launch that reuses the id. It is not:
+            // `drop_graph_command` has exactly one caller, this one. What is
+            // skipped here is skipped for good, so it is said rather than
+            // swallowed.
+            let up = image::container_running(backend.as_ref(), &name);
+            if let image::Running::Unknown(why) = &up {
+                ctx.warn(&format!(
+                    "could not tell whether {id}'s sandbox was up, so its graph entry \
                  was left behind: {why}"
-            ));
-        }
-        if matches!(up, image::Running::Yes) {
-            let project = base::project_name(&paths.repo_name(), id);
-            let _ = Command::new(backend.program())
-                .args(backend.exec_args(&name, &base::drop_graph_command(&project), false))
-                .output();
-        }
-        // Best-effort: a container that was never started has nothing to
-        // remove, and that must not stop the worktree from going.
-        // Warned rather than swallowed, and the line above already warns
-        // about the weaker failure — not being able to *tell* whether it was
-        // up. A removal that fails leaves a live container bound to a worktree
-        // this function is about to delete, which manufactures exactly the
-        // unenterable state `Probe::NotEnterable` exists for. This function's
-        // own doc names `omh s rm` as the historical cause of it.
-        if let Err(e) = image::container_remove(backend.program(), &name) {
-            ctx.warn(&format!(
-                "{id}'s container would not stop, and its worktree is going: it is left \
-                 running against a directory that will not be there. `docker rm -f {name}` \
-                 clears it — {e:#}"
-            ));
+                ));
+                unreached.push("its graph entry".to_string());
+            }
+            if matches!(up, image::Running::Yes) {
+                let project = base::project_name(&paths.repo_name(), id);
+                let _ = Command::new(backend.program())
+                    .args(backend.exec_args(&name, &base::drop_graph_command(&project), false))
+                    .output();
+                went.push("its graph entry".to_string());
+            }
+            // Best-effort: a container that was never started has nothing to
+            // remove, and that must not stop the worktree from going.
+            // Warned rather than swallowed, and the line above already warns
+            // about the weaker failure — not being able to *tell* whether it was
+            // up. A removal that fails leaves a live container bound to a worktree
+            // this function is about to delete, which manufactures exactly the
+            // unenterable state `Probe::NotEnterable` exists for. This function's
+            // own doc names `omh s rm` as the historical cause of it.
+            match image::container_remove(backend.program(), &name) {
+                Ok(()) => went.push("the container".to_string()),
+                Err(e) => {
+                    ctx.warn(&format!(
+                        "{id}'s container would not stop, and its worktree is going: it is left \
+                     running against a directory that will not be there. `docker rm -f {name}` \
+                     clears it — {e:#}"
+                    ));
+                    unreached.push("the container".to_string());
+                }
+            }
         }
     }
 
@@ -1378,13 +1413,71 @@ pub(crate) fn rm(cwd: &std::path::Path, id: &str, force: bool, ctx: &out::Ctx) -
     // leaving it costs nothing that breaks — but the `last-used` marker beside
     // it is what says a session ran here, and a marker with no session behind it
     // is how `omh s` learns to report a leftover that is not there any more.
-    let _ = std::fs::remove_dir_all(paths.runs().join(id));
+    match std::fs::remove_dir_all(paths.runs().join(id)) {
+        Ok(()) => went.push("the run directory".to_string()),
+        // Never made, or already gone: not a removal that failed.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => unreached.push(format!("the run directory ({e})")),
+    }
 
     // The branch is reported honestly rather than always claimed as kept: one
     // that never received a commit preserves nothing, and saying otherwise
     // trains people to ignore a namespace filling with dead refs.
     let base = session::default_branch(&paths.repo);
-    let action = match session.remove(&paths.repo, &base, &paths.shadows())? {
+    let done = session.remove(&paths.repo, &base, &paths.shadows())?;
+    let (removed, worktree) = (done.branch, done.worktree);
+    match &done.shadow {
+        session::Gone::Yes => went.push("the sandbox repository".to_string()),
+        session::Gone::No(why) => unreached.push(format!("the sandbox repository ({why})")),
+    }
+    // **A worktree still on disk makes "removed session sNN" false**, and the
+    // command used to print both — a warning saying it is there, then a
+    // success line saying the session is gone, then exit 0. That is the shape
+    // this whole change exists to remove, so the outcome is reported once and
+    // the incomplete case is a failure rather than a footnote to a success.
+    if let session::Gone::No(why) = &worktree {
+        // **What happened to the branch, not an assumption about it.** The
+        // first version said "the branch is untouched", and `remove` drops a
+        // commitless one *before* it returns — so for exactly the sessions
+        // that had nothing to review, the sentence was false.
+        let branch = match removed {
+            session::Removed::BranchKept(_) => {
+                format!("the branch omh/{id} is still there.\n")
+            }
+            session::Removed::BranchDropped => String::new(),
+            session::Removed::NoBranch => String::new(),
+        };
+        // Only what was observed. The first version asserted four removals
+        // flatly and checked none of them, so a run with no usable runtime —
+        // or one whose own warnings said the container would not stop —
+        // printed those warnings and then claimed it had gone anyway.
+        // The branch is its own sentence: `BranchKept` did *not* go, so
+        // folding it into the "what went" list would be a new false claim in
+        // the message written to remove one.
+        if removed == session::Removed::BranchDropped {
+            went.push(format!("the branch omh/{id}, which held no commits"));
+        }
+        let done = if went.is_empty() {
+            String::new()
+        } else {
+            format!("what went: {}\n", went.join(", "))
+        };
+        let missed = if unreached.is_empty() {
+            String::new()
+        } else {
+            format!("what omh could not reach: {}\n", unreached.join(", "))
+        };
+        anyhow::bail!(
+            "{id} is partly removed — its worktree is still there:\n  \
+             {at}\n  \
+             {why}\n\
+             {done}{missed}{branch}  \
+             omh {id} rm              run it again once the directory is free",
+            at = session.worktree.display()
+        );
+    }
+
+    let action = match removed {
         session::Removed::BranchKept(n) => {
             // Two ways to be kept, and they are not the same news. A branch
             // kept because it holds three commits is an invitation to review

@@ -188,9 +188,9 @@ it stops and shows you what the runtime said, along with two ways on:
 
 `omh sNN rm` is **not** the way out here, though an earlier version of this page
 said so. It deletes the worktree as well as the container, and when omh cannot
-read the sandbox it refuses outright rather than guessing what would be lost —
-so following that advice gets a second refusal, and the only way past it
-deletes work.
+read the sandbox it will not guess what would be lost: on a terminal it asks
+before going ahead, and with nobody to ask it refuses. Either way the answer
+that gets past it destroys the work you came here to keep.
 
 ### `current working directory is outside of container mount namespace root`
 
@@ -250,8 +250,23 @@ name and left short ones alone, since `-s` is a flag plenty of harnesses use.
 ### `omh s rm` says the session "is not a working tree"
 
 Worktree registration and the directory on disk disagreed. omh prunes before
-adding and falls back to removing the directory outright; if you hit this,
-`git worktree prune` in the main checkout clears it.
+adding and removes the directory outright when git will not, so this should no
+longer reach you.
+
+### `sNN is partly removed — its worktree is still there`
+
+`rm` asks the disk whether the worktree actually went rather than trusting
+git's exit code, and this is it saying no. The command exits non-zero and lists
+what it did observe going, so nothing is claimed that was not watched.
+
+Something is holding the directory: a shell still `cd`'d into it, an editor or
+a file watcher with it open, a mount that has gone read-only, or a parent whose
+permissions changed. Close whatever it is and run `omh sNN rm` again — the
+parts that already went are gone, and re-running finishes the rest.
+
+`--force` does not help here. It answers the question about unreviewed work; it
+does not make the removal try harder, and `git worktree remove --force` was
+passed either way.
 
 ### `moved this checkout's … off ` — upgrading to 0.8.0
 

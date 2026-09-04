@@ -621,12 +621,69 @@ pub(crate) fn must_know(running: image::Running, what: &str, doing: &str) -> Res
     }
 }
 
-/// Whether this session may be removed, or what stands in the way.
+/// Whether omh may delete work that exists nowhere else.
 ///
-/// Separate from `rm` so the decision is assertable: `rm` takes a container
-/// down, and nothing that needs one can be reached by a test here. What is
-/// left in `rm` is the single call — its absence is a line missing from a
-/// diff rather than a behaviour hiding behind a runtime.
+/// **One value, not two booleans.** A `force` flag and a "there is somebody at
+/// a keyboard" flag are adjacent, the same type, and mean opposite things.
+/// Swapping them is type-correct, and the two mistakes it makes are the worst
+/// available here: prompting inside a script, or refusing a person standing
+/// right there.
+///
+/// Three states because there are three behaviours, so a call site reads as
+/// the decision rather than as two flags to combine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Consent {
+    /// `--force`. Said deliberately, and the only way past without a person.
+    Given,
+    /// Nobody said anything, and there is somebody to ask.
+    MayAsk,
+    /// Nobody said anything, and there is nobody to ask — a script, a CI
+    /// runner, a closed pipe. The refusal stands.
+    CannotAsk,
+}
+
+/// `--force` was said.
+///
+/// A type rather than a `bool` because it travels beside `Interactive`, and
+/// two `bool`s next to each other is the hazard `Consent` exists to remove.
+///
+/// Naming the two positions is only half of it. Wrapping them at
+/// `may_remove`'s boundary moved the swap up to `rm`, which still took
+/// `force: bool, terminal: bool`; moving it to `rm` moved it up to the
+/// dispatch, where `Forced(x)` and `Interactive(y)` are both built from bools
+/// and so are still swappable by hand. What closes it is having nothing to
+/// swap: see `Interactive::of_stdin`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Forced(pub bool);
+
+/// There is somebody at a keyboard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Interactive(pub bool);
+
+impl Interactive {
+    /// The spelling every command uses. It takes no argument, so the flag
+    /// cannot arrive here and the terminal cannot arrive as `Forced` — the
+    /// transposition stops being expressible rather than being caught.
+    ///
+    /// The field stays constructible for tests, which need both answers
+    /// without a terminal to read them from.
+    pub(crate) fn of_stdin() -> Self {
+        Self(std::io::IsTerminal::is_terminal(&std::io::stdin()))
+    }
+}
+
+impl Consent {
+    /// Combined here rather than at each call site, so "forced beats
+    /// everything" has one spelling instead of one per caller.
+    pub(crate) fn read(forced: Forced, interactive: Interactive) -> Self {
+        match (forced.0, interactive.0) {
+            (true, _) => Self::Given,
+            (false, true) => Self::MayAsk,
+            (false, false) => Self::CannotAsk,
+        }
+    }
+}
+
 /// What omh knows about a session's turn snapshots when it is asked to remove
 /// it.
 ///
@@ -645,11 +702,19 @@ pub(crate) enum Snapshots {
     Unreadable(String),
 }
 
+/// Whether this session may be removed, or what stands in the way.
+///
+/// Separate from `rm` so the decision is assertable: `rm` takes a container
+/// down, and nothing that needs one can be reached by a test here. What is
+/// left in `rm` is the single call — its absence is a line missing from a
+/// diff rather than a behaviour hiding behind a runtime.
 pub(crate) fn may_remove(
     paths: &Paths,
     session: &Session,
     snapshots: Snapshots,
-    force: bool,
+    consent: Consent,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn std::io::Write,
 ) -> Result<Option<String>> {
     let branch = format!("omh/{}", session.id);
     // Named, never the reason. A snapshot is a tree omh photographed at the
@@ -722,15 +787,36 @@ pub(crate) fn may_remove(
         // the only copy of work omh could not count, in silence.
         AtStake::Unknown(why) => (why, "and omh cannot say what that removes"),
     };
-    anyhow::ensure!(
-        force,
-        "{id} has {what} {whether}{also}. Removing it deletes the only copy:\n  \
-         omh {id} log                 read what is there\n  \
-         omh {id} commit --keep       put it on {branch}\n  \
-         omh {id} commit -m \"…\"       or take the files as they stand{reading}\n  \
-         omh {id} rm --force          remove it anyway",
-        id = session.id
-    );
+    // **Asked, when there is somebody to ask.** This only ever refused, and
+    // the refusal's last line told you to retype the command with `--force` —
+    // so the way to answer the safety question was to type the dangerous thing
+    // from memory, with the reasons scrolled off. `omh s down` has asked for
+    // its destructive case all along; this is the same shape.
+    //
+    // `--force` keeps its meaning for everything that is not a terminal: a
+    // script, a CI runner, a closed pipe. `ask::confirm` treats silence and
+    // anything-but-yes as no, which is what makes that safe.
+    let at_stake = format!("{id} has {what} {whether}{also}", id = session.id);
+    if consent != Consent::Given {
+        let agreed = consent == Consent::MayAsk
+            && crate::ask::confirm(
+                &format!(
+                    "{at_stake}. Removing it deletes the only copy.\nremove {id} anyway?",
+                    id = session.id
+                ),
+                input,
+                out,
+            )?;
+        anyhow::ensure!(
+            agreed,
+            "{at_stake}. Removing it deletes the only copy:\n  \
+             omh {id} log                 read what is there\n  \
+             omh {id} commit --keep       put it on {branch}\n  \
+             omh {id} commit -m \"…\"       or take the files as they stand{reading}\n  \
+             omh {id} rm --force          remove it anyway",
+            id = session.id
+        );
+    }
     Ok(None)
 }
 

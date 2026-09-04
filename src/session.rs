@@ -9,6 +9,35 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Whether a thing this command is named for actually went.
+///
+/// **Not a bool.** `No` carries why, because a removal that did not happen and
+/// a removal nobody could explain are the same news to a caller that only has
+/// a flag — and this is the value `rm` prints to somebody deciding what to
+/// clean up by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Gone {
+    Yes,
+    No(String),
+}
+
+/// What a removal actually did, part by part.
+///
+/// One value rather than a tuple, because the parts are not independent: the
+/// branch news is only as good as the worktree news beside it, and a caller
+/// holding two loose values reads one without the other. Each field is the
+/// answer to "is it gone", never "was it attempted".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removal {
+    /// What became of `omh/<id>`.
+    pub branch: Removed,
+    /// Asked of the disk after the fact, not of git's exit code.
+    pub worktree: Gone,
+    /// The sandbox's own repository — the one holding commits nothing else
+    /// points at, which is why its failure is worth a sentence.
+    pub shadow: Gone,
+}
+
 /// What `remove` did with the branch, so the caller can report it truthfully
 /// rather than always claiming the branch was kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,7 +304,11 @@ impl Session {
         // taking the start point first made a session that was resumable
         // yesterday fail today because the trunk was renamed in between — and
         // fail talking about a base the command that ran never reads.
-        let args: Vec<String> = if self.branch_exists(repo) {
+        // `Ok(true)` and not "not an error": an unanswerable question falls to
+        // the create path exactly as it did before, and git refuses loudly
+        // either way. Only `remove` needs the third answer, because only
+        // `remove` reports on it.
+        let args: Vec<String> = if matches!(self.branch_exists(repo), Ok(true)) {
             ["worktree", "add", &path, &branch]
                 .iter()
                 .map(|s| s.to_string())
@@ -328,11 +361,45 @@ impl Session {
         Ok(())
     }
 
-    fn branch_exists(&self, repo: &Path) -> bool {
+    /// Whether `omh/<id>` is there — with "git could not answer" kept apart
+    /// from "there is no branch".
+    ///
+    /// `.is_ok()` on the whole command could not tell an absent branch from a
+    /// git that would not run or a path that is not a repository. Both read as
+    /// "no branch", and a branch holding unreviewed work then dropped out of
+    /// the report entirely; the caller falls the safe way on `Err` instead.
+    ///
+    /// **The third answer is narrower than it looks, and this is measured.**
+    /// An *unreadable ref directory* is indistinguishable from an absent ref
+    /// at git's own level: `show-ref --verify` says `not a valid ref` for
+    /// both, `rev-parse --verify` says `Needed a single revision` for both,
+    /// and `for-each-ref` returns empty for both. So `Ok(false)` here means
+    /// "git says there is no such ref", which is not quite "there is no such
+    /// ref". What `Err` catches is the layer above: no repository, or a git
+    /// that would not run at all.
+    ///
+    /// Without `--quiet`, because a suppressed diagnostic makes the error arm
+    /// carry no reason to print.
+    fn branch_exists(&self, repo: &Path) -> Result<bool, String> {
         let Some(branch) = &self.branch else {
-            return false;
+            return Ok(false);
         };
-        git(repo, &["rev-parse", "--verify", "--quiet", branch]).is_ok()
+        match git(
+            repo,
+            &["show-ref", "--verify", &format!("refs/heads/{branch}")],
+        ) {
+            Ok(_) => Ok(true),
+            // `show-ref --verify` exits 1 with nothing on stdout for a ref
+            // that is simply not there, which is the ordinary answer.
+            Err(e) => {
+                let why = format!("{e:#}");
+                if why.contains("not a valid ref") || why.trim().ends_with(':') {
+                    Ok(false)
+                } else {
+                    Err(why)
+                }
+            }
+        }
     }
 
     /// How many commits `base` has that this session does not. A session that
@@ -395,7 +462,7 @@ impl Session {
     ///
     /// Taken as an argument rather than reached for, so that removing a session
     /// and forgetting its shadow is not something a caller can express.
-    pub fn remove(&self, repo: &Path, base: &str, shadows: &Path) -> Result<Removed> {
+    pub fn remove(&self, repo: &Path, base: &str, shadows: &Path) -> Result<Removal> {
         // Decided before the worktree goes, because afterwards the branch is
         // the only thing left to ask.
         //
@@ -410,15 +477,26 @@ impl Session {
         // was never there, with a `git log` line that fails the same way.
         let outcome = match &self.branch {
             None => Removed::NoBranch,
-            Some(_) if !self.branch_exists(repo) => Removed::NoBranch,
-            Some(_) => match self.commits(repo, base) {
-                Ok(0) => Removed::BranchDropped,
-                Ok(n) => Removed::BranchKept(Some(n)),
+            // A question git could not answer keeps the branch, for the same
+            // reason a count it could not make does.
+            Some(_) => match self.branch_exists(repo) {
                 Err(_) => Removed::BranchKept(None),
+                Ok(false) => Removed::NoBranch,
+                Ok(true) => match self.commits(repo, base) {
+                    Ok(0) => Removed::BranchDropped,
+                    Ok(n) => Removed::BranchKept(Some(n)),
+                    Err(_) => Removed::BranchKept(None),
+                },
             },
         };
 
-        if git(
+        // **Asked of the disk, not of git's exit code.** The fallback used to
+        // run only when `git worktree remove` reported failure — so a git that
+        // exited 0 while leaving the directory behind (files it could not
+        // delete, an owner it is not) was taken at its word, and `rm` reported
+        // a removed session over a worktree still on disk. Nothing verified
+        // the thing this function is named for actually happened.
+        let _ = git(
             repo,
             &[
                 "worktree",
@@ -426,27 +504,54 @@ impl Session {
                 "--force",
                 &self.worktree.to_string_lossy(),
             ],
-        )
-        .is_err()
-        {
-            // git can lose the registration while the directory survives, and
-            // then refuses with "is not a working tree" — leaving a session
-            // that can never be removed. Clean up whatever is on disk.
-            if self.worktree.exists() {
-                std::fs::remove_dir_all(&self.worktree)
-                    .with_context(|| format!("removing {}", self.worktree.display()))?;
+        );
+        // git can also lose the registration while the directory survives, and
+        // then refuses with "is not a working tree" — leaving a session that
+        // can never be removed. Either way, what matters is whether it is gone.
+        //
+        // Asked with `still_there` and not `Path::exists`, for the same reason
+        // again one layer down: `exists` is `metadata().is_ok()`, so a parent
+        // that cannot be traversed answered "absent" and this reported a
+        // removal it never performed. Every step below re-asks rather than
+        // trusting a return value.
+        let worktree = match still_there(&self.worktree) {
+            Ok(false) => Gone::Yes,
+            Err(why) => Gone::No(format!("omh could not tell whether it is there: {why}")),
+            Ok(true) => {
+                let why = std::fs::remove_dir_all(&self.worktree).err();
+                match still_there(&self.worktree) {
+                    Ok(false) => Gone::Yes,
+                    Err(e) => Gone::No(format!("omh could not tell whether it is there: {e}")),
+                    // `remove_dir_all` reporting success over a directory that
+                    // is still there is the same class of claim as git's exit
+                    // code, so it gets the same treatment.
+                    Ok(true) => Gone::No(match why {
+                        Some(e) => format!("{e}"),
+                        None => "it is still there".to_string(),
+                    }),
+                }
             }
-            let _ = git(repo, &["worktree", "prune"]);
-        }
+        };
+        let _ = git(repo, &["worktree", "prune"]);
 
         // A branch carrying commits outlives its worktree on purpose: removing
         // a session must never destroy work nobody has reviewed. A branch
         // carrying none holds nothing to review — `--force` above has already
         // discarded anything uncommitted — so keeping it only leaves a dead ref
         // behind after every abandoned session.
+        let mut outcome = outcome;
         if outcome == Removed::BranchDropped {
             if let Some(branch) = &self.branch {
                 let _ = git(repo, &["branch", "-D", branch]);
+                // **Asked of git, not assumed** — the same rule the worktree
+                // above follows. `branch -D` refuses over an unwritable ref
+                // store, a stale lock, or a registration that outlived its
+                // directory, and the variant was decided before any of that
+                // could be known. Reporting a dropped branch that is still
+                // there fills `omh/` with refs omh has said are gone.
+                if !matches!(self.branch_exists(repo), Ok(false)) {
+                    outcome = Removed::BranchKept(None);
+                }
             }
         }
 
@@ -465,8 +570,12 @@ impl Session {
         // a rollback is exactly the case it sees — and stops before anything
         // is taken down unless the user said `--force`. The silence here is
         // the silence of a decision already made upstairs.
-        crate::shadow::Shadow::new(shadows, &self.id).reap();
-        Ok(outcome)
+        let shadow = crate::shadow::Shadow::new(shadows, &self.id).reap();
+        Ok(Removal {
+            branch: outcome,
+            worktree,
+            shadow,
+        })
     }
 
     /// What this session changed, against the point it forked from.
@@ -1423,6 +1532,25 @@ fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Whether something is still on disk — with "could not tell" kept apart from
+/// "not there".
+///
+/// Not `Path::exists`, which is `metadata().is_ok()` and so folds every stat
+/// failure into `false`. An unreadable parent, a directory whose search bit is
+/// gone, a mount that went away mid-command: all of them answered "absent",
+/// and a caller checking whether it had finished deleting something read that
+/// as done. Measured on macOS: with the parent at `0o600` the child still
+/// exists and `exists()` returns `false`.
+pub(crate) fn still_there(at: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(at) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        // Not followed, so a dangling symlink is its own presence rather than
+        // the absence of what it points at.
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(cwd)
@@ -1574,6 +1702,276 @@ mod tests {
         );
     }
 
+    /// **Whether it is gone is asked of the disk, not of git's exit code.**
+    ///
+    /// The fallback used to run only when `git worktree remove` reported
+    /// failure. A git that exits 0 while leaving the directory behind — files
+    /// it cannot delete, an owner it is not — was taken at its word, and `rm`
+    /// printed `removed session sNN` over a worktree still on disk, exiting 0.
+    /// Nothing verified the thing this function is named for.
+    ///
+    /// Driven by making the directory undeletable, which is the shape of the
+    /// real cause: something else is holding it.
+    #[test]
+    #[cfg(unix)]
+    fn a_worktree_that_could_not_be_removed_is_reported_as_still_there() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &root.display().to_string()])
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+        }
+
+        let worktrees = d.path().join("worktrees");
+        let s = Session::new(&worktrees, "s01".into());
+        s.ensure(&root, "main").unwrap();
+        assert!(s.worktree.exists(), "the fixture made a worktree");
+
+        // A directory whose parent denies writes cannot have its entries
+        // unlinked, so both git and `remove_dir_all` leave it behind.
+        let parent = s.worktree.parent().unwrap().to_path_buf();
+        let was = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let asked = s.remove(&root, "main", &d.path().join("shadows"));
+        std::fs::set_permissions(&parent, was).unwrap();
+
+        let gone = asked.expect("`remove` itself still answers").worktree;
+        match gone {
+            // The reason is what a caller prints to somebody deciding what to
+            // clean up by hand, so an empty one is a row nobody can act on.
+            Gone::No(why) => assert!(!why.trim().is_empty(), "and it says why: {why}"),
+            Gone::Yes => panic!(
+                "the worktree is still at {} — reporting it gone is the bug",
+                s.worktree.display()
+            ),
+        }
+        assert!(s.worktree.exists(), "the fixture really did block removal");
+    }
+
+    /// The same lie, one syscall earlier: a parent that cannot be looked into.
+    ///
+    /// `Path::exists` is `metadata().is_ok()`, so it answers `false` for every
+    /// stat failure and not only for "it is not there". With the parent's
+    /// search bit gone, the old check skipped the removal entirely and the
+    /// default `Gone::Yes` stood — `rm` reporting a removed session over a
+    /// worktree still on disk, which is the bug this type exists to make
+    /// unsayable.
+    ///
+    /// Measured, and the reason the test above cannot catch this: at `0o500`
+    /// the parent is still traversable, so `exists` answers truthfully and
+    /// `remove_dir_all` is what fails. Only `0o600` reaches the collapse.
+    #[test]
+    #[cfg(unix)]
+    fn a_worktree_that_cannot_be_looked_at_is_not_reported_as_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &root.display().to_string()])
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+        }
+
+        let worktrees = d.path().join("worktrees");
+        let s = Session::new(&worktrees, "s01".into());
+        s.ensure(&root, "main").unwrap();
+        assert!(s.worktree.exists(), "the fixture made a worktree");
+
+        // No search bit: the directory can neither be traversed nor stat'd,
+        // so every question about it fails rather than answering "absent".
+        let parent = s.worktree.parent().unwrap().to_path_buf();
+        let was = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let asked = s.remove(&root, "main", &d.path().join("shadows"));
+        std::fs::set_permissions(&parent, was).unwrap();
+
+        let gone = asked.expect("`remove` itself still answers").worktree;
+        match gone {
+            Gone::No(why) => assert!(!why.trim().is_empty(), "and it says why: {why}"),
+            Gone::Yes => panic!(
+                "the worktree is still at {} — omh could not tell, and \
+                 reporting that as gone is the bug",
+                s.worktree.display()
+            ),
+        }
+        assert!(s.worktree.exists(), "the fixture really did block removal");
+    }
+
+    /// The distinction the row above rests on: absent, present, and unanswerable
+    /// are three answers, and `Path::exists` collapses the third into the first.
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_that_cannot_be_stated_is_neither_there_nor_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let parent = d.path().join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+
+        assert_eq!(still_there(&child), Ok(true), "it is there");
+        assert_eq!(
+            still_there(&parent.join("never")),
+            Ok(false),
+            "and that one is not"
+        );
+
+        let was = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let blind = still_there(&child);
+        std::fs::set_permissions(&parent, was).unwrap();
+
+        assert!(
+            blind.is_err(),
+            "an unreadable parent is not an answer of `false`: {blind:?}"
+        );
+    }
+
+    /// The three answers, and the honest edge of the third.
+    #[test]
+    fn a_branch_question_git_cannot_answer_is_not_answered_as_no() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+            vec!["branch", "omh/s01"],
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &root.display().to_string()])
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+        }
+
+        let there = Session::new(&d.path().join("worktrees"), "s01".into());
+        assert_eq!(there.branch_exists(&root), Ok(true), "it is there");
+        let not = Session::new(&d.path().join("worktrees"), "s09".into());
+        assert_eq!(not.branch_exists(&root), Ok(false), "and that one is not");
+
+        // Not a repository at all: the answer is neither yes nor no, and
+        // answering "no" is what let a branch holding work disappear from the
+        // report. `remove` turns this into `BranchKept`, which is the arm that
+        // loses nothing.
+        let elsewhere = d.path().join("not-a-repo");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let blind = there.branch_exists(&elsewhere);
+        assert!(
+            blind.is_err(),
+            "a question git could not answer is not an answer of `false`: {blind:?}"
+        );
+    }
+
+    /// `BranchDropped` is a claim about a deletion, so the deletion has to be
+    /// the thing that produces it.
+    ///
+    /// It was computed before the worktree went and never revised: `git branch
+    /// -D` ran as `let _`, and the variant decided minutes earlier was
+    /// returned whether or not the ref survived. `rm` then printed "the branch
+    /// omh/s01, which held no commits" over a branch still on disk, and the
+    /// `omh/` namespace filled with refs omh had said were gone.
+    ///
+    /// Driven by an unwritable `refs/heads/omh`, which is what a read-only
+    /// checkout, a stale lock or a concurrent `gc` looks like from here.
+    #[test]
+    #[cfg(unix)]
+    fn a_branch_that_would_not_delete_is_not_reported_as_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &root.display().to_string()])
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+        }
+
+        let worktrees = d.path().join("worktrees");
+        let s = Session::new(&worktrees, "s01".into());
+        s.ensure(&root, "main").unwrap();
+        // Commitless, so the decision is `BranchDropped` and the delete is
+        // actually attempted.
+        let refs = root.join(".git/refs/heads/omh");
+        let was = std::fs::metadata(&refs).unwrap().permissions();
+        std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let done = s.remove(&root, "main", &d.path().join("shadows")).unwrap();
+        std::fs::set_permissions(&refs, was).unwrap();
+
+        let alive = std::process::Command::new("git")
+            .args(["-C", &root.display().to_string()])
+            .args(["rev-parse", "--verify", "--quiet", "omh/s01"])
+            .output()
+            .unwrap();
+        assert!(
+            alive.status.success(),
+            "the fixture has to actually block the delete"
+        );
+        assert_ne!(
+            done.branch,
+            Removed::BranchDropped,
+            "the branch is still there, so nothing may report it dropped"
+        );
+    }
+
     /// `rm` keeps a branch so unreviewed work is unloseable. A branch with no
     /// commits holds no work to lose — `worktree remove --force` has already
     /// discarded anything uncommitted — so keeping it preserves nothing and
@@ -1584,7 +1982,9 @@ mod tests {
         let s = Session::new(&dir.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
 
-        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let (outcome, gone) = (done.branch, done.worktree);
+        assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert_eq!(outcome, Removed::BranchDropped);
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s01"]).is_err(),
@@ -1604,7 +2004,9 @@ mod tests {
         git(&s.worktree, &["add", "."]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
 
-        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let (outcome, gone) = (done.branch, done.worktree);
+        assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert_eq!(outcome, Removed::BranchKept(Some(1)));
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s02"]).is_ok(),
@@ -1644,7 +2046,9 @@ mod tests {
             "the precondition is that git cannot answer; it just did"
         );
 
-        let outcome = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let (outcome, gone) = (done.branch, done.worktree);
+        assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s03"]).is_ok(),
             "a count omh could not take is not a branch it may delete"
@@ -1666,7 +2070,7 @@ mod tests {
         s.branch = None;
         s.ensure(&root, "main").unwrap();
         assert_eq!(
-            s.remove(&root, "main", &d_shadows()).unwrap(),
+            s.remove(&root, "main", &d_shadows()).unwrap().branch,
             Removed::NoBranch
         );
     }
@@ -1704,7 +2108,7 @@ mod tests {
 
         s.remove(&root, "main", &d_shadows()).unwrap();
         assert!(!s.worktree.exists(), "worktree gone");
-        assert!(s.branch_exists(&root), "branch must survive rm");
+        assert_eq!(s.branch_exists(&root), Ok(true), "branch must survive rm");
 
         s.ensure(&root, "main").unwrap();
         assert_eq!(
@@ -3186,7 +3590,11 @@ mod tests {
         s.remove(&root, "main", &d_shadows())
             .expect("must clean up what is actually there");
         assert!(!s.worktree.exists(), "the directory must be gone");
-        assert!(s.branch_exists(&root), "and the branch still kept");
+        assert_eq!(
+            s.branch_exists(&root),
+            Ok(true),
+            "and the branch still kept"
+        );
     }
 
     #[test]
@@ -3246,7 +3654,7 @@ mod tests {
         );
 
         assert_eq!(
-            s.remove(&root, "main", &d_shadows()).unwrap(),
+            s.remove(&root, "main", &d_shadows()).unwrap().branch,
             Removed::NoBranch,
             "a branch that does not exist was neither kept nor dropped"
         );
@@ -3326,6 +3734,6 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
         assert_eq!(s.branch.as_deref(), Some("omh/s01"));
-        assert!(s.branch_exists(&root));
+        assert_eq!(s.branch_exists(&root), Ok(true));
     }
 }

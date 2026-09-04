@@ -298,7 +298,19 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 let id = cli.session.as_deref().context(
                     "which session? name it first:\n  omh s01 rm\n  omh s      lists them",
                 )?;
-                cmd::session::rm(&cwd, id, *force, ctx)
+                cmd::session::rm(
+                    &cwd,
+                    id,
+                    // Wrapped where the two bools are born, so no frame
+                    // carries them side by side. Moving `Consent` to
+                    // `may_remove` only pushed the swap up to `rm`; this is
+                    // the boundary it was pushed to.
+                    cmd::harvest::Consent::read(
+                        cmd::harvest::Forced(*force),
+                        cmd::harvest::Interactive::of_stdin(),
+                    ),
+                    ctx,
+                )
             }
             SessionsCmd::Attach { editor } => {
                 cmd::session::attach(&cwd, cli.session.as_deref(), editor.as_deref(), ctx)
@@ -1581,7 +1593,7 @@ mod tests {
             ("accounts.md", 4),
             ("adapters.md", 1),
             ("code-graph.md", 1),
-            ("commands.md", 131),
+            ("commands.md", 133),
             ("configuration.md", 44),
             ("decisions.md", 1),
             ("editors.md", 4),
@@ -1674,7 +1686,7 @@ mod tests {
                 // The line clap puts in the parent's command list.
                 if let Some(about) = sub.get_about() {
                     let about = about.to_string();
-                    // cmd::init::Measured, not guessed: on the tree where this was
+                    // Measured, not guessed: on the tree where this was
                     // written the longest entry that reads as a line is
                     // `omh sessions rm` at 85 characters, and the two that
                     // read as paragraphs are 155 and 200. 100 sits in the gap
@@ -1882,7 +1894,7 @@ mod tests {
                     // A column laid out inside a literal was going to be the
                     // third rule here, cutting at the last `\n` escape and
                     // asking whether what precedes the command is padding.
-                    // cmd::init::Measured against the tree it admitted **nothing** the two
+                    // Measured against the tree it admitted **nothing** the two
                     // rules below did not already admit — every column entry
                     // omh prints either names a session or follows a gutter.
                     // It is not here because a clause that admits nothing,
@@ -2167,7 +2179,7 @@ mod tests {
             // this scan is for.
             ("src/cmd/inspect.rs", 5),
             ("src/cmd/memory.rs", 1),
-            ("src/cmd/session.rs", 10),
+            ("src/cmd/session.rs", 11),
             ("src/cmd/settings.rs", 10),
             ("src/config.rs", 3),
             ("src/container.rs", 4),
@@ -2679,18 +2691,31 @@ mod tests {
             )
             .unwrap();
 
-        let note =
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::Kept(12), false)
-                .expect("snapshots alone never stop a removal")
-                .expect("but they are said");
+        let note = cmd::harvest::may_remove(
+            &paths,
+            &session,
+            cmd::harvest::Snapshots::Kept(12),
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
+        )
+        .expect("snapshots alone never stop a removal")
+        .expect("but they are said");
         assert!(
             note.contains("12 turn snapshots") && note.contains("log --turns"),
             "named, with the way to read them: {note}"
         );
 
         assert_eq!(
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, false)
-                .unwrap(),
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::CannotAsk,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
+            )
+            .unwrap(),
             None,
             "and a session that has none says nothing about them"
         );
@@ -2699,10 +2724,16 @@ mod tests {
         // the guard this must not have weakened — and the snapshots ride along
         // in the same message rather than displacing it.
         let (paths, unkept, _shadow) = a_session_with_two_checkpoints();
-        let refused =
-            cmd::harvest::may_remove(&paths, &unkept, cmd::harvest::Snapshots::Kept(3), false)
-                .expect_err("unharvested commits still refuse")
-                .to_string();
+        let refused = cmd::harvest::may_remove(
+            &paths,
+            &unkept,
+            cmd::harvest::Snapshots::Kept(3),
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
+        )
+        .expect_err("unharvested commits still refuse")
+        .to_string();
         assert!(
             refused.contains("commit --keep"),
             "the refusal is unchanged: {refused}"
@@ -2886,6 +2917,113 @@ mod tests {
         );
     }
 
+    /// **Three behaviours, one value.** `force` and `terminal` were adjacent
+    /// `bool`s meaning opposite things — *the user said delete it anyway* and
+    /// *there is somebody at a keyboard*. Swapping them compiles, and the two
+    /// mistakes it makes are the worst available: prompting inside a script,
+    /// or refusing a person who is standing right there.
+    #[test]
+    fn consent_is_read_from_the_flag_and_the_terminal_once() {
+        use cmd::harvest::Consent;
+
+        // Forced beats everything, terminal or not — a script must not depend
+        // on there being somebody at a keyboard.
+        use cmd::harvest::{Forced, Interactive};
+        assert_eq!(
+            Consent::read(Forced(true), Interactive(false)),
+            Consent::Given
+        );
+        assert_eq!(
+            Consent::read(Forced(true), Interactive(true)),
+            Consent::Given
+        );
+
+        // Nobody said anything: ask if there is somebody, refuse if not.
+        assert_eq!(
+            Consent::read(Forced(false), Interactive(true)),
+            Consent::MayAsk
+        );
+        assert_eq!(
+            Consent::read(Forced(false), Interactive(false)),
+            Consent::CannotAsk
+        );
+
+        // **And the two arguments cannot be transposed.** `Forced(x),
+        // Interactive(y)` in the other order is a type error. That alone was
+        // not enough — the values reaching them were both `bool`, so the swap
+        // survived one frame up — which is why the dispatch builds the second
+        // with `Interactive::of_stdin()` and has no bool to misplace.
+
+        // **And the three are distinct.** A shape that collapsed any two would
+        // either prompt where it must not or refuse where it need not.
+        let all = [
+            Consent::read(Forced(true), Interactive(false)),
+            Consent::read(Forced(false), Interactive(true)),
+            Consent::read(Forced(false), Interactive(false)),
+        ];
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a, b, "each state is its own answer");
+            }
+        }
+    }
+
+    /// **Silence declines, and `--force` is the only non-interactive way past.**
+    ///
+    /// The refusal's last line told you to retype the command with `--force`,
+    /// so answering a safety question meant typing the dangerous thing from
+    /// memory with the reasons scrolled off. `omh s down` has asked for its
+    /// destructive case all along, and this is the same shape.
+    ///
+    /// Off a terminal — a script, a CI runner, a closed pipe — nothing is
+    /// asked and the refusal stands. That is what keeps the prompt safe: the
+    /// only way past without a person is `--force`, typed deliberately.
+    /// `ask::confirm` treats anything but a yes as no, which the module's own
+    /// table covers. What this pins is the refusal itself and that `--force`
+    /// still works when there is nobody to ask.
+    ///
+    /// It does **not** pin that omh declines to *reach* the prompt: this test
+    /// passed unchanged with that guard deleted, because it could not see
+    /// whether a question was asked. `a_removal_with_nobody_to_ask_asks_nothing`
+    /// is the one that watches for the question.
+    #[test]
+    fn removing_unkept_work_needs_force_when_there_is_nobody_to_ask() {
+        let (paths, session, _shadow) = a_session_with_two_checkpoints();
+
+        // No terminal, no force: refused, with every way out still named.
+        let err = cmd::harvest::may_remove(
+            &paths,
+            &session,
+            cmd::harvest::Snapshots::None,
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
+        )
+        .expect_err("off a terminal there is nobody to ask");
+        let said = format!("{err:#}");
+        for line in ["log", "commit --keep", "rm --force"] {
+            assert!(
+                said.contains(line),
+                "the refusal must still name every way out, including {line}: {said}"
+            );
+        }
+
+        // Force, no terminal: passes. This is what a script uses, and it must
+        // not depend on there being somebody at a keyboard.
+        assert!(
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::Given,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
+            )
+            .is_ok(),
+            "`--force` is the non-interactive way past, and stays one"
+        );
+    }
+
     /// A session holding work no branch has is not removed by accident.
     ///
     /// The last piece of [risks](../docs/design/risks.md) 2c. The branch
@@ -2896,8 +3034,15 @@ mod tests {
     fn a_session_holding_unkept_work_is_not_removed_without_being_asked() {
         let (paths, session, shadow) = a_session_with_two_checkpoints();
 
-        let err = cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, false)
-            .expect_err("two commits are on no branch anywhere");
+        let err = cmd::harvest::may_remove(
+            &paths,
+            &session,
+            cmd::harvest::Snapshots::None,
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
+        )
+        .expect_err("two commits are on no branch anywhere");
         let said = err.to_string();
         assert!(
             said.contains("s01 has 2 commits that no branch has"),
@@ -2926,7 +3071,15 @@ mod tests {
             "and names the branch it would go on: {said}"
         );
         assert!(
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, true).is_ok(),
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::Given,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
+            )
+            .is_ok(),
             "`--force` means it"
         );
 
@@ -2943,9 +3096,88 @@ mod tests {
         )
         .unwrap();
         assert!(
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, false)
-                .is_ok(),
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::CannotAsk,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
+            )
+            .is_ok(),
             "a session whose work is all on the branch removes quietly"
+        );
+    }
+
+    /// The question itself: asked, answered, and honoured in both directions.
+    ///
+    /// None of this was assertable before the terminal was handed in.
+    /// `may_remove` reached for `std::io::stdin()`, and every test drives the
+    /// binary through `Command::output()` — a null stdin — so `MayAsk` was
+    /// unreachable from the whole suite and deleting the guard left it green.
+    /// `ask.rs` says exactly this under "The terminal is handed in"; this was
+    /// a new call site with the old shape.
+    #[test]
+    fn a_person_who_is_asked_can_say_yes_and_can_say_nothing() {
+        let (paths, session, _shadow) = a_session_with_two_checkpoints();
+        let ask = |said: &'static str| {
+            let mut heard = Vec::new();
+            let answered = cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::MayAsk,
+                &mut said.as_bytes(),
+                &mut heard,
+            );
+            (answered, String::from_utf8(heard).unwrap())
+        };
+
+        let (yes, question) = ask("y\n");
+        assert!(
+            yes.is_ok(),
+            "a person who said yes is not refused: {:?}",
+            yes.err().map(|e| format!("{e:#}"))
+        );
+        // The question has to name what is being destroyed. A bare
+        // "remove s01 anyway?" is a yes/no on unrecoverable deletion with the
+        // reasons left out, and nothing else would notice it degraded.
+        assert!(
+            question.contains("2 commits") && question.contains("deletes the only copy"),
+            "and it said what was at stake: {question}"
+        );
+
+        // Silence is not consent. `ask::confirm` is what makes that true, and
+        // this pins that `rm` goes through it rather than around it.
+        let (silent, _) = ask("\n");
+        assert!(silent.is_err(), "silence declines");
+        let (typo, _) = ask("yes please\n");
+        assert!(typo.is_err(), "and anything that is not yes declines");
+    }
+
+    /// Nobody to ask means refuse — without printing a question into a log
+    /// where no one can answer it.
+    #[test]
+    fn a_removal_with_nobody_to_ask_asks_nothing() {
+        let (paths, session, _shadow) = a_session_with_two_checkpoints();
+        let mut heard = Vec::new();
+        let refused = cmd::harvest::may_remove(
+            &paths,
+            &session,
+            cmd::harvest::Snapshots::None,
+            cmd::harvest::Consent::CannotAsk,
+            // An open pipe that never delivers a line: what a CI runner or
+            // `omh … | tee` hands the process. Reaching `confirm` here would
+            // block for good, so this asserts the short-circuit and not only
+            // the refusal.
+            &mut std::io::empty(),
+            &mut heard,
+        );
+        assert!(refused.is_err(), "it refuses");
+        assert!(
+            heard.is_empty(),
+            "and asked nothing: {}",
+            String::from_utf8_lossy(&heard)
         );
     }
 
@@ -2955,7 +3187,7 @@ mod tests {
     /// to give back, and the first version of this guard was blind to it:
     /// `seed..HEAD` counts 0 afterwards, so `rm` removed three commits without
     /// a word — the exact scenario `risks.md` cites as the reason the guard
-    /// exists. cmd::init::Measured: `--all --reflog` still finds them.
+    /// exists. Measured: `--all --reflog` still finds them.
     ///
     /// The same read covers a side branch the agent wandered off, which
     /// `preflight` refuses a *harvest* over while `rm` was dropping it for
@@ -2987,8 +3219,15 @@ mod tests {
                 .is_empty(),
             "the numbered list cannot see them — that is why this guard reads wider"
         );
-        let err = cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, false)
-            .expect_err("two commits are still in there and on no branch");
+        let err = cmd::harvest::may_remove(
+            &paths,
+            &session,
+            cmd::harvest::Snapshots::None,
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
+        )
+        .expect_err("two commits are still in there and on no branch");
         assert!(err.to_string().contains("2 commits"), "{err}");
 
         // …and when the replay point no longer reaches, the count widens back
@@ -2997,8 +3236,15 @@ mod tests {
         // cannot place, which is how work goes missing from a number someone
         // is about to act on.
         std::fs::write(&shadow.landed_record, "0".repeat(40)).unwrap();
-        let err = cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, false)
-            .expect_err("a record naming nothing this repository has is not an answer");
+        let err = cmd::harvest::may_remove(
+            &paths,
+            &session,
+            cmd::harvest::Snapshots::None,
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
+        )
+        .expect_err("a record naming nothing this repository has is not an answer");
         assert!(
             err.to_string().contains("cannot say what that removes"),
             "omh says it cannot tell rather than counting from a point it cannot place: {err}"
@@ -3011,8 +3257,15 @@ mod tests {
         sandbox_git(&["add", "-A", "."]);
         sandbox_git(&["commit", "-q", "--no-verify", "-m", "a spike"]);
         sandbox_git(&["checkout", "-q", "-"]);
-        let err = cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, false)
-            .expect_err("three now");
+        let err = cmd::harvest::may_remove(
+            &paths,
+            &session,
+            cmd::harvest::Snapshots::None,
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
+        )
+        .expect_err("three now");
         assert!(err.to_string().contains("3 commits"), "{err}");
     }
 
@@ -3075,14 +3328,29 @@ mod tests {
         // so the repository demonstrably holds commits.
         let (paths, session, shadow) = a_session_with_two_checkpoints();
         std::fs::write(&shadow.landed_record, "").unwrap();
-        let err = cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, false)
-            .expect_err("omh cannot tell what landed — that is a reason to ask");
+        let err = cmd::harvest::may_remove(
+            &paths,
+            &session,
+            cmd::harvest::Snapshots::None,
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
+        )
+        .expect_err("omh cannot tell what landed — that is a reason to ask");
         assert!(
             err.to_string().contains("cannot say what that removes"),
             "it says it cannot tell, rather than naming a count it does not have: {err}"
         );
         assert!(
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, true).is_ok(),
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::Given,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
+            )
+            .is_ok(),
             "and `--force` is still the way past, so nobody is trapped"
         );
 
@@ -3092,8 +3360,15 @@ mod tests {
         let (paths, session, shadow) = a_session_with_two_checkpoints();
         std::fs::remove_file(&shadow.seed_record).unwrap();
         assert!(
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, false)
-                .is_err(),
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::CannotAsk,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
+            )
+            .is_err(),
             "a repository omh cannot place is not an empty session"
         );
 
@@ -3103,17 +3378,29 @@ mod tests {
         std::fs::remove_dir_all(&shadow.gitdir).unwrap();
         std::fs::remove_file(&shadow.seed_record).unwrap();
         assert!(
-            cmd::harvest::may_remove(&paths, &session, cmd::harvest::Snapshots::None, false)
-                .is_ok(),
+            cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::CannotAsk,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
+            )
+            .is_ok(),
             "nothing there is nothing to lose"
         );
 
         // And a session whose sandbox never ran at all.
         let never_ran = Session::new(&paths.worktrees().join("s02"), "s02".to_string());
-        assert!(
-            cmd::harvest::may_remove(&paths, &never_ran, cmd::harvest::Snapshots::None, false)
-                .is_ok()
-        );
+        assert!(cmd::harvest::may_remove(
+            &paths,
+            &never_ran,
+            cmd::harvest::Snapshots::None,
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
+        )
+        .is_ok());
     }
 
     /// The count says what it counted, and says it in the singular when there
@@ -5175,7 +5462,7 @@ because = "a fixture"
     /// The clause was formatting-dependent — it looked for `", cli,"`, so
     /// rustfmt breaking an argument list across lines silently disarmed it —
     /// and it was removed on the belief that it would otherwise misfire.
-    /// cmd::init::Measured afterwards, it would not have: it had already been disarmed by
+    /// Measured afterwards, it would not have: it had already been disarmed by
     /// exactly that formatting change, so removing it changed nothing and
     /// proved nothing.
     ///
