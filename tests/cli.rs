@@ -6778,6 +6778,105 @@ fn rm_fails_when_the_worktree_is_still_on_disk() {
         said.contains("what went:"),
         "the report lists what it observed: {said}"
     );
+    // `Gone::No` carries a reason instead of being a bool precisely so this
+    // line can exist. Asserting it inside the enum, as the unit test does, is
+    // not the same as asserting it survives into what the user reads.
+    assert!(
+        said.to_lowercase().contains("permission denied"),
+        "the reason reaches the terminal, not just the type: {said}"
+    );
+    assert!(
+        said.contains("omh s01 rm") && said.contains("once the directory is free"),
+        "and the way out is named: {said}"
+    );
+}
+
+/// A branch holding commits is the one thing a failed removal must describe
+/// correctly.
+///
+/// Every test here built a commitless `omh/s01`, so only `BranchDropped` was
+/// ever taken: setting the other two arms to the literal "the branch is
+/// untouched" — the sentence this message was rewritten to stop printing —
+/// left the whole suite green.
+#[test]
+#[cfg(unix)]
+fn a_partly_removed_session_says_the_branch_that_survived_it() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git must be installed to run this test");
+
+    let at = sb.worktrees().join("s01");
+    std::fs::create_dir_all(sb.worktrees()).unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["worktree", "add", "-q", "-b", "omh/s01"])
+        .arg(&at)
+        .output()
+        .expect("git worktree add");
+    // The difference from every other fixture: this branch holds work.
+    std::fs::write(at.join("kept.txt"), "work nobody has read\n").unwrap();
+    // `-am` stages modified *tracked* files only, so an untracked one commits
+    // nothing and the branch stays empty — which is the fixture silently
+    // building the case it meant to avoid.
+    std::process::Command::new("git")
+        .args(["-C", &at.display().to_string()])
+        .args(["add", "kept.txt"])
+        .output()
+        .expect("git add in the worktree");
+    std::process::Command::new("git")
+        .args(["-C", &at.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "-m", "keep me"])
+        .output()
+        .expect("git commit in the worktree");
+    let counted = std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["rev-list", "--count", "main..omh/s01"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&counted.stdout).trim(),
+        "1",
+        "the fixture has to actually put a commit on the branch"
+    );
+
+    let parent = sb.worktrees();
+    let was = std::fs::metadata(&parent).unwrap().permissions();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = sb.omh(&["s01", "rm", "--force"]);
+    std::fs::set_permissions(&parent, was).unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "still a failure: {said}");
+    assert!(
+        said.contains("the branch omh/s01 is still there"),
+        "a branch holding commits has to be named as surviving: {said}"
+    );
+    assert!(
+        !said.contains("untouched") && !said.contains("held no commits"),
+        "and never described as dropped or untouched: {said}"
+    );
+    // It survived in fact, not only in prose.
+    let alive = std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["rev-parse", "--verify", "--quiet", "omh/s01"])
+        .output()
+        .unwrap();
+    assert!(
+        alive.status.success(),
+        "the branch the message says is there must actually be there: {said}"
+    );
 }
 
 /// The partial-removal report says what happened, not what was attempted.
