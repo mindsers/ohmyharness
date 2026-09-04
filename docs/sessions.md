@@ -257,7 +257,7 @@ $ omh s01 rm              # remove the session — branch survives
 anyone parsing the table — see [what every command
 prints](commands.md#what-every-command-prints).
 
-Sessions idle longer than `idle_timeout` are stopped on the next launch.
+Sessions idle longer than `idle_timeout` are stopped on the next launch — but only when their harness has exited. A session whose agent is still running in the container is left alone however old its marker, because stopping it would take the agent's conversation with it, and a container omh cannot probe is left alone too.
 N sessions means N containers, so this is not a nicety — see
 [risks](design/risks.md).
 

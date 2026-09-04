@@ -455,7 +455,21 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
         })
         .collect();
 
-    for id in idle::expired(&running, timeout, std::time::SystemTime::now(), launching) {
+    // The liveness probe: a container `exec` listing the dtach sockets, read
+    // into Working / Idle / CouldNotTell. Run only for sessions the clock has
+    // already flagged, and only Idle is reaped — a live agent or an
+    // unanswerable probe keeps its container.
+    let live = |id: &str| {
+        let probe = backend.exec_args(&paths.container(id), &image::probe_command(), false);
+        idle::live_from(id, &image::container_probe(backend.program(), &probe))
+    };
+    for id in idle::expired(
+        &running,
+        timeout,
+        std::time::SystemTime::now(),
+        launching,
+        &live,
+    ) {
         match image::container_remove(backend.program(), &paths.container(&id)) {
             Ok(()) => ctx.progress(&format!(
                 "stopped {id} — idle over {raw} (worktree and branch survive)"

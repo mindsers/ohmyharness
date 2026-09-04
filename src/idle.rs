@@ -62,6 +62,7 @@ pub fn expired(
     timeout: Duration,
     now: SystemTime,
     keep: &str,
+    live: &dyn Fn(&str) -> Live,
 ) -> Vec<String> {
     running
         .iter()
@@ -78,8 +79,58 @@ pub fn expired(
                 .map(|age| age > timeout)
                 .unwrap_or(false),
         })
+        // The probe runs only here, for sessions already past the timeout —
+        // a container `exec` per launch, over every running session, would be
+        // its own cost. Past the timeout, the container is reaped only when
+        // its harness is gone; a live one, or one omh could not ask about,
+        // stays up.
+        .filter(|(id, _)| matches!(live(id), Live::Idle))
         .map(|(id, _)| id.clone())
         .collect()
+}
+
+/// Whether a session's harness is still there, for the reaper to spare it.
+///
+/// The idle timeout measures *engagement* — the last launch or attach — and
+/// an old marker used to be enough to stop the container. It is not: an agent
+/// working unattended has an old marker and a live harness, and stopping it
+/// takes its conversation with it. So a session past the timeout is reaped
+/// only when its harness is gone, and never when omh could not find out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Live {
+    /// A dtach master is running: the harness is in the container, attached
+    /// or not. Never reaped.
+    Working,
+    /// The socket directory is there and empty, or the container is broken
+    /// past entering: nothing is running, so the container is pure waste.
+    Idle,
+    /// omh could not ask. Not *idle* — reaping on a failed probe is exactly
+    /// how a working agent gets stopped.
+    CouldNotTell,
+}
+
+/// Read a liveness probe into a reaping decision.
+///
+/// `Listed` carries what `ls /omh/sock` printed; `persist::live` turns the
+/// socket names into the harnesses actually running, so a non-empty answer is
+/// `Working`. An empty listing is `Idle`. `NotEnterable` is a container whose
+/// worktree was replaced under it — no exec will ever work, so it is waste to
+/// reap rather than a live agent. `Gone` is a container the runtime no longer
+/// lists, which the running-set filter should already have removed; treated
+/// as `Idle` for the same reason. `Unknown` is the one that refuses.
+pub fn live_from(session: &str, probe: &crate::image::Probe) -> Live {
+    use crate::image::Probe;
+    match probe {
+        Probe::Listed(listing) => {
+            if crate::persist::live(session, listing).is_empty() {
+                Live::Idle
+            } else {
+                Live::Working
+            }
+        }
+        Probe::NotEnterable | Probe::Gone => Live::Idle,
+        Probe::Unknown(_) => Live::CouldNotTell,
+    }
 }
 
 /// When a session was last used, if it has ever been recorded.
@@ -128,7 +179,9 @@ mod tests {
             ("s02".into(), ago(7200)), // two hours idle
             ("s03".into(), ago(3540)), // just under the hour
         ];
-        let out = expired(&running, Duration::from_secs(3600), now, "");
+        let out = expired(&running, Duration::from_secs(3600), now, "", &|_| {
+            Live::Idle
+        });
         assert_eq!(out, vec!["s02"]);
     }
 
@@ -139,7 +192,12 @@ mod tests {
     fn the_session_being_launched_is_never_reaped() {
         let now = SystemTime::now();
         let running = vec![("s01".into(), ago(99_999))];
-        assert!(expired(&running, Duration::from_secs(60), now, "s01").is_empty());
+        assert!(
+            expired(&running, Duration::from_secs(60), now, "s01", &|_| {
+                Live::Idle
+            })
+            .is_empty()
+        );
     }
 
     /// A session with no marker predates this feature or had its run directory
@@ -149,7 +207,7 @@ mod tests {
     fn a_session_with_no_recorded_use_is_left_alone() {
         let now = SystemTime::now();
         let running = vec![("s01".into(), None)];
-        assert!(expired(&running, Duration::from_secs(1), now, "").is_empty());
+        assert!(expired(&running, Duration::from_secs(1), now, "", &|_| Live::Idle).is_empty());
     }
 
     #[test]
@@ -159,5 +217,76 @@ mod tests {
         touch(d.path(), "s01").unwrap();
         let t = last_used(d.path(), "s01").expect("recorded");
         assert!(SystemTime::now().duration_since(t).unwrap() < Duration::from_secs(5));
+    }
+    /// A session past the timeout but with a live harness is not reaped —
+    /// stopping it takes the agent's conversation with it.
+    #[test]
+    fn a_session_whose_harness_is_still_live_is_not_reaped() {
+        let now = SystemTime::now();
+        let running = vec![("s01".into(), ago(7200))];
+        let out = expired(&running, Duration::from_secs(3600), now, "", &|_| {
+            Live::Working
+        });
+        assert!(
+            out.is_empty(),
+            "a working agent is never stopped by the clock"
+        );
+    }
+
+    /// A probe omh could not answer is not a reason to reap. `CouldNotTell` is
+    /// not `Idle`, and treating it as one is exactly how a working agent gets
+    /// stopped.
+    #[test]
+    fn a_session_omh_could_not_probe_is_not_reaped() {
+        let now = SystemTime::now();
+        let running = vec![("s01".into(), ago(7200))];
+        let out = expired(&running, Duration::from_secs(3600), now, "", &|_| {
+            Live::CouldNotTell
+        });
+        assert!(out.is_empty(), "an unanswerable probe spares the session");
+    }
+
+    /// The probe is a container `exec`; it must not run for a session that is
+    /// not even past the timeout.
+    #[test]
+    fn the_probe_is_not_run_for_a_session_inside_the_timeout() {
+        use std::cell::Cell;
+        let now = SystemTime::now();
+        let running = vec![("s01".into(), ago(120))]; // fresh
+        let probes = Cell::new(0);
+        let out = expired(&running, Duration::from_secs(3600), now, "", &|_| {
+            probes.set(probes.get() + 1);
+            Live::Idle
+        });
+        assert!(out.is_empty());
+        assert_eq!(probes.get(), 0, "a fresh session is never probed");
+    }
+
+    /// Each probe answer maps to the reaping decision it should.
+    #[test]
+    fn a_probe_answer_becomes_a_reaping_decision() {
+        use crate::image::Probe;
+        assert_eq!(
+            live_from("s01", &Probe::Listed("s01-claude\n".into())),
+            Live::Working,
+            "a socket for this session's harness is a live agent"
+        );
+        assert_eq!(
+            live_from("s01", &Probe::Listed(String::new())),
+            Live::Idle,
+            "an empty socket directory is a container with nothing running"
+        );
+        assert_eq!(
+            live_from("s01", &Probe::Listed("s02-claude\n".into())),
+            Live::Idle,
+            "another session's socket is not this session's agent"
+        );
+        assert_eq!(live_from("s01", &Probe::NotEnterable), Live::Idle);
+        assert_eq!(live_from("s01", &Probe::Gone), Live::Idle);
+        assert_eq!(
+            live_from("s01", &Probe::Unknown("daemon refused".into())),
+            Live::CouldNotTell,
+            "a probe that failed is never read as idle"
+        );
     }
 }

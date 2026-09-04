@@ -190,6 +190,9 @@ impl Sandbox {
                  [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
                  if [ \"$1\" = exec ] && [ -f {exec_refuses} ]; then \
                  cat {exec_refuses} >&2; exit 1; fi\n\
+                 if [ \"$1\" = exec ]; then for a in \"$@\"; do case \"$a\" in \
+                 omh-*) [ -f {bin}/live-\"$a\" ] && cat {bin}/live-\"$a\" ;; esac; \
+                 done; exit 0; fi\n\
                  case \"$*\" in *--pull=never*) [ -f {probe_refuses} ] && {{ \
                  echo 'no such image' >&2; exit 125; }} ;; esac\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\n\
@@ -200,7 +203,8 @@ impl Sandbox {
                 exec_refuses = self.bin.join("docker-exec-refuses").display(),
                 probe_refuses = self.bin.join("docker-probe-refuses").display(),
                 containers = self.bin.join("containers").display(),
-                volumes = self.bin.join("volumes").display()
+                volumes = self.bin.join("volumes").display(),
+                bin = self.bin.display()
             ),
         )
         .unwrap();
@@ -1976,6 +1980,66 @@ fn a_bare_word_is_a_mistake_rather_than_a_launch() {
         out.status.success(),
         "`omh new claude` still launches: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// An idle timeout does not stop a session whose agent is still working.
+///
+/// Reaping used to read the `last-used` marker alone: a session older than the
+/// timeout was stopped, whether or not its harness was still running. An agent
+/// working unattended has an old marker and a live container, and stopping it
+/// takes its conversation with it. So the reaper probes liveness now, and only
+/// a session whose harness is gone is stopped.
+#[test]
+fn an_idle_timeout_does_not_stop_a_session_whose_agent_is_still_working() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    // Two sessions past the timeout: s01 has a live dtach socket, s02 does not.
+    sb.session("s01");
+    sb.session("s02");
+    // Both are in the running set the reaper reads.
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n{}\n", sb.container("s01"), sb.container("s02")),
+    )
+    .unwrap();
+    // The liveness probe: s01's socket directory lists a harness, s02's is
+    // empty.
+    std::fs::write(
+        sb.bin.join(format!("live-{}", sb.container("s01"))),
+        "s01-claude\n",
+    )
+    .unwrap();
+    // Backdate both markers well past the timeout.
+    for id in ["s01", "s02"] {
+        let marker = sb.keyed("run").join(id).join("last-used");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"").unwrap();
+        let ok = Command::new("touch")
+            .args(["-t", "202001010000"])
+            .arg(&marker)
+            .status()
+            .expect("touch must be available");
+        assert!(ok.success(), "backdating the marker");
+    }
+    assert!(sb.omh(&["set", "idle_timeout", "1s"]).status.success());
+
+    // A fresh launch runs the reaper over the others first.
+    let _ = sb.omh(&["new", "claude"]);
+
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    let stopped = |id: &str| {
+        ran.lines()
+            .any(|l| l.starts_with("rm -f ") && l.contains(&sb.container(id)))
+    };
+    assert!(
+        !stopped("s01"),
+        "the session with a live harness was stopped by the clock:\n{ran}"
+    );
+    assert!(
+        stopped("s02"),
+        "the session whose harness had exited was reaped:\n{ran}"
     );
 }
 
