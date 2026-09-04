@@ -859,24 +859,19 @@ mod workdir_tests {
     /// plan's workdir equals `container_workdir()` passes just as well when the
     /// plan holds the literal — both sides are the same string, so it pins
     /// nothing. Only counting the spellings can tell them apart.
+    ///
+    /// It counted three too few for a year. The cut it made at the first
+    /// `#[cfg(test)]` stopped at `base.rs`'s test-only constant on line 118,
+    /// and the graph indexer's two spellings, nine hundred lines further
+    /// down, were never read. `testsrc` makes the cut now, and found them.
     #[test]
     fn only_one_place_spells_the_container_workdir() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut offenders = Vec::new();
-        let mut stack = vec![root];
-        while let Some(dir) = stack.pop() {
-            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|e| e != "rs") {
-                    continue;
-                }
-                let body = std::fs::read_to_string(&path).unwrap();
-                // Fixtures may say it; the shipped path may not.
-                let production = body.split("#[cfg(test)]").next().unwrap_or("");
+        // Fixtures may say it; the shipped path may not. `testsrc` draws
+        // that line — the split on `#[cfg(test)]` this used to make stopped
+        // at the first test-only helper and read nothing after it.
+        {
+            for (path, production) in crate::testsrc::production() {
                 for (i, line) in production.lines().enumerate() {
                     if line.contains("\"/work\"") {
                         let name = path.file_name().unwrap().to_string_lossy().to_string();

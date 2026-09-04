@@ -2879,24 +2879,13 @@ mod tests {
     /// the exemption is gone with it and the scan can see the whole tree.
     #[test]
     fn no_command_resolves_the_certificate_twice() {
-        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
         let mut resolvers: Vec<String> = Vec::new();
         let mut twice: Vec<String> = Vec::new();
         let mut sandbox_resolves = false;
         let mut saw_sandbox_fn = false;
-        while let Some(at) = stack.pop() {
-            for entry in std::fs::read_dir(&at).unwrap().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|e| e != "rs") {
-                    continue;
-                }
-                let whole = std::fs::read_to_string(&path).unwrap();
-                // Production code only. A test may resolve as often as it likes.
-                let body = whole.split("#[cfg(test)]").next().unwrap_or("");
+        // Production code only. A test may resolve as often as it likes.
+        {
+            for (path, body) in crate::testsrc::production() {
                 let name = path
                     .strip_prefix(env!("CARGO_MANIFEST_DIR"))
                     .unwrap_or(&path)
@@ -2974,7 +2963,7 @@ mod tests {
     #[test]
     fn nothing_builds_a_root_except_its_one_constructor() {
         let src = std::fs::read_to_string(file!()).unwrap();
-        let body = src.split("#[cfg(test)]").next().unwrap_or("");
+        let body = crate::testsrc::production_of(&src);
         // `Root {` also opens the `struct` and its `impl`; neither builds one.
         let literals = body.matches("Root {").count()
             - body.matches("struct Root {").count()

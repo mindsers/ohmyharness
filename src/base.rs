@@ -1025,20 +1025,25 @@ pub fn index_args(
         "-v".into(),
         // Read-only: indexing reads code, and an indexer that can write into
         // the checkout is a sandbox hole for no benefit.
-        format!("{}:/work:ro", repo.display()),
+        format!("{}:{}:ro", repo.display(), crate::container_workdir()),
         "-v".into(),
         format!("{cache_volume}:{GRAPH_CACHE}"),
         // The server derives its project name from the working directory, not
         // from --repo-path: run elsewhere and `--name r` becomes
         // `some-other-path-r`. Verified against the real binary.
+        //
+        // The session's own workdir, by name: the graph a session reads is
+        // keyed on this path, so the indexer has to see the checkout where
+        // the agent does. Spelled as a literal until 2026.09, when the source
+        // scans first read this far into the file — see `testsrc`.
         "-w".into(),
-        "/work".into(),
+        crate::container_workdir().into(),
         image.into(),
         GRAPH_BIN.into(),
         "cli".into(),
         "index_repository".into(),
         "--repo-path".into(),
-        "/work".into(),
+        crate::container_workdir().into(),
         // Sessions live at different paths and the server derives a project
         // name from the path; without this every session builds its own graph.
         "--name".into(),

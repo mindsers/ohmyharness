@@ -41,6 +41,8 @@ mod settings;
 mod shadow;
 mod ssh;
 mod stack;
+#[cfg(test)]
+mod testsrc;
 mod why;
 
 use adapter::Adapter;
@@ -1786,9 +1788,14 @@ mod tests {
     /// that, and so does the rule that an admission is only ever added.
     #[test]
     fn the_lines_omh_prints_are_lines_omh_accepts() {
-        let mut files = rust_sources(&["src"]);
-        the_whole_tree(&files);
-        files.extend(manifests());
+        // Production text, by `testsrc`'s rule; the manifests whole.
+        let mut sources = crate::testsrc::production();
+        the_whole_tree(&sources.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+        sources.extend(
+            manifests()
+                .into_iter()
+                .map(|p| (p.clone(), std::fs::read_to_string(&p).unwrap())),
+        );
         // Counted apart from the file floor above: this asks whether the scan
         // still recognises the *lines* it was written to read, which is the
         // half that goes quiet when a verb is renamed.
@@ -1814,13 +1821,12 @@ mod tests {
         let mut qualifying = 0;
         let mut checked: std::collections::BTreeMap<String, usize> = Default::default();
         let mut refused: Vec<String> = Vec::new();
-        for file in &files {
+        for (file, body) in &sources {
             // A message wide enough to wrap is written with Rust's string
             // continuation, which eats the newline and the indent that follows
             // it. Read one line at a time, `omh s commit --keep` looks like
             // ``omh s commit \``, so the scan has to join what the compiler
             // joins before it reads anything.
-            let body = std::fs::read_to_string(file).unwrap();
             let mut joined = String::new();
             let mut continued = false;
             for line in body.lines() {
@@ -1842,17 +1848,14 @@ mod tests {
                     }
                 }
             }
-            // Stop at the test module. Everything below it is assertion text
-            // and fixtures, not anything omh prints — and counting it is not
-            // harmless: 24 of the lines this scan called "printed" were test
-            // strings, two of them *this test's own failure messages*, and
-            // three of the per-file floors below sat above the number of real
-            // printed lines in their file. A floor reached by counting the
-            // guard's own prose measures nothing about omh.
-            let body = match joined.find("\nmod tests {") {
-                Some(at) => joined[..at].to_string(),
-                None => joined,
-            };
+            // No test text. Assertion strings and fixtures are not anything
+            // omh prints, and counting them is not harmless: 24 of the lines
+            // this scan once called "printed" were test strings, two of them
+            // *this test's own failure messages*, and three per-file floors
+            // sat above the number of real printed lines in their file. The
+            // cut is `testsrc`'s now; it used to stop at `mod tests {` and so
+            // read every test-only helper above the module as shipped.
+            let body = joined;
             // The manifest is read for one field. `omh why` prints `remove`
             // verbatim as the way out of a feature, and nothing else in that
             // file is a line anyone is being told to type — `because` and
@@ -5490,10 +5493,7 @@ because = "a fixture"
         // The production half only. Below the test module the same spelling
         // appears inside this very scan, and a guard that counts itself is a
         // guard that can never reach one.
-        let body = whole
-            .split_once("#[cfg(test)]")
-            .expect("the test module is still spelled this way")
-            .0;
+        let body = crate::testsrc::production_of(&whole);
         let holders: Vec<&str> = body
             .match_indices("cli: &Cli")
             .map(|(at, _)| {
@@ -6124,30 +6124,24 @@ because = "a fixture"
         // log as the first thing a new user sees after `init` tells them to run
         // `omh new`. A guard that reads one file makes a claim about one file
         // and was cited as a claim about the program.
-        let files = rust_sources(&["src"]);
-        the_whole_tree(&files);
+        let sources = crate::testsrc::production();
+        the_whole_tree(&sources.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
 
         let mut offenders: Vec<String> = Vec::new();
-        for file in &files {
+        for (file, source) in &sources {
             // `out.rs` **is** the output layer. Every macro in it is the
             // implementation of the methods this rule is about, so exempting
             // the file is exempting the thing rather than making a hole in it.
             if file.file_name().is_some_and(|n| n == "out.rs") {
                 continue;
             }
-            let source = std::fs::read_to_string(file).expect("a source this crate compiles");
             let name = file
                 .strip_prefix(env!("CARGO_MANIFEST_DIR"))
                 .unwrap_or(file)
                 .display()
                 .to_string();
-            // Below the test module is fixture and assertion text, not
-            // anything omh prints — the same cut the printed-line scan makes,
-            // and for the same reason.
-            let source = match source.find("\nmod tests {") {
-                Some(at) => source[..at].to_string(),
-                None => source,
-            };
+            // Fixture and assertion text is not anything omh prints; the cut
+            // is `testsrc`'s, the same one every scan in this crate makes.
             for (i, line) in source.lines().enumerate() {
                 let line = line.trim();
                 // Only calls, never the word in a doc comment or a string that
@@ -6364,10 +6358,10 @@ because = "a fixture"
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
         )
         .unwrap();
-        let prod = body
+        let prod = crate::testsrc::production_of(&body)
+            .trim_end()
             .lines()
-            .position(|l| l.starts_with("#[cfg(test)]"))
-            .unwrap_or(body.lines().count());
+            .count();
         assert!(
             prod <= BUDGET,
             "src/main.rs holds {prod} lines of production code, over a budget of \
