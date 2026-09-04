@@ -23,5 +23,6 @@ pub mod init;
 pub mod inspect;
 pub mod mcp;
 pub mod memory;
+pub mod prune;
 pub mod session;
 pub mod settings;

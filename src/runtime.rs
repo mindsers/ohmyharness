@@ -54,6 +54,38 @@ pub trait Runtime: std::fmt::Debug {
         None
     }
 
+    /// List every container, running or not.
+    ///
+    /// Separate from `running_args`, which answers "is this one up". A stopped
+    /// container is exactly the leftover this exists to find, so a listing that
+    /// only shows running ones would report a machine as clean while six sit
+    /// there. Same contract: **one name per line, or a non-zero exit because
+    /// the question could not be answered.**
+    fn running_all_args(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    /// List the names of every network.
+    ///
+    /// `None` for anything omh has not measured, as above — a runtime whose
+    /// networks omh has never looked at must report *did not look*, never an
+    /// empty listing.
+    fn network_args(&self) -> Option<Vec<String>> {
+        None
+    }
+
+    /// List the ids of omh images that record which checkout they were built
+    /// for.
+    ///
+    /// Only stack images carry `omh.repo` — a base or harness image is shared
+    /// across checkouts and belongs to no one of them, so attributing it to a
+    /// checkout would be an invention. Two calls rather than one because
+    /// docker's `--format` cannot read a label on an image: `{{.Label "x"}}`
+    /// fails with *can't evaluate field Label in type imageContext*. Measured.
+    fn image_args(&self) -> Option<Vec<String>> {
+        None
+    }
+
     /// List the names of every container that is running.
     ///
     /// On the trait because how a runtime spells this is its business, and the
@@ -119,6 +151,36 @@ impl Runtime for Docker {
             "ls".into(),
             "--format".into(),
             "{{.Name}}".into(),
+        ])
+    }
+
+    /// `-a`, which is the whole point: a stopped container is the leftover.
+    fn running_all_args(&self) -> Option<Vec<String>> {
+        Some(vec![
+            "ps".into(),
+            "-a".into(),
+            "--format".into(),
+            "{{.Names}}".into(),
+        ])
+    }
+
+    /// `{{.Name}}`, one per line, as for volumes.
+    fn network_args(&self) -> Option<Vec<String>> {
+        Some(vec![
+            "network".into(),
+            "ls".into(),
+            "--format".into(),
+            "{{.Name}}".into(),
+        ])
+    }
+
+    fn image_args(&self) -> Option<Vec<String>> {
+        Some(vec![
+            "images".into(),
+            "--filter".into(),
+            "label=omh.repo".into(),
+            "--format".into(),
+            "{{.ID}}".into(),
         ])
     }
 

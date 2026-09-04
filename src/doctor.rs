@@ -145,13 +145,51 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
     ))
 }
 
+/// Artifacts split by whose checkout they belong to.
+///
+/// Three buckets because there are three answers, and the row prints all of
+/// them: a bucket omitted when empty reads as a fact, and "nothing omh could
+/// not attribute" is a different claim from silence.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Attributed {
+    /// Recorded, and the checkout is provably gone. The only bucket anything
+    /// may act on.
+    pub gone: Vec<(String, std::path::PathBuf)>,
+    /// Belong to checkouts still on this machine. Counted, not named — they
+    /// are somebody's working state and the list would be noise.
+    pub live: usize,
+    /// omh could not attribute, each with why.
+    pub unknown: Vec<(String, String)>,
+}
+
+/// Split artifacts by attribution, over an attributor someone else supplies.
+///
+/// Pure, and generic over the class: volumes today, containers, networks and
+/// state directories on the same call. The prober is the closure.
+pub fn attributed(
+    names: &[String],
+    attribute: &dyn Fn(&str) -> crate::profile::Attribution,
+) -> Attributed {
+    let mut out = Attributed::default();
+    for name in names {
+        match attribute(name) {
+            crate::profile::Attribution::Gone(path) => out.gone.push((name.clone(), path)),
+            crate::profile::Attribution::Live(_) => out.live += 1,
+            crate::profile::Attribution::Unknown(why) => out.unknown.push((name.clone(), why)),
+        }
+    }
+    out
+}
+
 /// What omh has left behind that nothing points at any more.
 ///
-/// `risks.md` records this one as *"recorded rather than fixed"*: omh issues no
-/// `volume ls` anywhere, so after a migration `omh-cache-<basename>` and any
-/// stopped `omh-<basename>-sNN` are orphaned and unmentioned. They cost disk
-/// and a name, not correctness — which is exactly the shape of thing this
-/// command exists to surface rather than fail over.
+/// `risks.md` recorded this as *"recorded rather than fixed"*: after a
+/// migration `omh-cache-<basename>` and any stopped `omh-<basename>-sNN` were
+/// orphaned and unmentioned. They cost disk and a name, not correctness —
+/// exactly the shape of thing this command exists to surface rather than fail
+/// over. omh does issue a `volume ls` now, which this row reads; the sentence
+/// that said otherwise was true when it was written and travelled here by
+/// being glued to the wrong item.
 ///
 /// **Never red.** A leftover breaks nothing; it is disk you can reclaim and a
 /// name that may confuse you later. A doctor that fails over it is one people
@@ -159,6 +197,7 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
 pub fn leftovers_from(
     sessions: Result<Vec<String>, String>,
     volumes: Result<Vec<String>, String>,
+    split: Attributed,
 ) -> Outcome {
     let mut said = Vec::new();
     // **Both halves can say "could not look".** Only volumes could, and the
@@ -185,27 +224,63 @@ pub fn leftovers_from(
         // half goes through swallowed its failure, so a dead daemon reported
         // *fewer* leftovers instead of saying it had not looked.
         Err(why) => said.push(format!("omh could not list volumes: {why}")),
-        // **Named, never recommended for removal.** This said "volumes no
-        // checkout claims" with `docker volume rm` attached — and omh cannot
-        // establish that. A cache volume is keyed by a digest of a checkout's
-        // absolute path, so from inside one repo the others are indistinguishable
-        // from orphans: `omh doctor` in `api` was calling `web`'s live graph
-        // cache garbage and handing over the command to destroy it. omh can see
-        // that these exist; it cannot see whose they are.
-        // **Counted, not enumerated.** Driving the real binary printed 330
-        // names in a single unwrapped line — `out::Table` pads columns and
-        // never wraps, so the row was a wall nobody could read, and it pushed
-        // every other row off the screen. The count is the fact worth having;
-        // the names are recoverable with `docker volume ls`, which the row
-        // names instead of reproducing.
-        Ok(v) if !v.is_empty() => said.push(format!(
-            "{} omh volume{} on this machine — `docker volume ls | grep omh-` \
-             lists them. omh cannot tell which belong to other checkouts, \
-             because a cache is keyed by a digest of the path it was made for, \
-             so this is disk to be aware of rather than disk to reclaim",
-            v.len(),
-            if v.len() == 1 { "" } else { "s" }
-        )),
+        // **Attributed, not just counted.** This used to say "omh cannot tell
+        // which belong to other checkouts, because a cache is keyed by a digest
+        // of the path it was made for" — true, and the limitation the checkout
+        // registry removes. What has not changed is the older lesson under it:
+        // an earlier version said "volumes no checkout claims" with
+        // `docker volume rm` attached, which was `omh doctor` in `api` calling
+        // `web`'s live graph cache garbage and handing over the command to
+        // destroy it. So the gone ones are named — that is what makes them
+        // actionable — and nothing else is.
+        //
+        // **Counted where naming would be a wall.** Driving the real binary
+        // printed 330 names in one unwrapped line: `out::Table` pads and never
+        // wraps, so the row pushed every other row off the screen. The live and
+        // unattributable ones are counted; only the actionable ones are listed.
+        Ok(v) if !v.is_empty() => {
+            let mut parts = vec![format!(
+                "{} omh volume{} on this machine",
+                v.len(),
+                if v.len() == 1 { "" } else { "s" }
+            )];
+            if !split.gone.is_empty() {
+                let mut whose: Vec<String> = split
+                    .gone
+                    .iter()
+                    .map(|(_, p)| p.display().to_string())
+                    .collect();
+                whose.sort();
+                whose.dedup();
+                parts.push(format!(
+                    "{} belong{} to checkouts that are gone: {}",
+                    split.gone.len(),
+                    if split.gone.len() == 1 { "s" } else { "" },
+                    whose.join(", ")
+                ));
+            }
+            if split.live > 0 {
+                parts.push(format!(
+                    "{} belong to checkouts still on this machine, and are theirs to keep",
+                    split.live
+                ));
+            }
+            // **Said even though there is nothing to do about it.** A bucket
+            // omitted when non-empty would read as "everything is accounted
+            // for", which is the one thing this row must never imply.
+            if !split.unknown.is_empty() {
+                let mut why: Vec<String> = split.unknown.iter().map(|(_, w)| w.clone()).collect();
+                why.sort();
+                why.dedup();
+                parts.push(format!(
+                    "{} omh could not attribute ({})",
+                    split.unknown.len(),
+                    why.join("; ")
+                ));
+            }
+            parts.push("`docker volume ls | grep omh-` lists them all".to_string());
+            said.push(parts.join(" — "));
+        }
         Ok(_) => {}
     }
     Outcome {
@@ -2626,6 +2701,47 @@ mod tests {
         );
     }
 
+    /// The row tells the three apart, and says all three.
+    ///
+    /// Before the registry it could only count: a cache is keyed by a digest
+    /// of the path it was made for, so from inside one checkout the others
+    /// were indistinguishable from orphans. The row said so honestly and
+    /// stopped there. It can do better now, and the thing it must not do is
+    /// let "omh could not tell" quietly join either of the other two.
+    #[test]
+    fn the_row_separates_gone_from_live_from_could_not_tell() {
+        use crate::profile::Attribution;
+        let names: Vec<String> = ["omh-cache-a", "omh-cache-b", "omh-cache-c", "omh-cache-d"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let split = attributed(&names, &|n| match n {
+            "omh-cache-a" => Attribution::Gone("/gone/api".into()),
+            "omh-cache-b" => Attribution::Live("/here/web".into()),
+            "omh-cache-c" => Attribution::Unknown("no record".into()),
+            _ => Attribution::Gone("/gone/wire".into()),
+        });
+        assert_eq!(split.gone.len(), 2, "two checkouts are gone");
+        assert_eq!(split.live, 1);
+        assert_eq!(split.unknown.len(), 1);
+
+        let row = leftovers_from(Ok(Vec::new()), Ok(names.clone()), split);
+        let said = row.detail.clone();
+        assert!(
+            said.contains("/gone/api") && said.contains("/gone/wire"),
+            "the gone ones are named, because that is what makes them actionable: {said}"
+        );
+        assert!(
+            said.contains("still on this machine"),
+            "the live ones are accounted for rather than omitted: {said}"
+        );
+        assert!(
+            said.contains("could not attribute") && said.contains("no record"),
+            "and what omh could not tell, with its reason: {said}"
+        );
+        assert!(row.ok, "still never a failure");
+    }
+
     /// **What omh left behind, which nothing has ever listed.**
     ///
     /// `risks.md` records it as "recorded rather than fixed": omh issues no
@@ -2637,7 +2753,7 @@ mod tests {
     #[test]
     fn leftovers_are_reported_and_never_a_failure() {
         // Nothing left behind: a row saying so, not silence — the reader asked.
-        let clean = leftovers_from(Ok(Vec::new()), Ok(Vec::new()));
+        let clean = leftovers_from(Ok(Vec::new()), Ok(Vec::new()), Attributed::default());
         assert!(clean.ok);
         assert!(
             clean.detail.contains("none"),
@@ -2649,6 +2765,7 @@ mod tests {
         let some = leftovers_from(
             Ok(vec!["s01".to_string(), "s04".to_string()]),
             Ok(vec!["omh-cache-repo-1234abcd".to_string()]),
+            Attributed::default(),
         );
         assert!(
             some.ok,
@@ -2699,7 +2816,11 @@ mod tests {
         // **A listing omh could not take is not an empty listing.** The `ps`
         // read inside `leftovers` swallowed its failure, so a dead daemon
         // reported *fewer* leftovers rather than saying it could not look.
-        let blind = leftovers_from(Ok(Vec::new()), Err("Cannot connect to the daemon".into()));
+        let blind = leftovers_from(
+            Ok(Vec::new()),
+            Err("Cannot connect to the daemon".into()),
+            Attributed::default(),
+        );
         assert!(blind.ok, "not being able to look is not a failure either");
         assert!(
             blind.detail.contains("Cannot connect"),
@@ -2717,7 +2838,11 @@ mod tests {
         // row printed "none — nothing orphaned" and `--json` carried no trace
         // of the warning at all. The comment above this function described
         // that exact failure while only the volume half could report it.
-        let deaf = leftovers_from(Err("Cannot connect to the daemon".into()), Ok(Vec::new()));
+        let deaf = leftovers_from(
+            Err("Cannot connect to the daemon".into()),
+            Ok(Vec::new()),
+            Attributed::default(),
+        );
         assert!(deaf.ok, "not being able to look is not a failure");
         assert!(
             deaf.detail.contains("could not list containers"),
