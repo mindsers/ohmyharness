@@ -44,10 +44,6 @@ use std::path::{Path, PathBuf};
 /// `Unknown`, never `Gone`.** Every checkout on a machine upgrading to this
 /// version has no record yet, so reading "no record" as "deleted" would make
 /// the first prune delete everything on it.
-// Read by tests and by `remember_checkout`'s caller only until the backfill
-// lands in the next commit, which is what gives these a production caller.
-// The `allow` goes with it — if it is still here, the backfill is not.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attribution {
     /// Recorded, and the checkout is still on disk.
@@ -64,7 +60,6 @@ pub enum Attribution {
 /// `Ok(None)` is "there is no record", and is a different fact from `Err`,
 /// which is "omh could not look". Both end as `Unknown`, but only because
 /// `attribution_from` decides that — the shapes stay apart on the way there.
-#[allow(dead_code)]
 pub fn recorded_checkout(root: &Path, repo_id: &str) -> Result<Option<PathBuf>, String> {
     let at = root.join("checkouts").join(repo_id);
     match std::fs::read_to_string(&at) {
@@ -86,11 +81,107 @@ pub fn recorded_checkout(root: &Path, repo_id: &str) -> Result<Option<PathBuf>, 
     }
 }
 
+/// The id a checkout at `repo` is keyed by.
+///
+/// A free function so the registry, the backfill and `Paths` all compute it
+/// one way. Two spellings of this would put a record under an id nothing else
+/// looks for, which is a registry that silently records nothing.
+pub fn id_for(repo: &Path) -> String {
+    let name = repo
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "repo".into());
+    let full = settled(repo);
+    format!("{name}-{:08x}", stable_digest(&full.to_string_lossy()))
+}
+
+/// Whether an id was made by the current scheme.
+///
+/// Ids from before 0.8.0 are a bare basename with no digest (risk 8d), so a
+/// digest comparison is meaningless for them — and a basename comparison is
+/// exactly the ambiguity 8d existed to end. Knowing which kind an id is, is
+/// what keeps the two apart.
+fn is_digest_shaped(repo_id: &str) -> bool {
+    match repo_id.rsplit_once('-') {
+        Some((name, digest)) => {
+            !name.is_empty() && digest.len() == 8 && digest.chars().all(|c| c.is_ascii_hexdigit())
+        }
+        None => false,
+    }
+}
+
+/// Who owns `repo_id`, using the record if there is one and the evidence omh
+/// already wrote if there is not.
+pub fn attribution_of(root: &Path, repo_id: &str) -> Attribution {
+    let recorded = match recorded_checkout(root, repo_id) {
+        Ok(Some(path)) => Ok(Some(path)),
+        // No record: fall back to what omh already wrote. A worktree's `.git`
+        // pointer names its checkout directly, which is the only evidence that
+        // works for ids made before 0.8.0 — they carry no digest to compare.
+        Ok(None) => match from_the_worktrees(root, repo_id) {
+            Ok(found) => {
+                if let Some(path) = &found {
+                    // Worked out once. A checkout that later disappears is
+                    // still attributable afterwards, which is exactly when it
+                    // matters — the pointer goes when the worktree does.
+                    let _ = record(root, repo_id, path);
+                }
+                Ok(found)
+            }
+            Err(why) => Err(why),
+        },
+        Err(why) => Err(why),
+    };
+    let on_disk = match &recorded {
+        Ok(Some(path)) => crate::session::still_there(path),
+        _ => Ok(false),
+    };
+    attribution_from(recorded, on_disk)
+}
+
+/// The checkout named by the `.git` pointers under this id's worktrees.
+fn from_the_worktrees(root: &Path, repo_id: &str) -> Result<Option<PathBuf>, String> {
+    let at = root.join("worktrees").join(repo_id);
+    match owning_checkout(&at) {
+        // Nothing there claims an owner. Absent evidence, not evidence of
+        // absence — the caller turns this into `Unknown`.
+        Ok(Ownership::Unclaimed) => Ok(None),
+        // More than one checkout, or a pointer omh could not read. `Disputed`
+        // is the migration's word for "omh does not get to decide", and it
+        // means the same here.
+        Ok(Ownership::Disputed(reasons)) => Err(reasons.join("; ")),
+        Ok(Ownership::All(owner)) => {
+            // A digest-shaped id that disagrees with the checkout its own
+            // worktree names is a checkout that has moved: the id describes
+            // where it *was*. Saying either one is guessing, so neither is
+            // said.
+            if is_digest_shaped(repo_id) && id_for(&owner) != repo_id {
+                return Err(format!(
+                    "its worktrees name {}, which is keyed as {} — the checkout has moved since",
+                    owner.display(),
+                    id_for(&owner)
+                ));
+            }
+            Ok(Some(owner))
+        }
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
+/// Record a mapping worked out from evidence, under an id that is not
+/// necessarily this process's own checkout.
+fn record(root: &Path, repo_id: &str, path: &Path) -> std::io::Result<()> {
+    let dir = root.join("checkouts");
+    std::fs::create_dir_all(&dir)?;
+    let tmp = dir.join(format!(".{repo_id}.tmp"));
+    std::fs::write(&tmp, format!("{}\n", path.display()))?;
+    std::fs::rename(&tmp, dir.join(repo_id))
+}
+
 /// The decision, over answers someone else went and got.
 ///
 /// Split from the reading for the reason `git_checks_from` is: the part that
 /// can be wrong silently is this one, and it is a table.
-#[allow(dead_code)]
 pub fn attribution_from(
     recorded: Result<Option<PathBuf>, String>,
     on_disk: Result<bool, String>,
@@ -284,16 +375,11 @@ impl Paths {
     /// disk omh can describe and never attribute. Written on the canonical
     /// path, because that is what the digest was taken over.
     pub fn remember_checkout(&self) -> std::io::Result<()> {
-        let dir = self.checkouts();
-        std::fs::create_dir_all(&dir)?;
-        let at = dir.join(self.repo_id());
         // Written whole or not at all: a half-written record is a path that
         // resolves to somewhere else, and this value decides what gets
         // removed. `recorded_checkout` refuses an empty one for the same
         // reason.
-        let tmp = dir.join(format!(".{}.tmp", self.repo_id()));
-        std::fs::write(&tmp, format!("{}\n", settled(&self.repo).display()))?;
-        std::fs::rename(&tmp, &at)
+        record(&self.root, &self.repo_id(), &settled(&self.repo))
     }
 
     pub fn network(&self) -> String {
@@ -326,13 +412,7 @@ impl Paths {
     /// Canonicalised, so a checkout reached through a symlink is the same repo
     /// as the checkout itself rather than a second one with its own sessions.
     fn repo_id(&self) -> String {
-        let name = self
-            .repo
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "repo".into());
-        let full = settled(&self.repo);
-        format!("{name}-{:08x}", stable_digest(&full.to_string_lossy()))
+        id_for(&self.repo)
     }
 }
 
@@ -897,6 +977,118 @@ pub fn repo_root(start: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A worktree's own `.git` pointer names its checkout, so an id with no
+    /// record can still be attributed from what omh already wrote.
+    ///
+    /// This is the whole of the backfill: without it the registry only helps
+    /// checkouts set up *after* it landed, and every artifact already on a
+    /// machine stays unattributable for ever.
+    ///
+    /// Measured while designing this, and worth recording because it removed a
+    /// planned source: a container's `omh.mounts` stamp does **not** help. Its
+    /// `/work` mount is the worktree, `~/.omh/worktrees/<repo_id>/sNN`, so it
+    /// yields the id omh already had rather than the checkout — circular.
+    #[test]
+    fn a_checkout_named_by_a_worktree_pointer_is_attributed_without_a_record() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("home/.omh");
+        let checkout = d.path().join("work/api");
+        std::fs::create_dir_all(checkout.join(".git/worktrees/s01")).unwrap();
+
+        let id = super::id_for(&checkout);
+        let wt = root.join("worktrees").join(&id).join("s01");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}/.git/worktrees/s01\n", checkout.display()),
+        )
+        .unwrap();
+
+        // No record at all — only the pointer omh wrote when it made the
+        // worktree.
+        assert_eq!(super::recorded_checkout(&root, &id), Ok(None));
+        assert_eq!(
+            super::attribution_of(&root, &id),
+            super::Attribution::Live(super::settled(&checkout)),
+            "the pointer names the checkout, and it is still there"
+        );
+
+        // And the answer is written back, so the next run does not re-derive
+        // it and a checkout that later disappears is still attributable.
+        assert_eq!(
+            super::recorded_checkout(&root, &id),
+            Ok(Some(super::settled(&checkout))),
+            "what was worked out once is recorded"
+        );
+
+        // With the checkout gone, the same id is `Gone` — the one answer a
+        // removal may act on.
+        std::fs::remove_dir_all(d.path().join("work")).unwrap();
+        assert_eq!(
+            super::attribution_of(&root, &id),
+            super::Attribution::Gone(super::settled(&checkout))
+        );
+    }
+
+    /// Evidence omh cannot read one way is not evidence of nobody.
+    ///
+    /// Both of these end as `Unknown`, so neither is a removal hazard — what
+    /// they must not lose is *why*, because that reason is the whole of what
+    /// the report gives somebody deciding by hand.
+    #[test]
+    fn evidence_that_disagrees_is_a_reason_not_an_absence() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("home/.omh");
+
+        // Two checkouts claiming worktrees under one id: the pre-0.8.0 state
+        // that risk 8d is about. omh does not get to pick one.
+        let disputed = "shared-1a2b3c4d";
+        for (n, owner) in [("s01", "one"), ("s02", "two")] {
+            let wt = root.join("worktrees").join(disputed).join(n);
+            std::fs::create_dir_all(&wt).unwrap();
+            std::fs::write(
+                wt.join(".git"),
+                format!(
+                    "gitdir: {}/{owner}/.git/worktrees/{n}\n",
+                    d.path().display()
+                ),
+            )
+            .unwrap();
+        }
+        match super::attribution_of(&root, disputed) {
+            super::Attribution::Unknown(why) => assert!(
+                why.contains("one") && why.contains("two"),
+                "it names both claims rather than saying nothing is there: {why}"
+            ),
+            other => panic!("two owners is not an answer: {other:?}"),
+        }
+
+        // A digest-shaped id whose worktree names a checkout that hashes to a
+        // *different* id: the checkout moved, so the id describes where it
+        // was. Saying either is guessing.
+        let moved = d.path().join("moved/api");
+        std::fs::create_dir_all(moved.join(".git")).unwrap();
+        let stale = "api-00000000";
+        let wt = root.join("worktrees").join(stale).join("s01");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}/.git/worktrees/s01\n", moved.display()),
+        )
+        .unwrap();
+        match super::attribution_of(&root, stale) {
+            super::Attribution::Unknown(why) => {
+                assert!(why.contains("moved") || why.contains("api-"), "{why}")
+            }
+            other => panic!("a moved checkout is not this id's owner: {other:?}"),
+        }
+        assert_eq!(
+            super::recorded_checkout(&root, stale),
+            Ok(None),
+            "and nothing is written back from evidence omh refused"
+        );
+    }
 
     /// A checkout that recorded itself can be found again — and one that never
     /// did is absent, not deleted.

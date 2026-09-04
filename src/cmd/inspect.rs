@@ -110,6 +110,43 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
     Ok(())
 }
 
+/// Every omh volume on this machine, or why omh could not ask.
+///
+/// Machine-wide on purpose: a cache outlives the checkout that made it, so a
+/// per-checkout listing structurally cannot see the ones that matter.
+fn volumes_on_this_machine(
+    paths: &Paths,
+    backend: Option<&dyn crate::runtime::Runtime>,
+) -> Result<Vec<String>, String> {
+    match backend.and_then(|b| b.volume_args().map(|args| (b.program(), args))) {
+        // **Not `Ok(vec![])`.** No runtime, or a runtime whose volume story omh
+        // has never measured, is *omh did not look* — rendering it as an empty
+        // listing prints "none — nothing orphaned on this machine", the exact
+        // claim this row's own doc forbids, about a machine omh never asked.
+        None if backend.is_none() => Err("there is no container runtime to ask".into()),
+        None => Err("omh has not measured how this runtime lists volumes".into()),
+        Some((program, args)) => std::process::Command::new(program)
+            .args(&args)
+            .output()
+            .map_err(|e| format!("{e}"))
+            .and_then(|out| match out.status.success() {
+                false => Err(crate::image::unreadable(
+                    &String::from_utf8_lossy(&out.stderr),
+                    &out.status,
+                )),
+                // Only omh's own. Somebody else's volumes are not omh's
+                // business to list, let alone to suggest removing.
+                true => Ok(String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .filter(|n| n.starts_with("omh-"))
+                    .filter(|n| *n != paths.cache_volume())
+                    .map(str::to_string)
+                    .collect()),
+            }),
+    }
+}
+
 /// Launch the real image with the real mounts and ask the harness's own paths
 /// what they can see. Nothing in process can answer this: a green unit suite
 /// proves omh mounts a path, never that anything reads it.
@@ -186,6 +223,23 @@ pub(crate) fn doctor_cmd(
     let files: doctor::SettingsRead = held.iter().map(|(n, h)| (n.as_str(), h.clone())).collect();
     let known: Vec<&str> = key::KEYS.iter().map(|k| k.name).collect();
 
+    // Volumes are read once and then attributed, rather than counted. `repo_id`
+    // is a one-way digest, so until the registry landed omh could see that
+    // these existed and never whose they were — which is what the row used to
+    // say, accurately. The name carries the id: `omh-cache-<repo_id>`.
+    let volumes = volumes_on_this_machine(&paths, chosen.as_ref().ok().map(|b| b.as_ref()));
+    let split = match &volumes {
+        Ok(names) => doctor::attributed(names, &|name| match name.strip_prefix("omh-cache-") {
+            Some(id) => crate::profile::attribution_of(&paths.root, id),
+            // A name omh does not key that way is not something it may reason
+            // about at all.
+            None => crate::profile::Attribution::Unknown(
+                "omh does not recognise this name's shape".into(),
+            ),
+        }),
+        Err(_) => doctor::Attributed::default(),
+    };
+
     let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
         .into_iter()
         .chain(doctor::settings_checks(&files, &known))
@@ -194,39 +248,8 @@ pub(crate) fn doctor_cmd(
                 (found, None) => Ok(found),
                 (_, Some(why)) => Err(why),
             },
-            match chosen
-                .as_ref()
-                .ok()
-                .and_then(|b| b.volume_args().map(|args| (b.program(), args)))
-            {
-                // **Not `Ok(vec![])`.** No runtime, or a runtime whose volume
-                // story omh has never measured, is *omh did not look* —
-                // rendering it as an empty listing prints "none — nothing
-                // orphaned on this machine", the exact claim this row's own
-                // doc forbids, about a machine omh never asked.
-                None if chosen.is_err() => Err("there is no container runtime to ask".into()),
-                None => Err("omh has not measured how this runtime lists volumes".into()),
-                Some((program, args)) => std::process::Command::new(program)
-                    .args(&args)
-                    .output()
-                    .map_err(|e| format!("{e}"))
-                    .and_then(|out| match out.status.success() {
-                        false => Err(crate::image::unreadable(
-                            &String::from_utf8_lossy(&out.stderr),
-                            &out.status,
-                        )),
-                        // Only omh's own. Somebody else's volumes are not
-                        // omh's business to list, let alone to suggest
-                        // removing.
-                        true => Ok(String::from_utf8_lossy(&out.stdout)
-                            .lines()
-                            .map(str::trim)
-                            .filter(|n| n.starts_with("omh-"))
-                            .filter(|n| *n != paths.cache_volume())
-                            .map(str::to_string)
-                            .collect()),
-                    }),
-            },
+            volumes,
+            split,
         )))
         .chain(std::iter::once(doctor::seeded_from(
             std::fs::read_to_string(paths.repo.join(".omh").join(crate::cmd::init::SEEDED_BY))
