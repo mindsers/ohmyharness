@@ -903,9 +903,45 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
         // It computes the whole plan before touching anything, so the preview
         // is the same value the real run acts on rather than a guess about it.
         | Cmd::Prune { .. } => true,
-        Cmd::Settings { cmd } => !matches!(cmd, Some(SettingsCmd::Edit { .. })),
-        Cmd::Memory { cmd } => matches!(cmd, Some(MemoryCmd::Rm { .. })),
-        Cmd::Sessions { cmd } => matches!(cmd, Some(SessionsCmd::Resume { .. })),
+        // Spelled out per verb, not `matches!`, so a new verb on any of the
+        // three nouns is a compile error here as well as above: the `Sessions`
+        // arm answered `false` for every verb it had never heard of, which is
+        // the silent default this function exists to refuse.
+        Cmd::Settings { cmd } => match cmd {
+            // Opens `$EDITOR`; there is no preview of what a person will type.
+            Some(SettingsCmd::Edit { .. }) => false,
+            None
+            | Some(SettingsCmd::Set { .. })
+            | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Mcp { .. }) => true,
+        },
+        Cmd::Memory { cmd } => match cmd {
+            Some(MemoryCmd::Rm { .. }) => true,
+            // Read-only, a wire protocol, or writes whose preview is the
+            // write: `remember` derives its key from the note, so showing
+            // the key means computing the note.
+            None
+            | Some(MemoryCmd::Remember { .. })
+            | Some(MemoryCmd::Serve { .. })
+            | Some(MemoryCmd::Promote { .. })
+            | Some(MemoryCmd::Stale)
+            | Some(MemoryCmd::Lint) => false,
+        },
+        Cmd::Sessions { cmd } => match cmd {
+            Some(SessionsCmd::Resume { .. }) => true,
+            // The listing is its own dry run; the rest stop containers,
+            // replant commits and delete worktrees, and each would have to
+            // compute what it *would* do before it could show it.
+            None
+            | Some(SessionsCmd::Attach { .. })
+            | Some(SessionsCmd::Down { .. })
+            | Some(SessionsCmd::Sync { .. })
+            | Some(SessionsCmd::Log { .. })
+            | Some(SessionsCmd::Diff { .. })
+            | Some(SessionsCmd::Commit { .. })
+            | Some(SessionsCmd::Push { .. })
+            | Some(SessionsCmd::Rm { .. }) => false,
+        },
         // Read-only: the command *is* its own dry run, so there is nothing to
         // withhold and nothing to describe. Refusing says that, where accepting
         // would imply a preview it never gives.
