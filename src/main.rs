@@ -4589,6 +4589,128 @@ mod tests {
         );
     }
 
+    /// A `Paths` under a throwaway home, with the repo initialised.
+    fn leftover_paths(dir: &tempfile::TempDir) -> Paths {
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        paths
+    }
+
+    /// Run `f` with `dir` unreadable, restoring it afterwards so the
+    /// `TempDir` can still clean itself up when the assertion fails.
+    fn while_unreadable<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let out = f();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        out
+    }
+
+    /// **Could not look is not "none", for the orphan that holds the work.**
+    ///
+    /// The `Err` arm warned to stderr and returned an empty list without
+    /// touching `unchecked`, so `doctor` printed "none — nothing orphaned on
+    /// this machine" — the claim this row's own doc forbids — about a directory
+    /// omh had failed to open. The sandbox repository is the orphan that holds
+    /// every commit the agent made, so a clean report is the one answer that
+    /// stops anybody going to look.
+    #[test]
+    fn an_unreadable_shadow_directory_is_reported_rather_than_read_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = leftover_paths(&dir);
+        std::fs::create_dir_all(paths.shadows()).unwrap();
+
+        let (_found, unchecked) = while_unreadable(&paths.shadows(), || {
+            cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+        });
+
+        assert!(
+            unchecked.iter().any(|w| w.contains("sandbox repositories")),
+            "a shadow directory omh could not read must say so: {unchecked:?}"
+        );
+    }
+
+    /// The same collapse in the arm that could not even warn.
+    ///
+    /// `read_dir(..).into_iter().flatten().flatten()` dropped the directory
+    /// error *and* every per-entry error, so this half reported "found nothing"
+    /// with nothing on stderr at all.
+    #[test]
+    fn an_unreadable_run_directory_is_reported_rather_than_read_as_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = leftover_paths(&dir);
+        std::fs::create_dir_all(paths.runs()).unwrap();
+
+        let (_found, unchecked) = while_unreadable(&paths.runs(), || {
+            cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+        });
+
+        assert!(
+            unchecked.iter().any(|w| w.contains("run directories")),
+            "a run directory omh could not read must say so: {unchecked:?}"
+        );
+    }
+
+    /// **A read that failed does not discard what the others found.**
+    ///
+    /// Three independent reads shared one `Option`, and `inspect` mapped any
+    /// failure to `Err`, throwing away the leftovers the other reads had
+    /// already collected. So a permission error on `shadow/` hid a real
+    /// orphaned run — the failure made omh report *less* than it knew.
+    #[test]
+    fn a_read_that_could_not_look_keeps_what_the_other_reads_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = leftover_paths(&dir);
+        std::fs::create_dir_all(paths.shadows()).unwrap();
+        idle::touch(&paths.runs(), "s07").unwrap();
+
+        let (found, unchecked) = while_unreadable(&paths.shadows(), || {
+            cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+        });
+
+        assert!(
+            found.contains(&"s07".to_string()),
+            "the run this did read must survive the read that failed: {found:?}"
+        );
+        assert!(
+            !unchecked.is_empty(),
+            "and the failed read is still reported: {unchecked:?}"
+        );
+    }
+
+    /// Every reason reaches the row, not just the last one written.
+    #[test]
+    fn the_doctor_row_carries_each_reason_it_could_not_look() {
+        let row = doctor::leftovers_from(
+            vec!["s07".into()],
+            vec![
+                "omh could not read /x, so orphaned sandbox repositories went unchecked: denied"
+                    .into(),
+                "omh could not read /y, so orphaned run directories went unchecked: denied".into(),
+            ],
+            Ok(Vec::new()),
+        );
+        assert!(row.ok, "a leftover is never a failure");
+        assert!(
+            row.detail.contains("sandbox repositories") && row.detail.contains("run directories"),
+            "both reasons must reach the row: {}",
+            row.detail
+        );
+        assert!(
+            row.detail.contains("s07"),
+            "and the leftover it did find is still named: {}",
+            row.detail
+        );
+        assert!(
+            !row.detail.contains("none"),
+            "a row that could not look must not read as a clean machine: {}",
+            row.detail
+        );
+    }
+
     /// The resolution is read from and written to the **committed** layer, and
     /// nothing else guarded which layer that is.
     ///
