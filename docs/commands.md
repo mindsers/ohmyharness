@@ -141,6 +141,13 @@ before the `--` is. See [where omh's flags end and the harness's
 begin](#where-omhs-flags-end-and-the-harnesss-begin). Use `omh new claude -- --json`
 to hand it to the harness instead.
 
+**A command that hands you a program refuses `--json`.** `omh new`, `omh sNN
+resume` and `omh settings edit` end by giving the terminal to a harness or an
+editor, and `omh memory serve` speaks a protocol on stdout; none has an answer
+to print, so the flag is refused rather than accepted and dropped. With
+`--dry-run` the preview is the answer, and `omh --dry-run --json new claude` is
+how a script reads a launch plan.
+
 ---
 
 ## `omh init`

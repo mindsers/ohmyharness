@@ -9090,3 +9090,42 @@ fn built_tags(calls: &[String]) -> Vec<String> {
         })
         .collect()
 }
+
+/// `--json` is refused by a command that hands you a program.
+///
+/// `omh new`, `omh sNN resume` and `omh settings edit` end by handing the
+/// terminal to a harness or an editor; `omh memory serve` speaks a wire
+/// protocol. None of them has an answer to print, so `--json` on them was
+/// accepted and produced nothing a script could parse — the shape of
+/// `--dry-run` being accepted and dropped, which this crate already refuses.
+/// The refusal happens before anything is read, so it needs no repository.
+#[test]
+fn json_is_refused_where_omh_hands_you_a_program() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    for line in [
+        &["--json", "new", "claude"][..],
+        &["--json", "s01", "resume"][..],
+        &["--json", "settings", "edit"][..],
+    ] {
+        let out = sb.omh(line);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "`{}` is refused", line.join(" "));
+        assert!(
+            err.contains("--json") && err.contains("hands you"),
+            "`{}` says why: {err}",
+            line.join(" ")
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "and prints nothing that looks like an answer: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    assert!(
+        !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("run"),
+        "nothing was launched on the way to the refusal"
+    );
+}

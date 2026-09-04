@@ -264,6 +264,17 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
          omh <command>    to run it"
     );
 
+    // And the third flag of that shape. A command that hands you a program
+    // has no answer for `--json` to carry, so it was accepted and produced
+    // nothing — which a script reads as an empty answer rather than a
+    // mistake. A preview is an answer, so `--dry-run` lifts the refusal.
+    anyhow::ensure!(
+        !cli.json || cli.dry_run || cli::answers_json(&cli.cmd),
+        "`--json` is not something this command can answer: it hands you a program \
+         and prints nothing to parse:\n  \
+         omh <command>    without --json"
+    );
+
     // Before any command reads per-repo state, and after `--dry-run` has been
     // settled — a preview writes nothing, and a migration is a write.
     if !cli.dry_run {
@@ -2225,7 +2236,9 @@ mod tests {
             // somebody who set one that did not work; it carries no `--local`
             // and is the shorter claim.
             ("src/image.rs", 3),
-            ("src/main.rs", 8),
+            // The ninth is the `--json` refusal, beside the two for `--dry-run`
+            // and a session prefix nothing consumes.
+            ("src/main.rs", 9),
             ("src/memory.rs", 2),
             ("src/memory/ingest.rs", 2),
             ("src/notice.rs", 2),
@@ -6048,7 +6061,8 @@ because = "a fixture"
     ///
     /// `omh new` does not guess. Everything before `--` is omh's, everything
     /// after it is the harness's, and there is no third category. So
-    /// `omh new claude --json` reports omh as JSON, while
+    /// `omh new claude --json` is omh's — refused, since a launch has nothing
+    /// to report, unless `--dry-run` makes it a preview — while
     /// `omh new claude -- --json` hands `--json` to claude — including for
     /// flags omh also has, which is the case the bare form cannot express at
     /// all without `--` either.
@@ -6549,5 +6563,34 @@ because = "a fixture"
             ),
             "the alias lands on the same field"
         );
+    }
+
+    /// The commands that refuse `--json` are the ones that end by handing
+    /// over the terminal, and no others.
+    #[test]
+    fn a_command_that_hands_you_a_program_has_no_json_to_print() {
+        for (line, answers) in [
+            (&["new", "claude"][..], false),
+            (&["sessions", "resume"][..], false),
+            (&["settings", "edit"][..], false),
+            (
+                &["memory", "serve", "--team", "t", "--local", "l"][..],
+                false,
+            ),
+            (&["sessions"][..], true),
+            (&["sessions", "attach"][..], true),
+            (&["graph"][..], true),
+            (&["info"][..], true),
+            (&["memory"][..], true),
+            (&["settings"][..], true),
+        ] {
+            let cli = Cli::try_parse_from(cli_argv(line)).unwrap();
+            assert_eq!(
+                cli::answers_json(&cli.cmd),
+                answers,
+                "`omh {}` answers --json",
+                line.join(" ")
+            );
+        }
     }
 }

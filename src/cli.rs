@@ -967,6 +967,42 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
     }
 }
 
+/// Whether this command has an answer `--json` can carry.
+///
+/// Four do not: `new`, `resume` and `settings edit` hand the terminal to a
+/// program, and `memory serve` *is* a program, speaking MCP on stdout. Each
+/// accepted `--json` and printed nothing a script could parse, which is the
+/// `--dry-run` accident in another flag — a request honoured in silence is
+/// indistinguishable from one ignored. So they refuse it, at the same site.
+///
+/// `--dry-run` overrides the refusal for the launches: a preview *is* a
+/// report, and `omh --dry-run --json new claude` is how a script reads the
+/// plan. `dispatch` applies that rule; this function answers the narrower
+/// question of whether the real run has anything to say.
+///
+/// Exhaustive, like the two above, so a new command decides this too.
+pub(crate) fn answers_json(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::New { .. } => false,
+        Cmd::Sessions { cmd } => !matches!(cmd, Some(SessionsCmd::Resume { .. })),
+        Cmd::Settings { cmd } => !matches!(cmd, Some(SettingsCmd::Edit { .. })),
+        Cmd::Memory { cmd } => !matches!(cmd, Some(MemoryCmd::Serve { .. })),
+        Cmd::Init
+        | Cmd::Prune { .. }
+        | Cmd::Doctor { .. }
+        | Cmd::Why { .. }
+        | Cmd::Graph { .. }
+        | Cmd::Auth { .. }
+        | Cmd::Info { .. }
+        | Cmd::Use { .. }
+        | Cmd::Unuse { .. }
+        | Cmd::Set { .. }
+        | Cmd::Unset { .. }
+        | Cmd::Eject { .. }
+        | Cmd::Import { .. } => true,
+    }
+}
+
 pub(crate) fn consumes_session(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::Sessions { .. } => true,
