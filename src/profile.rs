@@ -33,6 +33,92 @@ use crate::adapter::Capability;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
+/// Which checkout a `repo_id` belongs to — and whether it is still there.
+///
+/// `repo_id` is `<basename>-<digest of the canonical path>`, one-way on
+/// purpose: it must be stable, short and safe as a filename. The cost is that
+/// omh cannot look at `omh-cache-repo-5e54b748` and say whose it is, so every
+/// artifact keyed that way is disk omh can describe but never attribute.
+///
+/// Three answers, and the third is the one that matters. **No record is
+/// `Unknown`, never `Gone`.** Every checkout on a machine upgrading to this
+/// version has no record yet, so reading "no record" as "deleted" would make
+/// the first prune delete everything on it.
+// Read by tests and by `remember_checkout`'s caller only until the backfill
+// lands in the next commit, which is what gives these a production caller.
+// The `allow` goes with it — if it is still here, the backfill is not.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Attribution {
+    /// Recorded, and the checkout is still on disk.
+    Live(PathBuf),
+    /// Recorded, and the path is provably not there any more.
+    Gone(PathBuf),
+    /// No record, or omh could not tell. Carries what to say about it, and is
+    /// never something an automatic removal may act on.
+    Unknown(String),
+}
+
+/// Read back which checkout an id was recorded against.
+///
+/// `Ok(None)` is "there is no record", and is a different fact from `Err`,
+/// which is "omh could not look". Both end as `Unknown`, but only because
+/// `attribution_from` decides that — the shapes stay apart on the way there.
+#[allow(dead_code)]
+pub fn recorded_checkout(root: &Path, repo_id: &str) -> Result<Option<PathBuf>, String> {
+    let at = root.join("checkouts").join(repo_id);
+    match std::fs::read_to_string(&at) {
+        // Absent is genuinely "no record". Every other read failure is omh
+        // unable to look, which must not spell the same thing.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("{} could not be read ({e})", at.display())),
+        Ok(body) => {
+            let line = body.trim();
+            if line.is_empty() {
+                // A record with nothing in it is a record omh cannot use. It
+                // falls to `Err` rather than `None` so it reads as "could not
+                // tell" — a truncated write must never license a removal.
+                Err(format!("{} is empty", at.display()))
+            } else {
+                Ok(Some(PathBuf::from(line)))
+            }
+        }
+    }
+}
+
+/// The decision, over answers someone else went and got.
+///
+/// Split from the reading for the reason `git_checks_from` is: the part that
+/// can be wrong silently is this one, and it is a table.
+#[allow(dead_code)]
+pub fn attribution_from(
+    recorded: Result<Option<PathBuf>, String>,
+    on_disk: Result<bool, String>,
+) -> Attribution {
+    match recorded {
+        Err(why) => Attribution::Unknown(format!(
+            "omh could not read its record of this checkout: {why}"
+        )),
+        Ok(None) => Attribution::Unknown(
+            "omh has no record of which checkout this belongs to — it predates the \
+             record, or was never set up by this omh"
+                .to_string(),
+        ),
+        Ok(Some(path)) => match on_disk {
+            Ok(true) => Attribution::Live(path),
+            Ok(false) => Attribution::Gone(path),
+            // Asked of the disk properly, never `Path::exists`: that is
+            // `metadata().is_ok()`, so a checkout on a mount that has gone
+            // away answers "not there" and everything it owns reads as
+            // reclaimable.
+            Err(why) => Attribution::Unknown(format!(
+                "recorded as {}, but omh could not tell whether it is still there: {why}",
+                path.display()
+            )),
+        },
+    }
+}
+
 pub struct Paths {
     pub root: PathBuf,
     pub repo: PathBuf,
@@ -184,6 +270,30 @@ impl Paths {
     /// lets memory survive a harness switch.
     pub fn cache_volume(&self) -> String {
         format!("omh-cache-{}", self.repo_id())
+    }
+
+    /// The directory of checkout records: `<repo_id>` → the path it came from.
+    pub fn checkouts(&self) -> PathBuf {
+        self.root.join("checkouts")
+    }
+
+    /// Record where this checkout is, so what it leaves behind can be traced
+    /// back to it.
+    ///
+    /// `repo_id` is one-way, so without this every artifact omh keys by it is
+    /// disk omh can describe and never attribute. Written on the canonical
+    /// path, because that is what the digest was taken over.
+    pub fn remember_checkout(&self) -> std::io::Result<()> {
+        let dir = self.checkouts();
+        std::fs::create_dir_all(&dir)?;
+        let at = dir.join(self.repo_id());
+        // Written whole or not at all: a half-written record is a path that
+        // resolves to somewhere else, and this value decides what gets
+        // removed. `recorded_checkout` refuses an empty one for the same
+        // reason.
+        let tmp = dir.join(format!(".{}.tmp", self.repo_id()));
+        std::fs::write(&tmp, format!("{}\n", settled(&self.repo).display()))?;
+        std::fs::rename(&tmp, &at)
     }
 
     pub fn network(&self) -> String {
@@ -787,6 +897,111 @@ pub fn repo_root(start: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A checkout that recorded itself can be found again — and one that never
+    /// did is absent, not deleted.
+    #[test]
+    fn a_checkout_that_recorded_itself_can_be_found_again() {
+        let f = fixture(&[]);
+        std::fs::create_dir_all(&f.paths.repo).unwrap();
+        let id = f.paths.repo_id();
+
+        // Nothing recorded yet: absent, and not an error.
+        assert_eq!(
+            super::recorded_checkout(&f.paths.root, &id),
+            Ok(None),
+            "an id nothing recorded is absent"
+        );
+
+        f.paths.remember_checkout().expect("recording must work");
+        assert_eq!(
+            super::recorded_checkout(&f.paths.root, &id),
+            Ok(Some(super::settled(&f.paths.repo))),
+            "and afterwards it names the checkout it came from"
+        );
+
+        // Recording twice is not an error and does not duplicate: every
+        // command may do it.
+        f.paths.remember_checkout().expect("again");
+        assert_eq!(
+            super::recorded_checkout(&f.paths.root, &id),
+            Ok(Some(super::settled(&f.paths.repo)))
+        );
+
+        // Nothing is left beside the record. The write goes via a temp name so
+        // a torn write cannot leave a path that resolves somewhere else, and a
+        // stray temp file would be a second entry in a directory whose entries
+        // are about to mean "a checkout omh knows about".
+        let beside: Vec<String> = std::fs::read_dir(f.paths.checkouts())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != &id)
+            .collect();
+        assert!(beside.is_empty(), "only the record itself: {beside:?}");
+
+        // A record omh cannot make sense of is "could not tell", never "no
+        // such checkout" — the reasons differ, and the report prints them.
+        std::fs::write(f.paths.checkouts().join(&id), "   \n").unwrap();
+        match super::recorded_checkout(&f.paths.root, &id) {
+            Err(why) => assert!(why.contains("empty"), "and says so: {why}"),
+            other => panic!("an empty record is not the absence of one: {other:?}"),
+        }
+    }
+
+    /// The three answers a `repo_id` can have, and the one that must never be
+    /// guessed.
+    ///
+    /// `Unknown` is not a tidier spelling of `Gone`. On the first run after
+    /// this lands, *no* checkout has a record — so if absence of a record read
+    /// as "the checkout was deleted", prune would take every artifact on the
+    /// machine. That arm is the reason this function exists as a table rather
+    /// than an `if let`.
+    #[test]
+    fn a_repo_id_with_no_record_is_unknown_and_never_gone() {
+        use super::{attribution_from, Attribution};
+        let at = |p: &str| std::path::PathBuf::from(p);
+
+        // Recorded and present.
+        assert_eq!(
+            attribution_from(Ok(Some(at("/work/api"))), Ok(true)),
+            Attribution::Live(at("/work/api"))
+        );
+        // Recorded and provably not there: the only arm a removal may act on.
+        assert_eq!(
+            attribution_from(Ok(Some(at("/work/api"))), Ok(false)),
+            Attribution::Gone(at("/work/api"))
+        );
+
+        // No record at all.
+        match attribution_from(Ok(None), Ok(false)) {
+            Attribution::Unknown(why) => assert!(
+                !why.trim().is_empty(),
+                "and it says why, because the row prints it"
+            ),
+            other => panic!("no record is not a deleted checkout: {other:?}"),
+        }
+
+        // A record omh could not read.
+        match attribution_from(Err("permission denied".into()), Ok(false)) {
+            Attribution::Unknown(why) => assert!(why.contains("permission denied"), "{why}"),
+            other => panic!("an unreadable record is not a deleted checkout: {other:?}"),
+        }
+
+        // Recorded, but omh could not tell whether the path is there — a
+        // checkout on a mount that has gone away. `Path::exists` answers
+        // `false` here, which is how everything it owns would read as
+        // reclaimable.
+        match attribution_from(Ok(Some(at("/mnt/api"))), Err("host is down".into())) {
+            Attribution::Unknown(why) => {
+                assert!(
+                    why.contains("/mnt/api") && why.contains("host is down"),
+                    "{why}"
+                )
+            }
+            other => panic!("could not tell is not gone: {other:?}"),
+        }
+    }
     use super::*;
 
     struct Fixture {

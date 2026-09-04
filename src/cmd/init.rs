@@ -597,6 +597,18 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     )
     .with_context(|| format!("writing {}", repo_omh.join(SEEDED_BY).display()))?;
 
+    // Where this checkout is, filed under the id everything else is keyed by.
+    // `repo_id` is a one-way digest, so without this the caches, containers
+    // and state directories omh creates are disk it can describe and never
+    // attribute — which is what `doctor`'s leftovers row has been saying.
+    //
+    // Beside the stamp above rather than in `.omh/`: it belongs to the machine,
+    // not the repository, and committing a path from one developer's disk would
+    // say nothing true on anybody else's.
+    paths
+        .remember_checkout()
+        .with_context(|| format!("recording this checkout in {}", paths.checkouts().display()))?;
+
     // Only now the image, and the question about what it turned out to hold.
     //
     // Everything above configures the repo and cannot fail for want of a

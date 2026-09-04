@@ -6879,6 +6879,43 @@ fn a_partly_removed_session_says_the_branch_that_survived_it() {
     );
 }
 
+/// `omh init` records where this checkout is, so what it leaves behind can be
+/// traced back to it.
+///
+/// `repo_id` is a one-way digest of the path, which is what makes every
+/// artifact keyed by it — caches, containers, state directories — disk omh can
+/// describe and never attribute. The record is the other half of that pair.
+#[test]
+fn init_records_where_this_checkout_is() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+
+    let at = sb.home.join(".omh/checkouts").join(sb.repo_id());
+    assert!(
+        !at.exists(),
+        "nothing is recorded before init runs, or this test proves nothing"
+    );
+
+    let out = sb.omh(&["init"]);
+    assert!(out.status.success(), "init must run: {out:?}");
+
+    let said = std::fs::read_to_string(&at)
+        .unwrap_or_else(|e| panic!("init must record this checkout at {}: {e}", at.display()));
+    // The canonical path, because that is what the digest was taken over — a
+    // record naming a different spelling of the same directory would not match
+    // the id it is filed under.
+    assert_eq!(
+        said.trim(),
+        std::fs::canonicalize(&sb.repo)
+            .unwrap()
+            .display()
+            .to_string(),
+        "and it names the checkout it came from"
+    );
+}
+
 /// The partial-removal report says what happened, not what was attempted.
 ///
 /// The first version asserted four removals flatly — "The container, its graph
