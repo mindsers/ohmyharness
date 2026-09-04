@@ -708,10 +708,6 @@ pub(crate) enum Snapshots {
 /// down, and nothing that needs one can be reached by a test here. What is
 /// left in `rm` is the single call — its absence is a line missing from a
 /// diff rather than a behaviour hiding behind a runtime.
-///
-/// **This doc was stranded on `Snapshots`** — two well-formed blocks with no
-/// separator, so the combined comment documented the enum and this function
-/// had none. Structurally valid, suite green, and only a reader notices.
 pub(crate) fn may_remove(
     paths: &Paths,
     session: &Session,

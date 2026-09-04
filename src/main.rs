@@ -1593,7 +1593,7 @@ mod tests {
             ("accounts.md", 4),
             ("adapters.md", 1),
             ("code-graph.md", 1),
-            ("commands.md", 131),
+            ("commands.md", 133),
             ("configuration.md", 44),
             ("decisions.md", 1),
             ("editors.md", 4),
@@ -1686,7 +1686,7 @@ mod tests {
                 // The line clap puts in the parent's command list.
                 if let Some(about) = sub.get_about() {
                     let about = about.to_string();
-                    // cmd::init::Measured, not guessed: on the tree where this was
+                    // Measured, not guessed: on the tree where this was
                     // written the longest entry that reads as a line is
                     // `omh sessions rm` at 85 characters, and the two that
                     // read as paragraphs are 155 and 200. 100 sits in the gap
@@ -1894,7 +1894,7 @@ mod tests {
                     // A column laid out inside a literal was going to be the
                     // third rule here, cutting at the last `\n` escape and
                     // asking whether what precedes the command is padding.
-                    // cmd::init::Measured against the tree it admitted **nothing** the two
+                    // Measured against the tree it admitted **nothing** the two
                     // rules below did not already admit — every column entry
                     // omh prints either names a session or follows a gutter.
                     // It is not here because a clause that admits nothing,
@@ -2979,8 +2979,13 @@ mod tests {
     /// asked and the refusal stands. That is what keeps the prompt safe: the
     /// only way past without a person is `--force`, typed deliberately.
     /// `ask::confirm` treats anything but a yes as no, which the module's own
-    /// table covers; what this pins is that omh does not *reach* it off a
-    /// terminal, and that `--force` still works when it cannot ask.
+    /// table covers. What this pins is the refusal itself and that `--force`
+    /// still works when there is nobody to ask.
+    ///
+    /// It does **not** pin that omh declines to *reach* the prompt: this test
+    /// passed unchanged with that guard deleted, because it could not see
+    /// whether a question was asked. `a_removal_with_nobody_to_ask_asks_nothing`
+    /// is the one that watches for the question.
     #[test]
     fn removing_unkept_work_needs_force_when_there_is_nobody_to_ask() {
         let (paths, session, _shadow) = a_session_with_two_checkpoints();
@@ -3182,7 +3187,7 @@ mod tests {
     /// to give back, and the first version of this guard was blind to it:
     /// `seed..HEAD` counts 0 afterwards, so `rm` removed three commits without
     /// a word — the exact scenario `risks.md` cites as the reason the guard
-    /// exists. cmd::init::Measured: `--all --reflog` still finds them.
+    /// exists. Measured: `--all --reflog` still finds them.
     ///
     /// The same read covers a side branch the agent wandered off, which
     /// `preflight` refuses a *harvest* over while `rm` was dropping it for
@@ -5457,7 +5462,7 @@ because = "a fixture"
     /// The clause was formatting-dependent — it looked for `", cli,"`, so
     /// rustfmt breaking an argument list across lines silently disarmed it —
     /// and it was removed on the belief that it would otherwise misfire.
-    /// cmd::init::Measured afterwards, it would not have: it had already been disarmed by
+    /// Measured afterwards, it would not have: it had already been disarmed by
     /// exactly that formatting change, so removing it changed nothing and
     /// proved nothing.
     ///

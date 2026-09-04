@@ -1430,11 +1430,6 @@ pub(crate) fn rm(
         session::Gone::Yes => went.push("the sandbox repository".to_string()),
         session::Gone::No(why) => unreached.push(format!("the sandbox repository ({why})")),
     }
-    // **Said before the branch news, because it changes what that news means.**
-    // A worktree still on disk makes "removed session s03" false, and the
-    // command exited 0 saying it. `rm` is the command that removes everything a
-    // session owns; when one of them survives, the report has to name it and
-    // what clears it, rather than reporting a removal that did not happen.
     // **A worktree still on disk makes "removed session sNN" false**, and the
     // command used to print both — a warning saying it is there, then a
     // success line saying the session is gone, then exit 0. That is the shape

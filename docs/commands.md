@@ -787,7 +787,8 @@ ran. The agent's own commits are the exception: they live only in the sandbox's
 repository, and `rm` deletes that. After a `git reset --hard` in the sandbox
 they were the only copies there ever were.
 
-So `rm` counts them first, and says so rather than asking:
+So `rm` counts them first. On a terminal it asks; with nobody to ask — a
+script, a CI job, a closed pipe — it refuses and names every way out:
 
 ```console
 $ omh s01 rm
@@ -799,8 +800,11 @@ omh: s01 has 2 commits that no branch has. Removing it deletes the only copy:
 ```
 
 Nothing is taken down before that refusal — not the container, not the marker
-`omh s` reads, not the repository the refusal is about. `--force` is the way
-past, and it means what it says.
+`omh s` reads, not the repository the refusal is about.
+
+`--force` is the way past **that question**, and only that. It does not make
+the removal itself try harder: `git worktree remove --force` is passed either
+way, so a worktree that will not go will not go with `--force` either.
 
 **The count is wider than the one `omh s01 log` prints**, on purpose. `log`
 numbers what you can act on; this asks whether anything in that repository
@@ -955,6 +959,27 @@ removed session s01; branch omh/s01 kept — omh could not count it against main
   git log omh/s01
   git branch -D omh/s01
 ```
+
+**A removal that did not finish is a failure, not a footnote.** `rm` asks the
+disk whether the worktree is actually gone rather than trusting git's exit
+code, because a git that exits 0 while leaving the directory behind used to be
+believed — `removed session s01`, exit 0, worktree still there. When something
+survives, the command exits non-zero and reports what it observed:
+
+```console
+$ omh s01 rm --force
+omh: s01 is partly removed — its worktree is still there:
+  ~/.omh/worktrees/repo-5a4ec022/s01
+  Permission denied (os error 13)
+what went: the container, the sandbox repository
+the branch omh/s01 is still there.
+  omh s01 rm              run it again once the directory is free
+```
+
+The list is what omh **watched happen**, part by part — not a summary of what
+it set out to do. A step it never reached, because there was no usable
+container runtime or because the daemon would not answer, is named separately
+rather than counted as done.
 
 ## `omh set` · `omh unset`
 
