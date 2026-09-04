@@ -1330,6 +1330,8 @@ pub(crate) fn rm(
             crate::cmd::harvest::Forced(force),
             crate::cmd::harvest::Interactive(terminal),
         ),
+        &mut std::io::stdin().lock(),
+        &mut std::io::stderr(),
     )? {
         ctx.warn(note.trim());
     }

@@ -2690,6 +2690,8 @@ mod tests {
             &session,
             cmd::harvest::Snapshots::Kept(12),
             cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
         )
         .expect("snapshots alone never stop a removal")
         .expect("but they are said");
@@ -2703,7 +2705,9 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                cmd::harvest::Consent::CannotAsk
+                cmd::harvest::Consent::CannotAsk,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
             )
             .unwrap(),
             None,
@@ -2719,6 +2723,8 @@ mod tests {
             &unkept,
             cmd::harvest::Snapshots::Kept(3),
             cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
         )
         .expect_err("unharvested commits still refuse")
         .to_string();
@@ -2979,6 +2985,8 @@ mod tests {
             &session,
             cmd::harvest::Snapshots::None,
             cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
         )
         .expect_err("off a terminal there is nobody to ask");
         let said = format!("{err:#}");
@@ -2997,6 +3005,8 @@ mod tests {
                 &session,
                 cmd::harvest::Snapshots::None,
                 cmd::harvest::Consent::Given,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
             )
             .is_ok(),
             "`--force` is the non-interactive way past, and stays one"
@@ -3018,6 +3028,8 @@ mod tests {
             &session,
             cmd::harvest::Snapshots::None,
             cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
         )
         .expect_err("two commits are on no branch anywhere");
         let said = err.to_string();
@@ -3052,7 +3064,9 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                cmd::harvest::Consent::Given
+                cmd::harvest::Consent::Given,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
             )
             .is_ok(),
             "`--force` means it"
@@ -3075,10 +3089,84 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                cmd::harvest::Consent::CannotAsk
+                cmd::harvest::Consent::CannotAsk,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
             )
             .is_ok(),
             "a session whose work is all on the branch removes quietly"
+        );
+    }
+
+    /// The question itself: asked, answered, and honoured in both directions.
+    ///
+    /// None of this was assertable before the terminal was handed in.
+    /// `may_remove` reached for `std::io::stdin()`, and every test drives the
+    /// binary through `Command::output()` — a null stdin — so `MayAsk` was
+    /// unreachable from the whole suite and deleting the guard left it green.
+    /// `ask.rs` says exactly this under "The terminal is handed in"; this was
+    /// a new call site with the old shape.
+    #[test]
+    fn a_person_who_is_asked_can_say_yes_and_can_say_nothing() {
+        let (paths, session, _shadow) = a_session_with_two_checkpoints();
+        let ask = |said: &'static str| {
+            let mut heard = Vec::new();
+            let answered = cmd::harvest::may_remove(
+                &paths,
+                &session,
+                cmd::harvest::Snapshots::None,
+                cmd::harvest::Consent::MayAsk,
+                &mut said.as_bytes(),
+                &mut heard,
+            );
+            (answered, String::from_utf8(heard).unwrap())
+        };
+
+        let (yes, question) = ask("y\n");
+        assert!(
+            yes.is_ok(),
+            "a person who said yes is not refused: {:?}",
+            yes.err().map(|e| format!("{e:#}"))
+        );
+        // The question has to name what is being destroyed. A bare
+        // "remove s01 anyway?" is a yes/no on unrecoverable deletion with the
+        // reasons left out, and nothing else would notice it degraded.
+        assert!(
+            question.contains("2 commits") && question.contains("deletes the only copy"),
+            "and it said what was at stake: {question}"
+        );
+
+        // Silence is not consent. `ask::confirm` is what makes that true, and
+        // this pins that `rm` goes through it rather than around it.
+        let (silent, _) = ask("\n");
+        assert!(silent.is_err(), "silence declines");
+        let (typo, _) = ask("yes please\n");
+        assert!(typo.is_err(), "and anything that is not yes declines");
+    }
+
+    /// Nobody to ask means refuse — without printing a question into a log
+    /// where no one can answer it.
+    #[test]
+    fn a_removal_with_nobody_to_ask_asks_nothing() {
+        let (paths, session, _shadow) = a_session_with_two_checkpoints();
+        let mut heard = Vec::new();
+        let refused = cmd::harvest::may_remove(
+            &paths,
+            &session,
+            cmd::harvest::Snapshots::None,
+            cmd::harvest::Consent::CannotAsk,
+            // An open pipe that never delivers a line: what a CI runner or
+            // `omh … | tee` hands the process. Reaching `confirm` here would
+            // block for good, so this asserts the short-circuit and not only
+            // the refusal.
+            &mut std::io::empty(),
+            &mut heard,
+        );
+        assert!(refused.is_err(), "it refuses");
+        assert!(
+            heard.is_empty(),
+            "and asked nothing: {}",
+            String::from_utf8_lossy(&heard)
         );
     }
 
@@ -3125,6 +3213,8 @@ mod tests {
             &session,
             cmd::harvest::Snapshots::None,
             cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
         )
         .expect_err("two commits are still in there and on no branch");
         assert!(err.to_string().contains("2 commits"), "{err}");
@@ -3140,6 +3230,8 @@ mod tests {
             &session,
             cmd::harvest::Snapshots::None,
             cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
         )
         .expect_err("a record naming nothing this repository has is not an answer");
         assert!(
@@ -3159,6 +3251,8 @@ mod tests {
             &session,
             cmd::harvest::Snapshots::None,
             cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
         )
         .expect_err("three now");
         assert!(err.to_string().contains("3 commits"), "{err}");
@@ -3228,6 +3322,8 @@ mod tests {
             &session,
             cmd::harvest::Snapshots::None,
             cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
         )
         .expect_err("omh cannot tell what landed — that is a reason to ask");
         assert!(
@@ -3239,7 +3335,9 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                cmd::harvest::Consent::Given
+                cmd::harvest::Consent::Given,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
             )
             .is_ok(),
             "and `--force` is still the way past, so nobody is trapped"
@@ -3255,7 +3353,9 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                cmd::harvest::Consent::CannotAsk
+                cmd::harvest::Consent::CannotAsk,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
             )
             .is_err(),
             "a repository omh cannot place is not an empty session"
@@ -3271,7 +3371,9 @@ mod tests {
                 &paths,
                 &session,
                 cmd::harvest::Snapshots::None,
-                cmd::harvest::Consent::CannotAsk
+                cmd::harvest::Consent::CannotAsk,
+                &mut std::io::empty(),
+                &mut std::io::sink(),
             )
             .is_ok(),
             "nothing there is nothing to lose"
@@ -3283,7 +3385,9 @@ mod tests {
             &paths,
             &never_ran,
             cmd::harvest::Snapshots::None,
-            cmd::harvest::Consent::CannotAsk
+            cmd::harvest::Consent::CannotAsk,
+            &mut std::io::empty(),
+            &mut std::io::sink(),
         )
         .is_ok());
     }

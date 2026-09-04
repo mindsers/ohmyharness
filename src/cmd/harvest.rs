@@ -701,6 +701,8 @@ pub(crate) fn may_remove(
     session: &Session,
     snapshots: Snapshots,
     consent: Consent,
+    input: &mut dyn std::io::BufRead,
+    out: &mut dyn std::io::Write,
 ) -> Result<Option<String>> {
     let branch = format!("omh/{}", session.id);
     // Named, never the reason. A snapshot is a tree omh photographed at the
@@ -790,8 +792,8 @@ pub(crate) fn may_remove(
                     "{at_stake}. Removing it deletes the only copy.\nremove {id} anyway?",
                     id = session.id
                 ),
-                &mut std::io::stdin().lock(),
-                &mut std::io::stderr(),
+                input,
+                out,
             )?;
         anyhow::ensure!(
             agreed,
