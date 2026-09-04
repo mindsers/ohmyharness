@@ -117,7 +117,7 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                 Some(f) => f.clone(),
                 None => {
                     let template = binding.import.as_deref().with_context(|| {
-                        format!("adapter {harness} does not say where to import from; pass --file")
+                        format!("adapter {harness} does not say where to import from; pass --from")
                     })?;
                     adapter::expand_host(template, &home, &paths.repo)
                 }
@@ -125,7 +125,7 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
 
             let raw = std::fs::read_to_string(&source).with_context(|| {
                 format!(
-                    "reading {} — pass --file to point somewhere else",
+                    "reading {} — pass --from to point somewhere else",
                     source.display()
                 )
             })?;
@@ -151,7 +151,7 @@ pub(crate) fn mcp(paths: &Paths, cmd: &McpCmd, dry_run: bool, ctx: &out::Ctx) ->
                 .chain(outcome.conflicts.iter().map(|name| report::Considered {
                     name: name.clone(),
                     verdict: report::Verdict::Conflict,
-                    detail: "differs — keeping yours; --force to overwrite".into(),
+                    detail: "differs — keeping yours; --replace to overwrite".into(),
                 }))
                 .collect();
 

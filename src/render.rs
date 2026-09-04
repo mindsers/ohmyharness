@@ -219,7 +219,7 @@ pub fn parse(format: Render, raw: &str) -> Result<BTreeMap<String, Server>> {
             if doc.get("mcpServers").is_none() && doc.get("projects").is_some() {
                 anyhow::bail!(
                     "this config nests servers under `projects` — importing all of \
-                     them would pull in servers from unrelated repos. Point --file \
+                     them would pull in servers from unrelated repos. Point --from \
                      at a project-scoped .mcp.json instead."
                 );
             }

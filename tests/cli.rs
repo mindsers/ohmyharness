@@ -1581,7 +1581,7 @@ fn a_commit_over_conflict_markers_is_refused_by_the_command_itself() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("tap.rs:1"), "and it says where: {err}");
 
-    let out = sb.omh(&["s01", "commit", "-m", "Add the tap", "--force"]);
+    let out = sb.omh(&["s01", "commit", "-m", "Add the tap", "--allow-conflicts"]);
     assert!(
         out.status.success(),
         "and the user can still mean it: {}",

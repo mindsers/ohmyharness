@@ -54,6 +54,23 @@ shadow, so the list and the double parse are both gone. Harnesses and editors
 still share a namespace, but only inside their own verbs — `omh new zed` and
 `omh s attach zed` say which they mean.
 
+### Flags mean one thing everywhere
+
+A flag learned on one command is true on the next, or it is not there.
+
+| | |
+|---|---|
+| `--from <path>` | Read this instead of where the adapter says: `omh import`, `omh settings mcp import`. |
+| `--to <dir>` | Write here: `omh eject`. |
+| `--force` | *I have read the warning; do it anyway.* Only `omh s rm`, where the warning is about work nobody has reviewed. |
+| `--all` | Every one, not the one named: `omh use --all`, `omh s down --all`. |
+| `--dry-run` | Do none of it and show what would be done, or refuse — [above](#--dry-run). |
+| `--json` | The answer as JSON, or a refusal from a command that hands you a program and has none — [below](#what-every-command-prints). |
+
+`omh s commit --allow-conflicts` and `omh settings mcp import --replace` were
+both `--force` until 0.10, which made three meanings for one word. The old
+spellings still parse, unprinted, for one release.
+
 ### What every command prints
 
 Two audiences, one answer. Every command builds a value and renders it either
@@ -769,7 +786,7 @@ omh: s01 still has 3 conflict markers in its files:
   src/tap.rs:43: leftover conflict marker
   src/tap.rs:47: leftover conflict marker
 Resolve them first, or:
-  omh s01 commit --keep --force   commit them anyway
+  omh s01 commit --keep --allow-conflicts   commit them anyway
 ```
 
 Both ways of committing refuse, because both would land them: `-m` stages the
@@ -777,8 +794,10 @@ files as they are and `--keep` replants the agent's commits on top of them. A
 file the agent created and never added counts — that is the one `-m` would
 sweep up.
 
-`--force` is there because a conflict marker at the start of a line is not
-always a conflict. A test fixture holds them on purpose.
+`--allow-conflicts` is there because a conflict marker at the start of a line
+is not always a conflict. A test fixture holds them on purpose. It is not
+spelled `--force`, which on `rm` answers a question about unreviewed work —
+[flags mean one thing everywhere](#flags-mean-one-thing-everywhere).
 
 ### `omh sNN rm` — and what it refuses to take with it
 
@@ -1181,7 +1200,7 @@ omh settings edit [<capability> [name]]
 omh settings mcp ls
 omh settings mcp add <name> <cmd> [args…] [--env K=V]
 omh settings mcp rm <name>
-omh settings mcp import <harness> [--file <path>] [--force]
+omh settings mcp import <harness> [--from <path>] [--replace]
 ```
 
 ```console

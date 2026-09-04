@@ -2581,12 +2581,12 @@ mod tests {
             "and one is not `1 conflict markers`: {said}"
         );
         assert!(
-            said.contains("--force"),
+            said.contains("--allow-conflicts"),
             "and the way past is in the refusal: {said}"
         );
         assert!(
             cmd::harvest::may_commit("s01", &one, true).is_ok(),
-            "`--force` means it"
+            "`--allow-conflicts` means it"
         );
 
         // A whole-file conflict is one line per hunk. The refusal has to stay
@@ -6367,6 +6367,187 @@ because = "a fixture"
             "src/main.rs holds {prod} lines of production code, over a budget of \
              {BUDGET}. Move a command into `src/cmd/`, or raise the budget \
              deliberately and say why"
+        );
+    }
+
+    /// Every flag and positional omh accepts has a sentence in `--help`.
+    ///
+    /// Four did not — `--env`, `--file`, `--force` on the MCP import, and
+    /// `--layer` on `memory rm` — and `--help` printed a bare name for each.
+    /// The reader of `--help` is the person about to type the thing; a name
+    /// with nothing after it tells them only that it exists. Walked from the
+    /// parser so that a flag added without a doc comment fails here rather
+    /// than shipping.
+    #[test]
+    fn every_argument_omh_accepts_says_what_it_is_for() {
+        use clap::CommandFactory;
+        fn walk(cmd: &clap::Command, path: &str, silent: &mut Vec<String>) {
+            for arg in cmd.get_arguments() {
+                let id = arg.get_id().as_str();
+                if matches!(id, "help" | "version") {
+                    continue;
+                }
+                if arg.get_help().is_none() {
+                    silent.push(format!("{path} --{id}"));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                if sub.get_name() == "help" {
+                    continue;
+                }
+                walk(sub, &format!("{path} {}", sub.get_name()), silent);
+            }
+        }
+        let mut silent = Vec::new();
+        walk(&Cli::command(), "omh", &mut silent);
+        assert!(silent.is_empty(), "no help text: {silent:#?}");
+    }
+
+    /// The two global flags say what they do on **every** command, because
+    /// they are printed on every command.
+    ///
+    /// `--dry-run` said "Print the launch plan" on `omh why`, and `--session`
+    /// said "Reuse an existing session instead of creating a new one" on
+    /// `omh set` — a sentence about `omh new`, from before `new` was a verb.
+    /// Both are refused on most of the surface, and the help is where a
+    /// person finds that out.
+    #[test]
+    fn the_global_flags_describe_what_every_command_does_with_them() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let help_of = |id: &str| {
+            cmd.get_arguments()
+                .find(|a| a.get_id().as_str() == id)
+                .and_then(|a| a.get_help())
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| panic!("--{id} has no help"))
+        };
+        for (flag, stale) in [
+            ("dry_run", ["launch plan", "instead of running"]),
+            ("session", ["creating", "Reuse"]),
+        ] {
+            let help = help_of(flag);
+            for s in stale {
+                assert!(
+                    !help.contains(s),
+                    "--{flag} still says `{s}`, which describes one command: {help}"
+                );
+            }
+            assert!(
+                help.contains("command"),
+                "--{flag} is global, so its help says which commands honour it: {help}"
+            );
+        }
+    }
+
+    /// One spelling for "read this instead": `--from`. One for "write here":
+    /// `--to`.
+    ///
+    /// `omh import mcp <harness> --from` and `omh settings mcp import
+    /// <harness> --file` read the same adapter source, and a person who had
+    /// learned one was refused by the other. The old spelling stays as an
+    /// alias clap does not print, for one release.
+    #[test]
+    fn one_flag_names_a_path_everywhere() {
+        use clap::CommandFactory;
+        fn walk(cmd: &clap::Command, path: &str, seen: &mut Vec<(String, String)>) {
+            for arg in cmd.get_arguments() {
+                if let Some(long) = arg.get_long() {
+                    if matches!(long, "file" | "path" | "dir" | "from" | "to") {
+                        seen.push((path.to_string(), long.to_string()));
+                    }
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), seen);
+            }
+        }
+        let mut seen = Vec::new();
+        walk(&Cli::command(), "omh", &mut seen);
+        let odd: Vec<_> = seen
+            .iter()
+            .filter(|(_, long)| !matches!(long.as_str(), "from" | "to"))
+            .collect();
+        assert!(
+            odd.is_empty(),
+            "a path flag not spelled --from or --to: {odd:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(p, l)| p == "omh settings mcp import" && l == "from"),
+            "the MCP import reads --from like `omh import` does: {seen:?}"
+        );
+        let old = Cli::try_parse_from(cli_argv(&[
+            "settings", "mcp", "import", "claude", "--file", "x",
+        ]));
+        assert!(
+            old.is_ok(),
+            "the retired spelling still parses, as an alias: {:?}",
+            old.err()
+        );
+    }
+
+    /// `--force` means one thing: *I have read the warning; do it anyway*.
+    ///
+    /// It meant three. On `rm` it answered the question about unreviewed
+    /// work, which is that meaning. On `commit` it landed conflict markers,
+    /// and on the MCP import it overwrote a catalogue entry — neither of
+    /// which is a warning read, and a person who had typed `--force` on `rm`
+    /// a dozen times typed it on `commit` without reading either. Each of the
+    /// other two is now named for what it does, with the old spelling as an
+    /// unprinted alias for one release.
+    #[test]
+    fn force_means_i_have_read_the_warning() {
+        use clap::CommandFactory;
+        fn walk(cmd: &clap::Command, path: &str, forces: &mut Vec<String>) {
+            for arg in cmd.get_arguments() {
+                if arg.get_long() == Some("force") {
+                    forces.push(path.to_string());
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), forces);
+            }
+        }
+        let mut forces = Vec::new();
+        walk(&Cli::command(), "omh", &mut forces);
+        assert_eq!(
+            forces,
+            vec!["omh sessions rm".to_string()],
+            "--force is printed on the one command where it answers a warning"
+        );
+        for (line, field) in [
+            (
+                &["sessions", "commit", "--allow-conflicts"][..],
+                "allow-conflicts",
+            ),
+            (&["sessions", "commit", "--force"][..], "the alias"),
+            (
+                &["settings", "mcp", "import", "claude", "--replace"][..],
+                "replace",
+            ),
+            (
+                &["settings", "mcp", "import", "claude", "--force"][..],
+                "the alias",
+            ),
+        ] {
+            let parsed = Cli::try_parse_from(cli_argv(line));
+            assert!(
+                parsed.is_ok(),
+                "`{}` ({field}) parses: {:?}",
+                line.join(" "),
+                parsed.err()
+            );
+        }
+        let commit = Cli::try_parse_from(cli_argv(&["sessions", "commit", "--force"])).unwrap();
+        assert!(
+            matches!(
+                commit.cmd,
+                Cmd::Sessions {
+                    cmd: Some(SessionsCmd::Commit { force: true, .. })
+                }
+            ),
+            "the alias lands on the same field"
         );
     }
 }

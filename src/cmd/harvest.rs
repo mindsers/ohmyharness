@@ -573,7 +573,7 @@ pub(crate) fn may_commit(id: &str, unresolved: &[String], force: bool) -> Result
     anyhow::bail!(
         "{id} still has {n} conflict marker{s} in its files:\n  {lines}{more}\n\
          Resolve them first, or:\n  \
-         omh {id} commit --keep --force   commit them anyway",
+         omh {id} commit --keep --allow-conflicts   commit them anyway",
         n = unresolved.len(),
         s = if unresolved.len() == 1 { "" } else { "s" },
         lines = shown.join("\n  "),

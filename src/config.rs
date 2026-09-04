@@ -806,7 +806,7 @@ pub fn mcp_path(paths: &Paths) -> PathBuf {
 /// server just added — every other server, for every repo, gone with a success
 /// message. `mcp_import` is worse still: its "never clobber what you wrote by
 /// hand" guard is built on `all.get(&name)`, so an empty map classifies every
-/// incoming server as new and overwrites without `--force`.
+/// incoming server as new and overwrites without `--replace`.
 fn read_servers(path: &Path) -> Result<BTreeMap<String, Server>> {
     let Some(raw) = read_layer(path)? else {
         return Ok(BTreeMap::new());

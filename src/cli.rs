@@ -16,11 +16,13 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "omh", version, about, long_about = None)]
 pub(crate) struct Cli {
-    /// Print the launch plan instead of running it.
+    /// Show what this would do and do none of it. For the commands that can
+    /// say; the rest refuse the flag rather than guess.
     #[arg(long, global = true)]
     pub(crate) dry_run: bool,
 
-    /// Reuse an existing session instead of creating a new one.
+    /// The session to act on, for the commands that act on one. `omh sNN
+    /// <verb>` says the same thing.
     #[arg(long, short, global = true)]
     pub(crate) session: Option<String>,
 
@@ -416,6 +418,8 @@ pub(crate) enum McpCmd {
         /// Everything after the command, passed to it unchanged.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+        /// An environment variable the server runs with, as `KEY=VALUE`.
+        /// Repeat for several.
         #[arg(long = "env", value_parser = parse_env)]
         env: Vec<(String, String)>,
     },
@@ -428,9 +432,15 @@ pub(crate) enum McpCmd {
     Import {
         /// Which installed harness to read servers out of.
         harness: String,
-        #[arg(long)]
+        /// Read this file instead of where the adapter says the harness keeps
+        /// its servers. The same flag `omh import` takes; `--file` was its
+        /// name here until 0.10, and still parses.
+        #[arg(long = "from", alias = "file")]
         file: Option<std::path::PathBuf>,
-        #[arg(long)]
+        /// Overwrite a catalogue entry of the same name that differs. Without
+        /// it yours is kept and the difference reported. `--force` was its
+        /// name until 0.10, and still parses.
+        #[arg(long = "replace", alias = "force")]
         force: bool,
     },
 }
@@ -558,8 +568,11 @@ pub(crate) enum SessionsCmd {
         /// reword and drop by hand.
         #[arg(long, requires = "keep", conflicts_with = "message")]
         edit: bool,
-        /// Commit even with conflict markers still in the files.
-        #[arg(long)]
+        /// Commit even with conflict markers still in the files. Named for
+        /// what it does rather than `--force`, which on `rm` means *I have
+        /// read the warning* — a different thing to be sure of. `--force`
+        /// still parses here until 0.10.
+        #[arg(long = "allow-conflicts", alias = "force")]
         force: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
@@ -680,8 +693,10 @@ pub(crate) enum MemoryCmd {
     /// sandbox, where there is no repo to discover.
     #[command(hide = true)]
     Serve {
+        /// The team layer's directory, as mounted in the sandbox.
         #[arg(long)]
         team: std::path::PathBuf,
+        /// The local layer's directory, as mounted in the sandbox.
         #[arg(long)]
         local: std::path::PathBuf,
         /// The session this server serves. Defaults to `$OMH_SESSION`, which
@@ -705,6 +720,8 @@ pub(crate) enum MemoryCmd {
     Rm {
         /// Which note, as `omh memory lint` and the recall output name it.
         key: String,
+        /// `team` or `local`, when one key is in both layers. Without it a
+        /// key found twice is refused rather than guessed at.
         #[arg(long, value_parser = parse_note_layer)]
         layer: Option<memory::Layer>,
         /// Which file, when one key somehow reached two of them. Path
