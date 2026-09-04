@@ -623,11 +623,11 @@ pub(crate) fn must_know(running: image::Running, what: &str, doing: &str) -> Res
 
 /// Whether omh may delete work that exists nowhere else.
 ///
-/// **One value, not two booleans.** `may_remove` took `force: bool, terminal:
-/// bool` — adjacent, same type, meaning opposite things: one is *the user said
-/// delete it anyway*, the other *there is somebody at a keyboard*. Swapping
-/// them is type-correct, and the two mistakes it makes are the worst available
-/// here: prompting inside a script, or refusing a person standing right there.
+/// **One value, not two booleans.** A `force` flag and a "there is somebody at
+/// a keyboard" flag are adjacent, the same type, and mean opposite things.
+/// Swapping them is type-correct, and the two mistakes it makes are the worst
+/// available here: prompting inside a script, or refusing a person standing
+/// right there.
 ///
 /// Three states because there are three behaviours, so a call site reads as
 /// the decision rather than as two flags to combine.
@@ -646,15 +646,31 @@ pub(crate) enum Consent {
 ///
 /// A type rather than a `bool` because it travels beside `Interactive`, and
 /// two `bool`s next to each other is the hazard `Consent` exists to remove.
-/// Making them one value at `may_remove`'s boundary only moved the swap to the
-/// call site — measured: swapping the arguments to a `read(bool, bool)` still
-/// compiled. These cannot be transposed.
+///
+/// Naming the two positions is only half of it. Wrapping them at
+/// `may_remove`'s boundary moved the swap up to `rm`, which still took
+/// `force: bool, terminal: bool`; moving it to `rm` moved it up to the
+/// dispatch, where `Forced(x)` and `Interactive(y)` are both built from bools
+/// and so are still swappable by hand. What closes it is having nothing to
+/// swap: see `Interactive::of_stdin`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Forced(pub bool);
 
 /// There is somebody at a keyboard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Interactive(pub bool);
+
+impl Interactive {
+    /// The spelling every command uses. It takes no argument, so the flag
+    /// cannot arrive here and the terminal cannot arrive as `Forced` — the
+    /// transposition stops being expressible rather than being caught.
+    ///
+    /// The field stays constructible for tests, which need both answers
+    /// without a terminal to read them from.
+    pub(crate) fn of_stdin() -> Self {
+        Self(std::io::IsTerminal::is_terminal(&std::io::stdin()))
+    }
+}
 
 impl Consent {
     /// Combined here rather than at each call site, so "forced beats

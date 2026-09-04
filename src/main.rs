@@ -301,8 +301,14 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 cmd::session::rm(
                     &cwd,
                     id,
-                    *force,
-                    std::io::IsTerminal::is_terminal(&std::io::stdin()),
+                    // Wrapped where the two bools are born, so no frame
+                    // carries them side by side. Moving `Consent` to
+                    // `may_remove` only pushed the swap up to `rm`; this is
+                    // the boundary it was pushed to.
+                    cmd::harvest::Consent::read(
+                        cmd::harvest::Forced(*force),
+                        cmd::harvest::Interactive::of_stdin(),
+                    ),
                     ctx,
                 )
             }
@@ -2942,11 +2948,11 @@ mod tests {
             Consent::CannotAsk
         );
 
-        // **And the two arguments cannot be transposed.** Making the pair one
-        // value at `may_remove`'s boundary only moved the swap here —
-        // measured: swapping the arguments to a `read(bool, bool)` still
-        // compiled. `Forced(x), Interactive(y)` in the other order is a type
-        // error, which is the only way this stays fixed.
+        // **And the two arguments cannot be transposed.** `Forced(x),
+        // Interactive(y)` in the other order is a type error. That alone was
+        // not enough — the values reaching them were both `bool`, so the swap
+        // survived one frame up — which is why the dispatch builds the second
+        // with `Interactive::of_stdin()` and has no bool to misplace.
 
         // **And the three are distinct.** A shape that collapsed any two would
         // either prompt where it must not or refuse where it need not.

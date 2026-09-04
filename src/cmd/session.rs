@@ -1291,8 +1291,7 @@ pub(crate) fn resolved(paths: &Paths) -> Result<(base::Own, settings::RepoPolicy
 pub(crate) fn rm(
     cwd: &std::path::Path,
     id: &str,
-    force: bool,
-    terminal: bool,
+    consent: crate::cmd::harvest::Consent,
     ctx: &out::Ctx,
 ) -> Result<()> {
     session::validate_id(id)?;
@@ -1326,10 +1325,7 @@ pub(crate) fn rm(
         &paths,
         &session,
         snapshots,
-        crate::cmd::harvest::Consent::read(
-            crate::cmd::harvest::Forced(force),
-            crate::cmd::harvest::Interactive(terminal),
-        ),
+        consent,
         &mut std::io::stdin().lock(),
         &mut std::io::stderr(),
     )? {
