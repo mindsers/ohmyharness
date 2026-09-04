@@ -133,11 +133,27 @@ pub fn live_from(session: &str, probe: &crate::image::Probe) -> Live {
     }
 }
 
+/// When a session was last used: `Ok(None)` if it has never been recorded.
+///
+/// Split from `last_used` because a caller deciding whether it *could look*
+/// needs the difference the `Option` throws away. `NotFound` is the ordinary
+/// "this run has no marker"; anything else is omh being unable to tell, and for
+/// as long as the two were one `None` a marker omh was refused read as though
+/// the run had never been used, which is the false-clean report one level up.
+pub fn recorded_use(run_dir: &Path, session: &str) -> std::io::Result<Option<SystemTime>> {
+    match std::fs::metadata(marker(run_dir, session)) {
+        Ok(m) => m.modified().map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// When a session was last used, if it has ever been recorded.
+///
+/// The lossy form, for the callers that reap: a marker omh cannot read is a
+/// session it must not reap, which is what `None` already means there.
 pub fn last_used(run_dir: &Path, session: &str) -> Option<SystemTime> {
-    std::fs::metadata(marker(run_dir, session))
-        .ok()
-        .and_then(|m| m.modified().ok())
+    recorded_use(run_dir, session).ok().flatten()
 }
 
 #[cfg(test)]
