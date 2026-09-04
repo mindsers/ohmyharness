@@ -208,6 +208,29 @@ pub(crate) fn the_one_session(
 pub(crate) enum Cmd {
     /// Set this repo up. Decides everything; asks nothing.
     Init,
+    /// Remove what omh has left behind and nothing claims any more.
+    ///
+    /// Machine-wide, because an orphan outlives the checkout that made it: a
+    /// per-checkout view structurally cannot see the ones that matter.
+    ///
+    /// It removes only what it can prove is safe — the owning checkout is
+    /// recorded and verified gone, and nothing there holds work. Everything
+    /// else is reported and left, with the reason.
+    Prune {
+        /// Also remove what omh cannot vouch for, after naming each one and
+        /// asking.
+        ///
+        /// Two different dangers under one flag: things omh could not
+        /// attribute at all, and things it attributed to a gone checkout that
+        /// still hold work nobody has read. The prompt tells them apart, item
+        /// by item, so the discriminating happens where you can see it.
+        ///
+        /// **No `--force`, deliberately.** Off a terminal this refuses:
+        /// nothing about running in a script makes destroying unreviewed
+        /// commits safer.
+        #[arg(long)]
+        dangerously_include_unsafe: bool,
+    },
     /// Verify a harness actually sees the profile, inside a real sandbox.
     #[command(visible_alias = "d")]
     Doctor {
@@ -876,7 +899,10 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
         // shape of command that has to answer this rather than refuse it.
         | Cmd::Eject { .. }
         | Cmd::New { .. }
-        | Cmd::Doctor { .. } => true,
+        | Cmd::Doctor { .. }
+        // It computes the whole plan before touching anything, so the preview
+        // is the same value the real run acts on rather than a guess about it.
+        | Cmd::Prune { .. } => true,
         Cmd::Settings { cmd } => !matches!(cmd, Some(SettingsCmd::Edit { .. })),
         Cmd::Memory { cmd } => matches!(cmd, Some(MemoryCmd::Rm { .. })),
         Cmd::Sessions { cmd } => matches!(cmd, Some(SessionsCmd::Resume { .. })),
@@ -911,6 +937,9 @@ pub(crate) fn consumes_session(cmd: &Cmd) -> bool {
         // otherwise in the comment above `Cmd::Graph`.
         Cmd::Graph { .. }
         | Cmd::Init
+        // Machine-wide by nature: it is about checkouts that are gone, so a
+        // session prefix would be a scope it cannot honour.
+        | Cmd::Prune { .. }
         | Cmd::Doctor { .. }
         | Cmd::Why { .. }
         | Cmd::Auth { .. }

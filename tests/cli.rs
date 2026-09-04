@@ -6879,6 +6879,125 @@ fn a_partly_removed_session_says_the_branch_that_survived_it() {
     );
 }
 
+/// `omh prune` removes exactly what nothing claims, and accounts for the rest.
+///
+/// The fixture holds one of each answer: a checkout that is gone, one still
+/// here, one omh has no record of, and a directory holding something omh
+/// cannot vouch for.
+#[test]
+#[cfg(unix)]
+fn prune_removes_the_gone_one_and_accounts_for_the_rest() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    assert!(sb.omh(&["init"]).status.success(), "init must run");
+
+    let omh = sb.home.join(".omh");
+    // A checkout that existed and does not any more: recorded, then deleted.
+    let gone = sb.home.join("gone-checkout");
+    std::fs::create_dir_all(&gone).unwrap();
+    let gone_id = format!(
+        "gone-checkout-{}",
+        // Recorded by hand, which is what a real `omh init` in that checkout
+        // would have left behind before it was deleted.
+        "00000000"
+    );
+    std::fs::create_dir_all(omh.join("checkouts")).unwrap();
+    std::fs::write(
+        omh.join("checkouts").join(&gone_id),
+        format!("{}\n", gone.display()),
+    )
+    .unwrap();
+    for dir in ["run", "scratch", "keys"] {
+        std::fs::create_dir_all(omh.join(dir).join(&gone_id)).unwrap();
+    }
+    // Holds something, so it is not omh's to remove without asking.
+    std::fs::create_dir_all(omh.join("shadow").join(&gone_id).join("s01.git")).unwrap();
+    std::fs::remove_dir_all(&gone).unwrap();
+
+    // An aborted operation's remnant: owned by nobody by construction.
+    let remnant = omh.join("run").join("tmp.abcdef");
+    std::fs::create_dir_all(&remnant).unwrap();
+
+    // An id omh has never recorded.
+    std::fs::create_dir_all(omh.join("notes").join("stranger-1a2b3c4d")).unwrap();
+
+    let out = sb.omh(&["prune"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "a clean prune succeeds: {said}");
+
+    // What went: the gone checkout's derived state, and the remnant.
+    for dir in ["run", "scratch", "keys"] {
+        assert!(
+            !omh.join(dir).join(&gone_id).exists(),
+            "{dir} for a checkout that is gone must go: {said}"
+        );
+    }
+    assert!(
+        !remnant.exists(),
+        "an aborted remnant belongs to nobody: {said}"
+    );
+
+    // What must not: something omh could not attribute, and something holding
+    // work — neither is reachable without the flag that says so.
+    assert!(
+        omh.join("notes").join("stranger-1a2b3c4d").exists(),
+        "an id omh has no record of is never removed: {said}"
+    );
+    assert!(
+        omh.join("shadow").join(&gone_id).join("s01.git").exists(),
+        "a sandbox repository holding commits is never removed unasked: {said}"
+    );
+
+    // And every bucket is named, including the ones that are empty.
+    for phrase in [
+        "removed",
+        "belong to checkouts still on this machine",
+        "omh could not attribute",
+        "omh cannot vouch for",
+        "every class was listed",
+    ] {
+        assert!(
+            said.contains(phrase),
+            "the report must say `{phrase}`: {said}"
+        );
+    }
+}
+
+/// Off a terminal, the dangerous flag refuses rather than proceeding.
+///
+/// There is no `--force` here on purpose: nothing about running in a script
+/// makes destroying unreviewed commits safer.
+#[test]
+#[cfg(unix)]
+fn prune_refuses_to_remove_what_it_cannot_vouch_for_with_nobody_to_ask() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    assert!(sb.omh(&["init"]).status.success());
+
+    let stranger = sb.home.join(".omh/notes/stranger-1a2b3c4d");
+    std::fs::create_dir_all(&stranger).unwrap();
+
+    let out = sb.omh(&["prune", "--dangerously-include-unsafe"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "it refuses: {said}");
+    assert!(
+        stranger.exists(),
+        "and nothing omh could not vouch for was removed: {said}"
+    );
+}
+
 /// `omh init` records where this checkout is, so what it leaves behind can be
 /// traced back to it.
 ///

@@ -279,6 +279,16 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             }
         }
         Cmd::Eject { harness, to } => cmd::eject::eject(&cwd, harness, to, cli.dry_run, ctx),
+        Cmd::Prune {
+            dangerously_include_unsafe,
+        } => cmd::prune::prune_cmd(
+            &cwd,
+            cli.dry_run,
+            *dangerously_include_unsafe,
+            ctx,
+            &mut std::io::stdin().lock(),
+            &mut std::io::stderr(),
+        ),
         Cmd::Doctor { harness } => {
             cmd::inspect::doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx)
         }
@@ -2179,6 +2189,7 @@ mod tests {
             // this scan is for.
             ("src/cmd/inspect.rs", 5),
             ("src/cmd/memory.rs", 1),
+            ("src/cmd/prune.rs", 1),
             ("src/cmd/session.rs", 11),
             ("src/cmd/settings.rs", 10),
             ("src/config.rs", 3),

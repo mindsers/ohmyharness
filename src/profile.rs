@@ -124,7 +124,7 @@ pub fn attribution_of(root: &Path, repo_id: &str) -> Attribution {
                     // Worked out once. A checkout that later disappears is
                     // still attributable afterwards, which is exactly when it
                     // matters — the pointer goes when the worktree does.
-                    let _ = record(root, repo_id, path);
+                    let _ = remember(root, repo_id, path);
                 }
                 Ok(found)
             }
@@ -170,7 +170,7 @@ fn from_the_worktrees(root: &Path, repo_id: &str) -> Result<Option<PathBuf>, Str
 
 /// Record a mapping worked out from evidence, under an id that is not
 /// necessarily this process's own checkout.
-fn record(root: &Path, repo_id: &str, path: &Path) -> std::io::Result<()> {
+pub fn remember(root: &Path, repo_id: &str, path: &Path) -> std::io::Result<()> {
     let dir = root.join("checkouts");
     std::fs::create_dir_all(&dir)?;
     let tmp = dir.join(format!(".{repo_id}.tmp"));
@@ -379,7 +379,7 @@ impl Paths {
         // resolves to somewhere else, and this value decides what gets
         // removed. `recorded_checkout` refuses an empty one for the same
         // reason.
-        record(&self.root, &self.repo_id(), &settled(&self.repo))
+        remember(&self.root, &self.repo_id(), &settled(&self.repo))
     }
 
     pub fn network(&self) -> String {
