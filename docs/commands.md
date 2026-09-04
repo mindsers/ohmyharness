@@ -933,8 +933,14 @@ your branch.
 
 - **A carried file reached a commit** — by `git add -f`, copied under another
   name, pasted into source, or written into a message. omh knows the bytes it
-  carried in, so it can tell; it will not rewrite your history to hide a secret.
-  Drop the commit in the sandbox and harvest again.
+  carried in, so it can tell: every line of the file, and the value on it —
+  what follows the first `=` or `:`, quotes off — when that value is twelve
+  characters or more, holds no whitespace, and is not a number or a word every
+  configuration file has (`true`, `localhost`, `development`). A shorter or
+  commoner value is not searched for, so `PORT=8080` does not refuse every
+  harvest, and a secret that short is not one this scan can protect. It will
+  not rewrite your history to hide a secret. Drop the commit in the sandbox and
+  harvest again.
 - **The sandbox's repository is mid-rebase or mid-merge, detached, or has commits
   no branch there can reach.** The detached case was measured leaving work
   behind while reporting success; the other two are the same shape, argued

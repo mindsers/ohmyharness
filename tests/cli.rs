@@ -443,6 +443,34 @@ impl Sandbox {
         git(&["commit", "-q", "--no-verify", "-m", "the agent's own work"]);
     }
 
+    /// One more commit in the sandbox repository `sandbox_repo_with_unkept_work`
+    /// built: `body` at `file`, with `subject`.
+    fn commit_in_the_sandbox_repo(
+        &self,
+        id: &str,
+        worktree: &std::path::Path,
+        file: &str,
+        body: &str,
+        subject: &str,
+    ) {
+        let gitdir = self.keyed("shadow").join(format!("{id}.git"));
+        std::fs::write(worktree.join(file), body).unwrap();
+        for args in [
+            vec!["add", "-A", "."],
+            vec!["commit", "-q", "--no-verify", "-m", subject],
+        ] {
+            let out = Command::new("git")
+                .arg("--git-dir")
+                .arg(&gitdir)
+                .arg("--work-tree")
+                .arg(worktree)
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        }
+    }
+
     /// Where a branch points, for asserting that it did not move.
     fn head_of_branch(&self, branch: &str) -> String {
         let out = Command::new("git")
@@ -9180,5 +9208,45 @@ fn sync_removes_a_file_trunk_deleted_and_the_session_stops_claiming_it() {
     assert!(
         !said.contains("doomed.rs"),
         "and the session no longer claims it as its own change: {said}"
+    );
+}
+
+/// `commit --keep` refuses a commit holding the **value** of a carried secret,
+/// end to end: the setting that carries the file, the file in the checkout,
+/// the token alone in the agent's source.
+#[test]
+fn commit_keep_refuses_a_secret_value_pasted_into_source() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    assert!(sb.omh(&["set", "carry_in", "[\".env\"]"]).status.success());
+    // In the checkout only, which is where omh reads the bytes it carried.
+    // Not in the worktree: `sandbox_repo_with_unkept_work` runs `add -A`, and
+    // a `.env` there reaches the commit as a *path*, which the path check
+    // refuses on its own — this test then passed with the value rule deleted.
+    std::fs::write(sb.repo.join(".env"), "API_TOKEN=ghp_abc123def456\n").unwrap();
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    sb.commit_in_the_sandbox_repo(
+        "s01",
+        &worktree,
+        "client.rs",
+        "const TOKEN: &str = \"ghp_abc123def456\";\n",
+        "Hardcode the token for now",
+    );
+    let before = sb.head_of_branch("omh/s01");
+
+    let out = sb.omh(&["s01", "commit", "--keep"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "the token alone is the secret: {err}"
+    );
+    assert!(
+        err.contains("carried") && err.contains(".env"),
+        "and the refusal says which carried file it came from: {err}"
+    );
+    assert_eq!(
+        sb.head_of_branch("omh/s01"),
+        before,
+        "and the branch did not move"
     );
 }

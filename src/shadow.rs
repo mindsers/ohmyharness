@@ -1821,11 +1821,25 @@ impl Shadow {
             let (found, could_not_read) = Self::needles(&repo.join(rel), rel)?;
             unscanned.extend(could_not_read);
             for needle in found {
+                // One hit is the answer; `--max-count=1` stops git at it. The
+                // value rule doubled the needles, and each is a full walk of
+                // the range otherwise.
                 for (how, args) in [
-                    ("contains", vec!["log", "--oneline", "-S", &needle, range]),
+                    (
+                        "contains",
+                        vec!["log", "--oneline", "--max-count=1", "-S", &needle, range],
+                    ),
                     (
                         "mentions",
-                        vec!["log", "--oneline", "-F", "--grep", &needle, range],
+                        vec![
+                            "log",
+                            "--oneline",
+                            "--max-count=1",
+                            "-F",
+                            "--grep",
+                            &needle,
+                            range,
+                        ],
                     ),
                 ] {
                     let hit = git_in(repo, &args)?;
@@ -1870,6 +1884,76 @@ impl Shadow {
     /// `named` is how the user's `carry_in` entry spells this path, extended
     /// per directory level, because a warning that says `certs/` does not tell
     /// anybody which of eight files went unread.
+    /// What one line of a carried file gives the scan to search for: the
+    /// line, and the **value** on it.
+    ///
+    /// The line alone was the rule until 2026.09, and it caught `git add -f`,
+    /// a copy under another name and a whole line pasted into source — and
+    /// let the token through, because nobody pastes `API_TOKEN=`, they paste
+    /// what follows it. So the value is a needle of its own: what comes after
+    /// the first `=`, or failing that the first `:`, with `export ` off the
+    /// front, one pair of quotes off the value and a trailing `,` or `;` off
+    /// the end — the shapes of a dotenv, a shell export, a YAML line and a
+    /// JSON line.
+    ///
+    /// **Narrow on purpose.** A value is searched for only when it is worth
+    /// searching for: twelve characters or more, no whitespace, not a number,
+    /// and not one of the words every configuration file holds — `true`,
+    /// `localhost`. `NODE_ENV=development` is carried in `.env` files
+    /// everywhere and `development` is in every codebase; a scan that
+    /// refused on it would refuse every harvest, and a refusal that fires
+    /// always is one people learn to type past. The floor of twelve is the
+    /// line rule's, kept: shorter values are guessable and the scan is for
+    /// secrets, not for every string.
+    fn needles_of_line(line: &str) -> Vec<String> {
+        let line = line.trim();
+        if line.len() < 12 || line.starts_with('#') || line.starts_with("//") {
+            return Vec::new();
+        }
+        let mut out = vec![line.to_string()];
+        if let Some(value) = Self::value_of(line) {
+            if value != line {
+                out.push(value.to_string());
+            }
+        }
+        out
+    }
+
+    /// The value on a `KEY=value` or `key: value` line, when it is one worth
+    /// searching for. See `needles_of_line` for what that means.
+    fn value_of(line: &str) -> Option<&str> {
+        const NOT_SECRETS: [&str; 10] = [
+            "true",
+            "false",
+            "null",
+            "none",
+            "yes",
+            "no",
+            "localhost",
+            "undefined",
+            "development",
+            "production",
+        ];
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let (key, value) = line.split_once('=').or_else(|| line.split_once(':'))?;
+        let key = key.trim();
+        if key.is_empty() || key.contains(char::is_whitespace) {
+            return None;
+        }
+        let value = value.trim().trim_end_matches([',', ';']).trim();
+        let value = ['"', '\'']
+            .into_iter()
+            .find_map(|q| value.strip_prefix(q).and_then(|v| v.strip_suffix(q)))
+            .unwrap_or(value);
+        let worth = value.len() >= 12
+            && !value.contains(char::is_whitespace)
+            && !value
+                .chars()
+                .all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+            && !NOT_SECRETS.contains(&value.to_ascii_lowercase().as_str());
+        worth.then_some(value)
+    }
+
     fn needles(at: &Path, named: &str) -> Result<(Vec<String>, Vec<Unscanned>)> {
         if at.is_dir() {
             let mut out = Vec::new();
@@ -1936,12 +2020,12 @@ impl Shadow {
                 ))
             }
         };
-        let found: Vec<String> = body
-            .lines()
-            .map(str::trim)
-            .filter(|l| l.len() >= 12 && !l.starts_with('#') && !l.starts_with("//"))
-            .map(str::to_string)
-            .collect();
+        let mut found: Vec<String> = Vec::new();
+        for needle in body.lines().flat_map(Self::needles_of_line) {
+            if !found.contains(&needle) {
+                found.push(needle);
+            }
+        }
         // An *empty* file is not a gap. There is no content in it to have been
         // copied anywhere, so nothing went unchecked and reporting it would be
         // a false positive on the one warning that has to stay worth reading.
@@ -4717,6 +4801,150 @@ mod tests {
                 "{name}: and the branch must be untouched"
             );
         }
+    }
+
+    /// The **value** of a carried secret is refused on its own, not only the
+    /// line it came from.
+    ///
+    /// `a_harvest_refuses_a_commit_holding_something_you_carried_in` plants
+    /// the whole line — `API_TOKEN=ghp_…` — and passed while the scan only
+    /// knew whole lines. Nobody pastes the whole line: they paste the token.
+    /// Reproduced 2026-09-04 with `const K = "ghp_abc123def456";` on a
+    /// carried `.env`, landed by `--keep` without a word. Three spellings a
+    /// carried file is written in, so the value is found after `=`, after
+    /// `export KEY=`, and after `key:`.
+    #[test]
+    fn a_harvest_refuses_a_commit_holding_only_the_value_of_a_carried_secret() {
+        for (spelling, line) in [
+            ("dotenv", "API_TOKEN=ghp_abc123def456"),
+            (
+                "shell export, quoted",
+                "export API_TOKEN=\"ghp_abc123def456\"",
+            ),
+            ("yaml", "api_token: ghp_abc123def456"),
+            (
+                "json, trailing comma",
+                "\"api_token\": \"ghp_abc123def456\",",
+            ),
+        ] {
+            let (d, wt, shadow_dir) = fixture();
+            let checkout = d.path().join("checkout");
+            let s = Shadow::new(&shadow_dir, "s01");
+            s.ensure(&wt, &[".env".to_string()]).unwrap();
+            std::fs::write(checkout.join(".env"), format!("{line}\n")).unwrap();
+            std::fs::write(wt.join(".env"), format!("{line}\n")).unwrap();
+
+            // Only the value, in a shape the line never had.
+            std::fs::write(wt.join("k.rs"), "const K: &str = \"ghp_abc123def456\";\n").unwrap();
+            git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+            git(&s.gitdir, &wt, &["commit", "-qm", "Save config"]).unwrap();
+
+            let err = s
+                .harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], Keep::All)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("carried"),
+                "{spelling}: the value alone is the secret, and it must be refused: {err}"
+            );
+            assert!(
+                git_in(&checkout, &["log", "--oneline", "main..omh/s01"])
+                    .unwrap()
+                    .trim()
+                    .is_empty(),
+                "{spelling}: and the branch must be untouched"
+            );
+        }
+    }
+
+    /// What the value rule must **not** do: read every carried setting as a
+    /// secret. `DEBUG=true` and `PORT=8080` are carried in `.env` files
+    /// everywhere, and `true` and `8080` are in every codebase; a scan that
+    /// refused on them would refuse every harvest, and a refusal that fires
+    /// always is one people learn to route around.
+    ///
+    /// Green before the value rule and green after — it is the constraint the
+    /// rule is designed under, kept so that widening it later has to argue
+    /// with this.
+    #[test]
+    fn an_ordinary_configuration_value_is_not_treated_as_a_secret() {
+        let (d, wt, shadow_dir) = fixture();
+        let checkout = d.path().join("checkout");
+        let s = Shadow::new(&shadow_dir, "s01");
+        s.ensure(&wt, &[".env".to_string()]).unwrap();
+        let env = "DEBUG=true\nPORT=8080\nNODE_ENV=development\nHOST=localhost\nRETRIES=3\n";
+        std::fs::write(checkout.join(".env"), env).unwrap();
+        std::fs::write(wt.join(".env"), env).unwrap();
+
+        std::fs::write(
+            wt.join("server.rs"),
+            "const DEBUG: bool = true;\nconst PORT: u16 = 8080;\nconst ENV: &str = \"development\";\nconst HOST: &str = \"localhost\";\n",
+        )
+        .unwrap();
+        git(&s.gitdir, &wt, &["add", "-A", "."]).unwrap();
+        git(
+            &s.gitdir,
+            &wt,
+            &["commit", "-qm", "wire the server on 8080"],
+        )
+        .unwrap();
+
+        s.harvest(&checkout, &wt, "omh/s01", &[".env".to_string()], Keep::All)
+            .expect("ordinary configuration values are not secrets");
+    }
+
+    /// The value rule, as a table: where a value is worth searching for and
+    /// where it is not.
+    #[test]
+    fn a_value_needle_is_derived_only_where_a_value_is_worth_searching_for() {
+        let value = |line: &str| -> Vec<String> {
+            Shadow::needles_of_line(line)
+                .into_iter()
+                .filter(|n| n != line.trim())
+                .collect()
+        };
+        // Found.
+        assert_eq!(
+            value("API_TOKEN=ghp_abc123def456"),
+            vec!["ghp_abc123def456"]
+        );
+        assert_eq!(
+            value("export TOKEN='ghp_abc123def456'"),
+            vec!["ghp_abc123def456"]
+        );
+        assert_eq!(value("token: ghp_abc123def456"), vec!["ghp_abc123def456"]);
+        assert_eq!(
+            value("\"token\": \"ghp_abc123def456\","),
+            vec!["ghp_abc123def456"]
+        );
+        assert_eq!(
+            value("DATABASE_URL=postgres://u:p@h/db"),
+            vec!["postgres://u:p@h/db"],
+            "a URL with credentials is a secret whatever the key says"
+        );
+        // Not found, each for a reason.
+        for (line, why) in [
+            ("DEBUG=true", "a boolean"),
+            ("PORT=8080", "a number"),
+            ("NODE_ENV=development", "a word too common to search for"),
+            ("HOST=localhost", "on the skip list"),
+            ("TOKEN=short", "under twelve characters"),
+            (
+                "TOKEN=has a space in it",
+                "a value with whitespace is a sentence",
+            ),
+            ("# API_TOKEN=ghp_abc123def456", "a comment"),
+            ("just a line with no separator at all", "no key"),
+            ("=ghp_abc123def456", "no key before the separator"),
+        ] {
+            assert!(
+                value(line).is_empty(),
+                "`{line}` yields no value needle: {why}"
+            );
+        }
+        // The whole line is still a needle where it was before.
+        assert!(Shadow::needles_of_line("API_TOKEN=ghp_abc123def456")
+            .contains(&"API_TOKEN=ghp_abc123def456".to_string()));
     }
 
     /// A secret is matched as the bytes it is, not as a pattern.
