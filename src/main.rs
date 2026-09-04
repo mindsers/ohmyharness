@@ -1603,7 +1603,7 @@ mod tests {
             ("accounts.md", 4),
             ("adapters.md", 1),
             ("code-graph.md", 1),
-            ("commands.md", 133),
+            ("commands.md", 136),
             ("configuration.md", 44),
             ("decisions.md", 1),
             ("editors.md", 4),

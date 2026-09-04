@@ -310,8 +310,22 @@ ones.
 
 So after a migration `omh-cache-<basename>`, `omh-<basename>` and any stopped
 `omh-<basename>-sNN` are orphaned and unmentioned. They cost disk and a name,
-not correctness, and `docker volume ls | grep omh-cache-` finds them. Recorded
-rather than fixed, because the honest version of this page is what it is for.
+not correctness.
+
+*(Fixed in 0.10.0.)* `omh init` records the checkout's path beside the id
+everything else is keyed by, which is the half that was missing: the id is a
+one-way digest, so omh could see these existed and never whose they were.
+`omh prune` acts on it, machine-wide, across volumes, containers, networks, the
+per-checkout directories and the `tmp.*` remnants of operations that did not
+finish — removing only what it can prove belongs to a checkout that is gone.
+
+**What it does not close.** Ids created before 0.8.0 carry no path digest, so
+there is nothing to compare and they stay unattributable unless a worktree's
+`.git` pointer still names their checkout. On a machine with history that is
+most of them, and `prune` says so rather than guessing. Nor are images pruned:
+an image is content-addressed and shared, so the checkout that built it being
+gone says nothing about who is running it — that needs the in-use check
+`image::superseded` already implements, and it has not been wired up.
 
 ## Operational
 

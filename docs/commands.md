@@ -981,6 +981,83 @@ it set out to do. A step it never reached, because there was no usable
 container runtime or because the daemon would not answer, is named separately
 rather than counted as done.
 
+## `omh prune`
+
+```
+omh prune                                    remove what nothing claims any more
+omh --dry-run prune                          the same report, having removed nothing
+omh prune --dangerously-include-unsafe       and what omh cannot vouch for, after asking
+```
+
+omh creates things that outlive the checkout that made them: a cache volume, a
+container, a network, the per-checkout state under `~/.omh`, and the `tmp.*`
+remnants of operations that did not finish. Every one is keyed by a digest of
+the checkout's absolute path — which is **one-way**, so until omh started
+recording that path it could see these existed and never whose they were.
+
+`prune` is machine-wide, because an orphan outlives the checkout that made it:
+a per-checkout view structurally cannot see the ones that matter.
+
+```console
+$ omh prune
+removed 4 things
+  directory  ~/.omh/run/web-deadbeef
+  leftover   ~/.omh/run/tmp.9f3a2b
+  directory  ~/.omh/scratch/web-deadbeef
+  directory  ~/.omh/keys/web-deadbeef
+left 502 things
+  6    belong to checkouts still on this machine
+  494  omh could not attribute
+         494 of them — omh has no record of which checkout this belongs to — it predates the record, or was never set up by this omh
+           e.g. omh-cache-days-we-kept
+           e.g. omh-cache-ingest-e2e
+  2    omh cannot vouch for
+         ~/.omh/shadow/web-deadbeef — holds 1 thing omh cannot vouch for (s01.git)
+         ~/.omh/notes/web-deadbeef — holds 1 thing omh cannot vouch for (local)
+  those need `omh prune --dangerously-include-unsafe`, which names each one and asks first
+unread nothing — every class was listed
+```
+
+**Every bucket is printed every time, including the empty ones.** A report that
+lists only what it found reads as an inventory; one that also says *nothing omh
+could not attribute* is telling you it looked. The last line is the same rule:
+a class omh failed to enumerate makes every count above it a floor, and you
+cannot tell that from a small number.
+
+**It removes only what it can prove is nobody's.** The owning checkout has to
+be recorded and verified gone, and nothing there may hold work. There is no
+`--yes`: a confirmation over a set that is safe by construction is ceremony,
+and ceremony is what teaches people to confirm without reading — so that when
+the question that matters arrives, it gets the same reflex.
+
+### What it will not touch
+
+**Anything omh could not attribute.** On a machine with history this is most of
+them, and that is the honest answer rather than a disappointing one: ids from
+before 0.8.0 carry no path digest at all, so there is nothing to compare. omh
+recovers what it can from evidence it already wrote — a worktree's own `.git`
+pointer, and the checkout an image was built for — and says so when it cannot.
+
+**Anything holding work.** A sandbox repository, a worktree, or a note store
+that still has something in it is left alone even when its checkout is gone.
+Notes are in that list on purpose: a note is something a person wrote, not
+state omh derived, and orphaned is not the same as worthless.
+
+**Images.** They are content-addressed and shared — the same `omh/claude:<hash>`
+serves every checkout whose base resolves to it, and the label recording which
+checkout built it names only whoever got there first. Removing one because that
+checkout is gone would take the image other checkouts are running. omh uses
+those labels to *attribute* other things and removes no images at all.
+
+### `--dangerously-include-unsafe`
+
+Reaches the two buckets above. It names every item with its own reason and asks
+once, so what you are authorising is in front of you at the moment you
+authorise it.
+
+Off a terminal it refuses. There is no `--force` here and there should not be:
+nothing about running in a script makes destroying unreviewed commits safer.
+
 ## `omh set` · `omh unset`
 
 Change a setting, or switch one of omh's features. **Which file it lands in

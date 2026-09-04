@@ -253,6 +253,26 @@ Worktree registration and the directory on disk disagreed. omh prunes before
 adding and removes the directory outright when git will not, so this should no
 longer reach you.
 
+### omh is using more disk than I expected
+
+`omh doctor`'s **leftovers** row is the inventory, and `omh prune` is what acts
+on it. Between them they cover the six keyed things omh writes: cache volumes,
+containers, networks, the per-checkout directories under `~/.omh`, and the
+`tmp.*` remnants of operations that did not finish.
+
+`omh --dry-run prune` shows what would go without removing anything.
+
+Expect the first run on an established machine to report far more **left** than
+removed, and to say `omh could not attribute` about most of it. That is not the
+command failing. Until 0.9.0 omh keyed a checkout's state by a one-way digest
+of its path and recorded the path nowhere, so for anything created before that
+there is nothing to compare against. omh recovers what it can from evidence it
+already wrote — a worktree's `.git` pointer, an image's build label — and
+refuses to guess about the rest.
+
+The rest is not stuck. `omh prune --dangerously-include-unsafe` names every one
+of them with its reason and asks before removing any.
+
 ### `sNN is partly removed — its worktree is still there`
 
 `rm` asks the disk whether the worktree actually went rather than trusting

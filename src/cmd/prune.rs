@@ -22,6 +22,10 @@ pub enum Class {
     Volume,
     Container,
     Network,
+    /// Not produced yet, and deliberately. See `images`: an image is shared
+    /// across checkouts, so a gone checkout is not grounds for removing one —
+    /// that needs `image::superseded`'s in-use check.
+    #[allow(dead_code)]
     Image,
     /// A directory under `~/.omh` keyed by `repo_id`.
     State,
@@ -232,7 +236,7 @@ pub fn inventory(
                 },
                 &mut items,
             );
-            images(root, b, &mut blind, &mut items);
+            images(root, b, &mut blind);
             list(
                 b,
                 b.network_args(),
@@ -254,18 +258,26 @@ pub fn inventory(
     (items, blind)
 }
 
-/// Images that record the checkout they were built for.
+/// Harvest checkout paths from image labels. **Images are not pruned here.**
 ///
-/// Keyed by content hash rather than `repo_id`, so the usual route does not
-/// reach them. Only stack images carry `omh.repo`; a base or harness image is
-/// shared across checkouts and belongs to no single one, which is why omh does
-/// not claim it belongs to any.
-fn images(
-    root: &std::path::Path,
-    backend: &dyn crate::runtime::Runtime,
-    blind: &mut Vec<String>,
-    items: &mut Vec<Item>,
-) {
+/// `omh.repo` records the checkout an image was *built for*, and that is a
+/// backfill source worth having: recording it attributes that checkout's
+/// volumes, containers, networks and directories, so one label pays for all of
+/// them. Measured on one machine, it moved ten artifacts out of "could not
+/// attribute".
+///
+/// **It is not grounds for removing the image.** An image is content-addressed
+/// and shared: the same `omh/claude:<hash>` serves every checkout whose base
+/// resolves to it, and the label names only whoever built it first. A dry run
+/// while capturing the docs put `omh/claude:8eae0d5c1511fa89` — the image this
+/// machine was actively running — in the remove set, because the tmp checkout
+/// that first built it had been deleted. That is the mistake
+/// `image::superseded` already refuses in its own doc: *anything a container
+/// references, however old, because that is a session someone is still using*.
+///
+/// Pruning images needs the in-use check that function does, not this label.
+/// Until that lands, omh does not remove images at all.
+fn images(root: &std::path::Path, backend: &dyn crate::runtime::Runtime, blind: &mut Vec<String>) {
     let Some(args) = backend.image_args() else {
         blind.push("omh has not measured how this runtime lists images".into());
         return;
@@ -323,13 +335,7 @@ fn images(
                     // every volume, container, network and directory keyed by
                     // the same checkout — one label pays for all of them.
                     let path = std::path::Path::new(repo);
-                    let id = crate::profile::id_for(path);
-                    let _ = crate::profile::remember(root, &id, path);
-                    items.push(Item {
-                        class: Class::Image,
-                        name: tag.to_string(),
-                        id: Some(id),
-                    });
+                    let _ = crate::profile::remember(root, &crate::profile::id_for(path), path);
                 }
             }
         }
