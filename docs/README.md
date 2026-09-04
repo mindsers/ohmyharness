@@ -3,13 +3,18 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.8.0`. This release closes the two failures that were
-silent: two checkouts with the same directory name no longer share sessions
-([risks](design/risks.md) 8d), and the carried-file scan says which files it
-could not read instead of reporting a clean harvest either way (4d). It adds
-[`omh eject`](commands.md#omh-eject-harness---to-dir), the exit, and closes a
-`--dry-run` that had been writing on [`omh import`](commands.md#omh-import-capability-harness).
-The [command surface](design/profile.md) landed in 0.7.0 and the
+**Status: early.** `0.9.0`. This release is about being told what is wrong
+before it costs you an hour. [`omh doctor`](troubleshooting.md#omh-doctor)
+reports the **host** first — the runtime, the settings omh actually reads, disk,
+leftovers, which omh set the checkout up — so a machine that cannot build a
+sandbox gets a page of answers instead of one error. A sandbox can trust a
+corporate root with [`ca_cert`](configuration.md#ca_cert), and doctor names a
+TLS-inspecting proxy as the cause rather than leaving you with a build that
+fails somewhere inside docker. `omh sNN rm` asks before destroying work no
+branch has, and a removal that did not finish is now a failure that says which
+part survived — it used to report success over a worktree still on disk.
+The [silent failures](design/roadmap.md) closed in 0.8.0, the
+[command surface](design/profile.md) landed in 0.7.0 and the
 [work loop](design/git.md) in 0.6.0.
 
 One harness (`claude`) has been driven for real work; `opencode` and `omp` pass
