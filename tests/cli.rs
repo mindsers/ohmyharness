@@ -6764,13 +6764,97 @@ fn rm_fails_when_the_worktree_is_still_on_disk() {
     // that had nothing to review, the sentence was false. This fixture's
     // branch holds no commits, which is that case.
     assert!(
-        said.contains("held no commits and is gone"),
+        said.contains("the branch omh/s01, which held no commits"),
         "the branch here was commitless and was dropped, so saying it survived \
          would be a false claim about the one thing that holds work: {said}"
     );
     assert!(
-        !said.contains("untouched"),
-        "and nothing may claim it is untouched: {said}"
+        !said.contains("untouched") && !said.contains("the branch omh/s01 is still there"),
+        "and nothing may claim it survived: {said}"
+    );
+    // It is named among what went, not asserted alongside things omh never
+    // looked at — which is what the sentence here used to do for all four.
+    assert!(
+        said.contains("what went:"),
+        "the report lists what it observed: {said}"
+    );
+}
+
+/// The partial-removal report says what happened, not what was attempted.
+///
+/// The first version asserted four removals flatly — "The container, its graph
+/// entry, the run directory and the sandbox repository did go" — and verified
+/// none of them. With no usable runtime the container block is skipped whole,
+/// so omh never looked at the container at all and said it went anyway. Run
+/// against a refusing daemon it was worse: two warnings saying the container
+/// would not stop and the graph entry was left behind, then three lines later
+/// a sentence saying both went.
+///
+/// Driven by an unusable `runtime` setting rather than an empty PATH: the
+/// sandbox only *prepends* to PATH, so "no docker installed" depends on the
+/// machine running the test, while `select` refuses an unknown name always.
+#[test]
+#[cfg(unix)]
+fn a_partly_removed_session_claims_only_what_it_did() {
+    use std::os::unix::fs::PermissionsExt;
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git must be installed to run this test");
+
+    // `fake_docker` wrote `runtime = "docker"`; overwrite it with a name
+    // `select` cannot build, so the container half is never entered.
+    std::fs::write(
+        sb.repo.join(".omh/settings.local.toml"),
+        "runtime = \"podman\"\n",
+    )
+    .unwrap();
+
+    let at = sb.worktrees().join("s01");
+    std::fs::create_dir_all(sb.worktrees()).unwrap();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["worktree", "add", "-q", "-b", "omh/s01"])
+        .arg(&at)
+        .output()
+        .expect("git worktree add");
+    assert!(at.exists(), "the fixture made a worktree");
+
+    let parent = sb.worktrees();
+    let was = std::fs::metadata(&parent).unwrap().permissions();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let out = sb.omh(&["s01", "rm", "--force"]);
+    std::fs::set_permissions(&parent, was).unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "still a failure: {said}");
+    assert!(said.contains("partly removed"), "still reported: {said}");
+
+    // The claim, isolated: whatever omh says went, the container is not in it.
+    let went = said
+        .split("what went:")
+        .nth(1)
+        .unwrap_or("")
+        .lines()
+        .next()
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        !went.contains("container"),
+        "omh never reached the container and must not say it went — said `{went}` in: {said}"
+    );
+    assert!(
+        said.contains("could not reach") && said.contains("container"),
+        "and it must name what it did not do, so nobody has to guess: {said}"
     );
 }
 

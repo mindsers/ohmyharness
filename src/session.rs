@@ -21,6 +21,23 @@ pub enum Gone {
     No(String),
 }
 
+/// What a removal actually did, part by part.
+///
+/// One value rather than a tuple, because the parts are not independent: the
+/// branch news is only as good as the worktree news beside it, and a caller
+/// holding two loose values reads one without the other. Each field is the
+/// answer to "is it gone", never "was it attempted".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removal {
+    /// What became of `omh/<id>`.
+    pub branch: Removed,
+    /// Asked of the disk after the fact, not of git's exit code.
+    pub worktree: Gone,
+    /// The sandbox's own repository — the one holding commits nothing else
+    /// points at, which is why its failure is worth a sentence.
+    pub shadow: Gone,
+}
+
 /// What `remove` did with the branch, so the caller can report it truthfully
 /// rather than always claiming the branch was kept.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,7 +424,7 @@ impl Session {
     ///
     /// Taken as an argument rather than reached for, so that removing a session
     /// and forgetting its shadow is not something a caller can express.
-    pub fn remove(&self, repo: &Path, base: &str, shadows: &Path) -> Result<(Removed, Gone)> {
+    pub fn remove(&self, repo: &Path, base: &str, shadows: &Path) -> Result<Removal> {
         // Decided before the worktree goes, because afterwards the branch is
         // the only thing left to ask.
         //
@@ -500,8 +517,12 @@ impl Session {
         // a rollback is exactly the case it sees — and stops before anything
         // is taken down unless the user said `--force`. The silence here is
         // the silence of a decision already made upstairs.
-        crate::shadow::Shadow::new(shadows, &self.id).reap();
-        Ok((outcome, worktree))
+        let shadow = crate::shadow::Shadow::new(shadows, &self.id).reap();
+        Ok(Removal {
+            branch: outcome,
+            worktree,
+            shadow,
+        })
     }
 
     /// What this session changed, against the point it forked from.
@@ -1467,7 +1488,7 @@ fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
 /// and a caller checking whether it had finished deleting something read that
 /// as done. Measured on macOS: with the parent at `0o600` the child still
 /// exists and `exists()` returns `false`.
-fn still_there(at: &Path) -> Result<bool, String> {
+pub(crate) fn still_there(at: &Path) -> Result<bool, String> {
     match std::fs::symlink_metadata(at) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -1679,7 +1700,7 @@ mod tests {
         let asked = s.remove(&root, "main", &d.path().join("shadows"));
         std::fs::set_permissions(&parent, was).unwrap();
 
-        let (_outcome, gone) = asked.expect("`remove` itself still answers");
+        let gone = asked.expect("`remove` itself still answers").worktree;
         match gone {
             // The reason is what a caller prints to somebody deciding what to
             // clean up by hand, so an empty one is a row nobody can act on.
@@ -1745,7 +1766,7 @@ mod tests {
         let asked = s.remove(&root, "main", &d.path().join("shadows"));
         std::fs::set_permissions(&parent, was).unwrap();
 
-        let (_outcome, gone) = asked.expect("`remove` itself still answers");
+        let gone = asked.expect("`remove` itself still answers").worktree;
         match gone {
             Gone::No(why) => assert!(!why.trim().is_empty(), "and it says why: {why}"),
             Gone::Yes => panic!(
@@ -1796,7 +1817,8 @@ mod tests {
         let s = Session::new(&dir.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
 
-        let (outcome, gone) = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let (outcome, gone) = (done.branch, done.worktree);
         assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert_eq!(outcome, Removed::BranchDropped);
         assert!(
@@ -1817,7 +1839,8 @@ mod tests {
         git(&s.worktree, &["add", "."]).unwrap();
         git(&s.worktree, &["commit", "-q", "-m", "agent work"]).unwrap();
 
-        let (outcome, gone) = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let (outcome, gone) = (done.branch, done.worktree);
         assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert_eq!(outcome, Removed::BranchKept(Some(1)));
         assert!(
@@ -1858,7 +1881,8 @@ mod tests {
             "the precondition is that git cannot answer; it just did"
         );
 
-        let (outcome, gone) = s.remove(&root, "main", &d_shadows()).unwrap();
+        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        let (outcome, gone) = (done.branch, done.worktree);
         assert_eq!(gone, Gone::Yes, "the worktree is gone");
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s03"]).is_ok(),
@@ -1881,7 +1905,7 @@ mod tests {
         s.branch = None;
         s.ensure(&root, "main").unwrap();
         assert_eq!(
-            s.remove(&root, "main", &d_shadows()).unwrap().0,
+            s.remove(&root, "main", &d_shadows()).unwrap().branch,
             Removed::NoBranch
         );
     }
@@ -3461,7 +3485,7 @@ mod tests {
         );
 
         assert_eq!(
-            s.remove(&root, "main", &d_shadows()).unwrap().0,
+            s.remove(&root, "main", &d_shadows()).unwrap().branch,
             Removed::NoBranch,
             "a branch that does not exist was neither kept nor dropped"
         );

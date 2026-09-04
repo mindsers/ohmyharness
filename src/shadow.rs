@@ -2088,13 +2088,29 @@ impl Shadow {
     /// the gitdir — a seed naming a repository that is gone is exactly the
     /// state `ensure`'s fast path reads as "already built" — so the record goes
     /// last, after the directory it describes.
-    pub fn reap(&self) {
-        let _ = std::fs::remove_dir_all(&self.gitdir);
+    ///
+    /// Answers rather than returning `()`. `rm` used to state flatly that the
+    /// sandbox repository "did go" while this discarded every error — and this
+    /// is the one holding commits no branch points at, so a silent failure
+    /// here is exactly the orphan nobody goes looking for.
+    pub fn reap(&self) -> crate::session::Gone {
+        let why = std::fs::remove_dir_all(&self.gitdir).err();
         let _ = std::fs::remove_file(&self.seed_record);
         // With the seed, and for the reason the seed goes: session ids come
         // back around, and a replay point inherited by a stranger says a branch
         // has already been given commits it has never seen.
         let _ = std::fs::remove_file(&self.landed_record);
+        match crate::session::still_there(&self.gitdir) {
+            // A session that never built one is not a failed removal.
+            Ok(false) => crate::session::Gone::Yes,
+            Err(e) => {
+                crate::session::Gone::No(format!("omh could not tell whether it is there: {e}"))
+            }
+            Ok(true) => crate::session::Gone::No(match why {
+                Some(e) => format!("{e}"),
+                None => "it is still there".to_string(),
+            }),
+        }
     }
 
     /// Keep the agent's own `git status` clean at launch.

@@ -2173,7 +2173,7 @@ mod tests {
             // this scan is for.
             ("src/cmd/inspect.rs", 5),
             ("src/cmd/memory.rs", 1),
-            ("src/cmd/session.rs", 10),
+            ("src/cmd/session.rs", 11),
             ("src/cmd/settings.rs", 10),
             ("src/config.rs", 3),
             ("src/container.rs", 4),
