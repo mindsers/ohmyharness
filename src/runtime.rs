@@ -429,15 +429,19 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Box<
     };
 
     if preference == "auto" {
-        // Strongest first.
-        for name in ["sbx", "docker"] {
-            if available(name) {
-                return Ok(build(name).expect("name from the known list"));
-            }
+        // Only the measured backend. `auto` used to prefer `sbx` when it was
+        // present, and pick it silently — but the `Sbx` backend is
+        // provisional and unmeasured (its `caps` are guessed, its staging
+        // never run against a real `sbx`), so a machine that happened to have
+        // Docker Sandboxes installed launched every session on a backend
+        // nobody had exercised. `sbx` is an explicit opt-in until the spike in
+        // `docs/design` measures it, so `auto` never chooses a backend nobody
+        // has run.
+        if available("docker") {
+            return Ok(build("docker").expect("name from the known list"));
         }
         anyhow::bail!(
-            "no container runtime found — install one of: {}",
-            NAMES.join(", ")
+            "no measured container runtime found — install docker, or set              `runtime = \"sbx\"` to opt into the provisional Docker Sandboxes              backend (`omh doctor` to check it first)"
         );
     }
 
@@ -527,23 +531,36 @@ mod tests {
         move |p: &str| p == present
     }
 
+    /// `auto` never picks a backend nobody has measured. `sbx` present is not
+    /// enough — the `Sbx` backend is provisional, so `auto` chooses docker or
+    /// refuses, and `sbx` is reached only by asking for it.
     #[test]
-    fn auto_prefers_the_stronger_isolation() {
+    fn auto_never_picks_a_backend_nobody_has_measured() {
+        // Both present: docker, not the unmeasured sbx.
         let r = select("auto", &|_| true).unwrap();
-        assert_eq!(r.name(), "sbx");
-    }
-
-    #[test]
-    fn auto_falls_back_when_sbx_is_absent() {
+        assert_eq!(r.name(), "docker", "auto does not silently pick sbx");
+        // Docker present: docker.
         let r = select("auto", &only("docker")).unwrap();
         assert_eq!(r.name(), "docker");
+    }
+
+    /// With only the unmeasured backend installed, `auto` refuses and names
+    /// the explicit opt-in rather than choosing it silently.
+    #[test]
+    fn auto_with_only_sbx_refuses_and_names_the_opt_in() {
+        let err = select("auto", &only("sbx")).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("sbx") && msg.contains("doctor"),
+            "it names the opt-in and how to check it: {msg}"
+        );
     }
 
     #[test]
     fn auto_fails_clearly_when_nothing_is_installed() {
         let err = select("auto", &|_| false).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("docker") && msg.contains("sbx"), "got: {msg}");
+        assert!(msg.contains("docker"), "got: {msg}");
     }
 
     /// The opinion must be escapable — that is the whole reason backends stay

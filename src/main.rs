@@ -2248,6 +2248,9 @@ mod tests {
             // off the pre-2026.08 repo key.
             ("src/profile.rs", 1),
             ("src/render.rs", 1),
+            // `select`'s refusal when only the unmeasured backend is present
+            // names `omh doctor` as the way to check it first.
+            ("src/runtime.rs", 1),
             ("src/report.rs", 14),
             ("src/rules.rs", 1),
             ("src/selection.rs", 1),
