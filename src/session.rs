@@ -448,12 +448,30 @@ impl Session {
         // git can also lose the registration while the directory survives, and
         // then refuses with "is not a working tree" — leaving a session that
         // can never be removed. Either way, what matters is whether it is gone.
-        let mut worktree = Gone::Yes;
-        if self.worktree.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&self.worktree) {
-                worktree = Gone::No(format!("{e}"));
+        //
+        // Asked with `still_there` and not `Path::exists`, for the same reason
+        // again one layer down: `exists` is `metadata().is_ok()`, so a parent
+        // that cannot be traversed answered "absent" and this reported a
+        // removal it never performed. Every step below re-asks rather than
+        // trusting a return value.
+        let worktree = match still_there(&self.worktree) {
+            Ok(false) => Gone::Yes,
+            Err(why) => Gone::No(format!("omh could not tell whether it is there: {why}")),
+            Ok(true) => {
+                let why = std::fs::remove_dir_all(&self.worktree).err();
+                match still_there(&self.worktree) {
+                    Ok(false) => Gone::Yes,
+                    Err(e) => Gone::No(format!("omh could not tell whether it is there: {e}")),
+                    // `remove_dir_all` reporting success over a directory that
+                    // is still there is the same class of claim as git's exit
+                    // code, so it gets the same treatment.
+                    Ok(true) => Gone::No(match why {
+                        Some(e) => format!("{e}"),
+                        None => "it is still there".to_string(),
+                    }),
+                }
             }
-        }
+        };
         let _ = git(repo, &["worktree", "prune"]);
 
         // A branch carrying commits outlives its worktree on purpose: removing
@@ -1440,6 +1458,25 @@ fn git_with_index(cwd: &Path, index: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Whether something is still on disk — with "could not tell" kept apart from
+/// "not there".
+///
+/// Not `Path::exists`, which is `metadata().is_ok()` and so folds every stat
+/// failure into `false`. An unreadable parent, a directory whose search bit is
+/// gone, a mount that went away mid-command: all of them answered "absent",
+/// and a caller checking whether it had finished deleting something read that
+/// as done. Measured on macOS: with the parent at `0o600` the child still
+/// exists and `exists()` returns `false`.
+fn still_there(at: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(at) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        // Not followed, so a dangling symlink is its own presence rather than
+        // the absence of what it points at.
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .current_dir(cwd)
@@ -1653,6 +1690,100 @@ mod tests {
             ),
         }
         assert!(s.worktree.exists(), "the fixture really did block removal");
+    }
+
+    /// The same lie, one syscall earlier: a parent that cannot be looked into.
+    ///
+    /// `Path::exists` is `metadata().is_ok()`, so it answers `false` for every
+    /// stat failure and not only for "it is not there". With the parent's
+    /// search bit gone, the old check skipped the removal entirely and the
+    /// default `Gone::Yes` stood — `rm` reporting a removed session over a
+    /// worktree still on disk, which is the bug this type exists to make
+    /// unsayable.
+    ///
+    /// Measured, and the reason the test above cannot catch this: at `0o500`
+    /// the parent is still traversable, so `exists` answers truthfully and
+    /// `remove_dir_all` is what fails. Only `0o600` reaches the collapse.
+    #[test]
+    #[cfg(unix)]
+    fn a_worktree_that_cannot_be_looked_at_is_not_reported_as_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &root.display().to_string()])
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+        }
+
+        let worktrees = d.path().join("worktrees");
+        let s = Session::new(&worktrees, "s01".into());
+        s.ensure(&root, "main").unwrap();
+        assert!(s.worktree.exists(), "the fixture made a worktree");
+
+        // No search bit: the directory can neither be traversed nor stat'd,
+        // so every question about it fails rather than answering "absent".
+        let parent = s.worktree.parent().unwrap().to_path_buf();
+        let was = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let asked = s.remove(&root, "main", &d.path().join("shadows"));
+        std::fs::set_permissions(&parent, was).unwrap();
+
+        let (_outcome, gone) = asked.expect("`remove` itself still answers");
+        match gone {
+            Gone::No(why) => assert!(!why.trim().is_empty(), "and it says why: {why}"),
+            Gone::Yes => panic!(
+                "the worktree is still at {} — omh could not tell, and \
+                 reporting that as gone is the bug",
+                s.worktree.display()
+            ),
+        }
+        assert!(s.worktree.exists(), "the fixture really did block removal");
+    }
+
+    /// The distinction the row above rests on: absent, present, and unanswerable
+    /// are three answers, and `Path::exists` collapses the third into the first.
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_that_cannot_be_stated_is_neither_there_nor_gone() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let parent = d.path().join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+
+        assert_eq!(still_there(&child), Ok(true), "it is there");
+        assert_eq!(
+            still_there(&parent.join("never")),
+            Ok(false),
+            "and that one is not"
+        );
+
+        let was = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let blind = still_there(&child);
+        std::fs::set_permissions(&parent, was).unwrap();
+
+        assert!(
+            blind.is_err(),
+            "an unreadable parent is not an answer of `false`: {blind:?}"
+        );
     }
 
     /// `rm` keeps a branch so unreviewed work is unloseable. A branch with no
