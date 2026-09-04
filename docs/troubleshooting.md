@@ -9,7 +9,7 @@ checking claude in omh/claude:8eae0d5c1511fa89 — no account, so credentials go
   ✓  stacks detected     rust (from Cargo.toml)
   ✓  settings omh reads  every key set here is one omh reads
   ✓  leftovers           none — nothing orphaned on this machine
-  ✓  seeded by           version 0.8.0, the one running now
+  ✓  seeded by           version 0.9.0, the one running now
   ✓  disk                76.6 GB free on the filesystem holding /Users/you/.omh — …
   ✓  git on the host     git version 2.55.0 — takes a `--keep` selection; syncs
   ✓  rules               /work/CLAUDE.md

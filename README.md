@@ -13,7 +13,7 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.8.0`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.9.0`. **Claude Code is the only
 harness anyone has done real work through.** `opencode` and `omp` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the

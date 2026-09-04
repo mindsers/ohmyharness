@@ -4,9 +4,9 @@
 
 Ordered by what gates what, not by what is most fun.
 
-**These are milestones, not crate versions.** The crate is at `0.8.0` and
+**These are milestones, not crate versions.** The crate is at `0.9.0` and
 milestone v1.5 is roughly what 0.6.0 contained. They are deliberately not
-kept in lockstep — v0 has spanned eight releases already: a milestone moves when
+kept in lockstep — v0 has spanned nine minor releases already: a milestone moves when
 a body of work lands, semver moves on every release, and calling the crate `1.0`
 would imply a stability this project has not earned — one verified harness, one
 verified runtime.
@@ -205,6 +205,33 @@ broken implementation, one of them the whole `profile` suite green against a
 digest that re-collides the two paths it exists to separate. Both were found
 by review rather than by the suite, which is the same lesson 0.7.0 recorded
 and did not transfer.
+
+## Say it before it bites — done (0.9.0, #94–#97)
+
+Not a milestone. Four changes with one theme: omh knew things it was not
+saying, and each silence cost somebody an hour.
+
+**The host was never inspected** (#95, #96). `omh doctor` only ever spoke from
+*inside* a sandbox, so on a machine where the sandbox could not be built it
+answered with a single error about the thing that failed last. It reports the
+host first now — the runtime and whether it is actually *answering* rather than
+merely installed, the stacks, the settings omh reads and the keys it does not,
+free disk, what omh has left behind, which omh version set this checkout up,
+and whether the repo has a commit to fork a session from. Every row is a thing
+that changes how omh behaves with nothing else saying so.
+
+**A TLS-inspecting proxy looked like a broken build** (#94). Behind a corporate
+root, image builds failed deep inside docker with no line naming the cause.
+[`ca_cert`](../configuration.md#ca_cert) puts the root in the sandbox's trust
+store — all three layers, not just the base — and doctor says whether traffic is
+being inspected and whether omh has been told about it.
+
+**`rm` reported removals it had not performed** (#97). `git worktree remove` can
+exit 0 having unlinked nothing, and that was believed: `removed session sNN`,
+exit 0, worktree still there. The disk is asked now, a removal that did not
+finish is a non-zero exit that names what survived, and the report lists only
+the parts omh watched go. `rm` also asks before destroying commits no branch
+has, instead of refusing and telling you to retype the command with `--force`.
 
 ## v2 — portability
 
