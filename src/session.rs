@@ -304,7 +304,11 @@ impl Session {
         // taking the start point first made a session that was resumable
         // yesterday fail today because the trunk was renamed in between — and
         // fail talking about a base the command that ran never reads.
-        let args: Vec<String> = if self.branch_exists(repo) {
+        // `Ok(true)` and not "not an error": an unanswerable question falls to
+        // the create path exactly as it did before, and git refuses loudly
+        // either way. Only `remove` needs the third answer, because only
+        // `remove` reports on it.
+        let args: Vec<String> = if matches!(self.branch_exists(repo), Ok(true)) {
             ["worktree", "add", &path, &branch]
                 .iter()
                 .map(|s| s.to_string())
@@ -357,11 +361,45 @@ impl Session {
         Ok(())
     }
 
-    fn branch_exists(&self, repo: &Path) -> bool {
+    /// Whether `omh/<id>` is there — with "git could not answer" kept apart
+    /// from "there is no branch".
+    ///
+    /// `.is_ok()` on the whole command could not tell an absent branch from a
+    /// git that would not run or a path that is not a repository. Both read as
+    /// "no branch", and a branch holding unreviewed work then dropped out of
+    /// the report entirely; the caller falls the safe way on `Err` instead.
+    ///
+    /// **The third answer is narrower than it looks, and this is measured.**
+    /// An *unreadable ref directory* is indistinguishable from an absent ref
+    /// at git's own level: `show-ref --verify` says `not a valid ref` for
+    /// both, `rev-parse --verify` says `Needed a single revision` for both,
+    /// and `for-each-ref` returns empty for both. So `Ok(false)` here means
+    /// "git says there is no such ref", which is not quite "there is no such
+    /// ref". What `Err` catches is the layer above: no repository, or a git
+    /// that would not run at all.
+    ///
+    /// Without `--quiet`, because a suppressed diagnostic makes the error arm
+    /// carry no reason to print.
+    fn branch_exists(&self, repo: &Path) -> Result<bool, String> {
         let Some(branch) = &self.branch else {
-            return false;
+            return Ok(false);
         };
-        git(repo, &["rev-parse", "--verify", "--quiet", branch]).is_ok()
+        match git(
+            repo,
+            &["show-ref", "--verify", &format!("refs/heads/{branch}")],
+        ) {
+            Ok(_) => Ok(true),
+            // `show-ref --verify` exits 1 with nothing on stdout for a ref
+            // that is simply not there, which is the ordinary answer.
+            Err(e) => {
+                let why = format!("{e:#}");
+                if why.contains("not a valid ref") || why.trim().ends_with(':') {
+                    Ok(false)
+                } else {
+                    Err(why)
+                }
+            }
+        }
     }
 
     /// How many commits `base` has that this session does not. A session that
@@ -439,11 +477,16 @@ impl Session {
         // was never there, with a `git log` line that fails the same way.
         let outcome = match &self.branch {
             None => Removed::NoBranch,
-            Some(_) if !self.branch_exists(repo) => Removed::NoBranch,
-            Some(_) => match self.commits(repo, base) {
-                Ok(0) => Removed::BranchDropped,
-                Ok(n) => Removed::BranchKept(Some(n)),
+            // A question git could not answer keeps the branch, for the same
+            // reason a count it could not make does.
+            Some(_) => match self.branch_exists(repo) {
                 Err(_) => Removed::BranchKept(None),
+                Ok(false) => Removed::NoBranch,
+                Ok(true) => match self.commits(repo, base) {
+                    Ok(0) => Removed::BranchDropped,
+                    Ok(n) => Removed::BranchKept(Some(n)),
+                    Err(_) => Removed::BranchKept(None),
+                },
             },
         };
 
@@ -496,9 +539,19 @@ impl Session {
         // carrying none holds nothing to review — `--force` above has already
         // discarded anything uncommitted — so keeping it only leaves a dead ref
         // behind after every abandoned session.
+        let mut outcome = outcome;
         if outcome == Removed::BranchDropped {
             if let Some(branch) = &self.branch {
                 let _ = git(repo, &["branch", "-D", branch]);
+                // **Asked of git, not assumed** — the same rule the worktree
+                // above follows. `branch -D` refuses over an unwritable ref
+                // store, a stale lock, or a registration that outlived its
+                // directory, and the variant was decided before any of that
+                // could be known. Reporting a dropped branch that is still
+                // there fills `omh/` with refs omh has said are gone.
+                if !matches!(self.branch_exists(repo), Ok(false)) {
+                    outcome = Removed::BranchKept(None);
+                }
             }
         }
 
@@ -1807,6 +1860,118 @@ mod tests {
         );
     }
 
+    /// The three answers, and the honest edge of the third.
+    #[test]
+    fn a_branch_question_git_cannot_answer_is_not_answered_as_no() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+            vec!["branch", "omh/s01"],
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &root.display().to_string()])
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+        }
+
+        let there = Session::new(&d.path().join("worktrees"), "s01".into());
+        assert_eq!(there.branch_exists(&root), Ok(true), "it is there");
+        let not = Session::new(&d.path().join("worktrees"), "s09".into());
+        assert_eq!(not.branch_exists(&root), Ok(false), "and that one is not");
+
+        // Not a repository at all: the answer is neither yes nor no, and
+        // answering "no" is what let a branch holding work disappear from the
+        // report. `remove` turns this into `BranchKept`, which is the arm that
+        // loses nothing.
+        let elsewhere = d.path().join("not-a-repo");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let blind = there.branch_exists(&elsewhere);
+        assert!(
+            blind.is_err(),
+            "a question git could not answer is not an answer of `false`: {blind:?}"
+        );
+    }
+
+    /// `BranchDropped` is a claim about a deletion, so the deletion has to be
+    /// the thing that produces it.
+    ///
+    /// It was computed before the worktree went and never revised: `git branch
+    /// -D` ran as `let _`, and the variant decided minutes earlier was
+    /// returned whether or not the ref survived. `rm` then printed "the branch
+    /// omh/s01, which held no commits" over a branch still on disk, and the
+    /// `omh/` namespace filled with refs omh had said were gone.
+    ///
+    /// Driven by an unwritable `refs/heads/omh`, which is what a read-only
+    /// checkout, a stale lock or a concurrent `gc` looks like from here.
+    #[test]
+    #[cfg(unix)]
+    fn a_branch_that_would_not_delete_is_not_reported_as_dropped() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec![
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "x",
+            ],
+        ] {
+            std::process::Command::new("git")
+                .args(["-C", &root.display().to_string()])
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+        }
+
+        let worktrees = d.path().join("worktrees");
+        let s = Session::new(&worktrees, "s01".into());
+        s.ensure(&root, "main").unwrap();
+        // Commitless, so the decision is `BranchDropped` and the delete is
+        // actually attempted.
+        let refs = root.join(".git/refs/heads/omh");
+        let was = std::fs::metadata(&refs).unwrap().permissions();
+        std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let done = s.remove(&root, "main", &d.path().join("shadows")).unwrap();
+        std::fs::set_permissions(&refs, was).unwrap();
+
+        let alive = std::process::Command::new("git")
+            .args(["-C", &root.display().to_string()])
+            .args(["rev-parse", "--verify", "--quiet", "omh/s01"])
+            .output()
+            .unwrap();
+        assert!(
+            alive.status.success(),
+            "the fixture has to actually block the delete"
+        );
+        assert_ne!(
+            done.branch,
+            Removed::BranchDropped,
+            "the branch is still there, so nothing may report it dropped"
+        );
+    }
+
     /// `rm` keeps a branch so unreviewed work is unloseable. A branch with no
     /// commits holds no work to lose — `worktree remove --force` has already
     /// discarded anything uncommitted — so keeping it preserves nothing and
@@ -1943,7 +2108,7 @@ mod tests {
 
         s.remove(&root, "main", &d_shadows()).unwrap();
         assert!(!s.worktree.exists(), "worktree gone");
-        assert!(s.branch_exists(&root), "branch must survive rm");
+        assert_eq!(s.branch_exists(&root), Ok(true), "branch must survive rm");
 
         s.ensure(&root, "main").unwrap();
         assert_eq!(
@@ -3425,7 +3590,11 @@ mod tests {
         s.remove(&root, "main", &d_shadows())
             .expect("must clean up what is actually there");
         assert!(!s.worktree.exists(), "the directory must be gone");
-        assert!(s.branch_exists(&root), "and the branch still kept");
+        assert_eq!(
+            s.branch_exists(&root),
+            Ok(true),
+            "and the branch still kept"
+        );
     }
 
     #[test]
@@ -3565,6 +3734,6 @@ mod tests {
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
         assert_eq!(s.branch.as_deref(), Some("omh/s01"));
-        assert!(s.branch_exists(&root));
+        assert_eq!(s.branch_exists(&root), Ok(true));
     }
 }
