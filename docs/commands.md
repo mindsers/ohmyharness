@@ -1000,22 +1000,19 @@ a per-checkout view structurally cannot see the ones that matter.
 
 ```console
 $ omh prune
-removed 4 things
+removed 3 things
   directory  ~/.omh/run/web-deadbeef
-  leftover   ~/.omh/run/tmp.9f3a2b
   directory  ~/.omh/scratch/web-deadbeef
   directory  ~/.omh/keys/web-deadbeef
-left 502 things
-  6    belong to checkouts still on this machine
-  494  omh could not attribute
-         494 of them — omh has no record of which checkout this belongs to — it predates the record, or was never set up by this omh
-           e.g. omh-cache-days-we-kept
-           e.g. omh-cache-ingest-e2e
-  2    omh cannot vouch for
+left 2 things
+  0    belong to checkouts still on this machine
+  1    omh could not attribute
+         ~/.omh/notes/stranger-1a2b3c4d — omh has no record of which checkout this belongs to — it predates the record, or was never set up by this omh
+  1    omh cannot vouch for
          ~/.omh/shadow/web-deadbeef — holds 1 thing omh cannot vouch for (s01.git)
-         ~/.omh/notes/web-deadbeef — holds 1 thing omh cannot vouch for (local)
   those need `omh prune --dangerously-include-unsafe`, which names each one and asks first
-unread nothing — every class was listed
+unread 1 class omh could not list, so the counts above are a floor:
+  there is no container runtime to ask about volumes, containers or networks
 ```
 
 **Every bucket is printed every time, including the empty ones.** A report that
@@ -1046,8 +1043,16 @@ state omh derived, and orphaned is not the same as worthless.
 **Images.** They are content-addressed and shared — the same `omh/claude:<hash>`
 serves every checkout whose base resolves to it, and the label recording which
 checkout built it names only whoever got there first. Removing one because that
-checkout is gone would take the image other checkouts are running. omh uses
-those labels to *attribute* other things and removes no images at all.
+checkout is gone would take the image other checkouts are running, so omh
+refuses it explicitly and uses those labels only to *attribute* other things.
+Reclaiming images needs the in-use check, which is not written yet.
+
+**A checkout whose whole tree has vanished.** An ejected disk answers "not
+there" exactly as a deleted directory does. Deleting a checkout leaves the
+directory it sat in; unmounting takes the tree, so an absent path whose parent
+is also absent is reported as unattributable rather than gone. Deleting a whole
+project tree at once reads the same way — less is reclaimed, and nothing is
+reclaimed wrongly.
 
 ### `--dangerously-include-unsafe`
 

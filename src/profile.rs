@@ -110,9 +110,22 @@ fn is_digest_shaped(repo_id: &str) -> bool {
     }
 }
 
+/// Whether a derived attribution may be written down.
+///
+/// The backfill records what it works out, so the harvest is paid once. That
+/// is a **write**, and a command promising "nothing is written" must not do it
+/// — `omh --dry-run prune` was permanently recording attributions that a later
+/// real run then acted on, which makes the rehearsal the first half of the
+/// performance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backfill {
+    Record,
+    DoNot,
+}
+
 /// Who owns `repo_id`, using the record if there is one and the evidence omh
 /// already wrote if there is not.
-pub fn attribution_of(root: &Path, repo_id: &str) -> Attribution {
+pub fn attribution_of(root: &Path, repo_id: &str, backfill: Backfill) -> Attribution {
     let recorded = match recorded_checkout(root, repo_id) {
         Ok(Some(path)) => Ok(Some(path)),
         // No record: fall back to what omh already wrote. A worktree's `.git`
@@ -120,7 +133,7 @@ pub fn attribution_of(root: &Path, repo_id: &str) -> Attribution {
         // works for ids made before 0.8.0 — they carry no digest to compare.
         Ok(None) => match from_the_worktrees(root, repo_id) {
             Ok(found) => {
-                if let Some(path) = &found {
+                if let (Some(path), Backfill::Record) = (&found, backfill) {
                     // Worked out once. A checkout that later disappears is
                     // still attributable afterwards, which is exactly when it
                     // matters — the pointer goes when the worktree does.
@@ -133,10 +146,46 @@ pub fn attribution_of(root: &Path, repo_id: &str) -> Attribution {
         Err(why) => Err(why),
     };
     let on_disk = match &recorded {
-        Ok(Some(path)) => crate::session::still_there(path),
+        Ok(Some(path)) => absent_or_unreachable(path),
         _ => Ok(false),
     };
     attribution_from(recorded, on_disk)
+}
+
+/// Whether the checkout is there — with *the whole tree went* kept apart from
+/// *this directory went*.
+///
+/// `still_there` closed the `EACCES` collapse. It cannot close this one: when a
+/// volume is ejected the mountpoint's contents cease to exist, so `stat`
+/// returns a plain `ENOENT`, exactly as for a checkout somebody deleted. Every
+/// artifact belonging to every checkout on that disk would then be reclaimable
+/// — caches, containers, networks, and the ssh keys omh minted — on a bare
+/// `prune` with no flag and no prompt.
+///
+/// The tell is the parent. Deleting a checkout leaves the directory it sat in;
+/// unmounting takes the whole tree. So an absent path whose parent is *also*
+/// absent is a question rather than an answer, and `Err` is how this says so.
+///
+/// It costs some cleanup: deleting a whole project tree at once now reads as
+/// unattributable rather than gone. That is the direction to be wrong in.
+fn absent_or_unreachable(path: &Path) -> Result<bool, String> {
+    match crate::session::still_there(path) {
+        Ok(true) => Ok(true),
+        Err(why) => Err(why),
+        Ok(false) => match path.parent() {
+            // No parent to ask about — the filesystem root. Take the answer.
+            None => Ok(false),
+            Some(parent) => match crate::session::still_there(parent) {
+                Ok(true) => Ok(false),
+                Ok(false) => Err(format!(
+                    "{} is not there either, so this may be an unmounted disk rather than a \
+                     checkout somebody removed",
+                    parent.display()
+                )),
+                Err(why) => Err(why),
+            },
+        },
+    }
 }
 
 /// The checkout named by the `.git` pointers under this id's worktrees.
@@ -466,7 +515,7 @@ pub(crate) fn settled(path: &Path) -> PathBuf {
 /// beside the accessors that build them so adding a seventh is a change in one
 /// place — `worktrees`, `runs`, `keys`, `shadows`, `notes` and `scratch` each
 /// join one of these.
-const KEYED: [&str; 6] = ["worktrees", "run", "keys", "shadow", "notes", "scratch"];
+pub(crate) const KEYED: [&str; 6] = ["worktrees", "run", "keys", "shadow", "notes", "scratch"];
 
 /// What the one-time move from basename keying to digest keying did.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1009,7 +1058,7 @@ mod tests {
         // worktree.
         assert_eq!(super::recorded_checkout(&root, &id), Ok(None));
         assert_eq!(
-            super::attribution_of(&root, &id),
+            super::attribution_of(&root, &id, super::Backfill::Record),
             super::Attribution::Live(super::settled(&checkout)),
             "the pointer names the checkout, and it is still there"
         );
@@ -1023,12 +1072,59 @@ mod tests {
         );
 
         // With the checkout gone, the same id is `Gone` — the one answer a
-        // removal may act on.
-        std::fs::remove_dir_all(d.path().join("work")).unwrap();
+        // removal may act on. Only the checkout: removing `work/` too would be
+        // a whole tree vanishing, which is deliberately a different answer.
+        std::fs::remove_dir_all(&checkout).unwrap();
         assert_eq!(
-            super::attribution_of(&root, &id),
+            super::attribution_of(&root, &id, super::Backfill::Record),
             super::Attribution::Gone(super::settled(&checkout))
         );
+    }
+
+    /// An unplugged drive is not a deleted checkout.
+    ///
+    /// `still_there` fixed the `EACCES` collapse, but an ejected volume is
+    /// plainer than that: the mountpoint's contents simply cease to exist, so
+    /// `stat` says `ENOENT` — identical to a checkout somebody deleted. Unplug
+    /// the disk your work lives on, run a bare `omh prune`, and every checkout
+    /// on it reads as `Gone`: caches, containers, networks and the ssh keys omh
+    /// minted for them, with no flag and no prompt.
+    ///
+    /// The tell is the parent. Deleting a checkout leaves the directory it sat
+    /// in; unmounting takes the whole tree. So an absent path whose parent is
+    /// *also* absent is a question, not an answer.
+    #[test]
+    fn a_checkout_whose_whole_tree_vanished_is_not_reported_gone() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join(".omh");
+
+        // Deleted the ordinary way: `work/` survives it.
+        let deleted = d.path().join("work/api");
+        std::fs::create_dir_all(&deleted).unwrap();
+        let id = super::id_for(&deleted);
+        super::remember(&root, &id, &deleted).unwrap();
+        std::fs::remove_dir_all(&deleted).unwrap();
+        assert!(
+            matches!(
+                super::attribution_of(&root, &id, super::Backfill::Record),
+                super::Attribution::Gone(_)
+            ),
+            "a checkout removed from a directory that is still there is gone"
+        );
+
+        // The drive went: the mountpoint and everything above it with it.
+        let ejected = d.path().join("Volumes/Backup/api");
+        std::fs::create_dir_all(&ejected).unwrap();
+        let eid = super::id_for(&ejected);
+        super::remember(&root, &eid, &ejected).unwrap();
+        std::fs::remove_dir_all(d.path().join("Volumes/Backup")).unwrap();
+        match super::attribution_of(&root, &eid, super::Backfill::Record) {
+            super::Attribution::Unknown(why) => assert!(
+                why.contains("Backup") || why.contains("not there either"),
+                "and it says what it could not find: {why}"
+            ),
+            other => panic!("an unplugged drive is not a deleted checkout: {other:?}"),
+        }
     }
 
     /// Evidence omh cannot read one way is not evidence of nobody.
@@ -1056,7 +1152,7 @@ mod tests {
             )
             .unwrap();
         }
-        match super::attribution_of(&root, disputed) {
+        match super::attribution_of(&root, disputed, super::Backfill::Record) {
             super::Attribution::Unknown(why) => assert!(
                 why.contains("one") && why.contains("two"),
                 "it names both claims rather than saying nothing is there: {why}"
@@ -1077,7 +1173,7 @@ mod tests {
             format!("gitdir: {}/.git/worktrees/s01\n", moved.display()),
         )
         .unwrap();
-        match super::attribution_of(&root, stale) {
+        match super::attribution_of(&root, stale, super::Backfill::Record) {
             super::Attribution::Unknown(why) => {
                 assert!(why.contains("moved") || why.contains("api-"), "{why}")
             }

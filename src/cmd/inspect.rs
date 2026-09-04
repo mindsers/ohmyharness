@@ -110,7 +110,12 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
     Ok(())
 }
 
-/// Every omh volume on this machine, or why omh could not ask.
+/// Every omh volume on this machine except this checkout's own, or why omh
+/// could not ask.
+///
+/// This checkout's cache is excluded because the row is about what is left
+/// *over*; a volume the running checkout is using is not a leftover. The count
+/// the row prints is therefore one short of the machine's total, deliberately.
 ///
 /// Machine-wide on purpose: a cache outlives the checkout that made it, so a
 /// per-checkout listing structurally cannot see the ones that matter.
@@ -230,7 +235,13 @@ pub(crate) fn doctor_cmd(
     let volumes = volumes_on_this_machine(&paths, chosen.as_ref().ok().map(|b| b.as_ref()));
     let split = match &volumes {
         Ok(names) => doctor::attributed(names, &|name| match name.strip_prefix("omh-cache-") {
-            Some(id) => crate::profile::attribution_of(&paths.root, id),
+            Some(id) => crate::profile::attribution_of(
+                &paths.root,
+                id,
+                // A diagnostic that writes what a delete command later acts on
+                // is not read-only. `omh doctor` reports; it does not decide.
+                crate::profile::Backfill::DoNot,
+            ),
             // A name omh does not key that way is not something it may reason
             // about at all.
             None => crate::profile::Attribution::Unknown(

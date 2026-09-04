@@ -285,6 +285,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             &cwd,
             cli.dry_run,
             *dangerously_include_unsafe,
+            cmd::harvest::Interactive::of_stdin(),
             ctx,
             &mut std::io::stdin().lock(),
             &mut std::io::stderr(),

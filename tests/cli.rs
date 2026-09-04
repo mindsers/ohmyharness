@@ -67,6 +67,43 @@ impl Sandbox {
         self.omh_in(&self.repo.clone(), args)
     }
 
+    /// Run with something on stdin, from a **pipe**.
+    ///
+    /// `omh()` uses `Command::output()`, which gives the child a *null* stdin —
+    /// so a confirmation prompt reads EOF and declines whatever the code does.
+    /// A test asserting "it refuses off a terminal" therefore passes with the
+    /// terminal check deleted, which is exactly how one shipped: `yes | omh
+    /// prune --dangerously-include-unsafe` destroyed unreviewed commits while
+    /// the suite stayed green.
+    ///
+    /// A pipe is not a terminal either, so this is the shape a script has —
+    /// and the one a guard has to refuse.
+    fn omh_with_stdin(&self, args: &[&str], input: &str) -> Output {
+        use std::io::Write;
+        let path = match std::env::var("PATH") {
+            Ok(rest) => format!("{}:{rest}", self.bin.display()),
+            Err(_) => self.bin.display().to_string(),
+        };
+        let mut child = Command::new(env!("CARGO_BIN_EXE_omh"))
+            .args(args)
+            .current_dir(&self.repo)
+            .env("HOME", &self.home)
+            .env("PATH", path)
+            .env("EDITOR", self.bin.join("fake-editor"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the binary under test must run");
+        child
+            .stdin
+            .take()
+            .expect("piped")
+            .write_all(input.as_bytes())
+            .expect("write");
+        child.wait_with_output().expect("wait")
+    }
+
     /// Run somewhere other than the sandbox repo — outside one, for the
     /// commands whose subject is a file that does not live in a repository.
     fn omh_in(&self, cwd: &Path, args: &[&str]) -> Output {
@@ -6916,9 +6953,13 @@ fn prune_removes_the_gone_one_and_accounts_for_the_rest() {
     std::fs::create_dir_all(omh.join("shadow").join(&gone_id).join("s01.git")).unwrap();
     std::fs::remove_dir_all(&gone).unwrap();
 
-    // An aborted operation's remnant: owned by nobody by construction.
-    let remnant = omh.join("run").join("tmp.abcdef");
-    std::fs::create_dir_all(&remnant).unwrap();
+    // A directory whose name looks like a temp file. `mktemp -d` makes
+    // checkouts named exactly this, so its `repo_id` starts `tmp.` too — and
+    // omh used to read the name as proof it belonged to nobody, skip both the
+    // attribution table and the work check, and delete a live checkout's state
+    // with no flag and no prompt.
+    let looks_temporary = omh.join("run").join("tmp.abcdef");
+    std::fs::create_dir_all(&looks_temporary).unwrap();
 
     // An id omh has never recorded.
     std::fs::create_dir_all(omh.join("notes").join("stranger-1a2b3c4d")).unwrap();
@@ -6931,7 +6972,7 @@ fn prune_removes_the_gone_one_and_accounts_for_the_rest() {
     );
     assert!(out.status.success(), "a clean prune succeeds: {said}");
 
-    // What went: the gone checkout's derived state, and the remnant.
+    // What went: the gone checkout's derived state.
     for dir in ["run", "scratch", "keys"] {
         assert!(
             !omh.join(dir).join(&gone_id).exists(),
@@ -6939,8 +6980,9 @@ fn prune_removes_the_gone_one_and_accounts_for_the_rest() {
         );
     }
     assert!(
-        !remnant.exists(),
-        "an aborted remnant belongs to nobody: {said}"
+        looks_temporary.exists(),
+        "a name is not evidence of ownership — omh has no record of `tmp.abcdef`, \
+         so it is not omh's to remove: {said}"
     );
 
     // What must not: something omh could not attribute, and something holding
@@ -6967,6 +7009,49 @@ fn prune_removes_the_gone_one_and_accounts_for_the_rest() {
             "the report must say `{phrase}`: {said}"
         );
     }
+}
+
+/// A pipe is not a terminal, and `yes |` is not consent.
+///
+/// The flag's own help says "**No `--force`, deliberately.** Off a terminal
+/// this refuses". Nothing implemented it: `ask::confirm` reads a line and has
+/// no terminal gate, so `yes | omh prune --dangerously-include-unsafe`
+/// destroyed a sandbox repository holding commits, in a script, silently.
+///
+/// The test that was supposed to cover this passed vacuously — `omh()` nulls
+/// stdin, so EOF declined and the guard was never exercised. This one hands it
+/// a real pipe with a real `y` in it.
+#[test]
+#[cfg(unix)]
+fn a_pipe_is_not_a_terminal_and_yes_is_not_consent() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    assert!(sb.omh(&["init"]).status.success());
+
+    // Something omh cannot vouch for: a checkout it has no record of.
+    let stranger = sb.home.join(".omh/shadow/stranger-1a2b3c4d");
+    std::fs::create_dir_all(stranger.join("s01.git")).unwrap();
+
+    let out = sb.omh_with_stdin(&["prune", "--dangerously-include-unsafe"], "y\ny\ny\n");
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stranger.join("s01.git").exists(),
+        "a `y` down a pipe is not somebody at a keyboard: {said}"
+    );
+    assert!(
+        !out.status.success(),
+        "and it says no rather than proceeding: {said}"
+    );
+    assert!(
+        said.contains("terminal") || said.contains("nobody to ask"),
+        "naming why, so a script author knows what to do instead: {said}"
+    );
 }
 
 /// Off a terminal, the dangerous flag refuses rather than proceeding.

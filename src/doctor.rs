@@ -145,17 +145,6 @@ pub fn daemon_from(asked: std::io::Result<std::process::Output>) -> Result<(), S
     ))
 }
 
-/// What omh has left behind that nothing points at any more.
-///
-/// `risks.md` records this one as *"recorded rather than fixed"*: omh issues no
-/// `volume ls` anywhere, so after a migration `omh-cache-<basename>` and any
-/// stopped `omh-<basename>-sNN` are orphaned and unmentioned. They cost disk
-/// and a name, not correctness — which is exactly the shape of thing this
-/// command exists to surface rather than fail over.
-///
-/// **Never red.** A leftover breaks nothing; it is disk you can reclaim and a
-/// name that may confuse you later. A doctor that fails over it is one people
-/// stop running, and the exit code stops meaning *you cannot work*.
 /// Artifacts split by whose checkout they belong to.
 ///
 /// Three buckets because there are three answers, and the row prints all of
@@ -192,6 +181,19 @@ pub fn attributed(
     out
 }
 
+/// What omh has left behind that nothing points at any more.
+///
+/// `risks.md` recorded this as *"recorded rather than fixed"*: after a
+/// migration `omh-cache-<basename>` and any stopped `omh-<basename>-sNN` were
+/// orphaned and unmentioned. They cost disk and a name, not correctness —
+/// exactly the shape of thing this command exists to surface rather than fail
+/// over. omh does issue a `volume ls` now, which this row reads; the sentence
+/// that said otherwise was true when it was written and travelled here by
+/// being glued to the wrong item.
+///
+/// **Never red.** A leftover breaks nothing; it is disk you can reclaim and a
+/// name that may confuse you later. A doctor that fails over it is one people
+/// stop running, and the exit code stops meaning *you cannot work*.
 pub fn leftovers_from(
     sessions: Result<Vec<String>, String>,
     volumes: Result<Vec<String>, String>,
