@@ -677,9 +677,12 @@ pub fn plan(
         // so every path that builds a plan — run, attach, doctor, auth — gets
         // the same limits. Unset is unset: the runtime's default, not a
         // number omh chose.
+        // An empty setting is unset, not a distinct value: `sandbox_memory = ""`
+        // must read the same as no key, or it would stamp differently and read
+        // as drift against a session launched without it.
         limits: Limits {
-            memory: crate::policy_value(paths, "sandbox_memory"),
-            cpus: crate::policy_value(paths, "sandbox_cpus"),
+            memory: crate::policy_value(paths, "sandbox_memory").filter(|s| !s.is_empty()),
+            cpus: crate::policy_value(paths, "sandbox_cpus").filter(|s| !s.is_empty()),
         },
         env: vec![
             ("OMH_SESSION".into(), session.id.clone()),
@@ -704,7 +707,12 @@ pub fn plan(
                 },
             ),
         ],
-        network: paths.session_network(&session.id),
+        // A real session gets its own network; a scratch verb shares the
+        // per-repo one, which nothing has to remember to remove.
+        network: match session.branch.is_some() {
+            true => paths.session_network(&session.id),
+            false => paths.scratch_network(),
+        },
         workdir: crate::container_workdir().into(),
         argv: crate::persist::wrap(
             opts.persist,
@@ -1611,6 +1619,57 @@ mod tests {
     /// Every session gets its own network, named like its container. One
     /// network per checkout let a service one session started be reached from
     /// every other session of the repo, which is not what a sandbox promises.
+    /// A scratch verb (auth, doctor) shares the per-repo network rather than
+    /// getting its own that nothing removes.
+    #[test]
+    fn a_scratch_session_shares_the_per_repo_network() {
+        let fx = fixture();
+        let scratch =
+            crate::session::Session::scratch(fx.paths.root.join("scratch"), "auth".into());
+        std::fs::create_dir_all(&scratch.worktree).unwrap();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let (own, repo) = decided_from(&fx);
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &scratch,
+            &[],
+            Options {
+                staging: Staging::Skip,
+                persist: crate::persist::Mode::None,
+                tty: false,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(p.network, fx.paths.scratch_network());
+        assert_ne!(
+            p.network,
+            fx.paths.session_network("auth"),
+            "not a per-session network nothing removes"
+        );
+    }
+
+    /// An empty limit setting reads the same as no setting — not a distinct
+    /// value that would stamp differently and read as drift.
+    #[test]
+    fn an_empty_limit_setting_is_unset() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            "sandbox_memory = \"\"\nsandbox_cpus = \"\"\n",
+        )
+        .unwrap();
+        assert_eq!(plan_for(&fx, "claude").limits, Limits::default());
+    }
+
     #[test]
     fn each_session_has_its_own_network() {
         let fx = fixture();

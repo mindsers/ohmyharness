@@ -322,7 +322,9 @@ impl Adapter {
         // sum that is not there. If the command checks one, the field carries
         // it — where `omh doctor` reads it too.
         anyhow::ensure!(
-            !adapter.install.contains("sha256sum") || !adapter.checksums.is_empty(),
+            // `sha256sum -c`, the verification form, not a bare mention: an
+            // echoed or commented `sha256sum` should not trip this.
+            !adapter.install.contains("sha256sum -c") || !adapter.checksums.is_empty(),
             "adapter {}: the install verifies a checksum but declares none",
             path.display()
         );
@@ -623,6 +625,29 @@ mod tests {
             format!("{err:#}").contains("verifies a checksum but declares none"),
             "got: {err:#}"
         );
+    }
+
+    /// The sums the omp install verifies inline are the ones the `[checksums]`
+    /// map declares, arch for arch — so the map `omh doctor` reads and the
+    /// value `sha256sum -c` checks cannot silently disagree, and the arch
+    /// mapping is not transposed. The install labels arches `x64`/`arm64`; the
+    /// map keys them by `uname -m` (`x86_64`/`aarch64`).
+    #[test]
+    fn the_omp_inline_sums_match_the_declared_map() {
+        let omp = Adapter::find(Path::new(REAL), "omp").unwrap();
+        let command = omp.install_command().unwrap();
+        for (uname, _label) in [("x86_64", "x64"), ("aarch64", "arm64")] {
+            let sum = omp
+                .checksums
+                .get(uname)
+                .unwrap_or_else(|| panic!("no sum for {uname}"));
+            assert!(
+                command.contains(sum.as_str()),
+                "the map's {uname} sum does not appear in the install command"
+            );
+        }
+        // And the two arches carry different sums, so a match is not accidental.
+        assert_ne!(omp.checksums["x86_64"], omp.checksums["aarch64"]);
     }
 
     /// omp is a release binary, so its install verifies the download against a

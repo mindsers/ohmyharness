@@ -6374,6 +6374,17 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
             .any(|c| c.starts_with("rm ") && c.contains(&sb.container("s01"))),
         "the container outlived the worktree it mounts: {calls:?}"
     );
+    // The session's network goes with it, after the container.
+    let removed = calls
+        .iter()
+        .position(|c| c.starts_with("rm ") && c.contains(&sb.container("s01")));
+    let network = calls
+        .iter()
+        .position(|c| *c == format!("network rm {}", sb.container("s01")));
+    assert!(
+        removed.is_some() && network.is_some() && removed < network,
+        "rm must take the session's network too, after the container: {calls:?}"
+    );
 }
 
 /// The same half-removed state, seen from the other side. Nothing cleaned up

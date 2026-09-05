@@ -117,7 +117,12 @@ pub fn fetch_urls(version: &str, arch: &str) -> Urls {
 pub fn sum_for(sums: &str, name: &str) -> Option<String> {
     for line in sums.lines() {
         let line = line.trim_end_matches('\r');
-        let (hex, file) = line.split_once("  ").or_else(|| line.split_once(' '))?;
+        // `continue`, not `?`: a blank or malformed line must not abandon the
+        // scan before a valid later entry — a reformatted SHA256SUMS would
+        // otherwise wrongly refuse a good download.
+        let Some((hex, file)) = line.split_once("  ").or_else(|| line.split_once(' ')) else {
+            continue;
+        };
         let file = file.trim_start_matches("./");
         if file == name {
             let hex = hex.trim();
@@ -991,6 +996,59 @@ mod tests {
             "got: {err:#}"
         );
         assert!(!cached_at(&paths.root, arch, env!("CARGO_PKG_VERSION")).exists());
+    }
+
+    /// A verified download is unpacked, installed executable at the versioned
+    /// cache path, and the stale unversioned cache an older omh left is removed.
+    /// The success path, which the failure tests never reach.
+    #[test]
+    #[cfg(unix)]
+    fn a_verified_download_is_installed_and_the_stale_cache_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::consts::OS == "linux" {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::profile::Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let arch = target_arch(std::env::consts::ARCH).unwrap();
+        // A stale unversioned cache from an older omh, which must be cleared.
+        let stale = paths.root.join("bin").join(format!("omh-linux-{arch}"));
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, b"old").unwrap();
+
+        // A fetch that writes a real tarball holding `omh-<target>/omh` and a
+        // SHA256SUMS carrying that tarball's real sum.
+        let fetch = move |urls: &Urls, dest: &Path| {
+            let staged = dest.join("build");
+            let inner = staged.join(urls.name.trim_end_matches(".tar.gz"));
+            std::fs::create_dir_all(&inner)?;
+            std::fs::write(inner.join("omh"), b"#!/bin/sh\necho hi\n")?;
+            let status = std::process::Command::new("tar")
+                .arg("-czf")
+                .arg(dest.join(&urls.name))
+                .arg("-C")
+                .arg(&staged)
+                .arg(urls.name.trim_end_matches(".tar.gz"))
+                .status()?;
+            anyhow::ensure!(status.success(), "packing the fixture tarball");
+            let sum = sha256_of(&dest.join(&urls.name))?;
+            std::fs::write(dest.join("SHA256SUMS"), format!("{sum}  {}\n", urls.name))?;
+            Ok(())
+        };
+
+        let installed = ensure("docker", &paths, None, &fetch, &crate::out::Ctx::plain()).unwrap();
+        assert_eq!(
+            installed,
+            cached_at(&paths.root, arch, env!("CARGO_PKG_VERSION"))
+        );
+        assert!(installed.exists(), "the binary is installed");
+        let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "and it is executable: {mode:o}");
+        assert_eq!(std::fs::read(&installed).unwrap(), b"#!/bin/sh\necho hi\n");
+        assert!(!stale.exists(), "the stale unversioned cache is removed");
     }
 
     /// The guest path has to be somewhere already on PATH, or the base set's

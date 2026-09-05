@@ -1250,8 +1250,11 @@ pub fn network_remove(backend: &Backend, name: &str) -> Result<()> {
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr);
         // Never created — a session that was planned and not launched, or an
-        // older omh's per-repo network — is nothing to remove.
-        if said.contains("not found") || said.contains("No such network") {
+        // older omh's per-repo network — is nothing to remove. Case-folded
+        // because docker and podman disagree on the capitalisation of "no such
+        // network", and either is the same benign outcome.
+        let lower = said.to_lowercase();
+        if lower.contains("not found") || lower.contains("no such network") {
             return Ok(());
         }
         anyhow::bail!("{}", crate::out::untrusted(said.trim()));
@@ -3374,6 +3377,42 @@ mod tests {
 
     /// A bumped version pin moves the image tag, so the next launch rebuilds.
     /// The pin is substituted into the recipe, which the tag is a digest of.
+    /// Removing a network that was never created is not a failure — a session
+    /// planned but not launched, or an older per-repo network, has none.
+    #[test]
+    fn removing_a_network_that_never_existed_is_not_a_failure() {
+        let (backend, _) = crate::runtime::Backend::scripted(
+            Box::new(crate::runtime::Docker),
+            vec![
+                (
+                    vec!["network", "rm", "gone"],
+                    crate::runtime::answered(1, "", "Error: no such network: gone"),
+                ),
+                (
+                    vec!["network", "rm", "other"],
+                    crate::runtime::answered(1, "", "network other not found"),
+                ),
+                (
+                    vec!["network", "rm", "broken"],
+                    crate::runtime::answered(1, "", "permission denied"),
+                ),
+            ],
+        );
+        assert!(
+            network_remove(&backend, "gone").is_ok(),
+            "No such network is tolerated"
+        );
+        assert!(
+            network_remove(&backend, "other").is_ok(),
+            "not found is tolerated"
+        );
+        let err = network_remove(&backend, "broken").unwrap_err();
+        assert!(
+            err.to_string().contains("permission denied"),
+            "a real failure is not: {err}"
+        );
+    }
+
     #[test]
     fn a_bumped_pin_moves_the_tag() {
         let mut a = claude();

@@ -1134,9 +1134,15 @@ impl Session {
     /// `behind` and `commits` ask the two halves separately, and the dashboard
     /// used to call both for every row. This is the same two numbers from one
     /// process; the equivalence is pinned by a test on a real repository.
-    pub fn against(&self, repo: &Path, base: &str) -> Result<(usize, usize)> {
+    pub fn against(&self, repo: &Path, base: &str) -> Result<Standing> {
+        // `behind: 0, ahead: 0` for a branchless (scratch) session. Named
+        // fields, not a pair, so the two same-typed counts cannot be read in
+        // the wrong order two files away.
         let Some(branch) = &self.branch else {
-            return Ok((0, 0));
+            return Ok(Standing {
+                behind: 0,
+                ahead: 0,
+            });
         };
         let out = git(
             repo,
@@ -1151,15 +1157,16 @@ impl Session {
             .trim()
             .split_once('\t')
             .with_context(|| format!("reading `rev-list --left-right` for {branch}: {out:?}"))?;
-        Ok((
-            left.trim()
+        Ok(Standing {
+            behind: left
+                .trim()
                 .parse()
                 .with_context(|| format!("counting how far {branch} is behind {base}"))?,
-            right
+            ahead: right
                 .trim()
                 .parse()
                 .with_context(|| format!("counting commits on {branch}"))?,
-        ))
+        })
     }
 
     /// Push the session branch to origin under a name a reviewer can read, and
@@ -1665,6 +1672,15 @@ pub(crate) fn still_there(at: &Path) -> Result<bool, String> {
         // the absence of what it points at.
         Err(e) => Err(format!("{e}")),
     }
+}
+
+/// How a session stands against trunk: commits `base` has that it does not
+/// (`behind`), and commits it has that `base` does not (`ahead`). Both from one
+/// `rev-list --left-right`; named so the two counts are not swappable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Standing {
+    pub behind: usize,
+    pub ahead: usize,
 }
 
 /// What one branch tracks, out of the listing `upstreams` reads.
@@ -3039,21 +3055,31 @@ mod tests {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
-        let both = |s: &Session| {
-            (
-                s.behind(&root, "main").unwrap(),
-                s.commits(&root, "main").unwrap(),
-            )
+        let both = |s: &Session| Standing {
+            behind: s.behind(&root, "main").unwrap(),
+            ahead: s.commits(&root, "main").unwrap(),
         };
 
         assert_eq!(s.against(&root, "main").unwrap(), both(&s));
-        assert_eq!(s.against(&root, "main").unwrap(), (0, 0));
+        assert_eq!(
+            s.against(&root, "main").unwrap(),
+            Standing {
+                behind: 0,
+                ahead: 0
+            }
+        );
 
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
         s.commit(Some("Add the work"), Carried::refusing(&[]))
             .unwrap();
         assert_eq!(s.against(&root, "main").unwrap(), both(&s));
-        assert_eq!(s.against(&root, "main").unwrap(), (0, 1));
+        assert_eq!(
+            s.against(&root, "main").unwrap(),
+            Standing {
+                behind: 0,
+                ahead: 1
+            }
+        );
 
         for _ in 0..2 {
             git(
@@ -3063,7 +3089,13 @@ mod tests {
             .unwrap();
         }
         assert_eq!(s.against(&root, "main").unwrap(), both(&s));
-        assert_eq!(s.against(&root, "main").unwrap(), (2, 1));
+        assert_eq!(
+            s.against(&root, "main").unwrap(),
+            Standing {
+                behind: 2,
+                ahead: 1
+            }
+        );
 
         // A base git cannot resolve is a question it could not answer — for
         // both halves at once, never a zero for either.

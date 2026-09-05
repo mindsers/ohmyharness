@@ -754,7 +754,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                 work: Some(work_state(
                     &sess,
                     &upstreams,
-                    standing.as_ref().ok().map(|&(_, commits)| commits),
+                    standing.as_ref().ok().map(|s| s.ahead),
                     touched.as_ref().ok().map(Vec::len),
                 )),
                 // Not `.ok()`. The dashboard renders a failed count as a
@@ -764,7 +764,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                 // the same class of failure, and `log` prints git's own words;
                 // this was the one that threw them away.
                 behind: match &standing {
-                    Ok((behind, _)) => Some(*behind),
+                    Ok(s) => Some(s.behind),
                     Err(e) => {
                         ctx.warn(&format!(
                             "could not tell how far behind {base} {id} is: {e:#}"

@@ -431,6 +431,18 @@ impl Paths {
         remember(&self.root, &self.repo_id(), &settled(&self.repo))
     }
 
+    /// The network a scratch verb shares: the per-repo `omh-<repo_id>`.
+    ///
+    /// `omh auth` and `omh doctor` run a one-shot `--rm` container and need a
+    /// network, but not isolation from each other — they hold no services. A
+    /// per-session network for each would be a leftover nothing removes (they
+    /// are not in the session list) and one `id_in_network` would misattribute
+    /// to a phantom `<repo>-auth`. One shared, reused network avoids both, and
+    /// is what these verbs used before per-session networks existed.
+    pub fn scratch_network(&self) -> String {
+        format!("omh-{}", self.repo_id())
+    }
+
     /// The session's own network, named like its container. One per session
     /// rather than one per checkout: two sessions of the same repo have no
     /// business reaching each other's services, and on a shared network they
