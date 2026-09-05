@@ -460,6 +460,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 edit,
                 force,
                 no_verify,
+                no_promote,
             } => cmd::harvest::commit(
                 &cwd,
                 cli.session.as_deref(),
@@ -473,6 +474,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 *skip_carried,
                 *force,
                 *no_verify,
+                *no_promote,
                 ctx,
             ),
             SessionsCmd::Push { name, pr } => {

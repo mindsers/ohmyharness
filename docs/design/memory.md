@@ -368,10 +368,14 @@ $ omh memory stale              # join against §8 events
 $ omh memory lint               # schema + hygiene violations
 ```
 
-`promote` is the **only place a human gates anything**, because it is the only
-place a wrong note reaches somebody else. Everything else is invisible: no
-approval during work, no interruption — a memory you have to approve is a
-notebook, and nobody keeps one.
+A **commit is the gate**, because it is the one place a wrong note reaches
+somebody else and the one moment a human is already reviewing. `omh sNN commit`
+promotes the notes that session recorded into the team layer in the same commit
+as the code; `--no-promote` holds them back, and `omh memory promote` still
+promotes notes recorded outside a session by hand. Everything else is
+invisible: no approval during work, no interruption — a memory you have to
+approve on its own is a notebook, and nobody keeps one. Riding the gate on the
+commit means the review already happening is the review.
 
 The review moment rides on something already happening rather than a ritual
 nobody performs:

@@ -589,6 +589,13 @@ pub(crate) enum SessionsCmd {
         /// as `git commit --no-verify` skips git's.
         #[arg(long = "no-verify")]
         no_verify: bool,
+        /// Keep the session's notes local instead of promoting them.
+        ///
+        /// A commit is the human gate a note passes to reach the team layer,
+        /// so `commit` promotes the notes this session recorded in the same
+        /// commit as the code. This holds them back.
+        #[arg(long = "no-promote")]
+        no_promote: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
     Push {

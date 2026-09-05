@@ -9666,6 +9666,99 @@ fn commit_refuses_when_the_turn_end_hook_fails() {
     assert_ne!(sb.head_of_branch("omh/s01"), before, "and the work landed");
 }
 
+/// A commit promotes the session's own notes into the team layer, in the same
+/// commit as the code, and leaves another session's notes local.
+#[test]
+fn commit_lands_the_sessions_notes_in_the_team_layer() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+
+    // A note this session recorded, and one another session did.
+    let local = sb.keyed("notes").join("local");
+    std::fs::create_dir_all(local.join("surprise")).unwrap();
+    let note = |session: &str| {
+        format!(
+            "---\nkey: surprise/{session}-thing\ntype: surprise\nsource: session {session}, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx would happen\n\n## Observed\ny happened\n\n## Evidence\nthe log said so\n\n## Answers\n- do y instead\n"
+        )
+    };
+    std::fs::write(local.join("surprise/s01-thing.md"), note("s01")).unwrap();
+    std::fs::write(local.join("surprise/s02-thing.md"), note("s02")).unwrap();
+
+    let out = sb.omh(&["s01", "commit", "-m", "land the work"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The session's note is committed on its branch, under the team layer.
+    let tree = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(["ls-tree", "-r", "--name-only", "omh/s01"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .to_string();
+    assert!(
+        tree.contains(".omh/notes/surprise/s01-thing.md"),
+        "the session's note landed in the commit: {tree}"
+    );
+    assert!(
+        !tree.contains("s02-thing"),
+        "another session's note is not promoted: {tree}"
+    );
+    // And the promoted note is no longer local — promotion moves it.
+    assert!(
+        !local.join("surprise/s01-thing.md").exists(),
+        "the promoted note left the local layer"
+    );
+    assert!(
+        local.join("surprise/s02-thing.md").exists(),
+        "the other session's note stayed local"
+    );
+}
+
+/// `--no-promote` holds the session's notes back, and says nothing landed.
+#[test]
+fn commit_with_no_promote_leaves_the_notes_local() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let local = sb.keyed("notes").join("local");
+    std::fs::create_dir_all(local.join("surprise")).unwrap();
+    std::fs::write(
+        local.join("surprise/s01-thing.md"),
+        "---\nkey: surprise/s01-thing\ntype: surprise\nsource: session s01, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx would happen\n\n## Observed\ny happened\n\n## Evidence\nthe log said so\n\n## Answers\n- do y instead\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["s01", "commit", "-m", "land it", "--no-promote"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        local.join("surprise/s01-thing.md").exists(),
+        "--no-promote keeps the note local"
+    );
+    let tree = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(["ls-tree", "-r", "--name-only", "omh/s01"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .to_string();
+    assert!(!tree.contains("s01-thing"), "and out of the commit: {tree}");
+}
+
 /// `commit --keep` refuses a commit holding the **value** of a carried secret,
 /// end to end: the setting that carries the file, the file in the checkout,
 /// the token alone in the agent's source.

@@ -853,6 +853,15 @@ turns*. Cost is summed per model from a dated price table; a model omh has no
 price for reports its tokens and **cost unknown**, never `$0`. All of it is in
 `--json`.
 
+### `omh sNN commit` promotes the session's notes
+
+A commit is the human gate a note passes to reach the team layer, so
+`omh sNN commit` promotes the notes this session recorded — the ones whose
+provenance names this session — into `<repo>/.omh/notes` in the same commit as
+the code. A note the store would refuse is reported and left local; it never
+blocks the commit. `--no-promote` holds them all back. Notes recorded outside a
+session are still promoted by hand with `omh memory promote`.
+
 ### `omh sNN commit` runs this repo's checks first
 
 Before it lands anything, `omh sNN commit` runs the repo's turn-end hook
