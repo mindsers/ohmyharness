@@ -943,6 +943,11 @@ pub struct Sessions {
     /// as nothing at all when it is empty, so a partial answer would be
     /// indistinguishable from a clean one.
     pub unreadable: Vec<String>,
+    /// The `ssh` command that opens a shell in this session, when the view is
+    /// scoped to one running session. `None` for the wide listing and for a
+    /// stopped one: there is no shell to offer a session that is not up, and a
+    /// dashboard of many is not the place to name one.
+    pub shell: Option<String>,
 }
 
 impl Report for Sessions {
@@ -1119,6 +1124,13 @@ impl Report for Sessions {
                 ));
         }
 
+        // The shell into a focused, running session — the thing you reach for
+        // right after `attach` closes, and which `attach` itself already
+        // prints. A next action, so it stays out of a redirected listing.
+        if let Some(shell) = &self.shell {
+            asides = asides.hint(format!("  {shell}   open a shell in the session"));
+        }
+
         if self.leftovers.is_empty() {
             return asides;
         }
@@ -1172,6 +1184,7 @@ impl Report for Sessions {
                 "paths": o.paths,
             })).collect::<Vec<_>>(),
             "unreadable": self.unreadable,
+            "shell": self.shell,
         })
     }
 }

@@ -815,6 +815,17 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         }
     };
 
+    // Computed before the struct moves `sessions`: a shell is offered only when
+    // the view is one running session — the moment after `attach` closes.
+    // `host_alias` is what `attach` wrote into `~/.ssh/config.d/omh`, so the
+    // two name the same host.
+    let shell = only.and_then(|id| {
+        sessions
+            .iter()
+            .find(|s| s.id == id)
+            .filter(|s| matches!(s.running, Some(image::Running::Yes)))
+            .map(|s| format!("ssh {}", ssh::host_alias(&paths.repo_name(), &s.id)))
+    });
     ctx.say(&report::Sessions {
         sessions,
         // Not swept when one session was asked for. A leftover is an id with
@@ -834,6 +845,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         // about the focused session even though the id named is not.
         unreadable,
         base,
+        shell,
     });
     Ok(())
 }

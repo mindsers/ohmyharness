@@ -223,6 +223,10 @@ One row per editor omh has, keyed by the name it knows it under —
 An editor that is not installed is **not an error** — omh says so and prints the
 URL. See [Editors](editors.md).
 
+You do not need an editor to get a shell: the `ssh` alias above reaches the
+session directly, and `omh sNN` prints it as a next action while the session is
+running. `ssh omh-<repo>-sNN` lands you in `/work` as the agent.
+
 ## `omh graph [--stop]`
 
 Serves the code graph for this repo in a browser.
