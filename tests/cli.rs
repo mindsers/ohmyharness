@@ -7548,10 +7548,12 @@ fn a_partly_removed_session_claims_only_what_it_did() {
         .expect("git must be installed to run this test");
 
     // `fake_docker` wrote `runtime = "docker"`; overwrite it with a name
-    // `select` cannot build, so the container half is never entered.
+    // `select` cannot build, so the container half is never entered. Not
+    // `podman` — that is a real backend now — but a name in no `NAMES` list,
+    // which `select` refuses without probing the machine.
     std::fs::write(
         sb.repo.join(".omh/settings.local.toml"),
-        "runtime = \"podman\"\n",
+        "runtime = \"containerd\"\n",
     )
     .unwrap();
 
