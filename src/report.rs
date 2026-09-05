@@ -235,6 +235,135 @@ impl Report for Synced {
     }
 }
 
+/// Every session synced against trunk, in one report.
+///
+/// `omh s sync --all` moves trunk into each session in turn and stops at the
+/// first that cannot go cleanly — a conflict to resolve, or an error. Stopping
+/// is the point: a conflict wants a person, and pressing on would bury the one
+/// that needs deciding under a wall of ones that did not.
+#[derive(Debug, Clone)]
+pub struct SyncedAll {
+    /// The sessions brought forward cleanly, in order.
+    pub done: Vec<Synced>,
+    /// The session it stopped at, and why — a conflict or an error. `None`
+    /// when every session synced cleanly.
+    pub stopped: Option<SyncStop>,
+    /// The sessions after the stop, not reached. Empty when nothing stopped.
+    pub untouched: Vec<String>,
+}
+
+/// Why `sync --all` stopped.
+#[derive(Debug, Clone)]
+pub enum SyncStop {
+    /// It synced, but the result needs a person: markers to resolve.
+    Conflict(Synced),
+    /// It could not sync — a running sandbox that must be stopped first, a git
+    /// failure. Carries the session and the reason.
+    Error { id: String, why: String },
+}
+
+impl Report for SyncedAll {
+    fn human(&self, p: &out::Palette) -> String {
+        let mut s = out::heading(
+            p,
+            &format!(
+                "synced {} session{}",
+                self.done.len(),
+                if self.done.len() == 1 { "" } else { "s" }
+            ),
+        );
+        s.push('\n');
+        for synced in &self.done {
+            s.push_str(&format!(
+                "  {} · {} from {}\n",
+                p.paint(out::NAME, &synced.id),
+                match synced.moved {
+                    1 => "1 commit".to_string(),
+                    n => format!("{n} commits"),
+                },
+                synced.base
+            ));
+        }
+        match &self.stopped {
+            None => {}
+            Some(SyncStop::Conflict(synced)) => s.push_str(&format!(
+                "\n  {}\n",
+                p.paint(
+                    out::WARN,
+                    &format!(
+                        "stopped at {}: {} file{} to resolve",
+                        synced.id,
+                        synced.conflicted.len(),
+                        if synced.conflicted.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    )
+                )
+            )),
+            Some(SyncStop::Error { id, why }) => s.push_str(&format!(
+                "\n  {}\n",
+                p.paint(
+                    out::WARN,
+                    &format!("stopped at {id}: {}", out::untrusted(why))
+                )
+            )),
+        }
+        if !self.untouched.is_empty() {
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(
+                    out::DIM,
+                    &format!("not reached: {}", self.untouched.join(", "))
+                )
+            ));
+        }
+        s
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "done": self.done.iter().map(Report::json).collect::<Vec<_>>(),
+            "stopped": match &self.stopped {
+                None => serde_json::Value::Null,
+                Some(SyncStop::Conflict(synced)) => json!({
+                    "session": synced.id,
+                    "why": "conflict",
+                    "conflicted": synced.conflicted,
+                }),
+                Some(SyncStop::Error { id, why }) => json!({
+                    "session": id,
+                    "why": "error",
+                    "reason": why,
+                }),
+            },
+            "untouched": self.untouched,
+        })
+    }
+
+    fn asides(&self) -> out::Asides {
+        let mut asides = out::Asides::default();
+        match &self.stopped {
+            Some(SyncStop::Conflict(synced)) => {
+                asides = asides.hint(format!(
+                    "  omh {} resume          resolve the markers in the sandbox, then \
+                     `omh s sync --all` again",
+                    synced.id
+                ));
+            }
+            Some(SyncStop::Error { id, .. }) => {
+                asides = asides.hint(format!(
+                    "  omh {id} sync --down     sync this one, stopping its sandbox, then \
+                     `omh s sync --all` again"
+                ));
+            }
+            None => {}
+        }
+        asides
+    }
+}
+
 // ── omh sNN log ─────────────────────────────────────────────────────────────
 
 /// What the agent has committed inside the sandbox, and where the line is.

@@ -47,6 +47,70 @@ pub(crate) fn sync(
     Ok(())
 }
 
+/// Sync every session against trunk, stopping at the first that cannot go
+/// cleanly, and report the lot in one document.
+///
+/// Refused with a named session: `--all` is *every* session, and naming one
+/// asks two contradictory things. The loop is injected so the stop-at-first
+/// logic is testable without a runtime — `sync_all` decides what to do with
+/// each result; the command supplies the sync.
+pub(crate) fn sync_all(
+    cwd: &std::path::Path,
+    base: Option<&str>,
+    down: bool,
+    ctx: &out::Ctx,
+) -> Result<()> {
+    let paths = Paths::discover(cwd)?;
+    let ids = session::list(&paths.worktrees());
+    let base = base.map(str::to_string);
+    let report = sync_over(ids, |id| {
+        let session = Session::new(&paths.worktrees(), id.to_string());
+        let base = base
+            .clone()
+            .unwrap_or_else(|| session::default_branch(&paths.repo));
+        stop_before_syncing(&paths, &session, down, ctx)?;
+        sync_session(&paths, &session, &base)
+    });
+    ctx.say(&report);
+    Ok(())
+}
+
+/// Fold each session's sync into one report, stopping at the first that needs
+/// a person or fails.
+///
+/// A clean sync joins `done`; a sync that produced conflict markers stops the
+/// run (a conflict wants deciding, and burying it under later syncs helps
+/// nobody); an error stops it too. Everything after the stop is `untouched`.
+pub(crate) fn sync_over(
+    ids: Vec<String>,
+    mut sync_one: impl FnMut(&str) -> Result<report::Synced>,
+) -> report::SyncedAll {
+    let mut done = Vec::new();
+    let mut stopped = None;
+    let mut ids = ids.into_iter();
+    for id in ids.by_ref() {
+        match sync_one(&id) {
+            Ok(synced) if synced.conflicted.is_empty() => done.push(synced),
+            Ok(synced) => {
+                stopped = Some(report::SyncStop::Conflict(synced));
+                break;
+            }
+            Err(e) => {
+                stopped = Some(report::SyncStop::Error {
+                    id,
+                    why: format!("{e:#}"),
+                });
+                break;
+            }
+        }
+    }
+    report::SyncedAll {
+        done,
+        stopped,
+        untouched: ids.collect(),
+    }
+}
+
 /// The sync itself, once it is known to be safe to run.
 ///
 /// Split from `sync` so it can be asserted: the command around it needs a
@@ -1407,6 +1471,69 @@ mod tests {
             when: None,
             action,
         }
+    }
+
+    fn synced(id: &str, conflicted: Vec<&str>) -> report::Synced {
+        report::Synced {
+            id: id.into(),
+            base: "main".into(),
+            onto: "abc".into(),
+            moved: 1,
+            conflicted: conflicted.into_iter().map(str::to_string).collect(),
+            checkpoint: false,
+            note: None,
+        }
+    }
+
+    /// A sync of every session stops at the first conflict and names what it
+    /// did not reach, in one report.
+    #[test]
+    fn a_sync_of_every_session_stops_at_the_first_conflict_and_names_what_it_did_not_reach() {
+        let ids = vec!["s01".to_string(), "s02".to_string(), "s03".to_string()];
+        let report = sync_over(ids, |id| match id {
+            "s02" => Ok(synced("s02", vec!["src/tap.rs"])),
+            other => Ok(synced(other, vec![])),
+        });
+        assert_eq!(report.done.len(), 1, "only s01 synced cleanly");
+        assert_eq!(report.done[0].id, "s01");
+        match report.stopped {
+            Some(report::SyncStop::Conflict(s)) => assert_eq!(s.id, "s02"),
+            other => panic!("a conflict must stop the run, got {other:?}"),
+        }
+        assert_eq!(
+            report.untouched,
+            vec!["s03".to_string()],
+            "s03 was not reached"
+        );
+    }
+
+    /// An error stops it too, and is carried with the session it belongs to.
+    #[test]
+    fn a_sync_of_every_session_stops_at_the_first_error() {
+        let ids = vec!["s01".to_string(), "s02".to_string()];
+        let report = sync_over(ids, |id| match id {
+            "s01" => anyhow::bail!("s01 is running"),
+            other => Ok(synced(other, vec![])),
+        });
+        assert!(report.done.is_empty());
+        match report.stopped {
+            Some(report::SyncStop::Error { id, why }) => {
+                assert_eq!(id, "s01");
+                assert!(why.contains("running"), "{why}");
+            }
+            other => panic!("an error must stop the run, got {other:?}"),
+        }
+        assert_eq!(report.untouched, vec!["s02".to_string()]);
+    }
+
+    /// Every session clean is one report with nothing stopped and nothing left.
+    #[test]
+    fn syncing_every_session_emits_one_report_when_all_are_clean() {
+        let ids = vec!["s01".to_string(), "s02".to_string()];
+        let report = sync_over(ids, |id| Ok(synced(id, vec![])));
+        assert_eq!(report.done.len(), 2);
+        assert!(report.stopped.is_none());
+        assert!(report.untouched.is_empty());
     }
 
     /// A check is a turn-end command whose stack this repo has. A hook for

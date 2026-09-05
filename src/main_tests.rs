@@ -1544,7 +1544,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         // `select`'s refusal when only the unmeasured backend is present
         // names `omh doctor` as the way to check it first.
         ("src/runtime.rs", 1),
-        ("src/report.rs", 14),
+        ("src/report.rs", 18), // + the SyncedAll report's next-action lines
         ("src/rules.rs", 1),
         ("src/selection.rs", 1),
         ("src/session.rs", 4),

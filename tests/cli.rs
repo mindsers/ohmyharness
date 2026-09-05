@@ -1246,6 +1246,23 @@ fn listing_three_sessions_asks_the_runtime_once() {
     );
 }
 
+/// `--all` and a named session together is refused: one contradicts the other.
+#[test]
+fn sync_all_refuses_a_named_session() {
+    let sb = sandbox();
+    sb.git_init();
+    let out = sb.omh(&["s01", "sync", "--all"]);
+    assert!(
+        !out.status.success(),
+        "naming a session with --all is refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("every session"),
+        "and says why: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// The dashboard reads every session's upstream from one `for-each-ref`, and
 /// each session's standing against trunk from one `rev-list`.
 ///

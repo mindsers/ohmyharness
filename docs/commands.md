@@ -783,6 +783,13 @@ What the agent finds when it starts again:
 The conflict markers read `<<<<<<< main` and `>>>>>>> s01`, which is to say
 they name the sides rather than two object ids.
 
+**`omh s sync --all` syncs every session**, stopping at the first that needs a
+person — a conflict to resolve, or an error — and naming the ones it did not
+reach. Trunk moves once; you bring it into all of them without a command each.
+`--all` is refused together with a named session, since it is *every* session.
+A conflict stops the run rather than piling up behind the later syncs; resolve
+it and run `omh s sync --all` again.
+
 **It refuses while the sandbox is up**, and `--down` stops it first. Not about
 the files — the checkpoint makes an overwrite recoverable. It is about what the
 agent *believes* the tree contains, which lives in its conversation and not on
