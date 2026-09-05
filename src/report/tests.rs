@@ -779,6 +779,8 @@ fn the_scoped_row_carries_cost_only_when_a_transcript_was_read() {
         crate::transcript::Usage {
             input: 1_000_000,
             output: 1_000_000,
+            cache_read: 0,
+            cache_write: 0,
             cost: Some(18.0),
         },
     );

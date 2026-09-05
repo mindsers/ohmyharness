@@ -688,19 +688,28 @@ fn session_activity(
         ));
     }
     let dir = paths.runs().join(id).join("transcripts");
+    // A directory that is not there is "no transcript yet"; a directory omh
+    // could not read, or a file in it it could not open, is *unreadable* — a
+    // real failure must not be reported as an empty history.
+    let files = match walk_jsonl(&dir) {
+        Ok(files) => files,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return report::Activity::Unreadable,
+    };
+    if files.is_empty() {
+        return report::Activity::NotRecorded("no transcript written yet".into());
+    }
     let mut jsonl = String::new();
-    let mut found = false;
-    if let Ok(walk) = walk_jsonl(&dir) {
-        for file in walk {
-            if let Ok(text) = std::fs::read_to_string(&file) {
+    for file in files {
+        match std::fs::read_to_string(&file) {
+            Ok(text) => {
                 jsonl.push_str(&text);
                 jsonl.push('\n');
-                found = true;
             }
+            // A transcript file that exists and will not open is unreadable,
+            // not absent.
+            Err(_) => return report::Activity::Unreadable,
         }
-    }
-    if !found {
-        return report::Activity::NotRecorded("no transcript written yet".into());
     }
     let summary = crate::transcript::summarise(&jsonl);
     if summary.is_unreadable() {
@@ -730,10 +739,23 @@ fn walk_jsonl(dir: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>>
 
 /// The last check result `omh sNN commit` recorded, if any.
 fn read_check(paths: &Paths, id: &str) -> Option<report::CheckState> {
-    let text = std::fs::read_to_string(paths.runs().join(id).join("check.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    // A file that is not there is "no check recorded" (`None`, no line). A file
+    // that is there and will not read, or carries a state this version does not
+    // know, is `Unreadable` — a damaged record must not vanish.
+    let text = match std::fs::read_to_string(paths.runs().join(id).join("check.json")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(report::CheckState::Unreadable),
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Some(report::CheckState::Unreadable);
+    };
     let detail = value.get("detail");
-    match value.get("state").and_then(|s| s.as_str())? {
+    match value
+        .get("state")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unreadable")
+    {
         "passed" => Some(report::CheckState::Passed(
             detail
                 .and_then(|d| d.get("count"))
@@ -754,7 +776,9 @@ fn read_check(paths: &Paths, id: &str) -> Option<report::CheckState> {
                 .unwrap_or("unknown")
                 .to_string(),
         )),
-        _ => None,
+        // A state string this version does not know is a record it cannot
+        // read, not the absence of one.
+        _ => Some(report::CheckState::Unreadable),
     }
 }
 

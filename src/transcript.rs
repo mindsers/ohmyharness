@@ -35,6 +35,12 @@ pub struct Summary {
 pub struct Usage {
     pub input: u64,
     pub output: u64,
+    /// Tokens written to and read from the prompt cache. Separate because they
+    /// are priced differently — a cache read is a fraction of an input token,
+    /// a cache write a little more — and on a Claude Code session cache reads
+    /// dominate the volume, so leaving them out understates the real spend.
+    pub cache_read: u64,
+    pub cache_write: u64,
     /// `None` for a model with no price in `PRICES` — tokens are still summed,
     /// but a cost omh does not know is not reported as `0`.
     pub cost: Option<f64>,
@@ -102,8 +108,13 @@ pub fn summarise(jsonl: &str) -> Summary {
     // Prices, applied once the tokens are summed.
     for (model, usage) in s.usage.iter_mut() {
         usage.cost = price_of(model).map(|(input, output)| {
+            // Cache pricing relative to the base input rate, per Anthropic's
+            // published multipliers (read 2026-09): a cache read bills at 0.1x,
+            // a cache write at 1.25x.
             (usage.input as f64 / 1_000_000.0) * input
                 + (usage.output as f64 / 1_000_000.0) * output
+                + (usage.cache_read as f64 / 1_000_000.0) * input * 0.1
+                + (usage.cache_write as f64 / 1_000_000.0) * input * 1.25
         });
     }
     s
@@ -129,14 +140,11 @@ fn read_record(value: &serde_json::Value, s: &mut Summary) {
             .unwrap_or("unknown")
             .to_string();
         let entry = s.usage.entry(model).or_default();
-        entry.input += usage
-            .get("input_tokens")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0);
-        entry.output += usage
-            .get("output_tokens")
-            .and_then(|t| t.as_u64())
-            .unwrap_or(0);
+        let tok = |name: &str| usage.get(name).and_then(|t| t.as_u64()).unwrap_or(0);
+        entry.input += tok("input_tokens");
+        entry.output += tok("output_tokens");
+        entry.cache_read += tok("cache_read_input_tokens");
+        entry.cache_write += tok("cache_creation_input_tokens");
     }
 
     let content = message
@@ -265,6 +273,35 @@ mod tests {
             Some(3.0 + 15.0)
         );
         assert_eq!(known.cost(), Some(18.0));
+    }
+
+    /// Cache tokens are priced and counted, not dropped — on a Claude Code
+    /// session they dominate the volume, so leaving them out understates cost.
+    #[test]
+    fn cache_tokens_are_counted_in_the_cost() {
+        let line = serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "model": "claude-sonnet-4-20260514",
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_input_tokens": 1_000_000,
+                    "cache_creation_input_tokens": 1_000_000,
+                },
+                "content": [],
+            }
+        })
+        .to_string();
+        let s = summarise(&line);
+        let u = &s.usage["claude-sonnet-4-20260514"];
+        assert_eq!((u.cache_read, u.cache_write), (1_000_000, 1_000_000));
+        // sonnet input is $3/Mtok: read at 0.1x = $0.30, write at 1.25x = $3.75.
+        assert_eq!(
+            u.cost,
+            Some(0.30 + 3.75),
+            "cache reads and writes are priced, not free"
+        );
     }
 
     /// Every tool call names the file it touched, when the record carries one.

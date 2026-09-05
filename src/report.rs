@@ -1109,6 +1109,10 @@ pub enum CheckState {
     Passed(usize),
     Failed(String),
     NotRun(String),
+    /// `check.json` is there but omh could not read it — damaged, or written
+    /// by a version whose shape this one does not know. Not the same as no
+    /// check ever running, which shows no line at all.
+    Unreadable,
 }
 
 impl Report for Sessions {
@@ -1381,6 +1385,22 @@ fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
                     )
                 )
             ));
+            // Some turns read, some lines not: the totals are a floor, and
+            // saying so is the difference between an honest partial and a
+            // confident wrong total.
+            if summary.unreadable > 0 {
+                s.push_str(&format!(
+                    "  {}\n",
+                    p.paint(
+                        out::WARN,
+                        &format!(
+                            "{} transcript line{} could not be read — the totals above are a floor",
+                            summary.unreadable,
+                            if summary.unreadable == 1 { "" } else { "s" }
+                        )
+                    )
+                ));
+            }
         }
         Activity::NotRecorded(why) => {
             s.push_str(&format!(
@@ -1403,6 +1423,10 @@ fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
                 format!("checks: failed — {}", out::untrusted(name)),
             ),
             CheckState::NotRun(why) => (out::DIM, format!("checks: not run — {why}")),
+            CheckState::Unreadable => (
+                out::WARN,
+                "checks: a result was recorded but omh could not read it".to_string(),
+            ),
         };
         s.push_str(&format!("  {}\n", p.paint(style, &text)));
     }
@@ -1418,8 +1442,11 @@ fn focus_json(focus: &Focus) -> serde_json::Value {
             "tools": summary.tools,
             "files": summary.files.iter().collect::<Vec<_>>(),
             "cost": summary.cost(),
+            "unreadable": summary.unreadable,
             "usage": summary.usage.iter().map(|(m, u)| (m.clone(), json!({
-                "input": u.input, "output": u.output, "cost": u.cost,
+                "input": u.input, "output": u.output,
+                "cache_read": u.cache_read, "cache_write": u.cache_write,
+                "cost": u.cost,
             }))).collect::<serde_json::Map<_, _>>(),
         }),
         Activity::NotRecorded(why) => json!({ "state": "not-recorded", "why": why }),
@@ -1429,6 +1456,7 @@ fn focus_json(focus: &Focus) -> serde_json::Value {
         CheckState::Passed(n) => json!({ "state": "passed", "count": n }),
         CheckState::Failed(name) => json!({ "state": "failed", "check": name }),
         CheckState::NotRun(why) => json!({ "state": "not-run", "why": why }),
+        CheckState::Unreadable => json!({ "state": "unreadable" }),
     });
     json!({ "activity": activity, "check": check })
 }

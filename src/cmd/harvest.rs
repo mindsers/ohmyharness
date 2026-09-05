@@ -1056,12 +1056,13 @@ pub(crate) fn commit(
     // reached only for a commit that passed, was skipped, or could not be run.
     run_checks(&paths, &session, no_verify, ctx)?;
 
-    // Promote the notes this session recorded into the worktree's team layer,
-    // so they land in the same commit as the code — a commit is the human gate
-    // §12 talks about. Written before the landing: the squash's `git add -A`
-    // carries them, and `--keep` commits them explicitly below. A note the
-    // gate refuses is reported and left local; it never blocks the commit.
-    let promoted = promote_session_notes(&paths, &session, no_promote, ctx)?;
+    // The session's notes are promoted into the worktree's team layer so they
+    // land in the same commit as the code — a commit is the human gate §12
+    // talks about. *When* differs by landing, and it matters: the squash's
+    // `git add -A` sweeps whatever is in the worktree, but `shadow.harvest`
+    // opens `--keep` with its own uncommitted-work sweep, so notes written
+    // before it would be mislabelled "Work in progress". So each arm promotes
+    // at its own moment — squash before its commit, keep after the harvest.
 
     // Two ways to land the same work, and the user picks which at the moment
     // they land it. `-m` squashes the files into one commit of their own and
@@ -1099,8 +1100,9 @@ pub(crate) fn commit(
             };
             let harvest = shadow.harvest(&paths.repo, &session.worktree, branch, &carried, keep)?;
             let landed = harvest.landed;
-            // The replant does not sweep the worktree; the promoted notes need
-            // their own commit on the branch.
+            // After the harvest's own sweep, so the notes are not swept into a
+            // "Work in progress" commit; then committed on their own.
+            let promoted = promote_session_notes(&paths, &session, no_promote, ctx)?;
             commit_promoted_notes(&paths, &session, &promoted)?;
             // Said before the count, not after. This is the sentence that stops
             // "nothing carried reached the branch" from being read as "every
@@ -1177,6 +1179,8 @@ pub(crate) fn commit(
     } else {
         session::Carried::refusing(&carried)
     };
+    // Before the commit that sweeps the worktree, so the notes land in it.
+    let promoted = promote_session_notes(&paths, &session, no_promote, ctx)?;
     session.commit(message, policy)?;
 
     // Counted against the base rather than reported as "committed", because the
@@ -1395,58 +1399,61 @@ fn run_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::Ctx)
 /// Decide what running the checks found, without recording or refusing.
 fn decide_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::Ctx) -> Checked {
     if no_verify {
-        return Checked::NotRun("--no-verify");
+        return Checked::NotRun("--no-verify".into());
     }
-    let the_checks = checks_for(paths, ctx);
+    // A repo whose checks omh could not read is *unknown*, never *none*: running
+    // a subset would report a pass on checks that did not run.
+    let the_checks = match checks_for(paths, ctx) {
+        Ok(checks) => checks,
+        Err(why) => return Checked::NotRun(why),
+    };
     if the_checks.is_empty() {
-        return Checked::NotRun("this repo declares no turn-end checks");
+        return Checked::NotRun("this repo declares no turn-end checks".into());
     }
     let Ok(backend) = runtime::select(&crate::runtime_preference(paths), &|p| {
         runtime::installed(p)
     }) else {
-        return Checked::NotRun("no container runtime to run them in");
+        return Checked::NotRun("no container runtime to run them in".into());
     };
     let container = paths.container(&session.id);
     match image::container_running(&backend, &container) {
         image::Running::Yes => verify(&backend, &container, &the_checks),
-        // A stopped or unreadable sandbox is unchecked, never passing: omh
-        // could not ask, so it did not run them.
-        _ => Checked::NotRun("the sandbox is stopped"),
+        image::Running::No => Checked::NotRun("the sandbox is stopped".into()),
+        // omh could not ask — a broken daemon, not a stopped sandbox. Never a
+        // pass, and the runtime's own reason survives rather than a fabricated
+        // "stopped".
+        image::Running::Unknown(why) => Checked::NotRun(format!(
+            "omh could not reach the sandbox to run them: {why}"
+        )),
     }
 }
 
-/// The checks this repo declares, or an empty list when they cannot be read.
+/// The checks this repo declares.
 ///
-/// Best-effort by design: a repo whose hooks omh cannot read has its checks
-/// reported as "not run" (empty here becomes `NotRun`), never silently passed.
-fn checks_for(paths: &Paths, ctx: &out::Ctx) -> Vec<(String, String)> {
-    let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks()).unwrap_or_default();
+/// `Err` is *omh could not read them* — a malformed stack file, an unreadable
+/// hooks directory — and it must not be confused with `Ok(empty)`, which is
+/// *this repo declares none*. Reading only some of them and running that
+/// subset would report a pass on checks that never ran, so any failure to read
+/// the full picture is an error, not a shorter list.
+fn checks_for(paths: &Paths, ctx: &out::Ctx) -> std::result::Result<Vec<(String, String)>, String> {
+    // `?`-style: a stack file that collides with a shipped name, a hooks
+    // directory omh cannot stat — each is a reason the check set is unknown,
+    // not empty. Warned for the terminal and carried for the record.
+    let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks())
+        .map_err(|e| format!("could not read this repo's stacks — {e:#}"))?;
     let detected: Vec<String> = stack::detected(&defs, &paths.repo)
         .iter()
         .map(|d| d.name.clone())
         .collect();
-    let (own, repo) = match crate::cmd::session::resolved(paths) {
-        Ok(x) => x,
-        Err(e) => {
-            ctx.warn(&format!(
-                "could not read this repo's setup, so its checks went unrun — {e:#}"
-            ));
-            return Vec::new();
-        }
-    };
+    let (own, repo) = crate::cmd::session::resolved(paths)
+        .map_err(|e| format!("could not read this repo's setup — {e:#}"))?;
     let dirs = Profile::resolve(paths)
         .sources(adapter::Capability::Hooks)
-        .unwrap_or_default();
-    let hooks = match render::merge_hooks(&dirs, &own, &repo) {
-        Ok(h) => h,
-        Err(e) => {
-            ctx.warn(&format!(
-                "could not read this repo's hooks, so its checks went unrun — {e:#}"
-            ));
-            return Vec::new();
-        }
-    };
-    checks(&hooks, &detected)
+        .map_err(|e| format!("could not read this repo's hooks — {e:#}"))?;
+    let hooks = render::merge_hooks(&dirs, &own, &repo)
+        .map_err(|e| format!("could not read this repo's hooks — {e:#}"))?;
+    let _ = ctx;
+    Ok(checks(&hooks, &detected))
 }
 
 /// Write the check outcome where `omh sNN` reads it, best-effort.
@@ -1510,10 +1517,11 @@ pub(crate) enum Checked {
     /// One check failed; the rest were not reached. Carries which and the
     /// tail of what it said, for a person to read.
     Failed { name: String, tail: String },
-    /// Nothing was run, and why — a stopped sandbox, `--no-verify`, or a repo
-    /// with no turn-end checks. Never a pass: "not run" is a fact the report
-    /// states, not a green light.
-    NotRun(&'static str),
+    /// Nothing was run, and why — a stopped sandbox, `--no-verify`, a repo
+    /// with no turn-end checks, or hooks omh could not read. Never a pass:
+    /// "not run" is a fact the report states, not a green light. A `String`
+    /// rather than a fixed set, so an unreadable runtime's own reason survives.
+    NotRun(String),
 }
 
 /// Run each check in the running sandbox, stopping at the first failure.
