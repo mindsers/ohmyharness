@@ -129,7 +129,7 @@ pub const KEYS: &[Key] = &[
     Key {
         name: "runtime",
         does: "Which runtime builds and runs the sandbox. Unset means `auto`.",
-        shape: Shape::Choice(&["auto", "docker", "sbx"]),
+        shape: Shape::Choice(&["auto", "docker", "podman", "sbx"]),
         secret: Secret::No,
     },
     // A path to a PEM on the host, not a credential: a CA certificate is

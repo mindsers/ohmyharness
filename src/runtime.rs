@@ -181,7 +181,7 @@ pub struct Docker;
 #[derive(Debug)]
 pub struct Sbx;
 
-pub const NAMES: [&str; 2] = ["docker", "sbx"];
+pub const NAMES: [&str; 3] = ["docker", "podman", "sbx"];
 
 impl Runtime for Docker {
     fn name(&self) -> &'static str {
@@ -360,6 +360,84 @@ impl Runtime for Docker {
     }
 }
 
+/// The unprivileged user every image runs as, and every backend maps the
+/// worktree to. `1000` in one place: the base image asserts `id -u agent` is
+/// this, and rootless podman maps the host user to it so a bind mount is
+/// writable by the agent rather than by root.
+pub const AGENT_UID: u32 = 1000;
+
+/// The rootless-podman user-namespace mapping.
+///
+/// Docker's daemon runs as root and a bind mount is owned by whoever the host
+/// user is; rootless podman runs as the user and maps them to root *inside*
+/// the container by default, so the agent (uid 1000) could not write the
+/// worktree. `keep-id` maps the host user to a chosen guest uid instead —
+/// `agent` — which is the whole of what makes podman a drop-in here.
+fn rootless_userns() -> String {
+    format!("--userns=keep-id:uid={AGENT_UID},gid={AGENT_UID}")
+}
+
+/// Podman speaks docker's CLI, so it borrows docker's argv and adds only the
+/// rootless user-namespace mapping. Delegating rather than duplicating is the
+/// point: the two cannot drift, which is exactly what the multi-backend
+/// invariants assert.
+///
+/// Shipped as an explicit opt-in — `runtime = "podman"` — not in `auto`, until
+/// `omh doctor` has measured `podman ps --format {{.Names}}` on a real host.
+/// A rendering that collapsed every session to *not running* would end in
+/// `rm -f`, the exact failure `image::running_from` exists to prevent, so it
+/// is a measured promotion, not an assumed one.
+#[derive(Debug)]
+pub struct Podman;
+
+impl Podman {
+    fn with_userns(mut argv: Vec<String>) -> Vec<String> {
+        // After `run`, before anything else: order is irrelevant to podman but
+        // keeps the argv readable and the insertion point unambiguous.
+        argv.insert(1, rootless_userns());
+        argv
+    }
+}
+
+impl Runtime for Podman {
+    fn name(&self) -> &'static str {
+        "podman"
+    }
+    fn program(&self) -> &'static str {
+        "podman"
+    }
+    fn caps(&self) -> Caps {
+        Docker.caps()
+    }
+    fn running_args(&self) -> Vec<String> {
+        Docker.running_args()
+    }
+    fn volume_args(&self) -> Option<Vec<String>> {
+        Docker.volume_args()
+    }
+    fn running_all_args(&self) -> Option<Vec<String>> {
+        Docker.running_all_args()
+    }
+    fn network_args(&self) -> Option<Vec<String>> {
+        Docker.network_args()
+    }
+    fn image_args(&self) -> Option<Vec<String>> {
+        Docker.image_args()
+    }
+    fn args(&self, plan: &Plan) -> Vec<String> {
+        Self::with_userns(Docker.args(plan))
+    }
+    fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String> {
+        Self::with_userns(Docker.up_args(plan, name, port, pubkey))
+    }
+    fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String> {
+        Docker.exec_args(name, argv, tty)
+    }
+    fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String> {
+        Docker.exec_detached_args(name, argv)
+    }
+}
+
 impl Runtime for Sbx {
     fn name(&self) -> &'static str {
         "sbx"
@@ -477,6 +555,7 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Back
     let build = |name: &str| -> Option<Box<dyn Runtime>> {
         match name {
             "docker" => Some(Box::new(Docker)),
+            "podman" => Some(Box::new(Podman)),
             "sbx" => Some(Box::new(Sbx)),
             _ => None,
         }
@@ -768,9 +847,12 @@ mod tests {
 
     #[test]
     fn an_unknown_runtime_lists_the_real_ones() {
-        let err = select("podman", &|_| true).unwrap_err();
+        let err = select("containerd", &|_| true).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("docker") && msg.contains("sbx"), "got: {msg}");
+        assert!(
+            msg.contains("docker") && msg.contains("podman") && msg.contains("sbx"),
+            "got: {msg}"
+        );
     }
 
     // ── validation ──────────────────────────────────────────────────────────
@@ -879,7 +961,11 @@ mod tests {
         let writable: Vec<_> = plan.mounts.iter().filter(|m| !m.read_only).collect();
         assert_eq!(writable.len(), 1);
 
-        for backend in [&Docker as &dyn Runtime, &Sbx as &dyn Runtime] {
+        for backend in [
+            &Docker as &dyn Runtime,
+            &Podman as &dyn Runtime,
+            &Sbx as &dyn Runtime,
+        ] {
             let args = backend.args(&plan).join(" ");
             let ro = args.matches(":ro").count();
             assert_eq!(
@@ -1003,6 +1089,63 @@ mod tests {
         );
     }
 
+    /// Podman carries the same information docker does, plus the rootless
+    /// user-namespace mapping — because it borrows docker's argv and adds only
+    /// that. Every flag docker sets, podman sets.
+    #[test]
+    fn podman_carries_the_same_information_as_docker() {
+        let plan = sample_plan();
+        let d_up = Docker.up_args(&plan, "n", 49200, "k");
+        let p_up = Podman.up_args(&plan, "n", 49200, "k");
+        for arg in &d_up {
+            assert!(p_up.contains(arg), "podman up_args drops docker's {arg}");
+        }
+        let d_run = Docker.args(&plan);
+        let p_run = Podman.args(&plan);
+        for arg in &d_run {
+            assert!(p_run.contains(arg), "podman args drops docker's {arg}");
+        }
+    }
+
+    /// Rootless podman maps the host user to the agent, or the bind-mounted
+    /// worktree lands owned by root and the agent cannot write it.
+    #[test]
+    fn rootless_podman_maps_the_worktree_to_the_agent() {
+        let want = format!("--userns=keep-id:uid={0},gid={0}", AGENT_UID);
+        for argv in [
+            Podman.up_args(&sample_plan(), "n", 1, "k"),
+            Podman.args(&sample_plan()),
+        ] {
+            assert!(
+                argv.contains(&want),
+                "the rootless mapping is missing: {argv:?}"
+            );
+            assert_eq!(argv[0], "run", "and it comes after `run`");
+        }
+        // Docker's daemon owns the mount, so it never asks for this.
+        assert!(
+            !Docker
+                .up_args(&sample_plan(), "n", 1, "k")
+                .iter()
+                .any(|a| a.contains("keep-id")),
+            "docker must not carry a rootless mapping"
+        );
+    }
+
+    /// The UID every backend agrees on is the one the image asserts.
+    #[test]
+    fn the_agent_uid_is_the_one_the_image_builds() {
+        let df = crate::image::base_dockerfile(None);
+        assert!(
+            df.contains("id -u agent"),
+            "the image asserts the agent's UID"
+        );
+        assert!(
+            df.contains(&format!("= \"{AGENT_UID}\"")),
+            "and it is the one the userns mapping targets: {df}"
+        );
+    }
+
     /// sshd on 0.0.0.0 publishes a shell inside the sandbox to the local
     /// network — the exact inverse of what this project is for.
     #[test]
@@ -1080,7 +1223,11 @@ mod tests {
     #[test]
     fn the_session_records_what_it_was_built_from() {
         let plan = sample_plan();
-        for backend in [&Docker as &dyn Runtime, &Sbx as &dyn Runtime] {
+        for backend in [
+            &Docker as &dyn Runtime,
+            &Podman as &dyn Runtime,
+            &Sbx as &dyn Runtime,
+        ] {
             let args = backend.up_args(&plan, "n", 1, "k");
             for (key, value) in plan.labels() {
                 assert!(

@@ -493,6 +493,8 @@ pub fn base_dockerfile(ca: Option<&str>) -> String {
     // prepares and the directory the launcher mounts into cannot drift.
     let notes = crate::memory::GUEST_LOCAL_NOTES;
     let hostkeys = crate::ssh::GUEST_HOST_KEYS;
+    #[allow(non_snake_case)]
+    let AGENT_UID = crate::runtime::AGENT_UID;
     let ca_layer = ca_layer(ca);
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
@@ -511,7 +513,7 @@ RUN usermod -l agent -d {GUEST_HOME} -m node \
 # Assert the sbx kit contract at build time rather than assuming it. If a future
 # base image moves UID 1000, this fails here instead of failing mysteriously
 # inside a sandbox.
-RUN test "$(id -u agent)" = "1000" && test "$(getent passwd agent | cut -d: -f6)" = "{GUEST_HOME}"
+RUN test "$(id -u agent)" = "{AGENT_UID}" && test "$(getent passwd agent | cut -d: -f6)" = "{GUEST_HOME}"
 
 # The base set lives here, not in a harness layer: a code graph is
 # harness-agnostic and every session should get the same one.
