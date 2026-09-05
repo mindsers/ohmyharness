@@ -912,7 +912,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("accounts.md", 4),
         ("adapters.md", 1),
         ("code-graph.md", 1),
-        ("commands.md", 137), // + the checks-first commit example and --no-verify
+        ("commands.md", 138), // + checks-first commit, --no-verify, and the scoped activity example
         ("configuration.md", 44),
         ("decisions.md", 1),
         ("editors.md", 4),

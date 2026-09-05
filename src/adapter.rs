@@ -35,6 +35,13 @@ pub struct Adapter {
     /// the one the pin names.
     #[serde(default)]
     pub checksums: BTreeMap<String, String>,
+    /// Where this harness writes its `.jsonl` transcripts, if it does. omh
+    /// mounts a per-session directory over it, so `omh sNN` can read what the
+    /// agent did and what it cost. `None` for a harness whose transcript shape
+    /// omh has not read — the row then says *not recorded*, never a fabricated
+    /// empty session.
+    #[serde(default)]
+    pub transcripts: Option<String>,
     /// Paths holding credentials, captured by `omh auth` and remounted on
     /// launch. **A trailing slash declares a directory** — load-bearing, because
     /// a bind-mounted *file* cannot be replaced by rename and every tool saves

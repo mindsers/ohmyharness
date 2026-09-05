@@ -44,6 +44,7 @@ mod ssh;
 mod stack;
 #[cfg(test)]
 mod testsrc;
+mod transcript;
 mod why;
 
 use adapter::Adapter;

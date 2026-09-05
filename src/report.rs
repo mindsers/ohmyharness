@@ -1072,11 +1072,43 @@ pub struct Sessions {
     /// as nothing at all when it is empty, so a partial answer would be
     /// indistinguishable from a clean one.
     pub unreadable: Vec<String>,
+    /// What the agent did and what it cost, plus its last check result, shown
+    /// only when the view is scoped to one session. `None` for the wide
+    /// listing, which does not read a transcript per row.
+    pub focus: Option<Focus>,
     /// The `ssh` command that opens a shell in this session, when the view is
     /// scoped to one running session. `None` for the wide listing and for a
     /// stopped one: there is no shell to offer a session that is not up, and a
     /// dashboard of many is not the place to name one.
     pub shell: Option<String>,
+}
+
+/// The extra detail a scoped session view carries: what the agent did, and
+/// whether the work passed this repo's checks.
+#[derive(Debug, Clone)]
+pub struct Focus {
+    pub activity: Activity,
+    pub check: Option<CheckState>,
+}
+
+/// What a session's transcript says the agent did.
+#[derive(Debug, Clone)]
+pub enum Activity {
+    /// Read, and here is the summary.
+    Read(crate::transcript::Summary),
+    /// The harness declares no transcript, or none was written yet — not an
+    /// empty session, a *not recorded* one.
+    NotRecorded(String),
+    /// A transcript omh opened and could make nothing of.
+    Unreadable,
+}
+
+/// The last result of `omh sNN commit`'s checks, from `runs/<id>/check.json`.
+#[derive(Debug, Clone)]
+pub enum CheckState {
+    Passed(usize),
+    Failed(String),
+    NotRun(String),
 }
 
 impl Report for Sessions {
@@ -1125,6 +1157,11 @@ impl Report for Sessions {
                 )
             ));
         }
+        if let Some(focus) = &self.focus {
+            out.push('\n');
+            out.push_str(&focus_lines(p, focus));
+        }
+
         // Said whether or not there are collisions above: with none, an
         // unreadable session is the only reason the section is empty, and that
         // is precisely when the silence would be read as "nothing collides".
@@ -1314,8 +1351,86 @@ impl Report for Sessions {
             })).collect::<Vec<_>>(),
             "unreadable": self.unreadable,
             "shell": self.shell,
+            "focus": self.focus.as_ref().map(focus_json),
         })
     }
+}
+
+/// The scoped session's activity and check state, as lines under the table.
+fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
+    let mut s = String::new();
+    match &focus.activity {
+        Activity::Read(summary) => {
+            let tools: usize = summary.tools.values().sum();
+            let cost = match summary.cost() {
+                Some(c) => format!("${c:.2}"),
+                None => "cost unknown".to_string(),
+            };
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(
+                    out::HEAD,
+                    &format!(
+                        "{} turn{}, {} tool call{}, {} file{} touched · {cost}",
+                        summary.turns,
+                        if summary.turns == 1 { "" } else { "s" },
+                        tools,
+                        if tools == 1 { "" } else { "s" },
+                        summary.files.len(),
+                        if summary.files.len() == 1 { "" } else { "s" },
+                    )
+                )
+            ));
+        }
+        Activity::NotRecorded(why) => {
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(out::DIM, &format!("activity not recorded — {why}"))
+            ));
+        }
+        Activity::Unreadable => {
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(out::WARN, "omh could not read this session's transcript")
+            ));
+        }
+    }
+    if let Some(check) = &focus.check {
+        let (style, text) = match check {
+            CheckState::Passed(n) => (out::NAME, format!("checks: passed ({n})")),
+            CheckState::Failed(name) => (
+                out::WARN,
+                format!("checks: failed — {}", out::untrusted(name)),
+            ),
+            CheckState::NotRun(why) => (out::DIM, format!("checks: not run — {why}")),
+        };
+        s.push_str(&format!("  {}\n", p.paint(style, &text)));
+    }
+    s
+}
+
+/// The scoped focus, as JSON.
+fn focus_json(focus: &Focus) -> serde_json::Value {
+    let activity = match &focus.activity {
+        Activity::Read(summary) => json!({
+            "state": "read",
+            "turns": summary.turns,
+            "tools": summary.tools,
+            "files": summary.files.iter().collect::<Vec<_>>(),
+            "cost": summary.cost(),
+            "usage": summary.usage.iter().map(|(m, u)| (m.clone(), json!({
+                "input": u.input, "output": u.output, "cost": u.cost,
+            }))).collect::<serde_json::Map<_, _>>(),
+        }),
+        Activity::NotRecorded(why) => json!({ "state": "not-recorded", "why": why }),
+        Activity::Unreadable => json!({ "state": "unreadable" }),
+    };
+    let check = focus.check.as_ref().map(|c| match c {
+        CheckState::Passed(n) => json!({ "state": "passed", "count": n }),
+        CheckState::Failed(name) => json!({ "state": "failed", "check": name }),
+        CheckState::NotRun(why) => json!({ "state": "not-run", "why": why }),
+    });
+    json!({ "activity": activity, "check": check })
 }
 
 // ── omh info ────────────────────────────────────────────────────────────────

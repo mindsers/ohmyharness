@@ -764,7 +764,63 @@ fn sessions(rows: Vec<Session>) -> Sessions {
         overlaps: vec![],
         unreadable: vec![],
         shell: None,
+        focus: None,
     }
+}
+
+/// The scoped row carries cost only when a transcript was read; a not-recorded
+/// or unreadable session says so rather than showing a fabricated zero.
+#[test]
+fn the_scoped_row_carries_cost_only_when_a_transcript_was_read() {
+    let p = out::Palette::plain();
+    let mut usage = std::collections::BTreeMap::new();
+    usage.insert(
+        "claude-sonnet-4".to_string(),
+        crate::transcript::Usage {
+            input: 1_000_000,
+            output: 1_000_000,
+            cost: Some(18.0),
+        },
+    );
+    let summary = crate::transcript::Summary {
+        turns: 3,
+        usage,
+        ..Default::default()
+    };
+    let read = focused(Activity::Read(summary));
+    assert!(
+        read.human(&p).contains("$18.00"),
+        "a read transcript shows cost: {}",
+        read.human(&p)
+    );
+    assert!(read.human(&p).contains("3 turns"));
+
+    let not_recorded = focused(Activity::NotRecorded(
+        "opencode does not record transcripts omh can read".into(),
+    ));
+    let text = not_recorded.human(&p);
+    assert!(text.contains("not recorded"), "{text}");
+    assert!(
+        !text.contains('$'),
+        "no cost for a session with no transcript: {text}"
+    );
+
+    let unreadable = focused(Activity::Unreadable);
+    assert!(
+        unreadable.human(&p).contains("could not read"),
+        "{}",
+        unreadable.human(&p)
+    );
+    assert!(!unreadable.human(&p).contains('$'));
+}
+
+fn focused(activity: Activity) -> Sessions {
+    let mut report = sessions(vec![session("s01", Work::Clean)]);
+    report.focus = Some(Focus {
+        activity,
+        check: None,
+    });
+    report
 }
 
 /// A scoped, running session offers the shell that reaches it — the `ssh`

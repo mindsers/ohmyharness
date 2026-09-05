@@ -831,6 +831,28 @@ is not always a conflict. A test fixture holds them on purpose. It is not
 spelled `--force`, which on `rm` answers a question about unreviewed work —
 [flags mean one thing everywhere](#flags-mean-one-thing-everywhere).
 
+### `omh sNN` shows what the agent did and what it cost
+
+Scoped to one session, `omh sNN` reads the harness transcript and reports what
+produced the diff you are about to review:
+
+```console
+$ omh s01
+s01   claude   up   3 uncommitted
+
+  47 turns, 128 tool calls, 12 files touched · $2.14
+  checks: passed (3)
+  ssh omh-ohmyharness-3f9a2c1b-s01   open a shell in the session
+```
+
+The transcript is mounted per session under `~/.omh`, so reading it never
+reaches into the container. A harness that does not record a transcript omh can
+read says **activity not recorded** rather than a fabricated empty session, and
+a transcript omh opens and cannot parse says **could not read** — never *0
+turns*. Cost is summed per model from a dated price table; a model omh has no
+price for reports its tokens and **cost unknown**, never `$0`. All of it is in
+`--json`.
+
 ### `omh sNN commit` runs this repo's checks first
 
 Before it lands anything, `omh sNN commit` runs the repo's turn-end hook
