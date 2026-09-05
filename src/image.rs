@@ -570,11 +570,14 @@ WORKDIR /work
 pub fn harness_dockerfile(adapter: &Adapter, ca: Option<&str>) -> String {
     // Install as root, run as agent: an image that ends privileged would hand
     // the agent the sandbox's own escape hatch.
-    let mut df = format!(
-        "FROM {}\nUSER root\nRUN {}\n",
-        base_tag(ca),
-        adapter.install
-    );
+    // `install_command` substitutes the pinned version. It cannot fail here:
+    // `Adapter::load` validated the pin, and the fixtures the tests build pass
+    // the same check. A malformed adapter that reached this is a bug, not a
+    // user error, so it panics rather than silently installing `latest`.
+    let install = adapter
+        .install_command()
+        .expect("adapter install command validated on load");
+    let mut df = format!("FROM {}\nUSER root\nRUN {}\n", base_tag(ca), install);
 
     // Docker creates a missing mount parent as root, leaving the agent unable
     // to write beside its own config — atomic credential writes and transcripts
@@ -3367,10 +3370,25 @@ mod tests {
         );
     }
 
+    /// A bumped version pin moves the image tag, so the next launch rebuilds.
+    /// The pin is substituted into the recipe, which the tag is a digest of.
+    #[test]
+    fn a_bumped_pin_moves_the_tag() {
+        let mut a = claude();
+        a.version = Some("1.0.0".into());
+        a.install = "npm install -g claude@{{version}}".into();
+        let before = tag_for(&a, None);
+        a.version = Some("1.0.1".into());
+        assert_ne!(tag_for(&a, None), before, "a new pin must force a rebuild");
+    }
+
     #[test]
     fn a_changed_recipe_is_a_different_tag() {
         let mut a = claude();
         let before = tag_for(&a, None);
+        // A different install — and no longer a pinned one, so the template
+        // check is satisfied while the recipe genuinely changes.
+        a.version = None;
         a.install = "npm install -g @anthropic-ai/claude-code@next".into();
         assert_ne!(
             tag_for(&a, None),

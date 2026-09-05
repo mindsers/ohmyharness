@@ -1,6 +1,8 @@
 name    = "opencode"
 bin     = "opencode"
-install = "npm install -g opencode-ai"
+# Pinned; see claude.toml. Maintainer bumps `version` to the release under test.
+version = "0.6.7"
+install = "npm install -g opencode-ai@{{version}}"
 creds   = ["$HOME/.local/share/opencode/"]
 # What proves a login: a harness fills its config dir just by starting.
 token   = ["$HOME/.local/share/opencode/auth.json"]

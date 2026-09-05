@@ -19,8 +19,22 @@ pub struct Adapter {
     pub name: String,
     /// Executable to invoke inside the container.
     pub bin: String,
-    /// Command that installs `bin` into the image.
+    /// Command that installs `bin` into the image. May interpolate the pinned
+    /// `version` as `{{version}}`.
     pub install: String,
+    /// The harness version this adapter pins. `install` must interpolate it as
+    /// `{{version}}`, and a mismatch either way is refused when the adapter
+    /// loads — a declared version that never reaches the command is a pin that
+    /// does nothing, and a `{{version}}` with nothing to fill it builds an
+    /// image that names a literal `{{version}}`.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Per-target checksums the install verifies, keyed by `uname -m` output
+    /// (`x86_64`, `aarch64`). For a harness delivered as a release binary
+    /// rather than an npm package, where nothing else proves the download is
+    /// the one the pin names.
+    #[serde(default)]
+    pub checksums: BTreeMap<String, String>,
     /// Paths holding credentials, captured by `omh auth` and remounted on
     /// launch. **A trailing slash declares a directory** — load-bearing, because
     /// a bind-mounted *file* cannot be replaced by rename and every tool saves
@@ -295,7 +309,45 @@ impl Adapter {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("reading adapter {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("parsing adapter {}", path.display()))
+        let adapter: Self =
+            toml::from_str(&raw).with_context(|| format!("parsing adapter {}", path.display()))?;
+        // Validate the pin as the adapter loads, so a build never embeds a
+        // literal `{{version}}` or silently ignores a declared one. The
+        // dockerfile builders below rely on this having run.
+        adapter
+            .install_command()
+            .with_context(|| format!("adapter {}", path.display()))?;
+        // A checksum verified but never declared is a check against nothing:
+        // the install would `sha256sum -c` a file it also wrote, or fail on a
+        // sum that is not there. If the command checks one, the field carries
+        // it — where `omh doctor` reads it too.
+        anyhow::ensure!(
+            !adapter.install.contains("sha256sum") || !adapter.checksums.is_empty(),
+            "adapter {}: the install verifies a checksum but declares none",
+            path.display()
+        );
+        Ok(adapter)
+    }
+
+    /// The install command with the pinned version filled in.
+    ///
+    /// Refuses the two ways a pin can be inert: a `version` the command has no
+    /// `{{version}}` to receive, and a `{{version}}` with no `version` to fill
+    /// it. Both compile and both ship an image nobody meant — the first
+    /// installs `latest` while claiming a pin, the second installs a package
+    /// literally called `{{version}}`.
+    pub fn install_command(&self) -> Result<String> {
+        let templated = self.install.contains("{{version}}");
+        match (&self.version, templated) {
+            (Some(v), true) => Ok(self.install.replace("{{version}}", v)),
+            (Some(_), false) => anyhow::bail!(
+                "declares a version but its install command has no `{{{{version}}}}` to put it in"
+            ),
+            (None, true) => anyhow::bail!(
+                "install command interpolates `{{{{version}}}}` but declares no version"
+            ),
+            (None, false) => Ok(self.install.clone()),
+        }
     }
 
     /// Load every `*.toml` in `dir`, ignoring a missing directory.
@@ -506,6 +558,91 @@ mod tests {
         assert_eq!(
             all.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
             ["claude", "omp", "opencode"]
+        );
+    }
+
+    /// A declared version must reach the install command, and a `{{version}}`
+    /// must have a version to fill it. Both refusals, and the two that pass.
+    #[test]
+    fn a_version_that_never_reaches_the_install_command_is_refused() {
+        let mut a = Adapter::find(Path::new(REAL), "claude").unwrap();
+
+        a.version = Some("9.9.9".into());
+        a.install = "npm install -g claude@{{version}}".into();
+        assert_eq!(a.install_command().unwrap(), "npm install -g claude@9.9.9");
+
+        a.install = "npm install -g claude".into();
+        assert!(
+            a.install_command().is_err(),
+            "a version nothing interpolates is a pin that does nothing"
+        );
+
+        a.version = None;
+        a.install = "npm install -g claude@{{version}}".into();
+        assert!(
+            a.install_command().is_err(),
+            "a `{{version}}` with no version installs a package called `{{version}}`"
+        );
+
+        a.install = "npm install -g claude".into();
+        assert_eq!(a.install_command().unwrap(), "npm install -g claude");
+    }
+
+    /// Every bundled adapter pins the harness it installs, and the pin reaches
+    /// the command. Read from the shipped files, not from a fixture.
+    #[test]
+    fn every_bundled_adapter_pins_the_harness_it_installs() {
+        for adapter in Adapter::load_dir(Path::new(REAL)).unwrap() {
+            assert!(
+                adapter.version.is_some(),
+                "{} installs an unpinned harness",
+                adapter.name
+            );
+            let command = adapter.install_command().unwrap();
+            assert!(
+                command.contains(adapter.version.as_deref().unwrap()),
+                "{}: the pin does not reach the install command: {command}",
+                adapter.name
+            );
+        }
+    }
+
+    /// An install that checks a sum but declares none is refused as it loads —
+    /// a `sha256sum -c` against sums that are not there fails, or checks a file
+    /// against itself.
+    #[test]
+    fn an_install_that_checks_a_sum_must_declare_it() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("x.toml"),
+            "name = \"x\"\nbin = \"x\"\ninstall = \"curl -o x url && sha256sum -c && chmod +x x\"\n",
+        )
+        .unwrap();
+        let err = Adapter::load(&d.path().join("x.toml")).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("verifies a checksum but declares none"),
+            "got: {err:#}"
+        );
+    }
+
+    /// omp is a release binary, so its install verifies the download against a
+    /// per-arch checksum before it makes it executable — a `chmod +x` on an
+    /// unverified download is exactly the supply-chain gap a pin is meant to
+    /// close.
+    #[test]
+    fn an_omp_install_verifies_before_it_chmods() {
+        let omp = Adapter::find(Path::new(REAL), "omp").unwrap();
+        let command = omp.install_command().unwrap();
+        let verify = command.find("sha256sum -c").expect("it checks a sum");
+        let chmod = command.find("chmod +x").expect("it makes omp executable");
+        assert!(
+            verify < chmod,
+            "the check comes before the chmod: {command}"
+        );
+        assert!(
+            !omp.checksums.is_empty(),
+            "and the sums it checks are declared: {:?}",
+            omp.checksums
         );
     }
 
