@@ -72,14 +72,12 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
         let ca = image::ca_for(&paths)?;
         image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem))?;
 
-        let out = Command::new(backend.program())
-            .args(base::ui_run_args(
-                &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
-                &container,
-                &paths.cache_volume(),
-                port,
-            ))
-            .output()?;
+        let out = backend.output(&base::ui_run_args(
+            &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
+            &container,
+            &paths.cache_volume(),
+            port,
+        ))?;
         if !out.status.success() {
             anyhow::bail!(
                 "could not start the graph: {}",
@@ -536,9 +534,7 @@ pub(crate) fn doctor_cmd(
             ),
         });
 
-        let out = Command::new(backend.program())
-            .args(backend.args(&plan))
-            .output()?;
+        let out = backend.output(&backend.args(&plan))?;
         let from_the_sandbox = doctor::parse(&String::from_utf8_lossy(&out.stdout));
         let _ = session.remove(&paths.repo, "", &paths.shadows()); // diagnostic: leave no session behind
                                                                    // `with_context` would make the sandbox's stderr the *outer* error, so

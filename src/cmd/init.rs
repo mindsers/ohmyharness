@@ -697,14 +697,11 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
             let answered = if candidates.is_empty() {
                 Vec::new()
             } else {
-                match Command::new(backend.program())
-                    .args(stack::predicate_args(
-                        &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
-                        &paths.repo,
-                        &stack::predicate_script(&candidates),
-                    ))
-                    .output()
-                {
+                match backend.output(&stack::predicate_args(
+                    &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
+                    &paths.repo,
+                    &stack::predicate_script(&candidates),
+                )) {
                     // A container that ran and failed is not an answer. Only
                     // `Err` was handled before, so `docker run` failing — image
                     // gone, mount refused, no space — produced empty stdout,

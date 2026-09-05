@@ -321,10 +321,7 @@ fn images(
         blind.push("omh has not measured how this runtime lists images".into());
         return;
     };
-    let ids = match std::process::Command::new(backend.program())
-        .args(&args)
-        .output()
-    {
+    let ids = match backend.output(&args) {
         Err(e) => return blind.push(format!("omh could not list images: {e}")),
         Ok(out) if !out.status.success() => {
             return blind.push(format!(
@@ -352,10 +349,7 @@ fn images(
         "{{index .Config.Labels \"omh.repo\"}}\t{{index .RepoTags 0}}".into(),
     ];
     inspect.extend(ids);
-    match std::process::Command::new(backend.program())
-        .args(&inspect)
-        .output()
-    {
+    match backend.output(&inspect) {
         Err(e) => blind.push(format!("omh could not inspect images: {e}")),
         Ok(out) if !out.status.success() => blind.push(format!(
             "omh could not inspect images: {}",
@@ -434,10 +428,7 @@ fn list(
         ));
         return;
     };
-    match std::process::Command::new(backend.program())
-        .args(&args)
-        .output()
-    {
+    match backend.output(&args) {
         Err(e) => blind.push(format!("omh could not list {what}: {e}")),
         Ok(out) if !out.status.success() => blind.push(format!(
             "omh could not list {what}: {}",
@@ -714,10 +705,7 @@ pub fn remove_one(item: &Item, backend: Option<&crate::runtime::Backend>) -> Opt
     let Some(backend) = backend else {
         return Some("there is no container runtime to remove it with".into());
     };
-    match std::process::Command::new(backend.program())
-        .args(&args)
-        .output()
-    {
+    match backend.output(&args) {
         Err(e) => Some(format!("{e}")),
         Ok(out) if !out.status.success() => Some(crate::image::unreadable(
             &String::from_utf8_lossy(&out.stderr),

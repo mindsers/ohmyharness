@@ -838,10 +838,7 @@ pub(crate) fn leftovers(
         // daemon that was down reported *fewer* leftovers rather than saying
         // it had not looked — the same collapse `Running` exists to prevent,
         // in the function whose whole job is to notice what is left behind.
-        match Command::new(backend.program())
-            .args(["ps", "-a", "--format", "{{.Names}}"])
-            .output()
-        {
+        match backend.output(&["ps", "-a", "--format", "{{.Names}}"]) {
             Ok(out) if out.status.success() => found.extend(
                 String::from_utf8_lossy(&out.stdout)
                     .lines()
