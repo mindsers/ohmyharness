@@ -354,6 +354,17 @@ pub fn plan(
         file: false,
     });
 
+    // The sandbox's ssh host key, for the entrypoint to install as root. Read
+    // only, and the directory rather than the file, so the `.pub` rides along.
+    // `session_up` generates it before the launch; a plan that is only printed
+    // names the path either way.
+    mounts.push(Mount {
+        host: crate::ssh::host_key_dir(&paths.keys()),
+        guest: crate::ssh::GUEST_HOST_KEYS.into(),
+        read_only: true,
+        file: false,
+    });
+
     // Built once, which is what the type is for. Constructed inside the loop it
     // rebuilt all seven values six times and bought nothing its own doc claimed.
     let stager = Stager {
@@ -1595,6 +1606,24 @@ mod tests {
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
         assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
+    }
+
+    /// The sandbox's ssh host key rides in read-only, from the per-repo key
+    /// directory, at the path the entrypoint installs it from. Read-only
+    /// because the entrypoint copies it into `/etc/ssh` as root — a bind-mounted
+    /// key would carry host ownership and sshd refuses one it does not own.
+    #[test]
+    fn the_host_key_is_mounted_read_only_where_the_entrypoint_installs_it_from() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        let m = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new(crate::ssh::GUEST_HOST_KEYS))
+            .expect("the host key directory is mounted");
+        assert!(m.read_only, "{m:?}");
+        assert!(!m.file, "the directory, so the .pub rides along: {m:?}");
+        assert_eq!(m.host, crate::ssh::host_key_dir(&fx.paths.keys()));
     }
 
     /// `sandbox_memory` and `sandbox_cpus` are read from the settings like any

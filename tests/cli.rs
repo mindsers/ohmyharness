@@ -5384,6 +5384,57 @@ fn attach_opens_the_session_and_the_editor_it_was_given() {
     );
 }
 
+/// `attach` pins the sandbox's host key: the block it writes says so, and the
+/// known_hosts it names holds the key under the session's alias.
+///
+/// End to end because the pieces live in three places — the key under
+/// `~/.omh/keys`, the block under `~/.ssh/config.d`, the mount on the launch —
+/// and only a real `attach` connects them.
+#[test]
+fn attach_pins_the_sandboxes_host_key() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let log = sb.fake_docker();
+    sb.session("s01");
+    sb.fake_editor("zed");
+
+    let out = sb.omh(&["s01", "attach", "zed"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let block = std::fs::read_to_string(sb.home.join(".ssh/config.d/omh")).unwrap();
+    assert!(block.contains("StrictHostKeyChecking yes"), "{block}");
+    let known = block
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("UserKnownHostsFile "))
+        .expect("the block names a known_hosts");
+    let pinned = std::fs::read_to_string(known).expect("omh wrote it");
+    let key_dir = std::path::Path::new(known).parent().unwrap().join("host");
+    let host_pub = std::fs::read_to_string(key_dir.join("ssh_host_ed25519_key.pub")).unwrap();
+    let key = host_pub.split_whitespace().nth(1).unwrap();
+    assert!(
+        pinned
+            .lines()
+            .any(|l| l.starts_with("omh-") && l.ends_with(&format!("ssh-ed25519 {key}"))),
+        "the alias line carries the generated key: {pinned}"
+    );
+    // And the launch mounted that key where the entrypoint installs it from.
+    let run = sb
+        .docker_calls(&log)
+        .into_iter()
+        .find(|c| c.starts_with("run -d"))
+        .expect("a launch");
+    assert!(
+        run.contains(&format!("{}:/omh/hostkeys:ro", key_dir.display())),
+        "read-only, the directory: {run}"
+    );
+}
+
 /// `attach` rejoins the harness the session recorded, not the one this host
 /// prefers.
 ///

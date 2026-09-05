@@ -497,6 +497,7 @@ pub fn base_dockerfile(ca: Option<&str>) -> String {
     // Interpolated rather than written out, so the directory the image
     // prepares and the directory the launcher mounts into cannot drift.
     let notes = crate::memory::GUEST_LOCAL_NOTES;
+    let hostkeys = crate::ssh::GUEST_HOST_KEYS;
     let ca_layer = ca_layer(ca);
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
@@ -537,6 +538,10 @@ RUN mkdir -p /work /omh/sock /omh/cache /omh/layers {notes} {GRAPH_CACHE} \
 # no root. The stock Debian config accepts passwords, and `agent` merely has
 # none — a fact about the base image, not a decision. Its log goes to a file
 # doctor can read after an attach that would not connect.
+#
+# The host key is omh's, mounted in and installed here as root — a bind-mounted
+# key carries host ownership and sshd refuses it — so the client can pin it.
+# `ssh-keygen -A` is the fallback for a container run without the mount.
 RUN printf '%s\n' \
   '#!/bin/sh' \
   'set -e' \
@@ -545,9 +550,14 @@ RUN printf '%s\n' \
   '  printf "%s\\n" "$OMH_PUBKEY" > "$HOME/.ssh/authorized_keys"' \
   '  chmod 600 "$HOME/.ssh/authorized_keys"' \
   'fi' \
-  'sudo ssh-keygen -A >/dev/null 2>&1 || true' \
+  'if [ -f {hostkeys}/ssh_host_ed25519_key ]; then' \
+  '  sudo install -o root -g root -m 600 {hostkeys}/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key' \
+  '  sudo install -o root -g root -m 644 {hostkeys}/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub' \
+  'else' \
+  '  sudo ssh-keygen -A >/dev/null 2>&1 || true' \
+  'fi' \
   'sudo mkdir -p /run/sshd' \
-  'sudo /usr/sbin/sshd -E /omh/sshd.log -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes' \
+  'sudo /usr/sbin/sshd -E /omh/sshd.log -o HostKey=/etc/ssh/ssh_host_ed25519_key -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes' \
   'exec sleep infinity' \
   > /usr/local/bin/omh-session \
  && chmod 0755 /usr/local/bin/omh-session
@@ -3383,6 +3393,31 @@ mod tests {
         assert!(
             sshd.contains("-E /omh/sshd.log"),
             "sshd's own log goes where doctor can read it after a failed attach: {sshd}"
+        );
+    }
+
+    /// The entrypoint installs the mounted host key as root and pins sshd to
+    /// it, so the key the client was told to expect is the key that answers.
+    #[test]
+    fn the_entrypoint_installs_the_mounted_host_key_and_sshd_presents_only_it() {
+        let df = base_dockerfile(None);
+        let key = format!("{}/ssh_host_ed25519_key", crate::ssh::GUEST_HOST_KEYS);
+        assert!(
+            df.contains(&format!(
+                "sudo install -o root -g root -m 600 {key} /etc/ssh/ssh_host_ed25519_key"
+            )),
+            "the private half is root's, mode 600: {df}"
+        );
+        assert!(
+            df.contains(&format!(
+                "sudo install -o root -g root -m 644 {key}.pub /etc/ssh/ssh_host_ed25519_key.pub"
+            )),
+            "and the public half beside it: {df}"
+        );
+        let sshd = df.lines().find(|l| l.contains("/usr/sbin/sshd")).unwrap();
+        assert!(
+            sshd.contains("-o HostKey=/etc/ssh/ssh_host_ed25519_key"),
+            "sshd presents that key and no other: {sshd}"
         );
     }
 

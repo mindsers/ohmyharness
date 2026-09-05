@@ -222,6 +222,9 @@ pub(crate) fn session_up(
 
     let key = ssh::ensure_key(&paths.keys())?;
     let pubkey = std::fs::read_to_string(key.with_extension("pub"))?;
+    // The plan mounts the host key's directory; make sure there is one in it
+    // before the entrypoint looks.
+    ssh::ensure_host_key(&paths.keys())?;
     let port = ssh::port(&paths.repo_name(), &session.id);
 
     start(backend, &plan, &name, port, pubkey.trim(), &session.id)?;
@@ -392,16 +395,29 @@ pub(crate) fn attach(
     let home = dirs::home_dir().context("no home directory")?;
     let alias = ssh::host_alias(&paths.repo_name(), &session.id);
     let key = ssh::ensure_key(&paths.keys())?;
-    let blocks: Vec<String> = session::list(&paths.worktrees())
-        .into_iter()
+    // The sandbox's host key, pinned under every session's alias. One key per
+    // repo, so the known_hosts omh writes is the same key on every line — what
+    // differs is the alias, which is what `HostKeyAlias` looks up.
+    let host_pub =
+        std::fs::read_to_string(ssh::ensure_host_key(&paths.keys())?.with_extension("pub"))?;
+    let known_hosts = paths.keys().join("known_hosts");
+    let sessions = session::list(&paths.worktrees());
+    let blocks: Vec<String> = sessions
+        .iter()
         .map(|s| {
             ssh::config_block(
-                &ssh::host_alias(&paths.repo_name(), &s),
-                ssh::port(&paths.repo_name(), &s),
+                &ssh::host_alias(&paths.repo_name(), s),
+                ssh::port(&paths.repo_name(), s),
                 &key,
+                &known_hosts,
             )
         })
         .collect();
+    let pinned: Vec<String> = sessions
+        .iter()
+        .map(|s| ssh::known_hosts_line(&ssh::host_alias(&paths.repo_name(), s), &host_pub))
+        .collect();
+    ssh::write_known_hosts(&known_hosts, &pinned)?;
     ssh::write_hosts(&home.join(".ssh/config.d/omh"), &blocks)?;
     ssh::ensure_include(&home.join(".ssh/config"))?;
 
