@@ -559,7 +559,7 @@ mod tests {
         let all = Adapter::load_dir(Path::new(REAL)).unwrap();
         assert_eq!(
             all.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
-            ["claude", "omp", "opencode"]
+            ["claude", "codex", "omp", "opencode"]
         );
     }
 
@@ -1128,9 +1128,28 @@ install="x""#,
         );
     }
 
+    /// Codex renders its MCP servers into the `[mcp_servers.<name>]` TOML its
+    /// config uses, the shape the adapter declares — not the JSON the others
+    /// write.
+    #[test]
+    fn codex_mcp_renders_to_the_shape_the_adapter_declares() {
+        let codex = Adapter::find(Path::new(REAL), "codex").unwrap();
+        let binding = codex.supports(Capability::Mcp).unwrap();
+        assert_eq!(binding.render, Render::CodexToml, "codex config is TOML");
+        assert!(
+            binding.path.ends_with("config.toml"),
+            "into the file codex reads: {}",
+            binding.path
+        );
+        assert!(
+            codex.tools.is_empty(),
+            "codex declares no hooks, so no tool vocabulary"
+        );
+    }
+
     #[test]
     fn shipped_adapters_declare_where_to_import_mcp_from() {
-        for name in ["claude", "opencode"] {
+        for name in ["claude", "codex", "opencode"] {
             let a = Adapter::find(Path::new(REAL), name).unwrap();
             assert!(
                 a.supports(Capability::Mcp).unwrap().import.is_some(),
@@ -1155,7 +1174,7 @@ install="x""#,
     fn rules_are_imported_from_your_own_file_not_this_projects() {
         let home = Path::new("/Users/me");
         let repo = Path::new("/repo");
-        for name in ["claude", "opencode"] {
+        for name in ["claude", "codex", "opencode"] {
             let a = Adapter::find(Path::new(REAL), name).unwrap();
             let binding = a.supports(Capability::Rules).unwrap();
             let template = binding
