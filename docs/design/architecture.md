@@ -1,6 +1,6 @@
 # Architecture
 
-**Status: built, except the second backend.** The on-disk layout, the image build and the runtime trait are all shipping. `sbx` is selectable and **unverified** — `runtime = "sbx"` is a valid setting and `auto` prefers it when present — but the spike that resolves file mounts, guest paths and IDE attach has not run, so Docker is the only runtime anyone has confirmed works.
+**Status: built, except the second backend.** The on-disk layout, the image build and the runtime trait are all shipping. `sbx` is selectable and **unverified** — `runtime = "sbx"` is a valid setting, and `auto` never picks it, because nobody has measured it — but the spike that resolves file mounts, guest paths and IDE attach has not run, so Docker is the only runtime anyone has confirmed works.
 
 How omh is put together: what lives where on disk, how images are built, and how
 the runtime backend is kept swappable.
@@ -131,7 +131,8 @@ process invocation.
 ```
 
 Selection is `runtime = "auto" | "docker" | "sbx"` in `settings.toml`. `auto`
-prefers `sbx` when present.
+selects only `docker`; `sbx` is an explicit opt-in until the spike below has
+measured it, and `omh doctor` says so when it is chosen.
 
 ### Why not simply adopt `sbx`
 
