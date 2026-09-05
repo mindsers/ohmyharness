@@ -1282,6 +1282,39 @@ fn listing_three_sessions_asks_git_once_per_question() {
     );
 }
 
+/// A command that has no use for a container runtime never runs one.
+///
+/// A guard, green when written: `why`, `set` and the memory listing answer
+/// from files, and the one place the dispatcher reaches for a runtime on
+/// their behalf — the migration check — does so inside a closure that only
+/// runs when there is something to migrate. This keeps it that way: the shim
+/// logs every invocation, and there must be none.
+#[test]
+fn a_command_that_never_needs_a_runtime_never_looks_for_one() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.seed_base();
+
+    for args in [
+        vec!["why", "idle_timeout"],
+        vec!["set", "idle_timeout", "30m"],
+        vec!["memory"],
+        vec!["settings"],
+    ] {
+        let out = sb.omh(&args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(
+        sb.docker_calls(&log),
+        Vec::<String>::new(),
+        "none of these has a question for the runtime"
+    );
+}
+
 /// Two sessions changing one file are named together.
 ///
 /// The collision git will not mention until a merge, said while both sessions
