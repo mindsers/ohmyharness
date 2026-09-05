@@ -532,6 +532,11 @@ RUN mkdir -p /work /omh/sock /omh/cache /omh/layers {notes} {GRAPH_CACHE} \
 # container outlives the command that created it. The key arrives as an env var
 # because a bind-mounted authorized_keys lands with host ownership and sshd
 # silently refuses to read one it does not trust.
+#
+# sshd takes that key and nothing else: no passwords, no keyboard-interactive,
+# no root. The stock Debian config accepts passwords, and `agent` merely has
+# none — a fact about the base image, not a decision. Its log goes to a file
+# doctor can read after an attach that would not connect.
 RUN printf '%s\n' \
   '#!/bin/sh' \
   'set -e' \
@@ -542,7 +547,7 @@ RUN printf '%s\n' \
   'fi' \
   'sudo ssh-keygen -A >/dev/null 2>&1 || true' \
   'sudo mkdir -p /run/sshd' \
-  'sudo /usr/sbin/sshd' \
+  'sudo /usr/sbin/sshd -E /omh/sshd.log -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes' \
   'exec sleep infinity' \
   > /usr/local/bin/omh-session \
  && chmod 0755 /usr/local/bin/omh-session
@@ -3350,6 +3355,35 @@ mod tests {
         assert!(df.contains("agent"), "agent user");
         assert!(df.contains(GUEST_HOME), "home directory");
         assert!(df.contains("NOPASSWD"), "passwordless sudo");
+    }
+
+    /// The session's sshd takes the key omh hands it and nothing else.
+    ///
+    /// `docs/design/risks.md` said "no password auth" was asserted by a test,
+    /// and no test asserted it: the entrypoint started sshd on the Debian
+    /// package's stock config, which accepts passwords, and the `agent` user
+    /// has none — so the claim happened to hold by an accident of the base
+    /// image. This pins the recipe. Whether sshd honours the flags is a fact
+    /// about openssh, and `omh doctor`'s to prove.
+    #[test]
+    fn the_session_sshd_accepts_keys_and_nothing_else() {
+        let df = base_dockerfile(None);
+        let sshd = df
+            .lines()
+            .find(|l| l.contains("/usr/sbin/sshd"))
+            .expect("the entrypoint starts sshd");
+        for flag in [
+            "-o PasswordAuthentication=no",
+            "-o KbdInteractiveAuthentication=no",
+            "-o PermitRootLogin=no",
+            "-o PubkeyAuthentication=yes",
+        ] {
+            assert!(sshd.contains(flag), "{flag} is missing from: {sshd}");
+        }
+        assert!(
+            sshd.contains("-E /omh/sshd.log"),
+            "sshd's own log goes where doctor can read it after a failed attach: {sshd}"
+        );
     }
 
     /// The image is what *establishes* the home, and everything that mounts
