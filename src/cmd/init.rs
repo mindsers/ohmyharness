@@ -651,7 +651,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         // until this exists — and until it exists there is no sandbox to ask
         // about a toolchain.
         if image::exists(
-            backend.program(),
+            &backend,
             &image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)),
         ) {
             summary.image = Some(format!(
@@ -665,11 +665,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 "building {} — first run only…",
                 image::tag_for(&adapter, ca.as_ref().map(image::Root::pem))
             ));
-            image::ensure(
-                backend.program(),
-                &adapter,
-                ca.as_ref().map(image::Root::pem),
-            )?;
+            image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem))?;
             summary.image = Some(image::tag_for(&adapter, ca.as_ref().map(image::Root::pem)));
         }
 
@@ -782,7 +778,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 let (own, repo) = crate::cmd::session::resolved(&paths)?;
                 let sandbox = sandbox(&paths, &adapter, &repo, ca.clone())?;
                 image::ensure_stack(
-                    backend.program(),
+                    &backend,
                     &adapter,
                     &sandbox.recipe(),
                     // The sandbox's own reading, not a fresh one. `sandbox.tag`
@@ -812,15 +808,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 // is a different question about the same fact.
                 let hook_dirs = Profile::resolve(&paths).sources(adapter::Capability::Hooks)?;
                 let mut sandbox = sandbox;
-                sandbox.top_up(
-                    &paths,
-                    backend.program(),
-                    &adapter,
-                    &hook_dirs,
-                    &own,
-                    &repo,
-                    ctx,
-                )?;
+                sandbox.top_up(&paths, &backend, &adapter, &hook_dirs, &own, &repo, ctx)?;
                 for name in &sandbox.owed {
                     if sandbox.resolves.get(name) == Some(&false) {
                         summary
@@ -1407,7 +1395,7 @@ pub(crate) struct Measured {
 }
 
 pub(crate) fn measure(
-    program: &str,
+    backend: &runtime::Backend,
     paths: &Paths,
     tag: &str,
     wanted: &BTreeSet<String>,
@@ -1417,9 +1405,7 @@ pub(crate) fn measure(
     let unseen = facts.unseen(tag, wanted);
     if !unseen.is_empty() {
         let borrowed: Vec<&str> = unseen.iter().map(String::as_str).collect();
-        let ran = Command::new(program)
-            .args(image::probe_args(tag, &doctor::probe_programs(&borrowed)))
-            .output();
+        let ran = backend.output(&image::probe_args(tag, &doctor::probe_programs(&borrowed)));
         let outcomes = match ran {
             Ok(out) => measured_or_reason(
                 out.status.success(),
@@ -1542,7 +1528,7 @@ impl Sandbox {
     pub(crate) fn top_up(
         &mut self,
         paths: &Paths,
-        program: &str,
+        backend: &runtime::Backend,
         adapter: &Adapter,
         hook_dirs: &[PathBuf],
         own: &base::Own,
@@ -1557,14 +1543,14 @@ impl Sandbox {
         // it does not name.
         let ca = self.ca.as_ref().map(crate::image::Root::pem);
         image::ensure_stack(
-            program,
+            backend,
             adapter,
             &recipe.iter().map(String::as_str).collect::<Vec<_>>(),
             ca,
             &paths.repo,
         )?;
         let wanted = probe_targets(hook_dirs, own, repo, &self.owed)?;
-        let measured = measure(program, paths, &self.tag, &wanted, ctx)?;
+        let measured = measure(backend, paths, &self.tag, &wanted, ctx)?;
         self.resolves = measured.has;
         self.unmeasured = measured.gave_up;
         Ok(())

@@ -175,6 +175,23 @@ Docker drew its boundary exactly where omh's product begins. They isolate; they
 deliberately do not carry your setup in. The two **compose**: `sbx` provides the
 microVM, omh gets your profile inside it.
 
+### The seam in the code
+
+`runtime::Runtime` is pure: a `Plan` in, an argv out, and nothing in it ever
+runs a process. `runtime::Backend` is the one place an argv becomes a process.
+`runtime::select` returns a `Backend`, every command that shells out to the
+runtime goes through `Backend::output`, and only the two things that need a
+`Child` — an interactive attach and a build fed its Dockerfile on stdin — take
+`program()` and spawn their own.
+
+That split is what makes the launch path testable on a machine with no
+container runtime. `Backend::scripted` answers each argv from a table and logs
+what was asked, so `cmd::session`'s launch decisions — join the running
+container, refuse to touch one the daemon will not describe, refuse to restart
+one with a live harness inside, clear a stopped one before `run --name` — each
+have a unit test, where before the seam they had a manual check against Docker
+or nothing at all.
+
 ### Declared capabilities, and honest unknowns
 
 Backends differ in ways that break a naive plan, so each **declares** what it can

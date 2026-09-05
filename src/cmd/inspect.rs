@@ -35,7 +35,7 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
 
     if stop {
         if !crate::cmd::harvest::must_know(
-            image::container_running(backend.as_ref(), &container),
+            image::container_running(&backend, &container),
             "the graph",
             "stop it",
         )? {
@@ -45,7 +45,7 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
             );
             return Ok(());
         }
-        image::container_remove(backend.program(), &container)?;
+        image::container_remove(&backend, &container)?;
         ctx.say(
             &report::Action::new("graph-stopped", "graph stopped; sessions keep running")
                 .data(serde_json::json!({ "running": false })),
@@ -55,12 +55,12 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
 
     let port = base::ui_port(&container);
     if !crate::cmd::harvest::must_know(
-        image::container_running(backend.as_ref(), &container),
+        image::container_running(&backend, &container),
         "the graph",
         "start it",
     )? {
         // A stopped container of the same name blocks `run --name`.
-        let _ = image::container_remove(backend.program(), &container);
+        let _ = image::container_remove(&backend, &container);
 
         let names: Vec<String> = Adapter::load_dir(&paths.adapters())?
             .into_iter()
@@ -70,11 +70,7 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
             .context("no adapters installed — run `omh init`")?;
         let adapter = Adapter::find(&paths.adapters(), &harness)?;
         let ca = image::ca_for(&paths)?;
-        image::ensure(
-            backend.program(),
-            &adapter,
-            ca.as_ref().map(image::Root::pem),
-        )?;
+        image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem))?;
 
         let out = Command::new(backend.program())
             .args(base::ui_run_args(
@@ -121,34 +117,35 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
 /// per-checkout listing structurally cannot see the ones that matter.
 fn volumes_on_this_machine(
     paths: &Paths,
-    backend: Option<&dyn crate::runtime::Runtime>,
+    backend: Option<&crate::runtime::Backend>,
 ) -> Result<Vec<String>, String> {
-    match backend.and_then(|b| b.volume_args().map(|args| (b.program(), args))) {
+    match backend.and_then(|b| b.volume_args().map(|args| (b, args))) {
         // **Not `Ok(vec![])`.** No runtime, or a runtime whose volume story omh
         // has never measured, is *omh did not look* — rendering it as an empty
         // listing prints "none — nothing orphaned on this machine", the exact
         // claim this row's own doc forbids, about a machine omh never asked.
         None if backend.is_none() => Err("there is no container runtime to ask".into()),
         None => Err("omh has not measured how this runtime lists volumes".into()),
-        Some((program, args)) => std::process::Command::new(program)
-            .args(&args)
-            .output()
-            .map_err(|e| format!("{e}"))
-            .and_then(|out| match out.status.success() {
-                false => Err(crate::image::unreadable(
-                    &String::from_utf8_lossy(&out.stderr),
-                    &out.status,
-                )),
-                // Only omh's own. Somebody else's volumes are not omh's
-                // business to list, let alone to suggest removing.
-                true => Ok(String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .map(str::trim)
-                    .filter(|n| n.starts_with("omh-"))
-                    .filter(|n| *n != paths.cache_volume())
-                    .map(str::to_string)
-                    .collect()),
-            }),
+        Some((backend, args)) => {
+            backend
+                .output(&args)
+                .map_err(|e| format!("{e}"))
+                .and_then(|out| match out.status.success() {
+                    false => Err(crate::image::unreadable(
+                        &String::from_utf8_lossy(&out.stderr),
+                        &out.status,
+                    )),
+                    // Only omh's own. Somebody else's volumes are not omh's
+                    // business to list, let alone to suggest removing.
+                    true => Ok(String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .map(str::trim)
+                        .filter(|n| n.starts_with("omh-"))
+                        .filter(|n| *n != paths.cache_volume())
+                        .map(str::to_string)
+                        .collect()),
+                })
+        }
     }
 }
 
@@ -232,7 +229,7 @@ pub(crate) fn doctor_cmd(
     // is a one-way digest, so until the registry landed omh could see that
     // these existed and never whose they were — which is what the row used to
     // say, accurately. The name carries the id: `omh-cache-<repo_id>`.
-    let volumes = volumes_on_this_machine(&paths, chosen.as_ref().ok().map(|b| b.as_ref()));
+    let volumes = volumes_on_this_machine(&paths, chosen.as_ref().ok());
     let split = match &volumes {
         Ok(names) => doctor::attributed(names, &|name| match name.strip_prefix("omh-cache-") {
             Some(id) => crate::profile::attribution_of(
@@ -255,7 +252,7 @@ pub(crate) fn doctor_cmd(
         .into_iter()
         .chain(doctor::settings_checks(&files, &known))
         .chain(std::iter::once(doctor::leftovers_from(
-            match crate::cmd::session::leftovers(&paths, chosen.as_deref().ok(), ctx) {
+            match crate::cmd::session::leftovers(&paths, chosen.as_ref().ok(), ctx) {
                 (found, None) => Ok(found),
                 (_, Some(why)) => Err(why),
             },
@@ -432,7 +429,7 @@ pub(crate) fn doctor_cmd(
         }) {
             sandbox.top_up(
                 &paths,
-                backend.program(),
+                &backend,
                 &adapter,
                 &profile.sources(adapter::Capability::Hooks)?,
                 &own,
@@ -517,7 +514,7 @@ pub(crate) fn doctor_cmd(
         }
 
         image::ensure_stack(
-            backend.program(),
+            &backend,
             &adapter,
             &sandbox.recipe(),
             // The sandbox's own reading. A fresh `ca_for` here would be a second
@@ -526,7 +523,7 @@ pub(crate) fn doctor_cmd(
             sandbox.ca.as_ref().map(image::Root::pem),
             &paths.repo,
         )?;
-        image::ensure_network(backend.program(), &plan.network)?;
+        image::ensure_network(&backend, &plan.network)?;
 
         let account_name = account
             .as_ref()

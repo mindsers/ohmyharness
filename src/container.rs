@@ -1085,6 +1085,36 @@ impl Plan {
     }
 }
 
+/// A plan with one writable worktree and one read-only capability mount.
+///
+/// Shared by the runtime tests, which read its argv, and the launch tests in
+/// `cmd::session`, which stamp a container with its labels and ask whether the
+/// launch would attach to it — so the two agree on what a plan looks like.
+#[cfg(test)]
+pub(crate) fn sample_plan() -> Plan {
+    let dir = |host: &str, guest: &str, read_only: bool| Mount {
+        host: std::path::PathBuf::from(host),
+        guest: std::path::PathBuf::from(guest),
+        read_only,
+        file: false,
+    };
+    Plan {
+        image: "omh/claude:latest".into(),
+        mounts: vec![
+            dir("/host/worktree", "/work", false),
+            dir("/host/skills", "/home/agent/.claude/skills", true),
+        ],
+        env: vec![("OMH_SESSION".into(), "s01".into())],
+        network: "omh-repo".into(),
+        workdir: "/work".into(),
+        argv: vec!["claude".into()],
+        dropped: vec![],
+        dropped_hooks: vec![],
+        rules: Default::default(),
+        tty: true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

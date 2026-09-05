@@ -418,8 +418,8 @@ impl Runtime for Sbx {
     }
 }
 
-/// `auto` prefers the stronger isolation when it is installed.
-pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Box<dyn Runtime>> {
+/// The backend the settings ask for, or the one measured backend under `auto`.
+pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Backend> {
     let build = |name: &str| -> Option<Box<dyn Runtime>> {
         match name {
             "docker" => Some(Box::new(Docker)),
@@ -438,7 +438,9 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Box<
         // `docs/design` measures it, so `auto` never chooses a backend nobody
         // has run.
         if available("docker") {
-            return Ok(build("docker").expect("name from the known list"));
+            return Ok(Backend::real(
+                build("docker").expect("name from the known list"),
+            ));
         }
         anyhow::bail!(
             "no measured container runtime found — install docker, or set \
@@ -456,7 +458,7 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Box<
     if !available(preference) {
         anyhow::bail!("runtime `{preference}` is not installed");
     }
-    Ok(runtime)
+    Ok(Backend::real(runtime))
 }
 
 /// Real availability check, for the non-test path.
@@ -466,6 +468,126 @@ pub fn installed(program: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// A selected runtime together with the way its program is run.
+///
+/// `Runtime` stays pure — a plan in, an argv out — and this is the one place
+/// where an argv becomes a process. Production goes through `real`, which is
+/// `Command::new(program).args(argv).output()` and nothing else. Tests go
+/// through `scripted`, which answers each argv from a table and records what
+/// was asked, so the launch path can be exercised on a machine with no
+/// container runtime at all — which is how the two `attach` defects in the
+/// 0.9.0 audit went unwritten: there was no place to put the test.
+///
+/// It derefs to the runtime it wraps, so `backend.exec_args(..)` and
+/// `backend.program()` read as they always did. Interactive spawns — a tty
+/// attach, a build that pipes a Dockerfile on stdin — still take `program()`
+/// and build their own `Command`; everything that waits for an answer goes
+/// through `output`.
+pub struct Backend {
+    rt: Box<dyn Runtime>,
+    run: Box<Run>,
+}
+
+/// The runtime's argv, run and waited for.
+type Run = dyn Fn(&[String]) -> std::io::Result<std::process::Output>;
+
+impl std::fmt::Debug for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Backend")
+            .field("rt", &self.rt)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for Backend {
+    type Target = dyn Runtime;
+    fn deref(&self) -> &Self::Target {
+        self.rt.as_ref()
+    }
+}
+
+impl Backend {
+    /// The runtime's program, run for real.
+    pub fn real(rt: Box<dyn Runtime>) -> Backend {
+        let program = rt.program();
+        Backend {
+            rt,
+            run: Box::new(move |args| std::process::Command::new(program).args(args).output()),
+        }
+    }
+
+    /// Run the runtime's program with these arguments and wait for it.
+    pub fn output<S: AsRef<str>>(&self, args: &[S]) -> std::io::Result<std::process::Output> {
+        let args: Vec<String> = args.iter().map(|a| a.as_ref().to_string()).collect();
+        (self.run)(&args)
+    }
+
+    /// The runtime's argv, run through some other program — a shell script
+    /// standing in for docker. For tests that want a real process to record
+    /// what was asked and answer from a file, where `scripted` would have to
+    /// know the argv in advance.
+    #[cfg(test)]
+    pub fn shimmed(rt: Box<dyn Runtime>, program: &std::path::Path) -> Backend {
+        let program = program.to_path_buf();
+        Backend {
+            rt,
+            run: Box::new(move |args| std::process::Command::new(&program).args(args).output()),
+        }
+    }
+
+    /// A backend whose program is a table.
+    ///
+    /// Each entry is an argv prefix and the answer to give when the argv asked
+    /// starts with it; the first match wins, so a specific script goes before
+    /// a general one. Every argv is appended to the returned log, matched or
+    /// not. An argv nothing scripted is a **panic naming it**, never a
+    /// default answer: a test that runs a command it did not expect has found
+    /// a behaviour it did not know about, and a silent success there is the
+    /// exact collapse `Running::Unknown` exists to keep out of production.
+    #[cfg(test)]
+    pub fn scripted(
+        rt: Box<dyn Runtime>,
+        answers: Vec<(Vec<&str>, std::process::Output)>,
+    ) -> (Backend, std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>) {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let asked = log.clone();
+        let answers: Vec<(Vec<String>, std::process::Output)> = answers
+            .into_iter()
+            .map(|(prefix, out)| (prefix.into_iter().map(str::to_string).collect(), out))
+            .collect();
+        let run = move |args: &[String]| {
+            asked.borrow_mut().push(args.to_vec());
+            let hit = answers
+                .iter()
+                .find(|(prefix, _)| args.starts_with(prefix))
+                .unwrap_or_else(|| panic!("nothing scripted for `{}`", args.join(" ")));
+            Ok(std::process::Output {
+                status: hit.1.status,
+                stdout: hit.1.stdout.clone(),
+                stderr: hit.1.stderr.clone(),
+            })
+        };
+        (
+            Backend {
+                rt,
+                run: Box::new(run),
+            },
+            log,
+        )
+    }
+}
+
+/// An answer for `Backend::scripted`: exit code, stdout, stderr.
+#[cfg(test)]
+pub fn answered(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
 }
 
 #[cfg(test)]

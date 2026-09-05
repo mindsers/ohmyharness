@@ -160,7 +160,7 @@ pub(crate) fn stop_before_syncing(
     // above call the worst available, reached by the one path they do not
     // discuss.
     if !must_know(
-        image::container_running(backend.as_ref(), &name),
+        image::container_running(&backend, &name),
         &session.id,
         "sync over it",
     )? {
@@ -176,7 +176,7 @@ pub(crate) fn stop_before_syncing(
         id = session.id
     );
     ctx.progress(&format!("stopping {} first", session.id));
-    image::container_remove(backend.program(), &name)?;
+    image::container_remove(&backend, &name)?;
     Ok(())
 }
 

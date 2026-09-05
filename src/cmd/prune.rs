@@ -207,7 +207,7 @@ pub const STATE_DIRS: &[(&str, bool)] = &[
 /// per-checkout listing structurally cannot see the ones that matter.
 pub fn inventory(
     root: &std::path::Path,
-    backend: Option<&dyn crate::runtime::Runtime>,
+    backend: Option<&crate::runtime::Backend>,
     backfill: crate::profile::Backfill,
 ) -> (Vec<Item>, Vec<String>) {
     let mut items = Vec::new();
@@ -313,7 +313,7 @@ pub fn inventory(
 /// Until that lands, omh does not remove images at all.
 fn images(
     root: &std::path::Path,
-    backend: &dyn crate::runtime::Runtime,
+    backend: &crate::runtime::Backend,
     blind: &mut Vec<String>,
     backfill: crate::profile::Backfill,
 ) {
@@ -421,7 +421,7 @@ pub fn id_in_network(name: &str) -> Option<String> {
 /// Run one listing, and record it as unreadable rather than empty when it
 /// fails — the distinction the whole report rests on.
 fn list(
-    backend: &dyn crate::runtime::Runtime,
+    backend: &crate::runtime::Backend,
     args: Option<Vec<String>>,
     what: &str,
     blind: &mut Vec<String>,
@@ -692,7 +692,7 @@ fn count_ref(items: &[&Item]) -> String {
 /// item, and until that is written this reports what docker claimed rather than
 /// what omh observed. Said plainly rather than left as a promise the code does
 /// not keep.
-pub fn remove_one(item: &Item, backend: Option<&dyn crate::runtime::Runtime>) -> Option<String> {
+pub fn remove_one(item: &Item, backend: Option<&crate::runtime::Backend>) -> Option<String> {
     let args: Vec<String> = match item.class {
         Class::State => {
             let path = std::path::Path::new(&item.name);
@@ -798,7 +798,7 @@ pub fn prune_cmd(
         crate::profile::Backfill::Record
     };
     let home = paths.root.parent().unwrap_or(&paths.root).to_path_buf();
-    let (items, blind) = inventory(&paths.root, backend.as_deref(), backfill);
+    let (items, blind) = inventory(&paths.root, backend.as_ref(), backfill);
     let mut plan_ = plan(
         items,
         blind,
@@ -855,7 +855,7 @@ pub fn prune_cmd(
         plan_
             .remove
             .iter()
-            .map(|i| (i.clone(), remove_one(i, backend.as_deref())))
+            .map(|i| (i.clone(), remove_one(i, backend.as_ref())))
             .collect()
     };
 

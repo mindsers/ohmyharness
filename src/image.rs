@@ -8,6 +8,7 @@
 
 use crate::adapter::Adapter;
 use crate::base::GRAPH_CACHE;
+use crate::runtime::Backend;
 use anyhow::Result;
 use std::path::Path;
 
@@ -645,18 +646,18 @@ pub fn stack_tag(adapter: &Adapter, installs: &[&str], ca: Option<&str>) -> Stri
 /// tested thoroughly; that the build *works* is `omh doctor`'s to prove, which
 /// is the coverage line `CLAUDE.md` draws and not one a green suite can cross.
 pub fn ensure_stack(
-    program: &str,
+    backend: &Backend,
     adapter: &Adapter,
     installs: &[&str],
     ca: Option<&str>,
     repo: &Path,
 ) -> Result<String> {
-    ensure(program, adapter, ca)?;
+    ensure(backend, adapter, ca)?;
     let tag = stack_tag(adapter, installs, ca);
-    if tag != tag_for(adapter, ca) && !exists(program, &tag) {
+    if tag != tag_for(adapter, ca) && !exists(backend, &tag) {
         eprintln!("omh: building {tag} — this repo's toolchain, first run only");
         build(
-            program,
+            backend,
             &tag,
             &stack_dockerfile(adapter, installs, ca),
             &Kind::Stack(adapter, repo),
@@ -830,17 +831,17 @@ pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
 
 /// Build the base and the harness layer if they are missing. Progress goes
 /// straight to the terminal: a multi-minute silent step reads as a hang.
-pub fn ensure(program: &str, adapter: &Adapter, ca: Option<&str>) -> Result<()> {
+pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<()> {
     let base = base_tag(ca);
-    if !exists(program, &base) {
+    if !exists(backend, &base) {
         eprintln!("omh: building {base} (first run only)");
-        build(program, &base, &base_dockerfile(ca), &Kind::Base, ca)?;
+        build(backend, &base, &base_dockerfile(ca), &Kind::Base, ca)?;
     }
     let t = tag_for(adapter, ca);
-    if !exists(program, &t) {
+    if !exists(backend, &t) {
         eprintln!("omh: building {t}");
         build(
-            program,
+            backend,
             &t,
             &harness_dockerfile(adapter, ca),
             &Kind::Harness(adapter),
@@ -967,10 +968,21 @@ pub fn relay(err: std::process::ChildStderr) -> String {
     log
 }
 
-fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind, ca: Option<&str>) -> Result<()> {
+fn build(
+    backend: &Backend,
+    tag: &str,
+    dockerfile: &str,
+    kind: &Kind,
+    ca: Option<&str>,
+) -> Result<()> {
     use anyhow::Context;
     use std::io::Write;
     use std::process::Stdio;
+
+    // The one runner that does not go through `Backend::output`: the
+    // Dockerfile goes in on stdin and the log is relayed as it happens, and
+    // both need a `Child`, not an `Output`.
+    let program = backend.program();
 
     // Empty context: everything the image needs comes from the Dockerfile.
     let context = std::env::temp_dir().join("omh-build-context");
@@ -1028,7 +1040,7 @@ fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind, ca: Option<&st
         }
         anyhow::bail!("failed to build {tag}");
     }
-    reap(program, tag, kind);
+    reap(backend, tag, kind);
     Ok(())
 }
 
@@ -1045,18 +1057,18 @@ fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind, ca: Option<&st
 /// failing on every build for months is indistinguishable from one that is
 /// working unless it says so — and that indistinguishability is the whole
 /// failure this feature exists to end.
-fn reap(program: &str, built: &str, kind: &Kind) {
-    let tags = match list_tags(program, kind) {
+fn reap(backend: &Backend, built: &str, kind: &Kind) {
+    let tags = match list_tags(backend, kind) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("omh: could not list images to reap: {e}");
             return;
         }
     };
-    let in_use = images_in_use(program);
+    let in_use = images_in_use(backend);
     let mut gone = Vec::new();
     for tag in superseded(built, &tags, &in_use) {
-        match remove_image(program, &tag) {
+        match remove_image(backend, &tag) {
             Removal::Deleted => gone.push(tag),
             // Docker holding a line omh already tried to hold means the two
             // disagreed about what is in use, which the ID-shaped `{{.Image}}`
@@ -1087,11 +1099,8 @@ enum Removal {
     Failed(String),
 }
 
-fn remove_image(program: &str, tag: &str) -> Removal {
-    let out = match std::process::Command::new(program)
-        .args(["image", "rm", tag])
-        .output()
-    {
+fn remove_image(backend: &Backend, tag: &str) -> Removal {
+    let out = match backend.output(&["image", "rm", tag]) {
         Ok(o) => o,
         Err(e) => return Removal::Failed(e.to_string()),
     };
@@ -1124,10 +1133,8 @@ fn classify_removal(stdout: &str) -> Removal {
 }
 
 /// Every tag of the same class as the one just built.
-fn list_tags(program: &str, kind: &Kind) -> Result<Vec<String>> {
-    let out = std::process::Command::new(program)
-        .args(kind.list_args())
-        .output()?;
+fn list_tags(backend: &Backend, kind: &Kind) -> Result<Vec<String>> {
+    let out = backend.output(&kind.list_args())?;
     anyhow::ensure!(out.status.success(), "listing images to reap");
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -1151,11 +1158,10 @@ fn list_tags(program: &str, kind: &Kind) -> Result<Vec<String>> {
 /// that reference stops resolving — including when an earlier reap untagged it.
 /// The `omh.image` label is the tag omh itself launched, stamped by
 /// `Plan::labels`, and it does not degrade.
-fn images_in_use(program: &str) -> Vec<String> {
+fn images_in_use(backend: &Backend) -> Vec<String> {
     let read = |args: &[&str]| -> Vec<String> {
-        std::process::Command::new(program)
-            .args(args)
-            .output()
+        backend
+            .output(args)
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .lines()
@@ -1183,18 +1189,15 @@ fn images_in_use(program: &str) -> Vec<String> {
 /// The plan names a per-project network; something has to create it. Without
 /// this every launch dies at `network omh-<repo> not found` — a plan that is
 /// well-formed but not runnable.
-pub fn ensure_network(program: &str, name: &str) -> Result<()> {
-    let present = std::process::Command::new(program)
-        .args(["network", "inspect", name])
-        .output()
+pub fn ensure_network(backend: &Backend, name: &str) -> Result<()> {
+    let present = backend
+        .output(&["network", "inspect", name])
         .map(|o| o.status.success())
         .unwrap_or(false);
     if present {
         return Ok(());
     }
-    let out = std::process::Command::new(program)
-        .args(["network", "create", name])
-        .output()?;
+    let out = backend.output(&["network", "create", name])?;
     if !out.status.success() {
         anyhow::bail!(
             "creating network {name}: {}",
@@ -1292,13 +1295,8 @@ pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) ->
     }
 }
 
-pub fn container_running(backend: &dyn crate::runtime::Runtime, name: &str) -> Running {
-    running_from(
-        name,
-        std::process::Command::new(backend.program())
-            .args(backend.running_args())
-            .output(),
-    )
+pub fn container_running(backend: &Backend, name: &str) -> Running {
+    running_from(name, backend.output(&backend.running_args()))
 }
 
 /// Why omh has no answer, said the same way wherever that happens.
@@ -1479,8 +1477,8 @@ pub fn probe_from(asked: std::io::Result<std::process::Output>) -> Probe {
     Probe::Unknown(unreadable(&runtime_said, &out.status))
 }
 
-pub fn container_probe(program: &str, args: &[String]) -> Probe {
-    probe_from(std::process::Command::new(program).args(args).output())
+pub fn container_probe(backend: &Backend, args: &[String]) -> Probe {
+    probe_from(backend.output(args))
 }
 
 /// What the running container says it was built from.
@@ -1507,12 +1505,8 @@ pub enum Stamp {
     Unknown(String),
 }
 
-pub fn container_stamp(program: &str, name: &str) -> Stamp {
-    stamp_from(
-        std::process::Command::new(program)
-            .args(["inspect", "-f", "{{json .Config.Labels}}", name])
-            .output(),
-    )
+pub fn container_stamp(backend: &Backend, name: &str) -> Stamp {
+    stamp_from(backend.output(&["inspect", "-f", "{{json .Config.Labels}}", name]))
 }
 
 /// Read the stamp, given what the runtime said.
@@ -1558,10 +1552,8 @@ pub fn stamp_from(asked: std::io::Result<std::process::Output>) -> Stamp {
 }
 
 /// Stopped-but-present containers block `run --name`, so clear them first.
-pub fn container_remove(program: &str, name: &str) -> Result<()> {
-    let out = std::process::Command::new(program)
-        .args(["rm", "-f", name])
-        .output()?;
+pub fn container_remove(backend: &Backend, name: &str) -> Result<()> {
+    let out = backend.output(&["rm", "-f", name])?;
     if !out.status.success() {
         // A sandbox that is still running still has the credential directory
         // mounted writable; reporting it stopped would be a lie that matters.
@@ -1602,10 +1594,9 @@ pub fn superseded(built: &str, tags: &[String], in_use: &[String]) -> Vec<String
         .collect()
 }
 
-pub fn exists(program: &str, tag: &str) -> bool {
-    std::process::Command::new(program)
-        .args(["image", "inspect", tag])
-        .output()
+pub fn exists(backend: &Backend, tag: &str) -> bool {
+    backend
+        .output(&["image", "inspect", tag])
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -3113,7 +3104,8 @@ mod tests {
     #[test]
     #[ignore]
     fn a_real_build_streams_its_log_and_diagnoses_a_proxy() {
-        let docker = "docker";
+        let docker = Backend::real(Box::new(crate::runtime::Docker));
+        let docker = &docker;
         // A build that succeeds: proves the tee does not deadlock.
         let ok = build(
             docker,

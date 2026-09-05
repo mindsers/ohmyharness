@@ -199,7 +199,7 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
         session::list(&dir).into_iter().any(|id| {
             backend.as_ref().is_none_or(|b| {
                 !matches!(
-                    image::container_running(b.as_ref(), &format!("omh-{legacy}-{id}")),
+                    image::container_running(b, &format!("omh-{legacy}-{id}")),
                     image::Running::No
                 )
             })
@@ -4687,6 +4687,11 @@ mod tests {
     /// doctor`'s, and no green test crosses that line. What it does prove is
     /// omh's own arithmetic: which questions get asked, of which image, and
     /// what is done with the answers.
+    fn fake_backend(dir: &std::path::Path, present: &[&str], absent: &[&str]) -> runtime::Backend {
+        let shim = fake_runtime(dir, present, absent);
+        runtime::Backend::shimmed(Box::new(runtime::Docker), std::path::Path::new(&shim))
+    }
+
     fn fake_runtime(dir: &std::path::Path, present: &[&str], absent: &[&str]) -> String {
         let log = dir.join("calls.log");
         let mut body = String::from("#!/bin/sh\n");
@@ -4760,7 +4765,7 @@ mod tests {
     fn a_second_launch_asks_the_image_nothing() {
         let dir = tempfile::tempdir().unwrap();
         let (paths, adapter) = measurement_fixture(dir.path());
-        let runtime = fake_runtime(dir.path(), &["cargo"], &["cc"]);
+        let runtime = fake_backend(dir.path(), &["cargo"], &["cc"]);
         let own = base::Own::default();
         let repo = settings::RepoPolicy::default();
 
@@ -4826,7 +4831,7 @@ mod tests {
     fn the_probe_asks_this_image_about_what_it_owes() {
         let dir = tempfile::tempdir().unwrap();
         let (paths, adapter) = measurement_fixture(dir.path());
-        let runtime = fake_runtime(dir.path(), &["cargo"], &[]);
+        let runtime = fake_backend(dir.path(), &["cargo"], &[]);
 
         let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
         sb.top_up(
@@ -4869,7 +4874,7 @@ mod tests {
     fn an_image_is_made_sure_of_before_it_is_asked_anything() {
         let dir = tempfile::tempdir().unwrap();
         let (paths, adapter) = measurement_fixture(dir.path());
-        let runtime = fake_runtime(dir.path(), &["cargo"], &[]);
+        let runtime = fake_backend(dir.path(), &["cargo"], &[]);
 
         let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
         sb.top_up(
@@ -4919,7 +4924,7 @@ mod tests {
         let mut sb = a_sandbox("omh/claude:abc123", &["cargo"]);
         let _ = sb.top_up(
             &paths,
-            &bin.to_string_lossy(),
+            &runtime::Backend::shimmed(Box::new(runtime::Docker), &bin),
             &adapter,
             &[],
             &base::Own::default(),
