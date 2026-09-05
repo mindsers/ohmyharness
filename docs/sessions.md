@@ -156,7 +156,8 @@ has `curl` and outbound network. See [Risks](design/risks.md).
 
 Worth being precise about what this buys: a sandbox protects your *host*. What
 protects your *repo* is the worktree branch. That is why `omh s rm` never
-deletes a branch.
+deletes a branch that has commits — only an empty one, which held nothing to
+review.
 
 ## What a container is compared against
 
@@ -256,7 +257,7 @@ $ omh s01 rm              # remove the session — branch survives
 anyone parsing the table — see [what every command
 prints](commands.md#what-every-command-prints).
 
-Sessions idle longer than `idle_timeout` are stopped on the next launch.
+Sessions idle longer than `idle_timeout` are stopped on the next launch — but only when their harness has exited. A session whose agent is still running in the container is left alone however old its marker, because stopping it would take the agent's conversation with it, and a container omh cannot probe is left alone too.
 N sessions means N containers, so this is not a nicety — see
 [risks](design/risks.md).
 
@@ -270,9 +271,9 @@ Unset by default: nothing is stopped unless you ask for it. A session that has
 no recorded use — from before this existed, or after clearing `~/.omh/run` — is
 left alone rather than stopped on a guess.
 
-`down` and `rm` differ in what they leave behind, and both leave the branch. To
-actually discard agent work you delete the branch yourself, deliberately, with
-git.
+`down` and `rm` differ in what they leave behind, and both leave a branch that
+holds commits. To actually discard agent work you delete the branch yourself,
+deliberately, with git.
 
 ## Several sessions at once
 

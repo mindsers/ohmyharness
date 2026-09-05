@@ -709,7 +709,7 @@ Top-level keys of the same files:
 |---|---|---|
 | `carry_in` | list of paths | untracked files copied into the worktree |
 | `idle_timeout` | duration (`30m`, `2h`, `90s`) | stop a session nobody has used for this long. Unset means never |
-| `runtime` | `auto` \| `docker` \| `sbx` | which backend to use; `auto` prefers `sbx` when present |
+| `runtime` | `auto` \| `docker` \| `sbx` | which backend to use; `auto` means docker (the measured one). `sbx` is a provisional, unmeasured opt-in — set it explicitly and run `omh doctor` first |
 | `persistence` | `dtach` \| `none` | whether harnesses survive the terminal closing |
 | `account` | account name | which captured login this project uses |
 

@@ -307,20 +307,12 @@ mod tests {
     #[test]
     fn every_setting_omh_reads_is_a_key_omh_can_classify() {
         let mut read = std::collections::BTreeSet::new();
-        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
         let mut files = 0;
-        while let Some(at) = stack.pop() {
-            for entry in std::fs::read_dir(&at).unwrap().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|e| e != "rs") {
-                    continue;
-                }
+        // Production text only, by the one rule `testsrc` keeps: a test
+        // that reads a made-up key is not a setting omh reads.
+        {
+            for (_path, body) in crate::testsrc::production() {
                 files += 1;
-                let body = std::fs::read_to_string(&path).unwrap();
                 for call in ["policy_value(", "policy_list("] {
                     for (at, _) in body.match_indices(call) {
                         // `policy_value(&paths, "account")` — the literal is

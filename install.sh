@@ -194,7 +194,7 @@ esac
 # Stated, not enforced. omh needs a container runtime and git, and neither is
 # something an installer should be quietly putting on your machine.
 missing=""
-command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1 || missing="docker or podman"
+command -v docker >/dev/null 2>&1 || missing="docker"
 command -v git >/dev/null 2>&1 || missing="${missing:+$missing and }git"
 if [ -n "$missing" ]; then
   say ""

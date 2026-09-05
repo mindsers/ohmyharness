@@ -16,10 +16,28 @@ use std::path::Path;
 /// skips the build, so a base change never reaches an install that already
 /// built it. Adding `socat` to the base silently did nothing until this.
 pub fn base_tag(ca: Option<&str>) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    base_dockerfile(ca).hash(&mut h);
-    format!("omh/base:{:x}", h.finish())
+    format!("omh/base:{}", tag_digest(&base_dockerfile(ca)))
+}
+
+/// A stable digest of an image recipe, for the tag that names it.
+///
+/// 64-bit FNV-1a, computed the same on every machine. It replaced
+/// `DefaultHasher`, whose output std explicitly does not guarantee across
+/// releases: a tag is `ensure`'s only record that a recipe already built, so
+/// when the digest of an unchanged recipe moved on a Rust upgrade, every image
+/// rebuilt on the next launch for no reason anybody could see. The note-pin
+/// digest below shells out to `git hash-object` for the same stability; a tag
+/// is computed far more often and per launch, so it stays in process.
+///
+/// Not for anything that must resist an adversary — a recipe is omh's own
+/// text, and a collision would at worst reuse a layer omh built itself.
+pub fn tag_digest(recipe: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in recipe.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// Tag includes a digest of the recipe, so a Dockerfile omh ships actually
@@ -27,11 +45,12 @@ pub fn base_tag(ca: Option<&str>) -> String {
 /// `ensure` saw the tag present and skipped the build — while `omh init`
 /// reported "already built".
 pub fn tag_for(adapter: &Adapter, ca: Option<&str>) -> String {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    harness_dockerfile(adapter, ca).hash(&mut h);
-    base_dockerfile(ca).hash(&mut h);
-    format!("omh/{}:{:x}", adapter.name, h.finish())
+    let recipe = format!(
+        "{}\n{}",
+        harness_dockerfile(adapter, ca),
+        base_dockerfile(ca)
+    );
+    format!("omh/{}:{}", adapter.name, tag_digest(&recipe))
 }
 
 /// The agent's home inside the sandbox.
@@ -48,11 +67,14 @@ pub const GUEST_HOME: &str = "/home/agent";
 
 /// A digest of an image recipe, for a note to pin.
 ///
-/// Deliberately **not** `base_tag()`'s. That uses `DefaultHasher`, whose output
-/// std explicitly does not guarantee across releases — fine for a tag, which is
-/// ephemeral and local. A note is committed and travels, so pinning that value
-/// would mark every image-triggered note in the repo stale on the day somebody
-/// upgrades Rust: a mass false positive with no cause anybody could find.
+/// Deliberately **not** `tag_digest`, which `base_tag` uses. That is stable
+/// across toolchains — which is what a tag needs — but it is omh's own FNV,
+/// and a note is committed and travels between installs on different omh
+/// versions. Pinning a value whose algorithm could change with omh would
+/// mark every image-triggered note in the repo stale the day somebody
+/// upgrades omh: a mass false positive with no cause anybody could find.
+/// `git hash-object` is a standard SHA-1 that every git computes the same,
+/// for ever.
 ///
 /// `git hash-object` is a stable SHA-1 of the text, for ever, and shells out
 /// exactly as `carry.rs` and `session.rs` already do.
@@ -598,12 +620,13 @@ pub fn stack_tag(adapter: &Adapter, installs: &[&str], ca: Option<&str>) -> Stri
     if installs.is_empty() {
         return tag_for(adapter, ca);
     }
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    stack_dockerfile(adapter, installs, ca).hash(&mut h);
-    tag_for(adapter, ca).hash(&mut h);
-    base_dockerfile(ca).hash(&mut h);
-    format!("omh/{}:{:x}", adapter.name, h.finish())
+    let recipe = format!(
+        "{}\n{}\n{}",
+        stack_dockerfile(adapter, installs, ca),
+        tag_for(adapter, ca),
+        base_dockerfile(ca)
+    );
+    format!("omh/{}:{}", adapter.name, tag_digest(&recipe))
 }
 
 /// Build the base, the harness layer and this repo's stack layer if missing,
@@ -2419,6 +2442,28 @@ mod tests {
         );
     }
 
+    /// The tag digest is the same on every toolchain, because `ensure` uses
+    /// the tag as its only record that a recipe already built. `DefaultHasher`
+    /// was not: its output moved on a Rust upgrade, and every image rebuilt on
+    /// the next launch for a reason nobody could find.
+    ///
+    /// Pinned to FNV-1a-64's published vectors, so a change to the hash — not
+    /// just to a recipe — has to come here and say why.
+    #[test]
+    fn an_image_tag_is_stable_across_toolchains() {
+        assert_eq!(
+            tag_digest(""),
+            "cbf29ce484222325",
+            "the FNV-1a-64 offset basis"
+        );
+        assert_eq!(tag_digest("a"), "af63dc4c8601ec8c");
+        assert_eq!(tag_digest("foobar"), "85944171f73967e8");
+        assert!(
+            base_tag(None).ends_with(&tag_digest(&base_dockerfile(None))),
+            "the base tag carries the digest of its own recipe"
+        );
+    }
+
     #[test]
     fn tags_name_their_harness() {
         assert!(tag_for(&claude(), None).starts_with("omh/claude:"));
@@ -2879,24 +2924,13 @@ mod tests {
     /// the exemption is gone with it and the scan can see the whole tree.
     #[test]
     fn no_command_resolves_the_certificate_twice() {
-        let mut stack = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
         let mut resolvers: Vec<String> = Vec::new();
         let mut twice: Vec<String> = Vec::new();
         let mut sandbox_resolves = false;
         let mut saw_sandbox_fn = false;
-        while let Some(at) = stack.pop() {
-            for entry in std::fs::read_dir(&at).unwrap().flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if path.extension().is_none_or(|e| e != "rs") {
-                    continue;
-                }
-                let whole = std::fs::read_to_string(&path).unwrap();
-                // Production code only. A test may resolve as often as it likes.
-                let body = whole.split("#[cfg(test)]").next().unwrap_or("");
+        // Production code only. A test may resolve as often as it likes.
+        {
+            for (path, body) in crate::testsrc::production() {
                 let name = path
                     .strip_prefix(env!("CARGO_MANIFEST_DIR"))
                     .unwrap_or(&path)
@@ -2974,7 +3008,7 @@ mod tests {
     #[test]
     fn nothing_builds_a_root_except_its_one_constructor() {
         let src = std::fs::read_to_string(file!()).unwrap();
-        let body = src.split("#[cfg(test)]").next().unwrap_or("");
+        let body = crate::testsrc::production_of(&src);
         // `Root {` also opens the `struct` and its `impl`; neither builds one.
         let literals = body.matches("Root {").count()
             - body.matches("struct Root {").count()

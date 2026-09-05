@@ -16,11 +16,13 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "omh", version, about, long_about = None)]
 pub(crate) struct Cli {
-    /// Print the launch plan instead of running it.
+    /// Show what this would do and do none of it. For the commands that can
+    /// say; the rest refuse the flag rather than guess.
     #[arg(long, global = true)]
     pub(crate) dry_run: bool,
 
-    /// Reuse an existing session instead of creating a new one.
+    /// The session to act on, for the commands that act on one. `omh sNN
+    /// <verb>` says the same thing.
     #[arg(long, short, global = true)]
     pub(crate) session: Option<String>,
 
@@ -416,6 +418,8 @@ pub(crate) enum McpCmd {
         /// Everything after the command, passed to it unchanged.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+        /// An environment variable the server runs with, as `KEY=VALUE`.
+        /// Repeat for several.
         #[arg(long = "env", value_parser = parse_env)]
         env: Vec<(String, String)>,
     },
@@ -428,9 +432,15 @@ pub(crate) enum McpCmd {
     Import {
         /// Which installed harness to read servers out of.
         harness: String,
-        #[arg(long)]
+        /// Read this file instead of where the adapter says the harness keeps
+        /// its servers. The same flag `omh import` takes; `--file` was its
+        /// name here until 0.10, and still parses.
+        #[arg(long = "from", alias = "file")]
         file: Option<std::path::PathBuf>,
-        #[arg(long)]
+        /// Overwrite a catalogue entry of the same name that differs. Without
+        /// it yours is kept and the difference reported. `--force` was its
+        /// name until 0.10, and still parses.
+        #[arg(long = "replace", alias = "force")]
         force: bool,
     },
 }
@@ -558,8 +568,11 @@ pub(crate) enum SessionsCmd {
         /// reword and drop by hand.
         #[arg(long, requires = "keep", conflicts_with = "message")]
         edit: bool,
-        /// Commit even with conflict markers still in the files.
-        #[arg(long)]
+        /// Commit even with conflict markers still in the files. Named for
+        /// what it does rather than `--force`, which on `rm` means *I have
+        /// read the warning* — a different thing to be sure of. `--force`
+        /// still parses here until 0.10.
+        #[arg(long = "allow-conflicts", alias = "force")]
         force: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
@@ -680,8 +693,10 @@ pub(crate) enum MemoryCmd {
     /// sandbox, where there is no repo to discover.
     #[command(hide = true)]
     Serve {
+        /// The team layer's directory, as mounted in the sandbox.
         #[arg(long)]
         team: std::path::PathBuf,
+        /// The local layer's directory, as mounted in the sandbox.
         #[arg(long)]
         local: std::path::PathBuf,
         /// The session this server serves. Defaults to `$OMH_SESSION`, which
@@ -705,6 +720,8 @@ pub(crate) enum MemoryCmd {
     Rm {
         /// Which note, as `omh memory lint` and the recall output name it.
         key: String,
+        /// `team` or `local`, when one key is in both layers. Without it a
+        /// key found twice is refused rather than guessed at.
         #[arg(long, value_parser = parse_note_layer)]
         layer: Option<memory::Layer>,
         /// Which file, when one key somehow reached two of them. Path
@@ -903,14 +920,115 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
         // It computes the whole plan before touching anything, so the preview
         // is the same value the real run acts on rather than a guess about it.
         | Cmd::Prune { .. } => true,
-        Cmd::Settings { cmd } => !matches!(cmd, Some(SettingsCmd::Edit { .. })),
-        Cmd::Memory { cmd } => matches!(cmd, Some(MemoryCmd::Rm { .. })),
-        Cmd::Sessions { cmd } => matches!(cmd, Some(SessionsCmd::Resume { .. })),
+        // Spelled out per verb, not `matches!`, so a new verb on any of the
+        // three nouns is a compile error here as well as above: the `Sessions`
+        // arm answered `false` for every verb it had never heard of, which is
+        // the silent default this function exists to refuse.
+        Cmd::Settings { cmd } => match cmd {
+            // Opens `$EDITOR`; there is no preview of what a person will type.
+            Some(SettingsCmd::Edit { .. }) => false,
+            None
+            | Some(SettingsCmd::Set { .. })
+            | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Mcp { .. }) => true,
+        },
+        Cmd::Memory { cmd } => match cmd {
+            Some(MemoryCmd::Rm { .. }) => true,
+            // Read-only, a wire protocol, or writes whose preview is the
+            // write: `remember` derives its key from the note, so showing
+            // the key means computing the note.
+            None
+            | Some(MemoryCmd::Remember { .. })
+            | Some(MemoryCmd::Serve { .. })
+            | Some(MemoryCmd::Promote { .. })
+            | Some(MemoryCmd::Stale)
+            | Some(MemoryCmd::Lint) => false,
+        },
+        Cmd::Sessions { cmd } => match cmd {
+            Some(SessionsCmd::Resume { .. }) => true,
+            // The listing is its own dry run; the rest stop containers,
+            // replant commits and delete worktrees, and each would have to
+            // compute what it *would* do before it could show it.
+            None
+            | Some(SessionsCmd::Attach { .. })
+            | Some(SessionsCmd::Down { .. })
+            | Some(SessionsCmd::Sync { .. })
+            | Some(SessionsCmd::Log { .. })
+            | Some(SessionsCmd::Diff { .. })
+            | Some(SessionsCmd::Commit { .. })
+            | Some(SessionsCmd::Push { .. })
+            | Some(SessionsCmd::Rm { .. }) => false,
+        },
         // Read-only: the command *is* its own dry run, so there is nothing to
         // withhold and nothing to describe. Refusing says that, where accepting
         // would imply a preview it never gives.
         Cmd::Info { .. } | Cmd::Why { .. } => false,
         Cmd::Init | Cmd::Auth { .. } | Cmd::Graph { .. } => false,
+    }
+}
+
+/// Whether this command has an answer `--json` can carry.
+///
+/// Four do not: `new`, `resume` and `settings edit` hand the terminal to a
+/// program, and `memory serve` *is* a program, speaking MCP on stdout. Each
+/// accepted `--json` and printed nothing a script could parse, which is the
+/// `--dry-run` accident in another flag — a request honoured in silence is
+/// indistinguishable from one ignored. So they refuse it, at the same site.
+///
+/// `--dry-run` overrides the refusal for the launches: a preview *is* a
+/// report, and `omh --dry-run --json new claude` is how a script reads the
+/// plan. `dispatch` applies that rule; this function answers the narrower
+/// question of whether the real run has anything to say.
+///
+/// Exhaustive, like the two above, so a new command decides this too.
+pub(crate) fn answers_json(cmd: &Cmd) -> bool {
+    match cmd {
+        Cmd::New { .. } => false,
+        // Spelled out per verb, not `matches!`, for the same reason `previews`
+        // is: a new verb on any of these three nouns is a compile error until
+        // it decides this, rather than silently defaulting to `true` and
+        // reintroducing the "honoured in silence" bug this function refuses.
+        Cmd::Sessions { cmd } => match cmd {
+            Some(SessionsCmd::Resume { .. }) => false,
+            None
+            | Some(SessionsCmd::Attach { .. })
+            | Some(SessionsCmd::Down { .. })
+            | Some(SessionsCmd::Sync { .. })
+            | Some(SessionsCmd::Log { .. })
+            | Some(SessionsCmd::Diff { .. })
+            | Some(SessionsCmd::Commit { .. })
+            | Some(SessionsCmd::Push { .. })
+            | Some(SessionsCmd::Rm { .. }) => true,
+        },
+        Cmd::Settings { cmd } => match cmd {
+            Some(SettingsCmd::Edit { .. }) => false,
+            None
+            | Some(SettingsCmd::Set { .. })
+            | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Mcp { .. }) => true,
+        },
+        Cmd::Memory { cmd } => match cmd {
+            Some(MemoryCmd::Serve { .. }) => false,
+            None
+            | Some(MemoryCmd::Remember { .. })
+            | Some(MemoryCmd::Promote { .. })
+            | Some(MemoryCmd::Stale)
+            | Some(MemoryCmd::Lint)
+            | Some(MemoryCmd::Rm { .. }) => true,
+        },
+        Cmd::Init
+        | Cmd::Prune { .. }
+        | Cmd::Doctor { .. }
+        | Cmd::Why { .. }
+        | Cmd::Graph { .. }
+        | Cmd::Auth { .. }
+        | Cmd::Info { .. }
+        | Cmd::Use { .. }
+        | Cmd::Unuse { .. }
+        | Cmd::Set { .. }
+        | Cmd::Unset { .. }
+        | Cmd::Eject { .. }
+        | Cmd::Import { .. } => true,
     }
 }
 

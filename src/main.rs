@@ -41,6 +41,8 @@ mod settings;
 mod shadow;
 mod ssh;
 mod stack;
+#[cfg(test)]
+mod testsrc;
 mod why;
 
 use adapter::Adapter;
@@ -260,6 +262,17 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         !cli.dry_run || cli::previews(&cli.cmd),
         "`--dry-run` is not something this command can answer yet:\n  \
          omh <command>    to run it"
+    );
+
+    // And the third flag of that shape. A command that hands you a program
+    // has no answer for `--json` to carry, so it was accepted and produced
+    // nothing — which a script reads as an empty answer rather than a
+    // mistake. A preview is an answer, so `--dry-run` lifts the refusal.
+    anyhow::ensure!(
+        !cli.json || cli.dry_run || cli::answers_json(&cli.cmd),
+        "`--json` is not something this command can answer: it hands you a program \
+         and prints nothing to parse:\n  \
+         omh <command>    without --json"
     );
 
     // Before any command reads per-repo state, and after `--dry-run` has been
@@ -1786,9 +1799,14 @@ mod tests {
     /// that, and so does the rule that an admission is only ever added.
     #[test]
     fn the_lines_omh_prints_are_lines_omh_accepts() {
-        let mut files = rust_sources(&["src"]);
-        the_whole_tree(&files);
-        files.extend(manifests());
+        // Production text, by `testsrc`'s rule; the manifests whole.
+        let mut sources = crate::testsrc::production();
+        the_whole_tree(&sources.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
+        sources.extend(
+            manifests()
+                .into_iter()
+                .map(|p| (p.clone(), std::fs::read_to_string(&p).unwrap())),
+        );
         // Counted apart from the file floor above: this asks whether the scan
         // still recognises the *lines* it was written to read, which is the
         // half that goes quiet when a verb is renamed.
@@ -1814,13 +1832,12 @@ mod tests {
         let mut qualifying = 0;
         let mut checked: std::collections::BTreeMap<String, usize> = Default::default();
         let mut refused: Vec<String> = Vec::new();
-        for file in &files {
+        for (file, body) in &sources {
             // A message wide enough to wrap is written with Rust's string
             // continuation, which eats the newline and the indent that follows
             // it. Read one line at a time, `omh s commit --keep` looks like
             // ``omh s commit \``, so the scan has to join what the compiler
             // joins before it reads anything.
-            let body = std::fs::read_to_string(file).unwrap();
             let mut joined = String::new();
             let mut continued = false;
             for line in body.lines() {
@@ -1842,17 +1859,14 @@ mod tests {
                     }
                 }
             }
-            // Stop at the test module. Everything below it is assertion text
-            // and fixtures, not anything omh prints — and counting it is not
-            // harmless: 24 of the lines this scan called "printed" were test
-            // strings, two of them *this test's own failure messages*, and
-            // three of the per-file floors below sat above the number of real
-            // printed lines in their file. A floor reached by counting the
-            // guard's own prose measures nothing about omh.
-            let body = match joined.find("\nmod tests {") {
-                Some(at) => joined[..at].to_string(),
-                None => joined,
-            };
+            // No test text. Assertion strings and fixtures are not anything
+            // omh prints, and counting them is not harmless: 24 of the lines
+            // this scan once called "printed" were test strings, two of them
+            // *this test's own failure messages*, and three per-file floors
+            // sat above the number of real printed lines in their file. The
+            // cut is `testsrc`'s now; it used to stop at `mod tests {` and so
+            // read every test-only helper above the module as shipped.
+            let body = joined;
             // The manifest is read for one field. `omh why` prints `remove`
             // verbatim as the way out of a feature, and nothing else in that
             // file is a line anyone is being told to type — `because` and
@@ -2191,7 +2205,9 @@ mod tests {
             ("src/cmd/inspect.rs", 5),
             ("src/cmd/memory.rs", 1),
             ("src/cmd/prune.rs", 1),
-            ("src/cmd/session.rs", 11),
+            // The twelfth is `harness_for_attach`'s refusal, which names
+            // `omh <id> resume <harness>` the way the `Resume` arm does.
+            ("src/cmd/session.rs", 12),
             ("src/cmd/settings.rs", 10),
             ("src/config.rs", 3),
             ("src/container.rs", 4),
@@ -2222,7 +2238,9 @@ mod tests {
             // somebody who set one that did not work; it carries no `--local`
             // and is the shorter claim.
             ("src/image.rs", 3),
-            ("src/main.rs", 8),
+            // The ninth is the `--json` refusal, beside the two for `--dry-run`
+            // and a session prefix nothing consumes.
+            ("src/main.rs", 9),
             ("src/memory.rs", 2),
             ("src/memory/ingest.rs", 2),
             ("src/notice.rs", 2),
@@ -2230,6 +2248,9 @@ mod tests {
             // off the pre-2026.08 repo key.
             ("src/profile.rs", 1),
             ("src/render.rs", 1),
+            // `select`'s refusal when only the unmeasured backend is present
+            // names `omh doctor` as the way to check it first.
+            ("src/runtime.rs", 1),
             ("src/report.rs", 14),
             ("src/rules.rs", 1),
             ("src/selection.rs", 1),
@@ -2578,12 +2599,12 @@ mod tests {
             "and one is not `1 conflict markers`: {said}"
         );
         assert!(
-            said.contains("--force"),
+            said.contains("--allow-conflicts"),
             "and the way past is in the refusal: {said}"
         );
         assert!(
             cmd::harvest::may_commit("s01", &one, true).is_ok(),
-            "`--force` means it"
+            "`--allow-conflicts` means it"
         );
 
         // A whole-file conflict is one line per hunk. The refusal has to stay
@@ -5490,10 +5511,7 @@ because = "a fixture"
         // The production half only. Below the test module the same spelling
         // appears inside this very scan, and a guard that counts itself is a
         // guard that can never reach one.
-        let body = whole
-            .split_once("#[cfg(test)]")
-            .expect("the test module is still spelled this way")
-            .0;
+        let body = crate::testsrc::production_of(&whole);
         let holders: Vec<&str> = body
             .match_indices("cli: &Cli")
             .map(|(at, _)| {
@@ -6048,7 +6066,8 @@ because = "a fixture"
     ///
     /// `omh new` does not guess. Everything before `--` is omh's, everything
     /// after it is the harness's, and there is no third category. So
-    /// `omh new claude --json` reports omh as JSON, while
+    /// `omh new claude --json` is omh's — refused, since a launch has nothing
+    /// to report, unless `--dry-run` makes it a preview — while
     /// `omh new claude -- --json` hands `--json` to claude — including for
     /// flags omh also has, which is the case the bare form cannot express at
     /// all without `--` either.
@@ -6124,30 +6143,24 @@ because = "a fixture"
         // log as the first thing a new user sees after `init` tells them to run
         // `omh new`. A guard that reads one file makes a claim about one file
         // and was cited as a claim about the program.
-        let files = rust_sources(&["src"]);
-        the_whole_tree(&files);
+        let sources = crate::testsrc::production();
+        the_whole_tree(&sources.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>());
 
         let mut offenders: Vec<String> = Vec::new();
-        for file in &files {
+        for (file, source) in &sources {
             // `out.rs` **is** the output layer. Every macro in it is the
             // implementation of the methods this rule is about, so exempting
             // the file is exempting the thing rather than making a hole in it.
             if file.file_name().is_some_and(|n| n == "out.rs") {
                 continue;
             }
-            let source = std::fs::read_to_string(file).expect("a source this crate compiles");
             let name = file
                 .strip_prefix(env!("CARGO_MANIFEST_DIR"))
                 .unwrap_or(file)
                 .display()
                 .to_string();
-            // Below the test module is fixture and assertion text, not
-            // anything omh prints — the same cut the printed-line scan makes,
-            // and for the same reason.
-            let source = match source.find("\nmod tests {") {
-                Some(at) => source[..at].to_string(),
-                None => source,
-            };
+            // Fixture and assertion text is not anything omh prints; the cut
+            // is `testsrc`'s, the same one every scan in this crate makes.
             for (i, line) in source.lines().enumerate() {
                 let line = line.trim();
                 // Only calls, never the word in a doc comment or a string that
@@ -6364,15 +6377,417 @@ because = "a fixture"
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main.rs"),
         )
         .unwrap();
-        let prod = body
+        let prod = crate::testsrc::production_of(&body)
+            .trim_end()
             .lines()
-            .position(|l| l.starts_with("#[cfg(test)]"))
-            .unwrap_or(body.lines().count());
+            .count();
         assert!(
             prod <= BUDGET,
             "src/main.rs holds {prod} lines of production code, over a budget of \
              {BUDGET}. Move a command into `src/cmd/`, or raise the budget \
              deliberately and say why"
+        );
+    }
+
+    /// Every flag and positional omh accepts has a sentence in `--help`.
+    ///
+    /// Four did not — `--env`, `--file`, `--force` on the MCP import, and
+    /// `--layer` on `memory rm` — and `--help` printed a bare name for each.
+    /// The reader of `--help` is the person about to type the thing; a name
+    /// with nothing after it tells them only that it exists. Walked from the
+    /// parser so that a flag added without a doc comment fails here rather
+    /// than shipping.
+    #[test]
+    fn every_argument_omh_accepts_says_what_it_is_for() {
+        use clap::CommandFactory;
+        fn walk(cmd: &clap::Command, path: &str, silent: &mut Vec<String>) {
+            for arg in cmd.get_arguments() {
+                let id = arg.get_id().as_str();
+                if matches!(id, "help" | "version") {
+                    continue;
+                }
+                if arg.get_help().is_none() {
+                    silent.push(format!("{path} --{id}"));
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                if sub.get_name() == "help" {
+                    continue;
+                }
+                walk(sub, &format!("{path} {}", sub.get_name()), silent);
+            }
+        }
+        let mut silent = Vec::new();
+        walk(&Cli::command(), "omh", &mut silent);
+        assert!(silent.is_empty(), "no help text: {silent:#?}");
+    }
+
+    /// The two global flags say what they do on **every** command, because
+    /// they are printed on every command.
+    ///
+    /// `--dry-run` said "Print the launch plan" on `omh why`, and `--session`
+    /// said "Reuse an existing session instead of creating a new one" on
+    /// `omh set` — a sentence about `omh new`, from before `new` was a verb.
+    /// Both are refused on most of the surface, and the help is where a
+    /// person finds that out.
+    #[test]
+    fn the_global_flags_describe_what_every_command_does_with_them() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let help_of = |id: &str| {
+            cmd.get_arguments()
+                .find(|a| a.get_id().as_str() == id)
+                .and_then(|a| a.get_help())
+                .map(|h| h.to_string())
+                .unwrap_or_else(|| panic!("--{id} has no help"))
+        };
+        for (flag, stale) in [
+            ("dry_run", ["launch plan", "instead of running"]),
+            ("session", ["creating", "Reuse"]),
+        ] {
+            let help = help_of(flag);
+            for s in stale {
+                assert!(
+                    !help.contains(s),
+                    "--{flag} still says `{s}`, which describes one command: {help}"
+                );
+            }
+            assert!(
+                help.contains("command"),
+                "--{flag} is global, so its help says which commands honour it: {help}"
+            );
+        }
+    }
+
+    /// One spelling for "read this instead": `--from`. One for "write here":
+    /// `--to`.
+    ///
+    /// `omh import mcp <harness> --from` and `omh settings mcp import
+    /// <harness> --file` read the same adapter source, and a person who had
+    /// learned one was refused by the other. The old spelling stays as an
+    /// alias clap does not print, for one release.
+    #[test]
+    fn one_flag_names_a_path_everywhere() {
+        use clap::CommandFactory;
+        fn walk(cmd: &clap::Command, path: &str, seen: &mut Vec<(String, String)>) {
+            for arg in cmd.get_arguments() {
+                if let Some(long) = arg.get_long() {
+                    if matches!(long, "file" | "path" | "dir" | "from" | "to") {
+                        seen.push((path.to_string(), long.to_string()));
+                    }
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), seen);
+            }
+        }
+        let mut seen = Vec::new();
+        walk(&Cli::command(), "omh", &mut seen);
+        let odd: Vec<_> = seen
+            .iter()
+            .filter(|(_, long)| !matches!(long.as_str(), "from" | "to"))
+            .collect();
+        assert!(
+            odd.is_empty(),
+            "a path flag not spelled --from or --to: {odd:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(p, l)| p == "omh settings mcp import" && l == "from"),
+            "the MCP import reads --from like `omh import` does: {seen:?}"
+        );
+        let old = Cli::try_parse_from(cli_argv(&[
+            "settings", "mcp", "import", "claude", "--file", "x",
+        ]));
+        assert!(
+            old.is_ok(),
+            "the retired spelling still parses, as an alias: {:?}",
+            old.err()
+        );
+    }
+
+    /// `--force` means one thing: *I have read the warning; do it anyway*.
+    ///
+    /// It meant three. On `rm` it answered the question about unreviewed
+    /// work, which is that meaning. On `commit` it landed conflict markers,
+    /// and on the MCP import it overwrote a catalogue entry — neither of
+    /// which is a warning read, and a person who had typed `--force` on `rm`
+    /// a dozen times typed it on `commit` without reading either. Each of the
+    /// other two is now named for what it does, with the old spelling as an
+    /// unprinted alias for one release.
+    #[test]
+    fn force_means_i_have_read_the_warning() {
+        use clap::CommandFactory;
+        fn walk(cmd: &clap::Command, path: &str, forces: &mut Vec<String>) {
+            for arg in cmd.get_arguments() {
+                if arg.get_long() == Some("force") {
+                    forces.push(path.to_string());
+                }
+            }
+            for sub in cmd.get_subcommands() {
+                walk(sub, &format!("{path} {}", sub.get_name()), forces);
+            }
+        }
+        let mut forces = Vec::new();
+        walk(&Cli::command(), "omh", &mut forces);
+        assert_eq!(
+            forces,
+            vec!["omh sessions rm".to_string()],
+            "--force is printed on the one command where it answers a warning"
+        );
+        for (line, field) in [
+            (
+                &["sessions", "commit", "--allow-conflicts"][..],
+                "allow-conflicts",
+            ),
+            (&["sessions", "commit", "--force"][..], "the alias"),
+            (
+                &["settings", "mcp", "import", "claude", "--replace"][..],
+                "replace",
+            ),
+            (
+                &["settings", "mcp", "import", "claude", "--force"][..],
+                "the alias",
+            ),
+        ] {
+            let parsed = Cli::try_parse_from(cli_argv(line));
+            assert!(
+                parsed.is_ok(),
+                "`{}` ({field}) parses: {:?}",
+                line.join(" "),
+                parsed.err()
+            );
+        }
+        let commit = Cli::try_parse_from(cli_argv(&["sessions", "commit", "--force"])).unwrap();
+        assert!(
+            matches!(
+                commit.cmd,
+                Cmd::Sessions {
+                    cmd: Some(SessionsCmd::Commit { force: true, .. })
+                }
+            ),
+            "the alias lands on the same field"
+        );
+    }
+
+    /// The commands that refuse `--json` are the ones that end by handing
+    /// over the terminal, and no others.
+    #[test]
+    fn a_command_that_hands_you_a_program_has_no_json_to_print() {
+        for (line, answers) in [
+            (&["new", "claude"][..], false),
+            (&["sessions", "resume"][..], false),
+            (&["settings", "edit"][..], false),
+            (
+                &["memory", "serve", "--team", "t", "--local", "l"][..],
+                false,
+            ),
+            (&["sessions"][..], true),
+            (&["sessions", "attach"][..], true),
+            (&["graph"][..], true),
+            (&["info"][..], true),
+            (&["memory"][..], true),
+            (&["settings"][..], true),
+        ] {
+            let cli = Cli::try_parse_from(cli_argv(line)).unwrap();
+            assert_eq!(
+                cli::answers_json(&cli.cmd),
+                answers,
+                "`omh {}` answers --json",
+                line.join(" ")
+            );
+        }
+    }
+
+    /// A repository whose trunk holds files before the session forks from it,
+    /// so trunk can later delete one the session also has.
+    fn a_session_forked_from_a_trunk_with_files() -> (Paths, Session, shadow::Shadow) {
+        let dir = Box::leak(Box::new(tempfile::tempdir().unwrap()));
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        std::fs::write(paths.repo.join("kept.rs"), "fn kept() {}\n").unwrap();
+        std::fs::write(paths.repo.join("doomed.rs"), "fn doomed() {}\n").unwrap();
+        std::fs::create_dir_all(paths.repo.join("nested")).unwrap();
+        std::fs::write(paths.repo.join("nested/deep.rs"), "fn deep() {}\n").unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "t@example.com"],
+            vec!["config", "user.name", "t"],
+            vec!["add", "-A"],
+            vec!["commit", "-q", "-m", "trunk with files"],
+        ] {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(&args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "{args:?}: {out:?}");
+        }
+        std::fs::create_dir_all(paths.shadows()).unwrap();
+        let session = Session::new(&paths.worktrees().join("s01"), "s01".to_string());
+        session.ensure(&paths.repo, "main").unwrap();
+        let shadow = shadow::Shadow::new(&paths.shadows(), "s01");
+        shadow.ensure(&session.worktree, &[]).unwrap();
+        (paths, session, shadow)
+    }
+
+    /// After a sync the worktree holds the merged tree — no more and **no
+    /// less**. A file trunk deleted is gone from the session.
+    ///
+    /// `materialise` wrote every path the merged tree held and deleted none,
+    /// so a file trunk removed stayed in the worktree, `omh sNN diff` showed
+    /// the session re-adding it, and the next `commit` would have put it back
+    /// on the branch as the agent's work. Reproduced 2026-09-04 against
+    /// git 2.55 before this test was written.
+    #[test]
+    fn syncing_leaves_the_worktree_holding_exactly_the_merged_tree() {
+        let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+        let repo_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // Trunk deletes two files, one of them the only file in its directory.
+        repo_git(&["rm", "-q", "doomed.rs", "nested/deep.rs"]);
+        repo_git(&["commit", "-qm", "trunk deletes"]);
+
+        let synced = cmd::harvest::sync_session(&paths, &session, "main").unwrap();
+        assert!(
+            synced.conflicted.is_empty(),
+            "a deletion nobody contested merges cleanly"
+        );
+        assert!(
+            !session.worktree.join("doomed.rs").exists(),
+            "the file trunk deleted is gone from the session"
+        );
+        assert!(
+            !session.worktree.join("nested/deep.rs").exists(),
+            "so is the one in a directory of its own"
+        );
+        assert!(
+            !session.worktree.join("nested").exists(),
+            "and the directory it emptied is cleaned up, as a checkout would"
+        );
+        assert!(
+            session.worktree.join("kept.rs").exists(),
+            "and the one trunk kept is still there"
+        );
+        // The invariant, not the two names: what the session now claims to
+        // have changed against its moved base is nothing at all.
+        let claimed = session.diff("main", session::What::Summary).unwrap();
+        assert_eq!(
+            claimed.trim(),
+            "",
+            "the session claims no change after a clean sync, yet diff says:\n{claimed}"
+        );
+    }
+
+    /// The other direction of the same rule: a modification the session made
+    /// to a file trunk deleted is a conflict, and the modified file **stays**
+    /// for the agent to decide about. Removing it would be omh resolving a
+    /// conflict in trunk's favour without a word.
+    #[test]
+    fn a_file_the_session_changed_and_trunk_deleted_is_kept_and_reported() {
+        let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+        let repo_git = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&paths.repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        };
+        std::fs::write(
+            session.worktree.join("doomed.rs"),
+            "fn doomed() { changed(); }\n",
+        )
+        .unwrap();
+        repo_git(&["rm", "-q", "doomed.rs"]);
+        repo_git(&["commit", "-qm", "trunk deletes what the agent is editing"]);
+
+        let synced = cmd::harvest::sync_session(&paths, &session, "main").unwrap();
+        assert_eq!(
+            synced.conflicted,
+            vec!["doomed.rs".to_string()],
+            "modify/delete is a conflict, named"
+        );
+        assert_eq!(
+            std::fs::read_to_string(session.worktree.join("doomed.rs")).unwrap(),
+            "fn doomed() { changed(); }\n",
+            "and the agent's version is left in place to decide about"
+        );
+    }
+
+    /// What `materialise` may never unlink, whatever the trees say: the
+    /// placeholders omh mounts over on the next launch, and a file the user
+    /// carried in. Neither is the project's, so neither is trunk's to delete.
+    ///
+    /// Driven straight at `materialise` with a `was` tree that *does* hold
+    /// the placeholder — `reviewing` keeps it out of any tree `sync` computes,
+    /// so this is the guard against the function being handed a wider tree
+    /// than the one caller gives it today.
+    #[test]
+    fn materialise_never_removes_the_placeholders_omh_mounts_over() {
+        let (paths, session, _shadow) = a_session_forked_from_a_trunk_with_files();
+        let git_in = |cwd: &std::path::Path, args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        // A `was` tree holding the placeholder and a carried file, built in
+        // a scratch index of the user's repo so nothing is committed.
+        let placeholder = carry::hidden_in_the_worktree()[0];
+        std::fs::write(session.worktree.join(placeholder), "# omh's placeholder\n").unwrap();
+        // Carried the way `omh new` carries it, so the exclusion is the real
+        // one and not a stand-in for it.
+        std::fs::write(paths.repo.join(".env"), "SECRET=carried\n").unwrap();
+        carry::apply(&paths.repo, &session.worktree, &[".env".to_string()]).unwrap();
+        assert!(
+            session.worktree.join(".env").exists(),
+            "the fixture carried it"
+        );
+        // A path git may create: an existing empty file is an index git
+        // refuses as truncated.
+        let scratch = tempfile::tempdir().unwrap();
+        let index = scratch.path().join("index");
+        let with_index = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&session.worktree)
+                .env("GIT_INDEX_FILE", &index)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        with_index(&["add", "-f", "-A", "."]);
+        let was = with_index(&["write-tree"]);
+        // The merged tree is trunk's, which has neither.
+        let merged = git_in(&paths.repo, &["rev-parse", "main^{tree}"]);
+
+        session.materialise(&was, &merged).unwrap();
+        assert!(
+            session.worktree.join(placeholder).exists(),
+            "{placeholder} is omh's placeholder, not trunk's file to delete"
+        );
+        assert!(
+            session.worktree.join(".env").exists(),
+            "a carried file is the user's, not trunk's file to delete"
+        );
+        assert!(
+            session.worktree.join("kept.rs").exists(),
+            "and the ordinary case still writes the tree"
         );
     }
 }

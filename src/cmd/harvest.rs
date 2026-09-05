@@ -79,7 +79,7 @@ pub(crate) fn sync_session(paths: &Paths, session: &Session, base: &str) -> Resu
     let _ = session::unname_tree(&paths.repo, &ours);
     let merged = merged?;
 
-    session.materialise(&merged.tree)?;
+    session.materialise(&tree, &merged.tree)?;
     session.move_baseline(&paths.repo, &onto, &was)?;
     shadow.record_base_moved(&session.worktree, &onto, &merged.conflicted)?;
     let moved = session.commits_between(&paths.repo, &was, &onto)?;
@@ -573,7 +573,7 @@ pub(crate) fn may_commit(id: &str, unresolved: &[String], force: bool) -> Result
     anyhow::bail!(
         "{id} still has {n} conflict marker{s} in its files:\n  {lines}{more}\n\
          Resolve them first, or:\n  \
-         omh {id} commit --keep --force   commit them anyway",
+         omh {id} commit --keep --allow-conflicts   commit them anyway",
         n = unresolved.len(),
         s = if unresolved.len() == 1 { "" } else { "s" },
         lines = shown.join("\n  "),

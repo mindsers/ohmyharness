@@ -54,6 +54,23 @@ shadow, so the list and the double parse are both gone. Harnesses and editors
 still share a namespace, but only inside their own verbs — `omh new zed` and
 `omh s attach zed` say which they mean.
 
+### Flags mean one thing everywhere
+
+A flag learned on one command is true on the next, or it is not there.
+
+| | |
+|---|---|
+| `--from <path>` | Read this instead of where the adapter says: `omh import`, `omh settings mcp import`. |
+| `--to <dir>` | Write here: `omh eject`. |
+| `--force` | *I have read the warning; do it anyway.* Only `omh s rm`, where the warning is about work nobody has reviewed. |
+| `--all` | Every one, not the one named: `omh use --all`, `omh s down --all`. |
+| `--dry-run` | Do none of it and show what would be done, or refuse — [above](#--dry-run). |
+| `--json` | The answer as JSON, or a refusal from a command that hands you a program and has none — [below](#what-every-command-prints). |
+
+`omh s commit --allow-conflicts` and `omh settings mcp import --replace` were
+both `--force` until 0.10, which made three meanings for one word. The old
+spellings still parse, unprinted, for one release.
+
 ### What every command prints
 
 Two audiences, one answer. Every command builds a value and renders it either
@@ -124,6 +141,13 @@ before the `--` is. See [where omh's flags end and the harness's
 begin](#where-omhs-flags-end-and-the-harnesss-begin). Use `omh new claude -- --json`
 to hand it to the harness instead.
 
+**A command that hands you a program refuses `--json`.** `omh new`, `omh sNN
+resume` and `omh settings edit` end by giving the terminal to a harness or an
+editor, and `omh memory serve` speaks a protocol on stdout; none has an answer
+to print, so the flag is refused rather than accepted and dropped. With
+`--dry-run` the preview is the answer, and `omh --dry-run --json new claude` is
+how a script reads a launch plan.
+
 ---
 
 ## `omh init`
@@ -147,6 +171,13 @@ $ omh new claude -- --resume x
 `new` always starts a session that does not exist yet. To go back into one you
 already have, `omh sNN resume` rejoins it as the harness it ran, and
 `omh sNN resume <harness>` rejoins it as a different one.
+
+`omh sNN attach` opens the same session in your editor, and it too rejoins the
+harness the session recorded — not whatever this host prefers. Attaching from a
+machine set up for one harness to a session another built would otherwise stop
+its container and start the wrong image over the same worktree. A session whose
+harness record is damaged is refused rather than reattached on a guess, and
+`omh sNN resume <harness>` is how you say which one.
 
 A bare harness name used to do both — start or reattach, depending on what was
 there. It is not a command any more: any word could be a harness, so no word
@@ -758,6 +789,13 @@ harness restarts and reads the tree as it now is.
 `omh s01 diff` still shows the agent's work after a sync, not trunk's — the
 session's baseline moves with it.
 
+A file trunk deleted is deleted from the session too, so the worktree holds the
+merged tree and nothing more; a session that kept it would show it under `diff`
+as the agent's own addition and land it again at `commit`. A file the agent
+changed and trunk deleted is a conflict like any other: the agent's version
+stays, uncommitted, and is named in the report. Carried files and omh's own
+placeholders are never removed, whatever trunk did.
+
 Needs git 2.38 on the host. `omh doctor` says so if yours is older.
 
 ### `omh sNN commit` will not land a conflict
@@ -769,7 +807,7 @@ omh: s01 still has 3 conflict markers in its files:
   src/tap.rs:43: leftover conflict marker
   src/tap.rs:47: leftover conflict marker
 Resolve them first, or:
-  omh s01 commit --keep --force   commit them anyway
+  omh s01 commit --keep --allow-conflicts   commit them anyway
 ```
 
 Both ways of committing refuse, because both would land them: `-m` stages the
@@ -777,8 +815,10 @@ files as they are and `--keep` replants the agent's commits on top of them. A
 file the agent created and never added counts — that is the one `-m` would
 sweep up.
 
-`--force` is there because a conflict marker at the start of a line is not
-always a conflict. A test fixture holds them on purpose.
+`--allow-conflicts` is there because a conflict marker at the start of a line
+is not always a conflict. A test fixture holds them on purpose. It is not
+spelled `--force`, which on `rm` answers a question about unreviewed work —
+[flags mean one thing everywhere](#flags-mean-one-thing-everywhere).
 
 ### `omh sNN rm` — and what it refuses to take with it
 
@@ -900,8 +940,14 @@ your branch.
 
 - **A carried file reached a commit** — by `git add -f`, copied under another
   name, pasted into source, or written into a message. omh knows the bytes it
-  carried in, so it can tell; it will not rewrite your history to hide a secret.
-  Drop the commit in the sandbox and harvest again.
+  carried in, so it can tell: every line of the file, and the value on it —
+  what follows the first `=` or `:`, quotes off — when that value is twelve
+  characters or more, holds no whitespace, and is not a number or a word every
+  configuration file has (`true`, `localhost`, `development`). A shorter or
+  commoner value is not searched for, so `PORT=8080` does not refuse every
+  harvest, and a secret that short is not one this scan can protect. It will
+  not rewrite your history to hide a secret. Drop the commit in the sandbox and
+  harvest again.
 - **The sandbox's repository is mid-rebase or mid-merge, detached, or has commits
   no branch there can reach.** The detached case was measured leaving work
   behind while reporting success; the other two are the same shape, argued
@@ -1181,7 +1227,7 @@ omh settings edit [<capability> [name]]
 omh settings mcp ls
 omh settings mcp add <name> <cmd> [args…] [--env K=V]
 omh settings mcp rm <name>
-omh settings mcp import <harness> [--file <path>] [--force]
+omh settings mcp import <harness> [--from <path>] [--replace]
 ```
 
 ```console

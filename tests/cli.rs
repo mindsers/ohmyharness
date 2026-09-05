@@ -190,6 +190,9 @@ impl Sandbox {
                  [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
                  if [ \"$1\" = exec ] && [ -f {exec_refuses} ]; then \
                  cat {exec_refuses} >&2; exit 1; fi\n\
+                 if [ \"$1\" = exec ]; then for a in \"$@\"; do case \"$a\" in \
+                 omh-*) [ -f {bin}/live-\"$a\" ] && cat {bin}/live-\"$a\" ;; esac; \
+                 done; exit 0; fi\n\
                  case \"$*\" in *--pull=never*) [ -f {probe_refuses} ] && {{ \
                  echo 'no such image' >&2; exit 125; }} ;; esac\n\
                  if [ \"$1\" = inspect ]; then echo true; fi\n\
@@ -200,7 +203,8 @@ impl Sandbox {
                 exec_refuses = self.bin.join("docker-exec-refuses").display(),
                 probe_refuses = self.bin.join("docker-probe-refuses").display(),
                 containers = self.bin.join("containers").display(),
-                volumes = self.bin.join("volumes").display()
+                volumes = self.bin.join("volumes").display(),
+                bin = self.bin.display()
             ),
         )
         .unwrap();
@@ -441,6 +445,34 @@ impl Sandbox {
         std::fs::write(worktree.join("agent.rs"), "fn agent() {}\n").unwrap();
         git(&["add", "-A", "."]);
         git(&["commit", "-q", "--no-verify", "-m", "the agent's own work"]);
+    }
+
+    /// One more commit in the sandbox repository `sandbox_repo_with_unkept_work`
+    /// built: `body` at `file`, with `subject`.
+    fn commit_in_the_sandbox_repo(
+        &self,
+        id: &str,
+        worktree: &std::path::Path,
+        file: &str,
+        body: &str,
+        subject: &str,
+    ) {
+        let gitdir = self.keyed("shadow").join(format!("{id}.git"));
+        std::fs::write(worktree.join(file), body).unwrap();
+        for args in [
+            vec!["add", "-A", "."],
+            vec!["commit", "-q", "--no-verify", "-m", subject],
+        ] {
+            let out = Command::new("git")
+                .arg("--git-dir")
+                .arg(&gitdir)
+                .arg("--work-tree")
+                .arg(worktree)
+                .args(&args)
+                .output()
+                .expect("git must be installed to run this test");
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+        }
     }
 
     /// Where a branch points, for asserting that it did not move.
@@ -1581,7 +1613,7 @@ fn a_commit_over_conflict_markers_is_refused_by_the_command_itself() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("tap.rs:1"), "and it says where: {err}");
 
-    let out = sb.omh(&["s01", "commit", "-m", "Add the tap", "--force"]);
+    let out = sb.omh(&["s01", "commit", "-m", "Add the tap", "--allow-conflicts"]);
     assert!(
         out.status.success(),
         "and the user can still mean it: {}",
@@ -1948,6 +1980,66 @@ fn a_bare_word_is_a_mistake_rather_than_a_launch() {
         out.status.success(),
         "`omh new claude` still launches: {}",
         String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// An idle timeout does not stop a session whose agent is still working.
+///
+/// Reaping used to read the `last-used` marker alone: a session older than the
+/// timeout was stopped, whether or not its harness was still running. An agent
+/// working unattended has an old marker and a live container, and stopping it
+/// takes its conversation with it. So the reaper probes liveness now, and only
+/// a session whose harness is gone is stopped.
+#[test]
+fn an_idle_timeout_does_not_stop_a_session_whose_agent_is_still_working() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    // Two sessions past the timeout: s01 has a live dtach socket, s02 does not.
+    sb.session("s01");
+    sb.session("s02");
+    // Both are in the running set the reaper reads.
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n{}\n", sb.container("s01"), sb.container("s02")),
+    )
+    .unwrap();
+    // The liveness probe: s01's socket directory lists a harness, s02's is
+    // empty.
+    std::fs::write(
+        sb.bin.join(format!("live-{}", sb.container("s01"))),
+        "s01-claude\n",
+    )
+    .unwrap();
+    // Backdate both markers well past the timeout.
+    for id in ["s01", "s02"] {
+        let marker = sb.keyed("run").join(id).join("last-used");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        std::fs::write(&marker, b"").unwrap();
+        let ok = Command::new("touch")
+            .args(["-t", "202001010000"])
+            .arg(&marker)
+            .status()
+            .expect("touch must be available");
+        assert!(ok.success(), "backdating the marker");
+    }
+    assert!(sb.omh(&["set", "idle_timeout", "1s"]).status.success());
+
+    // A fresh launch runs the reaper over the others first.
+    let _ = sb.omh(&["new", "claude"]);
+
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    let stopped = |id: &str| {
+        ran.lines()
+            .any(|l| l.starts_with("rm -f ") && l.contains(&sb.container(id)))
+    };
+    assert!(
+        !stopped("s01"),
+        "the session with a live harness was stopped by the clock:\n{ran}"
+    );
+    assert!(
+        stopped("s02"),
+        "the session whose harness had exited was reaped:\n{ran}"
     );
 }
 
@@ -5154,6 +5246,82 @@ fn attach_opens_the_session_and_the_editor_it_was_given() {
     assert!(
         launched.contains("s01") && !launched.contains("s02"),
         "the editor opened the session the prefix named: {launched:?}"
+    );
+}
+
+/// `attach` rejoins the harness the session recorded, not the one this host
+/// prefers.
+///
+/// It picked `detect::preferred_harness` — the host default — and built that
+/// harness's image, so attaching from a machine that prefers claude to a
+/// session opencode had built stopped the opencode container and started a
+/// claude one over the same worktree. The recorded harness is the session's;
+/// the host's preference is for a fresh `omh new`.
+#[test]
+fn attach_uses_the_harness_the_session_recorded_rather_than_the_one_on_this_host() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let log = sb.fake_docker();
+    sb.session("s01");
+    sb.fake_editor("zed");
+    // The host prefers claude — no adapter is installed, so `preferred_harness`
+    // returns the first, which is claude. The session ran opencode.
+    let marker = sb.keyed("run").join("s01/.harness");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "opencode").unwrap();
+
+    let _ = sb.omh(&["s01", "attach", "zed"]);
+    let ran = std::fs::read_to_string(&log).unwrap_or_default();
+    let run_line = ran
+        .lines()
+        .find(|l| l.starts_with("run "))
+        .unwrap_or_else(|| panic!("attach never ran a container:\n{ran}"));
+    assert!(
+        run_line.contains("omh/opencode:"),
+        "attach rebuilt the session on the harness it recorded: {run_line}"
+    );
+    assert!(
+        !run_line.contains("omh/claude:"),
+        "and not the one this host prefers: {run_line}"
+    );
+}
+
+/// A session whose harness record is damaged is refused, not silently
+/// reattached on the host default.
+#[test]
+fn attach_refuses_a_session_whose_harness_record_it_cannot_read() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let log = sb.fake_docker();
+    sb.session("s01");
+    sb.fake_editor("zed");
+    // Present and unreadable — an empty marker is damage, not absence.
+    let marker = sb.keyed("run").join("s01/.harness");
+    std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    std::fs::write(&marker, "").unwrap();
+
+    let out = sb.omh(&["s01", "attach", "zed"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a record it cannot read is refused: {err}"
+    );
+    assert!(
+        err.contains("resume"),
+        "and it points at the way to say which harness: {err}"
+    );
+    assert!(
+        !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("\nrun ")
+            && !std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .starts_with("run "),
+        "nothing was launched"
     );
 }
 
@@ -9089,4 +9257,136 @@ fn built_tags(calls: &[String]) -> Vec<String> {
             None
         })
         .collect()
+}
+
+/// `--json` is refused by a command that hands you a program.
+///
+/// `omh new`, `omh sNN resume` and `omh settings edit` end by handing the
+/// terminal to a harness or an editor; `omh memory serve` speaks a wire
+/// protocol. None of them has an answer to print, so `--json` on them was
+/// accepted and produced nothing a script could parse — the shape of
+/// `--dry-run` being accepted and dropped, which this crate already refuses.
+/// The refusal happens before anything is read, so it needs no repository.
+#[test]
+fn json_is_refused_where_omh_hands_you_a_program() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    for line in [
+        &["--json", "new", "claude"][..],
+        &["--json", "s01", "resume"][..],
+        &["--json", "settings", "edit"][..],
+    ] {
+        let out = sb.omh(line);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "`{}` is refused", line.join(" "));
+        assert!(
+            err.contains("--json") && err.contains("hands you"),
+            "`{}` says why: {err}",
+            line.join(" ")
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "and prints nothing that looks like an answer: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
+    assert!(
+        !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("run"),
+        "nothing was launched on the way to the refusal"
+    );
+}
+
+/// A sync removes what trunk deleted, and the session stops claiming it.
+///
+/// Twice, because the session forks from an empty root here: the first sync
+/// brings the file in, the second takes it out again. After the second,
+/// `omh s01 diff` must not name it — it did, as a file the agent had added,
+/// which is the lie a `commit` would then have landed.
+#[test]
+fn sync_removes_a_file_trunk_deleted_and_the_session_stops_claiming_it() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(args)
+            .output()
+            .expect("git must be installed to run this test");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+
+    std::fs::write(sb.repo.join("doomed.rs"), "fn doomed() {}\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "trunk adds"]);
+    let first = sb.omh(&["s01", "sync"]);
+    assert!(
+        first.status.success(),
+        "the first sync brings the file in: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(worktree.join("doomed.rs").exists(), "and it arrived");
+
+    git(&["rm", "-q", "doomed.rs"]);
+    git(&["commit", "-qm", "trunk deletes"]);
+    let second = sb.omh(&["s01", "sync"]);
+    assert!(
+        second.status.success(),
+        "the second sync takes it out: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        !worktree.join("doomed.rs").exists(),
+        "a file trunk deleted does not survive a sync"
+    );
+    let diff = sb.omh(&["s01", "diff"]);
+    let said = String::from_utf8_lossy(&diff.stdout);
+    assert!(
+        !said.contains("doomed.rs"),
+        "and the session no longer claims it as its own change: {said}"
+    );
+}
+
+/// `commit --keep` refuses a commit holding the **value** of a carried secret,
+/// end to end: the setting that carries the file, the file in the checkout,
+/// the token alone in the agent's source.
+#[test]
+fn commit_keep_refuses_a_secret_value_pasted_into_source() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    assert!(sb.omh(&["set", "carry_in", "[\".env\"]"]).status.success());
+    // In the checkout only, which is where omh reads the bytes it carried.
+    // Not in the worktree: `sandbox_repo_with_unkept_work` runs `add -A`, and
+    // a `.env` there reaches the commit as a *path*, which the path check
+    // refuses on its own — this test then passed with the value rule deleted.
+    std::fs::write(sb.repo.join(".env"), "API_TOKEN=ghp_abc123def456\n").unwrap();
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    sb.commit_in_the_sandbox_repo(
+        "s01",
+        &worktree,
+        "client.rs",
+        "const TOKEN: &str = \"ghp_abc123def456\";\n",
+        "Hardcode the token for now",
+    );
+    let before = sb.head_of_branch("omh/s01");
+
+    let out = sb.omh(&["s01", "commit", "--keep"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "the token alone is the secret: {err}"
+    );
+    assert!(
+        err.contains("carried") && err.contains(".env"),
+        "and the refusal says which carried file it came from: {err}"
+    );
+    assert_eq!(
+        sb.head_of_branch("omh/s01"),
+        before,
+        "and the branch did not move"
+    );
 }
