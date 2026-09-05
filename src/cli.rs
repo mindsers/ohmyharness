@@ -984,9 +984,38 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
 pub(crate) fn answers_json(cmd: &Cmd) -> bool {
     match cmd {
         Cmd::New { .. } => false,
-        Cmd::Sessions { cmd } => !matches!(cmd, Some(SessionsCmd::Resume { .. })),
-        Cmd::Settings { cmd } => !matches!(cmd, Some(SettingsCmd::Edit { .. })),
-        Cmd::Memory { cmd } => !matches!(cmd, Some(MemoryCmd::Serve { .. })),
+        // Spelled out per verb, not `matches!`, for the same reason `previews`
+        // is: a new verb on any of these three nouns is a compile error until
+        // it decides this, rather than silently defaulting to `true` and
+        // reintroducing the "honoured in silence" bug this function refuses.
+        Cmd::Sessions { cmd } => match cmd {
+            Some(SessionsCmd::Resume { .. }) => false,
+            None
+            | Some(SessionsCmd::Attach { .. })
+            | Some(SessionsCmd::Down { .. })
+            | Some(SessionsCmd::Sync { .. })
+            | Some(SessionsCmd::Log { .. })
+            | Some(SessionsCmd::Diff { .. })
+            | Some(SessionsCmd::Commit { .. })
+            | Some(SessionsCmd::Push { .. })
+            | Some(SessionsCmd::Rm { .. }) => true,
+        },
+        Cmd::Settings { cmd } => match cmd {
+            Some(SettingsCmd::Edit { .. }) => false,
+            None
+            | Some(SettingsCmd::Set { .. })
+            | Some(SettingsCmd::Unset { .. })
+            | Some(SettingsCmd::Mcp { .. }) => true,
+        },
+        Cmd::Memory { cmd } => match cmd {
+            Some(MemoryCmd::Serve { .. }) => false,
+            None
+            | Some(MemoryCmd::Remember { .. })
+            | Some(MemoryCmd::Promote { .. })
+            | Some(MemoryCmd::Stale)
+            | Some(MemoryCmd::Lint)
+            | Some(MemoryCmd::Rm { .. }) => true,
+        },
         Cmd::Init
         | Cmd::Prune { .. }
         | Cmd::Doctor { .. }

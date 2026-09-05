@@ -26,7 +26,7 @@ pub fn base_tag(ca: Option<&str>) -> String {
 /// releases: a tag is `ensure`'s only record that a recipe already built, so
 /// when the digest of an unchanged recipe moved on a Rust upgrade, every image
 /// rebuilt on the next launch for no reason anybody could see. The note-pin
-/// digest above shells out to `git hash-object` for the same stability; a tag
+/// digest below shells out to `git hash-object` for the same stability; a tag
 /// is computed far more often and per launch, so it stays in process.
 ///
 /// Not for anything that must resist an adversary — a recipe is omh's own
@@ -67,11 +67,14 @@ pub const GUEST_HOME: &str = "/home/agent";
 
 /// A digest of an image recipe, for a note to pin.
 ///
-/// Deliberately **not** `base_tag()`'s. That uses `DefaultHasher`, whose output
-/// std explicitly does not guarantee across releases — fine for a tag, which is
-/// ephemeral and local. A note is committed and travels, so pinning that value
-/// would mark every image-triggered note in the repo stale on the day somebody
-/// upgrades Rust: a mass false positive with no cause anybody could find.
+/// Deliberately **not** `tag_digest`, which `base_tag` uses. That is stable
+/// across toolchains — which is what a tag needs — but it is omh's own FNV,
+/// and a note is committed and travels between installs on different omh
+/// versions. Pinning a value whose algorithm could change with omh would
+/// mark every image-triggered note in the repo stale the day somebody
+/// upgrades omh: a mass false positive with no cause anybody could find.
+/// `git hash-object` is a standard SHA-1 that every git computes the same,
+/// for ever.
 ///
 /// `git hash-object` is a stable SHA-1 of the text, for ever, and shells out
 /// exactly as `carry.rs` and `session.rs` already do.

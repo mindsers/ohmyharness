@@ -5,8 +5,8 @@
 //! omh prints but does not accept. Each cut the tests off with a rule of its
 //! own, and the two rules in use were wrong in opposite directions.
 //! `split("#[cfg(test)]")` stopped at the first test-only *helper*: `base.rs`
-//! keeps one at line 118, so ninety production lines after it were never read
-//! by four of the scans. `find("\nmod tests {")` read every such helper as if
+//! keeps one at line 118, so nine hundred production lines after it were never
+//! read by four of the scans. `find("\nmod tests {")` read every such helper as if
 //! omh shipped it. One rule lives here, and it is tested against a tree built
 //! to hold the shapes that fooled the other two.
 //!
@@ -327,6 +327,49 @@ mod tests {
             body.lines().count(),
             "blanked, not removed, so reported line numbers stay true"
         );
+    }
+
+    /// A column-zero `}` inside a raw string in a test does not end the cut
+    /// early. This is the hazard the `== "}"` check exists for — `render.rs`
+    /// holds a generated snippet with `}} catch (e) {{` in a test — and it
+    /// backs seven source-scanning guards, so a loosening to
+    /// `.starts_with('}')` would silently corrupt all of them.
+    ///
+    /// The sentinel sits *after* the raw string's `}`-line, so an early stop
+    /// keeps it as production and the assertion catches the loosening; a
+    /// correct cut blanks the whole module and the sentinel is gone.
+    #[test]
+    fn a_closing_brace_inside_a_raw_string_does_not_close_the_cut() {
+        let body = "\
+pub fn shipped() {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn emits_a_program() {
+        let js = r\"
+} caught the error
+\";
+        let sentinel_only_a_test_has = js.len();
+        assert!(sentinel_only_a_test_has > 0);
+    }
+}
+
+pub fn also_shipped() {}
+";
+        let prod = production_of(body);
+        assert!(
+            prod.contains("pub fn also_shipped()"),
+            "the production after the test module survives:\n{prod}"
+        );
+        // The sentinel follows the raw string's `}`-prefixed line. A cut that
+        // stopped at that brace would keep it; a correct one blanks the module.
+        for gone in ["mod tests", "sentinel_only_a_test_has", "caught the error"] {
+            assert!(
+                !prod.contains(gone),
+                "`{gone}` is test text and was kept:\n{prod}"
+            );
+        }
     }
 
     /// Only a column-zero attribute gates an item of the file. An indented

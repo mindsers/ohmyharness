@@ -222,8 +222,8 @@ fn harness_for_attach(
         session::Ran::NeverRecorded => detect::preferred_harness(installed, on_host)
             .context("no adapters installed — run `omh init`"),
         session::Ran::CouldNotTell(why) => anyhow::bail!(
-            "omh recorded a harness for this session and cannot read it back:              {why}
-  omh <id> resume <harness>   rejoin it as that, which              rewrites the record"
+            "omh recorded a harness for this session and cannot read it back: {why}\n  \
+             omh <id> resume <harness>   rejoin it as that, which rewrites the record"
         ),
     }
 }

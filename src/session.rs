@@ -685,7 +685,7 @@ impl Session {
             ],
         )?;
         let hidden = crate::carry::hidden_in_the_worktree();
-        for path in gone.split(' ').filter(|p| !p.is_empty()) {
+        for path in gone.split('\0').filter(|p| !p.is_empty()) {
             let rel = Path::new(path);
             anyhow::ensure!(
                 rel.is_relative()

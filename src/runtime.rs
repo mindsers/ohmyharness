@@ -441,7 +441,9 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Box<
             return Ok(build("docker").expect("name from the known list"));
         }
         anyhow::bail!(
-            "no measured container runtime found — install docker, or set              `runtime = \"sbx\"` to opt into the provisional Docker Sandboxes              backend (`omh doctor` to check it first)"
+            "no measured container runtime found — install docker, or set \
+             `runtime = \"sbx\"` to opt into the provisional Docker Sandboxes \
+             backend (`omh doctor` to check it first)"
         );
     }
 
@@ -569,6 +571,16 @@ mod tests {
     fn an_explicit_choice_overrides_detection() {
         let r = select("docker", &|_| true).unwrap();
         assert_eq!(r.name(), "docker");
+    }
+
+    /// The whole thesis of the auto change: `sbx` is still reachable, just
+    /// only by asking. A mutation that folded explicit `sbx` into the
+    /// auto-refusal would leave the backend unreachable and survive every
+    /// other test here — this is the one that catches it.
+    #[test]
+    fn an_explicit_sbx_still_selects_it() {
+        let r = select("sbx", &only("sbx")).unwrap();
+        assert_eq!(r.name(), "sbx", "sbx is reachable by naming it");
     }
 
     #[test]

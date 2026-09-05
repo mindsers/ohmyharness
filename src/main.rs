@@ -6672,6 +6672,10 @@ because = "a fixture"
             "so is the one in a directory of its own"
         );
         assert!(
+            !session.worktree.join("nested").exists(),
+            "and the directory it emptied is cleaned up, as a checkout would"
+        );
+        assert!(
             session.worktree.join("kept.rs").exists(),
             "and the one trunk kept is still there"
         );
