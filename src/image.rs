@@ -1267,36 +1267,68 @@ pub enum Running {
 ///
 /// It also does not fuse *stopped* with *never built* by accident — that is on
 /// purpose. Neither is running and no caller wants them apart.
+///
+/// Production reads one container out of one listing through `running_set`
+/// and `running_in`; this composes the two for the tests that pin the state
+/// machine, written when the listing was asked per container.
+#[cfg(test)]
 pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) -> Running {
+    running_in(&listed_from(asked), name)
+}
+
+/// Every container that is running, or why omh could not find out.
+///
+/// The listing is one question, so it is asked once and read many times: the
+/// dashboard, the idle reaper and `down` each have a row per session, and each
+/// used to run the same `ps` per row. `Err` is the failure `Running::Unknown`
+/// carries — sanitised and never empty — and it travels *with* the set rather
+/// than as an empty set, because an empty set is what "nothing is running"
+/// looks like too.
+pub type Listed = std::result::Result<std::collections::BTreeSet<String>, String>;
+
+pub fn listed_from(asked: std::io::Result<std::process::Output>) -> Listed {
     let out = match asked {
         Ok(out) => out,
         // The program is on `PATH` — `runtime::installed` said so before any
         // of this — so a spawn that fails is a fork failure or a binary that
         // vanished mid-run, and either way omh has no answer.
         Err(e) => {
-            return Running::Unknown(crate::out::untrusted(&format!(
+            return Err(crate::out::untrusted(&format!(
                 "could not run the container runtime: {e}"
             )))
         }
     };
     if !out.status.success() {
         // A non-zero exit is never a *no*, whatever it did or did not say.
-        return Running::Unknown(unreadable(
+        return Err(unreadable(
             &String::from_utf8_lossy(&out.stderr),
             &out.status,
         ));
     }
-    match String::from_utf8_lossy(&out.stdout)
+    Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
-        .any(|listed| listed.trim() == name)
-    {
-        true => Running::Yes,
-        false => Running::No,
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Whether one container is in the listing.
+pub fn running_in(listed: &Listed, name: &str) -> Running {
+    match listed {
+        Err(why) => Running::Unknown(why.clone()),
+        Ok(set) if set.contains(name) => Running::Yes,
+        Ok(_) => Running::No,
     }
 }
 
+/// Ask the runtime what is running, once.
+pub fn running_set(backend: &Backend) -> Listed {
+    listed_from(backend.output(&backend.running_args()))
+}
+
 pub fn container_running(backend: &Backend, name: &str) -> Running {
-    running_from(name, backend.output(&backend.running_args()))
+    running_in(&running_set(backend), name)
 }
 
 /// Why omh has no answer, said the same way wherever that happens.
@@ -1840,6 +1872,45 @@ mod tests {
     /// The states are the ones measured against docker 29.7.2, not invented:
     /// running prints an id, stopped and never-built print nothing, and only
     /// an unreachable daemon exits non-zero.
+    /// One listing, many sessions: the answer for each is read out of the
+    /// same set, and a listing that failed is *unknown* for every one of them.
+    ///
+    /// The second half is the one that matters. A `BTreeSet` that is empty
+    /// because the daemon was down looks exactly like one that is empty
+    /// because nothing is running, and `!set.contains(name)` reads both as
+    /// `No` — so the failure has to travel with the set, as it does here.
+    #[test]
+    fn a_runtime_that_will_not_list_containers_is_never_read_as_none() {
+        let listed = listed_from(output(0, "omh-repo-s01\nomh-repo-s02\n", ""));
+        assert_eq!(running_in(&listed, "omh-repo-s01"), Running::Yes);
+        assert_eq!(running_in(&listed, "omh-repo-s03"), Running::No);
+
+        let failed = listed_from(output(1, "", "Cannot connect to the Docker daemon"));
+        assert!(
+            failed.is_err(),
+            "a non-zero exit is a failed listing, not an empty one"
+        );
+        for name in ["omh-repo-s01", "omh-repo-s03"] {
+            let Running::Unknown(why) = running_in(&failed, name) else {
+                panic!("{name} must be unknown when the listing failed");
+            };
+            assert!(
+                why.contains("Cannot connect"),
+                "and carry the reason: {why}"
+            );
+        }
+        assert!(
+            matches!(
+                running_in(
+                    &listed_from(Err(std::io::Error::other("fork failed"))),
+                    "omh-repo-s01"
+                ),
+                Running::Unknown(_)
+            ),
+            "a runtime that would not even start is not a stopped container"
+        );
+    }
+
     #[test]
     fn a_runtime_that_will_not_answer_is_not_a_container_that_is_stopped() {
         assert_eq!(

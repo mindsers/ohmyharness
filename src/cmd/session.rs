@@ -493,11 +493,10 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
         return;
     };
 
+    let up = image::running_set(&backend);
     let running: Vec<(String, Option<std::time::SystemTime>)> = session::list(&paths.worktrees())
         .into_iter()
-        .filter(|id| {
-            crate::cmd::harvest::reapable(&image::container_running(&backend, &paths.container(id)))
-        })
+        .filter(|id| crate::cmd::harvest::reapable(&image::running_in(&up, &paths.container(id))))
         .map(|id| {
             let last = idle::last_used(&paths.runs(), &id);
             (id, last)
@@ -567,9 +566,10 @@ pub(crate) fn down(
     let mut sessions = Vec::new();
     let mut stuck = 0usize;
     let mut unasked = 0usize;
+    let up = image::running_set(&backend);
     for i in &ids {
         let name = paths.container(i);
-        match image::container_running(&backend, &name) {
+        match image::running_in(&up, &name) {
             image::Running::No => {
                 sessions.push((i.clone(), report::Stopped::WasNotRunning));
                 continue;
@@ -642,6 +642,10 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         }
     };
     let base = session::default_branch(&paths.repo);
+    // Which sandboxes are up, asked **once** for every row below. `None` when
+    // there is no backend to ask; a listing that failed is carried as the
+    // failure, so each row reads `Unknown` with the reason rather than `No`.
+    let up: Option<image::Listed> = backend.as_ref().map(image::running_set);
 
     // What each session is changing, asked **once** and used twice. The count
     // `work_state` renders and the paths the overlap section names are the
@@ -672,8 +676,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                 // tell*. The same two-level shape `work` uses one column over,
                 // and for the same reason it gives: the mistake becomes
                 // unspellable rather than merely absent.
-                running: backend.as_ref().map(|b| {
-                    let asked = image::container_running(b, &paths.container(&id));
+                running: up.as_ref().map(|up| {
+                    let asked = image::running_in(up, &paths.container(&id));
                     // Say why, which the first version of this did not — it
                     // built the reason, carried it through two layers and
                     // dropped it, while both docs promised it reached stderr.

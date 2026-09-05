@@ -1180,6 +1180,39 @@ fn a_refused_selection_leaves_the_branch_where_it_was() {
     );
 }
 
+/// The dashboard asks the runtime which containers are up once, not once per
+/// session.
+///
+/// `omh s` used to run `docker ps` for every row — three sessions, three
+/// forks, and the same answer each time. End to end, because the count is a
+/// fact about the shim's log, and the shim is the only place every caller of
+/// the listing meets.
+#[test]
+fn listing_three_sessions_asks_the_runtime_once() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    for id in ["s01", "s02", "s03"] {
+        sb.session(id);
+    }
+
+    let out = sb.omh(&["s"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let calls = sb.docker_calls(&log);
+    let listings = calls
+        .iter()
+        .filter(|c| c.as_str() == "ps --format {{.Names}}")
+        .count();
+    assert_eq!(
+        listings, 1,
+        "one listing answers every row; the runtime was asked {listings} times: {calls:?}"
+    );
+}
+
 /// Two sessions changing one file are named together.
 ///
 /// The collision git will not mention until a merge, said while both sessions
