@@ -113,6 +113,20 @@ pub const KEYS: &[Key] = &[
         secret: Secret::No,
     },
     Key {
+        name: "sandbox_memory",
+        does: "How much memory a session's sandbox may use, as the runtime spells \
+               it (`4g`, `512m`). Unset means the runtime's default.",
+        shape: Shape::Text,
+        secret: Secret::No,
+    },
+    Key {
+        name: "sandbox_cpus",
+        does: "How many CPUs a session's sandbox may use, as the runtime spells it \
+               (`2`, `1.5`). Unset means the runtime's default.",
+        shape: Shape::Text,
+        secret: Secret::No,
+    },
+    Key {
         name: "runtime",
         does: "Which runtime builds and runs the sandbox. Unset means `auto`.",
         shape: Shape::Choice(&["auto", "docker", "sbx"]),

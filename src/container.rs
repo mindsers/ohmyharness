@@ -22,6 +22,10 @@ pub struct Plan {
     pub network: String,
     pub workdir: String,
     pub argv: Vec<String>,
+    /// How much of the host the sandbox may take. Part of the plan, and so of
+    /// the stamp: a limit changed in the settings is drift, and the sandbox
+    /// restarts under the new one rather than running on under the old.
+    pub limits: Limits,
     /// Capabilities the profile carries that this harness cannot express.
     pub dropped: Vec<(Capability, usize)>,
     /// Hooks this harness *nearly* expressed — it has the capability but not
@@ -34,6 +38,27 @@ pub struct Plan {
     pub rules: crate::rules::Report,
     /// Interactive harnesses need a terminal; a captured probe must not ask.
     pub tty: bool,
+}
+
+/// How much of the host the sandbox may take, from `sandbox_memory` and
+/// `sandbox_cpus`. Each is passed to the runtime as written — `4g`, `1.5` —
+/// because the runtime is the one that knows what it accepts, and `omh doctor`
+/// is where a value it rejects gets found out.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Limits {
+    pub memory: Option<String>,
+    pub cpus: Option<String>,
+}
+
+impl Limits {
+    /// The stamp `Plan::labels` carries, so a changed limit reads as drift.
+    pub fn stamp(&self) -> String {
+        format!(
+            "memory={}\ncpus={}",
+            self.memory.as_deref().unwrap_or(""),
+            self.cpus.as_deref().unwrap_or("")
+        )
+    }
 }
 
 /// What to do with the container already sitting under a session id.
@@ -637,6 +662,14 @@ pub fn plan(
     Ok(Plan {
         image: opts.image.clone(),
         mounts,
+        // Read here, beside the other things a launch takes from the settings,
+        // so every path that builds a plan — run, attach, doctor, auth — gets
+        // the same limits. Unset is unset: the runtime's default, not a
+        // number omh chose.
+        limits: Limits {
+            memory: crate::policy_value(paths, "sandbox_memory"),
+            cpus: crate::policy_value(paths, "sandbox_cpus"),
+        },
         env: vec![
             ("OMH_SESSION".into(), session.id.clone()),
             // Hooks run inside the sandbox and must name the project they
@@ -1056,6 +1089,7 @@ impl Plan {
             ("omh.workdir".into(), self.workdir.clone()),
             ("omh.mounts".into(), mounts.join("\n")),
             ("omh.env".into(), env.join("\n")),
+            ("omh.limits".into(), self.limits.stamp()),
         ]
     }
 
@@ -1108,6 +1142,7 @@ pub(crate) fn sample_plan() -> Plan {
         network: "omh-repo".into(),
         workdir: "/work".into(),
         argv: vec!["claude".into()],
+        limits: Default::default(),
         dropped: vec![],
         dropped_hooks: vec![],
         rules: Default::default(),
@@ -1560,6 +1595,28 @@ mod tests {
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
         assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
+    }
+
+    /// `sandbox_memory` and `sandbox_cpus` are read from the settings like any
+    /// other key, and an unset key is no limit — not a default omh made up.
+    #[test]
+    fn the_sandbox_limits_come_from_the_settings() {
+        let fx = fixture();
+        assert_eq!(plan_for(&fx, "claude").limits, Limits::default());
+
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            "sandbox_memory = \"4g\"\nsandbox_cpus = \"2\"\n",
+        )
+        .unwrap();
+        let p = plan_for(&fx, "claude");
+        assert_eq!(
+            p.limits,
+            Limits {
+                memory: Some("4g".into()),
+                cpus: Some("2".into()),
+            }
+        );
     }
 
     /// `omh doctor` and `omh auth` must not be handed the user's secrets.

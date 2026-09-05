@@ -711,6 +711,8 @@ Top-level keys of the same files:
 | `idle_timeout` | duration (`30m`, `2h`, `90s`) | stop a session nobody has used for this long. Unset means never |
 | `runtime` | `auto` \| `docker` \| `sbx` | which backend to use; `auto` means docker (the measured one). `sbx` is a provisional, unmeasured opt-in — set it explicitly and run `omh doctor` first |
 | `persistence` | `dtach` \| `none` | whether harnesses survive the terminal closing |
+| `sandbox_memory` | as docker spells it: `4g`, `512m` | how much memory a session's sandbox may use. Unset means docker's default. Changing it restarts the sandbox on the next launch |
+| `sandbox_cpus` | as docker spells it: `2`, `1.5` | how many CPUs a session's sandbox may use. Unset means docker's default. Changing it restarts the sandbox on the next launch |
 | `account` | account name | which captured login this project uses |
 
 ## MCP servers

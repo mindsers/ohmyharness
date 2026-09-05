@@ -121,6 +121,60 @@ pub trait Runtime: std::fmt::Debug {
     fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String>;
 }
 
+/// What a session container may do, as Linux capabilities.
+///
+/// Everything is dropped and these come back, each for a reason the entrypoint
+/// or the agent's ordinary work needs. Docker's default grants fourteen; the
+/// six it grants that are not here — `FSETID`, `SETPCAP`, `NET_RAW`, `SYS_CHROOT`,
+/// `MKNOD`, `SETFCAP` — have no caller in the image, and `NET_RAW` in particular
+/// is what raw-socket tooling would need to spoof traffic on the session
+/// network. Anything not on the list is a request to add it, with its reason,
+/// here.
+pub const SESSION_CAPS: &[&str] = &[
+    // `sudo` in the entrypoint: becoming root to start sshd, and sshd itself
+    // dropping to `agent` for the session.
+    "SETUID",
+    "SETGID",
+    // The entrypoint's `chmod`/`chown` on files the bind mounts land with host
+    // ownership, and `install -o root` for the host key.
+    "CHOWN",
+    "FOWNER",
+    "DAC_OVERRIDE",
+    // sshd signals its own children; `omh down` and the idle reaper stop
+    // processes the agent left running.
+    "KILL",
+    // sshd binds 22.
+    "NET_BIND_SERVICE",
+    // PAM writes the login record on an ssh session; without it the attach
+    // connects and is dropped with `pam_loginuid` in the log.
+    "AUDIT_WRITE",
+];
+
+/// How many processes a session may hold. A fork bomb — or a test runner that
+/// has lost track of its children — stops at the sandbox wall instead of the
+/// host's. Two thousand is room for a large build with a watcher beside it;
+/// it is a chosen constant, not a measured limit, and it is here so that the
+/// day it is wrong the fix is one line with a reason next to it.
+pub const PIDS_LIMIT: u32 = 2048;
+
+/// The confinement every Docker `run` carries: the capability set, the process
+/// ceiling, and whatever `sandbox_memory`/`sandbox_cpus` ask for.
+///
+/// Not `--security-opt=no-new-privileges`: the entrypoint's `sudo` needs to
+/// gain privilege, and the decision was to keep sudo. A test pins that reason.
+fn confinement(plan: &Plan) -> Vec<String> {
+    let mut a: Vec<String> = vec!["--cap-drop=ALL".into()];
+    a.extend(SESSION_CAPS.iter().map(|c| format!("--cap-add={c}")));
+    a.extend(["--pids-limit".into(), PIDS_LIMIT.to_string()]);
+    if let Some(memory) = &plan.limits.memory {
+        a.extend(["--memory".into(), memory.clone()]);
+    }
+    if let Some(cpus) = &plan.limits.cpus {
+        a.extend(["--cpus".into(), cpus.clone()]);
+    }
+    a
+}
+
 #[derive(Debug)]
 pub struct Docker;
 
@@ -197,6 +251,7 @@ impl Runtime for Docker {
     fn args(&self, plan: &Plan) -> Vec<String> {
         // Never fetch: see `a_launch_never_fetches_an_image_it_could_not_find`.
         let mut a: Vec<String> = vec!["run".into(), "--rm".into(), "--pull=never".into()];
+        a.extend(confinement(plan));
         if plan.tty {
             a.push("-it".into());
         }
@@ -239,8 +294,7 @@ impl Runtime for Docker {
             "--name".into(),
             name.into(),
         ];
-        // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
-        // to the local network.
+        a.extend(confinement(plan));
         // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
         // to the local network.
         a.push("-p".into());
@@ -604,6 +658,7 @@ mod tests {
             network: "omh-repo".into(),
             workdir: "/work".into(),
             argv: vec!["claude".into()],
+            limits: Default::default(),
             dropped: vec![],
             dropped_hooks: vec![],
             rules: Default::default(),
@@ -837,6 +892,116 @@ mod tests {
     }
 
     // ── session containers ──────────────────────────────────────────────────
+
+    /// The session runs with the capabilities it needs and no others.
+    ///
+    /// Docker's default set is fourteen capabilities chosen for containers in
+    /// general; a sandbox whose whole job is to hold an agent that runs
+    /// arbitrary code wants the list written down with a reason per entry.
+    /// `SESSION_CAPS` is that list, and this pins the launch to it in both
+    /// directions — nothing dropped that the entrypoint needs, nothing kept
+    /// that it does not. The same for the one-off `run` doctor and auth use.
+    #[test]
+    fn the_session_drops_every_capability_it_does_not_name() {
+        for args in [
+            Docker.up_args(&sample_plan(), "n", 1, "k"),
+            Docker.args(&sample_plan()),
+        ] {
+            assert!(
+                args.iter().any(|a| a == "--cap-drop=ALL"),
+                "everything goes first: {args:?}"
+            );
+            let added: std::collections::BTreeSet<&str> = args
+                .iter()
+                .filter_map(|a| a.strip_prefix("--cap-add="))
+                .collect();
+            assert_eq!(
+                added,
+                SESSION_CAPS.iter().copied().collect(),
+                "then exactly the named set comes back"
+            );
+            for never in [
+                "SYS_ADMIN",
+                "NET_ADMIN",
+                "SYS_PTRACE",
+                "SYS_MODULE",
+                "MKNOD",
+                "NET_RAW",
+                "SYS_RAWIO",
+                "SYS_BOOT",
+                "ALL",
+            ] {
+                assert!(!added.contains(never), "{never} must not be granted");
+            }
+            assert!(
+                args.windows(2)
+                    .any(|w| w[0] == "--pids-limit" && w[1] == PIDS_LIMIT.to_string()),
+                "a fork bomb stops at the sandbox wall: {args:?}"
+            );
+        }
+    }
+
+    /// Why `no-new-privileges` is not on by default, pinned to the reason.
+    ///
+    /// The entrypoint runs sshd through `sudo`, and `no-new-privileges` is
+    /// exactly the flag that makes a setuid binary not gain privilege. The two
+    /// cannot both be true, and the decision was to keep sudo. This test goes
+    /// red the day sudo leaves the entrypoint — at which point the flag should
+    /// go on and this test should go.
+    #[test]
+    fn sudo_in_the_entrypoint_is_why_no_new_privileges_cannot_be_default() {
+        let df = crate::image::base_dockerfile(None);
+        let entrypoint: Vec<&str> = df.lines().filter(|l| l.starts_with("  '")).collect();
+        assert!(
+            entrypoint.iter().any(|l| l.contains("sudo ")),
+            "sudo has left the entrypoint: add `--security-opt=no-new-privileges` to \
+             `up_args` and `args`, and delete this test"
+        );
+        for args in [
+            Docker.up_args(&sample_plan(), "n", 1, "k"),
+            Docker.args(&sample_plan()),
+        ] {
+            assert!(
+                !args.iter().any(|a| a.contains("no-new-privileges")),
+                "sudo needs to gain privilege, so the flag would break the entrypoint: {args:?}"
+            );
+        }
+    }
+
+    /// A memory or CPU limit from the settings reaches the launch, and the
+    /// stamp — so a changed limit is drift and the sandbox restarts, rather
+    /// than running on under the old one with the new one in the file.
+    #[test]
+    fn a_resource_limit_reaches_the_launch_and_its_label() {
+        let bare = Docker.up_args(&sample_plan(), "n", 1, "k");
+        assert!(
+            !bare.iter().any(|a| a == "--memory" || a == "--cpus"),
+            "unset means the runtime's default, not a number omh invented: {bare:?}"
+        );
+
+        let mut plan = sample_plan();
+        plan.limits = crate::container::Limits {
+            memory: Some("4g".into()),
+            cpus: Some("2".into()),
+        };
+        let args = Docker.up_args(&plan, "n", 1, "k");
+        assert!(
+            args.windows(2).any(|w| w[0] == "--memory" && w[1] == "4g"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w[0] == "--cpus" && w[1] == "2"),
+            "{args:?}"
+        );
+
+        let stamped: std::collections::BTreeMap<String, String> =
+            sample_plan().labels().into_iter().collect();
+        let changed = crate::container::drift(&plan.labels(), &stamped);
+        assert!(
+            changed.iter().any(|c| c.contains("limits")),
+            "a container launched without the limit is not this plan: {changed:?}"
+        );
+    }
 
     /// sshd on 0.0.0.0 publishes a shell inside the sandbox to the local
     /// network — the exact inverse of what this project is for.
