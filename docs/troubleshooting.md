@@ -146,9 +146,9 @@ live sandboxes as `stopped` — and `omh sNN sync` believed there was nothing to
 stop, which would have written trunk's files over the work of an agent
 mid-turn.
 
-### `network omh-<repo> not found`
+### `network omh-<repo>-<session> not found`
 
-The plan named a per-project network that was never created. A plan must be
+The plan named a per-session network that was never created. A plan must be
 *runnable*, not merely well-formed — this gap made every real launch die while
 every unit test passed, and it is the archetypal case for why `doctor` exists.
 

@@ -167,7 +167,8 @@ review.
 ## What a container is compared against
 
 A launch plan is a pure description — image, mounts, network, environment — and a
-session container is one plan materialized. Everything in that list is fixed the
+session container is one plan materialized. The network is the session's own,
+named like its container; `omh sNN down` and `rm` remove it with the container. Everything in that list is fixed the
 moment the container starts: no later `exec` adds a mount or changes an image.
 
 So omh stamps the plan onto the container as labels at launch, and compares

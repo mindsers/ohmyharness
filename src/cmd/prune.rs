@@ -399,7 +399,8 @@ pub fn id_in_container(name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The `repo_id` inside a network name: `omh-<repo_id>`.
+/// The `repo_id` inside a network name: `omh-<repo_id>-sNN` for a session's,
+/// `omh-<repo_id>` for the per-repo one older versions made.
 ///
 /// No `cache-` exclusion. There was one, guarding against `omh-cache-<id>` —
 /// which is a **volume**, in a different namespace, and can never appear in a
@@ -407,9 +408,17 @@ pub fn id_in_container(name: &str) -> Option<String> {
 /// whose directory is called `cache-something` into no bucket at all, while
 /// the report still said every class had been listed.
 pub fn id_in_network(name: &str) -> Option<String> {
-    name.strip_prefix("omh-")
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
+    let rest = name.strip_prefix("omh-")?;
+    // The session form first, as in `id_in_container`: a session's network is
+    // named like its container, and read with the per-repo rule below it
+    // would attribute to an id nobody has.
+    if let Some((id, tail)) = rest.rsplit_once("-s") {
+        if !id.is_empty() && !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+            return Some(id.to_string());
+        }
+    }
+    // The per-repo network older versions created, one per checkout.
+    Some(rest).filter(|id| !id.is_empty()).map(str::to_string)
 }
 
 /// Run one listing, and record it as unreadable rather than empty when it
@@ -989,6 +998,33 @@ mod tests {
         assert_eq!(
             considered, keyed,
             "prune must consider exactly the directories a checkout's identity names"
+        );
+    }
+
+    /// A session's network is attributed to its checkout, not to a stranger
+    /// whose id happens to be the session name.
+    ///
+    /// Networks are per session now — `omh-<repo_id>-sNN`, the container's own
+    /// name — and reading that with the per-repo rule made `<repo_id>-s01`
+    /// the id, which omh has no record of, so the live session's network was
+    /// offered up for removal. The session form goes first, as it does in
+    /// `id_in_container`, and the bare per-repo form stays readable because
+    /// every checkout that ran an older omh still has one to prune.
+    #[test]
+    fn a_session_network_is_attributed_to_its_checkout_not_to_a_stranger() {
+        assert_eq!(
+            id_in_network("omh-tools-1a2b3c4d-s01").as_deref(),
+            Some("tools-1a2b3c4d")
+        );
+        assert_eq!(
+            id_in_network("omh-1a2b3c4d").as_deref(),
+            Some("1a2b3c4d"),
+            "the per-repo network older versions made is still somebody's"
+        );
+        assert_eq!(
+            id_in_network("omh-graph-tools-1a2b3c4d-s12").as_deref(),
+            Some("graph-tools-1a2b3c4d"),
+            "a checkout directory may be called graph-something"
         );
     }
 

@@ -1315,6 +1315,41 @@ fn a_command_that_never_needs_a_runtime_never_looks_for_one() {
     );
 }
 
+/// `down` takes the session's network with its container.
+///
+/// A network per session is only an isolation boundary if it goes when the
+/// session does; left behind, the next session under that id joins it.
+#[test]
+fn down_removes_the_sessions_network() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.session("s01");
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s01")),
+    )
+    .unwrap();
+
+    let out = sb.omh(&["s01", "down"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let calls = sb.docker_calls(&log);
+    let removed = calls
+        .iter()
+        .position(|c| *c == format!("rm -f {}", sb.container("s01")));
+    let network = calls
+        .iter()
+        .position(|c| *c == format!("network rm {}", sb.container("s01")));
+    assert!(
+        removed.is_some() && network.is_some() && removed < network,
+        "the container goes, then its network: {calls:?}"
+    );
+}
+
 /// Two sessions changing one file are named together.
 ///
 /// The collision git will not mention until a merge, said while both sessions

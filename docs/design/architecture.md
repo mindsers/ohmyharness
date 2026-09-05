@@ -89,8 +89,10 @@ About 30 seconds on first run, cached after.
 
 ### A plan must be runnable, not merely well-formed
 
-The per-project network a plan names has to be *created*, too. That gap made
-every real launch die at `network omh-<repo> not found` while every unit test
+The network a plan names — one per session, named like its container, so two
+sessions of one repo cannot reach each other's services — has to be *created*,
+too. That gap made every real launch die at `network omh-<repo> not found`
+(the per-project network of the time) while every unit test
 passed — the archetypal case for [`omh doctor`](../troubleshooting.md).
 
 ### Verified end to end

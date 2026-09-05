@@ -431,8 +431,13 @@ impl Paths {
         remember(&self.root, &self.repo_id(), &settled(&self.repo))
     }
 
-    pub fn network(&self) -> String {
-        format!("omh-{}", self.repo_id())
+    /// The session's own network, named like its container. One per session
+    /// rather than one per checkout: two sessions of the same repo have no
+    /// business reaching each other's services, and on a shared network they
+    /// could. The per-repo `omh-<repo_id>` older versions made is left for
+    /// `omh prune` to find; `id_in_network` still reads that form.
+    pub fn session_network(&self, session: &str) -> String {
+        format!("omh-{}-{session}", self.repo_id())
     }
 
     pub fn container(&self, session: &str) -> String {
@@ -1506,7 +1511,7 @@ mod tests {
         let both_ways: [Accessor; 9] = [
             ("container", |p| p.container("s01")),
             ("cache_volume", |p| p.cache_volume()),
-            ("network", |p| p.network()),
+            ("network", |p| p.session_network("s01")),
             ("worktrees", |p| p.worktrees().display().to_string()),
             ("runs", |p| p.runs().display().to_string()),
             ("keys", |p| p.keys().display().to_string()),

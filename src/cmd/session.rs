@@ -607,7 +607,16 @@ pub(crate) fn down(
             image::Running::Yes => {}
         }
         match image::container_remove(&backend, &name) {
-            Ok(()) => sessions.push((i.clone(), report::Stopped::Yes)),
+            Ok(()) => {
+                // The network goes with the container. Warned rather than
+                // counted as stuck: the session *is* down, and a network
+                // that lingers is a leftover `omh prune` finds, not a session
+                // still running.
+                if let Err(e) = image::network_remove(&backend, &paths.session_network(i)) {
+                    ctx.warn(&format!("{i}'s network was left behind: {e:#}"));
+                }
+                sessions.push((i.clone(), report::Stopped::Yes))
+            }
             // Reported and carried on rather than returned: one container that
             // will not go must not hide the ones that did. It still decides
             // the exit code below — a caller whose JSON says nothing stopped
@@ -1538,7 +1547,16 @@ pub(crate) fn rm(
             // unenterable state `Probe::NotEnterable` exists for. This function's
             // own doc names `omh s rm` as the historical cause of it.
             match image::container_remove(&backend, &name) {
-                Ok(()) => went.push("the container".to_string()),
+                Ok(()) => {
+                    went.push("the container".to_string());
+                    match image::network_remove(&backend, &paths.session_network(id)) {
+                        Ok(()) => went.push("its network".to_string()),
+                        Err(e) => {
+                            ctx.warn(&format!("{id}'s network was left behind: {e:#}"));
+                            unreached.push("its network".to_string());
+                        }
+                    }
+                }
                 Err(e) => {
                     ctx.warn(&format!(
                         "{id}'s container would not stop, and its worktree is going: it is left \

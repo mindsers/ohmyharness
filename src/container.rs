@@ -704,7 +704,7 @@ pub fn plan(
                 },
             ),
         ],
-        network: paths.network(),
+        network: paths.session_network(&session.id),
         workdir: crate::container_workdir().into(),
         argv: crate::persist::wrap(
             opts.persist,
@@ -1606,6 +1606,25 @@ mod tests {
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
         assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
+    }
+
+    /// Every session gets its own network, named like its container. One
+    /// network per checkout let a service one session started be reached from
+    /// every other session of the repo, which is not what a sandbox promises.
+    #[test]
+    fn each_session_has_its_own_network() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        assert_eq!(p.network, fx.paths.session_network("s01"));
+        assert_ne!(
+            fx.paths.session_network("s01"),
+            fx.paths.session_network("s02")
+        );
+        assert_eq!(
+            p.network,
+            fx.paths.container("s01"),
+            "the network carries the container's name, so both attribute the same way"
+        );
     }
 
     /// The sandbox's ssh host key rides in read-only, from the per-repo key

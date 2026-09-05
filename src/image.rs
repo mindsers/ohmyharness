@@ -1222,6 +1222,27 @@ pub fn ensure_network(backend: &Backend, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Remove the session's network once its container is gone.
+///
+/// A network per session is an isolation boundary only while it goes with the
+/// session; left behind, the next session under that id joins it, and docker
+/// would keep accumulating one per id ever used. Best-effort at the call sites
+/// — a network that will not go is reported, never a reason to leave the
+/// container.
+pub fn network_remove(backend: &Backend, name: &str) -> Result<()> {
+    let out = backend.output(&["network", "rm", name])?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        // Never created — a session that was planned and not launched, or an
+        // older omh's per-repo network — is nothing to remove.
+        if said.contains("not found") || said.contains("No such network") {
+            return Ok(());
+        }
+        anyhow::bail!("{}", crate::out::untrusted(said.trim()));
+    }
+    Ok(())
+}
+
 /// Is the session container up right now?
 /// Whether the sandbox is up — with *omh could not tell* as its own answer.
 ///
