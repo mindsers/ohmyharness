@@ -148,6 +148,35 @@ impl Sandbox {
         log
     }
 
+    /// A `git` that records every invocation and then runs the real one.
+    ///
+    /// For counting what omh asks git, which is only observable from outside:
+    /// the shim goes first on `PATH`, logs `$*`, and execs the git that was on
+    /// `PATH` before it.
+    fn fake_git(&self) -> PathBuf {
+        let real = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("sh");
+        let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+        assert!(!real.is_empty(), "git must be installed to run this test");
+        let log = self.bin.join("git.log");
+        std::fs::write(
+            self.bin.join("git"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexec {real} \"$@\"\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            self.bin.join("git"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        log
+    }
+
     /// A `docker` that records every invocation and claims the session
     /// container is up. Returns the log path.
     ///
@@ -1210,6 +1239,46 @@ fn listing_three_sessions_asks_the_runtime_once() {
     assert_eq!(
         listings, 1,
         "one listing answers every row; the runtime was asked {listings} times: {calls:?}"
+    );
+}
+
+/// The dashboard reads every session's upstream from one `for-each-ref`, and
+/// each session's standing against trunk from one `rev-list`.
+///
+/// It used to ask `git config` twice and `rev-list` up to three times per row.
+/// Counted through a `git` on `PATH` that logs and hands over to the real one,
+/// because the number of processes a listing forks is only visible from
+/// outside the process.
+#[test]
+fn listing_three_sessions_asks_git_once_per_question() {
+    let sb = sandbox();
+    let log = sb.fake_git();
+    for id in ["s01", "s02", "s03"] {
+        sb.session(id);
+    }
+
+    let out = sb.omh(&["s"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let calls = sb.docker_calls(&log);
+    let upstreams = calls.iter().filter(|c| c.contains("for-each-ref")).count();
+    let per_branch = calls
+        .iter()
+        .filter(|c| c.starts_with("config --get branch."))
+        .count();
+    let counts: Vec<&String> = calls.iter().filter(|c| c.contains("rev-list")).collect();
+    assert_eq!(
+        (upstreams, per_branch),
+        (1, 0),
+        "one listing of upstreams, no per-branch config reads: {calls:?}"
+    );
+    assert!(
+        counts.len() == 3 && counts.iter().all(|c| c.contains("--left-right")),
+        "one two-sided rev-list per session, not one per count: {counts:?}"
     );
 }
 

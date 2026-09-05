@@ -642,10 +642,28 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         }
     };
     let base = session::default_branch(&paths.repo);
-    // Which sandboxes are up, asked **once** for every row below. `None` when
-    // there is no backend to ask; a listing that failed is carried as the
-    // failure, so each row reads `Unknown` with the reason rather than `No`.
-    let up: Option<image::Listed> = backend.as_ref().map(image::running_set);
+    let ids = session::list(&paths.worktrees());
+    // Two questions asked **once** for every row below, and not at all when
+    // there are no rows: a checkout with no sessions has nothing to ask git
+    // about, and a listing that failed there would be a warning about nothing.
+    //
+    // Which sandboxes are up — `None` when there is no backend to ask; a
+    // listing that failed is carried as the failure, so each row reads
+    // `Unknown` with the reason rather than `No`. And what every session branch
+    // tracks — a listing git would not give is carried the same way: each row
+    // then reads `?` for its work, which is the rule `work_state` states.
+    let (up, upstreams): (Option<image::Listed>, session::Upstreams) = match ids.is_empty() {
+        true => (None, session::Upstreams::default()),
+        false => (
+            backend.as_ref().map(image::running_set),
+            session::upstreams(&paths.repo).unwrap_or_else(|e| {
+                ctx.warn(&format!(
+                    "could not read what the session branches track: {e:#}"
+                ));
+                session::Upstreams::default()
+            }),
+        ),
+    };
 
     // What each session is changing, asked **once** and used twice. The count
     // `work_state` renders and the paths the overlap section names are the
@@ -655,11 +673,14 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     // had just stashed.
     let mut changed: Vec<(String, Vec<String>)> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
-    let sessions: Vec<report::Session> = session::list(&paths.worktrees())
+    let sessions: Vec<report::Session> = ids
         .into_iter()
         .map(|id| {
             let sess = Session::new(&paths.worktrees(), id.clone());
             let touched = sess.changed();
+            // Behind trunk and ahead of it, from one `rev-list`: the two
+            // columns that used to be two processes per row.
+            let standing = sess.against(&paths.repo, &base);
             match &touched {
                 Ok(touched) => changed.push((id.clone(), touched.clone())),
                 // Carried, not dropped. A session omh cannot read contributes
@@ -693,8 +714,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                 label: sess.label().to_string(),
                 work: Some(work_state(
                     &sess,
-                    &paths.repo,
-                    &base,
+                    &upstreams,
+                    standing.as_ref().ok().map(|&(_, commits)| commits),
                     touched.as_ref().ok().map(Vec::len),
                 )),
                 // Not `.ok()`. The dashboard renders a failed count as a
@@ -703,8 +724,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                 // said it. `changed()` ten lines up pushes to `unreadable` for
                 // the same class of failure, and `log` prints git's own words;
                 // this was the one that threw them away.
-                behind: match sess.behind(&paths.repo, &base) {
-                    Ok(n) => Some(n),
+                behind: match &standing {
+                    Ok((behind, _)) => Some(*behind),
                     Err(e) => {
                         ctx.warn(&format!(
                             "could not tell how far behind {base} {id} is: {e:#}"
@@ -881,8 +902,8 @@ pub(crate) fn leftovers(
 /// committing whatever else is also true of it.
 pub(crate) fn work_state(
     session: &Session,
-    repo: &std::path::Path,
-    base: &str,
+    upstreams: &session::Upstreams,
+    commits: Option<usize>,
     uncommitted: Option<usize>,
 ) -> report::Work {
     use report::Work;
@@ -892,9 +913,12 @@ pub(crate) fn work_state(
     // checkout moves and is already handled as a real case by `Session::remove`
     // — and a blank column reads as "nothing here" for a session that may be
     // holding a day of work the user is about to `s rm`.
-    // The count comes from the caller, which already asked. `None` is the same
-    // failure this used to discover for itself.
-    let (uncommitted, unpushed) = match (uncommitted, session.unpushed()) {
+    // The counts come from the caller, which already asked: `uncommitted` from
+    // the status it also reads paths from, `commits` from the `rev-list` that
+    // also answers the *behind* column, and the upstream from one listing over
+    // every branch. `None` is the same failure this used to discover for
+    // itself, one process at a time.
+    let (uncommitted, unpushed) = match (uncommitted, session.unpushed_in(upstreams)) {
         (Some(uncommitted), Ok(unpushed)) => (uncommitted, unpushed),
         _ => return Work::Unknown,
     };
@@ -907,7 +931,7 @@ pub(crate) fn work_state(
         // Nothing origin does not already have. Report the name it went out
         // under, which is what you would look for in a list of PRs — `omh/s01`
         // is not a name anybody searches for.
-        Some(_) => match session.published_as() {
+        Some(_) => match session.published_in(upstreams) {
             Ok(Some(target)) => Work::Published(target),
             Ok(None) => Work::Clean,
             Err(_) => Work::Unknown,
@@ -916,13 +940,13 @@ pub(crate) fn work_state(
         // state the loop passes through every time, between `s commit` and the
         // first `s push`. Measured against the base branch instead, because a
         // blank here reads as a session nobody touched.
-        None => match session.commits(repo, base) {
-            Ok(0) => Work::Clean,
-            Ok(n) => Work::ToPush(n),
+        None => match commits {
+            Some(0) => Work::Clean,
+            Some(n) => Work::ToPush(n),
             // The same rule as the accessors above: a git that cannot answer is
             // never rendered as an answer. `Clean` here would read as a session
             // holding nothing, over a branch nobody can count.
-            Err(_) => Work::Unknown,
+            None => Work::Unknown,
         },
     }
 }

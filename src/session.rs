@@ -1075,39 +1075,33 @@ impl Session {
 
     /// The branch on origin this session has already been pushed to.
     ///
-    /// Read from `branch.<b>.remote`/`.merge` rather than `@{u}`, which resolves
-    /// against **HEAD**: a detached worktree would report no upstream for a
-    /// branch that demonstrably has one. Anything tracking a remote that is not
-    /// origin is an error rather than a name, because reusing it would push to a
-    /// different remote than the one it came from.
+    /// Read from what the branch is configured to track rather than `@{u}`,
+    /// which resolves against **HEAD**: a detached worktree would report no
+    /// upstream for a branch that demonstrably has one. Anything tracking a
+    /// remote that is not origin is an error rather than a name, because
+    /// reusing it would push to a different remote than the one it came from.
+    ///
+    /// One listing of every branch, then this branch out of it. The dashboard
+    /// reads the listing once for every row through `published_in`; asked
+    /// about one session this is the same answer with the listing inline.
     pub fn published_as(&self) -> Result<Option<String>> {
+        self.published_in(&upstreams(&self.worktree)?)
+    }
+
+    /// `published_as`, read out of a listing the caller already has.
+    pub fn published_in(&self, upstreams: &Upstreams) -> Result<Option<String>> {
         let Some(branch) = self.branch.as_deref() else {
             return Ok(None);
         };
-        // `config --get` exits non-zero when unset, which is the common case.
-        let remote = git(
-            &self.worktree,
-            &["config", "--get", &format!("branch.{branch}.remote")],
-        )
-        .unwrap_or_default();
-        let remote = remote.trim();
-        if remote.is_empty() {
+        let Some(tracking) = upstreams.of(branch) else {
             return Ok(None);
-        }
+        };
         anyhow::ensure!(
-            remote == "origin",
-            "{branch} tracks {remote}, not origin — name the branch explicitly:\n  omh s push <name>"
+            tracking.remote == "origin",
+            "{branch} tracks {}, not origin — name the branch explicitly:\n  omh s push <name>",
+            tracking.remote
         );
-        let merge = git(
-            &self.worktree,
-            &["config", "--get", &format!("branch.{branch}.merge")],
-        )
-        .unwrap_or_default();
-        Ok(merge
-            .trim()
-            .strip_prefix("refs/heads/")
-            .filter(|name| !name.is_empty())
-            .map(str::to_string))
+        Ok(Some(tracking.target.clone()).filter(|name| !name.is_empty()))
     }
 
     /// Commits this session has that origin does not.
@@ -1116,23 +1110,55 @@ impl Session {
     /// from zero: one says name it and push, the other says you are done. `Err`
     /// is a third — git could not answer — and the caller must not render it as
     /// either of the first two.
-    pub fn unpushed(&self) -> Result<Option<usize>> {
+    ///
+    /// The count is git's own `ahead` for the branch against what it tracks —
+    /// the same commits `rev-list <upstream>..<branch>` counts, without a
+    /// process per branch. An upstream that is *gone* is a question git could
+    /// not answer, exactly as the `rev-list` against a missing ref was.
+    pub fn unpushed_in(&self, upstreams: &Upstreams) -> Result<Option<usize>> {
         let Some(branch) = self.branch.as_deref() else {
             return Ok(None);
         };
-        let Some(target) = self.published_as()? else {
+        let Some(target) = self.published_in(upstreams)? else {
             return Ok(None);
         };
+        let tracking = upstreams.of(branch).expect("published_in found it");
+        tracking.ahead.map(Some).with_context(|| {
+            format!("{branch} tracks origin/{target}, which is gone — counting unpushed commits")
+        })
+    }
+
+    /// How far behind `base` this session is, and how many commits it has that
+    /// `base` does not — both from one `rev-list --left-right`.
+    ///
+    /// `behind` and `commits` ask the two halves separately, and the dashboard
+    /// used to call both for every row. This is the same two numbers from one
+    /// process; the equivalence is pinned by a test on a real repository.
+    pub fn against(&self, repo: &Path, base: &str) -> Result<(usize, usize)> {
+        let Some(branch) = &self.branch else {
+            return Ok((0, 0));
+        };
         let out = git(
-            &self.worktree,
+            repo,
             &[
                 "rev-list",
                 "--count",
-                &format!("refs/remotes/origin/{target}..{branch}"),
+                "--left-right",
+                &format!("{base}...{branch}"),
             ],
         )?;
-        Ok(Some(
-            out.trim().parse().context("counting unpushed commits")?,
+        let (left, right) = out
+            .trim()
+            .split_once('\t')
+            .with_context(|| format!("reading `rev-list --left-right` for {branch}: {out:?}"))?;
+        Ok((
+            left.trim()
+                .parse()
+                .with_context(|| format!("counting how far {branch} is behind {base}"))?,
+            right
+                .trim()
+                .parse()
+                .with_context(|| format!("counting commits on {branch}"))?,
         ))
     }
 
@@ -1639,6 +1665,91 @@ pub(crate) fn still_there(at: &Path) -> Result<bool, String> {
         // the absence of what it points at.
         Err(e) => Err(format!("{e}")),
     }
+}
+
+/// What one branch tracks, out of the listing `upstreams` reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tracking {
+    /// The remote's name — `origin`, or the reason `published_in` refuses.
+    pub remote: String,
+    /// The branch on that remote, without `refs/heads/`.
+    pub target: String,
+    /// Commits here that the tracked branch does not have. `None` when the
+    /// tracked ref is gone, which is not zero: git could not count.
+    pub ahead: Option<usize>,
+}
+
+/// Every local branch that tracks something, from one `for-each-ref`.
+///
+/// The dashboard has a row per session and each row used to ask git three
+/// questions about its own branch — two `config --get` and a `rev-list`.
+/// git answers all of them for every branch in one listing, and the listing
+/// is the same cost for one branch as for thirty.
+#[derive(Debug, Default)]
+pub struct Upstreams(std::collections::BTreeMap<String, Tracking>);
+
+impl Upstreams {
+    pub fn of(&self, branch: &str) -> Option<&Tracking> {
+        self.0.get(branch)
+    }
+}
+
+/// Ask git for every branch's tracking, once.
+///
+/// Measured against git 2.55: `%(upstream:track,nobracket)` is `ahead N`,
+/// `behind N`, `ahead N, behind M`, empty when level, or `gone` when the
+/// tracked ref no longer exists. The remote name and ref render empty for a
+/// branch that tracks nothing.
+pub fn upstreams(repo: &Path) -> Result<Upstreams> {
+    let out = git(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)%09%(upstream:remotename)%09%(upstream:remoteref)%09%(upstream:track,nobracket)",
+            "refs/heads/",
+        ],
+    )?;
+    Ok(parse_upstreams(&out))
+}
+
+/// Read the listing `upstreams` asks for.
+pub fn parse_upstreams(text: &str) -> Upstreams {
+    let mut map = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let mut fields = line.split('\t');
+        let (Some(branch), Some(remote), Some(remote_ref)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if remote.is_empty() {
+            continue;
+        }
+        let track = fields.next().unwrap_or("").trim();
+        let ahead = match track {
+            "gone" => None,
+            track => Some(
+                track
+                    .split(',')
+                    .map(str::trim)
+                    .find_map(|part| part.strip_prefix("ahead "))
+                    .and_then(|n| n.trim().parse().ok())
+                    .unwrap_or(0),
+            ),
+        };
+        map.insert(
+            branch.to_string(),
+            Tracking {
+                remote: remote.to_string(),
+                target: remote_ref
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(remote_ref)
+                    .to_string(),
+                ahead,
+            },
+        );
+    }
+    Upstreams(map)
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
@@ -2791,6 +2902,174 @@ mod tests {
         assert_eq!(s.changed().unwrap().len(), 0);
     }
 
+    /// One `for-each-ref` over every branch says what each tracks and how far
+    /// ahead it is; the answers must be the ones git gives when asked about
+    /// the branch alone. The oracle here is raw git, not the accessors — those
+    /// are what the listing now implements.
+    ///
+    /// Measured against git 2.55 (2026-09): `%(upstream:remotename)`,
+    /// `%(upstream:remoteref)` and `%(upstream:track,nobracket)` render as
+    /// asserted below, and `nobracket` leaves an up-to-date branch empty and a
+    /// deleted upstream as the word `gone`.
+    #[test]
+    fn one_listing_of_upstreams_agrees_with_asking_each_branch() {
+        let (d, root) = repo_with_origin();
+        let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
+        let branch = s.branch.clone().unwrap();
+        let ask = |key: &str| {
+            git(
+                &root,
+                &["config", "--get", &format!("branch.{branch}.{key}")],
+            )
+        };
+
+        // Never pushed: no upstream at all.
+        let up = upstreams(&root).unwrap();
+        assert!(
+            ask("merge").is_err(),
+            "the oracle: no upstream recorded yet"
+        );
+        assert_eq!(s.published_in(&up).unwrap(), None);
+        assert_eq!(s.unpushed_in(&up).unwrap(), None);
+
+        // Pushed and level with origin.
+        s.push(Some("fix/tap-guard")).unwrap();
+        let up = upstreams(&root).unwrap();
+        assert_eq!(ask("merge").unwrap().trim(), "refs/heads/fix/tap-guard");
+        assert_eq!(ask("remote").unwrap().trim(), "origin");
+        assert_eq!(
+            s.published_in(&up).unwrap().as_deref(),
+            Some("fix/tap-guard")
+        );
+        let counted: usize = git(
+            &root,
+            &[
+                "rev-list",
+                "--count",
+                &format!("refs/remotes/origin/fix/tap-guard..{branch}"),
+            ],
+        )
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+        assert_eq!((counted, s.unpushed_in(&up).unwrap()), (0, Some(0)));
+
+        // One commit ahead of what was pushed.
+        std::fs::write(s.worktree.join("more.rs"), "fn more() {}").unwrap();
+        s.commit(Some("Add more"), Carried::refusing(&[])).unwrap();
+        let up = upstreams(&root).unwrap();
+        assert_eq!(s.unpushed_in(&up).unwrap(), Some(1));
+
+        // Tracking a remote that is not origin is refused, as it always was.
+        // The remote has to exist for git to resolve the upstream at all: a
+        // `branch.<b>.remote` naming nothing is no upstream, and `for-each-ref`
+        // renders it empty, exactly as it does for a branch that tracks nothing.
+        let elsewhere = d.path().join("elsewhere.git");
+        git(
+            d.path(),
+            &["init", "-q", "--bare", elsewhere.to_str().unwrap()],
+        )
+        .unwrap();
+        git(
+            &root,
+            &["remote", "add", "elsewhere", elsewhere.to_str().unwrap()],
+        )
+        .unwrap();
+        git(
+            &root,
+            &["config", &format!("branch.{branch}.remote"), "elsewhere"],
+        )
+        .unwrap();
+        let up = upstreams(&root).unwrap();
+        let err = s.published_in(&up).unwrap_err().to_string();
+        assert!(
+            err.contains("elsewhere") && err.contains("not origin"),
+            "{err}"
+        );
+    }
+
+    /// The listing's text, read without git: every shape `for-each-ref` can
+    /// print for a branch, and what each means.
+    #[test]
+    fn the_upstream_listing_is_read_for_what_git_prints() {
+        let text = "omh/s01\torigin\trefs/heads/fix/a\tahead 2\n\
+                    omh/s02\torigin\trefs/heads/fix/b\t\n\
+                    omh/s03\torigin\trefs/heads/fix/c\tahead 1, behind 3\n\
+                    omh/s04\torigin\trefs/heads/fix/d\tgone\n\
+                    omh/s05\t\t\t\n\
+                    main\torigin\trefs/heads/main\tbehind 4\n";
+        let up = parse_upstreams(text);
+        let t = |b: &str| up.of(b).expect(b);
+        assert_eq!(
+            (t("omh/s01").target.as_str(), t("omh/s01").ahead),
+            ("fix/a", Some(2))
+        );
+        assert_eq!(
+            t("omh/s02").ahead,
+            Some(0),
+            "an empty track is level, not unknown"
+        );
+        assert_eq!(
+            t("omh/s03").ahead,
+            Some(1),
+            "behind is origin's business, ahead is ours"
+        );
+        assert_eq!(
+            t("omh/s04").ahead,
+            None,
+            "an upstream that is gone counts nothing"
+        );
+        assert!(
+            up.of("omh/s05").is_none(),
+            "a branch with no upstream has no tracking"
+        );
+        assert_eq!(
+            (t("main").ahead, t("main").remote.as_str()),
+            (Some(0), "origin")
+        );
+        assert!(up.of("omh/s99").is_none());
+    }
+
+    /// One `rev-list --left-right` answers both how far the session is behind
+    /// trunk and how much it has that trunk does not — the two counts the
+    /// dashboard used to ask for separately, per session.
+    #[test]
+    fn one_rev_list_answers_behind_and_commits_the_same_as_two() {
+        let (d, root) = repo();
+        let s = Session::new(&d.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        let both = |s: &Session| {
+            (
+                s.behind(&root, "main").unwrap(),
+                s.commits(&root, "main").unwrap(),
+            )
+        };
+
+        assert_eq!(s.against(&root, "main").unwrap(), both(&s));
+        assert_eq!(s.against(&root, "main").unwrap(), (0, 0));
+
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
+        s.commit(Some("Add the work"), Carried::refusing(&[]))
+            .unwrap();
+        assert_eq!(s.against(&root, "main").unwrap(), both(&s));
+        assert_eq!(s.against(&root, "main").unwrap(), (0, 1));
+
+        for _ in 0..2 {
+            git(
+                &root,
+                &["commit", "-q", "--allow-empty", "-m", "trunk moves"],
+            )
+            .unwrap();
+        }
+        assert_eq!(s.against(&root, "main").unwrap(), both(&s));
+        assert_eq!(s.against(&root, "main").unwrap(), (2, 1));
+
+        // A base git cannot resolve is a question it could not answer — for
+        // both halves at once, never a zero for either.
+        assert!(s.against(&root, "no-such-branch").is_err());
+    }
+
     /// Before a push there is no upstream to measure against, which is a
     /// different answer from "nothing to push" — one means name it, the other
     /// means you are done.
@@ -2798,14 +3077,15 @@ mod tests {
     fn unpushed_distinguishes_never_pushed_from_up_to_date() {
         let (d, root) = repo_with_origin();
         let s = session_with_a_commit(&root, &d.path().join("wt"), "work.rs");
-        assert_eq!(s.unpushed().unwrap(), None, "never pushed");
+        let unpushed = |s: &Session| s.unpushed_in(&upstreams(&root).unwrap()).unwrap();
+        assert_eq!(unpushed(&s), None, "never pushed");
 
         s.push(Some("fix/tap-guard")).unwrap();
-        assert_eq!(s.unpushed().unwrap(), Some(0), "everything is on origin");
+        assert_eq!(unpushed(&s), Some(0), "everything is on origin");
 
         std::fs::write(s.worktree.join("more.rs"), "fn more() {}").unwrap();
         s.commit(Some("Add more"), Carried::refusing(&[])).unwrap();
-        assert_eq!(s.unpushed().unwrap(), Some(1));
+        assert_eq!(unpushed(&s), Some(1));
     }
 
     /// A repo that commits its own `CLAUDE.md` is the normal case for one whose
