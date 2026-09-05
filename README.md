@@ -504,7 +504,7 @@ whether anything reads it. That gap is what `doctor` closes.
 | **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |
 | **Egress allowlist** | **unrestricted by design on Docker.** Egress policy is the backend's, not omh's — [decisions](docs/design/decisions.md) has recorded it as inherited from the runtime throughout, and `sbx` carries it. It arrives with that backend or not at all, together with the credential weakness it shares a fix with. |
 | **`--dry-run` everywhere** | it runs everything and writes nothing on the commands that can answer it. `init` and the session verbs refuse the flag instead — each has to compute what it *would* do, and a preview that guessed would be worse than none. |
-| **Other harnesses** | `opencode` and `omp` pass `doctor`, but only `claude` has been driven for real work. |
+| **Other harnesses** | `opencode`, `omp` and `codex` pass `doctor`, but only `claude` has been driven for real work. |
 
 Known rough edges: the graph store is shared across sessions of one repo, so an
 agent can query another session's graph (mitigated, not prevented);

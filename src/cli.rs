@@ -513,6 +513,13 @@ pub(crate) enum SessionsCmd {
         /// Stop the sandbox first, rather than refusing because it is up.
         #[arg(long)]
         down: bool,
+        /// Sync every session, stopping at the first that needs a person.
+        ///
+        /// Trunk moved once; this brings it into all of them without a command
+        /// each. Refused together with a named session — `--all` is every
+        /// session, and naming one contradicts it.
+        #[arg(long)]
+        all: bool,
     },
     /// What the agent has committed inside the sandbox, newest first.
     ///
@@ -574,6 +581,21 @@ pub(crate) enum SessionsCmd {
         /// still parses here until 0.10.
         #[arg(long = "allow-conflicts", alias = "force")]
         force: bool,
+        /// Land the work without running this repo's turn-end checks first.
+        ///
+        /// `omh sNN commit` runs the repo's turn-end hook commands in the
+        /// sandbox before it lands anything, and refuses on a failure — the
+        /// same checks the agent's loop runs, from the host. This skips them,
+        /// as `git commit --no-verify` skips git's.
+        #[arg(long = "no-verify")]
+        no_verify: bool,
+        /// Keep the session's notes local instead of promoting them.
+        ///
+        /// A commit is the human gate a note passes to reach the team layer,
+        /// so `commit` promotes the notes this session recorded in the same
+        /// commit as the code. This holds them back.
+        #[arg(long = "no-promote")]
+        no_promote: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
     Push {

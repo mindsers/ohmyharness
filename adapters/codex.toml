@@ -1,0 +1,50 @@
+name = "codex"
+bin  = "codex"
+
+# Pinned like the other npm harnesses (see claude.toml). MAINTAINER: bump
+# `version` to the release under test — a wrong pin is caught by omh's own build
+# and `omh doctor`, not by `cargo test`.
+version = "0.5.0"
+install = "npm install -g @openai/codex@{{version}}"
+
+# The whole config directory, not the token file: a bind-mounted *file* cannot
+# be replaced by rename, and a tool saves its token by writing a temp file and
+# renaming over it. Codex keeps everything under `~/.codex`.
+creds = ["$HOME/.codex/"]
+
+# What proves a login: `auth.json` holds the API key or the OAuth tokens Codex
+# writes after `codex login`. A config directory fills with other files on the
+# first start, so nothing else there distinguishes a login from boot noise.
+token = ["$HOME/.codex/auth.json"]
+
+login = "run `codex login` (or paste an API key), then exit"
+
+# Codex reads `AGENTS.md`, the standard file, and nothing Claude-specific — so
+# there is no `also`, unlike the claude adapter where both names are live.
+[capabilities.rules]
+path   = "/work/AGENTS.md"
+render = "concat"
+# The **personal** file, never the repo's: `rules::compose` already composes
+# this project's own AGENTS.md into every session, so importing that one would
+# deliver the same prose twice. Codex's user-scope instructions live in
+# `~/.codex/AGENTS.md`.
+import = "$HOME/.codex/AGENTS.md"
+
+[capabilities.skills]
+path   = "$HOME/.codex/skills"
+render = "dir"
+import = "$HOME/.codex/skills"
+
+# User scope, TOML. Codex's config is `~/.codex/config.toml`, and its MCP
+# servers live under `[mcp_servers.<name>]` tables — which is why this renders
+# with `codex-toml` rather than the `mcp-json` the other harnesses use.
+#
+# No `verify`/`ready`: Codex has no head-less "list my MCP servers" command
+# that omh has measured, so this path is a claim `omh doctor` cannot settle,
+# the same state the omp adapter's MCP binding records. It is on the record
+# rather than papered over — a `dir`/`concat` mount doctor can check proves the
+# file is *there*, not that Codex reads it.
+[capabilities.mcp]
+path   = "$HOME/.codex/config.toml"
+render = "codex-toml"
+import = "$HOME/.codex/config.toml"

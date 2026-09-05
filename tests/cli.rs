@@ -219,6 +219,9 @@ impl Sandbox {
                  [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
                  if [ \"$1\" = exec ] && [ -f {exec_refuses} ]; then \
                  cat {exec_refuses} >&2; exit 1; fi\n\
+                 if [ \"$1\" = exec ] && [ -f {check_fails} ]; then \
+                 for a in \"$@\"; do case \"$a\" in *OMHCHECK*) \
+                 echo 'check output: boom' >&2; exit 7 ;; esac; done; fi\n\
                  if [ \"$1\" = exec ]; then for a in \"$@\"; do case \"$a\" in \
                  omh-*) [ -f {bin}/live-\"$a\" ] && cat {bin}/live-\"$a\" ;; esac; \
                  done; exit 0; fi\n\
@@ -231,6 +234,7 @@ impl Sandbox {
                 refuses = self.bin.join("docker-refuses").display(),
                 exec_refuses = self.bin.join("docker-exec-refuses").display(),
                 probe_refuses = self.bin.join("docker-probe-refuses").display(),
+                check_fails = self.bin.join("docker-check-fails").display(),
                 containers = self.bin.join("containers").display(),
                 volumes = self.bin.join("volumes").display(),
                 bin = self.bin.display()
@@ -1239,6 +1243,23 @@ fn listing_three_sessions_asks_the_runtime_once() {
     assert_eq!(
         listings, 1,
         "one listing answers every row; the runtime was asked {listings} times: {calls:?}"
+    );
+}
+
+/// `--all` and a named session together is refused: one contradicts the other.
+#[test]
+fn sync_all_refuses_a_named_session() {
+    let sb = sandbox();
+    sb.git_init();
+    let out = sb.omh(&["s01", "sync", "--all"]);
+    assert!(
+        !out.status.success(),
+        "naming a session with --all is refused"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("every session"),
+        "and says why: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -9583,6 +9604,341 @@ fn sync_removes_a_file_trunk_deleted_and_the_session_stops_claiming_it() {
         !said.contains("doomed.rs"),
         "and the session no longer claims it as its own change: {said}"
     );
+}
+
+/// `omh sNN` reads the session's transcript and reports what the agent did and
+/// what it cost — the file-reading layer the summariser's unit tests do not
+/// reach.
+#[test]
+fn the_scoped_row_reports_activity_from_the_transcript_on_disk() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters"]);
+    sb.session("s01");
+    // The session recorded which harness it ran, and left a transcript.
+    let run = sb.keyed("run").join("s01");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(run.join(".harness"), "claude").unwrap();
+    let tdir = run.join("transcripts").join("project");
+    std::fs::create_dir_all(&tdir).unwrap();
+    let line = |file: &str| {
+        format!(
+            r#"{{"type":"assistant","message":{{"model":"claude-sonnet-4-x","usage":{{"input_tokens":1000000,"output_tokens":1000000}},"content":[{{"type":"tool_use","name":"Edit","input":{{"file_path":"{file}"}}}}]}}}}"#
+        )
+    };
+    std::fs::write(
+        tdir.join("s.jsonl"),
+        format!("{}\n{}\n", line("a.rs"), line("b.rs")),
+    )
+    .unwrap();
+
+    let human = String::from_utf8_lossy(&sb.omh(&["s01"]).stdout).to_string();
+    assert!(
+        human.contains("2 turns"),
+        "turns from the transcript: {human}"
+    );
+    assert!(
+        human.contains("2 files touched"),
+        "files from the transcript: {human}"
+    );
+    assert!(human.contains("$36.00"), "cost, priced per model: {human}");
+
+    let doc: serde_json::Value =
+        serde_json::from_slice(&sb.omh(&["s01", "--json"]).stdout).expect("one document");
+    assert_eq!(doc["focus"]["activity"]["state"], "read");
+    assert_eq!(doc["focus"]["activity"]["turns"], 2);
+    assert_eq!(doc["focus"]["activity"]["cost"], 36.0);
+}
+
+/// A harness that records no transcript reads as "not recorded", never as an
+/// empty session — the honest-negative the AGENTS.md rule is about.
+#[test]
+fn a_session_with_no_transcript_reads_as_not_recorded() {
+    let sb = sandbox();
+    sb.seed_catalogue(&["adapters"]);
+    sb.session("s01");
+    let run = sb.keyed("run").join("s01");
+    std::fs::create_dir_all(&run).unwrap();
+    // opencode declares no transcript path omh can read.
+    std::fs::write(run.join(".harness"), "opencode").unwrap();
+
+    let doc: serde_json::Value =
+        serde_json::from_slice(&sb.omh(&["s01", "--json"]).stdout).expect("one document");
+    assert_eq!(doc["focus"]["activity"]["state"], "not-recorded");
+}
+
+/// The check result a commit records is read back into the scoped row — the
+/// round-trip through `check.json`, closed in both directions.
+#[test]
+fn the_scoped_row_reports_the_recorded_check_result() {
+    let sb = sandbox();
+    sb.session("s01");
+    let run = sb.keyed("run").join("s01");
+    std::fs::create_dir_all(&run).unwrap();
+    // A check.json as `omh sNN commit` writes it.
+    std::fs::write(
+        run.join("check.json"),
+        r#"{"state":"failed","detail":{"check":"cargo test"},"at":1}"#,
+    )
+    .unwrap();
+
+    let human = String::from_utf8_lossy(&sb.omh(&["s01"]).stdout).to_string();
+    assert!(
+        human.contains("checks: failed") && human.contains("cargo test"),
+        "{human}"
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&sb.omh(&["s01", "--json"]).stdout).expect("one document");
+    assert_eq!(doc["focus"]["check"]["state"], "failed");
+    assert_eq!(doc["focus"]["check"]["check"], "cargo test");
+
+    // A damaged record is unreadable, not absent.
+    std::fs::write(run.join("check.json"), "{ this is not json").unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_slice(&sb.omh(&["s01", "--json"]).stdout).expect("one document");
+    assert_eq!(doc["focus"]["check"]["state"], "unreadable");
+}
+
+/// `--keep` promotes the session's notes too, in their own commit after the
+/// replant — the path the code review found broken.
+#[test]
+fn commit_keep_lands_the_sessions_notes() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let local = sb.keyed("notes").join("local");
+    std::fs::create_dir_all(local.join("surprise")).unwrap();
+    std::fs::write(
+        local.join("surprise/s01-thing.md"),
+        "---\nkey: surprise/s01-thing\ntype: surprise\nsource: session s01, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx would happen\n\n## Observed\ny happened\n\n## Evidence\nthe log said so\n\n## Answers\n- do y instead\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["s01", "commit", "--keep"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let tree = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(["ls-tree", "-r", "--name-only", "omh/s01"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .to_string();
+    assert!(
+        tree.contains(".omh/notes/surprise/s01-thing.md"),
+        "the note landed on the branch under --keep: {tree}"
+    );
+    // In a commit that names it as a promotion, not a "Work in progress" one.
+    let log = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(["log", "--oneline", "omh/s01"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .to_string();
+    assert!(
+        log.contains("notes: 1 from s01"),
+        "the notes have their own commit: {log}"
+    );
+    assert!(
+        !local.join("surprise/s01-thing.md").exists(),
+        "and left the local layer"
+    );
+}
+
+/// A note the gate refuses is reported and left local, and the commit still
+/// lands — a blocked note never blocks the work.
+#[test]
+fn a_blocked_note_is_reported_and_the_commit_still_lands() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    // The session's note, and a committed team note already claiming the key —
+    // a collision the gate refuses.
+    let note = "---\nkey: surprise/s01-thing\ntype: surprise\nsource: session s01, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx\n\n## Observed\ny\n\n## Evidence\nlog\n\n## Answers\n- z\n";
+    let local = sb.keyed("notes").join("local");
+    std::fs::create_dir_all(local.join("surprise")).unwrap();
+    std::fs::write(local.join("surprise/s01-thing.md"), note).unwrap();
+    // The destination already exists in the worktree, so promoting would
+    // overwrite it — the gate refuses.
+    let team = worktree.join(".omh/notes/surprise");
+    std::fs::create_dir_all(&team).unwrap();
+    std::fs::write(team.join("s01-thing.md"), note).unwrap();
+
+    let out = sb.omh(&["s01", "commit", "-m", "land the work"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "the commit still lands: {err}");
+    assert!(
+        err.contains("stays local"),
+        "the blocked note is reported: {err}"
+    );
+    // And it is still local, not lost.
+    assert!(
+        local.join("surprise/s01-thing.md").exists(),
+        "the refused note stayed local"
+    );
+}
+
+/// A failing turn-end check refuses the commit, and `--no-verify` skips it.
+///
+/// The check runs in the sandbox as the agent's own turn-end hook would, from
+/// the host, before anything lands. End to end because the wiring — gather the
+/// repo's hooks, find the sandbox is up, run the command, read the exit — is
+/// what a unit test on `checks`/`verify` cannot connect to a real commit.
+#[test]
+fn commit_refuses_when_the_turn_end_hook_fails() {
+    let sb = sandbox();
+    sb.seed_base();
+    let worktree = sb.session("s01");
+    // A turn-end check whose command carries the marker the shim fails on.
+    std::fs::create_dir_all(sb.repo.join(".omh/hooks")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/hooks/check.json"),
+        r#"{ "on": "turn-end", "run": "OMHCHECK" }"#,
+    )
+    .unwrap();
+    let log = sb.fake_docker();
+    // The sandbox is up, and its checks fail.
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s01")),
+    )
+    .unwrap();
+    std::fs::write(sb.bin.join("docker-check-fails"), "").unwrap();
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let before = sb.head_of_branch("omh/s01");
+
+    let out = sb.omh(&["s01", "commit", "-m", "land it"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a failing check must refuse the commit: {err}"
+    );
+    assert!(
+        err.contains("check failed"),
+        "and say a check failed: {err}"
+    );
+    assert_eq!(
+        sb.head_of_branch("omh/s01"),
+        before,
+        "the branch did not move"
+    );
+    // The check actually ran in the sandbox — an exec carrying the marker.
+    assert!(
+        sb.docker_calls(&log).iter().any(|c| c.contains("OMHCHECK")),
+        "the check command was run in the container"
+    );
+
+    // `--no-verify` lands it anyway.
+    let out = sb.omh(&["s01", "commit", "-m", "land it", "--no-verify"]);
+    assert!(
+        out.status.success(),
+        "--no-verify skips the checks: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(sb.head_of_branch("omh/s01"), before, "and the work landed");
+}
+
+/// A commit promotes the session's own notes into the team layer, in the same
+/// commit as the code, and leaves another session's notes local.
+#[test]
+fn commit_lands_the_sessions_notes_in_the_team_layer() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+
+    // A note this session recorded, and one another session did.
+    let local = sb.keyed("notes").join("local");
+    std::fs::create_dir_all(local.join("surprise")).unwrap();
+    let note = |session: &str| {
+        format!(
+            "---\nkey: surprise/{session}-thing\ntype: surprise\nsource: session {session}, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx would happen\n\n## Observed\ny happened\n\n## Evidence\nthe log said so\n\n## Answers\n- do y instead\n"
+        )
+    };
+    std::fs::write(local.join("surprise/s01-thing.md"), note("s01")).unwrap();
+    std::fs::write(local.join("surprise/s02-thing.md"), note("s02")).unwrap();
+
+    let out = sb.omh(&["s01", "commit", "-m", "land the work"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // The session's note is committed on its branch, under the team layer.
+    let tree = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(["ls-tree", "-r", "--name-only", "omh/s01"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .to_string();
+    assert!(
+        tree.contains(".omh/notes/surprise/s01-thing.md"),
+        "the session's note landed in the commit: {tree}"
+    );
+    assert!(
+        !tree.contains("s02-thing"),
+        "another session's note is not promoted: {tree}"
+    );
+    // And the promoted note is no longer local — promotion moves it.
+    assert!(
+        !local.join("surprise/s01-thing.md").exists(),
+        "the promoted note left the local layer"
+    );
+    assert!(
+        local.join("surprise/s02-thing.md").exists(),
+        "the other session's note stayed local"
+    );
+}
+
+/// `--no-promote` holds the session's notes back, and says nothing landed.
+#[test]
+fn commit_with_no_promote_leaves_the_notes_local() {
+    let sb = sandbox();
+    let worktree = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let local = sb.keyed("notes").join("local");
+    std::fs::create_dir_all(local.join("surprise")).unwrap();
+    std::fs::write(
+        local.join("surprise/s01-thing.md"),
+        "---\nkey: surprise/s01-thing\ntype: surprise\nsource: session s01, claude\nrecorded: 2026-08-07\n---\n\n# A surprise\n\n## Expected\nx would happen\n\n## Observed\ny happened\n\n## Evidence\nthe log said so\n\n## Answers\n- do y instead\n",
+    )
+    .unwrap();
+
+    let out = sb.omh(&["s01", "commit", "-m", "land it", "--no-promote"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        local.join("surprise/s01-thing.md").exists(),
+        "--no-promote keeps the note local"
+    );
+    let tree = String::from_utf8_lossy(
+        &std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(["ls-tree", "-r", "--name-only", "omh/s01"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .to_string();
+    assert!(!tree.contains("s01-thing"), "and out of the commit: {tree}");
 }
 
 /// `commit --keep` refuses a commit holding the **value** of a carried secret,
