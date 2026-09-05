@@ -393,7 +393,12 @@ impl Ctx {
     /// list, not a floor, so a file moving either way is an edit made here.
     #[test]
     fn every_rust_file_under_src_is_production_or_a_declared_test_module() {
-        const TEST_MODULES: &[&str] = &["testsrc.rs"];
+        const TEST_MODULES: &[&str] = &[
+            "main_tests.rs",
+            "report/tests.rs",
+            "shadow/tests.rs",
+            "testsrc.rs",
+        ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let sources = classify(&root);
         assert!(sources.len() > 30, "read {} sources", sources.len());
