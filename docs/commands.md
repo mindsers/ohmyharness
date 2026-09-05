@@ -1036,7 +1036,7 @@ omh prune --dangerously-include-unsafe       and what omh cannot vouch for, afte
 ```
 
 omh creates things that outlive the checkout that made them: a cache volume, a
-container, a network, the per-checkout state under `~/.omh`, and the `tmp.*`
+container and a network per session, the per-checkout state under `~/.omh`, and the `tmp.*`
 remnants of operations that did not finish. Every one is keyed by a digest of
 the checkout's absolute path — which is **one-way**, so until omh started
 recording that path it could see these existed and never whose they were.

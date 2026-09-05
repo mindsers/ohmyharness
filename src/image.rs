@@ -8,6 +8,7 @@
 
 use crate::adapter::Adapter;
 use crate::base::GRAPH_CACHE;
+use crate::runtime::Backend;
 use anyhow::Result;
 use std::path::Path;
 
@@ -32,12 +33,7 @@ pub fn base_tag(ca: Option<&str>) -> String {
 /// Not for anything that must resist an adversary — a recipe is omh's own
 /// text, and a collision would at worst reuse a layer omh built itself.
 pub fn tag_digest(recipe: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in recipe.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
+    format!("{:016x}", crate::hash::fnv1a_64(recipe.as_bytes()))
 }
 
 /// Tag includes a digest of the recipe, so a Dockerfile omh ships actually
@@ -496,6 +492,9 @@ pub fn base_dockerfile(ca: Option<&str>) -> String {
     // Interpolated rather than written out, so the directory the image
     // prepares and the directory the launcher mounts into cannot drift.
     let notes = crate::memory::GUEST_LOCAL_NOTES;
+    let hostkeys = crate::ssh::GUEST_HOST_KEYS;
+    #[allow(non_snake_case)]
+    let AGENT_UID = crate::runtime::AGENT_UID;
     let ca_layer = ca_layer(ca);
     // node:*-slim ships a `node` user already holding UID 1000, so rename it
     // rather than fighting it — sbx requires that UID to be `agent`.
@@ -514,7 +513,7 @@ RUN usermod -l agent -d {GUEST_HOME} -m node \
 # Assert the sbx kit contract at build time rather than assuming it. If a future
 # base image moves UID 1000, this fails here instead of failing mysteriously
 # inside a sandbox.
-RUN test "$(id -u agent)" = "1000" && test "$(getent passwd agent | cut -d: -f6)" = "{GUEST_HOME}"
+RUN test "$(id -u agent)" = "{AGENT_UID}" && test "$(getent passwd agent | cut -d: -f6)" = "{GUEST_HOME}"
 
 # The base set lives here, not in a harness layer: a code graph is
 # harness-agnostic and every session should get the same one.
@@ -531,6 +530,15 @@ RUN mkdir -p /work /omh/sock /omh/cache /omh/layers {notes} {GRAPH_CACHE} \
 # container outlives the command that created it. The key arrives as an env var
 # because a bind-mounted authorized_keys lands with host ownership and sshd
 # silently refuses to read one it does not trust.
+#
+# sshd takes that key and nothing else: no passwords, no keyboard-interactive,
+# no root. The stock Debian config accepts passwords, and `agent` merely has
+# none — a fact about the base image, not a decision. Its log goes to a file
+# doctor can read after an attach that would not connect.
+#
+# The host key is omh's, mounted in and installed here as root — a bind-mounted
+# key carries host ownership and sshd refuses it — so the client can pin it.
+# `ssh-keygen -A` is the fallback for a container run without the mount.
 RUN printf '%s\n' \
   '#!/bin/sh' \
   'set -e' \
@@ -539,9 +547,14 @@ RUN printf '%s\n' \
   '  printf "%s\\n" "$OMH_PUBKEY" > "$HOME/.ssh/authorized_keys"' \
   '  chmod 600 "$HOME/.ssh/authorized_keys"' \
   'fi' \
-  'sudo ssh-keygen -A >/dev/null 2>&1 || true' \
+  'if [ -f {hostkeys}/ssh_host_ed25519_key ]; then' \
+  '  sudo install -o root -g root -m 600 {hostkeys}/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key' \
+  '  sudo install -o root -g root -m 644 {hostkeys}/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub' \
+  'else' \
+  '  sudo ssh-keygen -A >/dev/null 2>&1 || true' \
+  'fi' \
   'sudo mkdir -p /run/sshd' \
-  'sudo /usr/sbin/sshd' \
+  'sudo /usr/sbin/sshd -E /omh/sshd.log -o HostKey=/etc/ssh/ssh_host_ed25519_key -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o PermitRootLogin=no -o PubkeyAuthentication=yes' \
   'exec sleep infinity' \
   > /usr/local/bin/omh-session \
  && chmod 0755 /usr/local/bin/omh-session
@@ -559,11 +572,14 @@ WORKDIR /work
 pub fn harness_dockerfile(adapter: &Adapter, ca: Option<&str>) -> String {
     // Install as root, run as agent: an image that ends privileged would hand
     // the agent the sandbox's own escape hatch.
-    let mut df = format!(
-        "FROM {}\nUSER root\nRUN {}\n",
-        base_tag(ca),
-        adapter.install
-    );
+    // `install_command` substitutes the pinned version. It cannot fail here:
+    // `Adapter::load` validated the pin, and the fixtures the tests build pass
+    // the same check. A malformed adapter that reached this is a bug, not a
+    // user error, so it panics rather than silently installing `latest`.
+    let install = adapter
+        .install_command()
+        .expect("adapter install command validated on load");
+    let mut df = format!("FROM {}\nUSER root\nRUN {}\n", base_tag(ca), install);
 
     // Docker creates a missing mount parent as root, leaving the agent unable
     // to write beside its own config — atomic credential writes and transcripts
@@ -645,18 +661,18 @@ pub fn stack_tag(adapter: &Adapter, installs: &[&str], ca: Option<&str>) -> Stri
 /// tested thoroughly; that the build *works* is `omh doctor`'s to prove, which
 /// is the coverage line `CLAUDE.md` draws and not one a green suite can cross.
 pub fn ensure_stack(
-    program: &str,
+    backend: &Backend,
     adapter: &Adapter,
     installs: &[&str],
     ca: Option<&str>,
     repo: &Path,
 ) -> Result<String> {
-    ensure(program, adapter, ca)?;
+    ensure(backend, adapter, ca)?;
     let tag = stack_tag(adapter, installs, ca);
-    if tag != tag_for(adapter, ca) && !exists(program, &tag) {
+    if tag != tag_for(adapter, ca) && !exists(backend, &tag) {
         eprintln!("omh: building {tag} — this repo's toolchain, first run only");
         build(
-            program,
+            backend,
             &tag,
             &stack_dockerfile(adapter, installs, ca),
             &Kind::Stack(adapter, repo),
@@ -830,17 +846,17 @@ pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
 
 /// Build the base and the harness layer if they are missing. Progress goes
 /// straight to the terminal: a multi-minute silent step reads as a hang.
-pub fn ensure(program: &str, adapter: &Adapter, ca: Option<&str>) -> Result<()> {
+pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<()> {
     let base = base_tag(ca);
-    if !exists(program, &base) {
+    if !exists(backend, &base) {
         eprintln!("omh: building {base} (first run only)");
-        build(program, &base, &base_dockerfile(ca), &Kind::Base, ca)?;
+        build(backend, &base, &base_dockerfile(ca), &Kind::Base, ca)?;
     }
     let t = tag_for(adapter, ca);
-    if !exists(program, &t) {
+    if !exists(backend, &t) {
         eprintln!("omh: building {t}");
         build(
-            program,
+            backend,
             &t,
             &harness_dockerfile(adapter, ca),
             &Kind::Harness(adapter),
@@ -967,17 +983,44 @@ pub fn relay(err: std::process::ChildStderr) -> String {
     log
 }
 
-fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind, ca: Option<&str>) -> Result<()> {
+/// A private, self-cleaning build context.
+///
+/// Empty, because the Dockerfile carries everything — but it must be *its
+/// own* directory: a fixed `omh-build-context` shared by every build let two
+/// running at once race to create and remove it, and one deleting it out from
+/// under the other failed a build for a reason nothing named. A `TempDir`
+/// gives each build a unique path and drops it when the build is done.
+fn build_context() -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("omh-build-context-")
+        .tempdir()
+        .map_err(Into::into)
+}
+
+fn build(
+    backend: &Backend,
+    tag: &str,
+    dockerfile: &str,
+    kind: &Kind,
+    ca: Option<&str>,
+) -> Result<()> {
     use anyhow::Context;
     use std::io::Write;
     use std::process::Stdio;
 
+    // The one runner that does not go through `Backend::output`: the
+    // Dockerfile goes in on stdin and the log is relayed as it happens, and
+    // both need a `Child`, not an `Output`.
+    let program = backend.program();
+
     // Empty context: everything the image needs comes from the Dockerfile.
-    let context = std::env::temp_dir().join("omh-build-context");
-    std::fs::create_dir_all(&context)?;
+    // Its own temp directory, held across the build below and deleted when it
+    // drops — a single shared `omh-build-context` let two concurrent builds
+    // share one directory and race to create and remove it.
+    let context = build_context()?;
 
     let mut child = std::process::Command::new(program)
-        .args(build_args(tag, &context, kind))
+        .args(build_args(tag, context.path(), kind))
         .stdin(Stdio::piped())
         // Piped so omh can read the reason it failed, then written straight
         // back out line by line — a build is minutes long and watching it is
@@ -1028,7 +1071,7 @@ fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind, ca: Option<&st
         }
         anyhow::bail!("failed to build {tag}");
     }
-    reap(program, tag, kind);
+    reap(backend, tag, kind);
     Ok(())
 }
 
@@ -1045,18 +1088,18 @@ fn build(program: &str, tag: &str, dockerfile: &str, kind: &Kind, ca: Option<&st
 /// failing on every build for months is indistinguishable from one that is
 /// working unless it says so — and that indistinguishability is the whole
 /// failure this feature exists to end.
-fn reap(program: &str, built: &str, kind: &Kind) {
-    let tags = match list_tags(program, kind) {
+fn reap(backend: &Backend, built: &str, kind: &Kind) {
+    let tags = match list_tags(backend, kind) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("omh: could not list images to reap: {e}");
             return;
         }
     };
-    let in_use = images_in_use(program);
+    let in_use = images_in_use(backend);
     let mut gone = Vec::new();
     for tag in superseded(built, &tags, &in_use) {
-        match remove_image(program, &tag) {
+        match remove_image(backend, &tag) {
             Removal::Deleted => gone.push(tag),
             // Docker holding a line omh already tried to hold means the two
             // disagreed about what is in use, which the ID-shaped `{{.Image}}`
@@ -1087,11 +1130,8 @@ enum Removal {
     Failed(String),
 }
 
-fn remove_image(program: &str, tag: &str) -> Removal {
-    let out = match std::process::Command::new(program)
-        .args(["image", "rm", tag])
-        .output()
-    {
+fn remove_image(backend: &Backend, tag: &str) -> Removal {
+    let out = match backend.output(&["image", "rm", tag]) {
         Ok(o) => o,
         Err(e) => return Removal::Failed(e.to_string()),
     };
@@ -1124,10 +1164,8 @@ fn classify_removal(stdout: &str) -> Removal {
 }
 
 /// Every tag of the same class as the one just built.
-fn list_tags(program: &str, kind: &Kind) -> Result<Vec<String>> {
-    let out = std::process::Command::new(program)
-        .args(kind.list_args())
-        .output()?;
+fn list_tags(backend: &Backend, kind: &Kind) -> Result<Vec<String>> {
+    let out = backend.output(&kind.list_args())?;
     anyhow::ensure!(out.status.success(), "listing images to reap");
     Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
@@ -1151,11 +1189,10 @@ fn list_tags(program: &str, kind: &Kind) -> Result<Vec<String>> {
 /// that reference stops resolving — including when an earlier reap untagged it.
 /// The `omh.image` label is the tag omh itself launched, stamped by
 /// `Plan::labels`, and it does not degrade.
-fn images_in_use(program: &str) -> Vec<String> {
+fn images_in_use(backend: &Backend) -> Vec<String> {
     let read = |args: &[&str]| -> Vec<String> {
-        std::process::Command::new(program)
-            .args(args)
-            .output()
+        backend
+            .output(args)
             .map(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .lines()
@@ -1183,23 +1220,44 @@ fn images_in_use(program: &str) -> Vec<String> {
 /// The plan names a per-project network; something has to create it. Without
 /// this every launch dies at `network omh-<repo> not found` — a plan that is
 /// well-formed but not runnable.
-pub fn ensure_network(program: &str, name: &str) -> Result<()> {
-    let present = std::process::Command::new(program)
-        .args(["network", "inspect", name])
-        .output()
+pub fn ensure_network(backend: &Backend, name: &str) -> Result<()> {
+    let present = backend
+        .output(&["network", "inspect", name])
         .map(|o| o.status.success())
         .unwrap_or(false);
     if present {
         return Ok(());
     }
-    let out = std::process::Command::new(program)
-        .args(["network", "create", name])
-        .output()?;
+    let out = backend.output(&["network", "create", name])?;
     if !out.status.success() {
         anyhow::bail!(
             "creating network {name}: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         );
+    }
+    Ok(())
+}
+
+/// Remove the session's network once its container is gone.
+///
+/// A network per session is an isolation boundary only while it goes with the
+/// session; left behind, the next session under that id joins it, and docker
+/// would keep accumulating one per id ever used. Best-effort at the call sites
+/// — a network that will not go is reported, never a reason to leave the
+/// container.
+pub fn network_remove(backend: &Backend, name: &str) -> Result<()> {
+    let out = backend.output(&["network", "rm", name])?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        // Never created — a session that was planned and not launched, or an
+        // older omh's per-repo network — is nothing to remove. Case-folded
+        // because docker and podman disagree on the capitalisation of "no such
+        // network", and either is the same benign outcome.
+        let lower = said.to_lowercase();
+        if lower.contains("not found") || lower.contains("no such network") {
+            return Ok(());
+        }
+        anyhow::bail!("{}", crate::out::untrusted(said.trim()));
     }
     Ok(())
 }
@@ -1264,41 +1322,68 @@ pub enum Running {
 ///
 /// It also does not fuse *stopped* with *never built* by accident — that is on
 /// purpose. Neither is running and no caller wants them apart.
+///
+/// Production reads one container out of one listing through `running_set`
+/// and `running_in`; this composes the two for the tests that pin the state
+/// machine, written when the listing was asked per container.
+#[cfg(test)]
 pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) -> Running {
+    running_in(&listed_from(asked), name)
+}
+
+/// Every container that is running, or why omh could not find out.
+///
+/// The listing is one question, so it is asked once and read many times: the
+/// dashboard, the idle reaper and `down` each have a row per session, and each
+/// used to run the same `ps` per row. `Err` is the failure `Running::Unknown`
+/// carries — sanitised and never empty — and it travels *with* the set rather
+/// than as an empty set, because an empty set is what "nothing is running"
+/// looks like too.
+pub type Listed = std::result::Result<std::collections::BTreeSet<String>, String>;
+
+pub fn listed_from(asked: std::io::Result<std::process::Output>) -> Listed {
     let out = match asked {
         Ok(out) => out,
         // The program is on `PATH` — `runtime::installed` said so before any
         // of this — so a spawn that fails is a fork failure or a binary that
         // vanished mid-run, and either way omh has no answer.
         Err(e) => {
-            return Running::Unknown(crate::out::untrusted(&format!(
+            return Err(crate::out::untrusted(&format!(
                 "could not run the container runtime: {e}"
             )))
         }
     };
     if !out.status.success() {
         // A non-zero exit is never a *no*, whatever it did or did not say.
-        return Running::Unknown(unreadable(
+        return Err(unreadable(
             &String::from_utf8_lossy(&out.stderr),
             &out.status,
         ));
     }
-    match String::from_utf8_lossy(&out.stdout)
+    Ok(String::from_utf8_lossy(&out.stdout)
         .lines()
-        .any(|listed| listed.trim() == name)
-    {
-        true => Running::Yes,
-        false => Running::No,
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Whether one container is in the listing.
+pub fn running_in(listed: &Listed, name: &str) -> Running {
+    match listed {
+        Err(why) => Running::Unknown(why.clone()),
+        Ok(set) if set.contains(name) => Running::Yes,
+        Ok(_) => Running::No,
     }
 }
 
-pub fn container_running(backend: &dyn crate::runtime::Runtime, name: &str) -> Running {
-    running_from(
-        name,
-        std::process::Command::new(backend.program())
-            .args(backend.running_args())
-            .output(),
-    )
+/// Ask the runtime what is running, once.
+pub fn running_set(backend: &Backend) -> Listed {
+    listed_from(backend.output(&backend.running_args()))
+}
+
+pub fn container_running(backend: &Backend, name: &str) -> Running {
+    running_in(&running_set(backend), name)
 }
 
 /// Why omh has no answer, said the same way wherever that happens.
@@ -1479,8 +1564,8 @@ pub fn probe_from(asked: std::io::Result<std::process::Output>) -> Probe {
     Probe::Unknown(unreadable(&runtime_said, &out.status))
 }
 
-pub fn container_probe(program: &str, args: &[String]) -> Probe {
-    probe_from(std::process::Command::new(program).args(args).output())
+pub fn container_probe(backend: &Backend, args: &[String]) -> Probe {
+    probe_from(backend.output(args))
 }
 
 /// What the running container says it was built from.
@@ -1507,12 +1592,8 @@ pub enum Stamp {
     Unknown(String),
 }
 
-pub fn container_stamp(program: &str, name: &str) -> Stamp {
-    stamp_from(
-        std::process::Command::new(program)
-            .args(["inspect", "-f", "{{json .Config.Labels}}", name])
-            .output(),
-    )
+pub fn container_stamp(backend: &Backend, name: &str) -> Stamp {
+    stamp_from(backend.output(&["inspect", "-f", "{{json .Config.Labels}}", name]))
 }
 
 /// Read the stamp, given what the runtime said.
@@ -1558,10 +1639,8 @@ pub fn stamp_from(asked: std::io::Result<std::process::Output>) -> Stamp {
 }
 
 /// Stopped-but-present containers block `run --name`, so clear them first.
-pub fn container_remove(program: &str, name: &str) -> Result<()> {
-    let out = std::process::Command::new(program)
-        .args(["rm", "-f", name])
-        .output()?;
+pub fn container_remove(backend: &Backend, name: &str) -> Result<()> {
+    let out = backend.output(&["rm", "-f", name])?;
     if !out.status.success() {
         // A sandbox that is still running still has the credential directory
         // mounted writable; reporting it stopped would be a lie that matters.
@@ -1602,10 +1681,9 @@ pub fn superseded(built: &str, tags: &[String], in_use: &[String]) -> Vec<String
         .collect()
 }
 
-pub fn exists(program: &str, tag: &str) -> bool {
-    std::process::Command::new(program)
-        .args(["image", "inspect", tag])
-        .output()
+pub fn exists(backend: &Backend, tag: &str) -> bool {
+    backend
+        .output(&["image", "inspect", tag])
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
@@ -1849,6 +1927,45 @@ mod tests {
     /// The states are the ones measured against docker 29.7.2, not invented:
     /// running prints an id, stopped and never-built print nothing, and only
     /// an unreachable daemon exits non-zero.
+    /// One listing, many sessions: the answer for each is read out of the
+    /// same set, and a listing that failed is *unknown* for every one of them.
+    ///
+    /// The second half is the one that matters. A `BTreeSet` that is empty
+    /// because the daemon was down looks exactly like one that is empty
+    /// because nothing is running, and `!set.contains(name)` reads both as
+    /// `No` — so the failure has to travel with the set, as it does here.
+    #[test]
+    fn a_runtime_that_will_not_list_containers_is_never_read_as_none() {
+        let listed = listed_from(output(0, "omh-repo-s01\nomh-repo-s02\n", ""));
+        assert_eq!(running_in(&listed, "omh-repo-s01"), Running::Yes);
+        assert_eq!(running_in(&listed, "omh-repo-s03"), Running::No);
+
+        let failed = listed_from(output(1, "", "Cannot connect to the Docker daemon"));
+        assert!(
+            failed.is_err(),
+            "a non-zero exit is a failed listing, not an empty one"
+        );
+        for name in ["omh-repo-s01", "omh-repo-s03"] {
+            let Running::Unknown(why) = running_in(&failed, name) else {
+                panic!("{name} must be unknown when the listing failed");
+            };
+            assert!(
+                why.contains("Cannot connect"),
+                "and carry the reason: {why}"
+            );
+        }
+        assert!(
+            matches!(
+                running_in(
+                    &listed_from(Err(std::io::Error::other("fork failed"))),
+                    "omh-repo-s01"
+                ),
+                Running::Unknown(_)
+            ),
+            "a runtime that would not even start is not a stopped container"
+        );
+    }
+
     #[test]
     fn a_runtime_that_will_not_answer_is_not_a_container_that_is_stopped() {
         assert_eq!(
@@ -3113,7 +3230,8 @@ mod tests {
     #[test]
     #[ignore]
     fn a_real_build_streams_its_log_and_diagnoses_a_proxy() {
-        let docker = "docker";
+        let docker = Backend::real(Box::new(crate::runtime::Docker));
+        let docker = &docker;
         // A build that succeeds: proves the tee does not deadlock.
         let ok = build(
             docker,
@@ -3257,10 +3375,61 @@ mod tests {
         );
     }
 
+    /// A bumped version pin moves the image tag, so the next launch rebuilds.
+    /// The pin is substituted into the recipe, which the tag is a digest of.
+    /// Removing a network that was never created is not a failure — a session
+    /// planned but not launched, or an older per-repo network, has none.
+    #[test]
+    fn removing_a_network_that_never_existed_is_not_a_failure() {
+        let (backend, _) = crate::runtime::Backend::scripted(
+            Box::new(crate::runtime::Docker),
+            vec![
+                (
+                    vec!["network", "rm", "gone"],
+                    crate::runtime::answered(1, "", "Error: no such network: gone"),
+                ),
+                (
+                    vec!["network", "rm", "other"],
+                    crate::runtime::answered(1, "", "network other not found"),
+                ),
+                (
+                    vec!["network", "rm", "broken"],
+                    crate::runtime::answered(1, "", "permission denied"),
+                ),
+            ],
+        );
+        assert!(
+            network_remove(&backend, "gone").is_ok(),
+            "No such network is tolerated"
+        );
+        assert!(
+            network_remove(&backend, "other").is_ok(),
+            "not found is tolerated"
+        );
+        let err = network_remove(&backend, "broken").unwrap_err();
+        assert!(
+            err.to_string().contains("permission denied"),
+            "a real failure is not: {err}"
+        );
+    }
+
+    #[test]
+    fn a_bumped_pin_moves_the_tag() {
+        let mut a = claude();
+        a.version = Some("1.0.0".into());
+        a.install = "npm install -g claude@{{version}}".into();
+        let before = tag_for(&a, None);
+        a.version = Some("1.0.1".into());
+        assert_ne!(tag_for(&a, None), before, "a new pin must force a rebuild");
+    }
+
     #[test]
     fn a_changed_recipe_is_a_different_tag() {
         let mut a = claude();
         let before = tag_for(&a, None);
+        // A different install — and no longer a pinned one, so the template
+        // check is satisfied while the recipe genuinely changes.
+        a.version = None;
         a.install = "npm install -g @anthropic-ai/claude-code@next".into();
         assert_ne!(
             tag_for(&a, None),
@@ -3272,6 +3441,26 @@ mod tests {
     #[test]
     fn an_unchanged_recipe_keeps_its_tag() {
         assert_eq!(tag_for(&claude(), None), tag_for(&claude(), None));
+    }
+
+    /// Two builds never share a build context, and each is gone when its
+    /// build is. A fixed shared directory let one build delete the other's
+    /// context mid-run.
+    #[test]
+    fn two_builds_never_share_a_build_context() {
+        let (a_path, b_path);
+        {
+            let a = build_context().unwrap();
+            let b = build_context().unwrap();
+            assert_ne!(a.path(), b.path(), "each build gets its own");
+            assert!(a.path().is_dir() && b.path().is_dir());
+            a_path = a.path().to_path_buf();
+            b_path = b.path().to_path_buf();
+        }
+        assert!(
+            !a_path.exists() && !b_path.exists(),
+            "both gone when their builds are"
+        );
     }
 
     /// The four things `sbx` requires of a kit base image. Getting these wrong
@@ -3287,6 +3476,60 @@ mod tests {
         assert!(df.contains("agent"), "agent user");
         assert!(df.contains(GUEST_HOME), "home directory");
         assert!(df.contains("NOPASSWD"), "passwordless sudo");
+    }
+
+    /// The session's sshd takes the key omh hands it and nothing else.
+    ///
+    /// `docs/design/risks.md` said "no password auth" was asserted by a test,
+    /// and no test asserted it: the entrypoint started sshd on the Debian
+    /// package's stock config, which accepts passwords, and the `agent` user
+    /// has none — so the claim happened to hold by an accident of the base
+    /// image. This pins the recipe. Whether sshd honours the flags is a fact
+    /// about openssh, and `omh doctor`'s to prove.
+    #[test]
+    fn the_session_sshd_accepts_keys_and_nothing_else() {
+        let df = base_dockerfile(None);
+        let sshd = df
+            .lines()
+            .find(|l| l.contains("/usr/sbin/sshd"))
+            .expect("the entrypoint starts sshd");
+        for flag in [
+            "-o PasswordAuthentication=no",
+            "-o KbdInteractiveAuthentication=no",
+            "-o PermitRootLogin=no",
+            "-o PubkeyAuthentication=yes",
+        ] {
+            assert!(sshd.contains(flag), "{flag} is missing from: {sshd}");
+        }
+        assert!(
+            sshd.contains("-E /omh/sshd.log"),
+            "sshd's own log goes where doctor can read it after a failed attach: {sshd}"
+        );
+    }
+
+    /// The entrypoint installs the mounted host key as root and pins sshd to
+    /// it, so the key the client was told to expect is the key that answers.
+    #[test]
+    fn the_entrypoint_installs_the_mounted_host_key_and_sshd_presents_only_it() {
+        let df = base_dockerfile(None);
+        let key = format!("{}/ssh_host_ed25519_key", crate::ssh::GUEST_HOST_KEYS);
+        assert!(
+            df.contains(&format!(
+                "sudo install -o root -g root -m 600 {key} /etc/ssh/ssh_host_ed25519_key"
+            )),
+            "the private half is root's, mode 600: {df}"
+        );
+        assert!(
+            df.contains(&format!(
+                "sudo install -o root -g root -m 644 {key}.pub /etc/ssh/ssh_host_ed25519_key.pub"
+            )),
+            "and the public half beside it: {df}"
+        );
+        let sshd = df.lines().find(|l| l.contains("/usr/sbin/sshd")).unwrap();
+        assert!(
+            sshd.contains("-o HostKey=/etc/ssh/ssh_host_ed25519_key"),
+            "sshd presents that key and no other: {sshd}"
+        );
     }
 
     /// The image is what *establishes* the home, and everything that mounts

@@ -207,7 +207,7 @@ pub const STATE_DIRS: &[(&str, bool)] = &[
 /// per-checkout listing structurally cannot see the ones that matter.
 pub fn inventory(
     root: &std::path::Path,
-    backend: Option<&dyn crate::runtime::Runtime>,
+    backend: Option<&crate::runtime::Backend>,
     backfill: crate::profile::Backfill,
 ) -> (Vec<Item>, Vec<String>) {
     let mut items = Vec::new();
@@ -313,7 +313,7 @@ pub fn inventory(
 /// Until that lands, omh does not remove images at all.
 fn images(
     root: &std::path::Path,
-    backend: &dyn crate::runtime::Runtime,
+    backend: &crate::runtime::Backend,
     blind: &mut Vec<String>,
     backfill: crate::profile::Backfill,
 ) {
@@ -321,10 +321,7 @@ fn images(
         blind.push("omh has not measured how this runtime lists images".into());
         return;
     };
-    let ids = match std::process::Command::new(backend.program())
-        .args(&args)
-        .output()
-    {
+    let ids = match backend.output(&args) {
         Err(e) => return blind.push(format!("omh could not list images: {e}")),
         Ok(out) if !out.status.success() => {
             return blind.push(format!(
@@ -352,10 +349,7 @@ fn images(
         "{{index .Config.Labels \"omh.repo\"}}\t{{index .RepoTags 0}}".into(),
     ];
     inspect.extend(ids);
-    match std::process::Command::new(backend.program())
-        .args(&inspect)
-        .output()
-    {
+    match backend.output(&inspect) {
         Err(e) => blind.push(format!("omh could not inspect images: {e}")),
         Ok(out) if !out.status.success() => blind.push(format!(
             "omh could not inspect images: {}",
@@ -405,7 +399,8 @@ pub fn id_in_container(name: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// The `repo_id` inside a network name: `omh-<repo_id>`.
+/// The `repo_id` inside a network name: `omh-<repo_id>-sNN` for a session's,
+/// `omh-<repo_id>` for the per-repo one older versions made.
 ///
 /// No `cache-` exclusion. There was one, guarding against `omh-cache-<id>` —
 /// which is a **volume**, in a different namespace, and can never appear in a
@@ -413,15 +408,23 @@ pub fn id_in_container(name: &str) -> Option<String> {
 /// whose directory is called `cache-something` into no bucket at all, while
 /// the report still said every class had been listed.
 pub fn id_in_network(name: &str) -> Option<String> {
-    name.strip_prefix("omh-")
-        .filter(|id| !id.is_empty())
-        .map(str::to_string)
+    let rest = name.strip_prefix("omh-")?;
+    // The session form first, as in `id_in_container`: a session's network is
+    // named like its container, and read with the per-repo rule below it
+    // would attribute to an id nobody has.
+    if let Some((id, tail)) = rest.rsplit_once("-s") {
+        if !id.is_empty() && !tail.is_empty() && tail.chars().all(|c| c.is_ascii_digit()) {
+            return Some(id.to_string());
+        }
+    }
+    // The per-repo network older versions created, one per checkout.
+    Some(rest).filter(|id| !id.is_empty()).map(str::to_string)
 }
 
 /// Run one listing, and record it as unreadable rather than empty when it
 /// fails — the distinction the whole report rests on.
 fn list(
-    backend: &dyn crate::runtime::Runtime,
+    backend: &crate::runtime::Backend,
     args: Option<Vec<String>>,
     what: &str,
     blind: &mut Vec<String>,
@@ -434,10 +437,7 @@ fn list(
         ));
         return;
     };
-    match std::process::Command::new(backend.program())
-        .args(&args)
-        .output()
-    {
+    match backend.output(&args) {
         Err(e) => blind.push(format!("omh could not list {what}: {e}")),
         Ok(out) if !out.status.success() => blind.push(format!(
             "omh could not list {what}: {}",
@@ -692,7 +692,7 @@ fn count_ref(items: &[&Item]) -> String {
 /// item, and until that is written this reports what docker claimed rather than
 /// what omh observed. Said plainly rather than left as a promise the code does
 /// not keep.
-pub fn remove_one(item: &Item, backend: Option<&dyn crate::runtime::Runtime>) -> Option<String> {
+pub fn remove_one(item: &Item, backend: Option<&crate::runtime::Backend>) -> Option<String> {
     let args: Vec<String> = match item.class {
         Class::State => {
             let path = std::path::Path::new(&item.name);
@@ -714,10 +714,7 @@ pub fn remove_one(item: &Item, backend: Option<&dyn crate::runtime::Runtime>) ->
     let Some(backend) = backend else {
         return Some("there is no container runtime to remove it with".into());
     };
-    match std::process::Command::new(backend.program())
-        .args(&args)
-        .output()
-    {
+    match backend.output(&args) {
         Err(e) => Some(format!("{e}")),
         Ok(out) if !out.status.success() => Some(crate::image::unreadable(
             &String::from_utf8_lossy(&out.stderr),
@@ -798,7 +795,7 @@ pub fn prune_cmd(
         crate::profile::Backfill::Record
     };
     let home = paths.root.parent().unwrap_or(&paths.root).to_path_buf();
-    let (items, blind) = inventory(&paths.root, backend.as_deref(), backfill);
+    let (items, blind) = inventory(&paths.root, backend.as_ref(), backfill);
     let mut plan_ = plan(
         items,
         blind,
@@ -855,7 +852,7 @@ pub fn prune_cmd(
         plan_
             .remove
             .iter()
-            .map(|i| (i.clone(), remove_one(i, backend.as_deref())))
+            .map(|i| (i.clone(), remove_one(i, backend.as_ref())))
             .collect()
     };
 
@@ -1001,6 +998,33 @@ mod tests {
         assert_eq!(
             considered, keyed,
             "prune must consider exactly the directories a checkout's identity names"
+        );
+    }
+
+    /// A session's network is attributed to its checkout, not to a stranger
+    /// whose id happens to be the session name.
+    ///
+    /// Networks are per session now — `omh-<repo_id>-sNN`, the container's own
+    /// name — and reading that with the per-repo rule made `<repo_id>-s01`
+    /// the id, which omh has no record of, so the live session's network was
+    /// offered up for removal. The session form goes first, as it does in
+    /// `id_in_container`, and the bare per-repo form stays readable because
+    /// every checkout that ran an older omh still has one to prune.
+    #[test]
+    fn a_session_network_is_attributed_to_its_checkout_not_to_a_stranger() {
+        assert_eq!(
+            id_in_network("omh-tools-1a2b3c4d-s01").as_deref(),
+            Some("tools-1a2b3c4d")
+        );
+        assert_eq!(
+            id_in_network("omh-1a2b3c4d").as_deref(),
+            Some("1a2b3c4d"),
+            "the per-repo network older versions made is still somebody's"
+        );
+        assert_eq!(
+            id_in_network("omh-graph-tools-1a2b3c4d-s12").as_deref(),
+            Some("graph-tools-1a2b3c4d"),
+            "a checkout directory may be called graph-something"
         );
     }
 

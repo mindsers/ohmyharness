@@ -1,6 +1,11 @@
 name    = "claude"
 bin     = "claude"
-install = "npm install -g @anthropic-ai/claude-code"
+# Pinned so a rebuild reproduces the harness it was built against, and a bump
+# moves the image tag. Maintainer bumps `version` to the release under test;
+# omh's own build (which needs a container runtime) and `omh doctor` are where
+# a wrong pin is caught, not `cargo test`.
+version = "2.0.14"
+install = "npm install -g @anthropic-ai/claude-code@{{version}}"
 # The whole config directory, not the token file: a bind-mounted *file* cannot
 # be replaced by rename, and every tool saves its token by writing a temp file
 # and renaming over it. omh prepares mountpoints for the capabilities that live

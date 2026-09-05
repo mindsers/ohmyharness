@@ -41,11 +41,7 @@ pub(crate) fn auth_cmd(
         runtime::installed(p)
     })?;
     let ca = image::ca_for(&paths)?;
-    image::ensure(
-        backend.program(),
-        &adapter,
-        ca.as_ref().map(image::Root::pem),
-    )?;
+    image::ensure(&backend, &adapter, ca.as_ref().map(image::Root::pem))?;
 
     // A throwaway: logging in must not leave a branch behind.
     let session = Session::scratch(paths.scratch("auth"), "auth".into());
@@ -84,7 +80,7 @@ pub(crate) fn auth_cmd(
         },
     )?;
     plan.validate(&backend.caps())?;
-    image::ensure_network(backend.program(), &plan.network)?;
+    image::ensure_network(&backend, &plan.network)?;
 
     // Progress, not the report: the login itself is what the user is here for,
     // and this is the sentence that tells them which window is about to open

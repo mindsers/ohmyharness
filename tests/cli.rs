@@ -148,6 +148,35 @@ impl Sandbox {
         log
     }
 
+    /// A `git` that records every invocation and then runs the real one.
+    ///
+    /// For counting what omh asks git, which is only observable from outside:
+    /// the shim goes first on `PATH`, logs `$*`, and execs the git that was on
+    /// `PATH` before it.
+    fn fake_git(&self) -> PathBuf {
+        let real = Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .expect("sh");
+        let real = String::from_utf8_lossy(&real.stdout).trim().to_string();
+        assert!(!real.is_empty(), "git must be installed to run this test");
+        let log = self.bin.join("git.log");
+        std::fs::write(
+            self.bin.join("git"),
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {}\nexec {real} \"$@\"\n",
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            self.bin.join("git"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        log
+    }
+
     /// A `docker` that records every invocation and claims the session
     /// container is up. Returns the log path.
     ///
@@ -1177,6 +1206,147 @@ fn a_refused_selection_leaves_the_branch_where_it_was() {
         sb.head_of_branch("omh/s01"),
         before,
         "the branch never moved"
+    );
+}
+
+/// The dashboard asks the runtime which containers are up once, not once per
+/// session.
+///
+/// `omh s` used to run `docker ps` for every row — three sessions, three
+/// forks, and the same answer each time. End to end, because the count is a
+/// fact about the shim's log, and the shim is the only place every caller of
+/// the listing meets.
+#[test]
+fn listing_three_sessions_asks_the_runtime_once() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    for id in ["s01", "s02", "s03"] {
+        sb.session(id);
+    }
+
+    let out = sb.omh(&["s"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let calls = sb.docker_calls(&log);
+    let listings = calls
+        .iter()
+        .filter(|c| c.as_str() == "ps --format {{.Names}}")
+        .count();
+    assert_eq!(
+        listings, 1,
+        "one listing answers every row; the runtime was asked {listings} times: {calls:?}"
+    );
+}
+
+/// The dashboard reads every session's upstream from one `for-each-ref`, and
+/// each session's standing against trunk from one `rev-list`.
+///
+/// It used to ask `git config` twice and `rev-list` up to three times per row.
+/// Counted through a `git` on `PATH` that logs and hands over to the real one,
+/// because the number of processes a listing forks is only visible from
+/// outside the process.
+#[test]
+fn listing_three_sessions_asks_git_once_per_question() {
+    let sb = sandbox();
+    let log = sb.fake_git();
+    for id in ["s01", "s02", "s03"] {
+        sb.session(id);
+    }
+
+    let out = sb.omh(&["s"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let calls = sb.docker_calls(&log);
+    let upstreams = calls.iter().filter(|c| c.contains("for-each-ref")).count();
+    let per_branch = calls
+        .iter()
+        .filter(|c| c.starts_with("config --get branch."))
+        .count();
+    let counts: Vec<&String> = calls.iter().filter(|c| c.contains("rev-list")).collect();
+    assert_eq!(
+        (upstreams, per_branch),
+        (1, 0),
+        "one listing of upstreams, no per-branch config reads: {calls:?}"
+    );
+    assert!(
+        counts.len() == 3 && counts.iter().all(|c| c.contains("--left-right")),
+        "one two-sided rev-list per session, not one per count: {counts:?}"
+    );
+}
+
+/// A command that has no use for a container runtime never runs one.
+///
+/// A guard, green when written: `why`, `set` and the memory listing answer
+/// from files, and the one place the dispatcher reaches for a runtime on
+/// their behalf — the migration check — does so inside a closure that only
+/// runs when there is something to migrate. This keeps it that way: the shim
+/// logs every invocation, and there must be none.
+#[test]
+fn a_command_that_never_needs_a_runtime_never_looks_for_one() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.seed_base();
+
+    for args in [
+        vec!["why", "idle_timeout"],
+        vec!["set", "idle_timeout", "30m"],
+        vec!["memory"],
+        vec!["settings"],
+    ] {
+        let out = sb.omh(&args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert_eq!(
+        sb.docker_calls(&log),
+        Vec::<String>::new(),
+        "none of these has a question for the runtime"
+    );
+}
+
+/// `down` takes the session's network with its container.
+///
+/// A network per session is only an isolation boundary if it goes when the
+/// session does; left behind, the next session under that id joins it.
+#[test]
+fn down_removes_the_sessions_network() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.session("s01");
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s01")),
+    )
+    .unwrap();
+
+    let out = sb.omh(&["s01", "down"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let calls = sb.docker_calls(&log);
+    let removed = calls
+        .iter()
+        .position(|c| *c == format!("rm -f {}", sb.container("s01")));
+    let network = calls
+        .iter()
+        .position(|c| *c == format!("network rm {}", sb.container("s01")));
+    assert!(
+        removed.is_some() && network.is_some() && removed < network,
+        "the container goes, then its network: {calls:?}"
     );
 }
 
@@ -5249,6 +5419,57 @@ fn attach_opens_the_session_and_the_editor_it_was_given() {
     );
 }
 
+/// `attach` pins the sandbox's host key: the block it writes says so, and the
+/// known_hosts it names holds the key under the session's alias.
+///
+/// End to end because the pieces live in three places — the key under
+/// `~/.omh/keys`, the block under `~/.ssh/config.d`, the mount on the launch —
+/// and only a real `attach` connects them.
+#[test]
+fn attach_pins_the_sandboxes_host_key() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    let log = sb.fake_docker();
+    sb.session("s01");
+    sb.fake_editor("zed");
+
+    let out = sb.omh(&["s01", "attach", "zed"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let block = std::fs::read_to_string(sb.home.join(".ssh/config.d/omh")).unwrap();
+    assert!(block.contains("StrictHostKeyChecking yes"), "{block}");
+    let known = block
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("UserKnownHostsFile "))
+        .expect("the block names a known_hosts");
+    let pinned = std::fs::read_to_string(known).expect("omh wrote it");
+    let key_dir = std::path::Path::new(known).parent().unwrap().join("host");
+    let host_pub = std::fs::read_to_string(key_dir.join("ssh_host_ed25519_key.pub")).unwrap();
+    let key = host_pub.split_whitespace().nth(1).unwrap();
+    assert!(
+        pinned
+            .lines()
+            .any(|l| l.starts_with("omh-") && l.ends_with(&format!("ssh-ed25519 {key}"))),
+        "the alias line carries the generated key: {pinned}"
+    );
+    // And the launch mounted that key where the entrypoint installs it from.
+    let run = sb
+        .docker_calls(&log)
+        .into_iter()
+        .find(|c| c.starts_with("run -d"))
+        .expect("a launch");
+    assert!(
+        run.contains(&format!("{}:/omh/hostkeys:ro", key_dir.display())),
+        "read-only, the directory: {run}"
+    );
+}
+
 /// `attach` rejoins the harness the session recorded, not the one this host
 /// prefers.
 ///
@@ -6152,6 +6373,17 @@ fn rm_takes_the_session_container_down_with_the_worktree() {
             .iter()
             .any(|c| c.starts_with("rm ") && c.contains(&sb.container("s01"))),
         "the container outlived the worktree it mounts: {calls:?}"
+    );
+    // The session's network goes with it, after the container.
+    let removed = calls
+        .iter()
+        .position(|c| c.starts_with("rm ") && c.contains(&sb.container("s01")));
+    let network = calls
+        .iter()
+        .position(|c| *c == format!("network rm {}", sb.container("s01")));
+    assert!(
+        removed.is_some() && network.is_some() && removed < network,
+        "rm must take the session's network too, after the container: {calls:?}"
     );
 }
 
@@ -7316,10 +7548,12 @@ fn a_partly_removed_session_claims_only_what_it_did() {
         .expect("git must be installed to run this test");
 
     // `fake_docker` wrote `runtime = "docker"`; overwrite it with a name
-    // `select` cannot build, so the container half is never entered.
+    // `select` cannot build, so the container half is never entered. Not
+    // `podman` — that is a real backend now — but a name in no `NAMES` list,
+    // which `select` refuses without probing the machine.
     std::fs::write(
         sb.repo.join(".omh/settings.local.toml"),
-        "runtime = \"podman\"\n",
+        "runtime = \"containerd\"\n",
     )
     .unwrap();
 

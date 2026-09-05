@@ -31,6 +31,9 @@ Host omh-s01
   Port 49201
   User agent
   IdentityFile ~/.omh/keys/ohmyharness/id_ed25519
+  HostKeyAlias omh-s01
+  StrictHostKeyChecking yes
+  UserKnownHostsFile ~/.omh/keys/ohmyharness/known_hosts
 ```
 
 Everything downstream then works without omh knowing it exists:
@@ -114,7 +117,16 @@ told no.
 your sandbox to the local network, which inverts the entire point of the
 project. There is a test for this.
 
-Keys are per-repo, and password auth is off.
+Keys are per-repo, and password auth is off — sshd is started with
+`PasswordAuthentication=no` and `PermitRootLogin=no`, not left on the package
+default.
+
+**The sandbox's host key is pinned.** omh generates one host key per repo,
+mounts it into the session read-only, and the entrypoint installs it into
+`/etc/ssh` as root. Each `Host` block says `StrictHostKeyChecking yes` against a
+known_hosts omh writes beside the keys, keyed by `HostKeyAlias`. The reason is
+the port: it is a hash of the repo and session names, so any local process can
+listen on it, and the previous `StrictHostKeyChecking no` trusted whatever did.
 
 ## Verified
 

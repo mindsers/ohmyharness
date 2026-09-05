@@ -11,11 +11,14 @@
 //! of the sources, which means it reruns exactly when the code changes and not
 //! otherwise.
 //!
-//! Releases publish static musl linux binaries now — the answer this was
-//! written while waiting for — but nothing here fetches one, so a macOS omh
-//! installed from a release finds no sources to build from and launches
-//! without a memory server, saying so. Downloading the tarball matching its
-//! own version is what closes that, and it is not done.
+//! A macOS omh installed from a release carries no sources to cross-build
+//! from. It fetches instead: the static musl linux binary its own version
+//! published, verified against that release's `SHA256SUMS` before it is
+//! installed, and cached under `~/.omh/bin` keyed by version so the next
+//! launch reuses it. `plan_delivery` decides between the running binary, the
+//! cache, a cross-build (sources present) and a fetch (sources absent); a
+//! fetch that cannot run, or a download that fails its checksum, installs
+//! nothing and says why.
 
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
@@ -32,8 +35,11 @@ pub enum Delivery {
     HostBinary(PathBuf),
     /// A cross-build from an earlier launch, still good.
     Cached(PathBuf),
-    /// Nothing usable yet.
+    /// Sources are here; cross-build it.
     MustBuild(PathBuf),
+    /// No sources — a released build — so fetch the published linux binary
+    /// this omh's own version publishes. Carries where to put it.
+    MustFetch(PathBuf),
 }
 
 /// Where a cross-built binary for `arch` lives.
@@ -42,8 +48,8 @@ pub enum Delivery {
 /// into an arm64 container fails with `exec format error`, which the harness
 /// reports as the MCP server crashing — a cause nobody would guess from the
 /// message.
-pub fn cached_at(root: &Path, arch: &str) -> PathBuf {
-    root.join("bin").join(format!("omh-linux-{arch}"))
+pub fn cached_at(root: &Path, arch: &str, version: &str) -> PathBuf {
+    root.join("bin").join(format!("omh-linux-{arch}-{version}"))
 }
 
 /// Decide, without touching anything.
@@ -54,18 +60,94 @@ pub fn cached_at(root: &Path, arch: &str) -> PathBuf {
 pub fn plan_delivery(
     os: &str,
     arch: &str,
+    version: &str,
     current_exe: &Path,
     root: &Path,
+    has_sources: bool,
     exists: &dyn Fn(&Path) -> bool,
 ) -> Delivery {
     if os == "linux" {
         return Delivery::HostBinary(current_exe.to_path_buf());
     }
-    let cached = cached_at(root, arch);
-    match exists(&cached) {
-        true => Delivery::Cached(cached),
-        false => Delivery::MustBuild(cached),
+    let cached = cached_at(root, arch, version);
+    if exists(&cached) {
+        return Delivery::Cached(cached);
     }
+    // Sources present means a dev tree: build. Absent means a released binary,
+    // which cannot cross-build itself, so fetch the linux artifact this same
+    // release published.
+    match has_sources {
+        true => Delivery::MustBuild(cached),
+        false => Delivery::MustFetch(cached),
+    }
+}
+
+/// Where the release for `version`/`arch` lives, and the sums beside it.
+///
+/// Matches `.github/workflows/release.yml`: the static musl target, a tarball
+/// named for it holding `omh-<target>/omh`, and one `SHA256SUMS` for the
+/// whole release. Static musl on purpose — a gnu build would need the guest's
+/// libc, and the base image's is not omh's to assume.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Urls {
+    pub tarball: String,
+    pub sums: String,
+    /// The tarball's basename, which is also its entry in `SHA256SUMS`.
+    pub name: String,
+}
+
+pub fn fetch_urls(version: &str, arch: &str) -> Urls {
+    let target = format!("{arch}-unknown-linux-musl");
+    let name = format!("omh-{target}.tar.gz");
+    let base = format!("https://github.com/mindsers/ohmyharness/releases/download/v{version}");
+    Urls {
+        tarball: format!("{base}/{name}"),
+        sums: format!("{base}/SHA256SUMS"),
+        name,
+    }
+}
+
+/// The recorded sum for one artifact, out of a `SHA256SUMS` file.
+///
+/// `sha256sum` writes `<hex>  <name>` and prepends `./` under some shells;
+/// a file fetched over HTTP may arrive with CRLF line endings. Neither is the
+/// artifact's business, so both are tolerated — and the name must match
+/// exactly, so a sum for another platform's tarball never stands in for this
+/// one.
+pub fn sum_for(sums: &str, name: &str) -> Option<String> {
+    for line in sums.lines() {
+        let line = line.trim_end_matches('\r');
+        // `continue`, not `?`: a blank or malformed line must not abandon the
+        // scan before a valid later entry — a reformatted SHA256SUMS would
+        // otherwise wrongly refuse a good download.
+        let Some((hex, file)) = line.split_once("  ").or_else(|| line.split_once(' ')) else {
+            continue;
+        };
+        let file = file.trim_start_matches("./");
+        if file == name {
+            let hex = hex.trim();
+            if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Some(hex.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// The crate directory, only when it really holds *this* omh's sources.
+///
+/// A released binary is unpacked wherever the user put it, and
+/// `CARGO_MANIFEST_DIR` is baked in at compile time — so on such a machine that
+/// path may exist and be somebody else's project. A `Cargo.toml` naming a
+/// different crate, or this crate at another version, is not sources omh may
+/// cross-build itself from.
+pub fn sources_at(dir: &Path, version: &str) -> Option<PathBuf> {
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    let table: toml::Table = manifest.parse().ok()?;
+    let package = table.get("package")?.as_table()?;
+    let named_omh = package.get("name").and_then(|v| v.as_str()) == Some("omh");
+    let same_version = package.get("version").and_then(|v| v.as_str()) == Some(version);
+    (named_omh && same_version).then(|| dir.to_path_buf())
 }
 
 /// The architecture a Linux container will run here, in Rust's target
@@ -110,13 +192,17 @@ pub fn available(paths: &crate::profile::Paths, ctx: &crate::out::Ctx) -> Option
     let plan = plan_delivery(
         std::env::consts::OS,
         arch,
+        env!("CARGO_PKG_VERSION"),
         &exe,
         &paths.root,
+        // `available` never builds or fetches, so whether sources are present
+        // does not change its answer: anything not already cached is `None`.
+        false,
         &|p: &Path| p.exists(),
     );
     match plan {
         Delivery::HostBinary(p) | Delivery::Cached(p) => Some(p),
-        Delivery::MustBuild(_) => None,
+        Delivery::MustBuild(_) | Delivery::MustFetch(_) => None,
     }
 }
 
@@ -124,7 +210,8 @@ pub fn available(paths: &crate::profile::Paths, ctx: &crate::out::Ctx) -> Option
 pub fn ensure(
     program: &str,
     paths: &crate::profile::Paths,
-    crate_dir: &Path,
+    sources: Option<&Path>,
+    fetch: &dyn Fn(&Urls, &Path) -> Result<()>,
     ctx: &crate::out::Ctx,
 ) -> Result<PathBuf> {
     let arch = target_arch(std::env::consts::ARCH)?;
@@ -132,33 +219,143 @@ pub fn ensure(
     match plan_delivery(
         std::env::consts::OS,
         arch,
+        env!("CARGO_PKG_VERSION"),
         &exe,
         &paths.root,
+        sources.is_some(),
         &|p: &Path| p.exists(),
     ) {
         Delivery::HostBinary(p) | Delivery::Cached(p) => Ok(p),
         Delivery::MustBuild(out) => {
-            // Cross-building needs omh's own sources, which a released binary
-            // does not carry. Said plainly rather than failing inside docker
-            // with a message about a missing Cargo.toml.
-            if !crate_dir.join("Cargo.toml").exists() {
-                bail!(
-                    "no omh sources at {} — a released build cannot cross-build \
-                     itself, so the memory server needs a published linux binary",
-                    crate_dir.display()
-                );
-            }
+            let crate_dir = sources.expect("MustBuild is only chosen when sources are present");
             // The proxy that made `ca_cert` necessary is in front of
             // crates.io too, and this container is not omh's image.
-            // The path off the same `Root` whose pem was validated. This
-            // used to be `ca_path`, a second resolution of the setting that
-            // could name a different file than the one `ca_for` had read.
             let root = crate::image::ca_for(paths)?;
             let ca = root.as_ref().map(crate::image::Root::path);
             build(program, crate_dir, &out, arch, ca, ctx)?;
             Ok(out)
         }
+        Delivery::MustFetch(out) => {
+            fetch_into(&out, arch, fetch, ctx)?;
+            Ok(out)
+        }
     }
+}
+
+/// Fetch, verify, and install the published linux binary for `arch`.
+///
+/// The download lands in a temp directory that drops when this returns; only a
+/// verified binary is installed, and it goes in atomically by rename so a
+/// half-written file is never mounted. The unversioned cache older omh wrote
+/// is removed once the versioned one lands.
+fn fetch_into(
+    out: &Path,
+    arch: &str,
+    fetch: &dyn Fn(&Urls, &Path) -> Result<()>,
+    ctx: &crate::out::Ctx,
+) -> Result<()> {
+    let version = env!("CARGO_PKG_VERSION");
+    let urls = fetch_urls(version, arch);
+    ctx.progress(&format!(
+        "fetching the memory server for linux/{arch} v{version} — first run only…"
+    ));
+    let staging = tempfile::tempdir().context("staging the download")?;
+    fetch(&urls, staging.path()).with_context(|| format!("fetching {}", urls.tarball))?;
+
+    let tarball = staging.path().join(&urls.name);
+    let sums = std::fs::read_to_string(staging.path().join("SHA256SUMS"))
+        .context("reading the published SHA256SUMS")?;
+    let want = sum_for(&sums, &urls.name).with_context(|| {
+        format!(
+            "no v{version} release publishes {} — SHA256SUMS names none",
+            urls.name
+        )
+    })?;
+    let got = sha256_of(&tarball)?;
+    anyhow::ensure!(
+        got == want,
+        "the downloaded {} does not match its published checksum — refusing it",
+        urls.name
+    );
+
+    // The tarball holds `omh-<target>/omh`; extract just that.
+    let extracted = staging.path().join("unpacked");
+    std::fs::create_dir_all(&extracted)?;
+    let status = std::process::Command::new("tar")
+        .args(["-xzf"])
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&extracted)
+        .status()
+        .context("running tar")?;
+    anyhow::ensure!(status.success(), "unpacking {} failed", urls.name);
+    let binary = std::fs::read_dir(&extracted)?
+        .flatten()
+        .map(|e| e.path().join("omh"))
+        .find(|p| p.exists())
+        .with_context(|| format!("{} held no omh binary", urls.name))?;
+
+    std::fs::create_dir_all(out.parent().context("cache has no parent")?)?;
+    let tmp = out.with_extension("partial");
+    std::fs::copy(&binary, &tmp).context("installing the memory server")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
+    }
+    std::fs::rename(&tmp, out).context("installing the memory server")?;
+    // The unversioned cache an older omh wrote is stale now.
+    let _ = std::fs::remove_file(out.parent().unwrap().join(format!("omh-linux-{arch}")));
+    Ok(())
+}
+
+/// The real fetch: `curl` the tarball and the sums into `dest`.
+///
+/// `curl` for the same reason the image build uses it — it honours the system
+/// trust store the `ca_cert` machinery configures — and `-f` so an HTTP error
+/// is a failure rather than a saved error page.
+pub fn fetch(urls: &Urls, dest: &Path) -> Result<()> {
+    for (url, name) in [
+        (&urls.tarball, &urls.name),
+        (&urls.sums, &"SHA256SUMS".to_string()),
+    ] {
+        let status = std::process::Command::new("curl")
+            .args(["-fsSL", "-o"])
+            .arg(dest.join(name.as_str()))
+            .arg(url)
+            .status()
+            .context("running curl")?;
+        anyhow::ensure!(status.success(), "downloading {url}");
+    }
+    Ok(())
+}
+
+/// SHA-256 of a file, through the platform's own tool.
+///
+/// `shasum -a 256` on macOS, `sha256sum` on Linux — one of the two is always
+/// present, and shelling out avoids a hashing crate for the one place omh
+/// needs one.
+fn sha256_of(file: &Path) -> Result<String> {
+    let (program, args): (&str, &[&str]) = if cfg!(target_os = "macos") {
+        ("shasum", &["-a", "256"])
+    } else {
+        ("sha256sum", &[])
+    };
+    let out = std::process::Command::new(program)
+        .args(args)
+        .arg(file)
+        .output()
+        .with_context(|| format!("running {program}"))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "{program} failed on {}",
+        file.display()
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .context("empty checksum output")
 }
 
 /// Cross-build `omh` for Linux, inside a container, into the cache.
@@ -485,8 +682,10 @@ mod tests {
         let plan = plan_delivery(
             "linux",
             "aarch64",
+            "1.0.0",
             Path::new("/usr/bin/omh"),
             Path::new("/home/x/.omh"),
+            false,
             NEVER,
         );
         assert_eq!(plan, Delivery::HostBinary(PathBuf::from("/usr/bin/omh")));
@@ -500,12 +699,17 @@ mod tests {
             let plan = plan_delivery(
                 "macos",
                 "aarch64",
+                "1.0.0",
                 Path::new("/opt/homebrew/bin/omh"),
                 Path::new("/home/x/.omh"),
+                true,
                 exists,
             );
             let chosen = match plan {
-                Delivery::HostBinary(p) | Delivery::Cached(p) | Delivery::MustBuild(p) => p,
+                Delivery::HostBinary(p)
+                | Delivery::Cached(p)
+                | Delivery::MustBuild(p)
+                | Delivery::MustFetch(p) => p,
             };
             assert_ne!(
                 chosen,
@@ -518,13 +722,190 @@ mod tests {
     #[test]
     fn a_cross_build_is_reused_when_it_is_already_there() {
         let root = Path::new("/home/x/.omh");
+        let plan = |sources, exists| {
+            plan_delivery(
+                "macos",
+                "aarch64",
+                "1.0.0",
+                Path::new("/bin/omh"),
+                root,
+                sources,
+                exists,
+            )
+        };
         assert_eq!(
-            plan_delivery("macos", "aarch64", Path::new("/bin/omh"), root, ALWAYS),
-            Delivery::Cached(cached_at(root, "aarch64"))
+            plan(true, ALWAYS),
+            Delivery::Cached(cached_at(root, "aarch64", "1.0.0"))
         );
         assert_eq!(
-            plan_delivery("macos", "aarch64", Path::new("/bin/omh"), root, NEVER),
-            Delivery::MustBuild(cached_at(root, "aarch64"))
+            plan(true, NEVER),
+            Delivery::MustBuild(cached_at(root, "aarch64", "1.0.0"))
+        );
+        // No sources and nothing cached: fetch, not build.
+        assert_eq!(
+            plan(false, NEVER),
+            Delivery::MustFetch(cached_at(root, "aarch64", "1.0.0"))
+        );
+    }
+
+    /// A released omh — no sources — fetches the published linux binary its own
+    /// version publishes, rather than trying to cross-build and failing.
+    #[test]
+    fn a_release_with_no_sources_fetches_the_published_linux_binary() {
+        let root = Path::new("/home/x/.omh");
+        let table = [
+            ("linux", true, ALWAYS, "host"),
+            ("macos", true, ALWAYS, "cached"),
+            ("macos", false, ALWAYS, "cached"),
+            ("macos", true, NEVER, "build"),
+            ("macos", false, NEVER, "fetch"),
+        ];
+        for (os, sources, exists, want) in table {
+            let got = match plan_delivery(
+                os,
+                "aarch64",
+                "1.0.0",
+                Path::new("/bin/omh"),
+                root,
+                sources,
+                exists,
+            ) {
+                Delivery::HostBinary(_) => "host",
+                Delivery::Cached(_) => "cached",
+                Delivery::MustBuild(_) => "build",
+                Delivery::MustFetch(_) => "fetch",
+            };
+            assert_eq!(got, want, "os={os} sources={sources}");
+        }
+    }
+
+    /// A cached binary from another version is not reused — a memory server
+    /// from the last release is not this release's.
+    #[test]
+    fn a_cached_binary_from_another_version_is_not_reused() {
+        let root = Path::new("/home/x/.omh");
+        assert_ne!(
+            cached_at(root, "aarch64", "1.0.0"),
+            cached_at(root, "aarch64", "1.0.1")
+        );
+        // The cache present is 1.0.0's; this omh is 1.0.1, so it does not count.
+        let here = cached_at(root, "aarch64", "1.0.1");
+        assert_eq!(
+            plan_delivery(
+                "macos",
+                "aarch64",
+                "1.0.1",
+                Path::new("/bin/omh"),
+                root,
+                false,
+                &|p: &Path| { p == cached_at(root, "aarch64", "1.0.0") }
+            ),
+            Delivery::MustFetch(here),
+        );
+    }
+
+    /// The tarball omh asks for is the one the release publishes: the musl
+    /// target, and one SHA256SUMS for the release.
+    #[test]
+    fn the_tarball_asked_for_is_the_one_the_release_publishes() {
+        let urls = fetch_urls("0.9.0", "x86_64");
+        assert_eq!(urls.name, "omh-x86_64-unknown-linux-musl.tar.gz");
+        assert!(
+            urls.tarball
+                .ends_with("/download/v0.9.0/omh-x86_64-unknown-linux-musl.tar.gz"),
+            "{}",
+            urls.tarball
+        );
+        assert!(
+            urls.sums.ends_with("/download/v0.9.0/SHA256SUMS"),
+            "{}",
+            urls.sums
+        );
+        assert_eq!(
+            fetch_urls("0.9.0", "aarch64").name,
+            "omh-aarch64-unknown-linux-musl.tar.gz"
+        );
+    }
+
+    /// A checksum for another platform never stands in for this one, and the
+    /// parser tolerates the `./` and CRLF a SHA256SUMS may carry.
+    #[test]
+    fn a_checksum_for_another_platform_never_stands_in_for_this_one() {
+        let a = "a".repeat(64);
+        let b = "b".repeat(64);
+        let sums = format!(
+            "{a}  ./omh-aarch64-unknown-linux-musl.tar.gz\r\n{b}  omh-x86_64-unknown-linux-musl.tar.gz\n"
+        );
+        assert_eq!(
+            sum_for(&sums, "omh-aarch64-unknown-linux-musl.tar.gz").as_deref(),
+            Some(a.as_str())
+        );
+        assert_eq!(
+            sum_for(&sums, "omh-x86_64-unknown-linux-musl.tar.gz").as_deref(),
+            Some(b.as_str())
+        );
+        assert_eq!(
+            sum_for(&sums, "omh-riscv64-unknown-linux-musl.tar.gz"),
+            None
+        );
+        assert_eq!(
+            sum_for("short  omh.tar.gz", "omh.tar.gz"),
+            None,
+            "a non-sha value is not a sum"
+        );
+    }
+
+    /// A baked source path that happens to exist is not trusted because it
+    /// exists: it has to be this crate, at this version.
+    #[test]
+    fn a_baked_source_path_is_not_trusted_because_it_exists() {
+        let d = tempfile::tempdir().unwrap();
+        assert_eq!(
+            sources_at(d.path(), "1.0.0"),
+            None,
+            "no Cargo.toml, no sources"
+        );
+
+        std::fs::write(
+            d.path().join("Cargo.toml"),
+            "[package]\nname = \"somethingelse\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            sources_at(d.path(), "1.0.0"),
+            None,
+            "another crate is not omh"
+        );
+
+        std::fs::write(
+            d.path().join("Cargo.toml"),
+            "[package]\nname = \"omh\"\nversion = \"0.0.1\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            sources_at(d.path(), "1.0.0"),
+            None,
+            "omh at another version is not these sources"
+        );
+
+        std::fs::write(
+            d.path().join("Cargo.toml"),
+            "[package]\nname = \"omh\"\nversion = \"1.0.0\"\n",
+        )
+        .unwrap();
+        assert_eq!(sources_at(d.path(), "1.0.0").as_deref(), Some(d.path()));
+    }
+
+    /// The real crate directory is these sources at this version.
+    #[test]
+    fn the_running_crate_is_recognised_as_its_own_sources() {
+        assert_eq!(
+            sources_at(
+                Path::new(env!("CARGO_MANIFEST_DIR")),
+                env!("CARGO_PKG_VERSION")
+            )
+            .as_deref(),
+            Some(Path::new(env!("CARGO_MANIFEST_DIR")))
         );
     }
 
@@ -535,10 +916,15 @@ mod tests {
     #[test]
     fn each_architecture_caches_to_its_own_path() {
         let root = Path::new("/home/x/.omh");
-        assert_ne!(cached_at(root, "aarch64"), cached_at(root, "x86_64"));
+        assert_ne!(
+            cached_at(root, "aarch64", "1.0.0"),
+            cached_at(root, "x86_64", "1.0.0")
+        );
         for arch in ["aarch64", "x86_64"] {
             assert!(
-                cached_at(root, arch).to_string_lossy().contains(arch),
+                cached_at(root, arch, "1.0.0")
+                    .to_string_lossy()
+                    .contains(arch),
                 "the path must name the architecture it holds"
             );
         }
@@ -555,28 +941,114 @@ mod tests {
         assert!(err.contains("riscv64"), "got: {err}");
     }
 
-    /// A released omh carries no sources, so it cannot build its own Linux
-    /// counterpart. That has to be a sentence somebody can act on, not a
-    /// failure inside docker about a missing Cargo.toml.
+    /// A fetch that could not run says so, and installs nothing. The failure
+    /// is the fetch's, reported plainly, not a silent empty cache.
     #[test]
-    fn a_build_with_no_sources_says_what_is_actually_wrong() {
+    fn an_offline_fetch_says_so_rather_than_saying_no_sources() {
+        // Only meaningful where a fetch would be attempted at all.
+        if std::env::consts::OS == "linux" {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         let paths = crate::profile::Paths {
             root: dir.path().join("home"),
             repo: dir.path().join("repo"),
         };
-        // Only meaningful where a cross-build would be attempted at all.
+        let fetch = |_: &Urls, _: &Path| bail!("could not resolve github.com");
+        let err = ensure("docker", &paths, None, &fetch, &crate::out::Ctx::plain()).unwrap_err();
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("could not resolve"),
+            "the fetch's own reason: {said}"
+        );
+        let arch = target_arch(std::env::consts::ARCH).unwrap();
+        assert!(
+            !cached_at(&paths.root, arch, env!("CARGO_PKG_VERSION")).exists(),
+            "nothing is installed on a failed fetch"
+        );
+    }
+
+    /// A download whose checksum does not match the published one is refused,
+    /// not installed.
+    #[test]
+    fn a_download_that_fails_its_checksum_is_refused() {
         if std::env::consts::OS == "linux" {
             return;
         }
-        let err = ensure("docker", &paths, dir.path(), &crate::out::Ctx::plain())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("published linux binary"), "got: {err}");
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::profile::Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let arch = target_arch(std::env::consts::ARCH).unwrap();
+        let fetch = move |urls: &Urls, dest: &Path| {
+            std::fs::write(dest.join(&urls.name), b"not the real binary")?;
+            // A well-formed SHA256SUMS, but for a different content.
+            std::fs::write(
+                dest.join("SHA256SUMS"),
+                format!("{}  {}\n", "0".repeat(64), urls.name),
+            )?;
+            Ok(())
+        };
+        let err = ensure("docker", &paths, None, &fetch, &crate::out::Ctx::plain()).unwrap_err();
         assert!(
-            err.contains(&dir.path().display().to_string()),
-            "got: {err}"
+            format!("{err:#}").contains("does not match"),
+            "got: {err:#}"
         );
+        assert!(!cached_at(&paths.root, arch, env!("CARGO_PKG_VERSION")).exists());
+    }
+
+    /// A verified download is unpacked, installed executable at the versioned
+    /// cache path, and the stale unversioned cache an older omh left is removed.
+    /// The success path, which the failure tests never reach.
+    #[test]
+    #[cfg(unix)]
+    fn a_verified_download_is_installed_and_the_stale_cache_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        if std::env::consts::OS == "linux" {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::profile::Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let arch = target_arch(std::env::consts::ARCH).unwrap();
+        // A stale unversioned cache from an older omh, which must be cleared.
+        let stale = paths.root.join("bin").join(format!("omh-linux-{arch}"));
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        std::fs::write(&stale, b"old").unwrap();
+
+        // A fetch that writes a real tarball holding `omh-<target>/omh` and a
+        // SHA256SUMS carrying that tarball's real sum.
+        let fetch = move |urls: &Urls, dest: &Path| {
+            let staged = dest.join("build");
+            let inner = staged.join(urls.name.trim_end_matches(".tar.gz"));
+            std::fs::create_dir_all(&inner)?;
+            std::fs::write(inner.join("omh"), b"#!/bin/sh\necho hi\n")?;
+            let status = std::process::Command::new("tar")
+                .arg("-czf")
+                .arg(dest.join(&urls.name))
+                .arg("-C")
+                .arg(&staged)
+                .arg(urls.name.trim_end_matches(".tar.gz"))
+                .status()?;
+            anyhow::ensure!(status.success(), "packing the fixture tarball");
+            let sum = sha256_of(&dest.join(&urls.name))?;
+            std::fs::write(dest.join("SHA256SUMS"), format!("{sum}  {}\n", urls.name))?;
+            Ok(())
+        };
+
+        let installed = ensure("docker", &paths, None, &fetch, &crate::out::Ctx::plain()).unwrap();
+        assert_eq!(
+            installed,
+            cached_at(&paths.root, arch, env!("CARGO_PKG_VERSION"))
+        );
+        assert!(installed.exists(), "the binary is installed");
+        let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+        assert_eq!(mode & 0o111, 0o111, "and it is executable: {mode:o}");
+        assert_eq!(std::fs::read(&installed).unwrap(), b"#!/bin/sh\necho hi\n");
+        assert!(!stale.exists(), "the stale unversioned cache is removed");
     }
 
     /// The guest path has to be somewhere already on PATH, or the base set's

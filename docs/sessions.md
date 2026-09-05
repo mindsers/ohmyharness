@@ -152,7 +152,12 @@ error suggests `git remote add`, and it is bypassable by `--no-verify`. Checked
 against git 2.55.0 rather than assumed, both directions.
 
 Nothing here contains a determined agent, and nothing ever did — the container
-has `curl` and outbound network. See [Risks](design/risks.md).
+has `curl` and outbound network. See [Risks](design/risks.md). What it does
+contain is an accident: the sandbox drops every Linux capability and takes back
+the eight the entrypoint and sshd need, holds at most 2048 processes, and takes
+the memory and CPU ceiling `sandbox_memory` and `sandbox_cpus` set. `sudo` still
+works inside — that is a decision, recorded in a test — so this is a wall
+against a runaway build, not against an agent that wants out.
 
 Worth being precise about what this buys: a sandbox protects your *host*. What
 protects your *repo* is the worktree branch. That is why `omh s rm` never
@@ -162,7 +167,8 @@ review.
 ## What a container is compared against
 
 A launch plan is a pure description — image, mounts, network, environment — and a
-session container is one plan materialized. Everything in that list is fixed the
+session container is one plan materialized. The network is the session's own,
+named like its container; `omh sNN down` and `rm` remove it with the container. Everything in that list is fixed the
 moment the container starts: no later `exec` adds a mount or changes an image.
 
 So omh stamps the plan onto the container as labels at launch, and compares

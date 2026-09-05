@@ -27,7 +27,7 @@ use std::process::Command;
 /// other way the exec can fail is a question omh cannot answer, and answering
 /// it wrongly costs an agent its turn — so those refuse.
 pub(crate) fn reuse_decision(
-    backend: &dyn runtime::Runtime,
+    backend: &runtime::Backend,
     name: &str,
     plan: &container::Plan,
     session: &Session,
@@ -35,16 +35,114 @@ pub(crate) fn reuse_decision(
     let probe = backend.exec_args(name, &image::probe_command(), false);
     container::decide(
         &session.id,
-        image::container_probe(backend.program(), &probe),
-        || image::container_stamp(backend.program(), name),
+        image::container_probe(backend, &probe),
+        || image::container_stamp(backend, name),
         plan,
     )
+}
+
+/// What became of a container already running under the session's name.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Disposition {
+    /// It is this session. Exec into it.
+    Attach,
+    /// It was not this session, nothing was live inside it, and it is gone.
+    /// The launch goes on to start a fresh one.
+    Replaced,
+}
+
+/// Decide about a running container, and act on the one decision that acts.
+///
+/// The decision is `container::decide`'s; this is where it meets the runtime.
+/// Split out of `session_up` so it can run against a scripted backend: the
+/// `attach` defects of the 0.9.0 audit lived exactly here and had nowhere to be
+/// tested, because the only way to reach this code was a real launch.
+pub(crate) fn reuse_or_replace(
+    backend: &runtime::Backend,
+    name: &str,
+    plan: &container::Plan,
+    session: &Session,
+    harness: &str,
+    ctx: &out::Ctx,
+) -> Result<Disposition> {
+    match reuse_decision(backend, name, plan, session)? {
+        container::Reuse::Attach => Ok(Disposition::Attach),
+        container::Reuse::Blocked { live, changed } => anyhow::bail!(
+            "session {id} is running {} and cannot be reused for this launch \
+             ({})\n  stop it with        omh {id} down\n  \
+             or start a fresh one  omh new {}",
+            live.join(", "),
+            changed.join(", "),
+            harness,
+            id = session.id,
+        ),
+        container::Reuse::Restart(why) => {
+            // `warn`, not `progress`. This destroys a running container,
+            // and `progress` is suppressed entirely under `--json` — so
+            // the one destructive act in a launch was the one a script
+            // could not see.
+            //
+            // An earlier draft justified that by "every other outcome of
+            // this match reaches both formats: `Attach` returns, `Blocked`
+            // bails", and neither half survives checking. `Attach` reaches
+            // *neither* format — it returns silently and the next thing
+            // said is `announce`, which is gated on `Format::Human`.
+            // `Blocked` bails, which a script sees as exit 1 and prose on
+            // stderr rather than as a field. The argument for `warn` does
+            // not need them: a destructive act should be visible wherever
+            // omh can speak at all.
+            ctx.warn(&format!(
+                "restarting the sandbox for {} — {}",
+                session.label(),
+                why.join(", ")
+            ));
+            // `?`, not `let _`. `container_remove` bails with docker's
+            // own stderr and its comment explains why — and both callers
+            // threw that away. The launch then failed further down against
+            // the same sick daemon, and the user read `the container name
+            // is already in use` with nothing connecting it to the restart
+            // they were just told about.
+            image::container_remove(backend, name)
+                .with_context(|| format!("replacing the sandbox for {}", session.id))?;
+            Ok(Disposition::Replaced)
+        }
+    }
+}
+
+/// Start the session container: clear a stopped one under the name, then run.
+///
+/// The clear is best-effort — there is usually nothing there — and the run is
+/// not: a runtime that refuses to start the container is the launch failing,
+/// said with the runtime's own reason.
+pub(crate) fn start(
+    backend: &runtime::Backend,
+    plan: &container::Plan,
+    name: &str,
+    port: u16,
+    pubkey: &str,
+    session_id: &str,
+) -> Result<()> {
+    let _ = image::container_remove(backend, name); // a stopped one blocks --name
+    let args = backend.up_args(plan, name, port, pubkey);
+    let out = backend.output(&args)?;
+    if !out.status.success() {
+        anyhow::bail!(
+            "starting session {session_id}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Bring a session's sandbox up if it is not already. A session is a *running
 /// container*, not a launch — that is what lets an editor attach to the same
 /// place the agent is working.
+// One more than clippy's seven, for the backend. Bundling it with `paths` and
+// `profile` into a launch context is the shape Phase 3c's `Resolved` takes;
+// until then the parameter list is the honest one.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn session_up(
+    backend: &runtime::Backend,
     paths: &Paths,
     profile: &Profile,
     adapter: &Adapter,
@@ -59,13 +157,10 @@ pub(crate) fn session_up(
     // — this PR read `ca_cert` a second time here — so they arrive together.
     sandbox: &crate::cmd::init::Sandbox,
     ctx: &out::Ctx,
-) -> Result<(Box<dyn runtime::Runtime>, String)> {
-    let backend = runtime::select(&crate::runtime_preference(paths), &|p| {
-        runtime::installed(p)
-    })?;
+) -> Result<String> {
     let name = paths.container(&session.id);
     let running = crate::cmd::harvest::must_know(
-        image::container_running(backend.as_ref(), &name),
+        image::container_running(backend, &name),
         &session.id,
         "start or reuse it",
     )?;
@@ -86,7 +181,12 @@ pub(crate) fn session_up(
     match memory::deliver::ensure(
         backend.program(),
         paths,
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        memory::deliver::sources_at(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .as_deref(),
+        &memory::deliver::fetch,
         ctx,
     ) {
         Ok(bin) => opts.memory_bin = Some(bin),
@@ -108,73 +208,37 @@ pub(crate) fn session_up(
     // from the same one. Cheap — `ensure` above is a path check once the binary
     // is cached, and the staging the plan performs happens every launch anyway.
     if running {
-        match reuse_decision(backend.as_ref(), &name, &plan, session)? {
-            container::Reuse::Attach => return Ok((backend, name)),
-            container::Reuse::Blocked { live, changed } => anyhow::bail!(
-                "session {id} is running {} and cannot be reused for this launch \
-                 ({})\n  stop it with        omh {id} down\n  \
-                 or start a fresh one  omh new {}",
-                live.join(", "),
-                changed.join(", "),
-                adapter.name,
-                id = session.id,
-            ),
-            container::Reuse::Restart(why) => {
-                // `warn`, not `progress`. This destroys a running container,
-                // and `progress` is suppressed entirely under `--json` — so
-                // the one destructive act in a launch was the one a script
-                // could not see.
-                //
-                // An earlier draft justified that by "every other outcome of
-                // this match reaches both formats: `Attach` returns, `Blocked`
-                // bails", and neither half survives checking. `Attach` reaches
-                // *neither* format — it returns silently and the next thing
-                // said is `announce`, which is gated on `Format::Human`.
-                // `Blocked` bails, which a script sees as exit 1 and prose on
-                // stderr rather than as a field. The argument for `warn` does
-                // not need them: a destructive act should be visible wherever
-                // omh can speak at all.
-                ctx.warn(&format!(
-                    "restarting the sandbox for {} — {}",
-                    session.label(),
-                    why.join(", ")
-                ));
-                // `?`, not `let _`. `container_remove` bails with docker's
-                // own stderr and its comment explains why — and both callers
-                // threw that away. The launch then failed further down against
-                // the same sick daemon, and the user read `the container name
-                // is already in use` with nothing connecting it to the restart
-                // they were just told about.
-                image::container_remove(backend.program(), &name)
-                    .with_context(|| format!("replacing the sandbox for {}", session.id))?;
-            }
+        if let Disposition::Attach =
+            reuse_or_replace(backend, &name, &plan, session, &adapter.name, ctx)?
+        {
+            return Ok(name);
         }
     }
 
     say_rules(&plan, ctx);
     image::ensure_stack(
-        backend.program(),
+        backend,
         adapter,
         &sandbox.recipe(),
         sandbox.ca.as_ref().map(crate::image::Root::pem),
         &paths.repo,
     )?;
-    image::ensure_network(backend.program(), &plan.network)?;
+    image::ensure_network(backend, &plan.network)?;
 
     let key = ssh::ensure_key(&paths.keys())?;
     let pubkey = std::fs::read_to_string(key.with_extension("pub"))?;
-    let port = ssh::port(&paths.repo_name(), &session.id);
+    // The plan mounts the host key's directory; make sure there is one in it
+    // before the entrypoint looks.
+    ssh::ensure_host_key(&paths.keys())?;
+    // Chosen once and recorded, probing for a free one only the first time.
+    let port = ssh::assigned_port(
+        &paths.runs(),
+        &paths.repo_name(),
+        &session.id,
+        &ssh::port_in_use,
+    )?;
 
-    let _ = image::container_remove(backend.program(), &name); // a stopped one blocks --name
-    let args = backend.up_args(&plan, &name, port, pubkey.trim());
-    let out = Command::new(backend.program()).args(&args).output()?;
-    if !out.status.success() {
-        anyhow::bail!(
-            "starting session {}: {}",
-            session.id,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
+    start(backend, &plan, &name, port, pubkey.trim(), &session.id)?;
     // The session's worktree is not the checkout indexed at init — it holds
     // whatever the agent has since written. Index it now; the Stop hook keeps
     // it current from here.
@@ -199,7 +263,7 @@ pub(crate) fn session_up(
         .stderr(std::process::Stdio::null())
         .spawn();
 
-    Ok((backend, name))
+    Ok(name)
 }
 
 /// Which harness `attach` rejoins as, from the session's own record.
@@ -256,19 +320,20 @@ pub(crate) fn attach(
     let (own, repo) = resolved(&paths)?;
     let ca = crate::image::ca_for(&paths)?;
     let mut sandbox = crate::cmd::init::sandbox(&paths, &adapter, &repo, ca)?;
-    if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
+    // Selected once, here, and handed down: `session_up` used to select its
+    // own, so a launch chose a runtime twice and a test could inject neither.
+    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)
-    }) {
-        sandbox.top_up(
-            &paths,
-            backend.program(),
-            &adapter,
-            &profile.sources(adapter::Capability::Hooks)?,
-            &own,
-            &repo,
-            ctx,
-        )?;
-    }
+    })?;
+    sandbox.top_up(
+        &paths,
+        &backend,
+        &adapter,
+        &profile.sources(adapter::Capability::Hooks)?,
+        &own,
+        &repo,
+        ctx,
+    )?;
 
     std::fs::create_dir_all(paths.worktrees())?;
     // Through `existing_session`, like every other verb under `omh s`.
@@ -315,6 +380,7 @@ pub(crate) fn attach(
     }
 
     session_up(
+        &backend,
         &paths,
         &profile,
         &adapter,
@@ -340,16 +406,32 @@ pub(crate) fn attach(
     let home = dirs::home_dir().context("no home directory")?;
     let alias = ssh::host_alias(&paths.repo_name(), &session.id);
     let key = ssh::ensure_key(&paths.keys())?;
-    let blocks: Vec<String> = session::list(&paths.worktrees())
-        .into_iter()
+    // The sandbox's host key, pinned under every session's alias. One key per
+    // repo, so the known_hosts omh writes is the same key on every line — what
+    // differs is the alias, which is what `HostKeyAlias` looks up.
+    let host_pub =
+        std::fs::read_to_string(ssh::ensure_host_key(&paths.keys())?.with_extension("pub"))?;
+    let known_hosts = paths.keys().join("known_hosts");
+    let sessions = session::list(&paths.worktrees());
+    let blocks: Vec<String> = sessions
+        .iter()
         .map(|s| {
             ssh::config_block(
-                &ssh::host_alias(&paths.repo_name(), &s),
-                ssh::port(&paths.repo_name(), &s),
+                &ssh::host_alias(&paths.repo_name(), s),
+                // The recorded port — never probe here: the session holds its
+                // own port, so a probe would walk away from it.
+                ssh::recorded_port(&paths.runs(), s)
+                    .unwrap_or_else(|| ssh::port(&paths.repo_name(), s)),
                 &key,
+                &known_hosts,
             )
         })
         .collect();
+    let pinned: Vec<String> = sessions
+        .iter()
+        .map(|s| ssh::known_hosts_line(&ssh::host_alias(&paths.repo_name(), s), &host_pub))
+        .collect();
+    ssh::write_known_hosts(&known_hosts, &pinned)?;
     ssh::write_hosts(&home.join(".ssh/config.d/omh"), &blocks)?;
     ssh::ensure_include(&home.join(".ssh/config"))?;
 
@@ -441,14 +523,10 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
         return;
     };
 
+    let up = image::running_set(&backend);
     let running: Vec<(String, Option<std::time::SystemTime>)> = session::list(&paths.worktrees())
         .into_iter()
-        .filter(|id| {
-            crate::cmd::harvest::reapable(&image::container_running(
-                backend.as_ref(),
-                &paths.container(id),
-            ))
-        })
+        .filter(|id| crate::cmd::harvest::reapable(&image::running_in(&up, &paths.container(id))))
         .map(|id| {
             let last = idle::last_used(&paths.runs(), &id);
             (id, last)
@@ -461,7 +539,7 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
     // unanswerable probe keeps its container.
     let live = |id: &str| {
         let probe = backend.exec_args(&paths.container(id), &image::probe_command(), false);
-        idle::live_from(id, &image::container_probe(backend.program(), &probe))
+        idle::live_from(id, &image::container_probe(&backend, &probe))
     };
     for id in idle::expired(
         &running,
@@ -470,7 +548,7 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
         launching,
         &live,
     ) {
-        match image::container_remove(backend.program(), &paths.container(&id)) {
+        match image::container_remove(&backend, &paths.container(&id)) {
             Ok(()) => ctx.progress(&format!(
                 "stopped {id} — idle over {raw} (worktree and branch survive)"
             )),
@@ -518,9 +596,10 @@ pub(crate) fn down(
     let mut sessions = Vec::new();
     let mut stuck = 0usize;
     let mut unasked = 0usize;
+    let up = image::running_set(&backend);
     for i in &ids {
         let name = paths.container(i);
-        match image::container_running(backend.as_ref(), &name) {
+        match image::running_in(&up, &name) {
             image::Running::No => {
                 sessions.push((i.clone(), report::Stopped::WasNotRunning));
                 continue;
@@ -541,8 +620,17 @@ pub(crate) fn down(
             }
             image::Running::Yes => {}
         }
-        match image::container_remove(backend.program(), &name) {
-            Ok(()) => sessions.push((i.clone(), report::Stopped::Yes)),
+        match image::container_remove(&backend, &name) {
+            Ok(()) => {
+                // The network goes with the container. Warned rather than
+                // counted as stuck: the session *is* down, and a network
+                // that lingers is a leftover `omh prune` finds, not a session
+                // still running.
+                if let Err(e) = image::network_remove(&backend, &paths.session_network(i)) {
+                    ctx.warn(&format!("{i}'s network was left behind: {e:#}"));
+                }
+                sessions.push((i.clone(), report::Stopped::Yes))
+            }
             // Reported and carried on rather than returned: one container that
             // will not go must not hide the ones that did. It still decides
             // the exit code below — a caller whose JSON says nothing stopped
@@ -593,6 +681,28 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         }
     };
     let base = session::default_branch(&paths.repo);
+    let ids = session::list(&paths.worktrees());
+    // Two questions asked **once** for every row below, and not at all when
+    // there are no rows: a checkout with no sessions has nothing to ask git
+    // about, and a listing that failed there would be a warning about nothing.
+    //
+    // Which sandboxes are up — `None` when there is no backend to ask; a
+    // listing that failed is carried as the failure, so each row reads
+    // `Unknown` with the reason rather than `No`. And what every session branch
+    // tracks — a listing git would not give is carried the same way: each row
+    // then reads `?` for its work, which is the rule `work_state` states.
+    let (up, upstreams): (Option<image::Listed>, session::Upstreams) = match ids.is_empty() {
+        true => (None, session::Upstreams::default()),
+        false => (
+            backend.as_ref().map(image::running_set),
+            session::upstreams(&paths.repo).unwrap_or_else(|e| {
+                ctx.warn(&format!(
+                    "could not read what the session branches track: {e:#}"
+                ));
+                session::Upstreams::default()
+            }),
+        ),
+    };
 
     // What each session is changing, asked **once** and used twice. The count
     // `work_state` renders and the paths the overlap section names are the
@@ -602,11 +712,14 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     // had just stashed.
     let mut changed: Vec<(String, Vec<String>)> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
-    let sessions: Vec<report::Session> = session::list(&paths.worktrees())
+    let sessions: Vec<report::Session> = ids
         .into_iter()
         .map(|id| {
             let sess = Session::new(&paths.worktrees(), id.clone());
             let touched = sess.changed();
+            // Behind trunk and ahead of it, from one `rev-list`: the two
+            // columns that used to be two processes per row.
+            let standing = sess.against(&paths.repo, &base);
             match &touched {
                 Ok(touched) => changed.push((id.clone(), touched.clone())),
                 // Carried, not dropped. A session omh cannot read contributes
@@ -623,8 +736,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                 // tell*. The same two-level shape `work` uses one column over,
                 // and for the same reason it gives: the mistake becomes
                 // unspellable rather than merely absent.
-                running: backend.as_ref().map(|b| {
-                    let asked = image::container_running(b.as_ref(), &paths.container(&id));
+                running: up.as_ref().map(|up| {
+                    let asked = image::running_in(up, &paths.container(&id));
                     // Say why, which the first version of this did not — it
                     // built the reason, carried it through two layers and
                     // dropped it, while both docs promised it reached stderr.
@@ -640,8 +753,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                 label: sess.label().to_string(),
                 work: Some(work_state(
                     &sess,
-                    &paths.repo,
-                    &base,
+                    &upstreams,
+                    standing.as_ref().ok().map(|s| s.ahead),
                     touched.as_ref().ok().map(Vec::len),
                 )),
                 // Not `.ok()`. The dashboard renders a failed count as a
@@ -650,8 +763,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                 // said it. `changed()` ten lines up pushes to `unreadable` for
                 // the same class of failure, and `log` prints git's own words;
                 // this was the one that threw them away.
-                behind: match sess.behind(&paths.repo, &base) {
-                    Ok(n) => Some(n),
+                behind: match &standing {
+                    Ok(s) => Some(s.behind),
                     Err(e) => {
                         ctx.warn(&format!(
                             "could not tell how far behind {base} {id} is: {e:#}"
@@ -712,7 +825,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         // session. Skipping it also saves the sweep's `ps` and its walks.
         leftovers: match only {
             // The list half; `omh s` already had the reason on stderr.
-            None => leftovers(&paths, backend.as_deref(), ctx).0,
+            None => leftovers(&paths, backend.as_ref(), ctx).0,
             Some(_) => Vec::new(),
         },
         overlaps,
@@ -739,7 +852,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
 /// and neither is a session anybody could resume or would want reported.
 pub(crate) fn leftovers(
     paths: &Paths,
-    backend: Option<&dyn runtime::Runtime>,
+    backend: Option<&runtime::Backend>,
     ctx: &out::Ctx,
 ) -> (Vec<String>, Option<String>) {
     // **Why omh could not look, when it could not.** The warning goes to
@@ -789,10 +902,7 @@ pub(crate) fn leftovers(
         // daemon that was down reported *fewer* leftovers rather than saying
         // it had not looked — the same collapse `Running` exists to prevent,
         // in the function whose whole job is to notice what is left behind.
-        match Command::new(backend.program())
-            .args(["ps", "-a", "--format", "{{.Names}}"])
-            .output()
-        {
+        match backend.output(&["ps", "-a", "--format", "{{.Names}}"]) {
             Ok(out) if out.status.success() => found.extend(
                 String::from_utf8_lossy(&out.stdout)
                     .lines()
@@ -831,8 +941,8 @@ pub(crate) fn leftovers(
 /// committing whatever else is also true of it.
 pub(crate) fn work_state(
     session: &Session,
-    repo: &std::path::Path,
-    base: &str,
+    upstreams: &session::Upstreams,
+    commits: Option<usize>,
     uncommitted: Option<usize>,
 ) -> report::Work {
     use report::Work;
@@ -842,9 +952,12 @@ pub(crate) fn work_state(
     // checkout moves and is already handled as a real case by `Session::remove`
     // — and a blank column reads as "nothing here" for a session that may be
     // holding a day of work the user is about to `s rm`.
-    // The count comes from the caller, which already asked. `None` is the same
-    // failure this used to discover for itself.
-    let (uncommitted, unpushed) = match (uncommitted, session.unpushed()) {
+    // The counts come from the caller, which already asked: `uncommitted` from
+    // the status it also reads paths from, `commits` from the `rev-list` that
+    // also answers the *behind* column, and the upstream from one listing over
+    // every branch. `None` is the same failure this used to discover for
+    // itself, one process at a time.
+    let (uncommitted, unpushed) = match (uncommitted, session.unpushed_in(upstreams)) {
         (Some(uncommitted), Ok(unpushed)) => (uncommitted, unpushed),
         _ => return Work::Unknown,
     };
@@ -857,7 +970,7 @@ pub(crate) fn work_state(
         // Nothing origin does not already have. Report the name it went out
         // under, which is what you would look for in a list of PRs — `omh/s01`
         // is not a name anybody searches for.
-        Some(_) => match session.published_as() {
+        Some(_) => match session.published_in(upstreams) {
             Ok(Some(target)) => Work::Published(target),
             Ok(None) => Work::Clean,
             Err(_) => Work::Unknown,
@@ -866,13 +979,13 @@ pub(crate) fn work_state(
         // state the loop passes through every time, between `s commit` and the
         // first `s push`. Measured against the base branch instead, because a
         // blank here reads as a session nobody touched.
-        None => match session.commits(repo, base) {
-            Ok(0) => Work::Clean,
-            Ok(n) => Work::ToPush(n),
+        None => match commits {
+            Some(0) => Work::Clean,
+            Some(n) => Work::ToPush(n),
             // The same rule as the accessors above: a git that cannot answer is
             // never rendered as an answer. `Clean` here would read as a session
             // holding nothing, over a branch nobody can count.
-            Err(_) => Work::Unknown,
+            None => Work::Unknown,
         },
     }
 }
@@ -1125,20 +1238,23 @@ pub(crate) fn run(
     // container and writes `~/.omh/facts.json`. What is already cached is used,
     // so the plan it prints is the plan a real launch would build from the same
     // knowledge.
+    // Selected once, here, and handed down — to `top_up`, to the plan's
+    // validation, and to `session_up`, which used to select its own. A dry run
+    // selects too: the plan it prints is validated against the backend's
+    // capabilities and spelled in the backend's argv.
+    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
+        runtime::installed(p)
+    })?;
     if !dry_run {
-        if let Ok(backend) = runtime::select(&crate::runtime_preference(&paths), &|p| {
-            runtime::installed(p)
-        }) {
-            sandbox.top_up(
-                &paths,
-                backend.program(),
-                &adapter,
-                &profile.sources(adapter::Capability::Hooks)?,
-                &own,
-                &repo,
-                ctx,
-            )?;
-        }
+        sandbox.top_up(
+            &paths,
+            &backend,
+            &adapter,
+            &profile.sources(adapter::Capability::Hooks)?,
+            &own,
+            &repo,
+            ctx,
+        )?;
     }
 
     let opts = container::Options {
@@ -1186,9 +1302,6 @@ pub(crate) fn run(
         opts.clone(),
     )?;
 
-    let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
-        runtime::installed(p)
-    })?;
     plan.validate(&backend.caps())?;
 
     say_rules(&plan, ctx);
@@ -1272,7 +1385,8 @@ pub(crate) fn run(
     // harness execed a binary the image does not contain. `session_up` restarts
     // on that mismatch now — a few seconds, not instant. Making it instant again
     // means one image carrying every installed harness.
-    let (backend, name) = session_up(
+    let name = session_up(
+        &backend,
         &paths,
         &profile,
         &adapter,
@@ -1423,7 +1537,7 @@ pub(crate) fn rm(
             // `drop_graph_command` has exactly one caller, this one. What is
             // skipped here is skipped for good, so it is said rather than
             // swallowed.
-            let up = image::container_running(backend.as_ref(), &name);
+            let up = image::container_running(&backend, &name);
             if let image::Running::Unknown(why) = &up {
                 ctx.warn(&format!(
                     "could not tell whether {id}'s sandbox was up, so its graph entry \
@@ -1446,8 +1560,17 @@ pub(crate) fn rm(
             // this function is about to delete, which manufactures exactly the
             // unenterable state `Probe::NotEnterable` exists for. This function's
             // own doc names `omh s rm` as the historical cause of it.
-            match image::container_remove(backend.program(), &name) {
-                Ok(()) => went.push("the container".to_string()),
+            match image::container_remove(&backend, &name) {
+                Ok(()) => {
+                    went.push("the container".to_string());
+                    match image::network_remove(&backend, &paths.session_network(id)) {
+                        Ok(()) => went.push("its network".to_string()),
+                        Err(e) => {
+                            ctx.warn(&format!("{id}'s network was left behind: {e:#}"));
+                            unreached.push("its network".to_string());
+                        }
+                    }
+                }
                 Err(e) => {
                     ctx.warn(&format!(
                         "{id}'s container would not stop, and its worktree is going: it is left \
@@ -1641,6 +1764,192 @@ mod tests {
         assert!(
             harness_for_attach(Ran::NeverRecorded, &[], &none).is_err(),
             "with nothing installed there is no default to fall back to"
+        );
+    }
+
+    // ── the launch path, without a container runtime ─────────────────────────
+    //
+    // These run `session_up`'s decisions against `Backend::scripted`. Before
+    // the seam existed the two `attach` defects of the 0.9.0 audit — a live
+    // session restarted because the host preferred another harness, and a
+    // container the daemon would not describe replaced on a guess — had no
+    // place to be written down; each is here now, red against the code that
+    // had the defect.
+
+    use crate::container::{sample_plan, Reuse};
+    use crate::runtime::{answered, Backend, Docker};
+
+    const NAME: &str = "omh-repo-s01";
+
+    fn s01() -> Session {
+        Session {
+            id: "s01".into(),
+            branch: Some("omh/s01".into()),
+            worktree: std::path::PathBuf::from("/host/worktree"),
+        }
+    }
+
+    /// What `docker inspect -f '{{json .Config.Labels}}'` prints for a
+    /// container launched from this plan.
+    fn stamped_from(plan: &container::Plan) -> String {
+        let labels: std::collections::BTreeMap<String, String> =
+            plan.labels().into_iter().collect();
+        serde_json::to_string(&labels).unwrap()
+    }
+
+    fn removed(log: &[Vec<String>]) -> bool {
+        log.iter()
+            .any(|argv| argv.starts_with(&["rm".to_string(), "-f".to_string()]))
+    }
+
+    #[test]
+    fn attaching_to_a_session_rejoins_the_harness_it_ran() {
+        let plan = sample_plan();
+        let (backend, log) = Backend::scripted(
+            Box::new(Docker),
+            vec![
+                (vec!["exec"], answered(0, "s01-claude\n", "")),
+                (vec!["inspect"], answered(0, &stamped_from(&plan), "")),
+            ],
+        );
+        let went =
+            reuse_or_replace(&backend, NAME, &plan, &s01(), "claude", &out::Ctx::plain()).unwrap();
+        assert_eq!(went, Disposition::Attach);
+        assert!(
+            !removed(&log.borrow()),
+            "a session that matches its plan is joined, never removed: {:?}",
+            log.borrow()
+        );
+    }
+
+    #[test]
+    fn a_container_the_runtime_will_not_describe_is_never_replaced() {
+        let plan = sample_plan();
+        let (backend, log) = Backend::scripted(
+            Box::new(Docker),
+            vec![
+                (vec!["exec"], answered(0, "s01-claude\n", "")),
+                (
+                    vec!["inspect"],
+                    answered(
+                        1,
+                        "",
+                        "Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+                    ),
+                ),
+            ],
+        );
+        let refused = reuse_or_replace(&backend, NAME, &plan, &s01(), "claude", &out::Ctx::plain())
+            .expect_err("an unreadable stamp is a refusal, not a restart");
+        assert!(
+            refused
+                .to_string()
+                .contains("neither attach to it nor replace it"),
+            "{refused}"
+        );
+        assert!(
+            !removed(&log.borrow()),
+            "and nothing was removed: {:?}",
+            log.borrow()
+        );
+    }
+
+    #[test]
+    fn a_session_running_another_harness_is_reported_not_restarted() {
+        let plan = sample_plan();
+        let mut other = sample_plan();
+        other.image = "omh/opencode:latest".into();
+        let (backend, log) = Backend::scripted(
+            Box::new(Docker),
+            vec![
+                (vec!["exec"], answered(0, "s01-opencode\n", "")),
+                (vec!["inspect"], answered(0, &stamped_from(&other), "")),
+            ],
+        );
+        let refused = reuse_or_replace(&backend, NAME, &plan, &s01(), "claude", &out::Ctx::plain())
+            .expect_err("a live harness blocks the restart");
+        let said = refused.to_string();
+        assert!(said.contains("opencode"), "names what is live: {said}");
+        assert!(said.contains("omh s01 down"), "and how to stop it: {said}");
+        assert!(
+            !removed(&log.borrow()),
+            "nothing live is ever removed: {:?}",
+            log.borrow()
+        );
+    }
+
+    #[test]
+    fn a_drifted_sandbox_with_nothing_live_in_it_is_replaced() {
+        let plan = sample_plan();
+        let mut other = sample_plan();
+        other.image = "omh/claude:older".into();
+        let (backend, log) = Backend::scripted(
+            Box::new(Docker),
+            vec![
+                (vec!["exec"], answered(0, "", "")),
+                (vec!["inspect"], answered(0, &stamped_from(&other), "")),
+                (vec!["rm", "-f", NAME], answered(0, "", "")),
+            ],
+        );
+        let went =
+            reuse_or_replace(&backend, NAME, &plan, &s01(), "claude", &out::Ctx::plain()).unwrap();
+        assert_eq!(went, Disposition::Replaced);
+        assert!(
+            removed(&log.borrow()),
+            "the stale container is removed: {:?}",
+            log.borrow()
+        );
+        // And the decision this rides on is still the one `container::decide`
+        // makes — the seam did not grow its own.
+        assert!(matches!(
+            reuse_decision(&backend, NAME, &plan, &s01()).unwrap(),
+            Reuse::Restart(_)
+        ));
+    }
+
+    #[test]
+    fn a_stopped_container_is_cleared_before_the_new_one_is_named() {
+        let plan = sample_plan();
+        let (backend, log) = Backend::scripted(
+            Box::new(Docker),
+            vec![
+                (vec!["rm", "-f", NAME], answered(1, "", "No such container")),
+                (vec!["run"], answered(0, "deadbeef\n", "")),
+            ],
+        );
+        start(&backend, &plan, NAME, 50022, "ssh-ed25519 AAAA omh", "s01").unwrap();
+        let log = log.borrow();
+        let cleared = log
+            .iter()
+            .position(|a| a.starts_with(&["rm".to_string(), "-f".to_string(), NAME.to_string()]));
+        let named = log.iter().position(|a| {
+            a.first().map(String::as_str) == Some("run")
+                && a.windows(2).any(|w| w[0] == "--name" && w[1] == NAME)
+        });
+        assert!(
+            cleared.is_some() && named.is_some() && cleared < named,
+            "a stopped container under the name blocks `run --name`, so it is cleared first: {log:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_the_runtime_refuses_names_the_session_and_repeats_the_reason() {
+        let plan = sample_plan();
+        let (backend, _) = Backend::scripted(
+            Box::new(Docker),
+            vec![
+                (vec!["rm", "-f", NAME], answered(0, "", "")),
+                (
+                    vec!["run"],
+                    answered(125, "", "docker: port is already allocated"),
+                ),
+            ],
+        );
+        let err = start(&backend, &plan, NAME, 50022, "ssh-ed25519 AAAA omh", "s01").unwrap_err();
+        let said = err.to_string();
+        assert!(
+            said.contains("s01") && said.contains("port is already allocated"),
+            "{said}"
         );
     }
 }

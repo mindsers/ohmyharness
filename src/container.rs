@@ -22,6 +22,10 @@ pub struct Plan {
     pub network: String,
     pub workdir: String,
     pub argv: Vec<String>,
+    /// How much of the host the sandbox may take. Part of the plan, and so of
+    /// the stamp: a limit changed in the settings is drift, and the sandbox
+    /// restarts under the new one rather than running on under the old.
+    pub limits: Limits,
     /// Capabilities the profile carries that this harness cannot express.
     pub dropped: Vec<(Capability, usize)>,
     /// Hooks this harness *nearly* expressed — it has the capability but not
@@ -34,6 +38,27 @@ pub struct Plan {
     pub rules: crate::rules::Report,
     /// Interactive harnesses need a terminal; a captured probe must not ask.
     pub tty: bool,
+}
+
+/// How much of the host the sandbox may take, from `sandbox_memory` and
+/// `sandbox_cpus`. Each is passed to the runtime as written — `4g`, `1.5` —
+/// because the runtime is the one that knows what it accepts, and `omh doctor`
+/// is where a value it rejects gets found out.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Limits {
+    pub memory: Option<String>,
+    pub cpus: Option<String>,
+}
+
+impl Limits {
+    /// The stamp `Plan::labels` carries, so a changed limit reads as drift.
+    pub fn stamp(&self) -> String {
+        format!(
+            "memory={}\ncpus={}",
+            self.memory.as_deref().unwrap_or(""),
+            self.cpus.as_deref().unwrap_or("")
+        )
+    }
 }
 
 /// What to do with the container already sitting under a session id.
@@ -326,6 +351,17 @@ pub fn plan(
         host: session.worktree.clone(),
         guest: crate::container_workdir().into(),
         read_only: false,
+        file: false,
+    });
+
+    // The sandbox's ssh host key, for the entrypoint to install as root. Read
+    // only, and the directory rather than the file, so the `.pub` rides along.
+    // `session_up` generates it before the launch; a plan that is only printed
+    // names the path either way.
+    mounts.push(Mount {
+        host: crate::ssh::host_key_dir(&paths.keys()),
+        guest: crate::ssh::GUEST_HOST_KEYS.into(),
+        read_only: true,
         file: false,
     });
 
@@ -637,6 +673,17 @@ pub fn plan(
     Ok(Plan {
         image: opts.image.clone(),
         mounts,
+        // Read here, beside the other things a launch takes from the settings,
+        // so every path that builds a plan — run, attach, doctor, auth — gets
+        // the same limits. Unset is unset: the runtime's default, not a
+        // number omh chose.
+        // An empty setting is unset, not a distinct value: `sandbox_memory = ""`
+        // must read the same as no key, or it would stamp differently and read
+        // as drift against a session launched without it.
+        limits: Limits {
+            memory: crate::policy_value(paths, "sandbox_memory").filter(|s| !s.is_empty()),
+            cpus: crate::policy_value(paths, "sandbox_cpus").filter(|s| !s.is_empty()),
+        },
         env: vec![
             ("OMH_SESSION".into(), session.id.clone()),
             // Hooks run inside the sandbox and must name the project they
@@ -660,7 +707,12 @@ pub fn plan(
                 },
             ),
         ],
-        network: paths.network(),
+        // A real session gets its own network; a scratch verb shares the
+        // per-repo one, which nothing has to remember to remove.
+        network: match session.branch.is_some() {
+            true => paths.session_network(&session.id),
+            false => paths.scratch_network(),
+        },
         workdir: crate::container_workdir().into(),
         argv: crate::persist::wrap(
             opts.persist,
@@ -1056,6 +1108,7 @@ impl Plan {
             ("omh.workdir".into(), self.workdir.clone()),
             ("omh.mounts".into(), mounts.join("\n")),
             ("omh.env".into(), env.join("\n")),
+            ("omh.limits".into(), self.limits.stamp()),
         ]
     }
 
@@ -1082,6 +1135,37 @@ impl Plan {
             parts.push(format!("dropped hooks: {}", hooks.join(", ")));
         }
         (!parts.is_empty()).then(|| parts.join("; "))
+    }
+}
+
+/// A plan with one writable worktree and one read-only capability mount.
+///
+/// Shared by the runtime tests, which read its argv, and the launch tests in
+/// `cmd::session`, which stamp a container with its labels and ask whether the
+/// launch would attach to it — so the two agree on what a plan looks like.
+#[cfg(test)]
+pub(crate) fn sample_plan() -> Plan {
+    let dir = |host: &str, guest: &str, read_only: bool| Mount {
+        host: std::path::PathBuf::from(host),
+        guest: std::path::PathBuf::from(guest),
+        read_only,
+        file: false,
+    };
+    Plan {
+        image: "omh/claude:latest".into(),
+        mounts: vec![
+            dir("/host/worktree", "/work", false),
+            dir("/host/skills", "/home/agent/.claude/skills", true),
+        ],
+        env: vec![("OMH_SESSION".into(), "s01".into())],
+        network: "omh-repo".into(),
+        workdir: "/work".into(),
+        argv: vec!["claude".into()],
+        limits: Default::default(),
+        dropped: vec![],
+        dropped_hooks: vec![],
+        rules: Default::default(),
+        tty: true,
     }
 }
 
@@ -1532,6 +1616,116 @@ mod tests {
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
     }
 
+    /// Every session gets its own network, named like its container. One
+    /// network per checkout let a service one session started be reached from
+    /// every other session of the repo, which is not what a sandbox promises.
+    /// A scratch verb (auth, doctor) shares the per-repo network rather than
+    /// getting its own that nothing removes.
+    #[test]
+    fn a_scratch_session_shares_the_per_repo_network() {
+        let fx = fixture();
+        let scratch =
+            crate::session::Session::scratch(fx.paths.root.join("scratch"), "auth".into());
+        std::fs::create_dir_all(&scratch.worktree).unwrap();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let (own, repo) = decided_from(&fx);
+        let p = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &scratch,
+            &[],
+            Options {
+                staging: Staging::Skip,
+                persist: crate::persist::Mode::None,
+                tty: false,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        assert_eq!(p.network, fx.paths.scratch_network());
+        assert_ne!(
+            p.network,
+            fx.paths.session_network("auth"),
+            "not a per-session network nothing removes"
+        );
+    }
+
+    /// An empty limit setting reads the same as no setting — not a distinct
+    /// value that would stamp differently and read as drift.
+    #[test]
+    fn an_empty_limit_setting_is_unset() {
+        let fx = fixture();
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            "sandbox_memory = \"\"\nsandbox_cpus = \"\"\n",
+        )
+        .unwrap();
+        assert_eq!(plan_for(&fx, "claude").limits, Limits::default());
+    }
+
+    #[test]
+    fn each_session_has_its_own_network() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        assert_eq!(p.network, fx.paths.session_network("s01"));
+        assert_ne!(
+            fx.paths.session_network("s01"),
+            fx.paths.session_network("s02")
+        );
+        assert_eq!(
+            p.network,
+            fx.paths.container("s01"),
+            "the network carries the container's name, so both attribute the same way"
+        );
+    }
+
+    /// The sandbox's ssh host key rides in read-only, from the per-repo key
+    /// directory, at the path the entrypoint installs it from. Read-only
+    /// because the entrypoint copies it into `/etc/ssh` as root — a bind-mounted
+    /// key would carry host ownership and sshd refuses one it does not own.
+    #[test]
+    fn the_host_key_is_mounted_read_only_where_the_entrypoint_installs_it_from() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        let m = p
+            .mounts
+            .iter()
+            .find(|m| m.guest == Path::new(crate::ssh::GUEST_HOST_KEYS))
+            .expect("the host key directory is mounted");
+        assert!(m.read_only, "{m:?}");
+        assert!(!m.file, "the directory, so the .pub rides along: {m:?}");
+        assert_eq!(m.host, crate::ssh::host_key_dir(&fx.paths.keys()));
+    }
+
+    /// `sandbox_memory` and `sandbox_cpus` are read from the settings like any
+    /// other key, and an unset key is no limit — not a default omh made up.
+    #[test]
+    fn the_sandbox_limits_come_from_the_settings() {
+        let fx = fixture();
+        assert_eq!(plan_for(&fx, "claude").limits, Limits::default());
+
+        std::fs::write(
+            fx.paths.repo.join(".omh/settings.toml"),
+            "sandbox_memory = \"4g\"\nsandbox_cpus = \"2\"\n",
+        )
+        .unwrap();
+        let p = plan_for(&fx, "claude");
+        assert_eq!(
+            p.limits,
+            Limits {
+                memory: Some("4g".into()),
+                cpus: Some("2".into()),
+            }
+        );
+    }
+
     /// `omh doctor` and `omh auth` must not be handed the user's secrets.
     ///
     /// Both borrow a writable `/work` for one command through
@@ -1891,7 +2085,7 @@ mod tests {
 
     fn fake_server_binary(fx: &Fx) -> std::path::PathBuf {
         let arch = crate::memory::deliver::target_arch(std::env::consts::ARCH).unwrap();
-        let at = crate::memory::deliver::cached_at(&fx.paths.root, arch);
+        let at = crate::memory::deliver::cached_at(&fx.paths.root, arch, env!("CARGO_PKG_VERSION"));
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
         std::fs::write(&at, b"#!/bin/sh\n").unwrap();
         at

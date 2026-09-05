@@ -1,6 +1,6 @@
 # Architecture
 
-**Status: built, except the second backend.** The on-disk layout, the image build and the runtime trait are all shipping. `sbx` is selectable and **unverified** — `runtime = "sbx"` is a valid setting and `auto` prefers it when present — but the spike that resolves file mounts, guest paths and IDE attach has not run, so Docker is the only runtime anyone has confirmed works.
+**Status: built, except the second backend.** The on-disk layout, the image build and the runtime trait are all shipping. `sbx` is selectable and **unverified** — `runtime = "sbx"` is a valid setting, and `auto` never picks it, because nobody has measured it — but the spike that resolves file mounts, guest paths and IDE attach has not run, so Docker is the only runtime anyone has confirmed works.
 
 How omh is put together: what lives where on disk, how images are built, and how
 the runtime backend is kept swappable.
@@ -89,8 +89,10 @@ About 30 seconds on first run, cached after.
 
 ### A plan must be runnable, not merely well-formed
 
-The per-project network a plan names has to be *created*, too. That gap made
-every real launch die at `network omh-<repo> not found` while every unit test
+The network a plan names — one per session, named like its container, so two
+sessions of one repo cannot reach each other's services — has to be *created*,
+too. That gap made every real launch die at `network omh-<repo> not found`
+(the per-project network of the time) while every unit test
 passed — the archetypal case for [`omh doctor`](../troubleshooting.md).
 
 ### Verified end to end
@@ -131,7 +133,8 @@ process invocation.
 ```
 
 Selection is `runtime = "auto" | "docker" | "sbx"` in `settings.toml`. `auto`
-prefers `sbx` when present.
+selects only `docker`; `sbx` is an explicit opt-in until the spike below has
+measured it, and `omh doctor` says so when it is chosen.
 
 ### Why not simply adopt `sbx`
 
@@ -173,6 +176,23 @@ From the sbx FAQ:
 Docker drew its boundary exactly where omh's product begins. They isolate; they
 deliberately do not carry your setup in. The two **compose**: `sbx` provides the
 microVM, omh gets your profile inside it.
+
+### The seam in the code
+
+`runtime::Runtime` is pure: a `Plan` in, an argv out, and nothing in it ever
+runs a process. `runtime::Backend` is the one place an argv becomes a process.
+`runtime::select` returns a `Backend`, every command that shells out to the
+runtime goes through `Backend::output`, and only the two things that need a
+`Child` — an interactive attach and a build fed its Dockerfile on stdin — take
+`program()` and spawn their own.
+
+That split is what makes the launch path testable on a machine with no
+container runtime. `Backend::scripted` answers each argv from a table and logs
+what was asked, so `cmd::session`'s launch decisions — join the running
+container, refuse to touch one the daemon will not describe, refuse to restart
+one with a live harness inside, clear a stopped one before `run --name` — each
+have a unit test, where before the seam they had a manual check against Docker
+or nothing at all.
 
 ### Declared capabilities, and honest unknowns
 

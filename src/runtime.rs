@@ -121,13 +121,67 @@ pub trait Runtime: std::fmt::Debug {
     fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String>;
 }
 
+/// What a session container may do, as Linux capabilities.
+///
+/// Everything is dropped and these come back, each for a reason the entrypoint
+/// or the agent's ordinary work needs. Docker's default grants fourteen; the
+/// six it grants that are not here — `FSETID`, `SETPCAP`, `NET_RAW`, `SYS_CHROOT`,
+/// `MKNOD`, `SETFCAP` — have no caller in the image, and `NET_RAW` in particular
+/// is what raw-socket tooling would need to spoof traffic on the session
+/// network. Anything not on the list is a request to add it, with its reason,
+/// here.
+pub const SESSION_CAPS: &[&str] = &[
+    // `sudo` in the entrypoint: becoming root to start sshd, and sshd itself
+    // dropping to `agent` for the session.
+    "SETUID",
+    "SETGID",
+    // The entrypoint's `chmod`/`chown` on files the bind mounts land with host
+    // ownership, and `install -o root` for the host key.
+    "CHOWN",
+    "FOWNER",
+    "DAC_OVERRIDE",
+    // sshd signals its own children; `omh down` and the idle reaper stop
+    // processes the agent left running.
+    "KILL",
+    // sshd binds 22.
+    "NET_BIND_SERVICE",
+    // PAM writes the login record on an ssh session; without it the attach
+    // connects and is dropped with `pam_loginuid` in the log.
+    "AUDIT_WRITE",
+];
+
+/// How many processes a session may hold. A fork bomb — or a test runner that
+/// has lost track of its children — stops at the sandbox wall instead of the
+/// host's. Two thousand is room for a large build with a watcher beside it;
+/// it is a chosen constant, not a measured limit, and it is here so that the
+/// day it is wrong the fix is one line with a reason next to it.
+pub const PIDS_LIMIT: u32 = 2048;
+
+/// The confinement every Docker `run` carries: the capability set, the process
+/// ceiling, and whatever `sandbox_memory`/`sandbox_cpus` ask for.
+///
+/// Not `--security-opt=no-new-privileges`: the entrypoint's `sudo` needs to
+/// gain privilege, and the decision was to keep sudo. A test pins that reason.
+fn confinement(plan: &Plan) -> Vec<String> {
+    let mut a: Vec<String> = vec!["--cap-drop=ALL".into()];
+    a.extend(SESSION_CAPS.iter().map(|c| format!("--cap-add={c}")));
+    a.extend(["--pids-limit".into(), PIDS_LIMIT.to_string()]);
+    if let Some(memory) = &plan.limits.memory {
+        a.extend(["--memory".into(), memory.clone()]);
+    }
+    if let Some(cpus) = &plan.limits.cpus {
+        a.extend(["--cpus".into(), cpus.clone()]);
+    }
+    a
+}
+
 #[derive(Debug)]
 pub struct Docker;
 
 #[derive(Debug)]
 pub struct Sbx;
 
-pub const NAMES: [&str; 2] = ["docker", "sbx"];
+pub const NAMES: [&str; 3] = ["docker", "podman", "sbx"];
 
 impl Runtime for Docker {
     fn name(&self) -> &'static str {
@@ -197,6 +251,7 @@ impl Runtime for Docker {
     fn args(&self, plan: &Plan) -> Vec<String> {
         // Never fetch: see `a_launch_never_fetches_an_image_it_could_not_find`.
         let mut a: Vec<String> = vec!["run".into(), "--rm".into(), "--pull=never".into()];
+        a.extend(confinement(plan));
         if plan.tty {
             a.push("-it".into());
         }
@@ -239,8 +294,7 @@ impl Runtime for Docker {
             "--name".into(),
             name.into(),
         ];
-        // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
-        // to the local network.
+        a.extend(confinement(plan));
         // Loopback only. On 0.0.0.0 this publishes a shell inside the sandbox
         // to the local network.
         a.push("-p".into());
@@ -303,6 +357,84 @@ impl Runtime for Docker {
         a.push(name.into());
         a.extend(argv.iter().cloned());
         a
+    }
+}
+
+/// The unprivileged user every image runs as, and every backend maps the
+/// worktree to. `1000` in one place: the base image asserts `id -u agent` is
+/// this, and rootless podman maps the host user to it so a bind mount is
+/// writable by the agent rather than by root.
+pub const AGENT_UID: u32 = 1000;
+
+/// The rootless-podman user-namespace mapping.
+///
+/// Docker's daemon runs as root and a bind mount is owned by whoever the host
+/// user is; rootless podman runs as the user and maps them to root *inside*
+/// the container by default, so the agent (uid 1000) could not write the
+/// worktree. `keep-id` maps the host user to a chosen guest uid instead —
+/// `agent` — which is the whole of what makes podman a drop-in here.
+fn rootless_userns() -> String {
+    format!("--userns=keep-id:uid={AGENT_UID},gid={AGENT_UID}")
+}
+
+/// Podman speaks docker's CLI, so it borrows docker's argv and adds only the
+/// rootless user-namespace mapping. Delegating rather than duplicating is the
+/// point: the two cannot drift, which is exactly what the multi-backend
+/// invariants assert.
+///
+/// Shipped as an explicit opt-in — `runtime = "podman"` — not in `auto`, until
+/// `omh doctor` has measured `podman ps --format {{.Names}}` on a real host.
+/// A rendering that collapsed every session to *not running* would end in
+/// `rm -f`, the exact failure `image::running_from` exists to prevent, so it
+/// is a measured promotion, not an assumed one.
+#[derive(Debug)]
+pub struct Podman;
+
+impl Podman {
+    fn with_userns(mut argv: Vec<String>) -> Vec<String> {
+        // After `run`, before anything else: order is irrelevant to podman but
+        // keeps the argv readable and the insertion point unambiguous.
+        argv.insert(1, rootless_userns());
+        argv
+    }
+}
+
+impl Runtime for Podman {
+    fn name(&self) -> &'static str {
+        "podman"
+    }
+    fn program(&self) -> &'static str {
+        "podman"
+    }
+    fn caps(&self) -> Caps {
+        Docker.caps()
+    }
+    fn running_args(&self) -> Vec<String> {
+        Docker.running_args()
+    }
+    fn volume_args(&self) -> Option<Vec<String>> {
+        Docker.volume_args()
+    }
+    fn running_all_args(&self) -> Option<Vec<String>> {
+        Docker.running_all_args()
+    }
+    fn network_args(&self) -> Option<Vec<String>> {
+        Docker.network_args()
+    }
+    fn image_args(&self) -> Option<Vec<String>> {
+        Docker.image_args()
+    }
+    fn args(&self, plan: &Plan) -> Vec<String> {
+        Self::with_userns(Docker.args(plan))
+    }
+    fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String> {
+        Self::with_userns(Docker.up_args(plan, name, port, pubkey))
+    }
+    fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String> {
+        Docker.exec_args(name, argv, tty)
+    }
+    fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String> {
+        Docker.exec_detached_args(name, argv)
     }
 }
 
@@ -418,11 +550,12 @@ impl Runtime for Sbx {
     }
 }
 
-/// `auto` prefers the stronger isolation when it is installed.
-pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Box<dyn Runtime>> {
+/// The backend the settings ask for, or the one measured backend under `auto`.
+pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Backend> {
     let build = |name: &str| -> Option<Box<dyn Runtime>> {
         match name {
             "docker" => Some(Box::new(Docker)),
+            "podman" => Some(Box::new(Podman)),
             "sbx" => Some(Box::new(Sbx)),
             _ => None,
         }
@@ -438,7 +571,9 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Box<
         // `docs/design` measures it, so `auto` never chooses a backend nobody
         // has run.
         if available("docker") {
-            return Ok(build("docker").expect("name from the known list"));
+            return Ok(Backend::real(
+                build("docker").expect("name from the known list"),
+            ));
         }
         anyhow::bail!(
             "no measured container runtime found — install docker, or set \
@@ -456,7 +591,7 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Box<
     if !available(preference) {
         anyhow::bail!("runtime `{preference}` is not installed");
     }
-    Ok(runtime)
+    Ok(Backend::real(runtime))
 }
 
 /// Real availability check, for the non-test path.
@@ -466,6 +601,126 @@ pub fn installed(program: &str) -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+/// A selected runtime together with the way its program is run.
+///
+/// `Runtime` stays pure — a plan in, an argv out — and this is the one place
+/// where an argv becomes a process. Production goes through `real`, which is
+/// `Command::new(program).args(argv).output()` and nothing else. Tests go
+/// through `scripted`, which answers each argv from a table and records what
+/// was asked, so the launch path can be exercised on a machine with no
+/// container runtime at all — which is how the two `attach` defects in the
+/// 0.9.0 audit went unwritten: there was no place to put the test.
+///
+/// It derefs to the runtime it wraps, so `backend.exec_args(..)` and
+/// `backend.program()` read as they always did. Interactive spawns — a tty
+/// attach, a build that pipes a Dockerfile on stdin — still take `program()`
+/// and build their own `Command`; everything that waits for an answer goes
+/// through `output`.
+pub struct Backend {
+    rt: Box<dyn Runtime>,
+    run: Box<Run>,
+}
+
+/// The runtime's argv, run and waited for.
+type Run = dyn Fn(&[String]) -> std::io::Result<std::process::Output>;
+
+impl std::fmt::Debug for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Backend")
+            .field("rt", &self.rt)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::ops::Deref for Backend {
+    type Target = dyn Runtime;
+    fn deref(&self) -> &Self::Target {
+        self.rt.as_ref()
+    }
+}
+
+impl Backend {
+    /// The runtime's program, run for real.
+    pub fn real(rt: Box<dyn Runtime>) -> Backend {
+        let program = rt.program();
+        Backend {
+            rt,
+            run: Box::new(move |args| std::process::Command::new(program).args(args).output()),
+        }
+    }
+
+    /// Run the runtime's program with these arguments and wait for it.
+    pub fn output<S: AsRef<str>>(&self, args: &[S]) -> std::io::Result<std::process::Output> {
+        let args: Vec<String> = args.iter().map(|a| a.as_ref().to_string()).collect();
+        (self.run)(&args)
+    }
+
+    /// The runtime's argv, run through some other program — a shell script
+    /// standing in for docker. For tests that want a real process to record
+    /// what was asked and answer from a file, where `scripted` would have to
+    /// know the argv in advance.
+    #[cfg(test)]
+    pub fn shimmed(rt: Box<dyn Runtime>, program: &std::path::Path) -> Backend {
+        let program = program.to_path_buf();
+        Backend {
+            rt,
+            run: Box::new(move |args| std::process::Command::new(&program).args(args).output()),
+        }
+    }
+
+    /// A backend whose program is a table.
+    ///
+    /// Each entry is an argv prefix and the answer to give when the argv asked
+    /// starts with it; the first match wins, so a specific script goes before
+    /// a general one. Every argv is appended to the returned log, matched or
+    /// not. An argv nothing scripted is a **panic naming it**, never a
+    /// default answer: a test that runs a command it did not expect has found
+    /// a behaviour it did not know about, and a silent success there is the
+    /// exact collapse `Running::Unknown` exists to keep out of production.
+    #[cfg(test)]
+    pub fn scripted(
+        rt: Box<dyn Runtime>,
+        answers: Vec<(Vec<&str>, std::process::Output)>,
+    ) -> (Backend, std::rc::Rc<std::cell::RefCell<Vec<Vec<String>>>>) {
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let asked = log.clone();
+        let answers: Vec<(Vec<String>, std::process::Output)> = answers
+            .into_iter()
+            .map(|(prefix, out)| (prefix.into_iter().map(str::to_string).collect(), out))
+            .collect();
+        let run = move |args: &[String]| {
+            asked.borrow_mut().push(args.to_vec());
+            let hit = answers
+                .iter()
+                .find(|(prefix, _)| args.starts_with(prefix))
+                .unwrap_or_else(|| panic!("nothing scripted for `{}`", args.join(" ")));
+            Ok(std::process::Output {
+                status: hit.1.status,
+                stdout: hit.1.stdout.clone(),
+                stderr: hit.1.stderr.clone(),
+            })
+        };
+        (
+            Backend {
+                rt,
+                run: Box::new(run),
+            },
+            log,
+        )
+    }
+}
+
+/// An answer for `Backend::scripted`: exit code, stdout, stderr.
+#[cfg(test)]
+pub fn answered(code: i32, stdout: &str, stderr: &str) -> std::process::Output {
+    use std::os::unix::process::ExitStatusExt;
+    std::process::Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    }
 }
 
 #[cfg(test)]
@@ -482,6 +737,7 @@ mod tests {
             network: "omh-repo".into(),
             workdir: "/work".into(),
             argv: vec!["claude".into()],
+            limits: Default::default(),
             dropped: vec![],
             dropped_hooks: vec![],
             rules: Default::default(),
@@ -591,9 +847,12 @@ mod tests {
 
     #[test]
     fn an_unknown_runtime_lists_the_real_ones() {
-        let err = select("podman", &|_| true).unwrap_err();
+        let err = select("containerd", &|_| true).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("docker") && msg.contains("sbx"), "got: {msg}");
+        assert!(
+            msg.contains("docker") && msg.contains("podman") && msg.contains("sbx"),
+            "got: {msg}"
+        );
     }
 
     // ── validation ──────────────────────────────────────────────────────────
@@ -702,7 +961,11 @@ mod tests {
         let writable: Vec<_> = plan.mounts.iter().filter(|m| !m.read_only).collect();
         assert_eq!(writable.len(), 1);
 
-        for backend in [&Docker as &dyn Runtime, &Sbx as &dyn Runtime] {
+        for backend in [
+            &Docker as &dyn Runtime,
+            &Podman as &dyn Runtime,
+            &Sbx as &dyn Runtime,
+        ] {
             let args = backend.args(&plan).join(" ");
             let ro = args.matches(":ro").count();
             assert_eq!(
@@ -715,6 +978,173 @@ mod tests {
     }
 
     // ── session containers ──────────────────────────────────────────────────
+
+    /// The session runs with the capabilities it needs and no others.
+    ///
+    /// Docker's default set is fourteen capabilities chosen for containers in
+    /// general; a sandbox whose whole job is to hold an agent that runs
+    /// arbitrary code wants the list written down with a reason per entry.
+    /// `SESSION_CAPS` is that list, and this pins the launch to it in both
+    /// directions — nothing dropped that the entrypoint needs, nothing kept
+    /// that it does not. The same for the one-off `run` doctor and auth use.
+    #[test]
+    fn the_session_drops_every_capability_it_does_not_name() {
+        for args in [
+            Docker.up_args(&sample_plan(), "n", 1, "k"),
+            Docker.args(&sample_plan()),
+        ] {
+            assert!(
+                args.iter().any(|a| a == "--cap-drop=ALL"),
+                "everything goes first: {args:?}"
+            );
+            let added: std::collections::BTreeSet<&str> = args
+                .iter()
+                .filter_map(|a| a.strip_prefix("--cap-add="))
+                .collect();
+            assert_eq!(
+                added,
+                SESSION_CAPS.iter().copied().collect(),
+                "then exactly the named set comes back"
+            );
+            for never in [
+                "SYS_ADMIN",
+                "NET_ADMIN",
+                "SYS_PTRACE",
+                "SYS_MODULE",
+                "MKNOD",
+                "NET_RAW",
+                "SYS_RAWIO",
+                "SYS_BOOT",
+                "ALL",
+            ] {
+                assert!(!added.contains(never), "{never} must not be granted");
+            }
+            assert!(
+                args.windows(2)
+                    .any(|w| w[0] == "--pids-limit" && w[1] == PIDS_LIMIT.to_string()),
+                "a fork bomb stops at the sandbox wall: {args:?}"
+            );
+        }
+    }
+
+    /// Why `no-new-privileges` is not on by default, pinned to the reason.
+    ///
+    /// The entrypoint runs sshd through `sudo`, and `no-new-privileges` is
+    /// exactly the flag that makes a setuid binary not gain privilege. The two
+    /// cannot both be true, and the decision was to keep sudo. This test goes
+    /// red the day sudo leaves the entrypoint — at which point the flag should
+    /// go on and this test should go.
+    #[test]
+    fn sudo_in_the_entrypoint_is_why_no_new_privileges_cannot_be_default() {
+        let df = crate::image::base_dockerfile(None);
+        let entrypoint: Vec<&str> = df.lines().filter(|l| l.starts_with("  '")).collect();
+        assert!(
+            entrypoint.iter().any(|l| l.contains("sudo ")),
+            "sudo has left the entrypoint: add `--security-opt=no-new-privileges` to \
+             `up_args` and `args`, and delete this test"
+        );
+        for args in [
+            Docker.up_args(&sample_plan(), "n", 1, "k"),
+            Docker.args(&sample_plan()),
+        ] {
+            assert!(
+                !args.iter().any(|a| a.contains("no-new-privileges")),
+                "sudo needs to gain privilege, so the flag would break the entrypoint: {args:?}"
+            );
+        }
+    }
+
+    /// A memory or CPU limit from the settings reaches the launch, and the
+    /// stamp — so a changed limit is drift and the sandbox restarts, rather
+    /// than running on under the old one with the new one in the file.
+    #[test]
+    fn a_resource_limit_reaches_the_launch_and_its_label() {
+        let bare = Docker.up_args(&sample_plan(), "n", 1, "k");
+        assert!(
+            !bare.iter().any(|a| a == "--memory" || a == "--cpus"),
+            "unset means the runtime's default, not a number omh invented: {bare:?}"
+        );
+
+        let mut plan = sample_plan();
+        plan.limits = crate::container::Limits {
+            memory: Some("4g".into()),
+            cpus: Some("2".into()),
+        };
+        let args = Docker.up_args(&plan, "n", 1, "k");
+        assert!(
+            args.windows(2).any(|w| w[0] == "--memory" && w[1] == "4g"),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2).any(|w| w[0] == "--cpus" && w[1] == "2"),
+            "{args:?}"
+        );
+
+        let stamped: std::collections::BTreeMap<String, String> =
+            sample_plan().labels().into_iter().collect();
+        let changed = crate::container::drift(&plan.labels(), &stamped);
+        assert!(
+            changed.iter().any(|c| c.contains("limits")),
+            "a container launched without the limit is not this plan: {changed:?}"
+        );
+    }
+
+    /// Podman carries the same information docker does, plus the rootless
+    /// user-namespace mapping — because it borrows docker's argv and adds only
+    /// that. Every flag docker sets, podman sets.
+    #[test]
+    fn podman_carries_the_same_information_as_docker() {
+        let plan = sample_plan();
+        let d_up = Docker.up_args(&plan, "n", 49200, "k");
+        let p_up = Podman.up_args(&plan, "n", 49200, "k");
+        for arg in &d_up {
+            assert!(p_up.contains(arg), "podman up_args drops docker's {arg}");
+        }
+        let d_run = Docker.args(&plan);
+        let p_run = Podman.args(&plan);
+        for arg in &d_run {
+            assert!(p_run.contains(arg), "podman args drops docker's {arg}");
+        }
+    }
+
+    /// Rootless podman maps the host user to the agent, or the bind-mounted
+    /// worktree lands owned by root and the agent cannot write it.
+    #[test]
+    fn rootless_podman_maps_the_worktree_to_the_agent() {
+        let want = format!("--userns=keep-id:uid={0},gid={0}", AGENT_UID);
+        for argv in [
+            Podman.up_args(&sample_plan(), "n", 1, "k"),
+            Podman.args(&sample_plan()),
+        ] {
+            assert!(
+                argv.contains(&want),
+                "the rootless mapping is missing: {argv:?}"
+            );
+            assert_eq!(argv[0], "run", "and it comes after `run`");
+        }
+        // Docker's daemon owns the mount, so it never asks for this.
+        assert!(
+            !Docker
+                .up_args(&sample_plan(), "n", 1, "k")
+                .iter()
+                .any(|a| a.contains("keep-id")),
+            "docker must not carry a rootless mapping"
+        );
+    }
+
+    /// The UID every backend agrees on is the one the image asserts.
+    #[test]
+    fn the_agent_uid_is_the_one_the_image_builds() {
+        let df = crate::image::base_dockerfile(None);
+        assert!(
+            df.contains("id -u agent"),
+            "the image asserts the agent's UID"
+        );
+        assert!(
+            df.contains(&format!("= \"{AGENT_UID}\"")),
+            "and it is the one the userns mapping targets: {df}"
+        );
+    }
 
     /// sshd on 0.0.0.0 publishes a shell inside the sandbox to the local
     /// network — the exact inverse of what this project is for.
@@ -793,7 +1223,11 @@ mod tests {
     #[test]
     fn the_session_records_what_it_was_built_from() {
         let plan = sample_plan();
-        for backend in [&Docker as &dyn Runtime, &Sbx as &dyn Runtime] {
+        for backend in [
+            &Docker as &dyn Runtime,
+            &Podman as &dyn Runtime,
+            &Sbx as &dyn Runtime,
+        ] {
             let args = backend.up_args(&plan, "n", 1, "k");
             for (key, value) in plan.labels() {
                 assert!(

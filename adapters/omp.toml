@@ -2,11 +2,22 @@ name = "omp"
 bin  = "omp"
 # A release binary, not a package manager. oh-my-pi ships one static executable
 # per platform and publishes no npm package, so this is `curl` where the other
-# two adapters are `npm install -g`. `latest` rather than the pinned `v17.3.3`
-# these paths were read against, for the same reason the others are unpinned:
-# an adapter that installs an old harness is a different lie from one that
-# points at the wrong path, and only the second is omh's to tell.
-install = """curl -fsSL https://github.com/can1357/oh-my-pi/releases/latest/download/omp-linux-$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) -o /usr/local/bin/omp && chmod +x /usr/local/bin/omp"""
+# two adapters are `npm install -g`. Pinned to a tagged release and verified
+# against a per-arch checksum before `chmod +x`: a release binary made
+# executable without a checksum is the supply-chain gap a pin exists to close.
+#
+# The sums under `[checksums]` are the source of truth `omh doctor` reads; the
+# install repeats the right one per arch and `sha256sum -c` refuses a download
+# that does not match. MAINTAINER: fill the real sums for this tag — the
+# placeholders below fail verification on purpose, so a build refuses rather
+# than installing an unverified binary.
+version = "17.3.3"
+install = """arch=$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) && sum=$(case "$arch" in arm64) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;; *) echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;; esac) && curl -fsSL https://github.com/can1357/oh-my-pi/releases/download/v{{version}}/omp-linux-$arch -o /usr/local/bin/omp && echo "$sum  /usr/local/bin/omp" | sha256sum -c - && chmod +x /usr/local/bin/omp"""
+
+# Per-`uname -m` SHA-256 of the release binary. MAINTAINER: replace with the
+# real sums for the pinned tag. Inline, so it stays a top-level key rather than
+# swallowing the keys below it into a `[checksums]` section.
+checksums = { x86_64 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", aarch64 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
 
 # The whole directory, and it has to be: omp keeps credentials in **SQLite**
 # (`auth_credentials`, `auth_credential_blocks` in `agent.db`), and a bind-

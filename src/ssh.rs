@@ -24,24 +24,94 @@ pub fn host_alias(repo: &str, session: &str) -> String {
 ///
 /// Derived rather than assigned so the alias keeps working across restarts —
 /// a port that moved would silently break every IDE bookmark pointing at it.
+const PORT_LOW: u16 = 49152;
+
 pub fn port(repo: &str, session: &str) -> u16 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    repo.hash(&mut h);
-    session.hash(&mut h);
-    // Ephemeral range: below 1024 needs root, and staying up here avoids
-    // stomping on anything real.
-    const LOW: u32 = 49152;
-    const SPAN: u32 = 65535 - LOW;
-    (LOW + (h.finish() % SPAN as u64) as u32) as u16
+    // FNV of `repo\0session` into the ephemeral range (below 1024 needs root).
+    // Stable across toolchains — it was `DefaultHasher`, which is explicitly
+    // not, so a compiler bump moved the port and the saved IDE bookmark
+    // stopped resolving.
+    let mut bytes = repo.as_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend_from_slice(session.as_bytes());
+    let span = u32::from(u16::MAX - PORT_LOW);
+    (u32::from(PORT_LOW) + (crate::hash::fnv1a_64(&bytes) % u64::from(span)) as u32) as u16
 }
 
-pub fn config_block(alias: &str, port: u16, key: &Path) -> String {
-    // Loopback only. On 0.0.0.0 this would publish a shell inside the sandbox
-    // to the local network, inverting the point of the project.
-    //
-    // Host keys are regenerated whenever the image is rebuilt, so pinning them
-    // would produce a mismatch warning the user cannot act on.
+/// The port a session actually uses, chosen once and remembered.
+///
+/// `port` gives a starting point; if something already holds it, walk up until
+/// free. The choice is written under the run directory so it never moves again
+/// — an IDE bookmark points at the alias, which resolves through the port, and
+/// a port that wandered between launches would break every saved window.
+pub fn assigned_port(
+    runs: &Path,
+    repo: &str,
+    session: &str,
+    taken: &dyn Fn(u16) -> bool,
+) -> Result<u16> {
+    if let Some(recorded) = recorded_port(runs, session) {
+        return Ok(recorded);
+    }
+    let mut candidate = port(repo, session);
+    for _ in 0..1024 {
+        if !taken(candidate) {
+            break;
+        }
+        candidate = if candidate == u16::MAX {
+            PORT_LOW
+        } else {
+            candidate + 1
+        };
+    }
+    let file = runs.join(session).join("port");
+    std::fs::create_dir_all(file.parent().unwrap())?;
+    std::fs::write(&file, candidate.to_string())?;
+    Ok(candidate)
+}
+
+/// The recorded port for a session, if one was written. Readers that must not
+/// probe — `attach` builds a block for a session whose port is in use by the
+/// session itself — read this, and fall back to the pure `port` for a session
+/// an older omh launched without recording one.
+pub fn recorded_port(runs: &Path, session: &str) -> Option<u16> {
+    std::fs::read_to_string(runs.join(session).join("port"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// A `taken` probe for real: the port is in use if nothing else can bind it.
+pub fn port_in_use(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+/// Where the session finds the host key omh generated: a directory, mounted
+/// read-only, holding `ssh_host_ed25519_key` and its `.pub`. The entrypoint
+/// installs both into `/etc/ssh` as root, because sshd refuses a key file it
+/// does not own and a bind mount lands with the host's ownership.
+pub const GUEST_HOST_KEYS: &str = "/omh/hostkeys";
+
+/// The per-repo directory the host key lives in, under `Paths::keys`.
+pub fn host_key_dir(keys: &Path) -> PathBuf {
+    keys.join("host")
+}
+
+/// One `Host` block: the alias, the loopback port, the client key — and the
+/// host key pinned.
+///
+/// Loopback only: on 0.0.0.0 this would publish a shell inside the sandbox to
+/// the local network, inverting the point of the project.
+///
+/// `StrictHostKeyChecking yes` against a known_hosts omh writes, keyed by
+/// `HostKeyAlias`, so that what answers on the port has to be the sandbox omh
+/// launched. The port is a hash of two public names, and any local process
+/// can listen on it; with `StrictHostKeyChecking no` — the previous setting,
+/// justified by "host keys are regenerated whenever the image is rebuilt" —
+/// whatever did was trusted. The key is omh's now, per repo, and does not
+/// change when the image does.
+pub fn config_block(alias: &str, port: u16, key: &Path, known_hosts: &Path) -> String {
     format!(
         "Host {alias}\n  \
          HostName 127.0.0.1\n  \
@@ -49,11 +119,36 @@ pub fn config_block(alias: &str, port: u16, key: &Path) -> String {
          User agent\n  \
          IdentityFile {}\n  \
          IdentitiesOnly yes\n  \
-         StrictHostKeyChecking no\n  \
-         UserKnownHostsFile /dev/null\n  \
+         HostKeyAlias {alias}\n  \
+         StrictHostKeyChecking yes\n  \
+         UserKnownHostsFile {}\n  \
          LogLevel ERROR\n",
-        key.display()
+        key.display(),
+        known_hosts.display()
     )
+}
+
+/// The known_hosts entry for one alias: `alias type key`, without the comment
+/// ssh-keygen appends to a `.pub` — a fourth field is read as part of the key.
+pub fn known_hosts_line(alias: &str, pubkey: &str) -> String {
+    let mut fields = pubkey.split_whitespace();
+    let kind = fields.next().unwrap_or("");
+    let key = fields.next().unwrap_or("");
+    format!("{alias} {kind} {key}")
+}
+
+/// omh's known_hosts, rewritten whole on every attach like the config include:
+/// one line per live session, all carrying the repo's one host key.
+pub fn write_known_hosts(path: &Path, lines: &[String]) -> Result<()> {
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let mut out =
+        String::from("# Generated by omh. Do not edit — rewritten on every `omh s attach`.\n");
+    for line in lines {
+        out.push_str(line);
+        out.push('\n');
+    }
+    std::fs::write(path, out)?;
+    Ok(())
 }
 
 /// Rewrite the managed include. Only omh's file is ever touched.
@@ -91,14 +186,23 @@ pub fn url(alias: &str) -> String {
 
 /// Per-repo key. Generated once, never leaves the host.
 pub fn ensure_key(dir: &Path) -> Result<PathBuf> {
-    let key = dir.join("id_ed25519");
+    keygen(&dir.join("id_ed25519"), "omh")
+}
+
+/// The sandbox's own host key, one per repo, made once. Every session of the
+/// checkout presents it; `write_known_hosts` pins it under each session's alias.
+pub fn ensure_host_key(keys: &Path) -> Result<PathBuf> {
+    keygen(&host_key_dir(keys).join("ssh_host_ed25519_key"), "omh-host")
+}
+
+fn keygen(key: &Path, comment: &str) -> Result<PathBuf> {
     if key.exists() {
-        return Ok(key);
+        return Ok(key.to_path_buf());
     }
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(key.parent().unwrap())?;
     let out = std::process::Command::new("ssh-keygen")
-        .args(["-t", "ed25519", "-N", "", "-C", "omh", "-f"])
-        .arg(&key)
+        .args(["-t", "ed25519", "-N", "", "-C", comment, "-f"])
+        .arg(key)
         .output()?;
     if !out.status.success() {
         anyhow::bail!(
@@ -106,7 +210,7 @@ pub fn ensure_key(dir: &Path) -> Result<PathBuf> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    Ok(key)
+    Ok(key.to_path_buf())
 }
 
 #[cfg(test)]
@@ -121,9 +225,35 @@ mod tests {
 
     /// An IDE bookmark points at the alias, and the alias resolves through the
     /// port. A port that moved between restarts would break every saved window.
+    /// Pinned FNV vectors: a toolchain bump must not move a session's port.
     #[test]
-    fn ports_are_stable_across_calls() {
-        assert_eq!(port("repo", "s01"), port("repo", "s01"));
+    fn ports_are_stable_across_toolchains() {
+        assert_eq!(port("repo", "s01"), 60466);
+        assert_eq!(port("repo", "s02"), 64997);
+        assert_eq!(port("alpha", "s01"), 51718);
+    }
+
+    #[test]
+    fn a_port_already_taken_is_not_handed_out_twice() {
+        let d = tempfile::tempdir().unwrap();
+        let base = port("repo", "s01");
+        let p = assigned_port(d.path(), "repo", "s01", &|p| p == base).unwrap();
+        assert_ne!(p, base, "the base was held, so a free one above it");
+        assert_eq!(p, base + 1);
+    }
+
+    #[test]
+    fn a_recorded_port_is_never_recomputed() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("s01")).unwrap();
+        std::fs::write(d.path().join("s01/port"), "50000").unwrap();
+        assert_eq!(
+            assigned_port(d.path(), "repo", "s01", &|_| true).unwrap(),
+            50000,
+            "the record wins over the hash and the probe"
+        );
+        assert_eq!(recorded_port(d.path(), "s01"), Some(50000));
+        assert_eq!(recorded_port(d.path(), "s02"), None);
     }
 
     #[test]
@@ -146,14 +276,24 @@ mod tests {
     /// local network, inverting the entire point of the project.
     #[test]
     fn the_host_block_binds_loopback_only() {
-        let block = config_block("omh-x-s01", 49200, Path::new("/k/id_ed25519"));
+        let block = config_block(
+            "omh-x-s01",
+            49200,
+            Path::new("/k/id_ed25519"),
+            Path::new("/k/known_hosts"),
+        );
         assert!(block.contains("HostName 127.0.0.1"), "got: {block}");
         assert!(!block.contains("0.0.0.0"));
     }
 
     #[test]
     fn the_host_block_names_the_alias_port_user_and_key() {
-        let block = config_block("omh-x-s01", 49200, Path::new("/k/id_ed25519"));
+        let block = config_block(
+            "omh-x-s01",
+            49200,
+            Path::new("/k/id_ed25519"),
+            Path::new("/k/known_hosts"),
+        );
         assert!(block.contains("Host omh-x-s01"));
         assert!(block.contains("Port 49200"));
         assert!(block.contains("User agent"));
@@ -162,11 +302,76 @@ mod tests {
 
     /// Container host keys change on every rebuild; without this every
     /// reconnect stops with a scary mismatch the user cannot act on.
+    /// The client trusts the key omh generated for the sandbox and no other.
+    ///
+    /// This used to say `StrictHostKeyChecking no` with `/dev/null` for a
+    /// known_hosts, on the reasoning that the sandbox's host key was
+    /// ephemeral. It was, and that was the hole: the port is computable by
+    /// any local process — `port()` is a hash of two public names — so
+    /// whatever listened on it was trusted with the agent's session. The key
+    /// is omh's now, per repo, mounted in and installed by the entrypoint,
+    /// and the block pins it through an alias-keyed known_hosts omh writes.
     #[test]
-    fn ephemeral_host_keys_do_not_trip_known_hosts() {
-        let block = config_block("omh-x-s01", 49200, Path::new("/k"));
-        assert!(block.contains("StrictHostKeyChecking no"));
-        assert!(block.contains("UserKnownHostsFile /dev/null"));
+    fn the_host_block_pins_the_key_omh_generated() {
+        let block = config_block(
+            "omh-x-s01",
+            49200,
+            Path::new("/k/id_ed25519"),
+            Path::new("/k/known_hosts"),
+        );
+        assert!(block.contains("StrictHostKeyChecking yes"), "got: {block}");
+        assert!(block.contains("HostKeyAlias omh-x-s01"), "got: {block}");
+        assert!(
+            block.contains("UserKnownHostsFile /k/known_hosts"),
+            "got: {block}"
+        );
+        assert!(
+            !block.contains("/dev/null"),
+            "nothing is thrown away: {block}"
+        );
+    }
+
+    /// One line per alias, carrying the key and not the comment ssh-keygen
+    /// appends — a known_hosts entry is `host type key`, and a fourth field is
+    /// read as part of the key.
+    #[test]
+    fn the_known_hosts_line_names_the_alias_and_carries_the_public_key() {
+        let line = known_hosts_line(
+            "omh-x-s01",
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample omh-host\n",
+        );
+        assert_eq!(
+            line,
+            "omh-x-s01 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample"
+        );
+    }
+
+    /// The host key is made once per repo and then reused: every session of a
+    /// checkout presents the same key, under its own alias.
+    #[test]
+    fn a_host_key_is_generated_once_per_repo() {
+        let d = tempfile::tempdir().unwrap();
+        let first = ensure_host_key(d.path()).unwrap();
+        assert!(first.exists(), "private key at {}", first.display());
+        assert!(first.with_extension("pub").exists(), "with its public half");
+        let before = std::fs::read(&first).unwrap();
+        let second = ensure_host_key(d.path()).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(before, std::fs::read(&second).unwrap(), "not regenerated");
+    }
+
+    /// The known_hosts file is omh's, rewritten whole like the config include.
+    #[test]
+    fn known_hosts_is_replaced_wholesale() {
+        let d = tempfile::tempdir().unwrap();
+        let f = d.path().join("known_hosts");
+        write_known_hosts(&f, &["omh-x-s01 ssh-ed25519 AAA".into()]).unwrap();
+        write_known_hosts(&f, &["omh-x-s02 ssh-ed25519 AAA".into()]).unwrap();
+        let body = std::fs::read_to_string(&f).unwrap();
+        assert!(
+            body.contains("omh-x-s02") && !body.contains("omh-x-s01"),
+            "{body}"
+        );
     }
 
     // ── the managed include ─────────────────────────────────────────────────

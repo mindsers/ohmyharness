@@ -193,8 +193,12 @@ esac
 
 # Stated, not enforced. omh needs a container runtime and git, and neither is
 # something an installer should be quietly putting on your machine.
+# docker or podman: `runtime = "podman"` is an explicit opt-in, so either one
+# satisfies the requirement. Not in `auto` until `omh doctor` measures podman's
+# `ps` output, which is a separate question from whether it is installed.
 missing=""
-command -v docker >/dev/null 2>&1 || missing="docker"
+{ command -v docker >/dev/null 2>&1 || command -v podman >/dev/null 2>&1; } \
+  || missing="docker or podman"
 command -v git >/dev/null 2>&1 || missing="${missing:+$missing and }git"
 if [ -n "$missing" ]; then
   say ""

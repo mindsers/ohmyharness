@@ -75,9 +75,12 @@ demonstrably still there and only its classification is missing. `--force`
 covers every refusal, so the door is never held shut; the user is asked once.
 
 **3. sshd is an attack surface pointed at yourself.** Loopback-only, per-repo
-keys, no password auth. All three are asserted by tests, because the failure
-mode of getting the bind address wrong is publishing a shell inside your sandbox
-to the local network.
+keys, no password auth. All three are asserted by tests on what omh writes — the
+publish address, the key, and the `-o PasswordAuthentication=no` family on the
+sshd line — because the failure mode of getting the bind address wrong is
+publishing a shell inside your sandbox to the local network. That sshd honours
+those flags is a fact about openssh, and `omh doctor` is where it gets proved,
+not the suite.
 
 **4. `carry_in` is read from a committed layer.** It is the only path by which a
 secret reaches the agent, so patterns are validated against escaping the repo.

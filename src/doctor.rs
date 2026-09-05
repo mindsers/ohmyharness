@@ -22,6 +22,7 @@ use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::profile::Profile;
 use anyhow::Result;
 use std::path::PathBuf;
+use tempfile::NamedTempFile;
 
 use crate::image::GUEST_HOME;
 
@@ -1030,14 +1031,13 @@ pub fn inspected_hosts() -> (Inspection, Vec<&'static str>) {
     // **Ask the tool what it does before believing anything it says.** Costs
     // one extra handshake per `omh doctor`, against the first host that would
     // be asked anyway.
-    let trustworthy =
-        match std::env::temp_dir().join(format!("omh-ca-canary-{}.pem", std::process::id())) {
-            at if std::fs::write(&at, CANARY).is_ok() => {
-                let host = FETCHES[0];
-                honours_ca_file(probe(&format!("{host}:443"), host, &at).as_deref())
-            }
-            _ => false,
-        };
+    let trustworthy = match roots_file(CANARY) {
+        Ok(at) => {
+            let host = FETCHES[0];
+            honours_ca_file(probe(&format!("{host}:443"), host, at.path()).as_deref())
+        }
+        Err(_) => false,
+    };
     if !trustworthy {
         return (
             Inspection::Unknown(
@@ -1126,7 +1126,7 @@ pub fn honours_ca_file(output: Option<&str>) -> bool {
 /// `None` rather than a guess anywhere it cannot be answered — on Linux the
 /// system store *is* the public set plus whatever was added, with no line
 /// between them, so this check does not apply there and says so.
-fn public_roots() -> Result<std::path::PathBuf, String> {
+fn public_roots() -> Result<NamedTempFile, String> {
     if !cfg!(target_os = "macos") {
         return Err(
             "omh can only tell a shipped root from an installed one on macOS — \
@@ -1160,14 +1160,29 @@ fn public_roots() -> Result<std::path::PathBuf, String> {
              as re-signed"
         ));
     }
-    // **Not a fixed name.** One path shared by every caller meant two omh
-    // processes — or the two hosts of a single run — could truncate the file
-    // while another's `openssl` was reading it. An empty root set verifies
-    // nothing, so that race produced `Private` for both hosts on an ordinary
-    // network.
-    let at = std::env::temp_dir().join(format!("omh-public-roots-{}.pem", std::process::id()));
-    std::fs::write(&at, pem).map_err(|e| format!("could not write {}: {e}", at.display()))?;
-    Ok(at)
+    roots_file(&pem)
+}
+
+/// Write a set of PEM roots to a self-cleaning temp file.
+///
+/// A `NamedTempFile`, held by the caller across the `openssl` it feeds and
+/// deleted when that value drops, so the file cannot outlive the check that
+/// wrote it. The pid-named path it replaced did, leaking one PEM per
+/// `omh doctor`, and a single shared name let two runs truncate each other's
+/// file mid-read.
+///
+/// An empty set is an error: verifying against no roots reports a clean
+/// network as re-signed, the cry-wolf every part of this check exists to
+/// avoid.
+fn roots_file(pem: &str) -> Result<NamedTempFile, String> {
+    if !pem.contains("BEGIN CERTIFICATE") {
+        return Err("no roots to verify against".into());
+    }
+    let mut file =
+        NamedTempFile::new().map_err(|e| format!("could not make a temp roots file: {e}"))?;
+    std::io::Write::write_all(&mut file, pem.as_bytes())
+        .map_err(|e| format!("could not write the roots file: {e}"))?;
+    Ok(file)
 }
 
 /// Ask whether a container would accept what this host is being served.
@@ -1182,11 +1197,13 @@ pub fn inspection_of(host: &str) -> Inspection {
 /// `inspection_of` with the endpoint spelled out, so a test can point it at a
 /// server it controls rather than at the internet.
 pub fn inspection_at(endpoint: &str, servername: &str) -> Inspection {
+    // Held across the probe: the file lives exactly as long as the `openssl`
+    // that reads it, then drops and deletes.
     let roots = match public_roots() {
         Ok(at) => at,
         Err(why) => return Inspection::Unknown(why),
     };
-    inspection(probe(endpoint, servername, &roots).as_deref())
+    inspection(probe(endpoint, servername, roots.path()).as_deref())
 }
 
 /// One `openssl s_client` handshake, verified against `roots` and nothing else.
@@ -2063,21 +2080,12 @@ mod tests {
         let got = public_roots();
         if cfg!(target_os = "macos") {
             let at = got.expect("macOS ships a root keychain omh can read");
-            let pem = std::fs::read_to_string(&at).expect("written");
+            let pem = std::fs::read_to_string(at.path()).expect("written");
             let roots = pem.matches("BEGIN CERTIFICATE").count();
             assert!(
                 roots >= 20,
                 "the shipped set should be substantial, got {roots}"
             );
-            // Per-process, so two runs cannot truncate each other's file while
-            // the other's openssl is reading it — that race read as `Private`
-            // for every host on an ordinary network.
-            let name = at.file_name().unwrap().to_string_lossy().into_owned();
-            assert!(
-                name.contains(&std::process::id().to_string()),
-                "the roots file must be this process's own: {name}"
-            );
-            let _ = std::fs::remove_file(&at);
         } else {
             let why = got.expect_err("only macOS separates shipped from installed");
             assert!(
@@ -2085,6 +2093,29 @@ mod tests {
                 "the reason must say why this platform cannot answer: {why}"
             );
         }
+    }
+
+    /// The roots file is deleted when the check that wrote it is done, and an
+    /// empty set never becomes a file at all.
+    #[test]
+    fn the_public_root_set_does_not_outlive_the_check_that_wrote_it() {
+        let pem = "-----BEGIN CERTIFICATE-----\nQUJD\n-----END CERTIFICATE-----\n";
+        let path = {
+            let file = roots_file(pem).expect("a non-empty set writes a file");
+            let path = file.path().to_path_buf();
+            assert!(path.exists(), "the file is there while the handle is held");
+            path
+        };
+        assert!(
+            !path.exists(),
+            "and gone once the check that held it is done"
+        );
+
+        assert!(
+            roots_file("").is_err(),
+            "an empty set is an error, not a file that verifies nothing"
+        );
+        assert!(roots_file("no certificates here").is_err());
     }
 
     /// **The facts that explain a failure must not be gated behind it.**
