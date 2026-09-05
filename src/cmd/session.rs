@@ -225,7 +225,13 @@ pub(crate) fn session_up(
     // The plan mounts the host key's directory; make sure there is one in it
     // before the entrypoint looks.
     ssh::ensure_host_key(&paths.keys())?;
-    let port = ssh::port(&paths.repo_name(), &session.id);
+    // Chosen once and recorded, probing for a free one only the first time.
+    let port = ssh::assigned_port(
+        &paths.runs(),
+        &paths.repo_name(),
+        &session.id,
+        &ssh::port_in_use,
+    )?;
 
     start(backend, &plan, &name, port, pubkey.trim(), &session.id)?;
     // The session's worktree is not the checkout indexed at init — it holds
@@ -407,7 +413,10 @@ pub(crate) fn attach(
         .map(|s| {
             ssh::config_block(
                 &ssh::host_alias(&paths.repo_name(), s),
-                ssh::port(&paths.repo_name(), s),
+                // The recorded port — never probe here: the session holds its
+                // own port, so a probe would walk away from it.
+                ssh::recorded_port(&paths.runs(), s)
+                    .unwrap_or_else(|| ssh::port(&paths.repo_name(), s)),
                 &key,
                 &known_hosts,
             )

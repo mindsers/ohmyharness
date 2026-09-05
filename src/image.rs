@@ -33,12 +33,7 @@ pub fn base_tag(ca: Option<&str>) -> String {
 /// Not for anything that must resist an adversary — a recipe is omh's own
 /// text, and a collision would at worst reuse a layer omh built itself.
 pub fn tag_digest(recipe: &str) -> String {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in recipe.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    format!("{hash:016x}")
+    format!("{:016x}", crate::hash::fnv1a_64(recipe.as_bytes()))
 }
 
 /// Tag includes a digest of the recipe, so a Dockerfile omh ships actually
@@ -983,6 +978,20 @@ pub fn relay(err: std::process::ChildStderr) -> String {
     log
 }
 
+/// A private, self-cleaning build context.
+///
+/// Empty, because the Dockerfile carries everything — but it must be *its
+/// own* directory: a fixed `omh-build-context` shared by every build let two
+/// running at once race to create and remove it, and one deleting it out from
+/// under the other failed a build for a reason nothing named. A `TempDir`
+/// gives each build a unique path and drops it when the build is done.
+fn build_context() -> Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("omh-build-context-")
+        .tempdir()
+        .map_err(Into::into)
+}
+
 fn build(
     backend: &Backend,
     tag: &str,
@@ -1000,11 +1009,13 @@ fn build(
     let program = backend.program();
 
     // Empty context: everything the image needs comes from the Dockerfile.
-    let context = std::env::temp_dir().join("omh-build-context");
-    std::fs::create_dir_all(&context)?;
+    // Its own temp directory, held across the build below and deleted when it
+    // drops — a single shared `omh-build-context` let two concurrent builds
+    // share one directory and race to create and remove it.
+    let context = build_context()?;
 
     let mut child = std::process::Command::new(program)
-        .args(build_args(tag, &context, kind))
+        .args(build_args(tag, context.path(), kind))
         .stdin(Stdio::piped())
         // Piped so omh can read the reason it failed, then written straight
         // back out line by line — a build is minutes long and watching it is
@@ -3371,6 +3382,26 @@ mod tests {
     #[test]
     fn an_unchanged_recipe_keeps_its_tag() {
         assert_eq!(tag_for(&claude(), None), tag_for(&claude(), None));
+    }
+
+    /// Two builds never share a build context, and each is gone when its
+    /// build is. A fixed shared directory let one build delete the other's
+    /// context mid-run.
+    #[test]
+    fn two_builds_never_share_a_build_context() {
+        let (a_path, b_path);
+        {
+            let a = build_context().unwrap();
+            let b = build_context().unwrap();
+            assert_ne!(a.path(), b.path(), "each build gets its own");
+            assert!(a.path().is_dir() && b.path().is_dir());
+            a_path = a.path().to_path_buf();
+            b_path = b.path().to_path_buf();
+        }
+        assert!(
+            !a_path.exists() && !b_path.exists(),
+            "both gone when their builds are"
+        );
     }
 
     /// The four things `sbx` requires of a kit base image. Getting these wrong

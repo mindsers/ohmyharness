@@ -24,16 +24,67 @@ pub fn host_alias(repo: &str, session: &str) -> String {
 ///
 /// Derived rather than assigned so the alias keeps working across restarts —
 /// a port that moved would silently break every IDE bookmark pointing at it.
+const PORT_LOW: u16 = 49152;
+
 pub fn port(repo: &str, session: &str) -> u16 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    repo.hash(&mut h);
-    session.hash(&mut h);
-    // Ephemeral range: below 1024 needs root, and staying up here avoids
-    // stomping on anything real.
-    const LOW: u32 = 49152;
-    const SPAN: u32 = 65535 - LOW;
-    (LOW + (h.finish() % SPAN as u64) as u32) as u16
+    // FNV of `repo\0session` into the ephemeral range (below 1024 needs root).
+    // Stable across toolchains — it was `DefaultHasher`, which is explicitly
+    // not, so a compiler bump moved the port and the saved IDE bookmark
+    // stopped resolving.
+    let mut bytes = repo.as_bytes().to_vec();
+    bytes.push(0);
+    bytes.extend_from_slice(session.as_bytes());
+    let span = u32::from(u16::MAX - PORT_LOW);
+    (u32::from(PORT_LOW) + (crate::hash::fnv1a_64(&bytes) % u64::from(span)) as u32) as u16
+}
+
+/// The port a session actually uses, chosen once and remembered.
+///
+/// `port` gives a starting point; if something already holds it, walk up until
+/// free. The choice is written under the run directory so it never moves again
+/// — an IDE bookmark points at the alias, which resolves through the port, and
+/// a port that wandered between launches would break every saved window.
+pub fn assigned_port(
+    runs: &Path,
+    repo: &str,
+    session: &str,
+    taken: &dyn Fn(u16) -> bool,
+) -> Result<u16> {
+    if let Some(recorded) = recorded_port(runs, session) {
+        return Ok(recorded);
+    }
+    let mut candidate = port(repo, session);
+    for _ in 0..1024 {
+        if !taken(candidate) {
+            break;
+        }
+        candidate = if candidate == u16::MAX {
+            PORT_LOW
+        } else {
+            candidate + 1
+        };
+    }
+    let file = runs.join(session).join("port");
+    std::fs::create_dir_all(file.parent().unwrap())?;
+    std::fs::write(&file, candidate.to_string())?;
+    Ok(candidate)
+}
+
+/// The recorded port for a session, if one was written. Readers that must not
+/// probe — `attach` builds a block for a session whose port is in use by the
+/// session itself — read this, and fall back to the pure `port` for a session
+/// an older omh launched without recording one.
+pub fn recorded_port(runs: &Path, session: &str) -> Option<u16> {
+    std::fs::read_to_string(runs.join(session).join("port"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// A `taken` probe for real: the port is in use if nothing else can bind it.
+pub fn port_in_use(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
 }
 
 /// Where the session finds the host key omh generated: a directory, mounted
@@ -174,9 +225,35 @@ mod tests {
 
     /// An IDE bookmark points at the alias, and the alias resolves through the
     /// port. A port that moved between restarts would break every saved window.
+    /// Pinned FNV vectors: a toolchain bump must not move a session's port.
     #[test]
-    fn ports_are_stable_across_calls() {
-        assert_eq!(port("repo", "s01"), port("repo", "s01"));
+    fn ports_are_stable_across_toolchains() {
+        assert_eq!(port("repo", "s01"), 60466);
+        assert_eq!(port("repo", "s02"), 64997);
+        assert_eq!(port("alpha", "s01"), 51718);
+    }
+
+    #[test]
+    fn a_port_already_taken_is_not_handed_out_twice() {
+        let d = tempfile::tempdir().unwrap();
+        let base = port("repo", "s01");
+        let p = assigned_port(d.path(), "repo", "s01", &|p| p == base).unwrap();
+        assert_ne!(p, base, "the base was held, so a free one above it");
+        assert_eq!(p, base + 1);
+    }
+
+    #[test]
+    fn a_recorded_port_is_never_recomputed() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("s01")).unwrap();
+        std::fs::write(d.path().join("s01/port"), "50000").unwrap();
+        assert_eq!(
+            assigned_port(d.path(), "repo", "s01", &|_| true).unwrap(),
+            50000,
+            "the record wins over the hash and the probe"
+        );
+        assert_eq!(recorded_port(d.path(), "s01"), Some(50000));
+        assert_eq!(recorded_port(d.path(), "s02"), None);
     }
 
     #[test]
