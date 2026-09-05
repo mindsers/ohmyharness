@@ -181,7 +181,12 @@ pub(crate) fn session_up(
     match memory::deliver::ensure(
         backend.program(),
         paths,
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+        memory::deliver::sources_at(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .as_deref(),
+        &memory::deliver::fetch,
         ctx,
     ) {
         Ok(bin) => opts.memory_bin = Some(bin),

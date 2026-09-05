@@ -2026,7 +2026,7 @@ mod tests {
 
     fn fake_server_binary(fx: &Fx) -> std::path::PathBuf {
         let arch = crate::memory::deliver::target_arch(std::env::consts::ARCH).unwrap();
-        let at = crate::memory::deliver::cached_at(&fx.paths.root, arch);
+        let at = crate::memory::deliver::cached_at(&fx.paths.root, arch, env!("CARGO_PKG_VERSION"));
         std::fs::create_dir_all(at.parent().unwrap()).unwrap();
         std::fs::write(&at, b"#!/bin/sh\n").unwrap();
         at
