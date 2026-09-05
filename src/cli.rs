@@ -574,6 +574,14 @@ pub(crate) enum SessionsCmd {
         /// still parses here until 0.10.
         #[arg(long = "allow-conflicts", alias = "force")]
         force: bool,
+        /// Land the work without running this repo's turn-end checks first.
+        ///
+        /// `omh sNN commit` runs the repo's turn-end hook commands in the
+        /// sandbox before it lands anything, and refuses on a failure — the
+        /// same checks the agent's loop runs, from the host. This skips them,
+        /// as `git commit --no-verify` skips git's.
+        #[arg(long = "no-verify")]
+        no_verify: bool,
     },
     /// Push a session's branch to origin under a name a reviewer can read.
     Push {

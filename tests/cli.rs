@@ -219,6 +219,9 @@ impl Sandbox {
                  [ -f {refuses} ] && {{ echo 'cannot connect to the daemon' >&2; exit 1; }}\n\
                  if [ \"$1\" = exec ] && [ -f {exec_refuses} ]; then \
                  cat {exec_refuses} >&2; exit 1; fi\n\
+                 if [ \"$1\" = exec ] && [ -f {check_fails} ]; then \
+                 for a in \"$@\"; do case \"$a\" in *OMHCHECK*) \
+                 echo 'check output: boom' >&2; exit 7 ;; esac; done; fi\n\
                  if [ \"$1\" = exec ]; then for a in \"$@\"; do case \"$a\" in \
                  omh-*) [ -f {bin}/live-\"$a\" ] && cat {bin}/live-\"$a\" ;; esac; \
                  done; exit 0; fi\n\
@@ -231,6 +234,7 @@ impl Sandbox {
                 refuses = self.bin.join("docker-refuses").display(),
                 exec_refuses = self.bin.join("docker-exec-refuses").display(),
                 probe_refuses = self.bin.join("docker-probe-refuses").display(),
+                check_fails = self.bin.join("docker-check-fails").display(),
                 containers = self.bin.join("containers").display(),
                 volumes = self.bin.join("volumes").display(),
                 bin = self.bin.display()
@@ -9583,6 +9587,66 @@ fn sync_removes_a_file_trunk_deleted_and_the_session_stops_claiming_it() {
         !said.contains("doomed.rs"),
         "and the session no longer claims it as its own change: {said}"
     );
+}
+
+/// A failing turn-end check refuses the commit, and `--no-verify` skips it.
+///
+/// The check runs in the sandbox as the agent's own turn-end hook would, from
+/// the host, before anything lands. End to end because the wiring — gather the
+/// repo's hooks, find the sandbox is up, run the command, read the exit — is
+/// what a unit test on `checks`/`verify` cannot connect to a real commit.
+#[test]
+fn commit_refuses_when_the_turn_end_hook_fails() {
+    let sb = sandbox();
+    sb.seed_base();
+    let worktree = sb.session("s01");
+    // A turn-end check whose command carries the marker the shim fails on.
+    std::fs::create_dir_all(sb.repo.join(".omh/hooks")).unwrap();
+    std::fs::write(
+        sb.repo.join(".omh/hooks/check.json"),
+        r#"{ "on": "turn-end", "run": "OMHCHECK" }"#,
+    )
+    .unwrap();
+    let log = sb.fake_docker();
+    // The sandbox is up, and its checks fail.
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s01")),
+    )
+    .unwrap();
+    std::fs::write(sb.bin.join("docker-check-fails"), "").unwrap();
+    sb.sandbox_repo_with_unkept_work("s01", &worktree);
+    let before = sb.head_of_branch("omh/s01");
+
+    let out = sb.omh(&["s01", "commit", "-m", "land it"]);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a failing check must refuse the commit: {err}"
+    );
+    assert!(
+        err.contains("check failed"),
+        "and say a check failed: {err}"
+    );
+    assert_eq!(
+        sb.head_of_branch("omh/s01"),
+        before,
+        "the branch did not move"
+    );
+    // The check actually ran in the sandbox — an exec carrying the marker.
+    assert!(
+        sb.docker_calls(&log).iter().any(|c| c.contains("OMHCHECK")),
+        "the check command was run in the container"
+    );
+
+    // `--no-verify` lands it anyway.
+    let out = sb.omh(&["s01", "commit", "-m", "land it", "--no-verify"]);
+    assert!(
+        out.status.success(),
+        "--no-verify skips the checks: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_ne!(sb.head_of_branch("omh/s01"), before, "and the work landed");
 }
 
 /// `commit --keep` refuses a commit holding the **value** of a carried secret,

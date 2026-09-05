@@ -820,6 +820,29 @@ is not always a conflict. A test fixture holds them on purpose. It is not
 spelled `--force`, which on `rm` answers a question about unreviewed work —
 [flags mean one thing everywhere](#flags-mean-one-thing-everywhere).
 
+### `omh sNN commit` runs this repo's checks first
+
+Before it lands anything, `omh sNN commit` runs the repo's turn-end hook
+commands inside the sandbox — the same checks the agent's own loop runs when a
+turn ends — and refuses the commit if one fails, printing what it said:
+
+```console
+$ omh s01 commit -m "Fix the tap guard"
+omh: `cargo test` failed in the sandbox — the work was not committed
+  test tap::guard ... FAILED
+omh: a check failed. Fix it, or `omh s01 commit --no-verify` to land anyway
+```
+
+A check is a `turn-end` hook that runs a command, for a stack this repo has.
+The checks run as the agent, in the running sandbox, so the answer is the one
+the agent would get — not one your host's toolchain gives. `--no-verify` skips
+them, as `git commit --no-verify` skips git's.
+
+When the sandbox is stopped, the checks are reported as **not run**, never as
+passing — a fact `omh sNN` shows, not a green light. The last result is
+recorded so `omh sNN` can show whether the work you are about to push passed
+its own checks.
+
 ### `omh sNN rm` — and what it refuses to take with it
 
 The session's branch survives a removal and its files were on disk until it

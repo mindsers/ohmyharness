@@ -7,8 +7,9 @@
 
 use crate::out;
 use crate::profile::Paths;
+use crate::profile::Profile;
 use crate::session::{self, Session};
-use crate::{config, doctor, image, report, runtime, shadow};
+use crate::{adapter, config, doctor, image, render, report, runtime, shadow, stack};
 use anyhow::{Context, Result};
 use std::process::Command;
 
@@ -972,12 +973,19 @@ pub(crate) fn commit(
     landing: Landing,
     skip_carried: bool,
     force: bool,
+    no_verify: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     let session = existing_session(&paths, id)?;
     let base = session::default_branch(&paths.repo);
     may_commit(&session.id, &session.unresolved(&base)?, force)?;
+
+    // Before anything lands: run this repo's own turn-end checks in the
+    // sandbox, and refuse the commit if one fails. `run_checks` records the
+    // outcome for `omh sNN` and bails on a failure, so the landing below is
+    // reached only for a commit that passed, was skipped, or could not be run.
+    run_checks(&paths, &session, no_verify, ctx)?;
 
     // Two ways to land the same work, and the user picks which at the moment
     // they land it. `-m` squashes the files into one commit of their own and
@@ -1183,4 +1191,350 @@ pub(crate) fn push(
         .context("running gh pr create")?;
     anyhow::ensure!(status.success(), "gh pr create did not open a pull request");
     Ok(())
+}
+
+/// Run this repo's turn-end checks in the sandbox, record the outcome, and
+/// refuse the commit if one failed.
+///
+/// The outcome is written to `runs/<id>/check.json` best-effort so `omh sNN`
+/// can show it, then a failure bails with the check's own tail on the terminal
+/// and a pointer to `--no-verify`. Everything short of a failure — skipped,
+/// stopped, no checks — is `Ok`, because those are not reasons to hold a
+/// commit, only facts the report carries.
+fn run_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::Ctx) -> Result<()> {
+    let outcome = decide_checks(paths, session, no_verify, ctx);
+    record_check(paths, &session.id, &outcome);
+    match &outcome {
+        Checked::Passed(n) => ctx.progress(&format!("checks passed ({n})")),
+        Checked::NotRun(why) => ctx.warn(&format!("checks not run — {why}")),
+        Checked::Failed { name, tail } => {
+            ctx.warn(&format!(
+                "`{name}` failed in the sandbox — the work was not committed"
+            ));
+            if !tail.is_empty() {
+                ctx.warn(tail);
+            }
+            anyhow::bail!(
+                "a check failed. Fix it, or `omh {} commit --no-verify` to land anyway",
+                session.id
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Decide what running the checks found, without recording or refusing.
+fn decide_checks(paths: &Paths, session: &Session, no_verify: bool, ctx: &out::Ctx) -> Checked {
+    if no_verify {
+        return Checked::NotRun("--no-verify");
+    }
+    let the_checks = checks_for(paths, ctx);
+    if the_checks.is_empty() {
+        return Checked::NotRun("this repo declares no turn-end checks");
+    }
+    let Ok(backend) = runtime::select(&crate::runtime_preference(paths), &|p| {
+        runtime::installed(p)
+    }) else {
+        return Checked::NotRun("no container runtime to run them in");
+    };
+    let container = paths.container(&session.id);
+    match image::container_running(&backend, &container) {
+        image::Running::Yes => verify(&backend, &container, &the_checks),
+        // A stopped or unreadable sandbox is unchecked, never passing: omh
+        // could not ask, so it did not run them.
+        _ => Checked::NotRun("the sandbox is stopped"),
+    }
+}
+
+/// The checks this repo declares, or an empty list when they cannot be read.
+///
+/// Best-effort by design: a repo whose hooks omh cannot read has its checks
+/// reported as "not run" (empty here becomes `NotRun`), never silently passed.
+fn checks_for(paths: &Paths, ctx: &out::Ctx) -> Vec<(String, String)> {
+    let defs = stack::load_all(&paths.stacks(), &paths.repo_stacks()).unwrap_or_default();
+    let detected: Vec<String> = stack::detected(&defs, &paths.repo)
+        .iter()
+        .map(|d| d.name.clone())
+        .collect();
+    let (own, repo) = match crate::cmd::session::resolved(paths) {
+        Ok(x) => x,
+        Err(e) => {
+            ctx.warn(&format!(
+                "could not read this repo's setup, so its checks went unrun — {e:#}"
+            ));
+            return Vec::new();
+        }
+    };
+    let dirs = Profile::resolve(paths)
+        .sources(adapter::Capability::Hooks)
+        .unwrap_or_default();
+    let hooks = match render::merge_hooks(&dirs, &own, &repo) {
+        Ok(h) => h,
+        Err(e) => {
+            ctx.warn(&format!(
+                "could not read this repo's hooks, so its checks went unrun — {e:#}"
+            ));
+            return Vec::new();
+        }
+    };
+    checks(&hooks, &detected)
+}
+
+/// Write the check outcome where `omh sNN` reads it, best-effort.
+fn record_check(paths: &Paths, id: &str, outcome: &Checked) {
+    let (state, detail): (&str, serde_json::Value) = match outcome {
+        Checked::Passed(n) => ("passed", serde_json::json!({ "count": n })),
+        Checked::Failed { name, .. } => ("failed", serde_json::json!({ "check": name })),
+        Checked::NotRun(why) => ("not-run", serde_json::json!({ "why": why })),
+    };
+    let record = serde_json::json!({
+        "state": state,
+        "detail": detail,
+        "at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    });
+    let dir = paths.runs().join(id);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(
+            dir.join("check.json"),
+            serde_json::to_string(&record).unwrap_or_default(),
+        );
+    }
+}
+
+/// The turn-end commands this repo's hooks declare, in name order.
+///
+/// A check is a `turn-end` hook that runs a command (`Action::Run`) and whose
+/// stack is this repo's — `None`, meaning every repo, or one `stack::detected`
+/// found here. These are the same commands the agent's own hooks run when a
+/// turn ends, so running them at commit asks the question the loop already
+/// asks, from the host, before the work lands.
+///
+/// A hook that only injects text or refuses a tool is not a check: it has no
+/// exit code to pass or fail. `detected` is the stack names, not the
+/// definitions, so the decision is pure and testable without a catalogue.
+pub(crate) fn checks(
+    hooks: &std::collections::BTreeMap<String, crate::hook::Hook>,
+    detected: &[String],
+) -> Vec<(String, String)> {
+    hooks
+        .iter()
+        .filter(|(_, h)| h.on == crate::hook::Event::TurnEnd)
+        .filter(|(_, h)| match &h.stack {
+            None => true,
+            Some(stack) => detected.iter().any(|d| d == stack),
+        })
+        .filter_map(|(name, h)| match &h.action {
+            crate::hook::Action::Run(cmd) => Some((name.clone(), cmd.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What running this repo's checks in the sandbox found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Checked {
+    /// Every check exited zero. Carries how many ran.
+    Passed(usize),
+    /// One check failed; the rest were not reached. Carries which and the
+    /// tail of what it said, for a person to read.
+    Failed { name: String, tail: String },
+    /// Nothing was run, and why — a stopped sandbox, `--no-verify`, or a repo
+    /// with no turn-end checks. Never a pass: "not run" is a fact the report
+    /// states, not a green light.
+    NotRun(&'static str),
+}
+
+/// Run each check in the running sandbox, stopping at the first failure.
+///
+/// Through `Backend::output` so it can be exercised against a scripted backend
+/// with no container. A check is `sh -c <command>` as the agent, exactly as
+/// its turn-end hook runs it; a non-zero exit — or a runtime that could not
+/// run it at all — is a failure, because a check omh could not run is not a
+/// check that passed.
+pub(crate) fn verify(
+    backend: &runtime::Backend,
+    container: &str,
+    checks: &[(String, String)],
+) -> Checked {
+    for (name, command) in checks {
+        let argv = vec!["sh".to_string(), "-c".to_string(), command.clone()];
+        match backend.output(&backend.exec_args(container, &argv, false)) {
+            Ok(out) if out.status.success() => continue,
+            Ok(out) => {
+                return Checked::Failed {
+                    name: name.clone(),
+                    tail: check_tail(&out.stdout, &out.stderr),
+                }
+            }
+            Err(e) => {
+                return Checked::Failed {
+                    name: name.clone(),
+                    tail: crate::out::untrusted(&e.to_string()),
+                }
+            }
+        }
+    }
+    Checked::Passed(checks.len())
+}
+
+/// The last few lines a failing check said, sanitised — it is the check's
+/// output, not omh's, and it goes to a terminal.
+fn check_tail(stdout: &[u8], stderr: &[u8]) -> String {
+    let both = format!(
+        "{}{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    let tail: Vec<&str> = both.lines().rev().take(20).collect();
+    crate::out::untrusted(&tail.into_iter().rev().collect::<Vec<_>>().join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hook::{Action, Event, Hook};
+    use crate::runtime::{answered, Backend, Docker};
+    use std::collections::BTreeMap;
+
+    fn hook(on: Event, stack: Option<&str>, action: Action) -> Hook {
+        Hook {
+            on,
+            stack: stack.map(str::to_string),
+            tools: Vec::new(),
+            when: None,
+            action,
+        }
+    }
+
+    /// A check is a turn-end command whose stack this repo has. A hook for
+    /// another moment, another stack, or one that only injects or refuses is
+    /// not a check.
+    #[test]
+    fn the_checks_are_the_turn_end_commands_for_this_repo() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            "test".to_string(),
+            hook(Event::TurnEnd, None, Action::Run("cargo test".into())),
+        );
+        hooks.insert(
+            "fmt".to_string(),
+            hook(
+                Event::TurnEnd,
+                Some("rust"),
+                Action::Run("cargo fmt --check".into()),
+            ),
+        );
+        hooks.insert(
+            "node-lint".to_string(),
+            hook(
+                Event::TurnEnd,
+                Some("node"),
+                Action::Run("npm run lint".into()),
+            ),
+        );
+        hooks.insert(
+            "greet".to_string(),
+            hook(Event::SessionStart, None, Action::Run("echo hi".into())),
+        );
+        hooks.insert(
+            "nudge".to_string(),
+            hook(
+                Event::TurnEnd,
+                None,
+                Action::Inject {
+                    capture: None,
+                    text: "mind the tests".into(),
+                },
+            ),
+        );
+
+        let got = checks(&hooks, &["rust".to_string()]);
+        assert_eq!(
+            got,
+            vec![
+                ("fmt".to_string(), "cargo fmt --check".to_string()),
+                ("test".to_string(), "cargo test".to_string()),
+            ],
+            "the every-repo check and the detected stack's, in name order; \
+             not node's, not session-start, not the injection"
+        );
+    }
+
+    fn a_check(cmd: &str) -> (String, String) {
+        (cmd.to_string(), cmd.to_string())
+    }
+
+    /// The checks run in order and all pass: the report says how many.
+    #[test]
+    fn a_sandbox_that_passes_its_checks_reports_how_many_ran() {
+        let checks = vec![a_check("cargo fmt --check"), a_check("cargo test")];
+        let (backend, log) =
+            Backend::scripted(Box::new(Docker), vec![(vec!["exec"], answered(0, "", ""))]);
+        assert_eq!(
+            verify(&backend, "omh-repo-s01", &checks),
+            Checked::Passed(2)
+        );
+        assert_eq!(log.borrow().len(), 2, "both checks ran: {:?}", log.borrow());
+    }
+
+    /// The first failing check stops the rest and names itself.
+    #[test]
+    fn a_failing_check_names_itself_and_stops_the_rest() {
+        let checks = vec![a_check("cargo fmt --check"), a_check("cargo test")];
+        let (backend, log) = Backend::scripted(
+            Box::new(Docker),
+            vec![(vec!["exec"], answered(1, "", "1 test failed"))],
+        );
+        match verify(&backend, "omh-repo-s01", &checks) {
+            Checked::Failed { name, tail } => {
+                assert_eq!(
+                    name, "cargo fmt --check",
+                    "the first one, by which it stopped"
+                );
+                assert!(tail.contains("1 test failed"), "with what it said: {tail}");
+            }
+            other => panic!("a failing check is a failure, got {other:?}"),
+        }
+        assert_eq!(log.borrow().len(), 1, "it stopped at the first failure");
+    }
+
+    /// A runtime that could not run a check is a failure, never a silent pass.
+    #[test]
+    fn a_check_omh_could_not_run_is_a_failure() {
+        let checks = vec![a_check("cargo test")];
+        // Scripted with no matching answer would panic; use a shim that errors.
+        let (backend, _) = Backend::scripted(
+            Box::new(Docker),
+            vec![(vec!["exec"], answered(127, "", "sh: not found"))],
+        );
+        assert!(matches!(
+            verify(&backend, "omh-repo-s01", &checks),
+            Checked::Failed { .. }
+        ));
+    }
+
+    /// No detected stack leaves only the every-repo checks.
+    #[test]
+    fn a_repo_with_no_detected_stack_still_runs_the_unconditional_checks() {
+        let mut hooks = BTreeMap::new();
+        hooks.insert(
+            "test".to_string(),
+            hook(Event::TurnEnd, None, Action::Run("cargo test".into())),
+        );
+        hooks.insert(
+            "rust-only".to_string(),
+            hook(
+                Event::TurnEnd,
+                Some("rust"),
+                Action::Run("cargo clippy".into()),
+            ),
+        );
+        assert_eq!(
+            checks(&hooks, &[]),
+            vec![("test".to_string(), "cargo test".to_string())]
+        );
+    }
 }
