@@ -1328,7 +1328,16 @@ pub enum Running {
 /// machine, written when the listing was asked per container.
 #[cfg(test)]
 pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) -> Running {
-    running_in(&listed_from(asked), name)
+    running_in(
+        &listed_from(asked, |s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        }),
+        name,
+    )
 }
 
 /// Every container that is running, or why omh could not find out.
@@ -1341,7 +1350,10 @@ pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) ->
 /// looks like too.
 pub type Listed = std::result::Result<std::collections::BTreeSet<String>, String>;
 
-pub fn listed_from(asked: std::io::Result<std::process::Output>) -> Listed {
+pub fn listed_from(
+    asked: std::io::Result<std::process::Output>,
+    names: impl Fn(&str) -> Vec<String>,
+) -> Listed {
     let out = match asked {
         Ok(out) => out,
         // The program is on `PATH` — `runtime::installed` said so before any
@@ -1360,11 +1372,8 @@ pub fn listed_from(asked: std::io::Result<std::process::Output>) -> Listed {
             &out.status,
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
+    Ok(names(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
         .collect())
 }
 
@@ -1379,7 +1388,11 @@ pub fn running_in(listed: &Listed, name: &str) -> Running {
 
 /// Ask the runtime what is running, once.
 pub fn running_set(backend: &Backend) -> Listed {
-    listed_from(backend.output(&backend.running_args()))
+    // The backend parses its own listing — docker splits lines, sbx reads the
+    // JSON and keeps only the running sandboxes.
+    listed_from(backend.output(&backend.running_args()), |s| {
+        backend.running_names(s)
+    })
 }
 
 pub fn container_running(backend: &Backend, name: &str) -> Running {
@@ -1936,11 +1949,17 @@ mod tests {
     /// `No` — so the failure has to travel with the set, as it does here.
     #[test]
     fn a_runtime_that_will_not_list_containers_is_never_read_as_none() {
-        let listed = listed_from(output(0, "omh-repo-s01\nomh-repo-s02\n", ""));
+        let lines = |s: &str| {
+            s.lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let listed = listed_from(output(0, "omh-repo-s01\nomh-repo-s02\n", ""), lines);
         assert_eq!(running_in(&listed, "omh-repo-s01"), Running::Yes);
         assert_eq!(running_in(&listed, "omh-repo-s03"), Running::No);
 
-        let failed = listed_from(output(1, "", "Cannot connect to the Docker daemon"));
+        let failed = listed_from(output(1, "", "Cannot connect to the Docker daemon"), lines);
         assert!(
             failed.is_err(),
             "a non-zero exit is a failed listing, not an empty one"
@@ -1957,7 +1976,7 @@ mod tests {
         assert!(
             matches!(
                 running_in(
-                    &listed_from(Err(std::io::Error::other("fork failed"))),
+                    &listed_from(Err(std::io::Error::other("fork failed")), lines),
                     "omh-repo-s01"
                 ),
                 Running::Unknown(_)
@@ -2058,20 +2077,21 @@ mod tests {
         assert!(why.contains("cannot connect"), "the words survive: {why:?}");
     }
 
-    /// Every backend asks the same question the same way: list what is
-    /// running, one name per line, and fail loudly rather than quietly.
-    ///
-    /// Both implementations, because `select` prefers `sbx` under `auto` — so
-    /// the unmeasured backend is the *default* one, and a third arriving with
-    /// its own spelling is how the contract rots. This asserts the shape they
-    /// share; what neither this nor any test can assert is that sbx's `ps`
-    /// behaves as assumed, which `runtime.rs` says out loud.
+    /// Every backend asks the same question — list what is *running*, by no
+    /// name — even though they spell it differently. Docker and podman say
+    /// `ps`; sbx says `ls --json` and is filtered to `status == "running"` in
+    /// `Sbx::running_names`, because `ls` alone lists stopped sandboxes too.
+    /// The shared invariant is what neither spelling may do: list everything
+    /// ever created, or take a container name the runtime could read as a
+    /// pattern. What no test can assert is that either runtime behaves as the
+    /// argv assumes, which `runtime.rs` and `omh doctor` carry instead.
     #[test]
     fn every_backend_asks_for_the_running_set_and_names_it() {
         use crate::runtime::Runtime;
+        // Docker and podman: `ps`, listing running containers by line.
         for backend in [
             &crate::runtime::Docker as &dyn Runtime,
-            &crate::runtime::Sbx as &dyn Runtime,
+            &crate::runtime::Podman as &dyn Runtime,
         ] {
             let args = backend.running_args();
             assert!(
@@ -2079,6 +2099,21 @@ mod tests {
                 "{}: the running set: {args:?}",
                 backend.name()
             );
+        }
+        // sbx: `ls --json`, filtered to running by `running_names`.
+        let sbx = crate::runtime::Sbx.running_args();
+        assert!(
+            sbx.first().is_some_and(|a| a == "ls"),
+            "sbx lists sandboxes: {sbx:?}"
+        );
+
+        // The invariant every spelling shares: running only, and no name.
+        for backend in [
+            &crate::runtime::Docker as &dyn Runtime,
+            &crate::runtime::Podman as &dyn Runtime,
+            &crate::runtime::Sbx as &dyn Runtime,
+        ] {
+            let args = backend.running_args();
             assert!(
                 !args.iter().any(|a| a == "-a"),
                 "{}: running, not every container ever created: {args:?}",
