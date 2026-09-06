@@ -55,6 +55,24 @@ pub trait Runtime: std::fmt::Debug {
     /// Run something inside an already-running session.
     fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String>;
 
+    /// Force-remove the named session container.
+    ///
+    /// `-f` on docker and podman; `--force` on sbx, which uses it both to skip
+    /// the confirmation prompt and to remove a sandbox that is still in use (an
+    /// open ssh connection). Measured against sbx 0.39.0.
+    fn remove_args(&self, name: &str) -> Vec<String> {
+        vec!["rm".into(), "-f".into(), name.into()]
+    }
+
+    /// Whether this runtime has per-session networks omh creates and reaps.
+    ///
+    /// Docker and podman put every session on an `omh-<repo>-<session>`
+    /// network. sbx isolates each sandbox in a microVM of its own and has no
+    /// network for omh to create, so the launch skips `ensure_network` for it.
+    fn uses_networks(&self) -> bool {
+        true
+    }
+
     /// How to list this runtime's named volumes, if it has such a notion.
     ///
     /// `None` for anything omh has not measured — the same posture `Sbx::caps`
@@ -590,6 +608,18 @@ impl Runtime for Sbx {
     /// not apply.
     fn stages_unmountable(&self) -> bool {
         true
+    }
+
+    /// `sbx rm SANDBOX --force` — measured 0.39.0. `--force` both skips the
+    /// confirmation and removes a sandbox still in use.
+    fn remove_args(&self, name: &str) -> Vec<String> {
+        vec!["rm".into(), name.into(), "--force".into()]
+    }
+
+    /// sbx isolates each sandbox in its own microVM and has no per-session
+    /// network for omh to create or reap.
+    fn uses_networks(&self) -> bool {
+        false
     }
 
     fn args(&self, plan: &Plan) -> Vec<String> {
@@ -1308,6 +1338,34 @@ mod tests {
             !Sbx::template_has("not json", "omh/claude:abc123"),
             "output sbx cannot parse lists nothing, so ensure loads"
         );
+    }
+
+    /// The remove verb is the runtime's own: `-f` on docker and podman,
+    /// `--force` on sbx, and the sandbox named either way.
+    #[test]
+    fn each_backend_removes_with_its_own_force_flag() {
+        assert_eq!(Docker.remove_args("omh-s01"), ["rm", "-f", "omh-s01"]);
+        assert_eq!(Podman.remove_args("omh-s01"), ["rm", "-f", "omh-s01"]);
+        let sbx = Sbx.remove_args("omh-s01");
+        assert!(sbx[0] == "rm", "the verb: {sbx:?}");
+        assert!(sbx.contains(&"--force".to_string()), "sbx forces: {sbx:?}");
+        assert!(
+            sbx.contains(&"omh-s01".to_string()),
+            "and names the sandbox: {sbx:?}"
+        );
+        assert!(
+            !sbx.contains(&"-f".to_string()),
+            "sbx has no -f short flag: {sbx:?}"
+        );
+    }
+
+    /// Docker and podman put every session on its own network; sbx isolates in
+    /// a microVM and has none, so it does not carry the network flag either.
+    #[test]
+    fn only_a_networked_backend_uses_networks() {
+        assert!(Docker.uses_networks());
+        assert!(Podman.uses_networks());
+        assert!(!Sbx.uses_networks());
     }
 
     /// The security invariant has to hold on every backend, not just the one

@@ -1329,6 +1329,11 @@ fn images_in_use(backend: &Backend) -> Vec<String> {
 /// this every launch dies at `network omh-<repo> not found` — a plan that is
 /// well-formed but not runnable.
 pub fn ensure_network(backend: &Backend, name: &str) -> Result<()> {
+    // sbx isolates each sandbox in its own microVM and has no per-session
+    // network — there is nothing to create, so this is a no-op for it.
+    if !backend.uses_networks() {
+        return Ok(());
+    }
     let present = backend
         .output(&["network", "inspect", name])
         .map(|o| o.status.success())
@@ -1761,7 +1766,7 @@ pub fn stamp_from(asked: std::io::Result<std::process::Output>) -> Stamp {
 
 /// Stopped-but-present containers block `run --name`, so clear them first.
 pub fn container_remove(backend: &Backend, name: &str) -> Result<()> {
-    let out = backend.output(&["rm", "-f", name])?;
+    let out = backend.output(&backend.remove_args(name))?;
     if !out.status.success() {
         // A sandbox that is still running still has the credential directory
         // mounted writable; reporting it stopped would be a lie that matters.
@@ -3876,6 +3881,21 @@ mod tests {
         let df = base_dockerfile(None);
         assert!(df.contains("openssh-server"), "got: {df}");
         assert!(df.contains("omh-session"), "needs a session entrypoint");
+    }
+
+    /// sbx has no per-session network, so `ensure_network` must not ask it to
+    /// inspect or create one — a scripted sbx backend that answers nothing
+    /// would panic if it were asked, so a clean return proves the no-op.
+    #[test]
+    fn ensure_network_is_a_no_op_on_a_networkless_backend() {
+        use crate::runtime::{Backend, Sbx};
+        let (sbx, asked) = Backend::scripted(Box::new(Sbx), vec![]);
+        ensure_network(&sbx, "omh-repo-s01").expect("no network to ensure");
+        assert!(
+            asked.borrow().is_empty(),
+            "sbx was asked nothing: {:?}",
+            asked.borrow()
+        );
     }
 
     /// sbx cannot build and does not share docker's image store, so `provide`
