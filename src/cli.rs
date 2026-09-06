@@ -506,6 +506,8 @@ pub(crate) enum SessionsCmd {
     ///
     /// The merge happens on the host, in your repository, and the sandbox only
     /// ever receives files — no commit of yours may enter it.
+    /// With no session named, syncs every session — stopping at the first that
+    /// needs a person. Name one (`omh s01 sync`) to sync only that one.
     Sync {
         /// Merge against this instead of the repo's default branch.
         #[arg(long)]
@@ -513,13 +515,6 @@ pub(crate) enum SessionsCmd {
         /// Stop the sandbox first, rather than refusing because it is up.
         #[arg(long)]
         down: bool,
-        /// Sync every session, stopping at the first that needs a person.
-        ///
-        /// Trunk moved once; this brings it into all of them without a command
-        /// each. Refused together with a named session — `--all` is every
-        /// session, and naming one contradicts it.
-        #[arg(long)]
-        all: bool,
     },
     /// What the agent has committed inside the sandbox, newest first.
     ///

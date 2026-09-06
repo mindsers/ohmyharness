@@ -1246,20 +1246,85 @@ fn listing_three_sessions_asks_the_runtime_once() {
     );
 }
 
-/// `--all` and a named session together is refused: one contradicts the other.
+/// A bare `omh s sync` — no session named — brings trunk into *every* session,
+/// not the most recent one. Naming no session means all of them; the hidden
+/// "last session" pick is gone.
 #[test]
-fn sync_all_refuses_a_named_session() {
+fn a_bare_sync_syncs_every_session() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let w1 = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &w1);
+    let w2 = sb.session("s02");
+    sb.sandbox_repo_with_unkept_work("s02", &w2);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::write(sb.repo.join("fromtrunk.rs"), "fn t() {}\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "trunk adds"]);
+
+    let out = sb.omh(&["s", "sync"]);
+    assert!(
+        out.status.success(),
+        "a bare sync reaches every session: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(w1.join("fromtrunk.rs").exists(), "s01 was synced");
+    assert!(w2.join("fromtrunk.rs").exists(), "s02 was synced too");
+}
+
+/// Naming a session syncs only that one — the selector still scopes to one.
+#[test]
+fn a_named_sync_touches_only_the_named_session() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let w1 = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &w1);
+    let w2 = sb.session("s02");
+    sb.sandbox_repo_with_unkept_work("s02", &w2);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::write(sb.repo.join("fromtrunk.rs"), "fn t() {}\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "trunk adds"]);
+
+    let out = sb.omh(&["s01", "sync"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(w1.join("fromtrunk.rs").exists(), "s01 synced");
+    assert!(
+        !w2.join("fromtrunk.rs").exists(),
+        "s02 was not named, so it was left alone"
+    );
+}
+
+/// `--all` is gone: absence of a session already means every session, so the
+/// flag is redundant and no longer accepted.
+#[test]
+fn sync_no_longer_takes_all() {
     let sb = sandbox();
     sb.git_init();
-    let out = sb.omh(&["s01", "sync", "--all"]);
+    let out = sb.omh(&["s", "sync", "--all"]);
     assert!(
         !out.status.success(),
-        "naming a session with --all is refused"
-    );
-    assert!(
-        String::from_utf8_lossy(&out.stderr).contains("every session"),
-        "and says why: {}",
-        String::from_utf8_lossy(&out.stderr)
+        "--all is not a flag sync has any more"
     );
 }
 

@@ -427,17 +427,12 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                 std::io::IsTerminal::is_terminal(&std::io::stdin()),
                 ctx,
             ),
-            SessionsCmd::Sync { base, down, all } => {
-                if *all {
-                    anyhow::ensure!(
-                        cli.session.is_none(),
-                        "`--all` syncs every session — name one or all, not both"
-                    );
-                    cmd::harvest::sync_all(&cwd, base.as_deref(), *down, ctx)
-                } else {
-                    cmd::harvest::sync(&cwd, cli.session.as_deref(), base.as_deref(), *down, ctx)
-                }
-            }
+            // Absence of a session means every session; naming one scopes to
+            // it. No `--all`: the selector's absence already carries that.
+            SessionsCmd::Sync { base, down } => match cli.session.as_deref() {
+                Some(id) => cmd::harvest::sync(&cwd, id, base.as_deref(), *down, ctx),
+                None => cmd::harvest::sync_all(&cwd, base.as_deref(), *down, ctx),
+            },
             SessionsCmd::Log { turns } => {
                 cmd::harvest::log_cmd(&cwd, cli.session.as_deref(), *turns, ctx)
             }

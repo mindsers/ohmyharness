@@ -31,13 +31,13 @@ use std::process::Command;
 /// steps 1-3 leaves the session exactly as it was.
 pub(crate) fn sync(
     cwd: &std::path::Path,
-    id: Option<&str>,
+    id: &str,
     base: Option<&str>,
     down: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let session = existing_session(&paths, id)?;
+    let session = existing_session(&paths, Some(id))?;
     let base = base
         .map(str::to_string)
         .unwrap_or_else(|| session::default_branch(&paths.repo));
