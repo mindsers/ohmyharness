@@ -492,16 +492,13 @@ pub(crate) enum SessionsCmd {
         args: Vec<String>,
     },
     /// Stop a sandbox. The worktree and branch survive.
-    Down {
-        /// Stop every sandbox without being asked.
-        ///
-        /// With no session named this stops all of them, which is what it is
-        /// for and also the one command whose blast radius grows with how much
-        /// work is in flight. It asks first — and a script, a pipe or CI has
-        /// nobody to answer, so this is how that answer is given in advance.
-        #[arg(long)]
-        all: bool,
-    },
+    ///
+    /// With no session named this stops every sandbox; naming one
+    /// (`omh s01 down`) stops only that one. A wide stop asks first when there
+    /// is a terminal to ask at, and proceeds without asking when there is not
+    /// (a script, a pipe, CI) — it is reversible, and omitting the selector is
+    /// the explicit way to mean all.
+    Down {},
     /// Bring the session up to date with its base branch.
     ///
     /// The merge happens on the host, in your repository, and the sandbox only

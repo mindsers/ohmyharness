@@ -63,7 +63,7 @@ A flag learned on one command is true on the next, or it is not there.
 | `--from <path>` | Read this instead of where the adapter says: `omh import`, `omh settings mcp import`. |
 | `--to <dir>` | Write here: `omh eject`. |
 | `--force` | *I have read the warning; do it anyway.* Only `omh s rm`, where the warning is about work nobody has reviewed. |
-| `--all` | Every one, not the one named: `omh use --all`, `omh s down --all`. |
+| `--all` | Every one, not the one named: `omh use --all`. On session verbs there is no `--all` — naming no session already means every session. |
 | `--dry-run` | Do none of it and show what would be done, or refuse — [above](#--dry-run). |
 | `--json` | The answer as JSON, or a refusal from a command that hands you a program and has none — [below](#what-every-command-prints). |
 

@@ -1352,8 +1352,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
                 // reader supplies is the point. That reasoning covers the
                 // six lines ending in an option that owes a value. It threw
                 // away twenty-two more that owe nothing and are complete as
-                // printed — `omh use --all`, `omh s down --all`, `omh sNN
-                // log --turns`, `omh s commit --skip-carried`. Each was
+                // printed — `omh use --all`, `omh sNN log --turns`, `omh s
+                // commit --skip-carried`. Each was
                 // breakable with the whole suite green.
                 //
                 // So the shape of the last word is not the question; clap

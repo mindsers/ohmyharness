@@ -586,7 +586,6 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
 pub(crate) fn down(
     cwd: &std::path::Path,
     id: Option<&str>,
-    all: bool,
     terminal: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
@@ -596,22 +595,26 @@ pub(crate) fn down(
     })?;
     let ids = match id {
         Some(i) => vec![i.to_string()],
+        // No session named means every session. A wide stop asks first when
+        // there is a terminal to ask at — the blast radius grows with how much
+        // is in flight — and proceeds without asking when there is not: it is
+        // reversible (worktree and branch survive), and omitting the selector
+        // is the explicit way to say all, so a script or CI that did so meant
+        // it. A declined prompt stops nothing.
         None => {
             let every = session::list(&paths.worktrees());
-            // Nothing to stop is not a question worth asking.
-            if !all && !every.is_empty() {
+            if terminal && !every.is_empty() {
                 // On stderr, like every other prompt here: the answer channel
                 // belongs to the report, and `omh s down > log` must not eat
                 // the question.
-                let agreed = terminal
-                    && ask::confirm(
-                        &format!("stop every sandbox? {} — {}", every.len(), every.join(", ")),
-                        &mut std::io::stdin().lock(),
-                        &mut std::io::stderr(),
-                    )?;
+                let agreed = ask::confirm(
+                    &format!("stop every sandbox? {} — {}", every.len(), every.join(", ")),
+                    &mut std::io::stdin().lock(),
+                    &mut std::io::stderr(),
+                )?;
                 anyhow::ensure!(
                     agreed,
-                    "nothing stopped:\n  omh s01 down       that one\n  omh s down --all   every one of them"
+                    "nothing stopped:\n  omh s01 down   stop that one\n  omh s down     stop every one of them"
                 );
             }
             every

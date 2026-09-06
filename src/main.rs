@@ -420,10 +420,9 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     launched
                 }
             }
-            SessionsCmd::Down { all } => cmd::session::down(
+            SessionsCmd::Down {} => cmd::session::down(
                 &cwd,
                 cli.session.as_deref(),
-                *all,
                 std::io::IsTerminal::is_terminal(&std::io::stdin()),
                 ctx,
             ),

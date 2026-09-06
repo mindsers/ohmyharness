@@ -6640,11 +6640,12 @@ fn the_focused_listing_is_one_session_in_the_document_too() {
 /// rule is that silence declines and a closed pipe stops — the safe answer
 /// has to be the one somebody gives when they are not there.
 ///
-/// `--all` is the way to mean it without being asked. Without that, a `down`
-/// in CI would either hang or stop everything, and both are worse than
-/// refusing.
+/// A bare `omh s down` means every session — the selector's absence carries
+/// that now, so there is no `--all`. With nobody to ask (CI, a closed pipe) a
+/// wide down proceeds rather than refusing: it is reversible (the worktree and
+/// branch survive), and omitting the selector is the explicit way to say all.
 #[test]
-fn a_wide_down_with_nobody_to_ask_stops_nothing() {
+fn a_wide_down_in_ci_stops_every_session() {
     let sb = sandbox();
     let log = sb.fake_docker();
     sb.session("s01");
@@ -6658,41 +6659,36 @@ fn a_wide_down_with_nobody_to_ask_stops_nothing() {
 
     // stdin is closed — `Command::output` nulls it — so this is the CI case.
     let out = sb.omh(&["s", "down"]);
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        !out.status.success(),
-        "a question nobody answered is not a yes: {}",
-        String::from_utf8_lossy(&out.stdout)
+        out.status.success(),
+        "a wide down proceeds with nobody to ask: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-
     let calls = sb.docker_calls(&log);
     assert!(
-        !calls.iter().any(|c| c.contains("rm")),
-        "and nothing was stopped: {calls:?}"
+        calls
+            .iter()
+            .any(|c| c.contains("rm") && c.contains(&sb.container("s01")))
+            && calls
+                .iter()
+                .any(|c| c.contains("rm") && c.contains(&sb.container("s02"))),
+        "both sessions were stopped: {calls:?}"
     );
     assert!(
-        said.contains("--all"),
-        "it names the way to mean it: {said}"
+        !String::from_utf8_lossy(&out.stderr).contains("--all"),
+        "and it never mentions a flag that no longer exists"
     );
+}
 
-    // Naming one is unchanged — this refuses a *wide* down, not `down`.
-    let one = sb.omh(&["s01", "down"]);
+/// `--all` is gone from `down` — absence already means all.
+#[test]
+fn down_no_longer_takes_all() {
+    let sb = sandbox();
+    sb.git_init();
+    let out = sb.omh(&["s", "down", "--all"]);
     assert!(
-        one.status.success(),
-        "a named session still stops: {}",
-        String::from_utf8_lossy(&one.stderr)
-    );
-    assert!(
-        sb.docker_calls(&log).iter().any(|c| c.contains("rm")),
-        "s01 really went down"
-    );
-
-    // …and so is saying you meant all of them.
-    let all = sb.omh(&["s", "down", "--all"]);
-    assert!(
-        all.status.success(),
-        "`--all` is the answer to the question: {}",
-        String::from_utf8_lossy(&all.stderr)
+        !out.status.success(),
+        "--all is not a flag down has any more"
     );
 }
 
