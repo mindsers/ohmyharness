@@ -1764,6 +1764,50 @@ pub fn stamp_from(asked: std::io::Result<std::process::Output>) -> Stamp {
     }
 }
 
+/// The plan stamp as a JSON object — the same `omh.*` facts `Plan::labels`
+/// stamps onto a docker container, for a runtime that cannot carry labels.
+pub fn stamp_json(plan: &crate::container::Plan) -> String {
+    let map: std::collections::BTreeMap<String, String> = plan.labels().into_iter().collect();
+    serde_json::to_string(&map).unwrap_or_default()
+}
+
+/// Record the stamp for a label-less runtime (sbx) at `path`, creating the
+/// parent directory. Written after the sandbox is created, so the next launch
+/// can read back what this one was built from — the role labels play for
+/// docker.
+pub fn write_stamp(path: &Path, plan: &crate::container::Plan) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, stamp_json(plan))
+}
+
+/// Read a stamp a label-less runtime recorded. A file omh wrote and can parse
+/// reads back as `Read`; a missing file (a running sandbox omh never stamped)
+/// or one it cannot read or parse is `Unknown`, so `decide` refuses to guess
+/// rather than `rm -f`-ing a sandbox on an invented reason — the same posture
+/// `stamp_from` takes for docker.
+pub fn stamp_recorded(path: &Path) -> Stamp {
+    let said = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Stamp::Unknown(crate::out::untrusted(&format!(
+                "this sandbox has no recorded stamp: {e}"
+            )))
+        }
+    };
+    match serde_json::from_str::<std::collections::BTreeMap<String, String>>(said.trim()) {
+        Ok(all) => Stamp::Read(
+            all.into_iter()
+                .filter(|(k, _)| k.starts_with("omh."))
+                .collect(),
+        ),
+        Err(e) => Stamp::Unknown(crate::out::untrusted(&format!(
+            "the recorded stamp is not readable: {e}"
+        ))),
+    }
+}
+
 /// Stopped-but-present containers block `run --name`, so clear them first.
 pub fn container_remove(backend: &Backend, name: &str) -> Result<()> {
     let out = backend.output(&backend.remove_args(name))?;
@@ -3881,6 +3925,59 @@ mod tests {
         let df = base_dockerfile(None);
         assert!(df.contains("openssh-server"), "got: {df}");
         assert!(df.contains("omh-session"), "needs a session entrypoint");
+    }
+
+    /// A label-less runtime records the same stamp docker puts in labels, in a
+    /// file beside the session, and reads it back identically — so a relaunch
+    /// off the same plan reads as no drift, and `reuse` attaches. A drifted
+    /// plan reads back as changed, exactly as a docker label would.
+    #[test]
+    fn a_recorded_stamp_reads_back_as_the_plan_that_wrote_it() {
+        use crate::container::Plan;
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("s01").join("stamp.json");
+
+        let plan = Plan {
+            image: "omh/claude:abc".into(),
+            mounts: vec![],
+            env: vec![("OMH_SESSION".into(), "s01".into())],
+            network: "omh-repo-s01".into(),
+            workdir: "/work".into(),
+            argv: vec!["claude".into()],
+            limits: Default::default(),
+            dropped: vec![],
+            dropped_hooks: vec![],
+            rules: Default::default(),
+            tty: true,
+        };
+
+        write_stamp(&path, &plan).expect("write");
+        let Stamp::Read(read) = stamp_recorded(&path) else {
+            panic!("a stamp omh wrote is readable");
+        };
+        let want: std::collections::BTreeMap<String, String> = plan.labels().into_iter().collect();
+        assert_eq!(read, want, "the recorded stamp is the plan's own labels");
+    }
+
+    /// A running sandbox with no recorded stamp — never stamped, or the file
+    /// gone — is `Unknown`, not an empty `Read`. An empty read is a confident
+    /// "nothing verifiable", which `reuse` turns into `rm -f`; `Unknown` makes
+    /// `decide` refuse and point at `resume`/`down` instead.
+    #[test]
+    fn a_missing_recorded_stamp_is_unknown_not_empty() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let missing = dir.path().join("s01").join("stamp.json");
+        assert!(
+            matches!(stamp_recorded(&missing), Stamp::Unknown(_)),
+            "a sandbox omh never stamped cannot be silently replaced"
+        );
+
+        std::fs::create_dir_all(missing.parent().unwrap()).unwrap();
+        std::fs::write(&missing, "{ not json").unwrap();
+        assert!(
+            matches!(stamp_recorded(&missing), Stamp::Unknown(_)),
+            "a damaged stamp is unknown, not an empty read"
+        );
     }
 
     /// sbx has no per-session network, so `ensure_network` must not ask it to

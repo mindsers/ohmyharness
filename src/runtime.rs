@@ -73,6 +73,17 @@ pub trait Runtime: std::fmt::Debug {
         true
     }
 
+    /// Whether the launch stamp rides on the container as labels.
+    ///
+    /// Docker and podman stamp `Plan::labels` onto the container and read it
+    /// back with `inspect` to decide attach-vs-restart. sbx has no labels
+    /// (measured 0.39.0), so omh records the same stamp beside the session
+    /// under `runs/<id>/stamp.json` and reads it from there — `container_stamp`
+    /// for the one, `stamp_recorded` for the other.
+    fn carries_labels(&self) -> bool {
+        true
+    }
+
     /// How to list this runtime's named volumes, if it has such a notion.
     ///
     /// `None` for anything omh has not measured — the same posture `Sbx::caps`
@@ -619,6 +630,12 @@ impl Runtime for Sbx {
     /// sbx isolates each sandbox in its own microVM and has no per-session
     /// network for omh to create or reap.
     fn uses_networks(&self) -> bool {
+        false
+    }
+
+    /// sbx has no labels (measured 0.39.0), so its launch stamp is recorded
+    /// beside the session in `runs/<id>/stamp.json`, not on the sandbox.
+    fn carries_labels(&self) -> bool {
         false
     }
 
