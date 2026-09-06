@@ -229,3 +229,86 @@ fine and cannot see its own profile.
 Resolving it is a one-afternoon spike — build an opencode kit, try a single-file
 mount, try attaching an IDE — and it gates whether `sbx` becomes the default or
 stays opt-in hardening. See [roadmap](roadmap.md).
+
+### Spike: `sbx` 0.39.0, measured 2026-09-06
+
+The section above was written against the `docker sandbox` Desktop plugin, which
+is **removed** (`docker sandbox` now prints a migration notice). Docker
+Sandboxes ships as a standalone CLI, `sbx`, installed with
+`brew trust docker/tap && brew install docker/tap/sbx`. This spike measured
+`sbx v0.39.0` on macOS 26 (Apple Silicon). What runs a *sandbox* needs
+`sbx login` (interactive Docker OAuth) and `sbx daemon start`; the CLI surface
+below was read without a login, and the runtime behaviours it raises are marked
+as still needing one.
+
+**Measured from the CLI (no login required):**
+
+- **Agent-aware, not command-aware.** `sbx create AGENT PATH [PATH...]` and
+  `sbx run AGENT …` take a *named* agent — `claude`, `codex`, `copilot`,
+  `cursor`, `gemini`, `opencode`, `shell`, and others — not an arbitrary argv.
+  `shell` is the bare sandbox omh would build on.
+- **Workspaces are positional, `:ro` for read-only**, and extra workspaces are
+  extra arguments (`sbx create claude . /docs:ro`). The guest path is not
+  chosen — this confirms `free_guest_paths: false`.
+- **`-t, --template IMAGE`** runs a chosen container image, and
+  `sbx template save|load|ls|rm` manages them (`sbx template load` reads a tar).
+  This is the enabler the old design lacked: **omh can hand sbx its own base
+  image** — the one that already carries sshd, the memory server and the graph
+  cache — rather than generating a kit. It removes most of the kit machinery the
+  plan sketched.
+- **`-p, --publish [[HOST_IP:]HOST_PORT:]SANDBOX_PORT[/PROTOCOL]`** on
+  `create`/`run`, and `sbx ports SANDBOX --publish …` on a running one.
+  Loopback by default (127.0.0.1), ephemeral host port when omitted — the same
+  loopback-only posture omh's Docker `up_args` keep by hand.
+- **`sbx exec [flags] SANDBOX COMMAND`** mirrors `docker exec` exactly: `-it`,
+  `-d`, `-u root`, `-e/--env`. omh's `exec_args` maps onto it with only the
+  program name changed.
+- **`-e/--env` and `--env-file`** carry environment in, so `OMH_SESSION` and
+  `OMH_GRAPH_PROJECT` ride along; **`-m/--memory` and `--cpus`** are the limits
+  omh's `sandbox_memory`/`sandbox_cpus` already express.
+- **Egress and credentials are first-class.** `--deny-network`, `--profile` and
+  `sbx policy` govern egress; `sbx secret set|import` stores *service* secrets
+  (github/anthropic/openai) that a proxy injects into API requests so **the
+  secret never enters the sandbox filesystem** — the exact "a compromised agent
+  never holds its own token" property this section wants, delivered by sbx
+  rather than built by omh. Registry secrets (`sbx secret set --registry`) pull
+  a private `--template` image without the credential entering the sandbox.
+- **`--clone`** runs the agent on an in-container git clone of the host repo
+  (mounted read-only), with the agent's commits reachable through a
+  `sandbox-<name>` git remote on the host. This is a second, sbx-native answer
+  to the isolation omh gets from a worktree plus harvest, and worth weighing
+  against omh's own model rather than layering on top of it.
+- Lifecycle verbs are all present: `ls`, `stop`, `rm`, `prune`, `cp`, `reset`,
+  `diagnose`. `sbx diagnose` runs without a login and confirmed virtualization
+  support and the daemon socket path.
+
+**The candidate omh-on-sbx model, under these answers:**
+
+1. `sbx template load` omh's base-image tar once, then
+   `sbx create shell -t omh/base:<tag> -p <port>:22 -e OMH_SESSION=sNN <worktree>`
+   — omh's own image, its own sshd, the worktree at its host path.
+2. Credentials for an API-key login go through `sbx secret set`; an OAuth login,
+   which is a file, rides a read-only host-path workspace as the weaker option,
+   documented as such.
+3. Egress is a `sbx policy` / `--deny-network` set seeded from the harness's
+   known hosts plus a `sandbox_egress` setting.
+4. The profile — skills, MCP, rules — is staged into the worktree and symlinked
+   from inside at startup, because the guest path cannot be chosen.
+
+**Still needs a login to settle (blocks the runtime rewrite and its acceptance
+test):**
+
+- Does a published loopback port actually reach an sshd the omh image's
+  entrypoint starts, so `attach` and the editors keep working? sbx has no SSH
+  model of its own; `exec` is its entry, which is what [Issue B](https://github.com/mindsers/ohmyharness/issues/109) (`omh sNN
+  shell`) would use where the port does not.
+- Does the home directory persist across `stop`/`run`?
+- Does omh's base image run unmodified as a `--template`, meeting the same
+  contract the base already asserts (agent at UID 1000, passwordless sudo)?
+- The acceptance test itself: `omh doctor --harness claude` with
+  `runtime = "sbx"`, which needs a real sandbox and so a `sbx login`.
+
+Until that login is run, `Sbx` in `runtime.rs` stays provisional and `auto`
+never selects it — the posture this section already describes, now backed by a
+measured CLI rather than the removed plugin's.
+
