@@ -5501,9 +5501,12 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
         // Wrapped, so the macro line carries no text of its own — the
         // only one of these where the file alone has to do it.
         ("src/facts.rs", "eprintln!("),
-        ("src/image.rs", "this repo's toolchain, first run only"),
-        ("src/image.rs", "(first run only)"),
-        ("src/image.rs", "omh: building {t}"),
+        // The three build-note prints in `ensure`/`ensure_stack` were folded
+        // into one `provide`, which `eprintln!`s the note it is handed — so
+        // the two `provide`/`provide_to_sbx` sites carry the same debt the old
+        // three did, under one text. The sbx delivery adds one note of its own.
+        ("src/image.rs", "omh: {note}"),
+        ("src/image.rs", "loading {tag} into the sbx template store"),
         ("src/image.rs", "could not list images to reap"),
         ("src/image.rs", "this build replaced"),
     ];
@@ -5548,9 +5551,11 @@ fn no_command_writes_to_a_stream_behind_the_output_layer() {
     }
     assert_eq!(
         named.len(),
-        9,
-        "the debt register grew. Two exemptions and seven sites owed a \
-         `Ctx` — an eighth owed site is a fix, not an entry"
+        8,
+        "the debt register grew. Two exemptions and six owed sites — the sbx \
+         delivery folded three build-note prints into `provide` (one text) and \
+         added the template-load note beside it. A ninth owed site is a fix, \
+         not an entry"
     );
     // The comment above `relayed` says it "may not quietly become a second
     // way in", and nothing made that true: only `named` was counted, so

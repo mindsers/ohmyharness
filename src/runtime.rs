@@ -642,6 +642,48 @@ impl Sbx {
     }
 }
 
+/// sbx has its own image store and cannot build: omh builds the image with
+/// docker, `docker save`s it to a tar, and loads that here (measured 0.39.0,
+/// `sbx template load FILE`). These describe that delivery for `image::ensure`
+/// to drive, and the check that answers whether it has already happened.
+impl Sbx {
+    /// `sbx template ls --json`: `{"images":[{"repository","tag",…}]}`.
+    pub fn template_ls_args() -> Vec<String> {
+        vec!["template".into(), "ls".into(), "--json".into()]
+    }
+
+    /// `sbx template load FILE`, the tar `docker save -o FILE <tag>` wrote.
+    pub fn template_load_args(tar: &std::path::Path) -> Vec<String> {
+        vec!["template".into(), "load".into(), tar.display().to_string()]
+    }
+
+    /// Whether `sbx template ls --json` already lists `tag` (`omh/claude:<d>`).
+    /// sbx may store it under a registry-prefixed repository
+    /// (`docker.io/library/omh/claude`), so the repository is matched on a path
+    /// boundary — `omh/claude` matches `docker.io/library/omh/claude` but not
+    /// `notomh/claude` — and the tag exactly.
+    pub fn template_has(stdout: &str, tag: &str) -> bool {
+        let Some((want_repo, want_tag)) = tag.rsplit_once(':') else {
+            return false;
+        };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(stdout) else {
+            return false;
+        };
+        doc.get("images")
+            .and_then(|i| i.as_array())
+            .into_iter()
+            .flatten()
+            .any(|img| {
+                let repo = img
+                    .get("repository")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let t = img.get("tag").and_then(|v| v.as_str()).unwrap_or_default();
+                t == want_tag && (repo == want_repo || repo.ends_with(&format!("/{want_repo}")))
+            })
+    }
+}
+
 /// The workspace positionals: `<host>` or `<host>:ro`, in path order.
 fn workspace_args(staging: &SbxStaging) -> Vec<String> {
     staging
@@ -1169,6 +1211,48 @@ mod tests {
     fn unparseable_sbx_output_names_nothing() {
         assert!(Sbx.running_names("not json at all").is_empty());
         assert!(Sbx.running_names("{\"other\":1}").is_empty());
+    }
+
+    /// sbx cannot build, so omh delivers the docker-built image as a template
+    /// tar. The load reads a file (measured `sbx template load FILE`), never
+    /// stdin, so the argv names the tar path.
+    #[test]
+    fn the_template_load_names_the_tar_docker_saved() {
+        let args = Sbx::template_load_args(std::path::Path::new("/tmp/omh.tar"));
+        assert_eq!(args, ["template", "load", "/tmp/omh.tar"]);
+        assert_eq!(Sbx::template_ls_args(), ["template", "ls", "--json"]);
+    }
+
+    /// The delivery is idempotent: `template_has` reads `sbx template ls
+    /// --json` (measured shape) and reports whether the tag is already loaded,
+    /// so `ensure` loads it once. A registry prefix on the repository must not
+    /// hide a match, and a repository that merely ends in the same letters
+    /// (`notomh/claude`) must not forge one.
+    #[test]
+    fn a_loaded_template_is_recognised_across_a_registry_prefix() {
+        let json = r#"{"images":[
+            {"repository":"docker.io/library/debian","tag":"bookworm-slim"},
+            {"repository":"docker.io/library/omh/claude","tag":"abc123"}
+        ]}"#;
+        assert!(Sbx::template_has(json, "omh/claude:abc123"));
+        assert!(
+            !Sbx::template_has(json, "omh/claude:different"),
+            "the tag must match, not just the repository"
+        );
+        assert!(
+            !Sbx::template_has(json, "omh/base:abc123"),
+            "another repository on the same tag is not this image"
+        );
+
+        let forged = r#"{"images":[{"repository":"notomh/claude","tag":"abc123"}]}"#;
+        assert!(
+            !Sbx::template_has(forged, "omh/claude:abc123"),
+            "a repository must match on a path boundary, not a suffix"
+        );
+        assert!(
+            !Sbx::template_has("not json", "omh/claude:abc123"),
+            "output sbx cannot parse lists nothing, so ensure loads"
+        );
     }
 
     /// The security invariant has to hold on every backend, not just the one

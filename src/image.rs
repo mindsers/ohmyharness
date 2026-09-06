@@ -684,14 +684,14 @@ pub fn ensure_stack(
 ) -> Result<String> {
     ensure(backend, adapter, ca)?;
     let tag = stack_tag(adapter, installs, ca);
-    if tag != tag_for(adapter, ca) && !exists(backend, &tag) {
-        eprintln!("omh: building {tag} — this repo's toolchain, first run only");
-        build(
+    if tag != tag_for(adapter, ca) {
+        provide(
             backend,
             &tag,
             &stack_dockerfile(adapter, installs, ca),
             &Kind::Stack(adapter, repo),
             ca,
+            &format!("building {tag} — this repo's toolchain, first run only"),
         )?;
     }
     Ok(tag)
@@ -863,22 +863,115 @@ pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
 /// straight to the terminal: a multi-minute silent step reads as a hang.
 pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<()> {
     let base = base_tag(ca);
-    if !exists(backend, &base) {
-        eprintln!("omh: building {base} (first run only)");
-        build(backend, &base, &base_dockerfile(ca), &Kind::Base, ca)?;
-    }
+    provide(
+        backend,
+        &base,
+        &base_dockerfile(ca),
+        &Kind::Base,
+        ca,
+        &format!("building {base} (first run only)"),
+    )?;
     let t = tag_for(adapter, ca);
-    if !exists(backend, &t) {
-        eprintln!("omh: building {t}");
-        build(
-            backend,
-            &t,
-            &harness_dockerfile(adapter, ca),
-            &Kind::Harness(adapter),
-            ca,
-        )?;
+    provide(
+        backend,
+        &t,
+        &harness_dockerfile(adapter, ca),
+        &Kind::Harness(adapter),
+        ca,
+        &format!("building {t}"),
+    )?;
+    Ok(())
+}
+
+/// Make `tag` available to `backend`, building it if it is not there yet.
+///
+/// For a runtime that builds its own images (docker, podman) that is a build
+/// in place, checked with `image inspect`. sbx does neither: it cannot build,
+/// and its templates live in a store of their own. So an sbx backend is routed
+/// to `provide_to_sbx`, which builds with docker and loads the result — the
+/// measured `docker save … | sbx template load` delivery, run as two waited
+/// commands rather than a pipe. `note` prints once, and only when a build
+/// actually runs.
+fn provide(
+    backend: &Backend,
+    tag: &str,
+    dockerfile: &str,
+    kind: &Kind,
+    ca: Option<&str>,
+    note: &str,
+) -> Result<()> {
+    if backend.name() == crate::runtime::Runtime::name(&crate::runtime::Sbx) {
+        return provide_to_sbx(backend, tag, dockerfile, kind, ca, note);
+    }
+    if !exists(backend, tag) {
+        eprintln!("omh: {note}");
+        build(backend, tag, dockerfile, kind, ca)?;
     }
     Ok(())
+}
+
+/// Deliver `tag` into sbx's template store: build it with docker if docker
+/// lacks it, `docker save` it to a tar, and `sbx template load` that tar.
+/// Idempotent — a tag already in the store is left alone, so a second launch
+/// neither rebuilds nor reloads.
+fn provide_to_sbx(
+    sbx: &Backend,
+    tag: &str,
+    dockerfile: &str,
+    kind: &Kind,
+    ca: Option<&str>,
+    note: &str,
+) -> Result<()> {
+    use anyhow::Context;
+    if template_exists(sbx, tag) {
+        return Ok(());
+    }
+    // sbx cannot build; docker does, into its own store, and the tar bridges
+    // the two. If docker is missing this is where an sbx session fails, which
+    // is a prerequisite `omh doctor` reports rather than a launch surprise.
+    let docker = Backend::real(Box::new(crate::runtime::Docker));
+    if !exists(&docker, tag) {
+        eprintln!("omh: {note}");
+        build(&docker, tag, dockerfile, kind, ca)?;
+    }
+    let staging = tempfile::tempdir().context("staging the template tar")?;
+    let tar = staging.path().join("image.tar");
+    let saved = docker
+        .output(&[
+            "save".to_string(),
+            "-o".to_string(),
+            tar.display().to_string(),
+            tag.to_string(),
+        ])
+        .context("docker save for the sbx template")?;
+    anyhow::ensure!(
+        saved.status.success(),
+        "docker save {tag} failed: {}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    eprintln!("omh: loading {tag} into the sbx template store");
+    let loaded = sbx
+        .output(&crate::runtime::Sbx::template_load_args(&tar))
+        .context("sbx template load")?;
+    anyhow::ensure!(
+        loaded.status.success(),
+        "sbx template load failed: {}",
+        String::from_utf8_lossy(&loaded.stderr)
+    );
+    Ok(())
+}
+
+/// Whether `sbx template ls --json` already lists `tag`. Output sbx could not
+/// produce or omh could not parse is read as *not loaded*, so `provide` loads
+/// rather than skipping — the safe direction, since a redundant load is a
+/// no-op and a skipped one leaves a session with no image.
+fn template_exists(sbx: &Backend, tag: &str) -> bool {
+    sbx.output(&crate::runtime::Sbx::template_ls_args())
+        .map(|o| {
+            o.status.success()
+                && crate::runtime::Sbx::template_has(&String::from_utf8_lossy(&o.stdout), tag)
+        })
+        .unwrap_or(false)
 }
 
 /// What a TLS-inspecting proxy looks like in a failed build, per toolchain.
@@ -3783,6 +3876,48 @@ mod tests {
         let df = base_dockerfile(None);
         assert!(df.contains("openssh-server"), "got: {df}");
         assert!(df.contains("omh-session"), "needs a session entrypoint");
+    }
+
+    /// sbx cannot build and does not share docker's image store, so `provide`
+    /// routes an sbx backend to its template store: it checks `sbx template ls`
+    /// and, when the tag is already loaded, does nothing — never `image
+    /// inspect` (which sbx has no verb for) and never a build. This pins the
+    /// idempotent short-circuit and the routing; the build-save-load path it
+    /// takes on a miss needs a real docker and is the live doctor's to prove.
+    #[test]
+    fn sbx_delivery_checks_the_template_store_and_skips_a_loaded_one() {
+        use crate::runtime::{answered, Backend, Sbx};
+        let base = base_tag(None);
+        let digest = base.rsplit(':').next().expect("a tag has a digest");
+        let listed = format!(r#"{{"images":[{{"repository":"omh/base","tag":"{digest}"}}]}}"#);
+        let (sbx, asked) = Backend::scripted(
+            Box::new(Sbx),
+            vec![(vec!["template", "ls", "--json"], answered(0, &listed, ""))],
+        );
+
+        provide(
+            &sbx,
+            &base,
+            &base_dockerfile(None),
+            &Kind::Base,
+            None,
+            "note",
+        )
+        .expect("a loaded template needs no build");
+
+        let asked = asked.borrow();
+        assert!(
+            asked
+                .iter()
+                .all(|a| a.first().map(String::as_str) == Some("template")),
+            "only the template store was asked — no image inspect, no save: {asked:?}"
+        );
+        assert!(
+            asked
+                .iter()
+                .any(|a| a.starts_with(&["template".to_string(), "ls".to_string()])),
+            "it did check the store: {asked:?}"
+        );
     }
 
     /// The key arrives as an env var rather than a mount: a bind-mounted
