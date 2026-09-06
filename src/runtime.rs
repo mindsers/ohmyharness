@@ -495,11 +495,16 @@ pub fn sbx_staging(mounts: &[crate::container::Mount]) -> SbxStaging {
 }
 
 /// The links encoded for the `OMH_LINKS` env var the entrypoint reads: one
-/// `guest\thost` per line. Paths omh builds, so none holds a tab or newline.
+/// `guest host` per line. The entrypoint splits with `read -r guest host`, so
+/// the guest path is the first field and the host path is the whole remainder
+/// — a host path with a space still reads correctly, and a guest path (an
+/// omh-defined constant like `/work`) never holds one. A space rather than a
+/// tab keeps the separator out of the raw-string Dockerfile, where a literal
+/// tab or an escaped quote would not survive rendering.
 pub fn encode_links(links: &[(std::path::PathBuf, std::path::PathBuf)]) -> String {
     links
         .iter()
-        .map(|(g, h)| format!("{}\t{}", g.display(), h.display()))
+        .map(|(g, h)| format!("{} {}", g.display(), h.display()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -1127,17 +1132,18 @@ mod tests {
         );
     }
 
-    /// `OMH_LINKS` is one `guest\thost` per line — the entrypoint splits on the
-    /// tab, so a shape change here silently breaks the symlinking it drives.
+    /// `OMH_LINKS` is one `guest host` per line — the entrypoint splits it with
+    /// `read -r guest host`, so a shape change here silently breaks the
+    /// symlinking it drives.
     #[test]
-    fn the_links_encode_as_tab_separated_lines() {
+    fn the_links_encode_as_space_separated_lines() {
         let encoded = encode_links(&[
             ("/work".into(), "/host/work".into()),
             ("/home/agent/.mcp.json".into(), "/host/cfg/.mcp.json".into()),
         ]);
         assert_eq!(
             encoded,
-            "/work\t/host/work\n/home/agent/.mcp.json\t/host/cfg/.mcp.json"
+            "/work /host/work\n/home/agent/.mcp.json /host/cfg/.mcp.json"
         );
     }
 

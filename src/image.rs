@@ -547,6 +547,21 @@ RUN printf '%s\n' \
   '  printf "%s\\n" "$OMH_PUBKEY" > "$HOME/.ssh/authorized_keys"' \
   '  chmod 600 "$HOME/.ssh/authorized_keys"' \
   'fi' \
+  '# sbx mounts each workspace at its host path and cannot mount a guest' \
+  '# path, so every guest path the profile needs is reached by a symlink' \
+  '# named here in OMH_LINKS (one "guest host" per line, guest first). Docker' \
+  '# leaves OMH_LINKS empty and this is a no-op. rmdir clears the empty' \
+  '# placeholder omh created (never a populated dir); sudo is the fallback' \
+  '# for a guest path under a root-owned parent.' \
+  'if [ -n "$OMH_LINKS" ]; then' \
+  '  printf "%s\\n" "$OMH_LINKS" | while read -r guest host; do' \
+  '    [ -n "$guest" ] || continue' \
+  '    dir=$(dirname "$guest")' \
+  '    mkdir -p "$dir" 2>/dev/null || sudo mkdir -p "$dir"' \
+  '    if [ -d "$guest" ] && [ ! -L "$guest" ]; then rmdir "$guest" 2>/dev/null || sudo rmdir "$guest" 2>/dev/null || true; fi' \
+  '    ln -sfn "$host" "$guest" 2>/dev/null || sudo ln -sfn "$host" "$guest"' \
+  '  done' \
+  'fi' \
   'if [ -f {hostkeys}/ssh_host_ed25519_key ]; then' \
   '  sudo install -o root -g root -m 600 {hostkeys}/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key' \
   '  sudo install -o root -g root -m 644 {hostkeys}/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub' \
@@ -3782,6 +3797,77 @@ mod tests {
         );
         assert!(df.contains("chmod 700"), "~/.ssh perms");
         assert!(df.contains("chmod 600"), "authorized_keys perms");
+    }
+
+    /// sbx mounts a workspace at its exact host path and cannot mount a guest
+    /// path or a single file, so `/work` and every profile path reach their
+    /// content through a symlink the entrypoint makes from `OMH_LINKS` (which
+    /// `runtime::encode_links` fills). The docker backend leaves `OMH_LINKS`
+    /// unset and the loop is a no-op, so the one entrypoint serves both. A
+    /// guest path under a root-owned directory needs `sudo` to link, so the
+    /// loop must fall back to it.
+    #[test]
+    fn the_session_entrypoint_symlinks_the_guest_paths_sbx_cannot_mount() {
+        let df = base_dockerfile(None);
+        assert!(
+            df.contains("OMH_LINKS"),
+            "the entrypoint must read the links: {df}"
+        );
+        assert!(
+            df.contains("ln -s"),
+            "the entrypoint must make the symlinks: {df}"
+        );
+        assert!(
+            df.contains("sudo ln -s"),
+            "a root-owned guest path needs sudo to link: {df}"
+        );
+    }
+
+    /// The entrypoint is a shell script assembled line by line inside a raw
+    /// string, where an escaping mistake renders as broken shell that only
+    /// surfaces at container start — the class of bug a build cache then hides
+    /// for weeks. This reconstructs the script the `printf '%s\n'` block emits
+    /// and hands it to `sh -n`, so a syntax error fails here instead.
+    #[test]
+    fn the_session_entrypoint_is_valid_shell() {
+        let df = base_dockerfile(None);
+        // The block is `RUN printf '%s\n' \` then one `  'LINE' \` per script
+        // line, until `> /usr/local/bin/omh-session`. Rebuild the script from
+        // those single-quoted arguments.
+        let start = df
+            .find("printf '%s\\n' \\")
+            .expect("the entrypoint printf block");
+        let rest = &df[start..];
+        let end = rest
+            .find("> /usr/local/bin/omh-session")
+            .expect("the entrypoint redirect");
+        let script: String = rest[..end]
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                let t = t.strip_prefix("printf '%s\\n'").unwrap_or(t).trim();
+                let t = t.strip_suffix('\\').unwrap_or(t).trim();
+                let inner = t.strip_prefix('\'')?.strip_suffix('\'')?;
+                Some(inner.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            script.contains("OMH_LINKS") && script.contains("sshd"),
+            "reconstruction picked up the entrypoint body: {script}"
+        );
+
+        let out = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("sh");
+        assert!(
+            out.status.success(),
+            "the entrypoint must parse as shell:\n{}\n--- script ---\n{script}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]
