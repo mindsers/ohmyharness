@@ -50,10 +50,10 @@ pub(crate) fn sync(
 /// Sync every session against trunk, stopping at the first that cannot go
 /// cleanly, and report the lot in one document.
 ///
-/// Refused with a named session: `--all` is *every* session, and naming one
-/// asks two contradictory things. The loop is injected so the stop-at-first
-/// logic is testable without a runtime — `sync_all` decides what to do with
-/// each result; the command supplies the sync.
+/// Reached when no session is named — the selector's absence means all, so
+/// naming one routes to `sync` instead and never here. The loop is injected so
+/// the stop-at-first logic is testable without a runtime — `sync_all` decides
+/// what to do with each result; the command supplies the sync.
 pub(crate) fn sync_all(
     cwd: &std::path::Path,
     base: Option<&str>,

@@ -1326,6 +1326,11 @@ fn sync_no_longer_takes_all() {
         !out.status.success(),
         "--all is not a flag sync has any more"
     );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--all") && err.contains("unexpected"),
+        "it fails *because* --all is not a flag, not for want of sessions: {err}"
+    );
 }
 
 /// The dashboard reads every session's upstream from one `for-each-ref`, and
@@ -2081,6 +2086,8 @@ fn a_bare_single_target_verb_refuses_without_a_session() {
         vec!["s", "push", "feat/x"],
         vec!["s", "log"],
         vec!["s", "diff"],
+        vec!["s", "attach"],
+        vec!["s", "resume"],
     ] {
         let out = sb.omh(&verb);
         assert!(
@@ -2093,7 +2100,8 @@ fn a_bare_single_target_verb_refuses_without_a_session() {
             err.contains("s01")
                 || err.to_lowercase().contains("which session")
                 || err.contains("name"),
-            "the refusal points at naming a session: {err}"
+            "`omh {}` refusal points at naming a session: {err}",
+            verb.join(" ")
         );
     }
 
@@ -6714,6 +6722,49 @@ fn a_wide_down_in_ci_stops_every_session() {
         !String::from_utf8_lossy(&out.stderr).contains("--all"),
         "and it never mentions a flag that no longer exists"
     );
+    // The scope-widening leaves a trace on stderr, which survives a `> log`
+    // that swallows the report on stdout — a script that stopped one session
+    // by omission would otherwise learn nothing from the exit code.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("every sandbox"),
+        "a non-interactive wide down says it widened: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Naming a session stops only that one and leaves the others running — the
+/// destructive path scopes to the selector, as the reversible `sync` does.
+#[test]
+fn a_named_down_stops_only_the_named_session() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.session("s01");
+    sb.session("s02");
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n{}\n", sb.container("s01"), sb.container("s02")),
+    )
+    .unwrap();
+
+    let out = sb.omh(&["s01", "down"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = sb.docker_calls(&log);
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("rm") && c.contains(&sb.container("s01"))),
+        "s01 was stopped: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("rm") && c.contains(&sb.container("s02"))),
+        "s02 was not named, so it was left running: {calls:?}"
+    );
 }
 
 /// `--all` is gone from `down` — absence already means all.
@@ -6725,6 +6776,11 @@ fn down_no_longer_takes_all() {
     assert!(
         !out.status.success(),
         "--all is not a flag down has any more"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--all") && err.contains("unexpected"),
+        "it fails *because* --all is not a flag, not for another reason: {err}"
     );
 }
 

@@ -405,8 +405,7 @@ longer parses either way.
 anyway.**
 
 ```console
-$ omh s diff          # the session you were last in
-$ omh s01 diff        # that one
+$ omh s01 diff        # that one — a session verb names its session
 $ omh s01 commit -m "Fix the tap guard"
 $ omh s01 rm
 $ omh s01 resume      # rejoin it
@@ -430,9 +429,12 @@ it twice is refused rather than resolved.
 
 `down` with no session stops every sandbox — the one place acting on all of
 them is what you mean, and the one command whose blast radius grows with how
-much work is in flight. So it asks first, and `--all` is how you say it without
-being asked. Silence declines, and a pipe or a CI runner has nobody to answer,
-so a wide `down` there stops nothing rather than everything.
+much work is in flight. So it asks first when there is a terminal to ask at.
+A pipe or a CI runner has nobody to answer, and there proceeds without asking:
+the stop is reversible — the worktree and branch survive — and omitting the
+session is the explicit way to mean all, so a script that did so meant it. A
+declined prompt stops nothing. There is no `--all`; naming no session already
+means all.
 
 **A session that has fallen behind is told what to do about it.** The number
 was there long before there was anything to do with it; `sync` is that thing.

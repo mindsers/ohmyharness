@@ -603,19 +603,32 @@ pub(crate) fn down(
         // it. A declined prompt stops nothing.
         None => {
             let every = session::list(&paths.worktrees());
-            if terminal && !every.is_empty() {
-                // On stderr, like every other prompt here: the answer channel
-                // belongs to the report, and `omh s down > log` must not eat
-                // the question.
-                let agreed = ask::confirm(
-                    &format!("stop every sandbox? {} — {}", every.len(), every.join(", ")),
-                    &mut std::io::stdin().lock(),
-                    &mut std::io::stderr(),
-                )?;
-                anyhow::ensure!(
-                    agreed,
-                    "nothing stopped:\n  omh s01 down   stop that one\n  omh s down     stop every one of them"
-                );
+            if !every.is_empty() {
+                if terminal {
+                    // On stderr, like every other prompt here: the answer
+                    // channel belongs to the report, and `omh s down > log`
+                    // must not eat the question.
+                    let agreed = ask::confirm(
+                        &format!("stop every sandbox? {} — {}", every.len(), every.join(", ")),
+                        &mut std::io::stdin().lock(),
+                        &mut std::io::stderr(),
+                    )?;
+                    anyhow::ensure!(
+                        agreed,
+                        "nothing stopped:\n  omh s01 down   stop that one\n  omh s down     stop every one of them"
+                    );
+                } else {
+                    // Non-interactive: there is no prompt to answer, so the
+                    // widening proceeds — but it leaves a trace on stderr,
+                    // which survives `> log` swallowing the report on stdout.
+                    // A script that stopped one session by omission would
+                    // otherwise learn nothing from the exit code.
+                    ctx.warn(&format!(
+                        "no session named — stopping every sandbox: {} — {}",
+                        every.len(),
+                        every.join(", ")
+                    ));
+                }
             }
             every
         }

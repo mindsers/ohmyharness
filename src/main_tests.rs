@@ -912,7 +912,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("accounts.md", 4),
         ("adapters.md", 1),
         ("code-graph.md", 1),
-        ("commands.md", 138), // + checks-first commit, --no-verify, and the scoped activity example
+        ("commands.md", 137), // + checks-first commit, --no-verify, scoped activity example; − the bare `omh s diff` example (a session verb now names its session)
         ("configuration.md", 46), // + the sbx set-runtime and doctor examples
         ("decisions.md", 1),
         ("editors.md", 4),
