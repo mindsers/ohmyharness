@@ -1482,7 +1482,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cli.rs", 14),
         ("src/cmd/auth.rs", 3),
         ("src/cmd/catalogue.rs", 12),
-        ("src/cmd/harvest.rs", 20), // + the --no-verify pointer in a failed check
+        ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
         ("src/cmd/init.rs", 6),
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only

@@ -102,8 +102,10 @@ $ omh s01 diff -p     act on it
 $ omh s01 resume      rejoin it
 ```
 
-`s` is the sessions namespace scoped to the current session; `sNN` is the same
-namespace scoped to that one. The desugaring is literal:
+`s` is the sessions namespace; `sNN` scopes it to one session. Naming no session
+is not a hidden pick of the current one — its absence means every session where
+that is meaningful (`sync`, `down`) and is refused everywhere else. The
+desugaring is literal:
 
 ```
 omh s01 log      ≡  omh sessions --session s01 log

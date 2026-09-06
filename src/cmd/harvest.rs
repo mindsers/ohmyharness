@@ -986,8 +986,21 @@ pub(crate) fn existing_session(paths: &Paths, explicit: Option<&str>) -> Result<
             session::validate_id(id)?;
             id.to_string()
         }
-        None => session::current(&paths.worktrees())
-            .context("no sessions yet — start one with `omh new <harness>`")?,
+        // No hidden "most recent session" pick. A single-target verb with no
+        // session named refuses and points at naming one — omitting the
+        // selector is never an instruction to guess which session you meant,
+        // even when exactly one exists. `sync` and `down` reach this only when
+        // a session *is* named; with none, they act on every session and never
+        // call here.
+        None => {
+            anyhow::ensure!(
+                !session::list(&paths.worktrees()).is_empty(),
+                "no sessions yet — start one with `omh new <harness>`"
+            );
+            anyhow::bail!(
+                "which session? name it:\n  omh s01 …   that one\n  omh s       lists them"
+            )
+        }
     };
     let session = Session::new(&paths.worktrees(), id);
     anyhow::ensure!(

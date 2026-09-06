@@ -1836,7 +1836,7 @@ fn work_committed_from_the_host_is_what_diff_then_reports() {
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
 
-    let out = sb.omh(&["s", "commit", "-m", "Add the feature"]);
+    let out = sb.omh(&["s01", "commit", "-m", "Add the feature"]);
     assert!(
         out.status.success(),
         "commit failed: {}",
@@ -1888,7 +1888,7 @@ fn keeping_a_sessions_own_commits_says_so_when_there_are_none() {
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
 
-    let out = sb.omh(&["s", "commit", "--keep"]);
+    let out = sb.omh(&["s01", "commit", "--keep"]);
 
     let said = format!(
         "{}{}",
@@ -1982,7 +1982,7 @@ fn a_session_that_has_committed_but_never_pushed_is_not_reported_as_clean() {
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
     assert!(sb
-        .omh(&["s", "commit", "-m", "Add the feature"])
+        .omh(&["s01", "commit", "-m", "Add the feature"])
         .status
         .success());
 
@@ -2004,10 +2004,10 @@ fn the_listing_renders_each_state_a_session_can_sit_in() {
     std::fs::write(worktree.join("a.rs"), "fn a() {}").unwrap();
     assert!(ls().contains("1 uncommitted"), "got: {}", ls());
 
-    assert!(sb.omh(&["s", "commit", "-m", "Add a"]).status.success());
+    assert!(sb.omh(&["s01", "commit", "-m", "Add a"]).status.success());
     assert!(ls().contains("1 to push"), "got: {}", ls());
 
-    assert!(sb.omh(&["s", "push", "feat/a"]).status.success());
+    assert!(sb.omh(&["s01", "push", "feat/a"]).status.success());
     assert!(ls().contains("→ feat/a"), "got: {}", ls());
 }
 
@@ -2043,14 +2043,14 @@ fn the_push_command_carries_its_name_and_refuses_without_one() {
     let sb = sandbox();
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("a.rs"), "fn a() {}").unwrap();
-    assert!(sb.omh(&["s", "commit", "-m", "Add a"]).status.success());
+    assert!(sb.omh(&["s01", "commit", "-m", "Add a"]).status.success());
 
-    let bare = sb.omh(&["s", "push"]);
+    let bare = sb.omh(&["s01", "push"]);
     assert!(!bare.status.success(), "a session id is not a branch name");
     assert!(String::from_utf8_lossy(&bare.stderr).contains("not a branch name"));
 
-    assert!(sb.omh(&["s", "push", "feat/a"]).status.success());
-    let printed = String::from_utf8_lossy(&sb.omh(&["s", "push", "feat/a"]).stdout).to_string();
+    assert!(sb.omh(&["s01", "push", "feat/a"]).status.success());
+    let printed = String::from_utf8_lossy(&sb.omh(&["s01", "push", "feat/a"]).stdout).to_string();
     assert!(printed.contains("origin/feat/a"), "got: {printed}");
 }
 
@@ -2066,6 +2066,42 @@ fn a_session_that_does_not_exist_is_named_in_the_refusal() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("s99"), "the refusal must name it: {err}");
+}
+
+/// A single-target verb with no session named refuses rather than picking one
+/// for you. The hidden "most recent session" default is gone: naming no session
+/// is not an instruction to guess, even when exactly one exists.
+#[test]
+fn a_bare_single_target_verb_refuses_without_a_session() {
+    let sb = sandbox();
+    sb.session("s01");
+
+    for verb in [
+        vec!["s", "commit", "-m", "x"],
+        vec!["s", "push", "feat/x"],
+        vec!["s", "log"],
+        vec!["s", "diff"],
+    ] {
+        let out = sb.omh(&verb);
+        assert!(
+            !out.status.success(),
+            "`omh {}` must refuse without a session named",
+            verb.join(" ")
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("s01")
+                || err.to_lowercase().contains("which session")
+                || err.contains("name"),
+            "the refusal points at naming a session: {err}"
+        );
+    }
+
+    // Named, they run (or fail for their own reasons, not for want of a target).
+    assert!(
+        sb.omh(&["s01", "log"]).status.success(),
+        "naming the session is how you say which"
+    );
 }
 
 /// The launcher discloses this repo's hooks, and a dry run leaves no trace.

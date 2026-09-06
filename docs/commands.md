@@ -413,14 +413,20 @@ $ omh s01 resume      # rejoin it
 $ omh s01 attach zed
 ```
 
-`s` is the sessions namespace scoped to the session you were last in; `sNN` is
-the same namespace scoped to that one, so `omh s01 diff` is exactly
-`omh sessions --session s01 diff`. When what follows is not a session verb the
-prefix still names the session and the command runs where it lives — which is
-what covers a launch, since `sessions` has no verb for starting a harness.
+`s` is the sessions namespace; `sNN` scopes it to one session, so `omh s01 diff`
+is exactly `omh sessions --session s01 diff`. When what follows is not a session
+verb the prefix still names the session and the command runs where it lives —
+which is what covers a launch, since `sessions` has no verb for starting a
+harness.
 
-`--session` still works, and is the only way to name a session whose id is not
-`sNN`. Naming it twice is refused rather than resolved.
+`--session`/`sNN` is the one selector, and naming no session is not a hidden
+pick of the last one. Its absence means **every session** for the reversible
+verbs that can act on all — `sync` and `down` with no session named reach all of
+them (there is no `--all`). For every other session verb — `commit`, `push`,
+`log`, `diff`, `attach`, `resume`, `rm` — naming no session is refused: omh
+never guesses which one you meant, even when exactly one exists. `--session`
+still works, and is the only way to name a session whose id is not `sNN`. Naming
+it twice is refused rather than resolved.
 
 `down` with no session stops every sandbox — the one place acting on all of
 them is what you mean, and the one command whose blast radius grows with how
