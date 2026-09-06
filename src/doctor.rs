@@ -327,8 +327,9 @@ pub fn seeded_from(stamp: Option<&str>, running: &str) -> Outcome {
                 format!("version {running}, the one running now")
             }
             Some(was) => format!(
-                "version {}, and you are running {running}. `omh init` reseeds \
-                 what changed, keeping anything you edited as `.yours`",
+                "version {}, and you are running {running}. `omh upgrade` \
+                 refreshes what changed and rebuilds the images, keeping \
+                 anything you edited as `.yours`",
                 was.trim()
             ),
         },
@@ -2710,8 +2711,8 @@ mod tests {
             older.detail
         );
         assert!(
-            older.detail.contains("omh init"),
-            "and what reseeds it: {}",
+            older.detail.contains("omh upgrade"),
+            "a drifted checkout is updated by `omh upgrade`, not a re-`init`: {}",
             older.detail
         );
 
