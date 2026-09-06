@@ -235,6 +235,135 @@ impl Report for Synced {
     }
 }
 
+/// Every session synced against trunk, in one report.
+///
+/// `omh s sync --all` moves trunk into each session in turn and stops at the
+/// first that cannot go cleanly — a conflict to resolve, or an error. Stopping
+/// is the point: a conflict wants a person, and pressing on would bury the one
+/// that needs deciding under a wall of ones that did not.
+#[derive(Debug, Clone)]
+pub struct SyncedAll {
+    /// The sessions brought forward cleanly, in order.
+    pub done: Vec<Synced>,
+    /// The session it stopped at, and why — a conflict or an error. `None`
+    /// when every session synced cleanly.
+    pub stopped: Option<SyncStop>,
+    /// The sessions after the stop, not reached. Empty when nothing stopped.
+    pub untouched: Vec<String>,
+}
+
+/// Why `sync --all` stopped.
+#[derive(Debug, Clone)]
+pub enum SyncStop {
+    /// It synced, but the result needs a person: markers to resolve.
+    Conflict(Synced),
+    /// It could not sync — a running sandbox that must be stopped first, a git
+    /// failure. Carries the session and the reason.
+    Error { id: String, why: String },
+}
+
+impl Report for SyncedAll {
+    fn human(&self, p: &out::Palette) -> String {
+        let mut s = out::heading(
+            p,
+            &format!(
+                "synced {} session{}",
+                self.done.len(),
+                if self.done.len() == 1 { "" } else { "s" }
+            ),
+        );
+        s.push('\n');
+        for synced in &self.done {
+            s.push_str(&format!(
+                "  {} · {} from {}\n",
+                p.paint(out::NAME, &synced.id),
+                match synced.moved {
+                    1 => "1 commit".to_string(),
+                    n => format!("{n} commits"),
+                },
+                synced.base
+            ));
+        }
+        match &self.stopped {
+            None => {}
+            Some(SyncStop::Conflict(synced)) => s.push_str(&format!(
+                "\n  {}\n",
+                p.paint(
+                    out::WARN,
+                    &format!(
+                        "stopped at {}: {} file{} to resolve",
+                        synced.id,
+                        synced.conflicted.len(),
+                        if synced.conflicted.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    )
+                )
+            )),
+            Some(SyncStop::Error { id, why }) => s.push_str(&format!(
+                "\n  {}\n",
+                p.paint(
+                    out::WARN,
+                    &format!("stopped at {id}: {}", out::untrusted(why))
+                )
+            )),
+        }
+        if !self.untouched.is_empty() {
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(
+                    out::DIM,
+                    &format!("not reached: {}", self.untouched.join(", "))
+                )
+            ));
+        }
+        s
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "done": self.done.iter().map(Report::json).collect::<Vec<_>>(),
+            "stopped": match &self.stopped {
+                None => serde_json::Value::Null,
+                Some(SyncStop::Conflict(synced)) => json!({
+                    "session": synced.id,
+                    "why": "conflict",
+                    "conflicted": synced.conflicted,
+                }),
+                Some(SyncStop::Error { id, why }) => json!({
+                    "session": id,
+                    "why": "error",
+                    "reason": why,
+                }),
+            },
+            "untouched": self.untouched,
+        })
+    }
+
+    fn asides(&self) -> out::Asides {
+        let mut asides = out::Asides::default();
+        match &self.stopped {
+            Some(SyncStop::Conflict(synced)) => {
+                asides = asides.hint(format!(
+                    "  omh {} resume          resolve the markers in the sandbox, then \
+                     `omh s sync --all` again",
+                    synced.id
+                ));
+            }
+            Some(SyncStop::Error { id, .. }) => {
+                asides = asides.hint(format!(
+                    "  omh {id} sync --down     sync this one, stopping its sandbox, then \
+                     `omh s sync --all` again"
+                ));
+            }
+            None => {}
+        }
+        asides
+    }
+}
+
 // ── omh sNN log ─────────────────────────────────────────────────────────────
 
 /// What the agent has committed inside the sandbox, and where the line is.
@@ -943,6 +1072,47 @@ pub struct Sessions {
     /// as nothing at all when it is empty, so a partial answer would be
     /// indistinguishable from a clean one.
     pub unreadable: Vec<String>,
+    /// What the agent did and what it cost, plus its last check result, shown
+    /// only when the view is scoped to one session. `None` for the wide
+    /// listing, which does not read a transcript per row.
+    pub focus: Option<Focus>,
+    /// The `ssh` command that opens a shell in this session, when the view is
+    /// scoped to one running session. `None` for the wide listing and for a
+    /// stopped one: there is no shell to offer a session that is not up, and a
+    /// dashboard of many is not the place to name one.
+    pub shell: Option<String>,
+}
+
+/// The extra detail a scoped session view carries: what the agent did, and
+/// whether the work passed this repo's checks.
+#[derive(Debug, Clone)]
+pub struct Focus {
+    pub activity: Activity,
+    pub check: Option<CheckState>,
+}
+
+/// What a session's transcript says the agent did.
+#[derive(Debug, Clone)]
+pub enum Activity {
+    /// Read, and here is the summary.
+    Read(crate::transcript::Summary),
+    /// The harness declares no transcript, or none was written yet — not an
+    /// empty session, a *not recorded* one.
+    NotRecorded(String),
+    /// A transcript omh opened and could make nothing of.
+    Unreadable,
+}
+
+/// The last result of `omh sNN commit`'s checks, from `runs/<id>/check.json`.
+#[derive(Debug, Clone)]
+pub enum CheckState {
+    Passed(usize),
+    Failed(String),
+    NotRun(String),
+    /// `check.json` is there but omh could not read it — damaged, or written
+    /// by a version whose shape this one does not know. Not the same as no
+    /// check ever running, which shows no line at all.
+    Unreadable,
 }
 
 impl Report for Sessions {
@@ -991,6 +1161,11 @@ impl Report for Sessions {
                 )
             ));
         }
+        if let Some(focus) = &self.focus {
+            out.push('\n');
+            out.push_str(&focus_lines(p, focus));
+        }
+
         // Said whether or not there are collisions above: with none, an
         // unreadable session is the only reason the section is empty, and that
         // is precisely when the silence would be read as "nothing collides".
@@ -1119,6 +1294,13 @@ impl Report for Sessions {
                 ));
         }
 
+        // The shell into a focused, running session — the thing you reach for
+        // right after `attach` closes, and which `attach` itself already
+        // prints. A next action, so it stays out of a redirected listing.
+        if let Some(shell) = &self.shell {
+            asides = asides.hint(format!("  {shell}   open a shell in the session"));
+        }
+
         if self.leftovers.is_empty() {
             return asides;
         }
@@ -1172,8 +1354,111 @@ impl Report for Sessions {
                 "paths": o.paths,
             })).collect::<Vec<_>>(),
             "unreadable": self.unreadable,
+            "shell": self.shell,
+            "focus": self.focus.as_ref().map(focus_json),
         })
     }
+}
+
+/// The scoped session's activity and check state, as lines under the table.
+fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
+    let mut s = String::new();
+    match &focus.activity {
+        Activity::Read(summary) => {
+            let tools: usize = summary.tools.values().sum();
+            let cost = match summary.cost() {
+                Some(c) => format!("${c:.2}"),
+                None => "cost unknown".to_string(),
+            };
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(
+                    out::HEAD,
+                    &format!(
+                        "{} turn{}, {} tool call{}, {} file{} touched · {cost}",
+                        summary.turns,
+                        if summary.turns == 1 { "" } else { "s" },
+                        tools,
+                        if tools == 1 { "" } else { "s" },
+                        summary.files.len(),
+                        if summary.files.len() == 1 { "" } else { "s" },
+                    )
+                )
+            ));
+            // Some turns read, some lines not: the totals are a floor, and
+            // saying so is the difference between an honest partial and a
+            // confident wrong total.
+            if summary.unreadable > 0 {
+                s.push_str(&format!(
+                    "  {}\n",
+                    p.paint(
+                        out::WARN,
+                        &format!(
+                            "{} transcript line{} could not be read — the totals above are a floor",
+                            summary.unreadable,
+                            if summary.unreadable == 1 { "" } else { "s" }
+                        )
+                    )
+                ));
+            }
+        }
+        Activity::NotRecorded(why) => {
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(out::DIM, &format!("activity not recorded — {why}"))
+            ));
+        }
+        Activity::Unreadable => {
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(out::WARN, "omh could not read this session's transcript")
+            ));
+        }
+    }
+    if let Some(check) = &focus.check {
+        let (style, text) = match check {
+            CheckState::Passed(n) => (out::NAME, format!("checks: passed ({n})")),
+            CheckState::Failed(name) => (
+                out::WARN,
+                format!("checks: failed — {}", out::untrusted(name)),
+            ),
+            CheckState::NotRun(why) => (out::DIM, format!("checks: not run — {why}")),
+            CheckState::Unreadable => (
+                out::WARN,
+                "checks: a result was recorded but omh could not read it".to_string(),
+            ),
+        };
+        s.push_str(&format!("  {}\n", p.paint(style, &text)));
+    }
+    s
+}
+
+/// The scoped focus, as JSON.
+fn focus_json(focus: &Focus) -> serde_json::Value {
+    let activity = match &focus.activity {
+        Activity::Read(summary) => json!({
+            "state": "read",
+            "turns": summary.turns,
+            "tools": summary.tools,
+            "files": summary.files.iter().collect::<Vec<_>>(),
+            "cost": summary.cost(),
+            "unreadable": summary.unreadable,
+            "usage": summary.usage.iter().map(|(m, u)| (m.clone(), json!({
+                "input": u.input, "output": u.output,
+                "cache_read": u.cache_read, "cache_write": u.cache_write,
+                "cost": u.cost,
+            }))).collect::<serde_json::Map<_, _>>(),
+        }),
+        Activity::NotRecorded(why) => json!({ "state": "not-recorded", "why": why }),
+        Activity::Unreadable => json!({ "state": "unreadable" }),
+    };
+    let check = focus.check.as_ref().map(|c| match c {
+        CheckState::Passed(n) => json!({ "state": "passed", "count": n }),
+        CheckState::Failed(name) => json!({ "state": "failed", "check": name }),
+        CheckState::NotRun(why) => json!({ "state": "not-run", "why": why }),
+        CheckState::Unreadable => json!({ "state": "unreadable" }),
+    });
+    json!({ "activity": activity, "check": check })
 }
 
 // ── omh info ────────────────────────────────────────────────────────────────

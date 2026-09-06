@@ -670,6 +670,28 @@ pub fn plan(
         }
     }
 
+    // The harness's transcripts, over a per-session directory omh owns, so a
+    // review can read what the agent did without reaching into the container.
+    // Writable — the harness writes here — and only for a real session (a
+    // scratch verb records nothing worth keeping). A harness that declares no
+    // transcript path gets no mount, and `omh sNN` says so rather than
+    // inventing an empty history.
+    if let Some(template) = &adapter.transcripts {
+        let host = paths.runs().join(&session.id).join("transcripts");
+        // The directory is created only when staging — a preview writes
+        // nothing — but the mount itself is part of the plan in either mode,
+        // so `Staging::Skip` and `Staging::Apply` describe the same container.
+        if staging == Staging::Apply {
+            std::fs::create_dir_all(&host).ok();
+        }
+        mounts.push(Mount {
+            host,
+            guest: crate::adapter::expand(template, GUEST_HOME),
+            read_only: false,
+            file: false,
+        });
+    }
+
     Ok(Plan {
         image: opts.image.clone(),
         mounts,
@@ -1601,9 +1623,10 @@ mod tests {
             .collect();
         assert_eq!(
             guests.len(),
-            5,
-            "worktree, graph cache, note store, the sandbox's own gitdir, and \
-             the one carried file the fixture declares: {guests:?}"
+            6,
+            "worktree, graph cache, note store, the sandbox's own gitdir, the \
+             transcripts directory, and the one carried file the fixture \
+             declares: {guests:?}"
         );
         assert!(
             guests.contains(&"/work/.env".to_string()),
@@ -1614,6 +1637,10 @@ mod tests {
         assert!(guests.iter().any(|g| g == crate::base::GRAPH_CACHE));
         assert!(guests.iter().any(|g| g == crate::memory::GUEST_LOCAL_NOTES));
         assert!(guests.iter().any(|g| g == crate::shadow::GUEST_GITDIR));
+        assert!(
+            guests.iter().any(|g| g.contains(".claude/projects")),
+            "the transcripts directory is writable — the harness writes there"
+        );
     }
 
     /// Every session gets its own network, named like its container. One

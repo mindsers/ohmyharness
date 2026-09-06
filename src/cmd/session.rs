@@ -660,6 +660,128 @@ pub(crate) fn down(
     Ok(())
 }
 
+/// The harness a session recorded, for reading its transcript shape. `None`
+/// when unrecorded — the activity is then "not recorded", not guessed.
+fn adapter_of(paths: &Paths, id: &str) -> Option<crate::adapter::Adapter> {
+    let harness = match session::harness_of(&paths.runs(), id) {
+        session::Ran::Harness(name) => name,
+        _ => return None,
+    };
+    crate::adapter::Adapter::find(&paths.adapters(), &harness).ok()
+}
+
+/// What the focused session's transcript says the agent did.
+fn session_activity(
+    paths: &Paths,
+    id: &str,
+    adapter: &Option<crate::adapter::Adapter>,
+) -> report::Activity {
+    let Some(adapter) = adapter else {
+        return report::Activity::NotRecorded(
+            "omh does not know which harness this session ran".into(),
+        );
+    };
+    if adapter.transcripts.is_none() {
+        return report::Activity::NotRecorded(format!(
+            "{} does not record transcripts omh can read",
+            adapter.name
+        ));
+    }
+    let dir = paths.runs().join(id).join("transcripts");
+    // A directory that is not there is "no transcript yet"; a directory omh
+    // could not read, or a file in it it could not open, is *unreadable* — a
+    // real failure must not be reported as an empty history.
+    let files = match walk_jsonl(&dir) {
+        Ok(files) => files,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return report::Activity::Unreadable,
+    };
+    if files.is_empty() {
+        return report::Activity::NotRecorded("no transcript written yet".into());
+    }
+    let mut jsonl = String::new();
+    for file in files {
+        match std::fs::read_to_string(&file) {
+            Ok(text) => {
+                jsonl.push_str(&text);
+                jsonl.push('\n');
+            }
+            // A transcript file that exists and will not open is unreadable,
+            // not absent.
+            Err(_) => return report::Activity::Unreadable,
+        }
+    }
+    let summary = crate::transcript::summarise(&jsonl);
+    if summary.is_unreadable() {
+        return report::Activity::Unreadable;
+    }
+    report::Activity::Read(summary)
+}
+
+/// Every `.jsonl` under `dir`, one level deep or nested — Claude Code keys
+/// transcripts by project directory, so they sit one subdirectory in.
+fn walk_jsonl(dir: &std::path::Path) -> std::io::Result<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for entry in std::fs::read_dir(&d)?.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "jsonl") {
+                out.push(path);
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// The last check result `omh sNN commit` recorded, if any.
+fn read_check(paths: &Paths, id: &str) -> Option<report::CheckState> {
+    // A file that is not there is "no check recorded" (`None`, no line). A file
+    // that is there and will not read, or carries a state this version does not
+    // know, is `Unreadable` — a damaged record must not vanish.
+    let text = match std::fs::read_to_string(paths.runs().join(id).join("check.json")) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some(report::CheckState::Unreadable),
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Some(report::CheckState::Unreadable);
+    };
+    let detail = value.get("detail");
+    match value
+        .get("state")
+        .and_then(|s| s.as_str())
+        .unwrap_or("unreadable")
+    {
+        "passed" => Some(report::CheckState::Passed(
+            detail
+                .and_then(|d| d.get("count"))
+                .and_then(|c| c.as_u64())
+                .unwrap_or(0) as usize,
+        )),
+        "failed" => Some(report::CheckState::Failed(
+            detail
+                .and_then(|d| d.get("check"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("a check")
+                .to_string(),
+        )),
+        "not-run" => Some(report::CheckState::NotRun(
+            detail
+                .and_then(|d| d.get("why"))
+                .and_then(|c| c.as_str())
+                .unwrap_or("unknown")
+                .to_string(),
+        )),
+        // A state string this version does not know is a record it cannot
+        // read, not the absence of one.
+        _ => Some(report::CheckState::Unreadable),
+    }
+}
+
 pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     // Validated before anything is read, so an id nothing created fails the
@@ -815,6 +937,24 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         }
     };
 
+    // The scoped view reads the focused session's transcript and its last
+    // check result. Only when one session is named: the wide listing does not
+    // read a transcript per row.
+    let focus = only.map(|id| report::Focus {
+        activity: session_activity(&paths, id, &adapter_of(&paths, id)),
+        check: read_check(&paths, id),
+    });
+    // Computed before the struct moves `sessions`: a shell is offered only when
+    // the view is one running session — the moment after `attach` closes.
+    // `host_alias` is what `attach` wrote into `~/.ssh/config.d/omh`, so the
+    // two name the same host.
+    let shell = only.and_then(|id| {
+        sessions
+            .iter()
+            .find(|s| s.id == id)
+            .filter(|s| matches!(s.running, Some(image::Running::Yes)))
+            .map(|s| format!("ssh {}", ssh::host_alias(&paths.repo_name(), &s.id)))
+    });
     ctx.say(&report::Sessions {
         sessions,
         // Not swept when one session was asked for. A leftover is an id with
@@ -834,6 +974,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         // about the focused session even though the id named is not.
         unreadable,
         base,
+        shell,
+        focus,
     });
     Ok(())
 }

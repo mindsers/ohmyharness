@@ -12,6 +12,11 @@ install = "npm install -g @anthropic-ai/claude-code@{{version}}"
 # inside this directory.
 creds   = ["$HOME/.claude/", "$HOME/.claude.json"]
 
+# Where Claude Code writes its per-project .jsonl transcripts. omh mounts a
+# per-session directory over it so `omh sNN` can read what the agent did and
+# what it cost.
+transcripts = "$HOME/.claude/projects"
+
 # A capability this harness cannot express is simply an absent key.
 # What proves a login: a harness fills its config dir just by starting.
 token   = ["$HOME/.claude/.credentials.json"]

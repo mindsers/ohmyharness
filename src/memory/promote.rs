@@ -136,6 +136,22 @@ pub fn plan(
     keys: &[String],
     is_ignored: &dyn Fn(&Path) -> Result<bool>,
 ) -> std::result::Result<Vec<Promotion>, Vec<Blocked>> {
+    plan_into(notes, &Layer::Team.dir(paths), keys, is_ignored)
+}
+
+/// `plan`, with the destination directory named explicitly.
+///
+/// `omh sNN commit` promotes a session's notes into the *session worktree's*
+/// `.omh/notes` rather than the host checkout's, so the squash's `git add -A`
+/// carries them into the same commit as the code. The gate is the same one —
+/// a note the store would refuse is reported and left where it is, and never
+/// blocks the commit.
+pub fn plan_into(
+    notes: &[Note],
+    to_dir: &Path,
+    keys: &[String],
+    is_ignored: &dyn Fn(&Path) -> Result<bool>,
+) -> std::result::Result<Vec<Promotion>, Vec<Blocked>> {
     let mut promotions = Vec::new();
     let mut blocked = Vec::new();
 
@@ -210,7 +226,7 @@ pub fn plan(
             continue;
         }
 
-        let to = Layer::Team.dir(paths).join(format!("{key}.md"));
+        let to = to_dir.join(format!("{key}.md"));
         // The store's own view first, so the common collision is caught with
         // no filesystem at all: a committed note whose frontmatter disagrees
         // with its filename owns this path without owning the key.

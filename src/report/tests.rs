@@ -763,7 +763,113 @@ fn sessions(rows: Vec<Session>) -> Sessions {
         leftovers: vec![],
         overlaps: vec![],
         unreadable: vec![],
+        shell: None,
+        focus: None,
     }
+}
+
+/// The scoped row carries cost only when a transcript was read; a not-recorded
+/// or unreadable session says so rather than showing a fabricated zero.
+#[test]
+fn the_scoped_row_carries_cost_only_when_a_transcript_was_read() {
+    let p = out::Palette::plain();
+    let mut usage = std::collections::BTreeMap::new();
+    usage.insert(
+        "claude-sonnet-4".to_string(),
+        crate::transcript::Usage {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 0,
+            cache_write: 0,
+            cost: Some(18.0),
+        },
+    );
+    let summary = crate::transcript::Summary {
+        turns: 3,
+        usage,
+        ..Default::default()
+    };
+    let read = focused(Activity::Read(summary));
+    assert!(
+        read.human(&p).contains("$18.00"),
+        "a read transcript shows cost: {}",
+        read.human(&p)
+    );
+    assert!(read.human(&p).contains("3 turns"));
+
+    let not_recorded = focused(Activity::NotRecorded(
+        "opencode does not record transcripts omh can read".into(),
+    ));
+    let text = not_recorded.human(&p);
+    assert!(text.contains("not recorded"), "{text}");
+    assert!(
+        !text.contains('$'),
+        "no cost for a session with no transcript: {text}"
+    );
+
+    let unreadable = focused(Activity::Unreadable);
+    assert!(
+        unreadable.human(&p).contains("could not read"),
+        "{}",
+        unreadable.human(&p)
+    );
+    assert!(!unreadable.human(&p).contains('$'));
+}
+
+fn focused(activity: Activity) -> Sessions {
+    let mut report = sessions(vec![session("s01", Work::Clean)]);
+    report.focus = Some(Focus {
+        activity,
+        check: None,
+    });
+    report
+}
+
+/// A scoped, running session offers the shell that reaches it — the `ssh`
+/// alias `attach` wrote — as a next action, kept off a redirected listing.
+#[test]
+fn the_scoped_row_offers_the_shell_when_the_session_is_running() {
+    let p = out::Palette::plain();
+    let mut report = sessions(vec![session("s01", Work::Clean)]);
+    report.shell = Some("ssh omh-repo-s01".into());
+    assert!(
+        report
+            .asides()
+            .hints
+            .iter()
+            .any(|h| h.contains("ssh omh-repo-s01")),
+        "the shell is a next action: {:?}",
+        report.asides().hints
+    );
+    assert!(
+        !report.human(&p).contains("ssh omh-repo-s01"),
+        "and not in the table a redirect captures"
+    );
+    // The wide listing, and a stopped session, offer no shell.
+    let quiet = sessions(vec![session("s01", Work::Clean)]);
+    assert!(
+        !quiet.asides().hints.iter().any(|h| h.contains("ssh ")),
+        "no shell without a scoped, running session"
+    );
+}
+
+/// The attach report names the ssh alias it wrote, so a shell is one paste
+/// away after the editor window is gone.
+#[test]
+fn the_attach_report_names_the_ssh_alias_it_wrote() {
+    let attached = Attached {
+        session: "s01".into(),
+        url: "ssh://omh-repo-s01/work".into(),
+        alias: "omh-repo-s01".into(),
+        opened_in: Some("zed".into()),
+        editors: vec![],
+    };
+    let human = attached.human(&out::Palette::plain());
+    assert!(
+        human.contains("ssh omh-repo-s01"),
+        "even when an editor opened it: {human}"
+    );
+    assert_eq!(attached.json()["ssh_alias"], "omh-repo-s01");
 }
 
 /// A session that has fallen behind is told what to do about it — and
