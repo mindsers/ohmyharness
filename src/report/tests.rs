@@ -2142,7 +2142,6 @@ fn an_upgrade_names_each_harness_outcome_and_the_sessions_left_behind() {
             ("codex".into(), Outcome::Unpinnable),
         ],
         refreshed: vec!["claude.toml".into()],
-        reaped: 2,
         stale_sessions: vec![
             StaleSession {
                 id: "s01".into(),

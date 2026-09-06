@@ -3276,8 +3276,6 @@ impl Report for Lint {
 /// without colour vision gets this and nothing else, and it is what a shell
 /// alias greps for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// Constructed by `upgrade_cmd`; the allow is removed when the driver lands.
-#[allow(dead_code)]
 pub enum Outcome {
     /// A pin moved, so the recipe moved, so the image was built again.
     Rebuilt,
@@ -3288,8 +3286,6 @@ pub enum Outcome {
     Unpinnable,
 }
 
-// Constructed by `upgrade_cmd`; the allow is removed when the driver lands.
-#[allow(dead_code)]
 impl Outcome {
     fn mark(&self) -> &'static str {
         match self {
@@ -3322,8 +3318,6 @@ impl Outcome {
 /// session on a current image, and reporting it as clean would be the
 /// false-negative the whole runtime layer is built to avoid.
 #[derive(Debug, Clone)]
-// Constructed by `upgrade_cmd`; the allow is removed when the driver lands.
-#[allow(dead_code)]
 pub enum StaleImage {
     /// A known tag that is no longer any current recipe.
     Known(String),
@@ -3333,25 +3327,19 @@ pub enum StaleImage {
 
 /// A running session left on an image `upgrade` just superseded.
 #[derive(Debug, Clone)]
-// Constructed by `upgrade_cmd`; the allow is removed when the driver lands.
-#[allow(dead_code)]
 pub struct StaleSession {
     pub id: String,
     pub image: StaleImage,
 }
 
-/// What `omh upgrade` refreshed, rebuilt, reaped, and left running behind.
+/// What `omh upgrade` refreshed, rebuilt, and left running behind.
 #[derive(Debug, Clone, Default)]
-// Constructed by `upgrade_cmd`; the allow is removed when the driver lands.
-#[allow(dead_code)]
 pub struct Upgraded {
     /// One `(harness, outcome)` per installed adapter.
     pub harnesses: Vec<(String, Outcome)>,
     /// Catalogue files rewritten from the binary (a `.yours` was kept for each
     /// one you had edited).
     pub refreshed: Vec<String>,
-    /// Superseded images removed.
-    pub reaped: usize,
     /// Sessions still on an image this upgrade superseded — a relaunch away
     /// from the new one.
     pub stale_sessions: Vec<StaleSession>,
@@ -3383,9 +3371,6 @@ impl Report for Upgraded {
         }
         s.push_str(&t.render(p));
 
-        if self.reaped > 0 {
-            s.push_str(&format!("reaped {} superseded\n", self.reaped));
-        }
         for stale in &self.stale_sessions {
             let detail = match &stale.image {
                 StaleImage::Known(tag) => format!("on {tag} — relaunch to move it"),
@@ -3407,7 +3392,6 @@ impl Report for Upgraded {
                 "outcome": outcome.key(),
             })).collect::<Vec<_>>(),
             "refreshed": self.refreshed,
-            "reaped": self.reaped,
             "stale": self.stale_sessions.iter().map(|s| match &s.image {
                 StaleImage::Known(tag) => json!({ "id": s.id, "image": tag }),
                 StaleImage::Unknown(why) => json!({ "id": s.id, "image": null, "unreadable": why }),

@@ -10157,3 +10157,113 @@ fn commit_keep_refuses_a_secret_value_pasted_into_source() {
         "and the branch did not move"
     );
 }
+
+/// `omh upgrade` refuses in a repo omh never set up — it is the update path,
+/// and there is nothing to update. It points at `omh init`, the symmetric
+/// first-run verb.
+#[test]
+fn upgrade_refuses_a_repo_that_was_never_initialised() {
+    let sb = sandbox();
+    sb.git_init();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(
+        !out.status.success(),
+        "an un-seeded repo has nothing for upgrade to do"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("omh init"),
+        "the refusal points at the first-run verb: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A real `omh upgrade` refreshes the catalogue and advances the seed stamp —
+/// even from an older version. This is the "the stamp moves when omh does"
+/// guard, which used to live on a second `omh init` and is upgrade's now: a
+/// review swapping `fs::write` for `write_if_absent` would leave the stamp
+/// recording the omh that *first* set the checkout up and lying about every
+/// upgrade after.
+#[test]
+fn upgrade_advances_the_seed_stamp_even_from_an_older_version() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    // An older omh set this checkout up.
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(
+        out.status.success(),
+        "upgrade runs in a seeded repo: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
+            .unwrap_or_default()
+            .trim(),
+        env!("CARGO_PKG_VERSION"),
+        "upgrade advances the stamp to the omh that ran it"
+    );
+}
+
+/// A dry-run classifies and reports, but builds nothing and does not advance
+/// the stamp — the preview is the real run's own decision, with no effect.
+#[test]
+fn a_dry_run_upgrade_builds_and_stamps_nothing() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+
+    let out = sb.omh(&["--dry-run", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
+            .unwrap_or_default()
+            .trim(),
+        "0.0.1",
+        "a dry run leaves the stamp where it was"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!calls.contains("build"), "and it never builds: {calls}");
+}
+
+/// `omh upgrade --json` reports each harness's outcome as structured data.
+#[test]
+fn upgrade_reports_each_harness_as_json() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json is machine-readable");
+    let harnesses = v["harnesses"].as_array().expect("a harnesses array");
+    assert!(
+        !harnesses.is_empty(),
+        "every installed adapter is classified: {v:#}"
+    );
+    assert!(
+        harnesses
+            .iter()
+            .all(|h| h["outcome"].is_string() && h["harness"].is_string()),
+        "each carries a harness and an outcome word: {v:#}"
+    );
+}
