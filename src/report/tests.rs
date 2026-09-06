@@ -2128,6 +2128,65 @@ fn what_omh_would_not_take_is_named_and_not_merely_absent() {
     );
 }
 
+/// `omh upgrade` reports one word per harness — the word carries the meaning
+/// on its own, for a reader in a pipe or without colour — and names a session
+/// left on an old image, distinguishing a known old tag from one it could not
+/// read (never dropping the uncertain one).
+#[test]
+fn an_upgrade_names_each_harness_outcome_and_the_sessions_left_behind() {
+    use super::{Outcome, StaleImage, StaleSession, Upgraded};
+    let report = Upgraded {
+        harnesses: vec![
+            ("claude".into(), Outcome::Rebuilt),
+            ("opencode".into(), Outcome::AlreadyCurrent),
+            ("codex".into(), Outcome::Unpinnable),
+        ],
+        refreshed: vec!["claude.toml".into()],
+        reaped: 2,
+        stale_sessions: vec![
+            StaleSession {
+                id: "s01".into(),
+                image: StaleImage::Known("omh/claude:old".into()),
+            },
+            StaleSession {
+                id: "s02".into(),
+                image: StaleImage::Unknown("daemon did not answer".into()),
+            },
+        ],
+        dry_run: false,
+    };
+
+    let human = report.human(&out::Palette::plain());
+    assert!(human.contains("rebuilt"), "the rebuilt word: {human}");
+    assert!(
+        human.contains("current"),
+        "the already-current word: {human}"
+    );
+    assert!(human.contains("unpinned"), "the unpinnable word: {human}");
+    assert!(human.contains("s01"), "the stale session is named: {human}");
+    assert!(
+        human.contains("could not tell"),
+        "an unreadable image reads as uncertain, never absent: {human}"
+    );
+
+    let machine = report.json();
+    let outcomes: std::collections::BTreeMap<String, String> = machine["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| {
+            (
+                h["harness"].as_str().unwrap().to_string(),
+                h["outcome"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(outcomes["claude"], "rebuilt");
+    assert_eq!(outcomes["opencode"], "current");
+    assert_eq!(outcomes["codex"], "unpinned");
+    assert_eq!(machine["stale"].as_array().unwrap().len(), 2);
+}
+
 /// An empty list says so, rather than printing nothing at all.
 ///
 /// A command that exits 0 having written nothing is indistinguishable from
