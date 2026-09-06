@@ -4407,6 +4407,10 @@ fn no_part_of_the_template_resolves_in_this_repo() {
 #[test]
 fn init_is_one_time_and_a_second_run_redirects_to_upgrade() {
     let sb = sandbox();
+    // A container runtime, faked: on a host where a harness binary is present
+    // `init` builds an image, and without this the first run fails for want of
+    // a runtime rather than exercising the one-time gate.
+    let _log = sb.fake_docker();
     sb.git_init();
 
     let first = sb.omh(&["init"]);
@@ -6396,12 +6400,19 @@ fn init_writes_the_selection_expanded() {
         "init's own explanation has to survive its own write: {written}"
     );
 
-    // Re-running must not resync a list somebody pruned on purpose.
+    // A pruned selection must not be resynced by re-running `init`. It cannot
+    // be: `init` writes the `[use]` selection once and is one-time now, so a
+    // second run refuses and touches nothing — the selection is written once,
+    // and `omh use --all` is how you ask for a resync.
     assert!(sb.omh(&["unuse", "skills", "review-diff"]).status.success());
-    assert!(sb.omh(&["init"]).status.success());
+    let second = sb.omh(&["init"]);
+    assert!(
+        !second.status.success(),
+        "a repo already set up is not initialised again"
+    );
     assert!(
         !sb.settings().contains("review-diff"),
-        "init writes the list once; `omh use --all` is how you ask for a resync"
+        "and the refusal leaves the pruned selection alone"
     );
 }
 
