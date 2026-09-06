@@ -1,7 +1,8 @@
 # Commands
 
 ```
-omh init                          set this repo up
+omh init                          set this repo up (once)
+omh upgrade                       apply a newer omh: refresh and rebuild
 omh new <harness> [-- args…]      start a session, run an agent in it
 omh s01 resume [harness]          rejoin one · claude · omp · opencode
 omh graph [--stop]                browse the code graph in a browser
@@ -152,10 +153,38 @@ how a script reads a launch plan.
 
 ## `omh init`
 
-Sets up the current repo. Decides everything, asks nothing, reports all of it.
-Covered in [Getting started](getting-started.md#what-it-actually-did).
+Sets up the current repo, once. Decides everything, asks nothing, reports all of
+it. Covered in [Getting started](getting-started.md#what-it-actually-did).
 
-Safe to re-run: it never overwrites files you have edited.
+**A one-time command.** The first run stamps the repo (`seeded-by`); running it
+again in a repo already set up refuses and points at `omh upgrade`, which is the
+verb that refreshes and rebuilds from there on. The two split cleanly on that
+stamp: `init` runs when the repo is not set up, `upgrade` when it is.
+
+## `omh upgrade`
+
+Applies a newly-installed omh to a repo you already set up. Run it after you
+update omh (a `brew upgrade`, say): the new binary carries fresh harness version
+pins, and this is what makes them take effect.
+
+```console
+$ omh upgrade
+$ omh upgrade --dry-run
+```
+
+It refreshes the managed catalogue from the binary — adapters, the base set,
+editors, stacks, hooks, markers — keeping anything you edited as `.yours`, just
+as `init` does. Then it rebuilds every image whose recipe moved (the base, each
+harness, and this repo's stack), reaps the superseded ones, and reports one word
+per harness — `rebuilt`, `current`, or `unpinned` (an adapter that pins no
+version, which omh cannot rebuild to anything reproducible). Finally it names any
+session still running on an image it just superseded — a relaunch away from the
+new one — and advances the `seeded-by` stamp, so `omh doctor`'s drift row goes
+quiet.
+
+It rebuilds, so it needs Docker; it needs no login. `--dry-run` decides and
+reports all of it and touches nothing. It runs in a repo already set up; in one
+that is not, it refuses and points at `omh init`.
 
 ## `omh new <harness> [-- args…]`
 

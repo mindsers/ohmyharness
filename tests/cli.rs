@@ -10267,3 +10267,36 @@ fn upgrade_reports_each_harness_as_json() {
         "each carries a harness and an outcome word: {v:#}"
     );
 }
+
+/// A session still running when omh upgrades is named in the report — a
+/// relaunch away from the rebuilt image. A session whose image omh cannot read
+/// is named as uncertain, never dropped.
+#[test]
+fn upgrade_names_a_session_still_running_on_an_old_image() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+    // A running session: a worktree, and its container in the `ps` listing.
+    sb.session("s01");
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s01")),
+    )
+    .unwrap();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let stale = v["stale"].as_array().expect("a stale array");
+    assert!(
+        stale.iter().any(|s| s["id"] == "s01"),
+        "the running session is named: {v:#}"
+    );
+}
