@@ -498,7 +498,7 @@ pub(crate) fn doctor_cmd(
         let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
             runtime::installed(p)
         })?;
-        plan.validate(&backend.caps())?;
+        plan.validate_for(&backend)?;
 
         if dry_run {
             // The script itself, unwrapped: this output exists to be piped into a

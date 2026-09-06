@@ -520,6 +520,13 @@ pub fn sbx_staging(mounts: &[crate::container::Mount]) -> SbxStaging {
     let mut writable: BTreeMap<std::path::PathBuf, bool> = BTreeMap::new();
     let mut links = Vec::new();
     for m in mounts {
+        // A non-absolute host is a docker named volume (`omh-cache-<repo>`),
+        // not a host path — sbx cannot mount one, and does not need to: its
+        // home persists across stop/run (measured 0.39.0), so the graph cache
+        // under `~/.cache` survives without a mount. Skipped, with no link.
+        if !m.host.is_absolute() {
+            continue;
+        }
         let dir = if m.file {
             m.host.parent().unwrap_or(&m.host).to_path_buf()
         } else {
@@ -532,10 +539,24 @@ pub fn sbx_staging(mounts: &[crate::container::Mount]) -> SbxStaging {
         *entry = *entry && m.read_only;
         links.push((m.guest.clone(), m.host.clone()));
     }
-    SbxStaging {
-        workspaces: writable.into_iter().collect(),
-        links,
-    }
+    // Drop a workspace another one already contains. sbx mounts a directory
+    // and everything under it, so a workspace nested inside another is
+    // redundant — and sbx can reject overlapping workspaces outright. A nested
+    // one is safe to drop only when the containing one grants at least the
+    // access it needed: a read-only child is covered by any ancestor, and a
+    // writable child only by a writable ancestor. The links are per-mount and
+    // untouched — each guest path still resolves inside the surviving mount.
+    let all: Vec<(std::path::PathBuf, bool)> = writable.into_iter().collect();
+    let workspaces = all
+        .iter()
+        .filter(|(path, ro)| {
+            !all.iter().any(|(other, other_ro)| {
+                other != path && path.starts_with(other) && (*ro || !*other_ro)
+            })
+        })
+        .cloned()
+        .collect();
+    SbxStaging { workspaces, links }
 }
 
 /// The links encoded for the `OMH_LINKS` env var the entrypoint reads: one
@@ -1244,6 +1265,101 @@ mod tests {
         assert!(staging
             .links
             .contains(&("/home/agent/.mcp.json".into(), "/host/cfg/.mcp.json".into())));
+    }
+
+    /// sbx mounts a directory and everything under it, so a workspace nested
+    /// inside another is redundant and sbx can reject the overlap. A nested one
+    /// is dropped when the containing workspace grants at least the access it
+    /// needed: a read-only child under any parent, a writable child only under
+    /// a writable parent. The links stay — each guest path resolves inside the
+    /// surviving mount.
+    #[test]
+    fn a_nested_workspace_is_dropped_when_a_parent_already_covers_it() {
+        let staging = sbx_staging(&[
+            mount("/host/run/claude", "/omh/layers/0", true, false),
+            mount(
+                "/host/run/claude/commands",
+                "/home/agent/.claude/commands",
+                true,
+                false,
+            ),
+            mount(
+                "/host/run/claude/skills",
+                "/home/agent/.claude/skills",
+                true,
+                false,
+            ),
+            // A writable sibling that is not nested survives on its own.
+            mount("/host/worktree", "/work", false, false),
+        ]);
+        let dirs: Vec<String> = staging
+            .workspaces
+            .iter()
+            .map(|(p, _)| p.display().to_string())
+            .collect();
+        assert!(dirs.contains(&"/host/run/claude".to_string()));
+        assert!(
+            !dirs.iter().any(|d| d.starts_with("/host/run/claude/")),
+            "the nested read-only children are dropped: {dirs:?}"
+        );
+        assert!(dirs.contains(&"/host/worktree".to_string()));
+        // Every guest path still has its link, nested or not.
+        assert!(staging
+            .links
+            .iter()
+            .any(|(g, _)| g.ends_with(".claude/commands")));
+    }
+
+    /// A writable child under a read-only parent is NOT dropped: the parent
+    /// does not grant the write the child needs, so both must stay even though
+    /// they overlap. (omh does not produce this today, but the rule must be
+    /// safe if it ever does.)
+    #[test]
+    fn a_writable_child_under_a_read_only_parent_survives() {
+        let staging = sbx_staging(&[
+            mount("/host/area", "/ro", true, false),
+            mount("/host/area/live", "/rw", false, false),
+        ]);
+        let dirs: Vec<String> = staging
+            .workspaces
+            .iter()
+            .map(|(p, _)| p.display().to_string())
+            .collect();
+        assert!(
+            dirs.contains(&"/host/area/live".to_string()),
+            "a writable child a read-only parent cannot cover stays: {dirs:?}"
+        );
+    }
+
+    /// A docker named volume (`omh-cache-<repo>`, a non-absolute host) is not a
+    /// host path sbx can mount, and sbx does not need it: its home persists
+    /// across stop/run, so the graph cache under `~/.cache` survives without a
+    /// mount. It contributes no workspace and no link.
+    #[test]
+    fn a_named_volume_is_not_an_sbx_workspace() {
+        let staging = sbx_staging(&[
+            mount("/host/work", "/work", false, false),
+            mount(
+                "omh-cache-repo",
+                "/home/agent/.cache/codebase-memory-mcp",
+                false,
+                false,
+            ),
+        ]);
+        assert!(
+            staging.workspaces.iter().all(|(p, _)| p.is_absolute()),
+            "no volume name became a workspace: {:?}",
+            staging.workspaces
+        );
+        assert!(
+            !staging
+                .links
+                .iter()
+                .any(|(g, _)| g.ends_with("codebase-memory-mcp")),
+            "and none is symlinked: {:?}",
+            staging.links
+        );
+        assert_eq!(staging.workspaces.len(), 1, "only the real host path");
     }
 
     /// A workspace omh collapses several mounts into is read-only only when
