@@ -329,3 +329,43 @@ test. The design is no longer guessed; `Sbx` in `runtime.rs` still needs its
 argv rewritten to `create`/`exec`/`ports` and `Plan::validate` taught the
 stage-and-symlink model, and until that ships `auto` never selects it.
 
+**The rewrite is architectural, not an argv swap (measured 2026-09-06).**
+Trying to map omh's Docker-shaped `Sbx` onto the real CLI surfaced four
+mismatches that are the actual work, each verified end to end with a throwaway
+image loaded into sbx:
+
+1. **The image reaches sbx by `docker save | sbx template load`.** omh builds
+   `omh/base:<tag>` in Docker; sbx runs in its own runtime and takes an image
+   with `-t`. `sbx template load <tar>` loaded a locally-built image, and
+   `sbx create shell -t <it>` **ran its ENTRYPOINT** — the stub wrote its marker
+   and `sleep infinity` was PID 1, so an sshd started before that exec would
+   persist. So omh's launch gains a save-and-load step before `create`.
+2. **sbx has no labels.** `create`/`run` take no `--label`, so omh's
+   `Plan::labels` drift-and-reuse — read back with `container_stamp` to decide
+   attach-vs-restart — has no equivalent. A first cut recreates the sandbox each
+   launch (`rm` then `create`); a fuller one records the plan stamp under
+   `runs/<id>` and compares there.
+3. **The workspace is at its host path, and `/work` must be a symlink.** `-e
+   OMH_WORKTREE=<host path>` carries the path in (env carrying is confirmed),
+   and the image entrypoint does `ln -s "$OMH_WORKTREE" /work`. The profile's
+   single-file and chosen-guest-path mounts (rules, `.mcp.json`, skills) cannot
+   be mounts at all — they stage into the worktree (or a second `:ro`
+   workspace) and are symlinked from the entrypoint, which is the
+   `stage-and-symlink` model `Plan::validate` must express for a backend with
+   `file_mounts: false, free_guest_paths: false`.
+4. **The running check is `sbx ls --json`, filtered by status.** `sbx ls -q`
+   lists *all* sandboxes, running or stopped, so it cannot stand in for Docker's
+   `ps --format {{.Names}}` (running only) — a stopped sandbox would read as up.
+   `--json` returns `{"sandboxes":[…]}` with a `status`; the sbx path filters
+   `status == "running"`. `sbx rm --force`, `sbx stop` map cleanly; `sbx exec
+   [-it] NAME ARGV` is the harness entry.
+
+So the `Sbx` rewrite touches `runtime.rs` (argv + a JSON running-check), the
+base image (the `/work` symlink entrypoint, one rebuild), `image` (save-and-load
+delivery), `container`/`Plan::validate` (stage-and-symlink, and reuse without
+labels), and its acceptance is a real launch: `omh doctor --harness claude` with
+`runtime = "sbx"`. The design is fully measured; none of it is guessed. It is a
+discrete feature, not a flag change, which is why `Sbx` stays the provisional
+placeholder until that feature lands and `auto` never selects it.
+
+
