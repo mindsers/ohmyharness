@@ -1871,6 +1871,29 @@ fn keep_takes_a_selection_or_nothing_and_never_the_next_word() {
     );
 }
 
+/// `omh upgrade` is a top-level command with no args, like `omh init` — it acts
+/// on the machine's adapters and this repo's images, and names no session.
+#[test]
+fn upgrade_is_a_top_level_verb_that_takes_no_session() {
+    assert!(
+        matches!(
+            Cli::try_parse_from(["omh", "upgrade"]).map(|c| c.cmd),
+            Ok(Cmd::Upgrade)
+        ),
+        "`omh upgrade` parses to the top-level Upgrade command"
+    );
+    // It carries no session — the selector belongs to the `s` namespace.
+    assert!(
+        !cli::consumes_session(&Cmd::Upgrade),
+        "upgrade acts machine-wide, not on a session"
+    );
+    // And it previews under --dry-run, like the other build commands.
+    assert!(
+        cli::previews(&Cmd::Upgrade),
+        "upgrade can say what it would rebuild without doing it"
+    );
+}
+
 /// A commit refuses over markers a sync left behind, says where they are,
 /// and can be meant anyway.
 #[test]

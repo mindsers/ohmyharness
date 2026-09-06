@@ -240,6 +240,15 @@ pub(crate) enum Cmd {
         #[arg(long)]
         harness: Option<String>,
     },
+    /// Apply a newly-installed omh: refresh the catalogue and rebuild the images
+    /// whose recipe moved.
+    ///
+    /// The ongoing counterpart to `omh init`, which sets a repo up once. Upgrade
+    /// refreshes the managed catalogue from this binary (keeping your edits as
+    /// `.yours`), rebuilds the base, harness and this repo's stack images whose
+    /// pins moved, reaps the superseded ones, and names any session still
+    /// running on an old image. It rebuilds — so it needs Docker — but no login.
+    Upgrade,
     /// Who put this here, and on what grounds.
     Why {
         /// A base-set entry, something you added, or something omh rejected.
@@ -931,6 +940,9 @@ pub(crate) fn previews(cmd: &Cmd) -> bool {
         | Cmd::Eject { .. }
         | Cmd::New { .. }
         | Cmd::Doctor { .. }
+        // It classifies every adapter and names what it would rebuild before
+        // building anything, so the preview is the real run's own decision.
+        | Cmd::Upgrade
         // It computes the whole plan before touching anything, so the preview
         // is the same value the real run acts on rather than a guess about it.
         | Cmd::Prune { .. } => true,
@@ -1033,6 +1045,7 @@ pub(crate) fn answers_json(cmd: &Cmd) -> bool {
         Cmd::Init
         | Cmd::Prune { .. }
         | Cmd::Doctor { .. }
+        | Cmd::Upgrade
         | Cmd::Why { .. }
         | Cmd::Graph { .. }
         | Cmd::Auth { .. }
@@ -1073,6 +1086,9 @@ pub(crate) fn consumes_session(cmd: &Cmd) -> bool {
         // session prefix would be a scope it cannot honour.
         | Cmd::Prune { .. }
         | Cmd::Doctor { .. }
+        // Machine-wide too: it refreshes the catalogue and rebuilds images,
+        // which belong to no one session.
+        | Cmd::Upgrade
         | Cmd::Why { .. }
         | Cmd::Auth { .. }
         | Cmd::Info { .. }
