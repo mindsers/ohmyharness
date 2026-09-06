@@ -31,6 +31,21 @@ pub trait Runtime: std::fmt::Debug {
     /// Executable to invoke.
     fn program(&self) -> &'static str;
     fn caps(&self) -> Caps;
+
+    /// Whether omh stages the mounts this runtime cannot do natively, rather
+    /// than the runtime refusing the plan.
+    ///
+    /// `caps` says what the runtime does *natively*, and `Plan::validate`
+    /// turns a `false` there into a refusal. sbx is native-false on both — it
+    /// mounts only directories, only at their host path — but omh bridges that
+    /// with `sbx_staging`: a file mount stages into its parent directory and
+    /// the guest path is reached by a symlink the entrypoint makes. So for a
+    /// staging backend the native refusal does not apply, and the launch skips
+    /// it. Docker and podman mount everything natively and stage nothing.
+    fn stages_unmountable(&self) -> bool {
+        false
+    }
+
     /// Arguments after the program name.
     fn args(&self, plan: &Plan) -> Vec<String>;
 
@@ -569,6 +584,14 @@ impl Runtime for Sbx {
         }
     }
 
+    /// sbx mounts only directories, only at their host path — but omh stages
+    /// the file mounts and the `/work` relocation into workspaces and symlinks
+    /// (`sbx_staging`), so the native refusal `Plan::validate` would raise does
+    /// not apply.
+    fn stages_unmountable(&self) -> bool {
+        true
+    }
+
     fn args(&self, plan: &Plan) -> Vec<String> {
         // The one-shot form (doctor, auth): create-and-run the shell agent on
         // omh's template image with the plan's workspaces, then the argv.
@@ -1020,8 +1043,13 @@ mod tests {
         }
     }
 
-    /// The loud-failure requirement: `sbx` must refuse a plan it cannot honour
-    /// rather than starting a sandbox where the profile silently isn't there.
+    /// `Plan::validate` is the *native*-mount check: a backend whose caps say
+    /// it cannot mount a file gets the plan refused, named to the offending
+    /// mount, rather than a sandbox where the profile silently isn't there.
+    /// sbx's raw caps are native-false, so it fails this check — and that is
+    /// correct here, because this tests the pure function. What the launch does
+    /// with sbx is skip it and stage instead
+    /// (`a_staging_backend_is_not_refused_the_plan_it_will_stage`).
     #[test]
     fn a_plan_needing_file_mounts_is_refused_by_a_backend_without_them() {
         let plan = plan_with(vec![
@@ -1053,6 +1081,33 @@ mod tests {
         };
         let err = sample_plan().validate(&caps).unwrap_err();
         assert!(format!("{err:#}").contains("/work"), "got: {err:#}");
+    }
+
+    /// sbx's raw caps refuse a real profile — a file mount and `/work` at a
+    /// guest path it cannot honour natively — but the launch never applies that
+    /// refusal to a staging backend, because omh stages those into workspaces
+    /// and symlinks. `stages_unmountable` is the seam `session_up` reads to skip
+    /// the native check; docker mounts everything and stages nothing, so it is
+    /// validated for real.
+    #[test]
+    fn a_staging_backend_is_not_refused_the_plan_it_will_stage() {
+        let plan = plan_with(vec![
+            dir_mount("/host/worktree", "/work", false),
+            Mount {
+                host: PathBuf::from("/host/run/mcp.rendered"),
+                guest: PathBuf::from("/home/agent/.mcp.json"),
+                read_only: true,
+                file: true,
+            },
+        ]);
+
+        // Validated against its raw caps, sbx refuses the plan…
+        assert!(plan.validate(&Sbx.caps()).is_err());
+        // …but sbx stages exactly those, so the launch skips the native check.
+        assert!(Sbx.stages_unmountable(), "sbx stages what it cannot mount");
+        // Docker mounts everything natively and stages nothing.
+        assert!(!Docker.stages_unmountable());
+        assert!(plan.validate(&Docker.caps()).is_ok());
     }
 
     // ── argument construction ───────────────────────────────────────────────

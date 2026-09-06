@@ -201,7 +201,13 @@ pub(crate) fn session_up(
     // logged out while `--dry-run` advertised the mounts.
     say_selection(paths, profile, &opts.repo, ctx);
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
-    plan.validate(&backend.caps())?;
+    // A staging backend (sbx) handles the file mounts and the `/work`
+    // relocation through workspaces and symlinks, so the native-mount refusal
+    // does not apply to it; only a runtime that mounts natively is validated
+    // against its own capabilities here.
+    if !backend.stages_unmountable() {
+        plan.validate(&backend.caps())?;
+    }
 
     // The plan is built before this rather than after, because the plan *is*
     // the question: a running container is only this session if it was made
