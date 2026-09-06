@@ -79,7 +79,7 @@ pub(crate) fn auth_cmd(
             resolves: BTreeMap::new(),
         },
     )?;
-    plan.validate(&backend.caps())?;
+    plan.validate_for(&backend)?;
     image::ensure_network(&backend, &plan.network)?;
 
     // Progress, not the report: the login itself is what the user is here for,

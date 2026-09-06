@@ -1054,6 +1054,17 @@ fn symlink(src: &Path, dst: &Path) -> Result<()> {
 impl Plan {
     /// Refuse a plan the chosen backend cannot honour. Starting a sandbox where
     /// the profile silently is not there is the worst available outcome.
+    /// Validate this plan for a backend, honouring that a staging backend (sbx)
+    /// handles through workspaces and symlinks the mounts it cannot do natively,
+    /// so the native-mount refusal does not apply to it. Docker and podman mount
+    /// everything natively and are validated against their capabilities.
+    pub fn validate_for(&self, backend: &crate::runtime::Backend) -> Result<()> {
+        if backend.stages_unmountable() {
+            return Ok(());
+        }
+        self.validate(&backend.caps())
+    }
+
     pub fn validate(&self, caps: &crate::runtime::Caps) -> Result<()> {
         let mut problems = Vec::new();
         for m in &self.mounts {

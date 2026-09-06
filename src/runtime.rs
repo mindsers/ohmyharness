@@ -31,6 +31,21 @@ pub trait Runtime: std::fmt::Debug {
     /// Executable to invoke.
     fn program(&self) -> &'static str;
     fn caps(&self) -> Caps;
+
+    /// Whether omh stages the mounts this runtime cannot do natively, rather
+    /// than the runtime refusing the plan.
+    ///
+    /// `caps` says what the runtime does *natively*, and `Plan::validate`
+    /// turns a `false` there into a refusal. sbx is native-false on both — it
+    /// mounts only directories, only at their host path — but omh bridges that
+    /// with `sbx_staging`: a file mount stages into its parent directory and
+    /// the guest path is reached by a symlink the entrypoint makes. So for a
+    /// staging backend the native refusal does not apply, and the launch skips
+    /// it. Docker and podman mount everything natively and stage nothing.
+    fn stages_unmountable(&self) -> bool {
+        false
+    }
+
     /// Arguments after the program name.
     fn args(&self, plan: &Plan) -> Vec<String>;
 
@@ -39,6 +54,35 @@ pub trait Runtime: std::fmt::Debug {
 
     /// Run something inside an already-running session.
     fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String>;
+
+    /// Force-remove the named session container.
+    ///
+    /// `-f` on docker and podman; `--force` on sbx, which uses it both to skip
+    /// the confirmation prompt and to remove a sandbox that is still in use (an
+    /// open ssh connection). Measured against sbx 0.39.0.
+    fn remove_args(&self, name: &str) -> Vec<String> {
+        vec!["rm".into(), "-f".into(), name.into()]
+    }
+
+    /// Whether this runtime has per-session networks omh creates and reaps.
+    ///
+    /// Docker and podman put every session on an `omh-<repo>-<session>`
+    /// network. sbx isolates each sandbox in a microVM of its own and has no
+    /// network for omh to create, so the launch skips `ensure_network` for it.
+    fn uses_networks(&self) -> bool {
+        true
+    }
+
+    /// Whether the launch stamp rides on the container as labels.
+    ///
+    /// Docker and podman stamp `Plan::labels` onto the container and read it
+    /// back with `inspect` to decide attach-vs-restart. sbx has no labels
+    /// (measured 0.39.0), so omh records the same stamp beside the session
+    /// under `runs/<id>/stamp.json` and reads it from there — `container_stamp`
+    /// for the one, `stamp_recorded` for the other.
+    fn carries_labels(&self) -> bool {
+        true
+    }
 
     /// How to list this runtime's named volumes, if it has such a notion.
     ///
@@ -108,6 +152,22 @@ pub trait Runtime: std::fmt::Debug {
     /// every future call resting on somebody remembering to escape. Listing
     /// and comparing in Rust has no pattern language in it at all.
     fn running_args(&self) -> Vec<String>;
+
+    /// The running container names in what `running_args` printed.
+    ///
+    /// Default: one trimmed, non-empty name per line — docker's
+    /// `{{.Names}}` and podman's. A backend whose listing is not a name
+    /// list overrides this: `sbx ls --json` returns every sandbox with a
+    /// `status`, so `Sbx` parses the JSON and keeps only the running ones,
+    /// where a plain line split would read a stopped sandbox as up.
+    fn running_names(&self, stdout: &str) -> Vec<String> {
+        stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
 
     /// Run something inside the session that must outlive the caller.
     ///
@@ -438,6 +498,82 @@ impl Runtime for Podman {
     }
 }
 
+/// How omh's mounts become an sbx sandbox: the workspaces to mount, and the
+/// guest→host symlinks the entrypoint makes once they are there.
+///
+/// sbx mounts a workspace at its **exact host path** and cannot mount a single
+/// file (both measured, 0.39.0). So a directory mount is its own workspace; a
+/// file mount contributes its **parent** directory, and the guest path is
+/// symlinked to the file where sbx put it. `/work` and every other guest path
+/// reach their content through a symlink, not a mount.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SbxStaging {
+    /// Host directories to mount, and whether each is read-only. Read-only only
+    /// when every mount that lands in it is.
+    pub workspaces: Vec<(std::path::PathBuf, bool)>,
+    /// `(guest, host)` pairs the entrypoint symlinks: `ln -s host guest`.
+    pub links: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+}
+
+pub fn sbx_staging(mounts: &[crate::container::Mount]) -> SbxStaging {
+    use std::collections::BTreeMap;
+    let mut writable: BTreeMap<std::path::PathBuf, bool> = BTreeMap::new();
+    let mut links = Vec::new();
+    for m in mounts {
+        // A non-absolute host is a docker named volume (`omh-cache-<repo>`),
+        // not a host path — sbx cannot mount one, and does not need to: its
+        // home persists across stop/run (measured 0.39.0), so the graph cache
+        // under `~/.cache` survives without a mount. Skipped, with no link.
+        if !m.host.is_absolute() {
+            continue;
+        }
+        let dir = if m.file {
+            m.host.parent().unwrap_or(&m.host).to_path_buf()
+        } else {
+            m.host.clone()
+        };
+        // A directory is read-only only if every mount in it is. omh owns the
+        // staging directory it collapses these into, so a widened workspace is
+        // safe, and a read-only file omh renders is not one the agent writes.
+        let entry = writable.entry(dir).or_insert(true);
+        *entry = *entry && m.read_only;
+        links.push((m.guest.clone(), m.host.clone()));
+    }
+    // Drop a workspace another one already contains. sbx mounts a directory
+    // and everything under it, so a workspace nested inside another is
+    // redundant — and sbx can reject overlapping workspaces outright. A nested
+    // one is safe to drop only when the containing one grants at least the
+    // access it needed: a read-only child is covered by any ancestor, and a
+    // writable child only by a writable ancestor. The links are per-mount and
+    // untouched — each guest path still resolves inside the surviving mount.
+    let all: Vec<(std::path::PathBuf, bool)> = writable.into_iter().collect();
+    let workspaces = all
+        .iter()
+        .filter(|(path, ro)| {
+            !all.iter().any(|(other, other_ro)| {
+                other != path && path.starts_with(other) && (*ro || !*other_ro)
+            })
+        })
+        .cloned()
+        .collect();
+    SbxStaging { workspaces, links }
+}
+
+/// The links encoded for the `OMH_LINKS` env var the entrypoint reads: one
+/// `guest host` per line. The entrypoint splits with `read -r guest host`, so
+/// the guest path is the first field and the host path is the whole remainder
+/// — a host path with a space still reads correctly, and a guest path (an
+/// omh-defined constant like `/work`) never holds one. A space rather than a
+/// tab keeps the separator out of the raw-string Dockerfile, where a literal
+/// tab or an escaped quote would not survive rendering.
+pub fn encode_links(links: &[(std::path::PathBuf, std::path::PathBuf)]) -> String {
+    links
+        .iter()
+        .map(|(g, h)| format!("{} {}", g.display(), h.display()))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl Runtime for Sbx {
     fn name(&self) -> &'static str {
         "sbx"
@@ -460,94 +596,198 @@ impl Runtime for Sbx {
     /// closes it is measuring against a real sbx, and `omh doctor` is where
     /// that check belongs once there is one to measure.
     fn running_args(&self) -> Vec<String> {
-        vec!["ps".into(), "--format".into(), "{{.Names}}".into()]
+        vec!["ls".into(), "--json".into()]
     }
+
+    /// `sbx ls --json` is `{"sandboxes":[{"name","status",…}]}`. Only the
+    /// running ones count — `ls -q` would list stopped sandboxes too, and a
+    /// stopped one read as up ends in the `rm -f` `Running::Unknown` exists to
+    /// prevent. Measured against sbx 0.39.0.
+    fn running_names(&self, stdout: &str) -> Vec<String> {
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(stdout) else {
+            return Vec::new();
+        };
+        doc.get("sandboxes")
+            .and_then(|s| s.as_array())
+            .into_iter()
+            .flatten()
+            .filter(|s| s.get("status").and_then(|v| v.as_str()) == Some("running"))
+            .filter_map(|s| s.get("name").and_then(|v| v.as_str()).map(str::to_string))
+            .collect()
+    }
+
     fn program(&self) -> &'static str {
         "sbx"
     }
 
     fn caps(&self) -> Caps {
-        // Both unverified. Docker's docs describe workspaces mounting at their
-        // host path and say nothing about single files, so assume neither until
-        // the spike proves otherwise. A wrong `true` here would start a sandbox
-        // with the profile silently missing.
+        // Both **measured** against sbx 0.39.0 (2026-09-06), not assumed. A
+        // workspace mounts at its exact host path — `sbx create shell <dir>`
+        // puts the files at `<dir>` inside, so the guest path cannot be chosen
+        // — and a workspace must be a directory: a single-file path is refused
+        // with "workspace path exists but is not a directory". So the profile's
+        // single-file mounts and `/work` convention both need the staging model
+        // `Plan::validate` will express, not a per-file mount.
         Caps {
             file_mounts: false,
             free_guest_paths: false,
         }
     }
 
+    /// sbx mounts only directories, only at their host path — but omh stages
+    /// the file mounts and the `/work` relocation into workspaces and symlinks
+    /// (`sbx_staging`), so the native refusal `Plan::validate` would raise does
+    /// not apply.
+    fn stages_unmountable(&self) -> bool {
+        true
+    }
+
+    /// `sbx rm SANDBOX --force` — measured 0.39.0. `--force` both skips the
+    /// confirmation and removes a sandbox still in use.
+    fn remove_args(&self, name: &str) -> Vec<String> {
+        vec!["rm".into(), name.into(), "--force".into()]
+    }
+
+    /// sbx isolates each sandbox in its own microVM and has no per-session
+    /// network for omh to create or reap.
+    fn uses_networks(&self) -> bool {
+        false
+    }
+
+    /// sbx has no labels (measured 0.39.0), so its launch stamp is recorded
+    /// beside the session in `runs/<id>/stamp.json`, not on the sandbox.
+    fn carries_labels(&self) -> bool {
+        false
+    }
+
     fn args(&self, plan: &Plan) -> Vec<String> {
-        // PROVISIONAL. The exact sbx flag names are an open question; only the
-        // information carried is asserted by tests, not this shape. Egress and
-        // credential handling are deliberately absent — sbx owns both, which is
-        // the reason to use it.
-        let mut a: Vec<String> = vec!["run".into()];
-        for m in &plan.mounts {
-            a.push("--workspace".into());
-            a.push(format!(
-                "{}{}",
-                m.host.display(),
-                if m.read_only { ":ro" } else { "" }
-            ));
-        }
-        for (k, v) in &plan.env {
-            a.push("--env".into());
-            a.push(format!("{k}={v}"));
-        }
+        // The one-shot form (doctor, auth): create-and-run the shell agent on
+        // omh's template image with the plan's workspaces, then the argv.
+        let staging = sbx_staging(&plan.mounts);
+        let mut a: Vec<String> = vec![
+            "run".into(),
+            "shell".into(),
+            "-t".into(),
+            plan.image.clone(),
+        ];
+        a.extend(self.env_args(plan, &staging));
+        a.extend(workspace_args(&staging));
         a.push("--".into());
         a.extend(plan.argv.iter().cloned());
         a
     }
 
     fn up_args(&self, plan: &Plan, name: &str, port: u16, pubkey: &str) -> Vec<String> {
-        // PROVISIONAL — sbx session semantics are part of the open spike.
+        // Create the sandbox (not attached), publishing sshd on loopback, from
+        // omh's template image. No `--label`: sbx has none, so reuse is decided
+        // by recreating rather than by reading a stamp back off the sandbox.
+        let staging = sbx_staging(&plan.mounts);
         let mut a: Vec<String> = vec![
-            "run".into(),
-            "--detach".into(),
+            "create".into(),
             "--name".into(),
             name.into(),
+            "shell".into(),
+            "-t".into(),
+            plan.image.clone(),
+            "-p".into(),
+            format!("127.0.0.1:{port}:22"),
+            "-e".into(),
+            format!("OMH_PUBKEY={pubkey}"),
         ];
-        a.push("--publish".into());
-        a.push(format!("127.0.0.1:{port}:22"));
-        for m in &plan.mounts {
-            a.push("--workspace".into());
-            a.push(format!(
-                "{}{}",
-                m.host.display(),
-                if m.read_only { ":ro" } else { "" }
-            ));
-        }
-        a.push("--env".into());
-        a.push(format!("OMH_PUBKEY={pubkey}"));
-        // PROVISIONAL like the rest of this backend, but carried rather than
-        // dropped: a plan's stamp is information, and no backend may lose it.
-        for (key, value) in plan.labels() {
-            a.push("--label".into());
-            a.push(format!("{key}={value}"));
-        }
-        a.push("--".into());
-        a.push("omh-session".into());
+        a.extend(self.env_args(plan, &staging));
+        a.extend(workspace_args(&staging));
         a
     }
 
     fn exec_detached_args(&self, name: &str, argv: &[String]) -> Vec<String> {
-        // PROVISIONAL, like the rest of the sbx backend.
-        let mut a: Vec<String> = vec!["exec".into(), "--detach".into(), name.into(), "--".into()];
+        let mut a: Vec<String> = vec!["exec".into(), "-d".into(), name.into()];
         a.extend(argv.iter().cloned());
         a
     }
 
     fn exec_args(&self, name: &str, argv: &[String], tty: bool) -> Vec<String> {
+        // sbx exec is `SANDBOX COMMAND [ARG...]` — no `--`, and it runs as the
+        // sandbox's `agent` in the workspace directory by default (measured).
         let mut a: Vec<String> = vec!["exec".into()];
         if tty {
             a.push("-it".into());
         }
         a.push(name.into());
-        a.push("--".into());
         a.extend(argv.iter().cloned());
         a
     }
+}
+
+impl Sbx {
+    /// `-e KEY=VALUE` for every plan env, plus `OMH_LINKS` — the guest→host
+    /// symlinks the entrypoint makes, since sbx cannot mount a guest path.
+    fn env_args(&self, plan: &Plan, staging: &SbxStaging) -> Vec<String> {
+        let mut a = Vec::new();
+        for (k, v) in &plan.env {
+            a.push("-e".into());
+            a.push(format!("{k}={v}"));
+        }
+        a.push("-e".into());
+        a.push(format!("OMH_LINKS={}", encode_links(&staging.links)));
+        a
+    }
+}
+
+/// sbx has its own image store and cannot build: omh builds the image with
+/// docker, `docker save`s it to a tar, and loads that here (measured 0.39.0,
+/// `sbx template load FILE`). These describe that delivery for `image::ensure`
+/// to drive, and the check that answers whether it has already happened.
+impl Sbx {
+    /// `sbx template ls --json`: `{"images":[{"repository","tag",…}]}`.
+    pub fn template_ls_args() -> Vec<String> {
+        vec!["template".into(), "ls".into(), "--json".into()]
+    }
+
+    /// `sbx template load FILE`, the tar `docker save -o FILE <tag>` wrote.
+    pub fn template_load_args(tar: &std::path::Path) -> Vec<String> {
+        vec!["template".into(), "load".into(), tar.display().to_string()]
+    }
+
+    /// Whether `sbx template ls --json` already lists `tag` (`omh/claude:<d>`).
+    /// sbx may store it under a registry-prefixed repository
+    /// (`docker.io/library/omh/claude`), so the repository is matched on a path
+    /// boundary — `omh/claude` matches `docker.io/library/omh/claude` but not
+    /// `notomh/claude` — and the tag exactly.
+    pub fn template_has(stdout: &str, tag: &str) -> bool {
+        let Some((want_repo, want_tag)) = tag.rsplit_once(':') else {
+            return false;
+        };
+        let Ok(doc) = serde_json::from_str::<serde_json::Value>(stdout) else {
+            return false;
+        };
+        doc.get("images")
+            .and_then(|i| i.as_array())
+            .into_iter()
+            .flatten()
+            .any(|img| {
+                let repo = img
+                    .get("repository")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let t = img.get("tag").and_then(|v| v.as_str()).unwrap_or_default();
+                t == want_tag && (repo == want_repo || repo.ends_with(&format!("/{want_repo}")))
+            })
+    }
+}
+
+/// The workspace positionals: `<host>` or `<host>:ro`, in path order.
+fn workspace_args(staging: &SbxStaging) -> Vec<String> {
+    staging
+        .workspaces
+        .iter()
+        .map(|(dir, ro)| {
+            if *ro {
+                format!("{}:ro", dir.display())
+            } else {
+                dir.display().to_string()
+            }
+        })
+        .collect()
 }
 
 /// The backend the settings ask for, or the one measured backend under `auto`.
@@ -770,13 +1010,14 @@ mod tests {
         assert!(c.free_guest_paths);
     }
 
-    /// Docker's docs describe workspace mounts landing at the host path and say
-    /// nothing about single files. Until the spike proves otherwise, both are
-    /// false — a wrong `true` here silently drops the profile.
+    /// Measured against sbx 0.39.0 (2026-09-06): a workspace mounts at its
+    /// host path (no chosen guest path) and must be a directory (a single-file
+    /// path is refused). A wrong `true` here would start a sandbox with the
+    /// profile silently missing.
     #[test]
-    fn sbx_capabilities_stay_conservative_until_verified() {
+    fn sbx_capabilities_are_the_measured_ones() {
         let c = Sbx.caps();
-        assert!(!c.file_mounts, "unverified: assume no");
+        assert!(!c.file_mounts, "a single file cannot be a workspace");
         assert!(
             !c.free_guest_paths,
             "sbx mounts workspaces at their host path"
@@ -870,8 +1111,13 @@ mod tests {
         }
     }
 
-    /// The loud-failure requirement: `sbx` must refuse a plan it cannot honour
-    /// rather than starting a sandbox where the profile silently isn't there.
+    /// `Plan::validate` is the *native*-mount check: a backend whose caps say
+    /// it cannot mount a file gets the plan refused, named to the offending
+    /// mount, rather than a sandbox where the profile silently isn't there.
+    /// sbx's raw caps are native-false, so it fails this check — and that is
+    /// correct here, because this tests the pure function. What the launch does
+    /// with sbx is skip it and stage instead
+    /// (`a_staging_backend_is_not_refused_the_plan_it_will_stage`).
     #[test]
     fn a_plan_needing_file_mounts_is_refused_by_a_backend_without_them() {
         let plan = plan_with(vec![
@@ -903,6 +1149,33 @@ mod tests {
         };
         let err = sample_plan().validate(&caps).unwrap_err();
         assert!(format!("{err:#}").contains("/work"), "got: {err:#}");
+    }
+
+    /// sbx's raw caps refuse a real profile — a file mount and `/work` at a
+    /// guest path it cannot honour natively — but the launch never applies that
+    /// refusal to a staging backend, because omh stages those into workspaces
+    /// and symlinks. `stages_unmountable` is the seam `session_up` reads to skip
+    /// the native check; docker mounts everything and stages nothing, so it is
+    /// validated for real.
+    #[test]
+    fn a_staging_backend_is_not_refused_the_plan_it_will_stage() {
+        let plan = plan_with(vec![
+            dir_mount("/host/worktree", "/work", false),
+            Mount {
+                host: PathBuf::from("/host/run/mcp.rendered"),
+                guest: PathBuf::from("/home/agent/.mcp.json"),
+                read_only: true,
+                file: true,
+            },
+        ]);
+
+        // Validated against its raw caps, sbx refuses the plan…
+        assert!(plan.validate(&Sbx.caps()).is_err());
+        // …but sbx stages exactly those, so the launch skips the native check.
+        assert!(Sbx.stages_unmountable(), "sbx stages what it cannot mount");
+        // Docker mounts everything natively and stages nothing.
+        assert!(!Docker.stages_unmountable());
+        assert!(plan.validate(&Docker.caps()).is_ok());
     }
 
     // ── argument construction ───────────────────────────────────────────────
@@ -951,6 +1224,281 @@ mod tests {
         }
         assert!(args.contains(":ro"), "read-only mounts must stay read-only");
         assert!(args.ends_with("claude"), "harness argv comes last: {args}");
+    }
+
+    fn mount(host: &str, guest: &str, read_only: bool, file: bool) -> crate::container::Mount {
+        crate::container::Mount {
+            host: host.into(),
+            guest: guest.into(),
+            read_only,
+            file,
+        }
+    }
+
+    /// A directory mount is its own workspace at its host path; a single-file
+    /// mount cannot be one (sbx refuses it), so its **parent** directory is the
+    /// workspace and the file's guest path is reached by a symlink. Measured.
+    #[test]
+    fn a_file_mount_becomes_its_parent_workspace_and_a_symlink() {
+        let staging = sbx_staging(&[
+            mount("/host/work", "/work", false, false),
+            mount("/host/cfg/.mcp.json", "/home/agent/.mcp.json", true, true),
+        ]);
+        let dirs: Vec<_> = staging
+            .workspaces
+            .iter()
+            .map(|(p, ro)| (p.display().to_string(), *ro))
+            .collect();
+        assert!(dirs.contains(&("/host/work".to_string(), false)));
+        assert!(
+            dirs.contains(&("/host/cfg".to_string(), true)),
+            "the file's parent is the workspace, not the file: {dirs:?}"
+        );
+        assert!(
+            !dirs.iter().any(|(p, _)| p.ends_with(".mcp.json")),
+            "the file itself is never a workspace: {dirs:?}"
+        );
+        // Every mount leaves a guest→host link for the entrypoint.
+        assert!(staging
+            .links
+            .contains(&("/work".into(), "/host/work".into())));
+        assert!(staging
+            .links
+            .contains(&("/home/agent/.mcp.json".into(), "/host/cfg/.mcp.json".into())));
+    }
+
+    /// sbx mounts a directory and everything under it, so a workspace nested
+    /// inside another is redundant and sbx can reject the overlap. A nested one
+    /// is dropped when the containing workspace grants at least the access it
+    /// needed: a read-only child under any parent, a writable child only under
+    /// a writable parent. The links stay — each guest path resolves inside the
+    /// surviving mount.
+    #[test]
+    fn a_nested_workspace_is_dropped_when_a_parent_already_covers_it() {
+        let staging = sbx_staging(&[
+            mount("/host/run/claude", "/omh/layers/0", true, false),
+            mount(
+                "/host/run/claude/commands",
+                "/home/agent/.claude/commands",
+                true,
+                false,
+            ),
+            mount(
+                "/host/run/claude/skills",
+                "/home/agent/.claude/skills",
+                true,
+                false,
+            ),
+            // A writable sibling that is not nested survives on its own.
+            mount("/host/worktree", "/work", false, false),
+        ]);
+        let dirs: Vec<String> = staging
+            .workspaces
+            .iter()
+            .map(|(p, _)| p.display().to_string())
+            .collect();
+        assert!(dirs.contains(&"/host/run/claude".to_string()));
+        assert!(
+            !dirs.iter().any(|d| d.starts_with("/host/run/claude/")),
+            "the nested read-only children are dropped: {dirs:?}"
+        );
+        assert!(dirs.contains(&"/host/worktree".to_string()));
+        // Every guest path still has its link, nested or not.
+        assert!(staging
+            .links
+            .iter()
+            .any(|(g, _)| g.ends_with(".claude/commands")));
+    }
+
+    /// A writable child under a read-only parent is NOT dropped: the parent
+    /// does not grant the write the child needs, so both must stay even though
+    /// they overlap. (omh does not produce this today, but the rule must be
+    /// safe if it ever does.)
+    #[test]
+    fn a_writable_child_under_a_read_only_parent_survives() {
+        let staging = sbx_staging(&[
+            mount("/host/area", "/ro", true, false),
+            mount("/host/area/live", "/rw", false, false),
+        ]);
+        let dirs: Vec<String> = staging
+            .workspaces
+            .iter()
+            .map(|(p, _)| p.display().to_string())
+            .collect();
+        assert!(
+            dirs.contains(&"/host/area/live".to_string()),
+            "a writable child a read-only parent cannot cover stays: {dirs:?}"
+        );
+    }
+
+    /// A docker named volume (`omh-cache-<repo>`, a non-absolute host) is not a
+    /// host path sbx can mount, and sbx does not need it: its home persists
+    /// across stop/run, so the graph cache under `~/.cache` survives without a
+    /// mount. It contributes no workspace and no link.
+    #[test]
+    fn a_named_volume_is_not_an_sbx_workspace() {
+        let staging = sbx_staging(&[
+            mount("/host/work", "/work", false, false),
+            mount(
+                "omh-cache-repo",
+                "/home/agent/.cache/codebase-memory-mcp",
+                false,
+                false,
+            ),
+        ]);
+        assert!(
+            staging.workspaces.iter().all(|(p, _)| p.is_absolute()),
+            "no volume name became a workspace: {:?}",
+            staging.workspaces
+        );
+        assert!(
+            !staging
+                .links
+                .iter()
+                .any(|(g, _)| g.ends_with("codebase-memory-mcp")),
+            "and none is symlinked: {:?}",
+            staging.links
+        );
+        assert_eq!(staging.workspaces.len(), 1, "only the real host path");
+    }
+
+    /// A workspace omh collapses several mounts into is read-only only when
+    /// *every* mount that lands in it is: one writable mount makes the shared
+    /// directory writable, and one read-only file among writable siblings must
+    /// not flip the whole directory to read-only.
+    #[test]
+    fn a_workspace_is_read_only_only_when_all_its_mounts_are() {
+        let staging = sbx_staging(&[
+            mount("/host/cfg/rules.md", "/work/AGENTS.md", true, true),
+            mount("/host/cfg/scratch", "/work/scratch", false, true),
+        ]);
+        let cfg = staging
+            .workspaces
+            .iter()
+            .find(|(p, _)| p.display().to_string() == "/host/cfg")
+            .expect("both files share the /host/cfg workspace");
+        assert!(
+            !cfg.1,
+            "a writable sibling makes the shared workspace writable"
+        );
+
+        let ro = sbx_staging(&[
+            mount("/host/ro/a", "/work/a", true, true),
+            mount("/host/ro/b", "/work/b", true, true),
+        ]);
+        assert!(
+            ro.workspaces.iter().all(|(_, ro)| *ro),
+            "all read-only mounts leave a read-only workspace"
+        );
+    }
+
+    /// `OMH_LINKS` is one `guest host` per line — the entrypoint splits it with
+    /// `read -r guest host`, so a shape change here silently breaks the
+    /// symlinking it drives.
+    #[test]
+    fn the_links_encode_as_space_separated_lines() {
+        let encoded = encode_links(&[
+            ("/work".into(), "/host/work".into()),
+            ("/home/agent/.mcp.json".into(), "/host/cfg/.mcp.json".into()),
+        ]);
+        assert_eq!(
+            encoded,
+            "/work /host/work\n/home/agent/.mcp.json /host/cfg/.mcp.json"
+        );
+    }
+
+    /// `sbx ls --json` names running and stopped sandboxes alike; only the
+    /// running ones may be read as up. A stopped one read as running is exactly
+    /// the false-positive that ends in `rm -f`.
+    #[test]
+    fn only_running_sandboxes_are_read_as_running() {
+        let json = r#"{"sandboxes":[
+            {"name":"omh-s01","status":"running"},
+            {"name":"omh-s02","status":"stopped"},
+            {"name":"omh-s03","status":"running"}
+        ]}"#;
+        let mut names = Sbx.running_names(json);
+        names.sort();
+        assert_eq!(names, vec!["omh-s01".to_string(), "omh-s03".to_string()]);
+    }
+
+    /// Output sbx cannot be parsed as its documented JSON yields no names, not
+    /// a panic and not a phantom running set — `running_in` reads the empty
+    /// result as `Unknown`, never as "none running".
+    #[test]
+    fn unparseable_sbx_output_names_nothing() {
+        assert!(Sbx.running_names("not json at all").is_empty());
+        assert!(Sbx.running_names("{\"other\":1}").is_empty());
+    }
+
+    /// sbx cannot build, so omh delivers the docker-built image as a template
+    /// tar. The load reads a file (measured `sbx template load FILE`), never
+    /// stdin, so the argv names the tar path.
+    #[test]
+    fn the_template_load_names_the_tar_docker_saved() {
+        let args = Sbx::template_load_args(std::path::Path::new("/tmp/omh.tar"));
+        assert_eq!(args, ["template", "load", "/tmp/omh.tar"]);
+        assert_eq!(Sbx::template_ls_args(), ["template", "ls", "--json"]);
+    }
+
+    /// The delivery is idempotent: `template_has` reads `sbx template ls
+    /// --json` (measured shape) and reports whether the tag is already loaded,
+    /// so `ensure` loads it once. A registry prefix on the repository must not
+    /// hide a match, and a repository that merely ends in the same letters
+    /// (`notomh/claude`) must not forge one.
+    #[test]
+    fn a_loaded_template_is_recognised_across_a_registry_prefix() {
+        let json = r#"{"images":[
+            {"repository":"docker.io/library/debian","tag":"bookworm-slim"},
+            {"repository":"docker.io/library/omh/claude","tag":"abc123"}
+        ]}"#;
+        assert!(Sbx::template_has(json, "omh/claude:abc123"));
+        assert!(
+            !Sbx::template_has(json, "omh/claude:different"),
+            "the tag must match, not just the repository"
+        );
+        assert!(
+            !Sbx::template_has(json, "omh/base:abc123"),
+            "another repository on the same tag is not this image"
+        );
+
+        let forged = r#"{"images":[{"repository":"notomh/claude","tag":"abc123"}]}"#;
+        assert!(
+            !Sbx::template_has(forged, "omh/claude:abc123"),
+            "a repository must match on a path boundary, not a suffix"
+        );
+        assert!(
+            !Sbx::template_has("not json", "omh/claude:abc123"),
+            "output sbx cannot parse lists nothing, so ensure loads"
+        );
+    }
+
+    /// The remove verb is the runtime's own: `-f` on docker and podman,
+    /// `--force` on sbx, and the sandbox named either way.
+    #[test]
+    fn each_backend_removes_with_its_own_force_flag() {
+        assert_eq!(Docker.remove_args("omh-s01"), ["rm", "-f", "omh-s01"]);
+        assert_eq!(Podman.remove_args("omh-s01"), ["rm", "-f", "omh-s01"]);
+        let sbx = Sbx.remove_args("omh-s01");
+        assert!(sbx[0] == "rm", "the verb: {sbx:?}");
+        assert!(sbx.contains(&"--force".to_string()), "sbx forces: {sbx:?}");
+        assert!(
+            sbx.contains(&"omh-s01".to_string()),
+            "and names the sandbox: {sbx:?}"
+        );
+        assert!(
+            !sbx.contains(&"-f".to_string()),
+            "sbx has no -f short flag: {sbx:?}"
+        );
+    }
+
+    /// Docker and podman put every session on its own network; sbx isolates in
+    /// a microVM and has none, so it does not carry the network flag either.
+    #[test]
+    fn only_a_networked_backend_uses_networks() {
+        assert!(Docker.uses_networks());
+        assert!(Podman.uses_networks());
+        assert!(!Sbx.uses_networks());
     }
 
     /// The security invariant has to hold on every backend, not just the one
@@ -1222,12 +1770,14 @@ mod tests {
     /// information, which is not Docker's alone to keep.
     #[test]
     fn the_session_records_what_it_was_built_from() {
+        // Docker and podman stamp the plan onto the container as labels, so a
+        // later launch can read it back and decide attach-vs-restart. `sbx`
+        // has no labels (measured, 0.39.0), so it cannot carry the stamp — its
+        // reuse is by recreation, and its identity is the `-t` template image,
+        // asserted below. The invariant here is about the label-carrying
+        // backends.
         let plan = sample_plan();
-        for backend in [
-            &Docker as &dyn Runtime,
-            &Podman as &dyn Runtime,
-            &Sbx as &dyn Runtime,
-        ] {
+        for backend in [&Docker as &dyn Runtime, &Podman as &dyn Runtime] {
             let args = backend.up_args(&plan, "n", 1, "k");
             for (key, value) in plan.labels() {
                 assert!(
@@ -1237,6 +1787,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// sbx has no labels, so it carries its identity as the `-t` template image
+    /// it was built from, and no `--label` argument at all.
+    #[test]
+    fn the_sbx_sandbox_names_the_image_it_was_built_from() {
+        let args = Sbx.up_args(&sample_plan(), "n", 1, "k");
+        assert!(
+            args.windows(2)
+                .any(|w| w[0] == "-t" && w[1] == "omh/claude:latest"),
+            "the template image is the record: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "--label"),
+            "sbx has no labels to stamp: {args:?}"
+        );
     }
 
     #[test]

@@ -547,6 +547,21 @@ RUN printf '%s\n' \
   '  printf "%s\\n" "$OMH_PUBKEY" > "$HOME/.ssh/authorized_keys"' \
   '  chmod 600 "$HOME/.ssh/authorized_keys"' \
   'fi' \
+  '# sbx mounts each workspace at its host path and cannot mount a guest' \
+  '# path, so every guest path the profile needs is reached by a symlink' \
+  '# named here in OMH_LINKS (one "guest host" per line, guest first). Docker' \
+  '# leaves OMH_LINKS empty and this is a no-op. rmdir clears the empty' \
+  '# placeholder omh created (never a populated dir); sudo is the fallback' \
+  '# for a guest path under a root-owned parent.' \
+  'if [ -n "$OMH_LINKS" ]; then' \
+  '  printf "%s\\n" "$OMH_LINKS" | while read -r guest host; do' \
+  '    [ -n "$guest" ] || continue' \
+  '    dir=$(dirname "$guest")' \
+  '    mkdir -p "$dir" 2>/dev/null || sudo mkdir -p "$dir"' \
+  '    if [ -d "$guest" ] && [ ! -L "$guest" ]; then rmdir "$guest" 2>/dev/null || sudo rmdir "$guest" 2>/dev/null || true; fi' \
+  '    ln -sfn "$host" "$guest" 2>/dev/null || sudo ln -sfn "$host" "$guest"' \
+  '  done' \
+  'fi' \
   'if [ -f {hostkeys}/ssh_host_ed25519_key ]; then' \
   '  sudo install -o root -g root -m 600 {hostkeys}/ssh_host_ed25519_key /etc/ssh/ssh_host_ed25519_key' \
   '  sudo install -o root -g root -m 644 {hostkeys}/ssh_host_ed25519_key.pub /etc/ssh/ssh_host_ed25519_key.pub' \
@@ -669,14 +684,14 @@ pub fn ensure_stack(
 ) -> Result<String> {
     ensure(backend, adapter, ca)?;
     let tag = stack_tag(adapter, installs, ca);
-    if tag != tag_for(adapter, ca) && !exists(backend, &tag) {
-        eprintln!("omh: building {tag} — this repo's toolchain, first run only");
-        build(
+    if tag != tag_for(adapter, ca) {
+        provide(
             backend,
             &tag,
             &stack_dockerfile(adapter, installs, ca),
             &Kind::Stack(adapter, repo),
             ca,
+            &format!("building {tag} — this repo's toolchain, first run only"),
         )?;
     }
     Ok(tag)
@@ -848,22 +863,115 @@ pub fn probe_args(tag: &str, script: &str) -> Vec<String> {
 /// straight to the terminal: a multi-minute silent step reads as a hang.
 pub fn ensure(backend: &Backend, adapter: &Adapter, ca: Option<&str>) -> Result<()> {
     let base = base_tag(ca);
-    if !exists(backend, &base) {
-        eprintln!("omh: building {base} (first run only)");
-        build(backend, &base, &base_dockerfile(ca), &Kind::Base, ca)?;
-    }
+    provide(
+        backend,
+        &base,
+        &base_dockerfile(ca),
+        &Kind::Base,
+        ca,
+        &format!("building {base} (first run only)"),
+    )?;
     let t = tag_for(adapter, ca);
-    if !exists(backend, &t) {
-        eprintln!("omh: building {t}");
-        build(
-            backend,
-            &t,
-            &harness_dockerfile(adapter, ca),
-            &Kind::Harness(adapter),
-            ca,
-        )?;
+    provide(
+        backend,
+        &t,
+        &harness_dockerfile(adapter, ca),
+        &Kind::Harness(adapter),
+        ca,
+        &format!("building {t}"),
+    )?;
+    Ok(())
+}
+
+/// Make `tag` available to `backend`, building it if it is not there yet.
+///
+/// For a runtime that builds its own images (docker, podman) that is a build
+/// in place, checked with `image inspect`. sbx does neither: it cannot build,
+/// and its templates live in a store of their own. So an sbx backend is routed
+/// to `provide_to_sbx`, which builds with docker and loads the result — the
+/// measured `docker save … | sbx template load` delivery, run as two waited
+/// commands rather than a pipe. `note` prints once, and only when a build
+/// actually runs.
+fn provide(
+    backend: &Backend,
+    tag: &str,
+    dockerfile: &str,
+    kind: &Kind,
+    ca: Option<&str>,
+    note: &str,
+) -> Result<()> {
+    if backend.name() == crate::runtime::Runtime::name(&crate::runtime::Sbx) {
+        return provide_to_sbx(backend, tag, dockerfile, kind, ca, note);
+    }
+    if !exists(backend, tag) {
+        eprintln!("omh: {note}");
+        build(backend, tag, dockerfile, kind, ca)?;
     }
     Ok(())
+}
+
+/// Deliver `tag` into sbx's template store: build it with docker if docker
+/// lacks it, `docker save` it to a tar, and `sbx template load` that tar.
+/// Idempotent — a tag already in the store is left alone, so a second launch
+/// neither rebuilds nor reloads.
+fn provide_to_sbx(
+    sbx: &Backend,
+    tag: &str,
+    dockerfile: &str,
+    kind: &Kind,
+    ca: Option<&str>,
+    note: &str,
+) -> Result<()> {
+    use anyhow::Context;
+    if template_exists(sbx, tag) {
+        return Ok(());
+    }
+    // sbx cannot build; docker does, into its own store, and the tar bridges
+    // the two. If docker is missing this is where an sbx session fails, which
+    // is a prerequisite `omh doctor` reports rather than a launch surprise.
+    let docker = Backend::real(Box::new(crate::runtime::Docker));
+    if !exists(&docker, tag) {
+        eprintln!("omh: {note}");
+        build(&docker, tag, dockerfile, kind, ca)?;
+    }
+    let staging = tempfile::tempdir().context("staging the template tar")?;
+    let tar = staging.path().join("image.tar");
+    let saved = docker
+        .output(&[
+            "save".to_string(),
+            "-o".to_string(),
+            tar.display().to_string(),
+            tag.to_string(),
+        ])
+        .context("docker save for the sbx template")?;
+    anyhow::ensure!(
+        saved.status.success(),
+        "docker save {tag} failed: {}",
+        String::from_utf8_lossy(&saved.stderr)
+    );
+    eprintln!("omh: loading {tag} into the sbx template store");
+    let loaded = sbx
+        .output(&crate::runtime::Sbx::template_load_args(&tar))
+        .context("sbx template load")?;
+    anyhow::ensure!(
+        loaded.status.success(),
+        "sbx template load failed: {}",
+        String::from_utf8_lossy(&loaded.stderr)
+    );
+    Ok(())
+}
+
+/// Whether `sbx template ls --json` already lists `tag`. Output sbx could not
+/// produce or omh could not parse is read as *not loaded*, so `provide` loads
+/// rather than skipping — the safe direction, since a redundant load is a
+/// no-op and a skipped one leaves a session with no image.
+fn template_exists(sbx: &Backend, tag: &str) -> bool {
+    sbx.output(&crate::runtime::Sbx::template_ls_args())
+        .map(|o| {
+            o.status.success()
+                && crate::runtime::Sbx::template_has(&String::from_utf8_lossy(&o.stdout), tag)
+        })
+        .unwrap_or(false)
 }
 
 /// What a TLS-inspecting proxy looks like in a failed build, per toolchain.
@@ -1221,6 +1329,11 @@ fn images_in_use(backend: &Backend) -> Vec<String> {
 /// this every launch dies at `network omh-<repo> not found` — a plan that is
 /// well-formed but not runnable.
 pub fn ensure_network(backend: &Backend, name: &str) -> Result<()> {
+    // sbx isolates each sandbox in its own microVM and has no per-session
+    // network — there is nothing to create, so this is a no-op for it.
+    if !backend.uses_networks() {
+        return Ok(());
+    }
     let present = backend
         .output(&["network", "inspect", name])
         .map(|o| o.status.success())
@@ -1328,7 +1441,16 @@ pub enum Running {
 /// machine, written when the listing was asked per container.
 #[cfg(test)]
 pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) -> Running {
-    running_in(&listed_from(asked), name)
+    running_in(
+        &listed_from(asked, |s| {
+            s.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect()
+        }),
+        name,
+    )
 }
 
 /// Every container that is running, or why omh could not find out.
@@ -1341,7 +1463,10 @@ pub fn running_from(name: &str, asked: std::io::Result<std::process::Output>) ->
 /// looks like too.
 pub type Listed = std::result::Result<std::collections::BTreeSet<String>, String>;
 
-pub fn listed_from(asked: std::io::Result<std::process::Output>) -> Listed {
+pub fn listed_from(
+    asked: std::io::Result<std::process::Output>,
+    names: impl Fn(&str) -> Vec<String>,
+) -> Listed {
     let out = match asked {
         Ok(out) => out,
         // The program is on `PATH` — `runtime::installed` said so before any
@@ -1360,11 +1485,8 @@ pub fn listed_from(asked: std::io::Result<std::process::Output>) -> Listed {
             &out.status,
         ));
     }
-    Ok(String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
+    Ok(names(&String::from_utf8_lossy(&out.stdout))
+        .into_iter()
         .collect())
 }
 
@@ -1379,7 +1501,11 @@ pub fn running_in(listed: &Listed, name: &str) -> Running {
 
 /// Ask the runtime what is running, once.
 pub fn running_set(backend: &Backend) -> Listed {
-    listed_from(backend.output(&backend.running_args()))
+    // The backend parses its own listing — docker splits lines, sbx reads the
+    // JSON and keeps only the running sandboxes.
+    listed_from(backend.output(&backend.running_args()), |s| {
+        backend.running_names(s)
+    })
 }
 
 pub fn container_running(backend: &Backend, name: &str) -> Running {
@@ -1638,9 +1764,53 @@ pub fn stamp_from(asked: std::io::Result<std::process::Output>) -> Stamp {
     }
 }
 
+/// The plan stamp as a JSON object — the same `omh.*` facts `Plan::labels`
+/// stamps onto a docker container, for a runtime that cannot carry labels.
+pub fn stamp_json(plan: &crate::container::Plan) -> String {
+    let map: std::collections::BTreeMap<String, String> = plan.labels().into_iter().collect();
+    serde_json::to_string(&map).unwrap_or_default()
+}
+
+/// Record the stamp for a label-less runtime (sbx) at `path`, creating the
+/// parent directory. Written after the sandbox is created, so the next launch
+/// can read back what this one was built from — the role labels play for
+/// docker.
+pub fn write_stamp(path: &Path, plan: &crate::container::Plan) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, stamp_json(plan))
+}
+
+/// Read a stamp a label-less runtime recorded. A file omh wrote and can parse
+/// reads back as `Read`; a missing file (a running sandbox omh never stamped)
+/// or one it cannot read or parse is `Unknown`, so `decide` refuses to guess
+/// rather than `rm -f`-ing a sandbox on an invented reason — the same posture
+/// `stamp_from` takes for docker.
+pub fn stamp_recorded(path: &Path) -> Stamp {
+    let said = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Stamp::Unknown(crate::out::untrusted(&format!(
+                "this sandbox has no recorded stamp: {e}"
+            )))
+        }
+    };
+    match serde_json::from_str::<std::collections::BTreeMap<String, String>>(said.trim()) {
+        Ok(all) => Stamp::Read(
+            all.into_iter()
+                .filter(|(k, _)| k.starts_with("omh."))
+                .collect(),
+        ),
+        Err(e) => Stamp::Unknown(crate::out::untrusted(&format!(
+            "the recorded stamp is not readable: {e}"
+        ))),
+    }
+}
+
 /// Stopped-but-present containers block `run --name`, so clear them first.
 pub fn container_remove(backend: &Backend, name: &str) -> Result<()> {
-    let out = backend.output(&["rm", "-f", name])?;
+    let out = backend.output(&backend.remove_args(name))?;
     if !out.status.success() {
         // A sandbox that is still running still has the credential directory
         // mounted writable; reporting it stopped would be a lie that matters.
@@ -1936,11 +2106,17 @@ mod tests {
     /// `No` — so the failure has to travel with the set, as it does here.
     #[test]
     fn a_runtime_that_will_not_list_containers_is_never_read_as_none() {
-        let listed = listed_from(output(0, "omh-repo-s01\nomh-repo-s02\n", ""));
+        let lines = |s: &str| {
+            s.lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        let listed = listed_from(output(0, "omh-repo-s01\nomh-repo-s02\n", ""), lines);
         assert_eq!(running_in(&listed, "omh-repo-s01"), Running::Yes);
         assert_eq!(running_in(&listed, "omh-repo-s03"), Running::No);
 
-        let failed = listed_from(output(1, "", "Cannot connect to the Docker daemon"));
+        let failed = listed_from(output(1, "", "Cannot connect to the Docker daemon"), lines);
         assert!(
             failed.is_err(),
             "a non-zero exit is a failed listing, not an empty one"
@@ -1957,7 +2133,7 @@ mod tests {
         assert!(
             matches!(
                 running_in(
-                    &listed_from(Err(std::io::Error::other("fork failed"))),
+                    &listed_from(Err(std::io::Error::other("fork failed")), lines),
                     "omh-repo-s01"
                 ),
                 Running::Unknown(_)
@@ -2058,20 +2234,21 @@ mod tests {
         assert!(why.contains("cannot connect"), "the words survive: {why:?}");
     }
 
-    /// Every backend asks the same question the same way: list what is
-    /// running, one name per line, and fail loudly rather than quietly.
-    ///
-    /// Both implementations, because `select` prefers `sbx` under `auto` — so
-    /// the unmeasured backend is the *default* one, and a third arriving with
-    /// its own spelling is how the contract rots. This asserts the shape they
-    /// share; what neither this nor any test can assert is that sbx's `ps`
-    /// behaves as assumed, which `runtime.rs` says out loud.
+    /// Every backend asks the same question — list what is *running*, by no
+    /// name — even though they spell it differently. Docker and podman say
+    /// `ps`; sbx says `ls --json` and is filtered to `status == "running"` in
+    /// `Sbx::running_names`, because `ls` alone lists stopped sandboxes too.
+    /// The shared invariant is what neither spelling may do: list everything
+    /// ever created, or take a container name the runtime could read as a
+    /// pattern. What no test can assert is that either runtime behaves as the
+    /// argv assumes, which `runtime.rs` and `omh doctor` carry instead.
     #[test]
     fn every_backend_asks_for_the_running_set_and_names_it() {
         use crate::runtime::Runtime;
+        // Docker and podman: `ps`, listing running containers by line.
         for backend in [
             &crate::runtime::Docker as &dyn Runtime,
-            &crate::runtime::Sbx as &dyn Runtime,
+            &crate::runtime::Podman as &dyn Runtime,
         ] {
             let args = backend.running_args();
             assert!(
@@ -2079,6 +2256,21 @@ mod tests {
                 "{}: the running set: {args:?}",
                 backend.name()
             );
+        }
+        // sbx: `ls --json`, filtered to running by `running_names`.
+        let sbx = crate::runtime::Sbx.running_args();
+        assert!(
+            sbx.first().is_some_and(|a| a == "ls"),
+            "sbx lists sandboxes: {sbx:?}"
+        );
+
+        // The invariant every spelling shares: running only, and no name.
+        for backend in [
+            &crate::runtime::Docker as &dyn Runtime,
+            &crate::runtime::Podman as &dyn Runtime,
+            &crate::runtime::Sbx as &dyn Runtime,
+        ] {
+            let args = backend.running_args();
             assert!(
                 !args.iter().any(|a| a == "-a"),
                 "{}: running, not every container ever created: {args:?}",
@@ -3735,6 +3927,116 @@ mod tests {
         assert!(df.contains("omh-session"), "needs a session entrypoint");
     }
 
+    /// A label-less runtime records the same stamp docker puts in labels, in a
+    /// file beside the session, and reads it back identically — so a relaunch
+    /// off the same plan reads as no drift, and `reuse` attaches. A drifted
+    /// plan reads back as changed, exactly as a docker label would.
+    #[test]
+    fn a_recorded_stamp_reads_back_as_the_plan_that_wrote_it() {
+        use crate::container::Plan;
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("s01").join("stamp.json");
+
+        let plan = Plan {
+            image: "omh/claude:abc".into(),
+            mounts: vec![],
+            env: vec![("OMH_SESSION".into(), "s01".into())],
+            network: "omh-repo-s01".into(),
+            workdir: "/work".into(),
+            argv: vec!["claude".into()],
+            limits: Default::default(),
+            dropped: vec![],
+            dropped_hooks: vec![],
+            rules: Default::default(),
+            tty: true,
+        };
+
+        write_stamp(&path, &plan).expect("write");
+        let Stamp::Read(read) = stamp_recorded(&path) else {
+            panic!("a stamp omh wrote is readable");
+        };
+        let want: std::collections::BTreeMap<String, String> = plan.labels().into_iter().collect();
+        assert_eq!(read, want, "the recorded stamp is the plan's own labels");
+    }
+
+    /// A running sandbox with no recorded stamp — never stamped, or the file
+    /// gone — is `Unknown`, not an empty `Read`. An empty read is a confident
+    /// "nothing verifiable", which `reuse` turns into `rm -f`; `Unknown` makes
+    /// `decide` refuse and point at `resume`/`down` instead.
+    #[test]
+    fn a_missing_recorded_stamp_is_unknown_not_empty() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let missing = dir.path().join("s01").join("stamp.json");
+        assert!(
+            matches!(stamp_recorded(&missing), Stamp::Unknown(_)),
+            "a sandbox omh never stamped cannot be silently replaced"
+        );
+
+        std::fs::create_dir_all(missing.parent().unwrap()).unwrap();
+        std::fs::write(&missing, "{ not json").unwrap();
+        assert!(
+            matches!(stamp_recorded(&missing), Stamp::Unknown(_)),
+            "a damaged stamp is unknown, not an empty read"
+        );
+    }
+
+    /// sbx has no per-session network, so `ensure_network` must not ask it to
+    /// inspect or create one — a scripted sbx backend that answers nothing
+    /// would panic if it were asked, so a clean return proves the no-op.
+    #[test]
+    fn ensure_network_is_a_no_op_on_a_networkless_backend() {
+        use crate::runtime::{Backend, Sbx};
+        let (sbx, asked) = Backend::scripted(Box::new(Sbx), vec![]);
+        ensure_network(&sbx, "omh-repo-s01").expect("no network to ensure");
+        assert!(
+            asked.borrow().is_empty(),
+            "sbx was asked nothing: {:?}",
+            asked.borrow()
+        );
+    }
+
+    /// sbx cannot build and does not share docker's image store, so `provide`
+    /// routes an sbx backend to its template store: it checks `sbx template ls`
+    /// and, when the tag is already loaded, does nothing — never `image
+    /// inspect` (which sbx has no verb for) and never a build. This pins the
+    /// idempotent short-circuit and the routing; the build-save-load path it
+    /// takes on a miss needs a real docker and is the live doctor's to prove.
+    #[test]
+    fn sbx_delivery_checks_the_template_store_and_skips_a_loaded_one() {
+        use crate::runtime::{answered, Backend, Sbx};
+        let base = base_tag(None);
+        let digest = base.rsplit(':').next().expect("a tag has a digest");
+        let listed = format!(r#"{{"images":[{{"repository":"omh/base","tag":"{digest}"}}]}}"#);
+        let (sbx, asked) = Backend::scripted(
+            Box::new(Sbx),
+            vec![(vec!["template", "ls", "--json"], answered(0, &listed, ""))],
+        );
+
+        provide(
+            &sbx,
+            &base,
+            &base_dockerfile(None),
+            &Kind::Base,
+            None,
+            "note",
+        )
+        .expect("a loaded template needs no build");
+
+        let asked = asked.borrow();
+        assert!(
+            asked
+                .iter()
+                .all(|a| a.first().map(String::as_str) == Some("template")),
+            "only the template store was asked — no image inspect, no save: {asked:?}"
+        );
+        assert!(
+            asked
+                .iter()
+                .any(|a| a.starts_with(&["template".to_string(), "ls".to_string()])),
+            "it did check the store: {asked:?}"
+        );
+    }
+
     /// The key arrives as an env var rather than a mount: a bind-mounted
     /// authorized_keys lands with host ownership, and sshd silently refuses to
     /// read one it does not trust.
@@ -3747,6 +4049,77 @@ mod tests {
         );
         assert!(df.contains("chmod 700"), "~/.ssh perms");
         assert!(df.contains("chmod 600"), "authorized_keys perms");
+    }
+
+    /// sbx mounts a workspace at its exact host path and cannot mount a guest
+    /// path or a single file, so `/work` and every profile path reach their
+    /// content through a symlink the entrypoint makes from `OMH_LINKS` (which
+    /// `runtime::encode_links` fills). The docker backend leaves `OMH_LINKS`
+    /// unset and the loop is a no-op, so the one entrypoint serves both. A
+    /// guest path under a root-owned directory needs `sudo` to link, so the
+    /// loop must fall back to it.
+    #[test]
+    fn the_session_entrypoint_symlinks_the_guest_paths_sbx_cannot_mount() {
+        let df = base_dockerfile(None);
+        assert!(
+            df.contains("OMH_LINKS"),
+            "the entrypoint must read the links: {df}"
+        );
+        assert!(
+            df.contains("ln -s"),
+            "the entrypoint must make the symlinks: {df}"
+        );
+        assert!(
+            df.contains("sudo ln -s"),
+            "a root-owned guest path needs sudo to link: {df}"
+        );
+    }
+
+    /// The entrypoint is a shell script assembled line by line inside a raw
+    /// string, where an escaping mistake renders as broken shell that only
+    /// surfaces at container start — the class of bug a build cache then hides
+    /// for weeks. This reconstructs the script the `printf '%s\n'` block emits
+    /// and hands it to `sh -n`, so a syntax error fails here instead.
+    #[test]
+    fn the_session_entrypoint_is_valid_shell() {
+        let df = base_dockerfile(None);
+        // The block is `RUN printf '%s\n' \` then one `  'LINE' \` per script
+        // line, until `> /usr/local/bin/omh-session`. Rebuild the script from
+        // those single-quoted arguments.
+        let start = df
+            .find("printf '%s\\n' \\")
+            .expect("the entrypoint printf block");
+        let rest = &df[start..];
+        let end = rest
+            .find("> /usr/local/bin/omh-session")
+            .expect("the entrypoint redirect");
+        let script: String = rest[..end]
+            .lines()
+            .filter_map(|l| {
+                let t = l.trim();
+                let t = t.strip_prefix("printf '%s\\n'").unwrap_or(t).trim();
+                let t = t.strip_suffix('\\').unwrap_or(t).trim();
+                let inner = t.strip_prefix('\'')?.strip_suffix('\'')?;
+                Some(inner.to_string())
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            script.contains("OMH_LINKS") && script.contains("sshd"),
+            "reconstruction picked up the entrypoint body: {script}"
+        );
+
+        let out = std::process::Command::new("sh")
+            .arg("-n")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .expect("sh");
+        assert!(
+            out.status.success(),
+            "the entrypoint must parse as shell:\n{}\n--- script ---\n{script}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     #[test]

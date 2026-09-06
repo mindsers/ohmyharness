@@ -31,12 +31,21 @@ pub(crate) fn reuse_decision(
     name: &str,
     plan: &container::Plan,
     session: &Session,
+    // Where a label-less runtime (sbx) recorded this session's stamp. Unused by
+    // docker and podman, which read the stamp off the container's labels.
+    stamp_path: &std::path::Path,
 ) -> Result<container::Reuse> {
     let probe = backend.exec_args(name, &image::probe_command(), false);
     container::decide(
         &session.id,
         image::container_probe(backend, &probe),
-        || image::container_stamp(backend, name),
+        || {
+            if backend.carries_labels() {
+                image::container_stamp(backend, name)
+            } else {
+                image::stamp_recorded(stamp_path)
+            }
+        },
         plan,
     )
 }
@@ -63,9 +72,10 @@ pub(crate) fn reuse_or_replace(
     plan: &container::Plan,
     session: &Session,
     harness: &str,
+    stamp_path: &std::path::Path,
     ctx: &out::Ctx,
 ) -> Result<Disposition> {
-    match reuse_decision(backend, name, plan, session)? {
+    match reuse_decision(backend, name, plan, session, stamp_path)? {
         container::Reuse::Attach => Ok(Disposition::Attach),
         container::Reuse::Blocked { live, changed } => anyhow::bail!(
             "session {id} is running {} and cannot be reused for this launch \
@@ -201,16 +211,25 @@ pub(crate) fn session_up(
     // logged out while `--dry-run` advertised the mounts.
     say_selection(paths, profile, &opts.repo, ctx);
     let plan = container::plan(paths, profile, adapter, session, &[], opts)?;
-    plan.validate(&backend.caps())?;
+    plan.validate_for(backend)?;
 
     // The plan is built before this rather than after, because the plan *is*
     // the question: a running container is only this session if it was made
     // from the same one. Cheap — `ensure` above is a path check once the binary
     // is cached, and the staging the plan performs happens every launch anyway.
+    // Where a label-less runtime records this session's stamp, read back on the
+    // next launch in place of a container label.
+    let stamp_path = paths.runs().join(&session.id).join("stamp.json");
     if running {
-        if let Disposition::Attach =
-            reuse_or_replace(backend, &name, &plan, session, &adapter.name, ctx)?
-        {
+        if let Disposition::Attach = reuse_or_replace(
+            backend,
+            &name,
+            &plan,
+            session,
+            &adapter.name,
+            &stamp_path,
+            ctx,
+        )? {
             return Ok(name);
         }
     }
@@ -239,6 +258,13 @@ pub(crate) fn session_up(
     )?;
 
     start(backend, &plan, &name, port, pubkey.trim(), &session.id)?;
+    // A label-less runtime (sbx) cannot carry the stamp on the sandbox, so
+    // record it beside the session now — the next launch reads it back to
+    // decide attach-vs-restart, exactly as docker reads a container label.
+    if !backend.carries_labels() {
+        image::write_stamp(&stamp_path, &plan)
+            .with_context(|| format!("recording the sandbox stamp for {}", session.id))?;
+    }
     // The session's worktree is not the checkout indexed at init — it holds
     // whatever the agent has since written. Index it now; the Stop hook keeps
     // it current from here.
@@ -1444,7 +1470,7 @@ pub(crate) fn run(
         opts.clone(),
     )?;
 
-    plan.validate(&backend.caps())?;
+    plan.validate_for(&backend)?;
 
     say_rules(&plan, ctx);
     say_selection(&paths, &profile, &opts.repo, ctx);
@@ -1954,8 +1980,16 @@ mod tests {
                 (vec!["inspect"], answered(0, &stamped_from(&plan), "")),
             ],
         );
-        let went =
-            reuse_or_replace(&backend, NAME, &plan, &s01(), "claude", &out::Ctx::plain()).unwrap();
+        let went = reuse_or_replace(
+            &backend,
+            NAME,
+            &plan,
+            &s01(),
+            "claude",
+            std::path::Path::new("unused"),
+            &out::Ctx::plain(),
+        )
+        .unwrap();
         assert_eq!(went, Disposition::Attach);
         assert!(
             !removed(&log.borrow()),
@@ -1981,8 +2015,16 @@ mod tests {
                 ),
             ],
         );
-        let refused = reuse_or_replace(&backend, NAME, &plan, &s01(), "claude", &out::Ctx::plain())
-            .expect_err("an unreadable stamp is a refusal, not a restart");
+        let refused = reuse_or_replace(
+            &backend,
+            NAME,
+            &plan,
+            &s01(),
+            "claude",
+            std::path::Path::new("unused"),
+            &out::Ctx::plain(),
+        )
+        .expect_err("an unreadable stamp is a refusal, not a restart");
         assert!(
             refused
                 .to_string()
@@ -2008,8 +2050,16 @@ mod tests {
                 (vec!["inspect"], answered(0, &stamped_from(&other), "")),
             ],
         );
-        let refused = reuse_or_replace(&backend, NAME, &plan, &s01(), "claude", &out::Ctx::plain())
-            .expect_err("a live harness blocks the restart");
+        let refused = reuse_or_replace(
+            &backend,
+            NAME,
+            &plan,
+            &s01(),
+            "claude",
+            std::path::Path::new("unused"),
+            &out::Ctx::plain(),
+        )
+        .expect_err("a live harness blocks the restart");
         let said = refused.to_string();
         assert!(said.contains("opencode"), "names what is live: {said}");
         assert!(said.contains("omh s01 down"), "and how to stop it: {said}");
@@ -2033,8 +2083,16 @@ mod tests {
                 (vec!["rm", "-f", NAME], answered(0, "", "")),
             ],
         );
-        let went =
-            reuse_or_replace(&backend, NAME, &plan, &s01(), "claude", &out::Ctx::plain()).unwrap();
+        let went = reuse_or_replace(
+            &backend,
+            NAME,
+            &plan,
+            &s01(),
+            "claude",
+            std::path::Path::new("unused"),
+            &out::Ctx::plain(),
+        )
+        .unwrap();
         assert_eq!(went, Disposition::Replaced);
         assert!(
             removed(&log.borrow()),
@@ -2044,9 +2102,75 @@ mod tests {
         // And the decision this rides on is still the one `container::decide`
         // makes — the seam did not grow its own.
         assert!(matches!(
-            reuse_decision(&backend, NAME, &plan, &s01()).unwrap(),
+            reuse_decision(
+                &backend,
+                NAME,
+                &plan,
+                &s01(),
+                std::path::Path::new("unused")
+            )
+            .unwrap(),
             Reuse::Restart(_)
         ));
+    }
+
+    /// sbx has no labels, so its reuse decision reads the stamp omh recorded in
+    /// a file, never `inspect`. A scripted sbx backend answers only the probe;
+    /// it would panic if the decision asked it to inspect a label, so a
+    /// matching stamp file yielding `Attach` with nothing but the probe asked
+    /// proves the file is the source.
+    #[test]
+    fn an_sbx_session_reuses_from_its_recorded_stamp_not_a_label() {
+        let plan = sample_plan();
+        let dir = tempfile::tempdir().expect("tmp");
+        let stamp = dir.path().join("s01").join("stamp.json");
+        crate::image::write_stamp(&stamp, &plan).expect("record the stamp");
+
+        let (backend, log) = Backend::scripted(
+            Box::new(crate::runtime::Sbx),
+            vec![(vec!["exec"], answered(0, "agent.sock\n", ""))],
+        );
+        let went = reuse_or_replace(
+            &backend,
+            NAME,
+            &plan,
+            &s01(),
+            "claude",
+            &stamp,
+            &out::Ctx::plain(),
+        )
+        .unwrap();
+        assert_eq!(went, Disposition::Attach, "same plan, same stamp — attach");
+        assert!(
+            log.borrow()
+                .iter()
+                .all(|a| a.first().map(String::as_str) != Some("inspect")),
+            "sbx read the file, never inspected a label: {:?}",
+            log.borrow()
+        );
+
+        // A drifted plan reads back as changed from the same file, just as a
+        // label would — nothing live in it, so it is replaced.
+        let mut moved = sample_plan();
+        moved.image = "omh/claude:newer".into();
+        let (backend, _) = Backend::scripted(
+            Box::new(crate::runtime::Sbx),
+            vec![
+                (vec!["exec"], answered(0, "", "")),
+                (vec!["rm"], answered(0, "", "")),
+            ],
+        );
+        let went = reuse_or_replace(
+            &backend,
+            NAME,
+            &moved,
+            &s01(),
+            "claude",
+            &stamp,
+            &out::Ctx::plain(),
+        )
+        .unwrap();
+        assert_eq!(went, Disposition::Replaced, "a drifted stamp restarts");
     }
 
     #[test]
