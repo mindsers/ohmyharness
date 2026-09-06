@@ -361,11 +361,39 @@ image loaded into sbx:
    [-it] NAME ARGV` is the harness entry.
 
 So the `Sbx` rewrite touches `runtime.rs` (argv + a JSON running-check), the
-base image (the `/work` symlink entrypoint, one rebuild), `image` (save-and-load
+base image (the symlink entrypoint, one rebuild), `image` (save-and-load
 delivery), `container`/`Plan::validate` (stage-and-symlink, and reuse without
 labels), and its acceptance is a real launch: `omh doctor --harness claude` with
-`runtime = "sbx"`. The design is fully measured; none of it is guessed. It is a
-discrete feature, not a flag change, which is why `Sbx` stays the provisional
-placeholder until that feature lands and `auto` never selects it.
+`runtime = "sbx"`. The design is fully measured; none of it is guessed.
+
+**Implemented (2026-09-06).** All four mismatches are now built and tested:
+
+1. **Delivery** is `provide`/`provide_to_sbx` in `image`: build with docker,
+   `docker save -o` to a tar, `sbx template load` it, idempotent through
+   `Sbx::template_has` reading `sbx template ls --json`. The measured store row
+   is registry-prefixed (`docker.io/omh/base`), which the parser matches on a
+   path boundary.
+2. **No labels** — the stamp is recorded in `runs/<id>/stamp.json` at create and
+   read back by `stamp_recorded`; `Runtime::carries_labels` is the seam, and the
+   reuse semantics (attach on no drift, restart on drift) are identical to the
+   label path. The fuller option won over recreate-each-launch, so a live sbx
+   agent is not killed on the next `resume`.
+3. **Stage-and-symlink** — every guest path travels in `OMH_LINKS` (`guest host`
+   per line) and the entrypoint symlinks each, `sudo` for a root-owned parent.
+   `sbx_staging` turns mounts into host-path workspaces: a file mount stages its
+   parent directory, a docker named volume (the graph cache) is dropped because
+   sbx home persists across stop/run, and a workspace nested in another is
+   dropped as redundant. `Plan::validate_for` skips the native-mount refusal for
+   a staging backend.
+4. **Running check** and `remove`/`network` are the runtime's own:
+   `running_names` parses the JSON by status, `remove_args` is `rm … --force`,
+   and `ensure_network` is a no-op because sbx isolates in a microVM.
+
+Verified live against sbx 0.39.0: the `OMH_LINKS` entrypoint symlinks `/work`
+and a root-owned path (through the sudo fallback) and reads the host content
+through them; `docker save | sbx template load` lists the image and the parser
+recognises it. The remaining acceptance is a full `omh new`/`omh doctor` launch,
+which rebuilds the base image once (the entrypoint changed). `auto` still never
+selects `sbx` — it stays an explicit opt-in behind the login and account gate.
 
 
