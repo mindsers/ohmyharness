@@ -31,13 +31,13 @@ use std::process::Command;
 /// steps 1-3 leaves the session exactly as it was.
 pub(crate) fn sync(
     cwd: &std::path::Path,
-    id: Option<&str>,
+    id: &str,
     base: Option<&str>,
     down: bool,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let session = existing_session(&paths, id)?;
+    let session = existing_session(&paths, Some(id))?;
     let base = base
         .map(str::to_string)
         .unwrap_or_else(|| session::default_branch(&paths.repo));
@@ -50,10 +50,10 @@ pub(crate) fn sync(
 /// Sync every session against trunk, stopping at the first that cannot go
 /// cleanly, and report the lot in one document.
 ///
-/// Refused with a named session: `--all` is *every* session, and naming one
-/// asks two contradictory things. The loop is injected so the stop-at-first
-/// logic is testable without a runtime — `sync_all` decides what to do with
-/// each result; the command supplies the sync.
+/// Reached when no session is named — the selector's absence means all, so
+/// naming one routes to `sync` instead and never here. The loop is injected so
+/// the stop-at-first logic is testable without a runtime — `sync_all` decides
+/// what to do with each result; the command supplies the sync.
 pub(crate) fn sync_all(
     cwd: &std::path::Path,
     base: Option<&str>,
@@ -986,8 +986,21 @@ pub(crate) fn existing_session(paths: &Paths, explicit: Option<&str>) -> Result<
             session::validate_id(id)?;
             id.to_string()
         }
-        None => session::current(&paths.worktrees())
-            .context("no sessions yet — start one with `omh new <harness>`")?,
+        // No hidden "most recent session" pick. A single-target verb with no
+        // session named refuses and points at naming one — omitting the
+        // selector is never an instruction to guess which session you meant,
+        // even when exactly one exists. `sync` and `down` reach this only when
+        // a session *is* named; with none, they act on every session and never
+        // call here.
+        None => {
+            anyhow::ensure!(
+                !session::list(&paths.worktrees()).is_empty(),
+                "no sessions yet — start one with `omh new <harness>`"
+            );
+            anyhow::bail!(
+                "which session? name it:\n  omh s01 …   that one\n  omh s       lists them"
+            )
+        }
     };
     let session = Session::new(&paths.worktrees(), id);
     anyhow::ensure!(

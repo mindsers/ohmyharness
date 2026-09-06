@@ -99,8 +99,8 @@ pub(crate) fn auth_cmd(
         .args(backend.args(&plan))
         .status()?;
     if let Err(e) = session.remove(&paths.repo, "", &paths.shadows()) {
-        // A leftover `auth` worktree wins `session::current()` and silently
-        // becomes the session the next launch runs in.
+        // A leftover `auth` worktree is a session `omh s` would list and offer
+        // as a real one. Removed so the login leaves nothing behind.
         ctx.warn(&format!("could not remove the auth worktree: {e}"));
     }
 

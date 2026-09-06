@@ -1367,12 +1367,6 @@ pub fn default_branch(repo: &Path) -> String {
         .unwrap_or_else(|_| "HEAD".into())
 }
 
-/// The session `omh s attach` should land in when none is named: the most
-/// recently created one.
-pub fn current(worktrees_dir: &Path) -> Option<String> {
-    list(worktrees_dir).pop()
-}
-
 /// Resolve which session to use. Creating a fresh one on every launch would
 /// defeat persistence entirely — you would never reattach to the agent you left
 /// running — so a new session is something you ask for.
@@ -3880,18 +3874,6 @@ mod tests {
             std::fs::create_dir_all(wt.join(id)).unwrap();
         }
         (d, wt)
-    }
-
-    #[test]
-    fn there_is_no_current_session_before_any_exist() {
-        let (_d, wt) = worktrees(&[]);
-        assert_eq!(current(&wt), None);
-    }
-
-    #[test]
-    fn the_current_session_is_the_most_recent() {
-        let (_d, wt) = worktrees(&["s01", "s02", "s03"]);
-        assert_eq!(current(&wt).as_deref(), Some("s03"));
     }
 
     #[test]

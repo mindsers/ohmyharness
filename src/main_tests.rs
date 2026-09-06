@@ -912,7 +912,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("accounts.md", 4),
         ("adapters.md", 1),
         ("code-graph.md", 1),
-        ("commands.md", 138), // + checks-first commit, --no-verify, and the scoped activity example
+        ("commands.md", 137), // + checks-first commit, --no-verify, scoped activity example; − the bare `omh s diff` example (a session verb now names its session)
         ("configuration.md", 46), // + the sbx set-runtime and doctor examples
         ("decisions.md", 1),
         ("editors.md", 4),
@@ -1352,8 +1352,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
                 // reader supplies is the point. That reasoning covers the
                 // six lines ending in an option that owes a value. It threw
                 // away twenty-two more that owe nothing and are complete as
-                // printed — `omh use --all`, `omh s down --all`, `omh sNN
-                // log --turns`, `omh s commit --skip-carried`. Each was
+                // printed — `omh use --all`, `omh sNN log --turns`, `omh s
+                // commit --skip-carried`. Each was
                 // breakable with the whole suite green.
                 //
                 // So the shape of the last word is not the question; clap
@@ -1482,7 +1482,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cli.rs", 14),
         ("src/cmd/auth.rs", 3),
         ("src/cmd/catalogue.rs", 12),
-        ("src/cmd/harvest.rs", 20), // + the --no-verify pointer in a failed check
+        ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
         ("src/cmd/init.rs", 6),
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only

@@ -63,7 +63,7 @@ A flag learned on one command is true on the next, or it is not there.
 | `--from <path>` | Read this instead of where the adapter says: `omh import`, `omh settings mcp import`. |
 | `--to <dir>` | Write here: `omh eject`. |
 | `--force` | *I have read the warning; do it anyway.* Only `omh s rm`, where the warning is about work nobody has reviewed. |
-| `--all` | Every one, not the one named: `omh use --all`, `omh s down --all`. |
+| `--all` | Every one, not the one named: `omh use --all`. On session verbs there is no `--all` — naming no session already means every session. |
 | `--dry-run` | Do none of it and show what would be done, or refuse — [above](#--dry-run). |
 | `--json` | The answer as JSON, or a refusal from a command that hands you a program and has none — [below](#what-every-command-prints). |
 
@@ -405,28 +405,36 @@ longer parses either way.
 anyway.**
 
 ```console
-$ omh s diff          # the session you were last in
-$ omh s01 diff        # that one
+$ omh s01 diff        # that one — a session verb names its session
 $ omh s01 commit -m "Fix the tap guard"
 $ omh s01 rm
 $ omh s01 resume      # rejoin it
 $ omh s01 attach zed
 ```
 
-`s` is the sessions namespace scoped to the session you were last in; `sNN` is
-the same namespace scoped to that one, so `omh s01 diff` is exactly
-`omh sessions --session s01 diff`. When what follows is not a session verb the
-prefix still names the session and the command runs where it lives — which is
-what covers a launch, since `sessions` has no verb for starting a harness.
+`s` is the sessions namespace; `sNN` scopes it to one session, so `omh s01 diff`
+is exactly `omh sessions --session s01 diff`. When what follows is not a session
+verb the prefix still names the session and the command runs where it lives —
+which is what covers a launch, since `sessions` has no verb for starting a
+harness.
 
-`--session` still works, and is the only way to name a session whose id is not
-`sNN`. Naming it twice is refused rather than resolved.
+`--session`/`sNN` is the one selector, and naming no session is not a hidden
+pick of the last one. Its absence means **every session** for the reversible
+verbs that can act on all — `sync` and `down` with no session named reach all of
+them (there is no `--all`). For every other session verb — `commit`, `push`,
+`log`, `diff`, `attach`, `resume`, `rm` — naming no session is refused: omh
+never guesses which one you meant, even when exactly one exists. `--session`
+still works, and is the only way to name a session whose id is not `sNN`. Naming
+it twice is refused rather than resolved.
 
 `down` with no session stops every sandbox — the one place acting on all of
 them is what you mean, and the one command whose blast radius grows with how
-much work is in flight. So it asks first, and `--all` is how you say it without
-being asked. Silence declines, and a pipe or a CI runner has nobody to answer,
-so a wide `down` there stops nothing rather than everything.
+much work is in flight. So it asks first when there is a terminal to ask at.
+A pipe or a CI runner has nobody to answer, and there proceeds without asking:
+the stop is reversible — the worktree and branch survive — and omitting the
+session is the explicit way to mean all, so a script that did so meant it. A
+declined prompt stops nothing. There is no `--all`; naming no session already
+means all.
 
 **A session that has fallen behind is told what to do about it.** The number
 was there long before there was anything to do with it; `sync` is that thing.
@@ -783,12 +791,13 @@ What the agent finds when it starts again:
 The conflict markers read `<<<<<<< main` and `>>>>>>> s01`, which is to say
 they name the sides rather than two object ids.
 
-**`omh s sync --all` syncs every session**, stopping at the first that needs a
-person — a conflict to resolve, or an error — and naming the ones it did not
-reach. Trunk moves once; you bring it into all of them without a command each.
-`--all` is refused together with a named session, since it is *every* session.
-A conflict stops the run rather than piling up behind the later syncs; resolve
-it and run `omh s sync --all` again.
+**`omh s sync` with no session named syncs every session**, stopping at the
+first that needs a person — a conflict to resolve, or an error — and naming the
+ones it did not reach. Trunk moves once; you bring it into all of them without a
+command each. Naming a session (`omh s01 sync`) scopes it to that one; there is
+no `--all`, because the absence of a session already means every session. A
+conflict stops the run rather than piling up behind the later syncs; resolve it
+and run `omh s sync` again.
 
 **It refuses while the sandbox is up**, and `--down` stops it first. Not about
 the files — the checkpoint makes an overwrite recoverable. It is about what the

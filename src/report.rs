@@ -237,7 +237,7 @@ impl Report for Synced {
 
 /// Every session synced against trunk, in one report.
 ///
-/// `omh s sync --all` moves trunk into each session in turn and stops at the
+/// `omh s sync` (no session named) moves trunk into each session in turn and stops at the
 /// first that cannot go cleanly — a conflict to resolve, or an error. Stopping
 /// is the point: a conflict wants a person, and pressing on would bury the one
 /// that needs deciding under a wall of ones that did not.
@@ -252,7 +252,7 @@ pub struct SyncedAll {
     pub untouched: Vec<String>,
 }
 
-/// Why `sync --all` stopped.
+/// Why a sync of every session stopped.
 #[derive(Debug, Clone)]
 pub enum SyncStop {
     /// It synced, but the result needs a person: markers to resolve.
@@ -348,14 +348,14 @@ impl Report for SyncedAll {
             Some(SyncStop::Conflict(synced)) => {
                 asides = asides.hint(format!(
                     "  omh {} resume          resolve the markers in the sandbox, then \
-                     `omh s sync --all` again",
+                     `omh s sync` again",
                     synced.id
                 ));
             }
             Some(SyncStop::Error { id, .. }) => {
                 asides = asides.hint(format!(
                     "  omh {id} sync --down     sync this one, stopping its sandbox, then \
-                     `omh s sync --all` again"
+                     `omh s sync` again"
                 ));
             }
             None => {}

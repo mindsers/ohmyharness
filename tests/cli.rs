@@ -1246,20 +1246,90 @@ fn listing_three_sessions_asks_the_runtime_once() {
     );
 }
 
-/// `--all` and a named session together is refused: one contradicts the other.
+/// A bare `omh s sync` — no session named — brings trunk into *every* session,
+/// not the most recent one. Naming no session means all of them; the hidden
+/// "last session" pick is gone.
 #[test]
-fn sync_all_refuses_a_named_session() {
+fn a_bare_sync_syncs_every_session() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let w1 = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &w1);
+    let w2 = sb.session("s02");
+    sb.sandbox_repo_with_unkept_work("s02", &w2);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::write(sb.repo.join("fromtrunk.rs"), "fn t() {}\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "trunk adds"]);
+
+    let out = sb.omh(&["s", "sync"]);
+    assert!(
+        out.status.success(),
+        "a bare sync reaches every session: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(w1.join("fromtrunk.rs").exists(), "s01 was synced");
+    assert!(w2.join("fromtrunk.rs").exists(), "s02 was synced too");
+}
+
+/// Naming a session syncs only that one — the selector still scopes to one.
+#[test]
+fn a_named_sync_touches_only_the_named_session() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let w1 = sb.session("s01");
+    sb.sandbox_repo_with_unkept_work("s01", &w1);
+    let w2 = sb.session("s02");
+    sb.sandbox_repo_with_unkept_work("s02", &w2);
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    std::fs::write(sb.repo.join("fromtrunk.rs"), "fn t() {}\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "trunk adds"]);
+
+    let out = sb.omh(&["s01", "sync"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(w1.join("fromtrunk.rs").exists(), "s01 synced");
+    assert!(
+        !w2.join("fromtrunk.rs").exists(),
+        "s02 was not named, so it was left alone"
+    );
+}
+
+/// `--all` is gone: absence of a session already means every session, so the
+/// flag is redundant and no longer accepted.
+#[test]
+fn sync_no_longer_takes_all() {
     let sb = sandbox();
     sb.git_init();
-    let out = sb.omh(&["s01", "sync", "--all"]);
+    let out = sb.omh(&["s", "sync", "--all"]);
     assert!(
         !out.status.success(),
-        "naming a session with --all is refused"
+        "--all is not a flag sync has any more"
     );
+    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
-        String::from_utf8_lossy(&out.stderr).contains("every session"),
-        "and says why: {}",
-        String::from_utf8_lossy(&out.stderr)
+        err.contains("--all") && err.contains("unexpected"),
+        "it fails *because* --all is not a flag, not for want of sessions: {err}"
     );
 }
 
@@ -1771,7 +1841,7 @@ fn work_committed_from_the_host_is_what_diff_then_reports() {
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
 
-    let out = sb.omh(&["s", "commit", "-m", "Add the feature"]);
+    let out = sb.omh(&["s01", "commit", "-m", "Add the feature"]);
     assert!(
         out.status.success(),
         "commit failed: {}",
@@ -1823,7 +1893,7 @@ fn keeping_a_sessions_own_commits_says_so_when_there_are_none() {
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
 
-    let out = sb.omh(&["s", "commit", "--keep"]);
+    let out = sb.omh(&["s01", "commit", "--keep"]);
 
     let said = format!(
         "{}{}",
@@ -1917,7 +1987,7 @@ fn a_session_that_has_committed_but_never_pushed_is_not_reported_as_clean() {
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
     assert!(sb
-        .omh(&["s", "commit", "-m", "Add the feature"])
+        .omh(&["s01", "commit", "-m", "Add the feature"])
         .status
         .success());
 
@@ -1939,10 +2009,10 @@ fn the_listing_renders_each_state_a_session_can_sit_in() {
     std::fs::write(worktree.join("a.rs"), "fn a() {}").unwrap();
     assert!(ls().contains("1 uncommitted"), "got: {}", ls());
 
-    assert!(sb.omh(&["s", "commit", "-m", "Add a"]).status.success());
+    assert!(sb.omh(&["s01", "commit", "-m", "Add a"]).status.success());
     assert!(ls().contains("1 to push"), "got: {}", ls());
 
-    assert!(sb.omh(&["s", "push", "feat/a"]).status.success());
+    assert!(sb.omh(&["s01", "push", "feat/a"]).status.success());
     assert!(ls().contains("→ feat/a"), "got: {}", ls());
 }
 
@@ -1978,14 +2048,14 @@ fn the_push_command_carries_its_name_and_refuses_without_one() {
     let sb = sandbox();
     let worktree = sb.session("s01");
     std::fs::write(worktree.join("a.rs"), "fn a() {}").unwrap();
-    assert!(sb.omh(&["s", "commit", "-m", "Add a"]).status.success());
+    assert!(sb.omh(&["s01", "commit", "-m", "Add a"]).status.success());
 
-    let bare = sb.omh(&["s", "push"]);
+    let bare = sb.omh(&["s01", "push"]);
     assert!(!bare.status.success(), "a session id is not a branch name");
     assert!(String::from_utf8_lossy(&bare.stderr).contains("not a branch name"));
 
-    assert!(sb.omh(&["s", "push", "feat/a"]).status.success());
-    let printed = String::from_utf8_lossy(&sb.omh(&["s", "push", "feat/a"]).stdout).to_string();
+    assert!(sb.omh(&["s01", "push", "feat/a"]).status.success());
+    let printed = String::from_utf8_lossy(&sb.omh(&["s01", "push", "feat/a"]).stdout).to_string();
     assert!(printed.contains("origin/feat/a"), "got: {printed}");
 }
 
@@ -2001,6 +2071,45 @@ fn a_session_that_does_not_exist_is_named_in_the_refusal() {
     assert!(!out.status.success());
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("s99"), "the refusal must name it: {err}");
+}
+
+/// A single-target verb with no session named refuses rather than picking one
+/// for you. The hidden "most recent session" default is gone: naming no session
+/// is not an instruction to guess, even when exactly one exists.
+#[test]
+fn a_bare_single_target_verb_refuses_without_a_session() {
+    let sb = sandbox();
+    sb.session("s01");
+
+    for verb in [
+        vec!["s", "commit", "-m", "x"],
+        vec!["s", "push", "feat/x"],
+        vec!["s", "log"],
+        vec!["s", "diff"],
+        vec!["s", "attach"],
+        vec!["s", "resume"],
+    ] {
+        let out = sb.omh(&verb);
+        assert!(
+            !out.status.success(),
+            "`omh {}` must refuse without a session named",
+            verb.join(" ")
+        );
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            err.contains("s01")
+                || err.to_lowercase().contains("which session")
+                || err.contains("name"),
+            "`omh {}` refusal points at naming a session: {err}",
+            verb.join(" ")
+        );
+    }
+
+    // Named, they run (or fail for their own reasons, not for want of a target).
+    assert!(
+        sb.omh(&["s01", "log"]).status.success(),
+        "naming the session is how you say which"
+    );
 }
 
 /// The launcher discloses this repo's hooks, and a dry run leaves no trace.
@@ -6575,11 +6684,12 @@ fn the_focused_listing_is_one_session_in_the_document_too() {
 /// rule is that silence declines and a closed pipe stops — the safe answer
 /// has to be the one somebody gives when they are not there.
 ///
-/// `--all` is the way to mean it without being asked. Without that, a `down`
-/// in CI would either hang or stop everything, and both are worse than
-/// refusing.
+/// A bare `omh s down` means every session — the selector's absence carries
+/// that now, so there is no `--all`. With nobody to ask (CI, a closed pipe) a
+/// wide down proceeds rather than refusing: it is reversible (the worktree and
+/// branch survive), and omitting the selector is the explicit way to say all.
 #[test]
-fn a_wide_down_with_nobody_to_ask_stops_nothing() {
+fn a_wide_down_in_ci_stops_every_session() {
     let sb = sandbox();
     let log = sb.fake_docker();
     sb.session("s01");
@@ -6593,41 +6703,84 @@ fn a_wide_down_with_nobody_to_ask_stops_nothing() {
 
     // stdin is closed — `Command::output` nulls it — so this is the CI case.
     let out = sb.omh(&["s", "down"]);
-    let said = String::from_utf8_lossy(&out.stderr).to_string();
     assert!(
-        !out.status.success(),
-        "a question nobody answered is not a yes: {}",
-        String::from_utf8_lossy(&out.stdout)
+        out.status.success(),
+        "a wide down proceeds with nobody to ask: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-
     let calls = sb.docker_calls(&log);
     assert!(
-        !calls.iter().any(|c| c.contains("rm")),
-        "and nothing was stopped: {calls:?}"
+        calls
+            .iter()
+            .any(|c| c.contains("rm") && c.contains(&sb.container("s01")))
+            && calls
+                .iter()
+                .any(|c| c.contains("rm") && c.contains(&sb.container("s02"))),
+        "both sessions were stopped: {calls:?}"
     );
     assert!(
-        said.contains("--all"),
-        "it names the way to mean it: {said}"
+        !String::from_utf8_lossy(&out.stderr).contains("--all"),
+        "and it never mentions a flag that no longer exists"
     );
+    // The scope-widening leaves a trace on stderr, which survives a `> log`
+    // that swallows the report on stdout — a script that stopped one session
+    // by omission would otherwise learn nothing from the exit code.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("every sandbox"),
+        "a non-interactive wide down says it widened: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
 
-    // Naming one is unchanged — this refuses a *wide* down, not `down`.
-    let one = sb.omh(&["s01", "down"]);
-    assert!(
-        one.status.success(),
-        "a named session still stops: {}",
-        String::from_utf8_lossy(&one.stderr)
-    );
-    assert!(
-        sb.docker_calls(&log).iter().any(|c| c.contains("rm")),
-        "s01 really went down"
-    );
+/// Naming a session stops only that one and leaves the others running — the
+/// destructive path scopes to the selector, as the reversible `sync` does.
+#[test]
+fn a_named_down_stops_only_the_named_session() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.session("s01");
+    sb.session("s02");
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n{}\n", sb.container("s01"), sb.container("s02")),
+    )
+    .unwrap();
 
-    // …and so is saying you meant all of them.
-    let all = sb.omh(&["s", "down", "--all"]);
+    let out = sb.omh(&["s01", "down"]);
     assert!(
-        all.status.success(),
-        "`--all` is the answer to the question: {}",
-        String::from_utf8_lossy(&all.stderr)
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let calls = sb.docker_calls(&log);
+    assert!(
+        calls
+            .iter()
+            .any(|c| c.contains("rm") && c.contains(&sb.container("s01"))),
+        "s01 was stopped: {calls:?}"
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|c| c.contains("rm") && c.contains(&sb.container("s02"))),
+        "s02 was not named, so it was left running: {calls:?}"
+    );
+}
+
+/// `--all` is gone from `down` — absence already means all.
+#[test]
+fn down_no_longer_takes_all() {
+    let sb = sandbox();
+    sb.git_init();
+    let out = sb.omh(&["s", "down", "--all"]);
+    assert!(
+        !out.status.success(),
+        "--all is not a flag down has any more"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("--all") && err.contains("unexpected"),
+        "it fails *because* --all is not a flag, not for another reason: {err}"
     );
 }
 
