@@ -467,10 +467,13 @@ impl Runtime for Sbx {
     }
 
     fn caps(&self) -> Caps {
-        // Both unverified. Docker's docs describe workspaces mounting at their
-        // host path and say nothing about single files, so assume neither until
-        // the spike proves otherwise. A wrong `true` here would start a sandbox
-        // with the profile silently missing.
+        // Both **measured** against sbx 0.39.0 (2026-09-06), not assumed. A
+        // workspace mounts at its exact host path — `sbx create shell <dir>`
+        // puts the files at `<dir>` inside, so the guest path cannot be chosen
+        // — and a workspace must be a directory: a single-file path is refused
+        // with "workspace path exists but is not a directory". So the profile's
+        // single-file mounts and `/work` convention both need the staging model
+        // `Plan::validate` will express, not a per-file mount.
         Caps {
             file_mounts: false,
             free_guest_paths: false,
@@ -770,13 +773,14 @@ mod tests {
         assert!(c.free_guest_paths);
     }
 
-    /// Docker's docs describe workspace mounts landing at the host path and say
-    /// nothing about single files. Until the spike proves otherwise, both are
-    /// false — a wrong `true` here silently drops the profile.
+    /// Measured against sbx 0.39.0 (2026-09-06): a workspace mounts at its
+    /// host path (no chosen guest path) and must be a directory (a single-file
+    /// path is refused). A wrong `true` here would start a sandbox with the
+    /// profile silently missing.
     #[test]
-    fn sbx_capabilities_stay_conservative_until_verified() {
+    fn sbx_capabilities_are_the_measured_ones() {
         let c = Sbx.caps();
-        assert!(!c.file_mounts, "unverified: assume no");
+        assert!(!c.file_mounts, "a single file cannot be a workspace");
         assert!(
             !c.free_guest_paths,
             "sbx mounts workspaces at their host path"

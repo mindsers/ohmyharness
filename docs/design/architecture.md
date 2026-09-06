@@ -201,9 +201,9 @@ do rather than failing mysteriously.
 
 | Capability | Docker | `sbx` | Consequence if absent |
 |---|---|---|---|
-| bind-mount a single **file** | yes | **unknown** | staging must mount dirs + symlink instead |
-| choose the **guest path** | yes | **no** — workspaces mount at the host path | the `/work` convention breaks |
-| SSH attach for IDE | yes (sshd in image) | **unknown** | [editors](../editors.md) need another mechanism |
+| bind-mount a single **file** | yes | **no** (measured 0.39.0) — a workspace must be a directory | staging must write into a workspace dir + symlink, not mount single files |
+| choose the **guest path** | yes | **no** (measured) — a workspace mounts at its host path | the `/work` convention breaks; stage + symlink from inside |
+| SSH attach for IDE | yes (sshd in image) | **no native SSH**; `exec` is the entry, and a published loopback port reaches a service inside (measured) | an sshd in omh's template on a published port should work; else `exec` ([#109](https://github.com/mindsers/ohmyharness/issues/109)) |
 
 The unknowns are not hand-waved. A `Plan` is validated against the selected
 backend's declared capabilities and fails **loudly** if it needs something the
@@ -295,20 +295,37 @@ as still needing one.
 4. The profile — skills, MCP, rules — is staged into the worktree and symlinked
    from inside at startup, because the guest path cannot be chosen.
 
-**Still needs a login to settle (blocks the runtime rewrite and its acceptance
-test):**
+**Measured with a login, sbx 0.39.0 (2026-09-06):**
 
-- Does a published loopback port actually reach an sshd the omh image's
-  entrypoint starts, so `attach` and the editors keep working? sbx has no SSH
-  model of its own; `exec` is its entry, which is what [Issue B](https://github.com/mindsers/ohmyharness/issues/109) (`omh sNN
-  shell`) would use where the port does not.
-- Does the home directory persist across `stop`/`run`?
-- Does omh's base image run unmodified as a `--template`, meeting the same
-  contract the base already asserts (agent at UID 1000, passwordless sudo)?
-- The acceptance test itself: `omh doctor --harness claude` with
-  `runtime = "sbx"`, which needs a real sandbox and so a `sbx login`.
+- **A workspace mounts at its exact host path** — `sbx create shell <dir>` puts
+  the files at `<dir>` inside the sandbox, `pwd` and all. The guest path is not
+  chosen (`free_guest_paths: false`).
+- **A workspace must be a directory** — a single-file path is refused with
+  *"workspace path exists but is not a directory"* (`file_mounts: false`). So
+  omh's per-file mounts (rules, `.mcp.json`) cannot be workspaces; they must be
+  staged into a directory and symlinked from inside.
+- **The default sandbox already presents `agent` at UID 1000, passwordless
+  sudo, and `/home/agent`** — omh's base-image contract, met out of the box.
+- **A published loopback port reaches a service inside.** `sbx ports NAME
+  --publish 8099` bound `127.0.0.1:<ephemeral>`, and a listener on 8099 inside
+  answered on the host — the same loopback bridge omh's Docker `up_args` build,
+  so publishing sshd's 22 works the same way.
+- **The home directory persists across `stop`/`run`** — a file written to
+  `~/` survived a stop and the next exec's auto-start.
+- **`-e/--env` carries in** — `OMH_SESSION=s01` read back inside.
+- **`--template <image>` runs a custom image as-is** — plain `debian` came up as
+  root with no sudo, so sbx does *not* add the agent/sudo layer; the image
+  provides it. omh's base does, so it is a valid template: the omh-on-sbx model
+  is `sbx create shell -t omh/base:<tag> -p <port>:22 <worktree>`.
+- **First-run prerequisites**, beyond install: `sbx login` (a Docker account),
+  `sbx daemon start`, and `sbx policy init <allow-all|balanced|deny-all>`
+  before the first `create`. These are what `omh doctor` should detect and hand
+  the user the exact next command for, rather than letting sbx's own errors
+  surface.
 
-Until that login is run, `Sbx` in `runtime.rs` stays provisional and `auto`
-never selects it — the posture this section already describes, now backed by a
-measured CLI rather than the removed plugin's.
+**What remains** is the end-to-end: build omh's base, `sbx template load` it,
+and run `omh doctor --harness claude` with `runtime = "sbx"` — the acceptance
+test. The design is no longer guessed; `Sbx` in `runtime.rs` still needs its
+argv rewritten to `create`/`exec`/`ports` and `Plan::validate` taught the
+stage-and-symlink model, and until that ships `auto` never selects it.
 

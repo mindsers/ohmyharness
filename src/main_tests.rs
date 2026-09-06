@@ -913,7 +913,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("adapters.md", 1),
         ("code-graph.md", 1),
         ("commands.md", 138), // + checks-first commit, --no-verify, and the scoped activity example
-        ("configuration.md", 44),
+        ("configuration.md", 46), // + the sbx set-runtime and doctor examples
         ("decisions.md", 1),
         ("editors.md", 4),
         ("getting-started.md", 14),

@@ -715,6 +715,61 @@ Top-level keys of the same files:
 | `sandbox_cpus` | as docker spells it: `2`, `1.5` | how many CPUs a session's sandbox may use. Unset means docker's default. Changing it restarts the sandbox on the next launch |
 | `account` | account name | which captured login this project uses |
 
+## The `sbx` runtime (Docker Sandboxes)
+
+`runtime = "sbx"` runs each session in a **Docker Sandbox** — a microVM with its
+own kernel — instead of a Docker container that shares the host's. It is an
+explicit opt-in: the default is Docker, and `auto` never picks `sbx`.
+
+### Why you might want it
+
+Two things it does that the Docker backend does not:
+
+- **Stronger isolation.** A microVM has its own kernel, so a container escape is
+  not a host escape. If you run agents on code you do not fully trust, this is
+  the difference that matters.
+- **The agent never holds its own token.** `sbx` injects service credentials
+  (Anthropic, OpenAI, GitHub) at an egress proxy, so the secret authenticates
+  the request without ever entering the sandbox's filesystem. omh's Docker
+  backend mounts a credential directory the agent *can* read; `sbx` closes that.
+
+It also carries per-sandbox egress policy (`sbx policy`, `--deny-network`) if you
+want to restrict where an agent can reach.
+
+The cost is real, which is why it is opt-in: it needs a Docker account, it is
+Apple-Silicon macOS today, and there is a one-time setup below. The Docker
+backend stays first-class; reach for `sbx` when the isolation is worth the
+setup, not by default.
+
+### How to set it up
+
+`sbx` is a separate CLI. One-time, before omh can use it:
+
+```console
+$ brew trust docker/tap
+$ brew install docker/tap/sbx
+$ sbx login                                  # a Docker account; --username + --password-stdin for CI
+$ sbx daemon start
+$ sbx policy init balanced                   # or allow-all / deny-all
+```
+
+Then point a repo (or your global settings) at it and check:
+
+```console
+$ omh set runtime sbx
+$ omh doctor
+```
+
+`omh doctor` is where a missing step is caught and named — it reports whether
+`sbx` is installed, logged in, its daemon is up, and its policy is initialised,
+and hands you the exact command for whichever is missing. Run it before your
+first launch on `sbx`.
+
+> **Status.** The `sbx` backend is provisional. Its CLI and runtime behaviour
+> are measured (see [architecture](design/architecture.md#runtime-backends)),
+> but omh's own launch path on `sbx` is not yet wired end to end, so treat it as
+> hardening under test rather than a finished backend.
+
 ## MCP servers
 
 ```console
