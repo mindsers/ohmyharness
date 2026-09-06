@@ -356,6 +356,16 @@ pub(crate) fn refuse_what_cannot_be_seeded(
 pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // Fail fast. Everything below is wasted work outside a repo.
     let paths = Paths::discover(cwd)?;
+
+    // `init` is a one-time command. A repo carrying the stamp is already set
+    // up, and refreshing its catalogue and rebuilding its images is `omh
+    // upgrade`'s job now — the two are split so neither does the other's work.
+    // The stamp is written at the end of a first run, so a run interrupted
+    // before it lands still re-runs to completion.
+    anyhow::ensure!(
+        !paths.repo.join(".omh").join(SEEDED_BY).exists(),
+        "this project already uses omh — run `omh upgrade` to update everything"
+    );
     // And the template, for the same reason: it depends on nothing `init`
     // computes, and a refusal after fifteen writes leaves a half-made repo
     // while the message reads as though nothing happened.
@@ -365,34 +375,7 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // `report::Init` for why this is not printed as it happens.
     let mut summary = report::Init::default();
 
-    // A fresh install has no adapters, so `omh <harness>` would fail no matter
-    // what else init did. Ship them before anything else.
-    let adapters = install_bundled_adapters(&paths, ctx)?;
-    // Shipped, and no longer reported here: what editors exist is a fact
-    // about the machine, which is `omh info`'s question.
-    install_bundled(&paths.editors(), bundled::Shipped::Editors, ctx)?;
-    // The base set ships as data next to the adapters, for the same reason: the
-    // opinion should be reviewable by the people it is imposed on. It travels
-    // *inside* the binary now — otherwise a released omh installs nothing — but
-    // it still lands as a file in `~/.omh/base`, which is where the
-    // reviewability actually lives. `omh why` reads the file init seeds from.
-    install_bundled(&paths.base(), bundled::Shipped::Base, ctx)?;
-    // The stacks, for the same reason and by the same route: what a project
-    // needs installed is omh's opinion, and an opinion imposed on somebody
-    // should be one they can read. Managed, so a shipped fix always lands.
-    install_bundled(&paths.stacks(), bundled::Shipped::Stacks, ctx)?;
-    // And the conventional hooks, which used to be a `match` in Rust written
-    // into every repo as two files. As catalogue data they are one body per
-    // ecosystem instead of one per checkout, so a fix reaches everybody; a repo
-    // needing its own spelling shadows the name, which is the rule hooks
-    // already had. Each names the stack it belongs to and nothing else about
-    // it — the marker stays in `stacks/`, so the two cannot drift.
-    install_bundled(&paths.hooks(), bundled::Shipped::Hooks, ctx)?;
-    // And the markers: ecosystems omh can recognise and cannot yet set up.
-    // Data rather than a `match` for the same reason the stacks are — a marker
-    // is removed by the same release that ships its stack, and the curation
-    // test refuses the pair being true at once.
-    install_bundled(&paths.markers(), bundled::Shipped::Markers, ctx)?;
+    let adapters = refresh_catalogue(&paths, ctx)?;
     let manifest = base::Manifest::load_dir(&paths.base())?;
     std::fs::create_dir_all(paths.worktrees())?;
 
@@ -980,6 +963,34 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
 
     ctx.say(&summary);
     Ok(())
+}
+
+/// Refresh the whole managed catalogue from this binary, returning the adapter
+/// names (which `init` needs to detect a harness, and `upgrade` reports on).
+///
+/// The six kinds `init` first-run and `omh upgrade` both write: adapters,
+/// editors, the base set, stacks, hooks, markers. Each is **managed** — a
+/// shipped fix lands over the old copy, and an edit of yours is kept as
+/// `.yours` (see `install_bundled`). This is the one place that list lives, so
+/// `init` and `upgrade` cannot refresh different things.
+pub(crate) fn refresh_catalogue(paths: &Paths, ctx: &out::Ctx) -> Result<Vec<String>> {
+    // Adapters first: a fresh install has none, so `omh <harness>` would fail
+    // no matter what else ran.
+    let adapters = install_bundled_adapters(paths, ctx)?;
+    // What editors exist is a fact about the machine — `omh info`'s question,
+    // so nothing is reported here.
+    install_bundled(&paths.editors(), bundled::Shipped::Editors, ctx)?;
+    // The base set, the stacks, the hooks and the markers all ship as data next
+    // to the adapters for one reason: an opinion imposed on somebody should be
+    // one they can read. They travel inside the binary (otherwise a released
+    // omh installs nothing) but still land as files under `~/.omh`, which is
+    // where the reviewability lives — `omh why` reads the base file init seeds
+    // from. Managed, so a shipped fix always reaches an existing install.
+    install_bundled(&paths.base(), bundled::Shipped::Base, ctx)?;
+    install_bundled(&paths.stacks(), bundled::Shipped::Stacks, ctx)?;
+    install_bundled(&paths.hooks(), bundled::Shipped::Hooks, ctx)?;
+    install_bundled(&paths.markers(), bundled::Shipped::Markers, ctx)?;
+    Ok(adapters)
 }
 
 /// Adapters ship with omh but live in `~/.omh`. Without this a fresh install

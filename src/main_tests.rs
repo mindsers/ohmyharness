@@ -1483,7 +1483,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/auth.rs", 3),
         ("src/cmd/catalogue.rs", 12),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
-        ("src/cmd/init.rs", 6),
+        ("src/cmd/init.rs", 7),     // + the `omh upgrade` redirect when a repo is already set up
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only
         // next step is the command it names, so a spelling omh does not

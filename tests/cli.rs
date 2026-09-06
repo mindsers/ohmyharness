@@ -4138,6 +4138,8 @@ fn init_reports_what_it_did_here_and_not_what_the_machine_has() {
         "init wrote the selection `omh info --repo` reads: {repo}"
     );
 
+    // init is one-time now; clear the stamp so it re-runs and reports in JSON too.
+    let _ = std::fs::remove_file(sb.repo.join(".omh/seeded-by"));
     let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
         .expect("--json is machine-readable");
     assert!(json["adapters"].is_null(), "the inventory left: {json:#}");
@@ -4192,6 +4194,8 @@ fn a_probe_that_could_not_run_is_not_a_clean_bill_of_health() {
         "the sandbox was never asked, and an empty list says the opposite: {said}"
     );
 
+    // init is one-time now; clear the stamp so it re-runs and reports in JSON too.
+    let _ = std::fs::remove_file(sb.repo.join(".omh/seeded-by"));
     let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
         .expect("--json is machine-readable");
     assert!(
@@ -4251,6 +4255,8 @@ fn a_hook_measurement_that_did_not_happen_says_which_gate_stopped_it() {
         "the reason names the gate that actually stopped it: {said}"
     );
 
+    // init is one-time now; clear the stamp so it re-runs and reports in JSON too.
+    let _ = std::fs::remove_file(sb.repo.join(".omh/seeded-by"));
     let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
         .expect("--json is machine-readable");
     assert!(
@@ -4391,6 +4397,38 @@ fn no_part_of_the_template_resolves_in_this_repo() {
     assert!(
         !said.contains("from-template"),
         "a `[use]` list from the template reached this repo: {said}"
+    );
+}
+
+/// `omh init` is a one-time command: the first run sets the repo up and stamps
+/// it with `seeded-by`; a second run refuses and points at `omh upgrade`, which
+/// is the verb that refreshes and rebuilds from here on. This is the split that
+/// makes `init` and `upgrade` non-overlapping.
+#[test]
+fn init_is_one_time_and_a_second_run_redirects_to_upgrade() {
+    let sb = sandbox();
+    sb.git_init();
+
+    let first = sb.omh(&["init"]);
+    assert!(
+        first.status.success(),
+        "the first init sets the repo up: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        sb.repo.join(".omh/seeded-by").exists(),
+        "and stamps the repo so the next run knows it is set up"
+    );
+
+    let second = sb.omh(&["init"]);
+    assert!(
+        !second.status.success(),
+        "a repo already set up is not initialised again"
+    );
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("omh upgrade"),
+        "the refusal sends you to the update verb: {}",
+        String::from_utf8_lossy(&second.stderr)
     );
 }
 
@@ -7080,23 +7118,9 @@ fn init_records_which_omh_seeded_the_checkout() {
         "the secret-bearing layer is still ignored: {ignored}"
     );
 
-    // **Rewritten, not `write_if_absent`.** The whole point is that the stamp
-    // moves when omh does; a review swapped `fs::write` for `write_if_absent`
-    // and all 1538 tests passed, because this test only ever ran `init` once
-    // against an absent file, where both spellings behave the same. The
-    // surviving mutation records the omh that *first* set the checkout up and
-    // then lies about every upgrade after it — in the row whose only job is
-    // detecting exactly that.
-    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
-    sb.omh(&["init"]);
-    assert_eq!(
-        std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
-            .unwrap_or_default()
-            .trim(),
-        env!("CARGO_PKG_VERSION"),
-        "a second `init` restamps; otherwise the stamp records the first omh \
-         that ever ran here and never moves again"
-    );
+    // The stamp *moving when omh does* is now `omh upgrade`'s job, not a second
+    // `init` (which refuses a repo already set up) — see
+    // `upgrade_advances_the_seed_stamp_even_from_an_older_version`.
 
     // An older stamp reads as skew, and is not a failure.
     std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
