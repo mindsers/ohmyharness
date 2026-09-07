@@ -912,7 +912,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("accounts.md", 4),
         ("adapters.md", 1),
         ("code-graph.md", 1),
-        ("commands.md", 137), // + checks-first commit, --no-verify, scoped activity example; − the bare `omh s diff` example (a session verb now names its session)
+        ("commands.md", 140),     // + the `omh upgrade` section and its examples
         ("configuration.md", 46), // + the sbx set-runtime and doctor examples
         ("decisions.md", 1),
         ("editors.md", 4),
@@ -1483,7 +1483,8 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/auth.rs", 3),
         ("src/cmd/catalogue.rs", 12),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
-        ("src/cmd/init.rs", 6),
+        ("src/cmd/init.rs", 7),     // + the `omh upgrade` redirect when a repo is already set up
+        ("src/cmd/upgrade.rs", 1),  // the `omh init` redirect when a repo is not set up
         // The fifth is the `adapters installed` row `doctor` adds when
         // there is none: printed to somebody on a fresh machine whose only
         // next step is the command it names, so a spelling omh does not
@@ -1868,6 +1869,29 @@ fn keep_takes_a_selection_or_nothing_and_never_the_next_word() {
             .unwrap_err()
             .contains("cannot be used with"),
         "and squashing is the other way to land work, not a modifier of this one"
+    );
+}
+
+/// `omh upgrade` is a top-level command with no args, like `omh init` — it acts
+/// on the machine's adapters and this repo's images, and names no session.
+#[test]
+fn upgrade_is_a_top_level_verb_that_takes_no_session() {
+    assert!(
+        matches!(
+            Cli::try_parse_from(["omh", "upgrade"]).map(|c| c.cmd),
+            Ok(Cmd::Upgrade)
+        ),
+        "`omh upgrade` parses to the top-level Upgrade command"
+    );
+    // It carries no session — the selector belongs to the `s` namespace.
+    assert!(
+        !cli::consumes_session(&Cmd::Upgrade),
+        "upgrade acts machine-wide, not on a session"
+    );
+    // And it previews under --dry-run, like the other build commands.
+    assert!(
+        cli::previews(&Cmd::Upgrade),
+        "upgrade can say what it would rebuild without doing it"
     );
 }
 

@@ -3268,6 +3268,153 @@ impl Report for Lint {
     }
 }
 
+// ── omh upgrade ─────────────────────────────────────────────────────────────
+
+/// What became of a harness's image when `omh upgrade` looked at it.
+///
+/// The word carries the meaning on its own — a reader in a pipe, in CI, or
+/// without colour vision gets this and nothing else, and it is what a shell
+/// alias greps for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// A pin moved, so the recipe moved, so the image was built again.
+    Rebuilt,
+    /// The recipe was unchanged; nothing to do.
+    AlreadyCurrent,
+    /// The adapter pins no version, so omh cannot rebuild it to anything
+    /// reproducible — left alone, and said so.
+    Unpinnable,
+}
+
+impl Outcome {
+    fn mark(&self) -> &'static str {
+        match self {
+            Self::Rebuilt => "rebuilt",
+            Self::AlreadyCurrent => "current",
+            Self::Unpinnable => "unpinned",
+        }
+    }
+
+    fn style(&self) -> anstyle::Style {
+        match self {
+            Self::Rebuilt => out::OK,
+            Self::AlreadyCurrent => out::DIM,
+            Self::Unpinnable => out::WARN,
+        }
+    }
+
+    fn key(&self) -> &'static str {
+        match self {
+            Self::Rebuilt => "rebuilt",
+            Self::AlreadyCurrent => "current",
+            Self::Unpinnable => "unpinned",
+        }
+    }
+}
+
+/// The image a session is running on, when it is not one of the current ones.
+///
+/// `Unknown` is not dropped: a session omh could not read the image of is not a
+/// session on a current image, and reporting it as clean would be the
+/// false-negative the whole runtime layer is built to avoid.
+#[derive(Debug, Clone)]
+pub enum StaleImage {
+    /// A known tag that is no longer any current recipe.
+    Known(String),
+    /// omh could not read what this session is on, and here is why.
+    Unknown(String),
+}
+
+/// A running session left on an image `upgrade` just superseded.
+#[derive(Debug, Clone)]
+pub struct StaleSession {
+    pub id: String,
+    pub image: StaleImage,
+}
+
+/// What `omh upgrade` refreshed, rebuilt, and left running behind.
+#[derive(Debug, Clone, Default)]
+pub struct Upgraded {
+    /// One `(harness, outcome)` per installed adapter.
+    pub harnesses: Vec<(String, Outcome)>,
+    /// The adapters refreshed from the binary this run (a `.yours` was kept for
+    /// each catalogue file you had edited; those warnings print as they
+    /// happen). Empty on a dry run, which refreshes nothing.
+    pub refreshed: Vec<String>,
+    /// Sessions still on an image this upgrade superseded — a relaunch away
+    /// from the new one.
+    pub stale_sessions: Vec<StaleSession>,
+    /// Set when the runtime would not list what is running, so the stale-session
+    /// check could not run — reported rather than read as "nothing is stale".
+    pub sessions_unchecked: Option<String>,
+    pub dry_run: bool,
+}
+
+impl Report for Upgraded {
+    fn human(&self, p: &out::Palette) -> String {
+        let mut s = String::new();
+        if self.dry_run {
+            s.push_str(&format!(
+                "{}\n",
+                p.paint(out::DIM, "--dry-run: nothing built")
+            ));
+        }
+        if !self.refreshed.is_empty() {
+            s.push_str(&format!(
+                "refreshed {}\n",
+                p.paint(out::DIM, &self.refreshed.join(", "))
+            ));
+        }
+
+        let mut t = Table::new();
+        for (harness, outcome) in &self.harnesses {
+            t = t.row(vec![
+                Cell::styled(outcome.mark(), outcome.style()),
+                Cell::plain(harness),
+            ]);
+        }
+        s.push_str(&t.render(p));
+
+        for stale in &self.stale_sessions {
+            let detail = match &stale.image {
+                StaleImage::Known(tag) => format!("on {tag} — relaunch to move it"),
+                StaleImage::Unknown(why) => format!("could not tell what it is on: {why}"),
+            };
+            s.push_str(&format!(
+                "  {} {}\n",
+                p.paint(out::WARN, &stale.id),
+                p.paint(out::DIM, &detail)
+            ));
+        }
+        if let Some(why) = &self.sessions_unchecked {
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(
+                    out::WARN,
+                    &format!("could not check running sessions: {why}")
+                )
+            ));
+        }
+        s
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "harnesses": self.harnesses.iter().map(|(harness, outcome)| json!({
+                "harness": harness,
+                "outcome": outcome.key(),
+            })).collect::<Vec<_>>(),
+            "refreshed": self.refreshed,
+            "stale": self.stale_sessions.iter().map(|s| match &s.image {
+                StaleImage::Known(tag) => json!({ "id": s.id, "image": tag }),
+                StaleImage::Unknown(why) => json!({ "id": s.id, "image": null, "unreadable": why }),
+            }).collect::<Vec<_>>(),
+            "sessions_unchecked": self.sessions_unchecked,
+            "dry_run": self.dry_run,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

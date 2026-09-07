@@ -308,6 +308,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
         Cmd::Doctor { harness } => {
             cmd::inspect::doctor_cmd(&cwd, harness.as_deref(), cli.dry_run, ctx)
         }
+        Cmd::Upgrade => cmd::upgrade::upgrade_cmd(&cwd, cli.dry_run, ctx),
         Cmd::Why { thing } => cmd::inspect::why_cmd(&cwd, thing, ctx),
         Cmd::Graph { stop } => cmd::inspect::graph(&cwd, *stop, ctx),
 

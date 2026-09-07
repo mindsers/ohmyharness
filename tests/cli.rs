@@ -4138,6 +4138,8 @@ fn init_reports_what_it_did_here_and_not_what_the_machine_has() {
         "init wrote the selection `omh info --repo` reads: {repo}"
     );
 
+    // init is one-time now; clear the stamp so it re-runs and reports in JSON too.
+    let _ = std::fs::remove_file(sb.repo.join(".omh/seeded-by"));
     let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
         .expect("--json is machine-readable");
     assert!(json["adapters"].is_null(), "the inventory left: {json:#}");
@@ -4192,6 +4194,8 @@ fn a_probe_that_could_not_run_is_not_a_clean_bill_of_health() {
         "the sandbox was never asked, and an empty list says the opposite: {said}"
     );
 
+    // init is one-time now; clear the stamp so it re-runs and reports in JSON too.
+    let _ = std::fs::remove_file(sb.repo.join(".omh/seeded-by"));
     let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
         .expect("--json is machine-readable");
     assert!(
@@ -4251,6 +4255,8 @@ fn a_hook_measurement_that_did_not_happen_says_which_gate_stopped_it() {
         "the reason names the gate that actually stopped it: {said}"
     );
 
+    // init is one-time now; clear the stamp so it re-runs and reports in JSON too.
+    let _ = std::fs::remove_file(sb.repo.join(".omh/seeded-by"));
     let json: serde_json::Value = serde_json::from_slice(&sb.omh(&["--json", "init"]).stdout)
         .expect("--json is machine-readable");
     assert!(
@@ -4391,6 +4397,42 @@ fn no_part_of_the_template_resolves_in_this_repo() {
     assert!(
         !said.contains("from-template"),
         "a `[use]` list from the template reached this repo: {said}"
+    );
+}
+
+/// `omh init` is a one-time command: the first run sets the repo up and stamps
+/// it with `seeded-by`; a second run refuses and points at `omh upgrade`, which
+/// is the verb that refreshes and rebuilds from here on. This is the split that
+/// makes `init` and `upgrade` non-overlapping.
+#[test]
+fn init_is_one_time_and_a_second_run_redirects_to_upgrade() {
+    let sb = sandbox();
+    // A container runtime, faked: on a host where a harness binary is present
+    // `init` builds an image, and without this the first run fails for want of
+    // a runtime rather than exercising the one-time gate.
+    let _log = sb.fake_docker();
+    sb.git_init();
+
+    let first = sb.omh(&["init"]);
+    assert!(
+        first.status.success(),
+        "the first init sets the repo up: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        sb.repo.join(".omh/seeded-by").exists(),
+        "and stamps the repo so the next run knows it is set up"
+    );
+
+    let second = sb.omh(&["init"]);
+    assert!(
+        !second.status.success(),
+        "a repo already set up is not initialised again"
+    );
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("omh upgrade"),
+        "the refusal sends you to the update verb: {}",
+        String::from_utf8_lossy(&second.stderr)
     );
 }
 
@@ -6358,12 +6400,19 @@ fn init_writes_the_selection_expanded() {
         "init's own explanation has to survive its own write: {written}"
     );
 
-    // Re-running must not resync a list somebody pruned on purpose.
+    // A pruned selection must not be resynced by re-running `init`. It cannot
+    // be: `init` writes the `[use]` selection once and is one-time now, so a
+    // second run refuses and touches nothing — the selection is written once,
+    // and `omh use --all` is how you ask for a resync.
     assert!(sb.omh(&["unuse", "skills", "review-diff"]).status.success());
-    assert!(sb.omh(&["init"]).status.success());
+    let second = sb.omh(&["init"]);
+    assert!(
+        !second.status.success(),
+        "a repo already set up is not initialised again"
+    );
     assert!(
         !sb.settings().contains("review-diff"),
-        "init writes the list once; `omh use --all` is how you ask for a resync"
+        "and the refusal leaves the pruned selection alone"
     );
 }
 
@@ -7080,23 +7129,9 @@ fn init_records_which_omh_seeded_the_checkout() {
         "the secret-bearing layer is still ignored: {ignored}"
     );
 
-    // **Rewritten, not `write_if_absent`.** The whole point is that the stamp
-    // moves when omh does; a review swapped `fs::write` for `write_if_absent`
-    // and all 1538 tests passed, because this test only ever ran `init` once
-    // against an absent file, where both spellings behave the same. The
-    // surviving mutation records the omh that *first* set the checkout up and
-    // then lies about every upgrade after it — in the row whose only job is
-    // detecting exactly that.
-    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
-    sb.omh(&["init"]);
-    assert_eq!(
-        std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
-            .unwrap_or_default()
-            .trim(),
-        env!("CARGO_PKG_VERSION"),
-        "a second `init` restamps; otherwise the stamp records the first omh \
-         that ever ran here and never moves again"
-    );
+    // The stamp *moving when omh does* is now `omh upgrade`'s job, not a second
+    // `init` (which refuses a repo already set up) — see
+    // `upgrade_advances_the_seed_stamp_even_from_an_older_version`.
 
     // An older stamp reads as skew, and is not a failure.
     std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
@@ -10131,5 +10166,186 @@ fn commit_keep_refuses_a_secret_value_pasted_into_source() {
         sb.head_of_branch("omh/s01"),
         before,
         "and the branch did not move"
+    );
+}
+
+/// `omh upgrade` refuses in a repo omh never set up — it is the update path,
+/// and there is nothing to update. It points at `omh init`, the symmetric
+/// first-run verb.
+#[test]
+fn upgrade_refuses_a_repo_that_was_never_initialised() {
+    let sb = sandbox();
+    sb.git_init();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(
+        !out.status.success(),
+        "an un-seeded repo has nothing for upgrade to do"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("omh init"),
+        "the refusal points at the first-run verb: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// A real `omh upgrade` refreshes the catalogue and advances the seed stamp —
+/// even from an older version. This is the "the stamp moves when omh does"
+/// guard, which used to live on a second `omh init` and is upgrade's now: a
+/// review swapping `fs::write` for `write_if_absent` would leave the stamp
+/// recording the omh that *first* set the checkout up and lying about every
+/// upgrade after.
+#[test]
+fn upgrade_advances_the_seed_stamp_even_from_an_older_version() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    // An older omh set this checkout up.
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+
+    let out = sb.omh(&["upgrade"]);
+    assert!(
+        out.status.success(),
+        "upgrade runs in a seeded repo: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
+            .unwrap_or_default()
+            .trim(),
+        env!("CARGO_PKG_VERSION"),
+        "upgrade advances the stamp to the omh that ran it"
+    );
+}
+
+/// A dry-run classifies and reports, but builds nothing and does not advance
+/// the stamp — the preview is the real run's own decision, with no effect.
+#[test]
+fn a_dry_run_upgrade_builds_and_stamps_nothing() {
+    let sb = sandbox();
+    let log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+
+    let out = sb.omh(&["--dry-run", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
+            .unwrap_or_default()
+            .trim(),
+        "0.0.1",
+        "a dry run leaves the stamp where it was"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(!calls.contains("build"), "and it never builds: {calls}");
+}
+
+/// `omh upgrade --json` reports each harness's outcome as structured data.
+#[test]
+fn upgrade_reports_each_harness_as_json() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("--json is machine-readable");
+    let harnesses = v["harnesses"].as_array().expect("a harnesses array");
+    assert!(
+        !harnesses.is_empty(),
+        "every installed adapter is classified: {v:#}"
+    );
+    assert!(
+        harnesses
+            .iter()
+            .all(|h| h["outcome"] == "current" && h["harness"].is_string()),
+        "with every image present, each harness reads current: {v:#}"
+    );
+}
+
+/// A session still running when omh upgrades is named in the report — a
+/// relaunch away from the rebuilt image. A session whose image omh cannot read
+/// is named as uncertain, never dropped.
+#[test]
+fn upgrade_names_a_session_still_running_on_an_old_image() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+    // A running session: a worktree, and its container in the `ps` listing.
+    sb.session("s01");
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s01")),
+    )
+    .unwrap();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let stale = v["stale"].as_array().expect("a stale array");
+    assert!(
+        stale.iter().any(|s| s["id"] == "s01"),
+        "the running session is named: {v:#}"
+    );
+}
+
+/// A real upgrade against a runtime with nothing built rebuilds every harness
+/// and runs a build — the load-bearing path the `fake_docker` e2e (where every
+/// image already "exists") never reaches.
+#[test]
+fn a_real_upgrade_rebuilds_when_the_image_is_missing() {
+    let sb = sandbox();
+    let log = sb.fake_docker_with_nothing_built(&[], &[]);
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["harnesses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|h| h["outcome"] == "rebuilt"),
+        "with no image present, each harness rebuilds: {v:#}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(calls.contains("build"), "a build actually ran: {calls}");
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
+            .unwrap_or_default()
+            .trim(),
+        env!("CARGO_PKG_VERSION"),
+        "and the stamp advanced"
     );
 }
