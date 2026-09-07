@@ -4,7 +4,7 @@
 
 Ordered by what gates what, not by what is most fun.
 
-**These are milestones, not crate versions.** The crate is at `0.9.0` and
+**These are milestones, not crate versions.** The crate is at `0.10.0` and
 milestone v1.5 is roughly what 0.6.0 contained. They are deliberately not
 kept in lockstep — v0 has spanned nine minor releases already: a milestone moves when
 a body of work lands, semver moves on every release, and calling the crate `1.0`
@@ -27,12 +27,18 @@ ship; hub pages do not
 
 ## v0.5 — backends
 
-The runtime trait exists and declares capabilities. What is missing is the
-spike: build an opencode kit, try a single-file mount, try attaching an IDE.
+The runtime trait exists, and a `podman` backend ships beside Docker. The `sbx`
+spike ran against `sbx` 0.39.0 — single-file mounts, chosen guest paths and the
+image-delivery path are all measured — and the backend was rewritten from what
+it found: stage-and-symlink for the mounts `sbx` cannot do natively, `docker
+save | sbx template load` delivery, and label-free session reuse.
 
-It is roughly an afternoon, and it decides whether `sbx` becomes the default or
-stays opt-in hardening. Until it runs, **Docker is the only verified runtime**
-and the [credential weakness](risks.md#security) stays unaddressed.
+It is **opt-in** (`runtime = "sbx"`); `auto` never picks it. What decides
+whether it becomes the default is the full live acceptance — a real `omh doctor
+--harness claude` under `sbx` — which has not run. Until it does, **Docker is
+the only end-to-end-verified runtime** and the
+[credential weakness](risks.md#security) `sbx` addresses stays unaddressed on
+Docker.
 
 ## v1 — accountability
 

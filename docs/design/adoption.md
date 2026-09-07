@@ -754,7 +754,9 @@ and decides, launch is the command that uses what was decided.
 One rule protects the human: **re-resolution may add entries and may flip an
 entry to `true`, but must never clear a `false`.** Only a person writes `false` —
 omh writing one would mean it had decided against something it detected — so a
-`false` is a decision, and re-running `init` is not consent to discard it.
+`false` is a decision. `init` is one-time and does not revisit it; `omh upgrade`
+refreshes the catalogue and rebuilds but never re-resolves this repo's
+selection, so neither path is consent to discard a `false`.
 
 ### Drift, stated
 

@@ -132,9 +132,10 @@ process invocation.
                credential injection
 ```
 
-Selection is `runtime = "auto" | "docker" | "sbx"` in `settings.toml`. `auto`
-selects only `docker`; `sbx` is an explicit opt-in until the spike below has
-measured it, and `omh doctor` says so when it is chosen.
+Selection is `runtime = "auto" | "docker" | "podman" | "sbx"` in `settings.toml`.
+`auto` selects only `docker`; `podman` (rootless, docker's CLI) and `sbx`
+(Docker Sandboxes, rewritten from the measured spike below) are explicit
+opt-ins, and `omh doctor` says so when one is chosen.
 
 ### Why not simply adopt `sbx`
 

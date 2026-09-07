@@ -59,11 +59,11 @@ rests on the difference between an unverified claim and a disclosed gap:
 - **`.claude.json` is a file mount that cannot be atomically replaced.**
 - The **egress allowlist is designed, not wired.** Assume a session has network
   access.
-- Only **Docker** has been driven for real work. The `sbx` backend declares
-  capabilities that have not been exercised.
+- Only **Docker** has been driven for real work. The `sbx` backend was measured
+  and rewritten from the spike, but is opt-in and not yet verified end to end.
 
 ## Supported versions
 
-The latest release is supported, and only that one: `0.9.0` today. Fixes land
+The latest release is supported, and only that one: `0.10.0` today. Fixes land
 on `main` and reach you in the next tag — there are no backport branches before
 1.0, because one maintainer cannot honestly promise to keep two lines patched.

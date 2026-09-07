@@ -908,7 +908,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
     // loud, and a shape leaving one page while another gains lines is
     // loud — none of which a total or a floor can say.
     let expected: std::collections::BTreeMap<String, usize> = [
-        ("README.md", 55),
+        ("README.md", 56), // + the omh upgrade command in the list
         ("accounts.md", 4),
         ("adapters.md", 1),
         ("code-graph.md", 1),

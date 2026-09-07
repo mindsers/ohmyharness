@@ -13,19 +13,25 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.9.0`. **Claude Code is the only
-harness anyone has done real work through.** `opencode` and `omp` pass
+**Status: early, and one harness deep.** `0.10.0`. **Claude Code is the only
+harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
 architecture is built for and not yet a thing anybody has done.
 
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
-This release closes the two silent failures that would have got worse with
-every user — two checkouts of the same name no longer share sessions, and the
-carried-file scan now says what it could not read — and adds
-[`omh eject`](docs/commands.md#omh-eject-harness---to-dir), which writes the
-config out and steps aside.
+This release makes that loop something you reach for daily —
+[`omh sNN commit`](docs/commands.md#omh-snn-commit-runs-this-repos-checks-first)
+runs the repo's own turn-end checks in the sandbox before it lands anything,
+`omh sNN` shows what the agent did and what it cost, and a session's notes
+promote to the team on commit. It
+adds [`omh upgrade`](docs/commands.md#omh-upgrade) — one command to apply a
+newer omh, so `omh init` is now a one-time setup — a `podman` runtime, and the
+measured, opt-in [`sbx`](docs/design/architecture.md#runtime-backends) backend.
+The session verbs lost their footguns: naming no session means *every* session
+for `sync`/`down` and is refused elsewhere, and `omh sNN rm` no longer reports
+removing a session that was never there.
 
 [What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
 
@@ -223,7 +229,8 @@ not have to stay that way.
 ## Commands
 
 ```
-omh init                          set this repo up
+omh init                          set this repo up (once)
+omh upgrade                       apply a newer omh: refresh and rebuild
 omh new <harness> [-- args…]      start a session, run an agent in it
 omh auth <harness> [-n <name>]    log in once; repeat for several accounts
 
@@ -501,7 +508,7 @@ whether anything reads it. That gap is what `doctor` closes.
 |---|---|
 | **Memory** | mostly [built](docs/commands.md#omh-memory-) — the store, its schemas, retrieval, the team layer and `remember` / `recall` as MCP tools all ship. What remains is hub pages, whose lint needs a threshold the design refuses to let anyone guess. |
 | **Cost accounting** | each base-set entry should report what it injects, in bytes, so the set has a reason to shrink. Not a benchmark — [here's why](docs/design/trust.md#measure-the-cost-argue-the-benefit). |
-| **`sbx` backend** | the trait exists and declares capabilities; the spike that resolves file-mounts, guest paths and IDE attach has not run. Docker is the only verified runtime. |
+| **`sbx` backend** | the spike ran (against `sbx` 0.39.0) and the backend was rewritten from what it measured — image delivery, the stage-and-symlink model for file mounts and guest paths, label-free session reuse. It is **opt-in** (`runtime = "sbx"`), and `auto` never picks it. What remains is the full live `omh doctor --harness claude` acceptance and a doctor row for its setup prerequisites; Docker is still the only end-to-end-verified runtime. |
 | **Egress allowlist** | **unrestricted by design on Docker.** Egress policy is the backend's, not omh's — [decisions](docs/design/decisions.md) has recorded it as inherited from the runtime throughout, and `sbx` carries it. It arrives with that backend or not at all, together with the credential weakness it shares a fix with. |
 | **`--dry-run` everywhere** | it runs everything and writes nothing on the commands that can answer it. `init` and the session verbs refuse the flag instead — each has to compute what it *would* do, and a preview that guessed would be worse than none. |
 | **Other harnesses** | `opencode`, `omp` and `codex` pass `doctor`, but only `claude` has been driven for real work. |
