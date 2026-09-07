@@ -3,7 +3,7 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.9.0`. This release is about being told what is wrong
+**Status: early.** `0.10.0`. This release is about being told what is wrong
 before it costs you an hour. [`omh doctor`](troubleshooting.md#omh-doctor)
 reports the **host** first — the runtime, the settings omh actually reads, disk,
 leftovers, which omh set the checkout up — so a machine that cannot build a
