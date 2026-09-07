@@ -63,14 +63,16 @@ A flag learned on one command is true on the next, or it is not there.
 |---|---|
 | `--from <path>` | Read this instead of where the adapter says: `omh import`, `omh settings mcp import`. |
 | `--to <dir>` | Write here: `omh eject`. |
-| `--force` | *I have read the warning; do it anyway.* Only `omh s rm`, where the warning is about work nobody has reviewed. |
+| `--yes` `-y` | *Yes, I have read the warning — answer the prompt in advance.* `omh s rm`, for runs with nobody to ask. It does not force the removal, only the answer. |
 | `--all` | Every one, not the one named: `omh use --all`. On session verbs there is no `--all` — naming no session already means every session. |
 | `--dry-run` | Do none of it and show what would be done, or refuse — [above](#--dry-run). |
 | `--json` | The answer as JSON, or a refusal from a command that hands you a program and has none — [below](#what-every-command-prints). |
 
-`omh s commit --allow-conflicts` and `omh settings mcp import --replace` were
-both `--force` until 0.10, which made three meanings for one word. The old
-spellings still parse, unprinted, for one release.
+`omh s rm --yes`, `omh s commit --allow-conflicts` and `omh settings mcp import
+--replace` were all `--force` until 0.10, which made three meanings for one word
+— and `--force` on `rm` did not even force the removal, only the answer to its
+prompt. Each is now named for what it does; `--force` still parses on all three,
+unprinted, for one release.
 
 ### What every command prints
 
@@ -394,10 +396,11 @@ omh s sync [--down]   bring trunk into the session, merged on the host
 omh s push [name]     push it to origin under a name a reviewer can read
 omh s resume          rejoin it, running the harness it ran before
 omh s down            stop the container, keep the worktree and branch
-omh s rm [--force]    remove the session — its container, its worktree, its staging,
+omh s rm [--yes]      remove the session — its container, its worktree, its staging,
                        and the repository the sandbox had. Asks first over work
-                       no branch has; `--force` is for runs with nobody to ask,
-                       and does not make the removal itself try harder.
+                       no branch has; `--yes` answers that in advance for runs
+                       with nobody to ask, and does not make the removal itself
+                       try harder.
 ```
 
 **The noun on its own is the listing, and a session on its own is one row of
@@ -528,6 +531,13 @@ to open. It is not offered a sync — a merge advised off a count that failed is
 advice built on a guess — but it is not passed over in silence either: beside
 rows that each carry a next step, saying nothing reads as *this one is fine*.
 `omh s03 log` prints the reason git gave.
+
+`rm` refuses an id this checkout has no session for — no worktree, no sandbox
+repository, no run directory — rather than reporting a removal of nothing:
+absence and completion are different answers, and a mistyped id must not print a
+success line. A stray `omh/<id>` branch is named as information, never under a
+removal claim and never with the `git branch -D` a real removal's leftover
+offers — so a typo cannot hand you a command that destroys unreviewed work.
 
 `omh s` also names ids that have a container, a run directory or a **sandbox
 repository** but no worktree — sessions removed by a version of omh that only
@@ -939,7 +949,7 @@ omh: s01 has 2 commits that no branch has. Removing it deletes the only copy:
   omh s01 log                 read what is there
   omh s01 commit --keep       put it on omh/s01
   omh s01 commit -m "…"       or take the files as they stand
-  omh s01 rm --force          remove it anyway
+  omh s01 rm --yes            remove it anyway
 ```
 
 Nothing is taken down before that refusal — not the container, not the marker
@@ -1116,7 +1126,7 @@ believed — `removed session s01`, exit 0, worktree still there. When something
 survives, the command exits non-zero and reports what it observed:
 
 ```console
-$ omh s01 rm --force
+$ omh s01 rm --yes
 omh: s01 is partly removed — its worktree is still there:
   ~/.omh/worktrees/repo-5a4ec022/s01
   Permission denied (os error 13)

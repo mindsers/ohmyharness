@@ -1565,10 +1565,11 @@ fn a_sandbox_repository_with_no_session_is_reported() {
          and being told to `rm` all of it: {said}"
     );
 
-    // The hint is only worth printing if it works. `--force` because the
-    // orphan holds a commit, which is #58 doing its job.
+    // The hint is only worth printing if it works. `--yes` because the
+    // orphan holds a commit, which is #58 doing its job — and this is the
+    // printed spelling now (`--force` is the alias, exercised elsewhere).
     assert!(
-        sb.omh(&["s09", "rm", "--force"]).status.success(),
+        sb.omh(&["s09", "rm", "--yes"]).status.success(),
         "the hint `omh s` prints has to be a command that clears it"
     );
     assert!(!orphan.exists(), "and it did");
@@ -1605,7 +1606,7 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
         said.contains("s01 has 1 commit that no branch has"),
         "it says what is at stake, in the singular: {said}"
     );
-    assert!(said.contains("--force"), "and how to mean it: {said}");
+    assert!(said.contains("rm --yes"), "and how to mean it: {said}");
 
     // "Nothing was taken down" is about the things that go *first*. The
     // worktree is removed last, so its survival is true of any ordering that
@@ -7434,6 +7435,88 @@ fn rm_fails_when_the_worktree_is_still_on_disk() {
     assert!(
         said.contains("omh s01 rm") && said.contains("once the directory is free"),
         "and the way out is named: {said}"
+    );
+}
+
+/// `rm` on an id this checkout never had a session for says so and exits
+/// non-zero, rather than reporting a removal of nothing. Absence and completion
+/// are different answers (#100). A well-formed id is not a session.
+#[test]
+fn rm_refuses_an_id_this_checkout_never_had_a_session_for() {
+    let sb = sandbox();
+    sb.git_init();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git");
+
+    let out = sb.omh(&["s99", "rm"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "there was no session s99, so this is not a success: {said}"
+    );
+    assert!(
+        !said.contains("removed session"),
+        "and it must not claim a removal that did not happen: {said}"
+    );
+    assert!(
+        said.contains("s99") && said.to_lowercase().contains("no session"),
+        "it names the id and says there is no session: {said}"
+    );
+}
+
+/// The dangerous case: a stray `omh/s99` branch with unreviewed work but no
+/// session. `rm` surfaces the branch as information, but never under a removal
+/// claim and never with the `git branch -D` it would offer for a real
+/// removal's leftover — a typo must not hand you a command that destroys work.
+#[test]
+fn rm_of_an_absent_session_surfaces_a_stray_branch_without_offering_to_delete_it() {
+    let sb = sandbox();
+    sb.git_init();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    // A branch named like a session's, holding an unreviewed commit — but no
+    // worktree, shadow or run dir, so omh never made a session s99.
+    git(&["checkout", "-q", "-b", "omh/s99"]);
+    std::fs::write(sb.repo.join("f.txt"), "unreviewed\n").unwrap();
+    git(&["add", "f.txt"]);
+    git(&["commit", "-qm", "unreviewed work"]);
+    git(&["checkout", "-q", "main"]);
+
+    let out = sb.omh(&["s99", "rm"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "no session s99 existed: {said}");
+    assert!(
+        !said.contains("removed session"),
+        "must not claim a removal: {said}"
+    );
+    assert!(
+        !said.contains("git branch -D"),
+        "and must never offer to delete unreviewed work after a typo: {said}"
+    );
+    assert!(
+        said.contains("omh/s99"),
+        "the stray branch is real information, so it is named: {said}"
     );
 }
 

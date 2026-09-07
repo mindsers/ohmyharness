@@ -1501,7 +1501,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/prune.rs", 1),
         // The twelfth is `harness_for_attach`'s refusal, which names
         // `omh <id> resume <harness>` the way the `Resume` arm does.
-        ("src/cmd/session.rs", 12),
+        ("src/cmd/session.rs", 13), // + the `omh s` pointer when rm names no session
         ("src/cmd/settings.rs", 10),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
@@ -2353,7 +2353,7 @@ fn removing_unkept_work_needs_force_when_there_is_nobody_to_ask() {
     )
     .expect_err("off a terminal there is nobody to ask");
     let said = format!("{err:#}");
-    for line in ["log", "commit --keep", "rm --force"] {
+    for line in ["log", "commit --keep", "rm --yes"] {
         assert!(
             said.contains(line),
             "the refusal must still name every way out, including {line}: {said}"
@@ -2415,7 +2415,7 @@ fn a_session_holding_unkept_work_is_not_removed_without_being_asked() {
         );
     }
     assert!(
-        said.contains("--keep") && said.contains("commit -m") && said.contains("--force"),
+        said.contains("--keep") && said.contains("commit -m") && said.contains("--yes"),
         "put it on the branch, take the files as they stand, or mean it: {said}"
     );
     assert!(
@@ -5824,17 +5824,18 @@ fn one_flag_names_a_path_everywhere() {
     );
 }
 
-/// `--force` means one thing: *I have read the warning; do it anyway*.
+/// `--force` is a retired spelling, printed nowhere.
 ///
-/// It meant three. On `rm` it answered the question about unreviewed
-/// work, which is that meaning. On `commit` it landed conflict markers,
-/// and on the MCP import it overwrote a catalogue entry — neither of
-/// which is a warning read, and a person who had typed `--force` on `rm`
-/// a dozen times typed it on `commit` without reading either. Each of the
-/// other two is now named for what it does, with the old spelling as an
-/// unprinted alias for one release.
+/// It meant three things. On `rm` it answered the question about unreviewed
+/// work; on `commit` it landed conflict markers; on the MCP import it
+/// overwrote a catalogue entry — and a person who had typed `--force` on `rm`
+/// a dozen times typed it on `commit` without reading either. `commit` and the
+/// import were named for what they do (`--allow-conflicts`, `--replace`), and
+/// `rm`'s consent — which does not force the removal, only answers the prompt
+/// in advance — is now `--yes`. `--force` survives as an unprinted alias on all
+/// three for one release, landing on each command's real field.
 #[test]
-fn force_means_i_have_read_the_warning() {
+fn force_is_retired_and_named_for_what_each_command_does() {
     use clap::CommandFactory;
     fn walk(cmd: &clap::Command, path: &str, forces: &mut Vec<String>) {
         for arg in cmd.get_arguments() {
@@ -5848,24 +5849,28 @@ fn force_means_i_have_read_the_warning() {
     }
     let mut forces = Vec::new();
     walk(&Cli::command(), "omh", &mut forces);
-    assert_eq!(
-        forces,
-        vec!["omh sessions rm".to_string()],
-        "--force is printed on the one command where it answers a warning"
+    assert!(
+        forces.is_empty(),
+        "--force is printed on no command; it is a hidden alias everywhere: {forces:?}"
     );
+
+    // Each command's real, printed flag — and `--force` still parsing as the
+    // alias for one release, on every one of them.
     for (line, field) in [
+        (&["sessions", "rm", "--yes"][..], "yes"),
+        (&["sessions", "rm", "--force"][..], "the rm alias"),
         (
             &["sessions", "commit", "--allow-conflicts"][..],
             "allow-conflicts",
         ),
-        (&["sessions", "commit", "--force"][..], "the alias"),
+        (&["sessions", "commit", "--force"][..], "the commit alias"),
         (
             &["settings", "mcp", "import", "claude", "--replace"][..],
             "replace",
         ),
         (
             &["settings", "mcp", "import", "claude", "--force"][..],
-            "the alias",
+            "the import alias",
         ),
     ] {
         let parsed = Cli::try_parse_from(cli_argv(line));
@@ -5876,15 +5881,17 @@ fn force_means_i_have_read_the_warning() {
             parsed.err()
         );
     }
-    let commit = Cli::try_parse_from(cli_argv(&["sessions", "commit", "--force"])).unwrap();
+
+    // The rm alias lands on the same `yes` field its printed spelling does.
+    let rm = Cli::try_parse_from(cli_argv(&["sessions", "rm", "--force"])).unwrap();
     assert!(
         matches!(
-            commit.cmd,
+            rm.cmd,
             Cmd::Sessions {
-                cmd: Some(SessionsCmd::Commit { force: true, .. })
+                cmd: Some(SessionsCmd::Rm { yes: true })
             }
         ),
-        "the alias lands on the same field"
+        "`rm --force` still means the consent `rm --yes` gives"
     );
 }
 

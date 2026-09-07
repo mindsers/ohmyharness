@@ -321,7 +321,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             // prefix and `--session` both land in `cli.session`. `rm` used to
             // require its own positional and `diff` accepted either, which is
             // how the same question came to have two answers.
-            SessionsCmd::Rm { force } => {
+            SessionsCmd::Rm { yes } => {
                 let id = cli.session.as_deref().context(
                     "which session? name it first:\n  omh s01 rm\n  omh s      lists them",
                 )?;
@@ -333,7 +333,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     // `may_remove` only pushed the swap up to `rm`; this is
                     // the boundary it was pushed to.
                     cmd::harvest::Consent::read(
-                        cmd::harvest::Forced(*force),
+                        cmd::harvest::Forced(*yes),
                         cmd::harvest::Interactive::of_stdin(),
                     ),
                     ctx,

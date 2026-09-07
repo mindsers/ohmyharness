@@ -380,7 +380,7 @@ impl Session {
     ///
     /// Without `--quiet`, because a suppressed diagnostic makes the error arm
     /// carry no reason to print.
-    fn branch_exists(&self, repo: &Path) -> Result<bool, String> {
+    pub(crate) fn branch_exists(&self, repo: &Path) -> Result<bool, String> {
         let Some(branch) = &self.branch else {
             return Ok(false);
         };
