@@ -46,9 +46,9 @@ pub(crate) fn next_after_init(harness: Option<&str>) -> Vec<(String, String)> {
         (format!("omh new {harness}"), "start a session".into()),
         ("omh s resume".into(), "rejoin it later".into()),
         // `omh s attach`, not `omh s01 attach zed`. Two guesses in one line:
-        // `s01` is a constant, and `init` is re-runnable — in a repo already
-        // carrying `s01`, `omh new` makes `s04` and this advice would open an
-        // unrelated session, successfully and silently. And naming `zed`
+        // `s01` is a constant — in a repo already carrying `s01`, `omh new`
+        // makes `s04` and this advice would open an unrelated session,
+        // successfully and silently. And naming `zed`
         // guesses at the machine in the commit that deleted the `editors` row
         // for being a fact about the machine. `attach` with no id takes the
         // session omh picks and `$EDITOR` if you have one, which is right on
@@ -519,8 +519,9 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
     // reports exactly that, which is what makes writing it expanded safe.
     //
     // Only when there is no `[use]` already: `write_if_absent` guards the file,
-    // not the table, and re-running `init` in a curated repo must not resync a
-    // list somebody pruned on purpose. `omh use --all` is how you ask for that.
+    // not the table, so a list somebody pruned on purpose is never resynced —
+    // by an interrupted first run that re-runs, nor by anything else. `init`
+    // writes it once; `omh use --all` is how you ask for a resync.
     if !crate::cmd::mcp::repo_has_selection(&paths)? {
         let lists = crate::cmd::catalogue::catalogue_lists(&paths)?;
         config::write_selection(&paths, config::Layer::Shared, &lists)?;
@@ -551,7 +552,8 @@ pub(crate) fn init(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         }
     }
 
-    // Appended, not overwritten: re-running init must not eat a line you added.
+    // Appended, not overwritten: a re-run (an interrupted first init) must not
+    // eat a line you added.
     let gitignore = paths.repo.join(".omh/.gitignore");
     // Left tracked, a machine-local override gets committed to the team's
     // repo. The stamp is per-checkout for the same reason: two teammates on
@@ -1102,10 +1104,11 @@ pub(crate) fn ask_all(
 
 /// Copy definitions that ship with omh into `~/.omh`.
 ///
-/// Bundled files are **managed**: they are refreshed on every `init`, because a
-/// fix omh ships has to reach people who already ran it once. The one that
-/// mattered was a wrong credential path, which made `omh auth` capture nothing
-/// while reporting success. Definitions you add yourself are left alone.
+/// Bundled files are **managed**: `init` writes them on a first run and
+/// `omh upgrade` refreshes them after — because a fix omh ships has to reach
+/// people who already ran it once. The one that mattered was a wrong credential
+/// path, which made `omh auth` capture nothing while reporting success.
+/// Definitions you add yourself are left alone.
 ///
 /// The contents come from [`bundled`], embedded at compile time. Reading them
 /// from the source tree instead is what made a released binary install nothing

@@ -3337,12 +3337,16 @@ pub struct StaleSession {
 pub struct Upgraded {
     /// One `(harness, outcome)` per installed adapter.
     pub harnesses: Vec<(String, Outcome)>,
-    /// Catalogue files rewritten from the binary (a `.yours` was kept for each
-    /// one you had edited).
+    /// The adapters refreshed from the binary this run (a `.yours` was kept for
+    /// each catalogue file you had edited; those warnings print as they
+    /// happen). Empty on a dry run, which refreshes nothing.
     pub refreshed: Vec<String>,
     /// Sessions still on an image this upgrade superseded — a relaunch away
     /// from the new one.
     pub stale_sessions: Vec<StaleSession>,
+    /// Set when the runtime would not list what is running, so the stale-session
+    /// check could not run — reported rather than read as "nothing is stale".
+    pub sessions_unchecked: Option<String>,
     pub dry_run: bool,
 }
 
@@ -3382,6 +3386,15 @@ impl Report for Upgraded {
                 p.paint(out::DIM, &detail)
             ));
         }
+        if let Some(why) = &self.sessions_unchecked {
+            s.push_str(&format!(
+                "  {}\n",
+                p.paint(
+                    out::WARN,
+                    &format!("could not check running sessions: {why}")
+                )
+            ));
+        }
         s
     }
 
@@ -3396,6 +3409,7 @@ impl Report for Upgraded {
                 StaleImage::Known(tag) => json!({ "id": s.id, "image": tag }),
                 StaleImage::Unknown(why) => json!({ "id": s.id, "image": null, "unreadable": why }),
             }).collect::<Vec<_>>(),
+            "sessions_unchecked": self.sessions_unchecked,
             "dry_run": self.dry_run,
         })
     }

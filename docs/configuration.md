@@ -392,9 +392,9 @@ says **about** it: if one of your hooks needs the program, omh still asks the
 sandbox whether it is there, and still holds the hook back by name if it is not.
 
 Keyed `"<stack>/<provide>"`. `omh why` names what each one buys and what it
-costs. Re-running `omh init` is the honest fix for drift — swap a `yarn.lock`
-for a `pnpm-lock.yaml` and the yarn entry goes, because the table describes what
-is true now.
+costs. `omh upgrade` is the honest fix for drift — swap a `yarn.lock` for a
+`pnpm-lock.yaml` and the yarn entry goes, because the table describes what is
+true now.
 
 These layer like every other setting, so a provide you want left out on **your**
 machine belongs in `settings.local.toml`, where it says nothing to anyone else —

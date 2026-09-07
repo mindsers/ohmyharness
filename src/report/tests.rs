@@ -2152,6 +2152,7 @@ fn an_upgrade_names_each_harness_outcome_and_the_sessions_left_behind() {
                 image: StaleImage::Unknown("daemon did not answer".into()),
             },
         ],
+        sessions_unchecked: None,
         dry_run: false,
     };
 
@@ -2184,6 +2185,29 @@ fn an_upgrade_names_each_harness_outcome_and_the_sessions_left_behind() {
     assert_eq!(outcomes["opencode"], "current");
     assert_eq!(outcomes["codex"], "unpinned");
     assert_eq!(machine["stale"].as_array().unwrap().len(), 2);
+}
+
+/// A runtime that would not list what is running is reported as a check that
+/// did not run — never as "nothing is stale", which would be the false
+/// all-clear the runtime layer exists to prevent.
+#[test]
+fn an_upgrade_that_could_not_check_running_sessions_says_so() {
+    use super::Upgraded;
+    let report = Upgraded {
+        harnesses: vec![("claude".into(), super::Outcome::AlreadyCurrent)],
+        sessions_unchecked: Some("cannot connect to the daemon".into()),
+        ..Default::default()
+    };
+    let human = report.human(&out::Palette::plain());
+    assert!(
+        human.contains("could not check running sessions") && human.contains("cannot connect"),
+        "the check-did-not-run reason survives: {human}"
+    );
+    assert_eq!(
+        report.json()["sessions_unchecked"],
+        serde_json::json!("cannot connect to the daemon"),
+        "and reaches the machine format"
+    );
 }
 
 /// An empty list says so, rather than printing nothing at all.

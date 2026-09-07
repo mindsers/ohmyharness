@@ -10274,8 +10274,8 @@ fn upgrade_reports_each_harness_as_json() {
     assert!(
         harnesses
             .iter()
-            .all(|h| h["outcome"].is_string() && h["harness"].is_string()),
-        "each carries a harness and an outcome word: {v:#}"
+            .all(|h| h["outcome"] == "current" && h["harness"].is_string()),
+        "with every image present, each harness reads current: {v:#}"
     );
 }
 
@@ -10309,5 +10309,43 @@ fn upgrade_names_a_session_still_running_on_an_old_image() {
     assert!(
         stale.iter().any(|s| s["id"] == "s01"),
         "the running session is named: {v:#}"
+    );
+}
+
+/// A real upgrade against a runtime with nothing built rebuilds every harness
+/// and runs a build — the load-bearing path the `fake_docker` e2e (where every
+/// image already "exists") never reaches.
+#[test]
+fn a_real_upgrade_rebuilds_when_the_image_is_missing() {
+    let sb = sandbox();
+    let log = sb.fake_docker_with_nothing_built(&[], &[]);
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    std::fs::create_dir_all(sb.repo.join(".omh")).unwrap();
+    std::fs::write(sb.repo.join(".omh/seeded-by"), "0.0.1\n").unwrap();
+
+    let out = sb.omh(&["--json", "upgrade"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        v["harnesses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|h| h["outcome"] == "rebuilt"),
+        "with no image present, each harness rebuilds: {v:#}"
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(calls.contains("build"), "a build actually ran: {calls}");
+    assert_eq!(
+        std::fs::read_to_string(sb.repo.join(".omh/seeded-by"))
+            .unwrap_or_default()
+            .trim(),
+        env!("CARGO_PKG_VERSION"),
+        "and the stamp advanced"
     );
 }

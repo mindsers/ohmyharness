@@ -51,10 +51,21 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
     // Classify — and, on a real run, rebuild — each installed adapter, and
     // gather every current tag so a running session on any other is named
     // below.
+    //
+    // The adapters classified against are the ones upgrade *would install*: on
+    // a real run that is what it just refreshed to disk; on a dry run the disk
+    // still holds the old pins, so it reads the new pins straight from the
+    // binary — otherwise the preview would report `current` for exactly the
+    // harnesses a real run rebuilds.
+    let adapters = if dry_run {
+        bundled_adapters()?
+    } else {
+        Adapter::load_dir(&paths.adapters())?
+    };
     let mut current: BTreeSet<String> = BTreeSet::new();
     current.insert(image::base_tag(ca.as_ref().map(Root::pem)));
     let mut harnesses = Vec::new();
-    for adapter in Adapter::load_dir(&paths.adapters())? {
+    for adapter in adapters {
         let sandbox = sandbox(&paths, &adapter, &repo, ca.clone())?;
         let pem = sandbox.ca.as_ref().map(Root::pem);
         let recipe = sandbox.recipe();
@@ -68,12 +79,14 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         });
         harnesses.push((adapter.name.clone(), outcome));
 
-        // An unpinnable adapter is left alone — omh cannot rebuild it to
-        // anything reproducible, and its image is whatever it already was.
+        // These tags are current whatever the outcome — an `Unpinnable`
+        // adapter is left on the image it already had, so a session on it is
+        // *not* stale. This has to happen before the `continue`, or that
+        // session is falsely named "relaunch to move it" with nowhere to move.
+        current.extend(tags);
         if outcome == Outcome::Unpinnable {
             continue;
         }
-        current.extend(tags);
         if !dry_run {
             // Builds base/harness/stack as needed and reaps the superseded.
             let tag = image::ensure_stack(&backend, &adapter, &recipe, pem, &paths.repo)?;
@@ -81,24 +94,31 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         }
     }
 
-    // Sessions still running on an image this upgrade did not just build.
-    let up = image::running_set(&backend);
-    let mut running = Vec::new();
-    for id in session::list(&paths.worktrees()) {
-        let name = paths.container(&id);
-        if !matches!(image::running_in(&up, &name), image::Running::Yes) {
-            continue;
+    // Sessions still running on an image this upgrade did not just build. If
+    // the runtime will not list what is running, that is not "nothing is
+    // stale" — the check did not run, and the report says so rather than a
+    // false all-clear.
+    let (stale_sessions, sessions_unchecked) = match image::running_set(&backend) {
+        Err(why) => (Vec::new(), Some(why)),
+        Ok(up) => {
+            let mut running = Vec::new();
+            for id in session::list(&paths.worktrees()) {
+                let name = paths.container(&id);
+                if !up.contains(&name) {
+                    continue;
+                }
+                let image = match image::container_stamp(&backend, &name) {
+                    image::Stamp::Read(labels) => labels
+                        .get("omh.image")
+                        .cloned()
+                        .ok_or_else(|| "the sandbox records no image".to_string()),
+                    image::Stamp::Unknown(why) => Err(why),
+                };
+                running.push((id, image));
+            }
+            (sessions_on_old_images(&running, &current), None)
         }
-        let image = match image::container_stamp(&backend, &name) {
-            image::Stamp::Read(labels) => labels
-                .get("omh.image")
-                .cloned()
-                .ok_or_else(|| "the sandbox records no image".to_string()),
-            image::Stamp::Unknown(why) => Err(why),
-        };
-        running.push((id, image));
-    }
-    let stale_sessions = sessions_on_old_images(&running, &current);
+    };
 
     // Advance the stamp so `omh doctor`'s drift row goes quiet — the same
     // write `init` does, and, like it, not `write_if_absent`: the stamp has to
@@ -114,9 +134,32 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         harnesses,
         refreshed,
         stale_sessions,
+        sessions_unchecked,
         dry_run,
     });
     Ok(())
+}
+
+/// The adapters as this binary ships them — the new pins, read without writing
+/// anything. `upgrade --dry-run` classifies against these so its preview
+/// matches what a real run, which refreshes the same definitions to disk first,
+/// would rebuild.
+fn bundled_adapters() -> Result<Vec<Adapter>> {
+    use anyhow::Context;
+    crate::bundled::Shipped::Adapters
+        .files()
+        .iter()
+        .map(|f| {
+            let adapter: Adapter = toml::from_str(f.contents)
+                .with_context(|| format!("parsing bundled adapter {}", f.name))?;
+            // Same pin validation `Adapter::load` runs, so a preview cannot
+            // read a version the real load would reject.
+            adapter
+                .install_command()
+                .with_context(|| format!("bundled adapter {}", f.name))?;
+            Ok(adapter)
+        })
+        .collect()
 }
 
 /// What `upgrade` will do to one adapter's image, decided before building.
