@@ -858,7 +858,7 @@ pub(crate) fn may_remove(
     // from memory, with the reasons scrolled off. `omh s down` has asked for
     // its destructive case all along; this is the same shape.
     //
-    // `--force` keeps its meaning for everything that is not a terminal: a
+    // `--yes` answers this in advance for everything that is not a terminal: a
     // script, a CI runner, a closed pipe. `ask::confirm` treats silence and
     // anything-but-yes as no, which is what makes that safe.
     let at_stake = format!("{id} has {what} {whether}{also}", id = session.id);
@@ -878,7 +878,7 @@ pub(crate) fn may_remove(
              omh {id} log                 read what is there\n  \
              omh {id} commit --keep       put it on {branch}\n  \
              omh {id} commit -m \"…\"       or take the files as they stand{reading}\n  \
-             omh {id} rm --force          remove it anyway",
+             omh {id} rm --yes            remove it anyway",
             id = session.id
         );
     }

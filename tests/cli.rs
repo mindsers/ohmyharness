@@ -1565,10 +1565,11 @@ fn a_sandbox_repository_with_no_session_is_reported() {
          and being told to `rm` all of it: {said}"
     );
 
-    // The hint is only worth printing if it works. `--force` because the
-    // orphan holds a commit, which is #58 doing its job.
+    // The hint is only worth printing if it works. `--yes` because the
+    // orphan holds a commit, which is #58 doing its job — and this is the
+    // printed spelling now (`--force` is the alias, exercised elsewhere).
     assert!(
-        sb.omh(&["s09", "rm", "--force"]).status.success(),
+        sb.omh(&["s09", "rm", "--yes"]).status.success(),
         "the hint `omh s` prints has to be a command that clears it"
     );
     assert!(!orphan.exists(), "and it did");
@@ -1605,7 +1606,7 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
         said.contains("s01 has 1 commit that no branch has"),
         "it says what is at stake, in the singular: {said}"
     );
-    assert!(said.contains("--force"), "and how to mean it: {said}");
+    assert!(said.contains("rm --yes"), "and how to mean it: {said}");
 
     // "Nothing was taken down" is about the things that go *first*. The
     // worktree is removed last, so its survival is true of any ordering that

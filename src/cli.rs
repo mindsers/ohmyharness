@@ -617,16 +617,18 @@ pub(crate) enum SessionsCmd {
         ///
         /// The question without this is the whole point: those commits and
         /// those edits exist nowhere else, and `rm` is what deletes the
-        /// repository holding them. This says *I know, and I want them gone*.
+        /// repository holding them. This answers *yes, I know, and I want them
+        /// gone* in advance.
         ///
-        /// **It does not make omh try harder to remove anything.** On a
-        /// terminal omh asks instead of refusing, so this exists for the runs
-        /// where there is nobody to ask — a script, a CI job, a closed pipe.
-        /// A user whose worktree would not go once read this flag as "force
-        /// the removal" and typed it to no effect; `git worktree remove
-        /// --force` is passed either way.
-        #[arg(long)]
-        force: bool,
+        /// **It does not make omh try harder to remove anything** — it only
+        /// answers the prompt, for runs where there is nobody to answer it: a
+        /// script, a CI job, a closed pipe. On a terminal omh asks instead of
+        /// refusing. Named `--yes` for that reason; the old `--force` read as
+        /// "force the removal" and did no such thing (`git worktree remove
+        /// --force` is passed either way). `--force` stays as a hidden alias
+        /// for one release.
+        #[arg(long = "yes", short = 'y', alias = "force")]
+        yes: bool,
     },
 }
 
