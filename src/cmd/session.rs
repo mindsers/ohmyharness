@@ -1647,6 +1647,38 @@ pub(crate) fn rm(
     let paths = Paths::discover(cwd)?;
     let session = Session::new(&paths.worktrees(), id.to_string());
 
+    // Does this checkout have a session by this id at all? A session is omh's
+    // worktree, its shadow repository, or its run directory — a bare `omh/<id>`
+    // branch is not (it may be hand-made, or a stranger's). Without this,
+    // `omh s99 rm` reported "removed session s99" and exit 0 for an id that was
+    // never here, and — worse — offered `git branch -D` for a stray branch
+    // holding unreviewed work after a typo (#100). Absence and completion are
+    // not the same answer.
+    let present = session.worktree.exists()
+        || shadow::Shadow::new(&paths.shadows(), &session.id)
+            .gitdir
+            .exists()
+        || paths.runs().join(id).exists();
+    if !present {
+        // Surface a stray branch as information — it is real (a namespace
+        // filling with dead refs is worth knowing) — but never under a removal
+        // claim, and never with the `git branch -D` a real removal's leftover
+        // offers: a typo must not hand you a command that destroys work.
+        let base = session::default_branch(&paths.repo);
+        let note = match session.branch_exists(&paths.repo) {
+            Ok(true) => match session.commits(&paths.repo, &base) {
+                Ok(n) if n > 0 => format!(
+                    "\nnote: a branch omh/{id} exists ({n} {}) but no session does — \
+                     omh did not make it.\n  git log {base}..omh/{id}   to read it",
+                    if n == 1 { "commit" } else { "commits" }
+                ),
+                _ => format!("\nnote: a branch omh/{id} exists, but no session does."),
+            },
+            _ => String::new(),
+        };
+        anyhow::bail!("no session {id} in this checkout — `omh s` lists the ones there are.{note}");
+    }
+
     // Before anything is taken down, because everything below this line is
     // irreversible and the first of them is the container.
     //

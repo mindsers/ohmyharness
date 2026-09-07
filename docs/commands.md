@@ -529,6 +529,13 @@ advice built on a guess — but it is not passed over in silence either: beside
 rows that each carry a next step, saying nothing reads as *this one is fine*.
 `omh s03 log` prints the reason git gave.
 
+`rm` refuses an id this checkout has no session for — no worktree, no sandbox
+repository, no run directory — rather than reporting a removal of nothing:
+absence and completion are different answers, and a mistyped id must not print a
+success line. A stray `omh/<id>` branch is named as information, never under a
+removal claim and never with the `git branch -D` a real removal's leftover
+offers — so a typo cannot hand you a command that destroys unreviewed work.
+
 `omh s` also names ids that have a container, a run directory or a **sandbox
 repository** but no worktree — sessions removed by a version of omh that only
 took half of one down. `omh sNN rm` clears them, and says what it would take

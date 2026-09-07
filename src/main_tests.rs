@@ -1501,7 +1501,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/prune.rs", 1),
         // The twelfth is `harness_for_attach`'s refusal, which names
         // `omh <id> resume <harness>` the way the `Resume` arm does.
-        ("src/cmd/session.rs", 12),
+        ("src/cmd/session.rs", 13), // + the `omh s` pointer when rm names no session
         ("src/cmd/settings.rs", 10),
         ("src/config.rs", 3),
         ("src/container.rs", 4),

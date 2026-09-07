@@ -7437,6 +7437,88 @@ fn rm_fails_when_the_worktree_is_still_on_disk() {
     );
 }
 
+/// `rm` on an id this checkout never had a session for says so and exits
+/// non-zero, rather than reporting a removal of nothing. Absence and completion
+/// are different answers (#100). A well-formed id is not a session.
+#[test]
+fn rm_refuses_an_id_this_checkout_never_had_a_session_for() {
+    let sb = sandbox();
+    sb.git_init();
+    std::process::Command::new("git")
+        .args(["-C", &sb.repo.display().to_string()])
+        .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+        .args(["commit", "-q", "--allow-empty", "-m", "init"])
+        .output()
+        .expect("git");
+
+    let out = sb.omh(&["s99", "rm"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "there was no session s99, so this is not a success: {said}"
+    );
+    assert!(
+        !said.contains("removed session"),
+        "and it must not claim a removal that did not happen: {said}"
+    );
+    assert!(
+        said.contains("s99") && said.to_lowercase().contains("no session"),
+        "it names the id and says there is no session: {said}"
+    );
+}
+
+/// The dangerous case: a stray `omh/s99` branch with unreviewed work but no
+/// session. `rm` surfaces the branch as information, but never under a removal
+/// claim and never with the `git branch -D` it would offer for a real
+/// removal's leftover — a typo must not hand you a command that destroys work.
+#[test]
+fn rm_of_an_absent_session_surfaces_a_stray_branch_without_offering_to_delete_it() {
+    let sb = sandbox();
+    sb.git_init();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sb.repo)
+            .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+            .args(args)
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+    };
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    // A branch named like a session's, holding an unreviewed commit — but no
+    // worktree, shadow or run dir, so omh never made a session s99.
+    git(&["checkout", "-q", "-b", "omh/s99"]);
+    std::fs::write(sb.repo.join("f.txt"), "unreviewed\n").unwrap();
+    git(&["add", "f.txt"]);
+    git(&["commit", "-qm", "unreviewed work"]);
+    git(&["checkout", "-q", "main"]);
+
+    let out = sb.omh(&["s99", "rm"]);
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!out.status.success(), "no session s99 existed: {said}");
+    assert!(
+        !said.contains("removed session"),
+        "must not claim a removal: {said}"
+    );
+    assert!(
+        !said.contains("git branch -D"),
+        "and must never offer to delete unreviewed work after a typo: {said}"
+    );
+    assert!(
+        said.contains("omh/s99"),
+        "the stray branch is real information, so it is named: {said}"
+    );
+}
+
 /// A branch holding commits is the one thing a failed removal must describe
 /// correctly.
 ///
