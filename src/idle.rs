@@ -226,6 +226,28 @@ mod tests {
         assert!(expired(&running, Duration::from_secs(1), now, "", &|_| Live::Idle).is_empty());
     }
 
+    /// **Never recorded is not could not read**, which is the whole reason this
+    /// function exists beside `last_used`.
+    ///
+    /// Only the `Err` arm had a guard (a chmod'd run directory, in the leftovers
+    /// tests). Drop the `NotFound => Ok(None)` arm and every one of those still
+    /// passes, while omh starts reporting a run nobody has ever used as one it
+    /// could not check.
+    #[test]
+    fn a_run_with_no_marker_reads_as_never_used_rather_than_unreadable() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(
+            matches!(recorded_use(d.path(), "s01"), Ok(None)),
+            "a run directory with no marker has simply never been used"
+        );
+
+        touch(d.path(), "s01").unwrap();
+        assert!(
+            matches!(recorded_use(d.path(), "s01"), Ok(Some(_))),
+            "and once touched it reads back as a time"
+        );
+    }
+
     #[test]
     fn touching_a_session_records_a_time_that_reads_back() {
         let d = tempfile::tempdir().unwrap();

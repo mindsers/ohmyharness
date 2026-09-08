@@ -1007,7 +1007,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         // session. Skipping it also saves the sweep's `ps` and its walks.
         leftovers: match only {
             // The list half; `omh s` already had the reason on stderr.
-            None => leftovers(&paths, backend.as_ref(), ctx).0,
+            None => leftovers(&paths, backend.as_ref(), ctx).found,
             Some(_) => Vec::new(),
         },
         overlaps,
@@ -1020,6 +1020,40 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         focus,
     });
     Ok(())
+}
+
+/// What omh found lying around, and where it could not look.
+///
+/// Two `Vec<String>` returned side by side are transposable in silence: a
+/// swapped destructure here, or swapped arguments at `leftovers_from`, compiles
+/// and reads as a clean machine reporting reasons as orphans. Naming the halves
+/// closes that, and moves the *found* versus *could not look* distinction out of
+/// a doc comment and into the type.
+pub(crate) struct Leftovers {
+    /// Sessions nothing points at: sandbox repositories, run directories and
+    /// containers, minus the ones a live worktree still claims.
+    pub(crate) found: Vec<String>,
+    /// One line per read that failed, in the words the warning used. Empty is
+    /// "omh looked everywhere", which is the only thing that makes `found`
+    /// being empty mean *nothing is orphaned*.
+    pub(crate) unchecked: Vec<String>,
+}
+
+/// The reason line for `count` entries omh could not read under `dir`, or
+/// `None` when it read them all.
+///
+/// Split out for the same reason `listed` is. The count is only ever non-zero
+/// when the directory stream yields an `Err`, which no fixture on this platform
+/// can produce, so the step from a count to a reason is unreachable in a test
+/// unless it is reachable on its own.
+pub(crate) fn unreadable_reason(count: usize, what: &str, dir: &std::path::Path) -> Option<String> {
+    (count > 0).then(|| {
+        format!(
+            "omh could not read {count} entr{} under {}, so those {what} went unchecked",
+            if count == 1 { "y" } else { "ies" },
+            dir.display()
+        )
+    })
 }
 
 /// The names in a directory listing, and how many entries omh could not read.
@@ -1063,7 +1097,7 @@ pub(crate) fn leftovers(
     paths: &Paths,
     backend: Option<&runtime::Backend>,
     ctx: &out::Ctx,
-) -> (Vec<String>, Vec<String>) {
+) -> Leftovers {
     // **Why omh could not look, when it could not.** The warning goes to
     // stderr, which `omh s` wants — but `omh doctor` puts this in a report, and
     // a row that says "none" because nothing was listed is the collapse the
@@ -1092,13 +1126,9 @@ pub(crate) fn leftovers(
             let (names, unreadable) = listed(entries, |e: &std::fs::DirEntry| {
                 e.file_name().to_string_lossy().into_owned()
             });
-            if unreadable > 0 {
-                let why = format!(
-                    "omh could not read {unreadable} entr{} under {}, so those sandbox \
-                     repositories went unchecked",
-                    if unreadable == 1 { "y" } else { "ies" },
-                    paths.shadows().display()
-                );
+            if let Some(why) =
+                unreadable_reason(unreadable, "sandbox repositories", &paths.shadows())
+            {
                 ctx.warn(&why);
                 unchecked.push(why);
             }
@@ -1145,12 +1175,7 @@ pub(crate) fn leftovers(
                     }
                 }
             }
-            if unreadable > 0 {
-                let why = format!(
-                    "omh could not read {unreadable} entr{} under {}, so those runs went unchecked",
-                    if unreadable == 1 { "y" } else { "ies" },
-                    paths.runs().display()
-                );
+            if let Some(why) = unreadable_reason(unreadable, "runs", &paths.runs()) {
                 ctx.warn(&why);
                 unchecked.push(why);
             }
@@ -1201,7 +1226,7 @@ pub(crate) fn leftovers(
     found.retain(|id| !live.contains(id));
     found.sort();
     found.dedup();
-    (found, unchecked)
+    Leftovers { found, unchecked }
 }
 
 /// Where a session is in the cycle, phrased as the next thing to do about it.

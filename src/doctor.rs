@@ -196,11 +196,14 @@ pub fn attributed(
 /// name that may confuse you later. A doctor that fails over it is one people
 /// stop running, and the exit code stops meaning *you cannot work*.
 pub fn leftovers_from(
-    sessions: Vec<String>,
-    unchecked: Vec<String>,
+    sessions: crate::cmd::session::Leftovers,
     volumes: Result<Vec<String>, String>,
     split: Attributed,
 ) -> Outcome {
+    let crate::cmd::session::Leftovers {
+        found: sessions,
+        unchecked,
+    } = sessions;
     let mut said = Vec::new();
     // **Both halves can say "could not look".** Only volumes could, and the
     // session half is the one this row's comment was written about: when
@@ -2740,6 +2743,14 @@ mod tests {
     /// were indistinguishable from orphans. The row said so honestly and
     /// stopped there. It can do better now, and the thing it must not do is
     /// let "omh could not tell" quietly join either of the other two.
+    /// `Leftovers` for a test, in the order the fields read.
+    fn seen(found: &[&str], unchecked: &[&str]) -> crate::cmd::session::Leftovers {
+        crate::cmd::session::Leftovers {
+            found: found.iter().map(|s| s.to_string()).collect(),
+            unchecked: unchecked.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
     #[test]
     fn the_row_separates_gone_from_live_from_could_not_tell() {
         use crate::profile::Attribution;
@@ -2757,7 +2768,7 @@ mod tests {
         assert_eq!(split.live, 1);
         assert_eq!(split.unknown.len(), 1);
 
-        let row = leftovers_from(Vec::new(), Vec::new(), Ok(names.clone()), split);
+        let row = leftovers_from(seen(&[], &[]), Ok(names.clone()), split);
         let said = row.detail.clone();
         assert!(
             said.contains("/gone/api") && said.contains("/gone/wire"),
@@ -2785,12 +2796,7 @@ mod tests {
     #[test]
     fn leftovers_are_reported_and_never_a_failure() {
         // Nothing left behind: a row saying so, not silence — the reader asked.
-        let clean = leftovers_from(
-            Vec::new(),
-            Vec::new(),
-            Ok(Vec::new()),
-            Attributed::default(),
-        );
+        let clean = leftovers_from(seen(&[], &[]), Ok(Vec::new()), Attributed::default());
         assert!(clean.ok);
         assert!(
             clean.detail.contains("none"),
@@ -2800,8 +2806,7 @@ mod tests {
 
         // Sessions and volumes, both named, and still not a failure.
         let some = leftovers_from(
-            vec!["s01".to_string(), "s04".to_string()],
-            Vec::new(),
+            seen(&["s01", "s04"], &[]),
             Ok(vec!["omh-cache-repo-1234abcd".to_string()]),
             Attributed::default(),
         );
@@ -2855,8 +2860,7 @@ mod tests {
         // read inside `leftovers` swallowed its failure, so a dead daemon
         // reported *fewer* leftovers rather than saying it could not look.
         let blind = leftovers_from(
-            Vec::new(),
-            Vec::new(),
+            seen(&[], &[]),
             Err("Cannot connect to the daemon".into()),
             Attributed::default(),
         );
@@ -2878,12 +2882,13 @@ mod tests {
         // of the warning at all. The comment above this function described
         // that exact failure while only the volume half could report it.
         let deaf = leftovers_from(
-            Vec::new(),
-            vec![
-                "omh could not list containers, so orphaned sandboxes went unchecked: Cannot \
-                 connect to the daemon"
-                    .to_string(),
-            ],
+            seen(
+                &[],
+                &[
+                    "omh could not list containers, so orphaned sandboxes went unchecked: Cannot \
+                   connect to the daemon",
+                ],
+            ),
             Ok(Vec::new()),
             Attributed::default(),
         );
