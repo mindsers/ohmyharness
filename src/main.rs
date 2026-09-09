@@ -27,6 +27,7 @@ mod hook;
 mod idle;
 mod image;
 mod key;
+mod ledger;
 mod mcp;
 mod memory;
 mod notice;

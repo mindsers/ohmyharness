@@ -332,6 +332,12 @@ names the first one a batched call touches. Dropped by name on codex, which
 has no hooks capability at all. A dropped guard is announced at launch,
 never silently downgraded to a nudge.
 
+**Every hook's decision is logged**, not only a guard's. Whether a hook fired,
+stayed silent or refused, on every harness that can log at all (claude,
+opencode, omp — codex again excepted, for the same reason), is read back per
+session — see `omh sNN` in [commands.md](commands.md). `omh eject` carries
+none of it.
+
 ## `[use]` — what this repo takes from your catalogue
 
 The catalogue is everything you have. `[use]` is what *this* project uses:

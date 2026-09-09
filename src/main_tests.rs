@@ -912,7 +912,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("accounts.md", 4),
         ("adapters.md", 1),
         ("code-graph.md", 1),
-        ("commands.md", 140),     // + the `omh upgrade` section and its examples
+        ("commands.md", 141),     // + `omh sNN`'s hooks-this-session example
         ("configuration.md", 47), // + `omh use hooks tdd-guard`
         ("decisions.md", 1),
         ("editors.md", 4),

@@ -1633,10 +1633,14 @@ fn hook_names(
         Capability::Hooks,
         binding,
         sources,
-        own,
-        repo,
-        tools,
-        resolves,
+        &crate::render::RenderContext {
+            own,
+            repo,
+            tools,
+            resolves,
+            // A doctor probe, not a launch — nothing here stages a session.
+            log: None,
+        },
     )?;
     let dropped: Vec<&str> = doc.dropped.iter().map(|d| d.name.as_str()).collect();
     let mut names: Vec<String> = own

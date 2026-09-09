@@ -259,6 +259,27 @@ pub fn turn_hook_when() -> String {
 /// news.
 pub const GUEST_NOTE: &str = "/omh/shadow/omh-note";
 
+/// Where a launch's hooks record their decisions, guest side.
+///
+/// A plain file directly in the gitdir root, following `GUEST_NOTE`'s own
+/// precedent rather than a mount of its own: `GUEST_NOTE`'s doc records that
+/// `status`, `log` and `fsck` say nothing about a file placed here and
+/// `gc --prune=now` does not reap it, measured 2026-08-23 — exactly the
+/// tolerance an events file, appended to on every matching tool call, needs.
+/// A new mount would have bought nothing this one does not already give.
+///
+/// Agent-writable, like everything else in this gitdir — see the module doc's
+/// governing rule. `report::Summary` (via `ledger::Observations`) is the
+/// boundary that treats every line read from here as unverified.
+pub const GUEST_EVENTS: &str = "/omh/shadow/omh-events.jsonl";
+
+/// The events file's basename inside the gitdir, host side. A sibling
+/// constant to [`GUEST_EVENTS`] for the same reason `note_file` is a function
+/// beside `GUEST_NOTE` rather than a derivation of it — see that doc.
+pub fn events_file(gitdir: &Path) -> PathBuf {
+    gitdir.join("omh-events.jsonl")
+}
+
 /// The note's name inside the gitdir, host side.
 ///
 /// The two paths must name one file — a hook reading a path omh never writes
@@ -354,6 +375,21 @@ pub struct Shadow {
     /// than a second seed — a session that has never landed anything replays
     /// from the seed, and that is not a missing record, it is the first round.
     pub landed_record: PathBuf,
+    /// What omh itself rendered for this launch's hooks — one name per hook
+    /// that could produce a log line, host-written at plan time.
+    ///
+    /// A sibling of the gitdir for the same reason `seed_record` and
+    /// `landed_record` are: the gitdir is mounted, so anything recorded
+    /// inside it is the agent's to forge, and `ledger::Ledger` is the trusted
+    /// half of the pair `ledger.rs`'s own doc describes — the "never trust
+    /// what the sandbox asserts" rule applied to hook decisions specifically.
+    ///
+    /// Overwritten whole at every launch's plan time, so it names only the
+    /// *last* launch's hooks. The events file it is read back against is not
+    /// reset the same way — `ensure`'s fast path keeps a finished shadow's
+    /// gitdir as it was — so a resumed session's observation counts can span
+    /// every launch while `dormant` is judged against only the latest one.
+    pub events_ledger: PathBuf,
     /// Named for the session so the user can tell which sandbox an editor
     /// window is showing, and `-scratch` because that is what it is: the
     /// history the user curates before any of it becomes the branch's.
@@ -447,6 +483,7 @@ impl Shadow {
             gitdir: shadow_dir.join(format!("{session_id}.git")),
             seed_record: shadow_dir.join(format!("{session_id}.seed")),
             landed_record: shadow_dir.join(format!("{session_id}.landed")),
+            events_ledger: shadow_dir.join(format!("{session_id}.ledger")),
             branch: format!("{session_id}-scratch"),
         }
     }

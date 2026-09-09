@@ -332,6 +332,7 @@ pub fn plan(
     let mut mounts = Vec::new();
     let mut dropped = Vec::new();
     let mut dropped_hooks = Vec::new();
+    let mut rendered_hooks = Vec::new();
 
     // Composed before the capability loop because `place_destination` runs
     // inside it: it creates the empty placeholder at every declared name, and
@@ -365,6 +366,14 @@ pub fn plan(
         file: false,
     });
 
+    // `Some` exactly when the shadow gitdir is mounted below — a scratch
+    // session (`omh auth`, `omh doctor`) has no branch and no shadow, and a
+    // hook's log statement would be writing into a mount that is not there.
+    let log = session
+        .branch
+        .is_some()
+        .then_some(crate::shadow::GUEST_EVENTS);
+
     // Built once, which is what the type is for. Constructed inside the loop it
     // rebuilt all seven values six times and bought nothing its own doc claimed.
     let stager = Stager {
@@ -376,6 +385,7 @@ pub fn plan(
         stage: &stage,
         worktree: &session.worktree,
         staging,
+        log,
     };
 
     for cap in Capability::ALL {
@@ -428,7 +438,9 @@ pub fn plan(
             dropped.push((cap, count));
             continue;
         }
-        dropped_hooks.extend(stager.stage(cap, &sources, &mut mounts)?);
+        let staged = stager.stage(cap, &sources, &mut mounts)?;
+        dropped_hooks.extend(staged.dropped_hooks);
+        rendered_hooks.extend(staged.rendered_hooks);
     }
 
     // What `carry_in` names, mounted rather than copied.
@@ -541,6 +553,18 @@ pub fn plan(
         // what a dry run prints is still the truth about the launch.
         if staging == Staging::Apply {
             shadow.ensure(&session.worktree, &excluded)?;
+
+            // The trusted half of the ledger, written before the container
+            // ever starts — see `ledger.rs`'s module doc and `shadow.rs`'s
+            // doc on `events_ledger`. Best-effort: a launch must not fail
+            // over a record nothing downstream requires to run correctly,
+            // only to be read back later by `omh sNN`.
+            let record = crate::ledger::Ledger {
+                hooks: rendered_hooks.clone(),
+            };
+            if let Ok(json) = serde_json::to_string(&record) {
+                let _ = std::fs::write(&shadow.events_ledger, json);
+            }
         }
 
         mounts.push(Mount {
@@ -777,6 +801,12 @@ struct Stager<'a> {
     stage: &'a Path,
     worktree: &'a Path,
     staging: Staging,
+    /// This launch's events file, guest-side — `Some` exactly when the shadow
+    /// gitdir is, since that is the mount a hook's log statement writes into.
+    /// Named "either way" the mounts themselves are, per the doc on that
+    /// mount: what a dry run prints should still be the truth about the
+    /// launch it describes.
+    log: Option<&'a str>,
 }
 
 impl Stager<'_> {
@@ -785,7 +815,7 @@ impl Stager<'_> {
         cap: Capability,
         sources: &[PathBuf],
         mounts: &mut Vec<Mount>,
-    ) -> Result<Vec<crate::hook::Dropped>> {
+    ) -> Result<Staged> {
         let Stager {
             adapter,
             rules_doc,
@@ -795,8 +825,10 @@ impl Stager<'_> {
             stage,
             worktree,
             staging,
+            log,
         } = *self;
         let mut dropped_hooks = Vec::new();
+        let mut rendered_hooks = Vec::new();
         // Looked up here rather than threaded in, so the tool vocabulary — which
         // lives on the adapter, not the binding — arrives with the adapter it
         // belongs to. `plan` has already established the capability is
@@ -908,12 +940,16 @@ impl Stager<'_> {
                     cap,
                     binding,
                     sources,
-                    own,
-                    repo,
-                    &adapter.tools,
-                    resolves,
+                    &crate::render::RenderContext {
+                        own,
+                        repo,
+                        tools: &adapter.tools,
+                        resolves,
+                        log,
+                    },
                 )?;
                 dropped_hooks.extend(rendered.dropped);
+                rendered_hooks.extend(rendered.rendered_hooks);
                 if staging == Staging::Apply {
                     std::fs::create_dir_all(stage)?;
                     std::fs::write(&file, rendered.body)?;
@@ -941,8 +977,21 @@ impl Stager<'_> {
                 });
             }
         }
-        Ok(dropped_hooks)
+        Ok(Staged {
+            dropped_hooks,
+            rendered_hooks,
+        })
     }
+}
+
+/// What one capability's staging produced, split the way `container::plan`'s
+/// two accumulators need it: `dropped_hooks` folds into the notice a launch
+/// prints, `rendered_hooks` into `ledger::Ledger` — the trusted record of
+/// what this launch's hooks *could* log, written host-side before the
+/// container ever starts.
+struct Staged {
+    dropped_hooks: Vec<crate::hook::Dropped>,
+    rendered_hooks: Vec<String>,
 }
 
 /// Take out the links for entries this repo no longer uses.
@@ -2571,7 +2620,13 @@ mod tests {
         selects(&fx, "hooks = [\"lint\"]\n");
 
         let staged = staged_hooks(&plan_for(&fx, "claude"));
-        assert!(staged.iter().any(|c| c == "repo lint"), "got: {staged:?}");
+        // `contains` rather than `==`: a real launch's session always has a
+        // branch (`Session::new`), so `plan_for`'s command carries the ledger
+        // wrapper's log statement ahead of `run` — see `hook::log_statement`.
+        assert!(
+            staged.iter().any(|c| c.contains("repo lint")),
+            "got: {staged:?}"
+        );
         assert!(
             !staged.iter().any(|c| c == "fmt"),
             "the catalogue's `fmt` was not named here: {staged:?}"
@@ -2603,7 +2658,7 @@ mod tests {
             "omh's own survive an empty list; `linear` is yours and does not"
         );
         let hooks = staged_hooks(&p);
-        for (name, command) in own_commands() {
+        for (name, command) in own_commands(Some(crate::shadow::GUEST_EVENTS)) {
             assert!(
                 hooks.contains(&command),
                 "{name} is omh's and must still fire: {hooks:?}"
@@ -2769,19 +2824,23 @@ mod tests {
     /// to look for in a settings document is the rendering — asserting the
     /// authored `run` string would pass against a harness that was handed
     /// nothing.
-    fn own_commands() -> Vec<(&'static str, String)> {
+    /// `log` must match whatever the `plan()` a caller compares against would
+    /// use — `fixture()`'s session always has a branch (`Session::new`), so
+    /// every caller comparing against a real `plan()` output passes
+    /// `Some(shadow::GUEST_EVENTS)`, the same as that launch would.
+    fn own_commands(log: Option<&str>) -> Vec<(&'static str, String)> {
         let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
         let binding = adapter
             .supports(Capability::Hooks)
             .expect("claude has hooks");
         crate::base::hooks()
             .into_iter()
-            .map(
-                |h| match crate::hook::render(h.name, &h.hook, binding, &adapter.tools).unwrap() {
+            .map(|h| {
+                match crate::hook::render(h.name, &h.hook, binding, &adapter.tools, log).unwrap() {
                     crate::hook::Outcome::Rendered(r) => (h.name, r.command),
                     crate::hook::Outcome::Dropped(d) => panic!("claude cannot express {d}"),
-                },
-            )
+                }
+            })
             .collect()
     }
 
@@ -2798,7 +2857,7 @@ mod tests {
         std::fs::remove_dir_all(fx.paths.root.join("hooks")).unwrap();
 
         let staged = staged_hooks(&plan_for(&fx, "claude"));
-        for (name, command) in own_commands() {
+        for (name, command) in own_commands(Some(crate::shadow::GUEST_EVENTS)) {
             assert!(
                 staged.contains(&command),
                 "{name} must reach the harness with no hooks layer to read it: {staged:?}"
@@ -3366,7 +3425,7 @@ mod tests {
         // The rest of the capability survives, which is the whole point of
         // dropping one hook rather than all of them.
         let staged = staged_hooks(&p);
-        let (_, refresh) = own_commands()
+        let (_, refresh) = own_commands(Some(crate::shadow::GUEST_EVENTS))
             .into_iter()
             .find(|(name, _)| *name == "graph-refresh")
             .unwrap();

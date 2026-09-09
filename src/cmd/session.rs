@@ -824,6 +824,60 @@ fn read_check(paths: &Paths, id: &str) -> Option<report::CheckState> {
     }
 }
 
+/// What this session's hooks did, read back from the decision ledger.
+///
+/// `adapter` decides the first split — a harness with no hooks capability at
+/// all (codex, today) has nothing to read and says so, the same as
+/// `session_activity` does for a harness recording no transcript. Everything
+/// after that reads two files under the shadow gitdir: `events_ledger`
+/// (host-written, trusted — what this launch rendered) and the events file
+/// itself, inside the mounted gitdir (agent-writable, read only through
+/// `ledger::Observations::parse_all`, which is where "never trust the
+/// sandbox" is enforced for hook decisions specifically).
+fn read_hooks(
+    paths: &Paths,
+    id: &str,
+    adapter: &Option<crate::adapter::Adapter>,
+) -> report::HooksState {
+    let Some(adapter) = adapter else {
+        return report::HooksState::NotRecorded(
+            "omh does not know which harness this session ran".into(),
+        );
+    };
+    if adapter
+        .supports(crate::adapter::Capability::Hooks)
+        .is_none()
+    {
+        return report::HooksState::NotRecorded(format!(
+            "{} has no hooks capability",
+            adapter.name
+        ));
+    }
+    let shadow = crate::shadow::Shadow::new(&paths.shadows(), id);
+    let ledger_text = match std::fs::read_to_string(&shadow.events_ledger) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Not every session with hooks has one yet: a scratch session
+            // (`omh auth`, `omh doctor`) never mounts the shadow gitdir at
+            // all, and a session launched by an omh built before this
+            // feature shipped never wrote one either. Neither is a damaged
+            // record.
+            return report::HooksState::NotRecorded("this session has no recorded ledger".into());
+        }
+        Err(_) => return report::HooksState::Unreadable,
+    };
+    let Ok(ledger) = serde_json::from_str::<crate::ledger::Ledger>(&ledger_text) else {
+        return report::HooksState::Unreadable;
+    };
+    // The events file is written by the hook wrapper only when a hook
+    // actually reaches a decision — a launch whose hooks never fired never
+    // creates it, and that is zero observations, not a missing record.
+    let events_text =
+        std::fs::read_to_string(crate::shadow::events_file(&shadow.gitdir)).unwrap_or_default();
+    let observed = crate::ledger::Observations::parse_all(&events_text);
+    report::HooksState::Seen(crate::ledger::Summary::of(&ledger, &observed))
+}
+
 pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::Ctx) -> Result<()> {
     let paths = Paths::discover(cwd)?;
     // Validated before anything is read, so an id nothing created fails the
@@ -985,6 +1039,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     let focus = only.map(|id| report::Focus {
         activity: session_activity(&paths, id, &adapter_of(&paths, id)),
         check: read_check(&paths, id),
+        hooks: read_hooks(&paths, id, &adapter_of(&paths, id)),
     });
     // Computed before the struct moves `sessions`: a shell is offered only when
     // the view is one running session — the moment after `attach` closes.
@@ -1946,6 +2001,7 @@ pub(crate) fn rm(
 mod tests {
     use super::*;
     use crate::session::Ran;
+    use std::path::Path;
 
     /// The harness `attach` rejoins as, decided from the record alone.
     #[test]
@@ -1981,6 +2037,93 @@ mod tests {
             harness_for_attach(Ran::NeverRecorded, &[], &none).is_err(),
             "with nothing installed there is no default to fall back to"
         );
+    }
+
+    // ── the decision ledger, read back ──────────────────────────────────────
+
+    const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+
+    fn fixture_paths() -> (tempfile::TempDir, Paths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        std::fs::create_dir_all(&paths.repo).unwrap();
+        (dir, paths)
+    }
+
+    /// codex has no `[capabilities.hooks]` at all — the first split, and the
+    /// one that must never read as `Seen` with zero counts.
+    #[test]
+    fn a_harness_without_hooks_says_so() {
+        let (_dir, paths) = fixture_paths();
+        let codex = crate::adapter::Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
+        let state = read_hooks(&paths, "s01", &Some(codex));
+        assert!(
+            matches!(&state, report::HooksState::NotRecorded(why) if why.contains("no hooks capability")),
+            "{state:?}"
+        );
+    }
+
+    /// A harness with hooks but no ledger file yet — a scratch session, or one
+    /// launched before this feature shipped. Not the same as a damaged file.
+    #[test]
+    fn a_hooks_capable_harness_with_no_ledger_yet_is_not_recorded() {
+        let (_dir, paths) = fixture_paths();
+        let claude = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let state = read_hooks(&paths, "s01", &Some(claude));
+        assert!(
+            matches!(&state, report::HooksState::NotRecorded(_)),
+            "{state:?}"
+        );
+    }
+
+    /// A ledger that will not parse is a damaged record, not an absent one —
+    /// the same distinction `read_check` already draws for `check.json`.
+    #[test]
+    fn a_ledger_that_does_not_parse_is_unreadable() {
+        let (_dir, paths) = fixture_paths();
+        let claude = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let shadow = crate::shadow::Shadow::new(&paths.shadows(), "s01");
+        std::fs::create_dir_all(shadow.events_ledger.parent().unwrap()).unwrap();
+        std::fs::write(&shadow.events_ledger, "not json").unwrap();
+        assert!(matches!(
+            read_hooks(&paths, "s01", &Some(claude)),
+            report::HooksState::Unreadable
+        ));
+    }
+
+    /// The whole round trip: a launch's ledger plus what the sandbox reported,
+    /// read back as one `Summary` — fired, silent and refused kept apart, and
+    /// a rendered hook that never once appears in the events file reported as
+    /// dormant rather than dropped from the picture.
+    #[test]
+    fn a_launchs_hooks_are_read_back_as_a_summary() {
+        let (_dir, paths) = fixture_paths();
+        let claude = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let shadow = crate::shadow::Shadow::new(&paths.shadows(), "s01");
+        std::fs::create_dir_all(&shadow.gitdir).unwrap();
+        std::fs::write(
+            &shadow.events_ledger,
+            serde_json::to_string(&crate::ledger::Ledger {
+                hooks: vec!["graph-read".into(), "graph-first".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            crate::shadow::events_file(&shadow.gitdir),
+            "{\"hook\":\"graph-read\",\"decision\":\"fired\"}\n\
+             {\"hook\":\"graph-read\",\"decision\":\"silent\"}\n",
+        )
+        .unwrap();
+        let report::HooksState::Seen(summary) = read_hooks(&paths, "s01", &Some(claude)) else {
+            panic!("expected a Seen summary");
+        };
+        let a = summary.activity["graph-read"];
+        assert_eq!((a.fired, a.silent), (1, 1));
+        assert_eq!(summary.dormant, vec!["graph-first".to_string()]);
     }
 
     // ── the launch path, without a container runtime ─────────────────────────

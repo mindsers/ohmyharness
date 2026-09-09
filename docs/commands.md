@@ -908,6 +908,39 @@ turns*. Cost is summed per model from a dated price table; a model omh has no
 price for reports its tokens and **cost unknown**, never `$0`. All of it is in
 `--json`.
 
+### `omh sNN` shows which hooks fired
+
+Every hook rendered for a launch writes one decision — fired, silent or
+refused — to that session's own events file, and `omh sNN` reads it back as a
+`hooks this session` block:
+
+```console
+$ omh s01
+  s01  omh/s01  stopped  1 uncommitted
+
+  activity not recorded — no transcript written yet
+  hooks this session
+    graph-orient   1 fired
+    graph-read   1 fired, 14 silent
+    dormant        graph-first, git-turn
+```
+
+Fired and silent land on the same line when a hook did both across the
+session — `graph-read` narrows to `Read`, so it is checked far more often than
+it has anything to say. A hook that rendered and never once fired is named
+under **dormant**, not omitted — silence there would read exactly like the
+hook was never part of the launch. A harness with no hooks capability at all
+(codex, today) says **not recorded**, never `0 fired`: that would misleadingly
+read as guards that ran and found nothing. `omh eject` carries none of this —
+the wrapper that writes it is spliced in only when a real launch is staging
+the events file, never into a config handed to you.
+
+The write itself is cheap enough to leave unconditional rather than gate
+behind a setting: measured 2026-09-09, one append averages ~0.65ms in the
+shell wrapper claude's hooks run through (200 appends in a loop) and ~0.03ms
+through `node`'s `appendFileSync` (opencode, omp) — against `git-turn`'s own
+~80ms per turn, the heaviest thing omh already does on every tool call.
+
 ### `omh sNN commit` promotes the session's notes
 
 A commit is the human gate a note passes to reach the team layer, so

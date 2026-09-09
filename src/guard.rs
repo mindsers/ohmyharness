@@ -208,7 +208,7 @@ mod rendered {
         let binding = adapter
             .supports(Capability::Hooks)
             .expect("claude has hooks");
-        match crate::hook::render(hook_name, &hook, binding, &adapter.tools).unwrap() {
+        match crate::hook::render(hook_name, &hook, binding, &adapter.tools, None).unwrap() {
             Outcome::Rendered(r) => r.command,
             Outcome::Dropped(d) => panic!("claude cannot express {hook_name}: {d}"),
         }
@@ -579,10 +579,13 @@ mod rendered {
             Capability::Hooks,
             binding,
             &sources,
-            &crate::base::Own::default(),
-            &crate::settings::RepoPolicy::default(),
-            &adapter.tools,
-            &Default::default(),
+            &crate::render::RenderContext {
+                own: &crate::base::Own::default(),
+                repo: &crate::settings::RepoPolicy::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap();
         for name in ["tdd-guard", "config-guard"] {

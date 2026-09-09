@@ -1089,6 +1089,7 @@ pub struct Sessions {
 pub struct Focus {
     pub activity: Activity,
     pub check: Option<CheckState>,
+    pub hooks: HooksState,
 }
 
 /// What a session's transcript says the agent did.
@@ -1100,6 +1101,27 @@ pub enum Activity {
     /// empty session, a *not recorded* one.
     NotRecorded(String),
     /// A transcript omh opened and could make nothing of.
+    Unreadable,
+}
+
+/// What this session's hooks did, read back from the decision ledger.
+///
+/// Three states, the same shape `Activity` and `CheckState` already use, and
+/// for the same reason: `NotRecorded` must never be spelled the same as
+/// `Seen` with every count at zero — a harness with no hooks capability and a
+/// harness that fired nothing look identical unless the state itself says
+/// which one happened.
+#[derive(Debug, Clone)]
+pub enum HooksState {
+    /// A launch that could have logged, read back against what it did.
+    Seen(crate::ledger::Summary),
+    /// codex (no hooks capability), or a session launched before the ledger
+    /// existed — two different sentences, kept as one variant because a
+    /// reader only ever needs the one that applies to say why the section is
+    /// empty.
+    NotRecorded(String),
+    /// The ledger or the events file exists and omh could not read it as
+    /// either — a damaged record must not read as "nothing happened".
     Unreadable,
 }
 
@@ -1430,7 +1452,86 @@ fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
         };
         s.push_str(&format!("  {}\n", p.paint(style, &text)));
     }
+    s.push_str(&hooks_lines(p, &focus.hooks));
     s
+}
+
+/// `hooks this session`, one line per hook that has anything to say, and a
+/// closing `dormant` line for any that rendered and never fired at all.
+///
+/// Silent about a `Seen` summary with nothing in it — every rendered hook
+/// dormant is not a defect and does not need a paragraph — but says why an
+/// empty section is empty otherwise, matching the rest of this file's rule
+/// that a blank line and "nothing to report" must never look the same.
+fn hooks_lines(p: &out::Palette, hooks: &HooksState) -> String {
+    match hooks {
+        HooksState::Seen(summary) => {
+            if summary.activity.is_empty() && summary.dormant.is_empty() {
+                return String::new();
+            }
+            let mut s = format!("  {}\n", p.paint(out::HEAD, "hooks this session"));
+            for (name, a) in &summary.activity {
+                let mut parts = Vec::new();
+                if a.fired > 0 {
+                    parts.push(format!("{} fired", a.fired));
+                }
+                if a.silent > 0 {
+                    parts.push(format!("{} silent", a.silent));
+                }
+                if a.refused > 0 {
+                    parts.push(format!("{} refused", a.refused));
+                }
+                if a.unevaluated > 0 {
+                    parts.push(format!("{} unevaluated", a.unevaluated));
+                }
+                s.push_str(&format!(
+                    "    {}   {}\n",
+                    out::untrusted(name),
+                    parts.join(", ")
+                ));
+            }
+            if !summary.dormant.is_empty() {
+                s.push_str(&format!(
+                    "    {}        {}\n",
+                    p.paint(out::DIM, "dormant"),
+                    summary
+                        .dormant
+                        .iter()
+                        .map(|n| out::untrusted(n))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            if summary.unreadable > 0 {
+                s.push_str(&format!(
+                    "  {}\n",
+                    p.paint(
+                        out::WARN,
+                        &format!(
+                            "{} event line{} could not be read",
+                            summary.unreadable,
+                            if summary.unreadable == 1 { "" } else { "s" }
+                        )
+                    )
+                ));
+            }
+            s
+        }
+        // Said explicitly rather than left silent — the whole reason this is
+        // its own variant. A blank section here would read exactly like a
+        // harness whose guards ran and found nothing to say, which is a
+        // different fact from having no hooks capability at all.
+        HooksState::NotRecorded(why) => {
+            format!(
+                "  {}\n",
+                p.paint(out::DIM, &format!("hooks: not recorded — {why}"))
+            )
+        }
+        HooksState::Unreadable => format!(
+            "  {}\n",
+            p.paint(out::WARN, "omh could not read this session's hook events")
+        ),
+    }
 }
 
 /// The scoped focus, as JSON.
@@ -1458,7 +1559,20 @@ fn focus_json(focus: &Focus) -> serde_json::Value {
         CheckState::NotRun(why) => json!({ "state": "not-run", "why": why }),
         CheckState::Unreadable => json!({ "state": "unreadable" }),
     });
-    json!({ "activity": activity, "check": check })
+    let hooks = match &focus.hooks {
+        HooksState::Seen(summary) => json!({
+            "state": "seen",
+            "hooks": summary.activity.iter().map(|(name, a)| (name.clone(), json!({
+                "fired": a.fired, "silent": a.silent,
+                "refused": a.refused, "unevaluated": a.unevaluated,
+            }))).collect::<serde_json::Map<_, _>>(),
+            "dormant": summary.dormant,
+            "unreadable": summary.unreadable,
+        }),
+        HooksState::NotRecorded(why) => json!({ "state": "not-recorded", "why": why }),
+        HooksState::Unreadable => json!({ "state": "unreadable" }),
+    };
+    json!({ "activity": activity, "check": check, "hooks": hooks })
 }
 
 // ── omh info ────────────────────────────────────────────────────────────────

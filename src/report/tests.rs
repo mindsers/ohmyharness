@@ -821,8 +821,86 @@ fn focused(activity: Activity) -> Sessions {
     report.focus = Some(Focus {
         activity,
         check: None,
+        // `Seen` with nothing in it renders no line at all (`hooks_lines`) —
+        // unlike `NotRecorded`, which prints its own "not recorded" text and
+        // would trivially satisfy this file's `contains("not recorded")`
+        // assertions on `Activity::NotRecorded` for the wrong reason.
+        hooks: HooksState::Seen(Default::default()),
     });
     report
+}
+
+fn focused_hooks(hooks: HooksState) -> Sessions {
+    let mut report = sessions(vec![session("s01", Work::Clean)]);
+    report.focus = Some(Focus {
+        activity: Activity::NotRecorded("no activity fixture for this test".into()),
+        check: None,
+        hooks,
+    });
+    report
+}
+
+/// `hooks this session`: fired and silent counts on the same line, a refused
+/// hook on its own, and a rendered-but-never-observed hook reported as
+/// dormant rather than silently dropped from the picture — the three facts
+/// `ledger::Summary` carries, each landing somewhere a reader can see it.
+#[test]
+fn hooks_this_session_names_each_decision_and_what_never_fired() {
+    let p = out::Palette::plain();
+    let mut activity = std::collections::BTreeMap::new();
+    activity.insert(
+        "graph-read".to_string(),
+        crate::ledger::Activity {
+            fired: 1,
+            silent: 14,
+            refused: 0,
+            unevaluated: 0,
+        },
+    );
+    activity.insert(
+        "tdd-guard".to_string(),
+        crate::ledger::Activity {
+            fired: 0,
+            silent: 0,
+            refused: 2,
+            unevaluated: 0,
+        },
+    );
+    let summary = crate::ledger::Summary {
+        activity,
+        dormant: vec!["graph-first".to_string()],
+        unreadable: 0,
+    };
+    let text = focused_hooks(HooksState::Seen(summary)).human(&p);
+    assert!(text.contains("hooks this session"), "{text}");
+    assert!(
+        text.contains("graph-read") && text.contains("1 fired") && text.contains("14 silent"),
+        "fired and silent land on the same line: {text}"
+    );
+    assert!(
+        text.contains("tdd-guard") && text.contains("2 refused"),
+        "{text}"
+    );
+    assert!(
+        text.contains("dormant") && text.contains("graph-first"),
+        "a hook that never fired is named, not omitted: {text}"
+    );
+}
+
+/// codex, or a session that predates the ledger: the section says why it has
+/// nothing, rather than staying blank in a way that reads exactly like a
+/// harness whose guards ran and found nothing.
+#[test]
+fn a_harness_with_no_ledger_says_so_rather_than_staying_blank() {
+    let p = out::Palette::plain();
+    let text = focused_hooks(HooksState::NotRecorded(
+        "codex has no hooks capability".into(),
+    ))
+    .human(&p);
+    assert!(
+        text.contains("not recorded") && text.contains("codex has no hooks capability"),
+        "{text}"
+    );
 }
 
 /// A scoped, running session offers the shell that reaches it — the `ssh`
