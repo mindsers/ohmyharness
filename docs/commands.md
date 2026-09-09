@@ -1473,6 +1473,12 @@ sections — are not selectable in either direction. `omh set <feature> on|off`
 is their switch, because a feature is all or nothing. See
 [Configuration](configuration.md#a-feature-is-not-selectable).
 
+A **guard** — a hook that refuses rather than advises — is a catalogue entry
+like any other and `omh use hooks tdd-guard` finds it, but neither `omh init`
+nor `omh use --all` ever turns one on for you: every other catalogue hook is
+safe to run unattended, and a guard can refuse the agent's first edit. See
+[Guards, and their bypass](configuration.md#guards-and-their-bypass).
+
 ## `omh import <capability> <harness>`
 
 **The way in.** Bring a setup you already have into your catalogue, rather

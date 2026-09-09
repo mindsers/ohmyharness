@@ -280,6 +280,53 @@ from the [base set](design/base-set.md), not files. A hook file answering to one
 committed, reviewed and silently inert is worse than one that refuses to start.
 To be rid of omh's, switch the feature off with `[omh]`.
 
+### Guards, and their bypass
+
+A **guard** is a catalogue hook whose action is `refuse` — a `before-tool`
+hook that blocks the call rather than advising around it. omh ships two:
+`tdd-guard` refuses editing a source file whose paired test has not moved
+since the last commit — go, python and node today, dispatching on extension
+inside the one hook, the way `config-guard` dispatches on path with no
+`stack` field. One name rather than one hook per language: a monorepo with go
+and node turns on `tdd-guard` once, not `go-tdd` and `node-tdd` separately.
+`config-guard` refuses editing this repo's own `.omh/` from inside a session,
+since that directory decides what the next session gets and what
+`omh sNN commit` runs before it lands anything.
+
+There is no `rust-tdd`. Rust's tests live inside the file under test
+(`#[cfg(test)] mod tests`), so "the test file changed first" cannot be
+expressed — the guard would refuse the edit that adds the test. `tdd-guard`
+is simply silent on `.rs` files rather than pretending to cover them.
+
+**A guard is discipline, not containment.** `tools: ["edit"]` matches
+Claude's `Edit|Write|MultiEdit` — a shell redirect or `sed -i` reaches the
+same file through `Bash` and is never seen. No guard adds a shell arm to
+close that: the [base set](design/base-set.md) already argues the identical
+point about `git push`, and its own pattern for matching `git` at all shipped
+broken once by missing a multi-line script. The sandbox — the worktree the
+agent cannot escape — is what actually contains a session; a guard is a
+reminder at the moment its rule is broken, not a second containment.
+
+**A guard fails open.** Each one refuses only when it can positively confirm
+the rule is unmet; anything it cannot ask about — no git repository, `git`
+erroring — allows the edit rather than blocking on a question it could not
+answer.
+
+**Guards are never in the default expansion.** `omh init` and `omh use --all`
+turn on every other applicable catalogue hook, but never a guard — the same
+way `graph-first` etc. are never a wall. Turn one on by name:
+
+```console
+$ omh use hooks tdd-guard
+```
+
+**Coverage is per harness**, like everything hooks-shaped: `refuse` renders
+on claude (`permissionDecision: "deny"`) and opencode (`throw`). It is
+dropped by name on oh-my-pi — its `edit` tool has no `path` field the
+renderer can read `$OMH_TOOL_FILE` from, recorded in `adapters/omp.toml` — and
+on codex, which has no hooks capability at all. A dropped guard is announced
+at launch, never silently downgraded to a nudge.
+
 ## `[use]` — what this repo takes from your catalogue
 
 The catalogue is everything you have. `[use]` is what *this* project uses:

@@ -355,6 +355,14 @@ key decides which file it lands in: one that can name a credential is kept out
 of git, everything else is committed so a teammate cloning gets it —
 [Configuration](docs/configuration.md#two-scopes-two-commands) has the rest.
 
+A hook can also **refuse** a call instead of advising around it — `tdd-guard`
+and `config-guard` ship this way, opt-in (`omh use hooks tdd-guard`), never
+turned on by `omh init` itself. One name covers every stack it knows (go,
+python, node), so a monorepo names it once. Discipline, not containment: the
+worktree is what actually contains a session; a guard is a reminder at the
+moment its rule is broken —
+[Guards, and their bypass](docs/configuration.md#guards-and-their-bypass).
+
 ### The base set is data too, and it has to justify itself
 
 omh's opinion lives in a versioned file, not in the binary — `init` seeds from

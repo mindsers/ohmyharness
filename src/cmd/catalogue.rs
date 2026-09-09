@@ -887,15 +887,74 @@ pub(crate) fn current_list(
     }
 }
 
-/// Every capability's catalogue entries, minus the ones omh owns.
+/// Every capability's catalogue entries, minus the ones omh owns — the list
+/// `init` writes into a fresh repo's `[use]`, and `omh use --all` resyncs to.
+///
+/// Hooks alone get a second narrowing: a guard (`refuse`) is dropped even
+/// though `catalogue_names` calls it applicable. Every other catalogue hook
+/// is safe to run unattended — `omh init && omh new claude` is meant to be
+/// zero questions and nothing surprising, and a guard can refuse the agent's
+/// very first edit. `catalogue_names` itself stays unfiltered: `omh use
+/// hooks tdd-guard` still has to find it by name, and the refusal it would
+/// otherwise get — "your catalogue has no hooks called tdd-guard" — would be
+/// a lie about what is actually there.
 pub(crate) fn catalogue_lists(
     paths: &Paths,
 ) -> Result<std::collections::BTreeMap<adapter::Capability, Vec<String>>> {
     let mut out = std::collections::BTreeMap::new();
     for cap in adapter::Capability::ALL {
-        out.insert(cap, catalogue_names(paths, cap)?);
+        let mut names = catalogue_names(paths, cap)?;
+        if cap == adapter::Capability::Hooks {
+            let guards = guard_hooks(paths)?;
+            names.retain(|name| !guards.contains(name));
+        }
+        out.insert(cap, names);
     }
     Ok(out)
+}
+
+/// Every catalogue hook whose action is `refuse` — the property that makes
+/// automatic selection unsafe. Reads the files itself rather than
+/// `render::declared_stacks`, which only ever carried the `stack` field.
+///
+/// `sources` orders the catalogue dir before the repo's own `.omh/hooks/`,
+/// and a repo hook shadowing the same name is what actually runs — so a
+/// **later** directory's copy of `name` overwrites an earlier one, matching
+/// `merge_hooks` and `declared_stacks`'s own later-wins rule.
+fn guard_hooks(paths: &Paths) -> Result<BTreeSet<String>> {
+    let profile = Profile::resolve(paths);
+    let mut refuses = std::collections::BTreeMap::new();
+    for dir in profile.sources(adapter::Capability::Hooks)? {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        };
+        for entry in entries {
+            let path = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
+            if !path.extension().is_some_and(|e| e == "json") {
+                continue;
+            }
+            let name = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(hook) = hook::Hook::parse(&raw, &path.display().to_string()) else {
+                continue;
+            };
+            refuses.insert(name, matches!(hook.action, hook::Action::Refuse { .. }));
+        }
+    }
+    Ok(refuses
+        .into_iter()
+        .filter_map(|(name, is_refuse)| is_refuse.then_some(name))
+        .collect())
 }
 
 /// Which of these hooks this repo could ever take.
@@ -926,11 +985,43 @@ pub(crate) fn covered_here(
     hook_dirs: &[std::path::PathBuf],
     detected: &[&stack::Definition],
 ) -> Result<BTreeSet<String>> {
-    Ok(render::declared_stacks(hook_dirs)?
-        .into_values()
-        .flatten()
-        .filter(|named| detected.iter().any(|d| &d.name == named))
-        .collect())
+    // Deliberately not `render::declared_stacks`: that answers "what stack
+    // does this hook belong to", which every hook has an opinion about,
+    // guards included. What `derive::hooks` needs from `covered` is
+    // narrower — *does the catalogue already run this project's tests* —
+    // and a guard (`refuse`) never runs anything. Counting it here silenced
+    // `pnpm-test` derivation in every node repo the moment a node guard
+    // existed in the catalogue, without the guard ever running a test.
+    let mut out = BTreeSet::new();
+    for dir in hook_dirs {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("reading {}", dir.display())),
+        };
+        for entry in entries {
+            let path = entry
+                .with_context(|| format!("reading {}", dir.display()))?
+                .path();
+            if !path.extension().is_some_and(|e| e == "json") {
+                continue;
+            }
+            let Some(hook) = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|raw| hook::Hook::parse(&raw, &path.display().to_string()).ok())
+            else {
+                continue;
+            };
+            if !matches!(hook.action, hook::Action::Run(_)) {
+                continue;
+            }
+            let Some(stack) = hook.stack else { continue };
+            if detected.iter().any(|d| d.name == stack) {
+                out.insert(stack);
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub(crate) fn applicable_hooks(

@@ -1,0 +1,8 @@
+{
+  "on": "before-tool",
+  "tools": [
+    "edit"
+  ],
+  "when": "case \"$OMH_TOOL_FILE\" in *_test.go) false ;; *.go) d=$(dirname -- \"$OMH_TOOL_FILE\"); t=\"${OMH_TOOL_FILE%.go}_test.go\"; s=$(git -C \"$d\" status --porcelain -- \"$t\" 2>/dev/null) || exit 0; [ -z \"$s\" ] ;; *.ts|*.tsx|*.js|*.jsx) case \"$OMH_TOOL_FILE\" in *.d.ts|*.test.*|*.spec.*|*__tests__/*) false ;; *) ext=\"${OMH_TOOL_FILE##*.}\"; base=\"${OMH_TOOL_FILE%.$ext}\"; d=$(dirname -- \"$OMH_TOOL_FILE\"); n=$(basename -- \"$base\"); t1=\"$base.test.$ext\"; t2=\"$base.spec.$ext\"; t3=\"$d/__tests__/$n.test.$ext\"; s=$(git -C \"$d\" status --porcelain -- \"$t1\" \"$t2\" \"$t3\" 2>/dev/null) || exit 0; [ -z \"$s\" ] ;; esac ;; *) b=$(basename -- \"$OMH_TOOL_FILE\"); case \"$b\" in test_*.py|conftest.py) false ;; *) case \"$OMH_TOOL_FILE\" in */tests/*.py|tests/*.py) false ;; *.py) d=$(dirname -- \"$OMH_TOOL_FILE\"); n=$(basename -- \"$OMH_TOOL_FILE\" .py); t1=\"$d/test_$n.py\"; t2=\"$d/tests/test_$n.py\"; s=$(git -C \"$d\" status --porcelain -- \"$t1\" \"$t2\" 2>/dev/null) || exit 0; [ -z \"$s\" ] ;; *) false ;; esac ;; esac ;; esac",
+  "refuse": "test-first: nothing has changed in the test file for $OMH_TOOL_FILE. Write the failing test first."
+}
