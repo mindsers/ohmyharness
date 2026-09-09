@@ -812,29 +812,6 @@ fn omp_plugin(
             dropped.push(give_up("way to inject text before a tool runs"));
             continue;
         }
-        // A field the adapter maps for the harness, on a tool that has not got
-        // it. omp's `edit` takes one `input` string with the path inside a
-        // `[PATH#TAG]` payload, so `event.input.path` is never there — while
-        // `read`, which the same map serves correctly, does have it.
-        //
-        // Emitting it anyway bound `""`, and a hook that then guards on the
-        // value simply never fired: in the module, in `doctor`'s name list, not
-        // in `dropped`, indistinguishable from a hook with nothing to say.
-        //
-        // The knowledge is omp's and lives in omp's renderer because the schema
-        // has no way to say "this field exists on these tools and not those" —
-        // `fields` is one map per harness. That is a real limit of the adapter
-        // format and is recorded in `adapters/omp.toml` beside the map itself.
-        if let Some(edit) = tools.get(&hook::Tool::Edit) {
-            let wants_file = wired
-                .fields
-                .iter()
-                .any(|(f, _)| *f == hook::Field::ToolFile);
-            if wants_file && wired.tools.iter().any(|t| t == edit) {
-                dropped.push(give_up(&format!("`tool-file` on `{edit}`")));
-                continue;
-            }
-        }
         // There is deliberately no mirror of that check for a `refuse` at
         // `after-tool`. It reads like the obvious counterpart and would be dead
         // code: omh refuses that pairing when the hook is *parsed*, so no such
@@ -884,10 +861,19 @@ fn omp_one_hook(
     b.push_str("    const env = {}\n");
     // Both tool moments keep the call's arguments on `event.input` — unlike
     // opencode, where the parameter they hang off changes with the moment.
+    // A `fields-by-tool` entry is already a complete expression (the escape
+    // hatch this exists for is `edit`, whose path lives inside one `input`
+    // string rather than a property) and must be used verbatim; the shared
+    // default is a bare suffix, wrapped in `event.input?.` as always.
     if moment != Moment::Bare {
-        for (field, at) in &wired.fields {
+        for (field, at, overridden) in &wired.fields {
+            let expr = if *overridden {
+                at.to_string()
+            } else {
+                format!("event.input?.{at}")
+            };
             b.push_str(&format!(
-                "    env[{:?}] = String(event.input?.{at} ?? \"\")\n",
+                "    env[{:?}] = String({expr} ?? \"\")\n",
                 field.var()
             ));
         }
@@ -992,9 +978,16 @@ fn one_hook(
     // `before` and on `input` at `after`, and reading the wrong one binds the
     // empty string rather than failing.
     if let Slot::Call { args, .. } = slot {
-        for (field, at) in &wired.fields {
+        // A `fields-by-tool` entry is a complete expression, used verbatim;
+        // the shared default is a bare suffix off `{args}?.args`, as always.
+        for (field, at, overridden) in &wired.fields {
+            let expr = if *overridden {
+                at.to_string()
+            } else {
+                format!("{args}?.args?.{at}")
+            };
             b.push_str(&format!(
-                "      env[{:?}] = String({args}?.args?.{at} ?? \"\")\n",
+                "      env[{:?}] = String({expr} ?? \"\")\n",
                 field.var()
             ));
         }
@@ -2427,29 +2420,36 @@ template = 'return { block: true, reason: {{text}} }'
         );
     }
 
-    /// A file path on omp's `edit` is a thing this harness cannot say, so the
-    /// hook wanting it is dropped by name rather than handed an empty string.
+    /// A file path on omp's `edit` used to be a thing this harness could not
+    /// say — its `input` is one string with the path embedded in
+    /// `[PATH#TAG]` sections, not a `path` property — until
+    /// `[capabilities.hooks.fields-by-tool.edit]` gave the renderer a
+    /// complete expression to read it with instead of a bare suffix.
     ///
-    /// omp's edit tool takes one `input` string with the path embedded in
-    /// `[PATH#TAG]` sections, so `event.input.path` is never there. The adapter
-    /// wrote that down and the renderer emitted the binding anyway: the hook
-    /// shipped, bound `""`, and never fired — present in the module, present in
-    /// `omh doctor`'s name list, absent from `dropped`, and indistinguishable
-    /// from a hook with nothing to say. Naming it is the whole rule.
+    /// Before that existed, the adapter recorded the gap and the renderer
+    /// emitted the binding anyway: the hook shipped, bound `""`, and never
+    /// fired — present in the module, present in `omh doctor`'s name list,
+    /// absent from `dropped`, and indistinguishable from a hook with nothing
+    /// to say. That failure mode is what this now proves does not recur: the
+    /// binding must be the override expression, not the plain `path` suffix,
+    /// and it must not be dropped.
     #[test]
-    fn a_file_path_on_omps_edit_tool_is_dropped_by_name() {
+    fn a_file_path_on_omps_edit_tool_reads_the_override() {
         let doc = omp_module(&[(
             "fmt-one",
             r#"{"on":"after-tool","tools":["edit"],"run":"prettier $OMH_TOOL_FILE"}"#,
         )]);
-        let wanted = dropped_for(&doc, "fmt-one");
+        assert!(doc.dropped.is_empty(), "dropped: {:?}", doc.dropped);
         assert!(
-            wanted.contains("tool-file") && wanted.contains("edit"),
-            "the drop must name the field and the tool it cannot come from: {wanted}"
+            doc.body
+                .contains(r#"env["OMH_TOOL_FILE"] = String((event.input?.input?.match("#),
+            "edit must read the override, not the bare `path` suffix that is \
+             never there: {}",
+            doc.body
         );
         assert!(
-            !doc.body.contains(r#"env["OMH_TOOL_FILE"]"#),
-            "a dropped hook left its binding behind: {}",
+            !doc.body.contains(r#"String(event.input?.path ?? "")"#),
+            "the plain suffix would silently bind empty: {}",
             doc.body
         );
     }

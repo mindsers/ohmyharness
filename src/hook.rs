@@ -546,8 +546,14 @@ pub struct Wired<'a> {
     /// This harness's names for the tools the hook narrows to. Empty means
     /// every tool, which is the only sensible reading for a moment with none.
     pub tools: Vec<&'a str>,
-    /// Where this harness keeps each field the hook actually reads.
-    pub fields: Vec<(Field, &'a str)>,
+    /// Where this harness keeps each field the hook actually reads, and
+    /// whether that expression came from `[fields-by-tool]` rather than the
+    /// shared `[fields]` map. A renderer that substitutes fields into a
+    /// template (the JS plugins' `event.input?.SUFFIX`) needs to know which:
+    /// a `fields-by-tool` entry is already a complete expression and must be
+    /// used verbatim, never wrapped a second time. Claude's jq paths are
+    /// complete either way, so its renderer ignores the flag.
+    pub fields: Vec<(Field, &'a str, bool)>,
 }
 
 /// Resolve a hook against one harness's vocabulary.
@@ -581,12 +587,43 @@ pub fn wire<'a>(
     }
     let mut fields = Vec::new();
     for field in hook.fields() {
-        let at = binding
-            .fields
-            .get(&field)
-            .map(String::as_str)
-            .ok_or_else(|| drop(format!("`{field}` field")))?;
-        fields.push((field, at));
+        let default = || {
+            binding
+                .fields
+                .get(&field)
+                .map(String::as_str)
+                .ok_or_else(|| drop(format!("`{field}` field")))
+        };
+        let at = if hook.tools.is_empty() {
+            // No tool to check an override against, so this is exactly
+            // today's behaviour: the shared default, or a drop.
+            (default()?, false)
+        } else {
+            let mut resolved = Vec::new();
+            for tool in &hook.tools {
+                resolved.push(
+                    match binding.tool_fields.get(tool).and_then(|m| m.get(&field)) {
+                        Some(expr) => (expr.as_str(), true),
+                        None => (default()?, false),
+                    },
+                );
+            }
+            let first = resolved[0];
+            if resolved.iter().all(|r| r.0 == first.0) {
+                first
+            } else {
+                // A hook narrowing to several tools that keep this field in
+                // genuinely different places has no shipped example — every
+                // renderer's field emission is one expression, not a
+                // dispatch on which tool fired. Refusing here is honest
+                // about that rather than picking one tool's answer and
+                // silently mishandling the others.
+                return Err(drop(format!(
+                    "way to read `{field}` the same way across every tool this hook narrows to"
+                )));
+            }
+        };
+        fields.push((field, at.0, at.1));
     }
     Ok(Wired {
         event,
@@ -690,7 +727,10 @@ pub fn render(
     // text while the hook does nothing.
     if !fields.is_empty() {
         command.push_str("p=$(cat); ");
-        for (field, expr) in &fields {
+        // The bool marks a `fields-by-tool` override — irrelevant here: a jq
+        // path is a complete expression whichever map it came from, unlike
+        // the JS renderers' `event.input?.SUFFIX` template.
+        for (field, expr, _) in &fields {
             command.push_str(&format!(
                 "{}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); ",
                 field.var()
@@ -1383,6 +1423,95 @@ mod tests {
         match render("peek", &h, &b, &tools).unwrap() {
             Outcome::Dropped(d) => assert!(d.wanted.contains("read"), "got: {}", d.wanted),
             Outcome::Rendered(r) => panic!("unexpectedly rendered: {r:?}"),
+        }
+    }
+
+    /// `[fields-by-tool.<tool>]` — the escape hatch for a field that lives
+    /// somewhere other than the shared map on one specific tool. omp's
+    /// `edit` is the real case; this is the same shape against a hand-built
+    /// binding, isolated from any particular harness's syntax.
+    #[test]
+    fn a_field_can_be_declared_per_tool() {
+        let b = binding(
+            "path = \"/x\"\nrender = \"claude-settings\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
+             [fields]\ntool-file = \".shared_path\"\n\
+             [fields-by-tool.edit]\ntool-file = \".edit_only_path\"\n",
+        );
+        let tools = BTreeMap::from([(Tool::Edit, "Edit".to_string())]);
+        let h = Hook::parse(
+            r#"{"on":"before-tool","tools":["edit"],"when":"[ -n \"$OMH_TOOL_FILE\" ]","run":"x"}"#,
+            "h.json",
+        )
+        .unwrap();
+        let r = match render("guard", &h, &b, &tools).unwrap() {
+            Outcome::Rendered(r) => r,
+            Outcome::Dropped(d) => panic!("unexpectedly dropped: {d}"),
+        };
+        assert!(
+            r.command.contains(".edit_only_path"),
+            "the override, not the shared default: {}",
+            r.command
+        );
+        assert!(!r.command.contains(".shared_path"), "got: {}", r.command);
+    }
+
+    /// A tool with no entry in `[fields-by-tool]` still falls back to
+    /// `[fields]` — additive, so a binding that never declared an override
+    /// keeps behaving exactly as it did before this existed.
+    #[test]
+    fn an_absent_override_falls_back_to_the_default_map() {
+        let b = binding(
+            "path = \"/x\"\nrender = \"claude-settings\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
+             [fields]\ntool-file = \".shared_path\"\n\
+             [fields-by-tool.edit]\ntool-file = \".edit_only_path\"\n",
+        );
+        let tools = BTreeMap::from([(Tool::Read, "Read".to_string())]);
+        let h = Hook::parse(
+            r#"{"on":"before-tool","tools":["read"],"when":"[ -n \"$OMH_TOOL_FILE\" ]","run":"x"}"#,
+            "h.json",
+        )
+        .unwrap();
+        let r = match render("guard", &h, &b, &tools).unwrap() {
+            Outcome::Rendered(r) => r,
+            Outcome::Dropped(d) => panic!("unexpectedly dropped: {d}"),
+        };
+        assert!(
+            r.command.contains(".shared_path"),
+            "read has no override, so the default applies: {}",
+            r.command
+        );
+    }
+
+    /// A hook narrowing to several tools that keep a field in genuinely
+    /// different places has no renderer that can express it — none emits a
+    /// runtime dispatch on which tool actually fired. Dropped rather than
+    /// silently picking one tool's answer for all of them.
+    #[test]
+    fn tools_that_disagree_on_a_field_are_dropped_not_guessed() {
+        let b = binding(
+            "path = \"/x\"\nrender = \"claude-settings\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
+             [fields]\ntool-file = \".shared_path\"\n\
+             [fields-by-tool.edit]\ntool-file = \".edit_only_path\"\n",
+        );
+        let tools = BTreeMap::from([
+            (Tool::Edit, "Edit".to_string()),
+            (Tool::Read, "Read".to_string()),
+        ]);
+        let h = Hook::parse(
+            r#"{"on":"before-tool","tools":["edit","read"],"when":"[ -n \"$OMH_TOOL_FILE\" ]","run":"x"}"#,
+            "h.json",
+        )
+        .unwrap();
+        match render("guard", &h, &b, &tools).unwrap() {
+            Outcome::Dropped(d) => assert!(
+                d.wanted.contains("tool-file"),
+                "the drop must name the field: {}",
+                d.wanted
+            ),
+            Outcome::Rendered(r) => panic!("must not silently pick one tool's answer: {r:?}"),
         }
     }
 

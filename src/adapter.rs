@@ -194,6 +194,20 @@ pub struct Binding {
     /// wrong about the other two.
     #[serde(default)]
     pub fields: BTreeMap<crate::hook::Field, String>,
+    /// The escape hatch `fields` cannot express: a field that lives
+    /// somewhere else on one particular tool. omp's `edit` is the reason
+    /// this exists — its path is not a property at all, but a substring of
+    /// one `input` string, so no single suffix appended to `event.input?.`
+    /// can read it the way `fields` reads every other tool's.
+    ///
+    /// Unlike `fields`, an entry here is a **complete expression**, used
+    /// verbatim rather than substituted into a template — `fields` cannot
+    /// hold that shape without breaking every harness whose fields really
+    /// are plain property names. A tool with no entry here falls back to
+    /// `fields`, so this is additive: every binding that never needed it
+    /// renders exactly as before.
+    #[serde(default, rename = "fields-by-tool")]
+    pub tool_fields: BTreeMap<crate::hook::Tool, BTreeMap<crate::hook::Field, String>>,
     /// This harness's protocol for putting text in the agent's context.
     #[serde(default)]
     pub inject: Option<Template>,

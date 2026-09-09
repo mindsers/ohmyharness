@@ -564,22 +564,16 @@ mod rendered {
         assert!(!refused(&command, "/work/AGENTS.md"));
     }
 
-    /// omp's `edit` tool takes one `input` string with the path embedded in a
-    /// `[PATH#TAG]` payload, not a `path` field — `adapters/omp.toml:159`
-    /// records the gap, and the check for it lives in `render::omp_plugin`
-    /// (`render.rs:829`), not in the shared `hook::render` every harness
-    /// calls into. So this has to go through `render::document` — the
-    /// function a real launch actually calls — rather than `hook::render`
-    /// directly, or it would silently miss the one special case it exists to
-    /// prove. Until §1b closes it, every guard has to be dropped *by name*
-    /// there, never silently absent.
+    /// Every guard rendered for omp, then actually run through `node`
+    /// against a realistic `edit` payload — `[PATH#TAG]` sections, the shape
+    /// `docs/tools/edit.md` documents for oh-my-pi v17.3.3, not a
+    /// hand-invented one. `[capabilities.hooks.fields-by-tool.edit]` in
+    /// `adapters/omp.toml` is what makes this render instead of drop; before
+    /// it existed, both guards were dropped by name here.
     #[test]
-    fn every_guard_is_dropped_by_name_on_omp() {
+    fn every_guard_renders_and_blocks_on_omp() {
         let adapter = Adapter::find(Path::new(ADAPTERS), "omp").unwrap();
         let binding = adapter.supports(Capability::Hooks).expect("omp has hooks");
-        // `sources` is layer *directories*, scanned for every `*.json` in
-        // them — matching how `profile::sources` hands `render::document`
-        // the whole catalogue dir, never one file at a time.
         let sources = vec![PathBuf::from(HOOKS)];
         let doc = crate::render::document(
             Capability::Hooks,
@@ -593,12 +587,87 @@ mod rendered {
         .unwrap();
         for name in ["tdd-guard", "config-guard"] {
             assert!(
-                doc.dropped.iter().any(|d| d.name == name),
-                "{name}: expected in `dropped`, got: {:?} / body: {}",
-                doc.dropped,
-                doc.body
+                !doc.dropped.iter().any(|d| d.name == name),
+                "{name}: expected to render, got dropped: {:?}",
+                doc.dropped
             );
         }
+
+        // A real git repo, exactly `repo_with`'s shape — the guard's `when`
+        // still shells out to `git status`, whichever harness renders it.
+        let dir = repo_with("foo.go", "foo_test.go");
+        // A source file whose paired test is untouched — `foo.go`, matching
+        // the go-tdd suite above — expressed as omp's real edit payload.
+        let input = "[foo.go#A1B2]\nPUT <1:\n+package foo\n";
+        let result = drive_omp(
+            &doc.body,
+            dir.path(),
+            "tool_call",
+            &format!(r#"{{ toolName: "edit", input: {{ input: {input:?} }} }}"#),
+        );
+        assert!(
+            result.contains(r#""block":true"#),
+            "an untouched test file must block on omp too: {result}"
+        );
+
+        // The negative: the same payload against a repo where the test file
+        // has moved must return nothing — omp's `tool_call` allows by
+        // returning no result, exactly as Claude Code allows by silence.
+        std::fs::write(dir.path().join("foo_test.go"), "changed").unwrap();
+        let allowed = drive_omp(
+            &doc.body,
+            dir.path(),
+            "tool_call",
+            &format!(r#"{{ toolName: "edit", input: {{ input: {input:?} }} }}"#),
+        );
+        assert_eq!(
+            allowed, "null",
+            "a dirty test file must not block on omp: {allowed}"
+        );
+    }
+
+    /// Registers every `pi.on(event, handler)` the module makes and invokes
+    /// the one matching `event_name`, returning what the handler returned as
+    /// JSON — or `THREW: …`. The same reasoning as `render.rs`'s opencode
+    /// `drive()`: a substring check on generated source cannot see whether a
+    /// handler actually runs, or what it does when it does.
+    ///
+    /// `cwd`: the guard's `when` shells out to `git`, so this has to run
+    /// from a real repository — never the harness's own, which `git -C "."`
+    /// would silently fall back to if the payload's path had no directory.
+    fn drive_omp(body: &str, cwd: &Path, event_name: &str, event: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, body).unwrap();
+        let driver = dir.path().join("run.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import register from "file://{}"
+const handlers = {{}}
+const pi = {{ on: (event, handler) => {{ handlers[event] = handler }} }}
+register(pi)
+const event = {event}
+try {{
+  const result = await handlers[{event_name:?}]?.(event, {{}})
+  console.log(JSON.stringify(result ?? null))
+}} catch (e) {{ console.log("THREW: " + e.message) }}
+"#,
+                module.display()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&driver)
+            .current_dir(cwd)
+            .output()
+            .expect("node is required: a probe that skips is a probe that passes");
+        assert!(
+            out.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
     /// codex has no hooks capability at all (`adapters/codex.toml`), so the

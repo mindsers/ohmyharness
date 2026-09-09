@@ -321,11 +321,16 @@ $ omh use hooks tdd-guard
 ```
 
 **Coverage is per harness**, like everything hooks-shaped: `refuse` renders
-on claude (`permissionDecision: "deny"`) and opencode (`throw`). It is
-dropped by name on oh-my-pi — its `edit` tool has no `path` field the
-renderer can read `$OMH_TOOL_FILE` from, recorded in `adapters/omp.toml` — and
-on codex, which has no hooks capability at all. A dropped guard is announced
-at launch, never silently downgraded to a nudge.
+on claude (`permissionDecision: "deny"`), opencode (`throw`) and oh-my-pi
+(`{ block: true, reason }`). omp needed one more thing first: its `edit`
+tool keeps its path inside one `input` string (`[PATH#TAG]` sections) rather
+than a plain property, so `$OMH_TOOL_FILE` needed a per-tool override —
+`[capabilities.hooks.fields-by-tool.edit]` in `adapters/omp.toml` — instead
+of the shared field map every other tool reads. Known gap: a single `edit`
+call can batch edits across several files, and `$OMH_TOOL_FILE` only ever
+names the first one a batched call touches. Dropped by name on codex, which
+has no hooks capability at all. A dropped guard is announced at launch,
+never silently downgraded to a nudge.
 
 ## `[use]` — what this repo takes from your catalogue
 
