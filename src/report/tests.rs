@@ -869,6 +869,7 @@ fn hooks_this_session_names_each_decision_and_what_never_fired() {
     let summary = crate::ledger::Summary {
         activity,
         dormant: vec!["graph-first".to_string()],
+        unlisted: Default::default(),
         unreadable: 0,
     };
     let text = focused_hooks(HooksState::Seen(summary)).human(&p);
@@ -887,6 +888,76 @@ fn hooks_this_session_names_each_decision_and_what_never_fired() {
     );
 }
 
+/// An observation naming a hook outside the ledger — a stray write, or one
+/// left over from an earlier launch of a resumed session — is shown as its
+/// own fact, never folded into `activity` where it would read as a rendered
+/// hook's own doing.
+#[test]
+fn an_unlisted_hook_is_shown_apart_from_activity() {
+    let p = out::Palette::plain();
+    let mut unlisted = std::collections::BTreeMap::new();
+    unlisted.insert(
+        "tdd-guard".to_string(),
+        crate::ledger::Activity {
+            fired: 2,
+            silent: 0,
+            refused: 0,
+            unevaluated: 0,
+        },
+    );
+    let summary = crate::ledger::Summary {
+        activity: Default::default(),
+        dormant: vec![],
+        unlisted,
+        unreadable: 0,
+    };
+    let text = focused_hooks(HooksState::Seen(summary)).human(&p);
+    assert!(
+        text.contains("tdd-guard") && text.contains("never rendered"),
+        "{text}"
+    );
+    // "apart from", which the name promises and the assertion above does
+    // not test: this fixture's `activity` is empty, so a renderer that
+    // *also* printed the hook as an ordinary activity row would satisfy
+    // every line above. Counted rather than pattern-matched, because the
+    // claim is that the name is spoken once — in the sentence that says omh
+    // cannot vouch for it — and not a second time as a row that looks like
+    // any other hook's.
+    assert_eq!(
+        text.matches("tdd-guard").count(),
+        1,
+        "an unlisted hook is named once, in its own line — never also as an \
+         activity row omh would be standing behind: {text}"
+    );
+}
+
+/// A launch whose ledger named no hooks, read against an events file holding
+/// nothing but torn lines, has one fact to report: the record is damaged.
+/// `hooks_lines`' early return weighed `activity`, `dormant` and `unlisted`
+/// and not `unreadable`, so the single state where damage is the *only* fact
+/// rendered as a blank — a damaged record and a quiet launch looking exactly
+/// alike, which is the confusion `HooksState::Unreadable` exists to prevent,
+/// reached from the other side. Built through `Summary::of` rather than by
+/// hand, because the point is that a real launch can land here.
+#[test]
+fn a_summary_whose_only_fact_is_damage_is_not_silent() {
+    let p = out::Palette::plain();
+    let ledger = crate::ledger::Ledger { hooks: vec![] };
+    let observed = crate::ledger::Observations::parse_all("{\"hook\":\"gra\nnot json at all\n");
+    let summary = crate::ledger::Summary::of(&ledger, &observed);
+    assert_eq!(summary.unreadable, 2, "fixture: both lines are torn");
+    assert!(
+        summary.activity.is_empty() && summary.dormant.is_empty() && summary.unlisted.is_empty(),
+        "fixture: damage is the only fact this summary carries"
+    );
+
+    let text = focused_hooks(HooksState::Seen(summary)).human(&p);
+    assert!(
+        text.contains("could not be read"),
+        "a damaged record must not render as silence: {text:?}"
+    );
+}
+
 /// codex, or a session that predates the ledger: the section says why it has
 /// nothing, rather than staying blank in a way that reads exactly like a
 /// harness whose guards ran and found nothing.
@@ -900,6 +971,93 @@ fn a_harness_with_no_ledger_says_so_rather_than_staying_blank() {
     assert!(
         text.contains("not recorded") && text.contains("codex has no hooks capability"),
         "{text}"
+    );
+}
+
+/// `--json` is a contract, and it had no test at all: every caller of
+/// `focused_hooks` above reads `.human(&p)`, so deleting a key from
+/// `focus_json` outright left the suite green. The two channels are meant to
+/// carry the same four facts about a launch's hooks, and the human one has
+/// already been caught saying less than the JSON did.
+///
+/// Every state is asserted here, not just the interesting one, because the
+/// gap this closes was a whole branch nothing read.
+#[test]
+fn the_hooks_json_carries_every_fact_the_human_report_does() {
+    let mut activity = std::collections::BTreeMap::new();
+    activity.insert(
+        "graph-read".to_string(),
+        crate::ledger::Activity {
+            fired: 3,
+            silent: 1,
+            refused: 0,
+            unevaluated: 0,
+        },
+    );
+    let mut unlisted = std::collections::BTreeMap::new();
+    unlisted.insert(
+        "tdd-guard".to_string(),
+        crate::ledger::Activity {
+            fired: 2,
+            silent: 0,
+            refused: 1,
+            unevaluated: 0,
+        },
+    );
+    let summary = crate::ledger::Summary {
+        activity,
+        dormant: vec!["graph-first".to_string()],
+        unlisted,
+        unreadable: 4,
+    };
+
+    let doc = focused_hooks(HooksState::Seen(summary)).json();
+    let hooks = &doc["focus"]["hooks"];
+    assert_eq!(hooks["state"], serde_json::json!("seen"));
+    assert_eq!(hooks["hooks"]["graph-read"]["fired"], serde_json::json!(3));
+    assert_eq!(hooks["hooks"]["graph-read"]["silent"], serde_json::json!(1));
+    assert_eq!(hooks["dormant"], serde_json::json!(["graph-first"]));
+    assert_eq!(
+        hooks["unlisted"]["tdd-guard"]["fired"],
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        hooks["unlisted"]["tdd-guard"]["refused"],
+        serde_json::json!(1)
+    );
+    assert_eq!(hooks["unreadable"], serde_json::json!(4));
+
+    // `unlisted` is its own key, never folded into `hooks` — the JSON half
+    // of the separation `an_unlisted_hook_is_shown_apart_from_activity`
+    // asserts for the console.
+    assert!(
+        hooks["hooks"]["tdd-guard"].is_null(),
+        "an unlisted hook must not appear as observed activity: {hooks}"
+    );
+
+    // The two states that carry a reason must carry it, so a reader is never
+    // told "no hooks" where the truth is "omh could not look".
+    let not_recorded = focused_hooks(HooksState::NotRecorded("gitdir never mounted".into())).json();
+    assert_eq!(
+        not_recorded["focus"]["hooks"]["state"],
+        serde_json::json!("not-recorded")
+    );
+    assert_eq!(
+        not_recorded["focus"]["hooks"]["why"],
+        serde_json::json!("gitdir never mounted")
+    );
+    let unreadable = focused_hooks(HooksState::Unreadable(
+        "a directory sits at that path".into(),
+    ))
+    .json();
+    assert_eq!(
+        unreadable["focus"]["hooks"]["state"],
+        serde_json::json!("unreadable")
+    );
+    assert_eq!(
+        unreadable["focus"]["hooks"]["why"],
+        serde_json::json!("a directory sits at that path"),
+        "damage must say which damage — three unrelated faults reach this state"
     );
 }
 

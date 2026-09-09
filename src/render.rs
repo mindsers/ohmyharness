@@ -41,11 +41,14 @@ impl From<String> for Document {
     }
 }
 
-/// What every render of one launch shares, whichever capability is being
-/// rendered — the same "built once, invariant across the loop" reasoning
-/// `container::Stager` gives for its own fields, one level up: every one of
-/// these is the same value across a whole `Capability::ALL` pass, only
-/// `cap`, `binding` and `sources` change call to call.
+/// A parameter object, not a domain type: `document` crossed clippy's
+/// too-many-arguments threshold when `log` was added, and these five values
+/// are the ones that stay the same across a whole `Capability::ALL` pass —
+/// only `cap`, `binding` and `sources` change call to call. Unlike
+/// `container::Stager`, which really is constructed once outside its loop,
+/// a `RenderContext` is built fresh on every `Stager::stage` call, from
+/// fields `Stager` already holds; grouping them here says nothing about
+/// when they were computed, only that `document` needs all five together.
 pub struct RenderContext<'a> {
     /// What omh itself contributes. Not a layer — omh's hooks belong to no
     /// directory.
@@ -59,8 +62,10 @@ pub struct RenderContext<'a> {
     /// from `facts::Facts::about`. A program absent from it is one nobody
     /// probed, which suppresses nothing — see `suppressed_by_probe`.
     pub resolves: &'a BTreeMap<String, bool>,
-    /// The guest path of this launch's events file, or `None` for anything
-    /// that is not staging a real launch — see `hook::render`'s own doc.
+    /// The guest path of this launch's events file, or `None` when nothing
+    /// is being staged for a real launch — `omh eject`, `omh doctor`'s
+    /// probe, and (per `container::plan`) a scratch session with no branch,
+    /// which never mounts the shadow gitdir this path would point into.
     pub log: Option<&'a str>,
 }
 
@@ -1238,8 +1243,9 @@ const LOG_BRIDGE: &str = r#"import { appendFileSync } from "node:fs"
 
 // One JSON line per decision, appended to this launch's events file. Never
 // lets a write failure — the file's directory not mounted, say — change what
-// the hook itself does: every call site is inside a `try`, and nothing here
-// ever throws or returns a value a caller could branch on.
+// the hook itself does: the write is inside its own `try`, and this function
+// never throws or returns a value a call site could branch on — so wherever
+// it is called from, the call itself cannot fail.
 const omh_log = (path, hook, decision) => {
   try {
     appendFileSync(path, JSON.stringify({ hook, decision }) + "\n")
@@ -2201,6 +2207,81 @@ mod tests {
         }
     }
 
+    /// `rendered_hooks` is the trusted half of the decision ledger, and it is
+    /// built three times — once in each renderer's own arm of `document`.
+    /// Only claude's was covered, by a `container::plan` test that cannot
+    /// reach the other two; deleting the `push` from *both* the opencode and
+    /// omp arms left the entire suite green.
+    ///
+    /// What that silence costs is not a missing feature. `ledger::Summary`
+    /// partitions observations on membership of this list, so a renderer
+    /// that renders a hook and forgets to record it sends every genuine
+    /// observation of that hook into `unlisted` — which `omh sNN` prints, in
+    /// warning colour, as a hook reporting activity this launch never
+    /// rendered. The report accuses a working hook of forging its own name.
+    ///
+    /// Asserted per the field's own contract — "every hook the launch could
+    /// log and none it could not" — rather than by count, so a fourth
+    /// renderer, or a hook the sandbox drops, is covered without this test
+    /// moving.
+    #[test]
+    fn every_renderer_records_what_it_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/graph-read.json",
+            r#"{"on":"turn-end","run":"echo read"}"#,
+        );
+        file(
+            dir.path(),
+            "h/graph-first.json",
+            r#"{"on":"turn-end","run":"echo first"}"#,
+        );
+
+        let claude = claude_hooks();
+        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 3] = [
+            (hooks_binding(&claude), &claude.tools),
+            (opencode_hooks(), &opencode().tools),
+            (omp_hooks(), &omp().tools),
+        ];
+        for (binding, tools) in paths {
+            let out = document(
+                Capability::Hooks,
+                binding,
+                &[dir.path().join("h")],
+                &RenderContext {
+                    own: &Default::default(),
+                    repo: &Default::default(),
+                    tools,
+                    resolves: &Default::default(),
+                    log: Some(crate::shadow::GUEST_EVENTS),
+                },
+            )
+            .unwrap();
+
+            for name in ["graph-read", "graph-first"] {
+                assert!(
+                    out.rendered_hooks.iter().any(|h| h == name),
+                    "{:?}: {name} reached the body but not the ledger — every \
+                     observation of it would be reported as unlisted: {:?}",
+                    binding.render,
+                    out.rendered_hooks
+                );
+            }
+            // "and none it could not": a name here that never reached the
+            // body would make `dormant` claim a hook rendered and stayed
+            // quiet when it was never there to run.
+            for name in &out.rendered_hooks {
+                assert!(
+                    out.body.contains(name.as_str()),
+                    "{:?}: the ledger names {name}, which never reached the body:\n{}",
+                    binding.render,
+                    out.body
+                );
+            }
+        }
+    }
+
     fn opencode() -> &'static Adapter {
         static CELL: std::sync::OnceLock<Adapter> = std::sync::OnceLock::new();
         CELL.get_or_init(|| Adapter::find(Path::new(ADAPTERS), "opencode").unwrap())
@@ -2252,9 +2333,10 @@ mod tests {
 
     /// `omh eject` calls exactly this render, with `log: None` — this is what
     /// makes `LOG_BRIDGE` a separate constant from `SHELL_BRIDGE` rather than
-    /// folded permanently into it. `plugin()` and `omp_module()` above both
-    /// default to `log: None`, so their ordinary output is the fixture: a
-    /// caller passing `Some` has to say so, same as every other test here.
+    /// folded permanently into it. `plugin()` (opencode's helper, below) and
+    /// `omp_module()` (above) both default to `log: None`, so their ordinary
+    /// output is the fixture: a caller passing `Some` has to say so, same as
+    /// every other test here.
     #[test]
     fn an_unlogged_module_carries_no_plumbing() {
         let hook = ("noted", r#"{"on":"turn-end","run":"echo hi"}"#);
@@ -3019,11 +3101,12 @@ try {{
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    /// The wrapper is one function called from all three renderers, not
-    /// written three times — this is the test that would catch it landing in
-    /// one and being forgotten in the other two. Same hook, driven for real
-    /// through opencode and omp (both `node`); claude's twin lives in
-    /// `hook.rs`, where the same hook runs through `sh` instead.
+    /// `log_call` is one function shared by opencode's and omp's renderers,
+    /// not written twice — this is the test that would catch it landing in
+    /// one and being forgotten in the other. Same hook, driven for real
+    /// through both (each `node`); claude's twin lives in `hook.rs`, where
+    /// the same hook runs through `sh` and the logging statement is
+    /// `log_statement` rather than `log_call` — a shell string, not a JS one.
     #[test]
     #[ignore]
     fn every_harness_that_has_hooks_logs_them() {
@@ -3084,6 +3167,51 @@ try {{
             .unwrap_or_else(|| panic!("not a readable line: {written:?}"));
         assert_eq!(obs.hook, "guard");
         assert_eq!(obs.decision.wire(), "refused", "omp: {written}");
+    }
+
+    /// `Unevaluated`, proven the same way as the three decisions above: real
+    /// `node`, a real events file, read back through `Observation::parse` —
+    /// not the source-text assertion `a_refusal_whose_guard_cannot_be_evaluated_blocks`
+    /// makes about the same branch. `spawnSync` reports `status: null` for a
+    /// killed-by-signal child the same way it does for one that never
+    /// started (`SHELL_BRIDGE`'s `sh`'s own doc), so a `when` that kills its
+    /// own shell (`kill -9 $$`) is a `when` that never ran, from `sh`'s point
+    /// of view, without needing a broken binary in `PATH`.
+    #[test]
+    #[ignore]
+    fn omps_unevaluated_guard_reaches_a_real_events_file() {
+        let hook = r#"{"on":"before-tool","tools":["edit"],"when":"kill -9 $$","refuse":"no"}"#;
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = log_dir.path().join("omp.jsonl");
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "h/guard.json", hook);
+        let doc = document(
+            Capability::Hooks,
+            omp_hooks(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &omp().tools,
+                resolves: &Default::default(),
+                log: Some(log.to_str().unwrap()),
+            },
+        )
+        .unwrap();
+        let result = drive_omp(
+            &doc.body,
+            "tool_call",
+            r#"{ toolName: "edit", input: { filePath: "/work/x" } }"#,
+        );
+        assert!(
+            result.contains("block"),
+            "a predicate that could not be evaluated blocks, fails closed: {result}"
+        );
+        let written = std::fs::read_to_string(&log).expect("omp must have written a line");
+        let obs = crate::ledger::Observation::parse(written.trim())
+            .unwrap_or_else(|| panic!("not a readable line: {written:?}"));
+        assert_eq!(obs.hook, "guard");
+        assert_eq!(obs.decision.wire(), "unevaluated", "omp: {written}");
     }
 
     /// A hook that could not run must not look like a hook that said nothing.

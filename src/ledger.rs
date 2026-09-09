@@ -22,9 +22,11 @@ use std::collections::BTreeMap;
 /// that could not be run both leave a call unblocked, but only the second is
 /// omp's own `!p.ran` branch (`render.rs`'s `omp_one_hook`) — a refusal whose
 /// predicate never ran, so the call is blocked rather than allowed unchecked.
-/// Claude's `{when} || exit 0` cannot draw this distinction from a plain exit
-/// status and never emits it; that is a limit of that renderer, not of this
-/// enum.
+/// Claude's `{when} || { <log silent>; exit 0; }` cannot draw this
+/// distinction from a plain exit status and never emits it; that is a limit
+/// of that renderer, not of this enum. (The bare `{when} || exit 0` this
+/// once named is what `hook::render` emits only when nothing is logging at
+/// all — every launch that records a ledger gets the wrapper.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Decision {
@@ -53,10 +55,18 @@ impl Decision {
 /// vocabulary shared by every renderer that logs at all.
 ///
 /// A plain `String` rather than a `Value`: what a renderer needs is exact
-/// bytes to interpolate into a shell or JS literal, and building the object
-/// here — instead of in three renderers separately — is what keeps
-/// `Observation::parse`'s two keys, `hook` and `decision`, from drifting out
-/// of step with what gets written.
+/// bytes to interpolate into a shell literal, and this is what keeps
+/// `hook::log_statement` (claude, the only renderer that actually calls this
+/// function) from hand-rolling the object and drifting out of step with
+/// `Observation::parse`'s two keys.
+///
+/// The two JS renderers do **not** call this — `render.rs`'s `LOG_BRIDGE`
+/// hand-rolls `JSON.stringify({ hook, decision })` in generated JavaScript,
+/// which cannot call a Rust function. Those two field names are kept in step
+/// with `Wire`'s by hand, not by construction; `render::tests::
+/// every_harness_that_has_hooks_logs_them` is what would actually catch a
+/// drift there, by driving real `node` output back through
+/// `Observation::parse`.
 pub fn line(name: &str, decision: Decision) -> String {
     serde_json::json!({ "hook": name, "decision": decision.wire() }).to_string()
 }
@@ -107,16 +117,32 @@ pub struct Observations {
 }
 
 impl Observations {
-    pub fn parse_all(text: &str) -> Self {
+    /// Every line of an events file, from a `&str` or from raw bytes.
+    ///
+    /// Bytes, not text, is the honest input: the file is agent-writable, so
+    /// it can hold anything. Splitting on `\n` *before* decoding is what
+    /// makes "one poisoned byte costs one line" true rather than nearly
+    /// true. Decoding the whole file with `from_utf8_lossy` first turns a
+    /// bad byte into U+FFFD, and U+FFFD inside a JSON string value leaves
+    /// the line perfectly valid — so a mangled `graph-<?>read` parsed
+    /// cleanly, missed the ledger it could never match, and was reported as
+    /// a hook nobody rendered. One corrupt byte manufactured a forgery
+    /// warning. A line that is not valid UTF-8 is damage, and damage is
+    /// counted.
+    ///
+    /// `\n` cannot appear inside a multi-byte UTF-8 sequence, so splitting
+    /// first can never cut a character in half.
+    pub fn parse_all(input: impl AsRef<[u8]>) -> Self {
         let mut entries = Vec::new();
         let mut unreadable = 0;
-        for line in text.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            match Observation::parse(line) {
-                Some(o) => entries.push(o),
-                None => unreadable += 1,
+        for line in input.as_ref().split(|b| *b == b'\n') {
+            match std::str::from_utf8(line) {
+                Ok(text) if text.trim().is_empty() => continue,
+                Ok(text) => match Observation::parse(text) {
+                    Some(o) => entries.push(o),
+                    None => unreadable += 1,
+                },
+                Err(_) => unreadable += 1,
             }
         }
         Self {
@@ -146,23 +172,58 @@ pub struct Activity {
 }
 
 /// A launch's hooks, read back against what actually happened.
+///
+/// `activity` and `unlisted` are the same trust split the module doc opens
+/// with, applied to the observations themselves rather than only to
+/// `dormant`: an observation naming a hook this launch's `Ledger` actually
+/// rendered goes in `activity`, and one naming anything else is counted,
+/// never dropped, but kept out so it cannot read as a genuine row in a hook
+/// this launch never rendered.
+///
+/// What that buys is bounded, and worth stating precisely, because this is
+/// the module whose thesis is never trusting what the sandbox asserts. The
+/// split keeps *unrendered* names out of `activity`. It does not make the
+/// rows inside `activity` trustworthy: the events file is a fixed path in a
+/// mount the agent can write, and the guest is handed every rendered hook
+/// name in its own settings document, so a `run` can append a line under any
+/// of those names and it will be counted as that hook's own doing. Within
+/// the launch's own names, an observation remains the sandbox's claim about
+/// itself. `shadow.rs`'s doc on `events_ledger` states the same boundary
+/// from the other side.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Summary {
-    /// Every hook with at least one observation, in name order.
+    /// Every hook the ledger named, with at least one observation, in name
+    /// order.
     pub activity: BTreeMap<String, Activity>,
     /// Rendered by this launch and never once observed. Derivable only from
     /// having `Ledger` and `Observations` as separate types — see the module
     /// doc.
     pub dormant: Vec<String>,
+    /// Observations naming a hook absent from the ledger — see the struct
+    /// doc. Never *non*-empty by accident, now that a launch starts its own
+    /// events file empty: a name here was either invented by something
+    /// running in the sandbox, or rendered by a renderer that forgot to
+    /// record it. Both are worth showing rather than dropping, and the
+    /// second is the one a reader is likelier to be looking at, which is why
+    /// `render::tests::every_renderer_records_what_it_rendered` checks every
+    /// hooks-capable renderer's `rendered_hooks` and not just claude's.
+    pub unlisted: BTreeMap<String, Activity>,
     /// Lines `Observations::parse_all` could not read as an observation.
     pub unreadable: usize,
 }
 
 impl Summary {
     pub fn of(ledger: &Ledger, observed: &Observations) -> Self {
+        let rendered: std::collections::BTreeSet<&str> =
+            ledger.hooks.iter().map(String::as_str).collect();
         let mut activity: BTreeMap<String, Activity> = BTreeMap::new();
+        let mut unlisted: BTreeMap<String, Activity> = BTreeMap::new();
         for o in &observed.entries {
-            let a = activity.entry(o.hook.clone()).or_default();
+            let a = if rendered.contains(o.hook.as_str()) {
+                activity.entry(o.hook.clone()).or_default()
+            } else {
+                unlisted.entry(o.hook.clone()).or_default()
+            };
             match o.decision {
                 Decision::Silent => a.silent += 1,
                 Decision::Fired => a.fired += 1,
@@ -179,6 +240,7 @@ impl Summary {
         Self {
             activity,
             dormant,
+            unlisted,
             unreadable: observed.unreadable,
         }
     }
@@ -232,6 +294,34 @@ mod tests {
         assert_eq!(summary.dormant, vec!["graph-orient".to_string()]);
     }
 
+    /// The other half of the fixture above: that stray observation must not
+    /// land in `activity` either. `activity` is what a reader takes as "this
+    /// launch's own hook did this" — a hook's own `run` writing a line under
+    /// any name it likes must not be able to forge one, and a name left over
+    /// from an earlier launch of a resumed session (the events file outlives
+    /// a launch, the ledger does not) must read as what it is rather than as
+    /// this launch's activity.
+    #[test]
+    fn an_observation_for_a_hook_outside_the_ledger_is_unlisted_not_activity() {
+        let ledger = Ledger {
+            hooks: vec!["graph-orient".into()],
+        };
+        let observed = Observations::parse_all(
+            "{\"hook\":\"tdd-guard\",\"decision\":\"fired\"}\n\
+             {\"hook\":\"tdd-guard\",\"decision\":\"fired\"}\n",
+        );
+        let summary = Summary::of(&ledger, &observed);
+        assert!(
+            !summary.activity.contains_key("tdd-guard"),
+            "a hook outside the ledger must not appear as activity: {:?}",
+            summary.activity
+        );
+        assert_eq!(
+            summary.unlisted["tdd-guard"].fired, 2,
+            "but it is still counted, never dropped"
+        );
+    }
+
     #[test]
     fn counts_split_by_decision_not_totalled() {
         let ledger = Ledger {
@@ -249,9 +339,11 @@ mod tests {
 
     #[test]
     fn the_written_line_parses_back_to_the_same_observation() {
-        // The renderers never build this JSON by hand — `ledger::line` is the
-        // one place it is assembled, and this is what keeps that assembly
-        // from drifting out of step with `Observation::parse`.
+        // Claude's renderer never builds this JSON by hand — `line` is the
+        // one place it assembles it — so this is what keeps `line` itself
+        // from drifting out of step with `Observation::parse`. The two JS
+        // renderers hand-roll their own JSON independently; see `line`'s
+        // own doc for how that half is checked instead.
         let written = line("graph-read", Decision::Fired);
         let parsed = Observation::parse(&written).expect("line must parse back");
         assert_eq!(parsed.hook, "graph-read");

@@ -375,7 +375,7 @@ pub fn plan(
         .then_some(crate::shadow::GUEST_EVENTS);
 
     // Built once, which is what the type is for. Constructed inside the loop it
-    // rebuilt all seven values six times and bought nothing its own doc claimed.
+    // rebuilt every value six times and bought nothing its own doc claimed.
     let stager = Stager {
         adapter,
         rules_doc: &rules_doc,
@@ -565,6 +565,22 @@ pub fn plan(
             if let Ok(json) = serde_json::to_string(&record) {
                 let _ = std::fs::write(&shadow.events_ledger, json);
             }
+
+            // The observed half, started empty in the same breath as the
+            // trusted one so the two describe the same window. `ensure`
+            // above leaves an existing gitdir exactly as it is — which is
+            // what makes relaunching safe — so without this the events file
+            // accumulates across every launch of the session while the
+            // ledger beside it is rewritten, and `Summary::of` compares this
+            // launch's hooks against every launch's observations.
+            //
+            // Truncating and creating are the same call here on purpose.
+            // The file's *absence* is a fact `read_hooks` depends on: the
+            // host writes it, so a session with a ledger and no events file
+            // is one whose gitdir never mounted, not one whose hooks were
+            // quiet. That distinction only holds if this never silently
+            // skips a launch.
+            let _ = std::fs::write(crate::shadow::events_file(&shadow.gitdir), "");
         }
 
         mounts.push(Mount {
@@ -777,10 +793,12 @@ pub fn plan(
 
 /// What staging needs that does not change from one capability to the next.
 ///
-/// Seven values, invariant across the six-capability loop, built once before it
-/// — which is what a struct with a method is for, and what this was not doing:
-/// the literal was inside the loop, so every field was rebuilt six times and
-/// the type bought nothing its doc claimed.
+/// Several values, invariant across the six-capability loop, built once
+/// before it — which is what a struct with a method is for, and what this
+/// was not doing: the literal was inside the loop, so every field was
+/// rebuilt six times and the type bought nothing its doc claimed. The count
+/// has grown twice since (`resolves`, then `log`) and is deliberately not
+/// pinned to a number here — see each field's own doc for what it holds.
 ///
 /// `Destination` used to hold the last three, on the argument that they keep
 /// `stage_capability` under clippy's argument count. That function is this
@@ -859,10 +877,21 @@ impl Stager<'_> {
                     if staging == Staging::Skip {
                         continue;
                     }
-                    let Ok(entries) = std::fs::read_dir(src) else {
-                        continue;
-                    };
-                    for entry in entries.flatten() {
+                    // Not a skipped `Err`. `profile.sources` only returns
+                    // paths that exist, so failing here means the layer is
+                    // there and unreadable — and staging it as empty starts
+                    // the session with the agent's skills silently absent.
+                    // `doctor.rs`'s `hooks_row` was fixed to report exactly
+                    // this; the path it audits should not still swallow it.
+                    let entries = std::fs::read_dir(src)
+                        .with_context(|| format!("reading {} for {cap}", src.display()))?;
+                    // Not `.flatten()`, for the reason `render.rs` gives:
+                    // `readdir` can fail part-way through a directory, and
+                    // a dropped entry here is a skill the agent never sees.
+                    for entry in entries {
+                        let entry = entry.with_context(|| {
+                            format!("reading an entry of {} for {cap}", src.display())
+                        })?;
                         // The selection decides what the harness is *offered*.
                         // The layer behind these links is still mounted whole,
                         // so an unselected skill is not loaded but stays
@@ -2670,6 +2699,184 @@ mod tests {
         );
     }
 
+    /// The trusted half of the ledger, read back off real disk after a real
+    /// `plan()` — not asserted by reading the code that writes it. Every
+    /// hook this fixture's own `own_commands()` proves claude actually
+    /// staged must be a name the ledger names too, since that is the whole
+    /// point of writing it: `omh sNN` trusts this file to tell a hook that
+    /// rendered and never fired apart from one that was never part of the
+    /// launch.
+    ///
+    /// This covers claude's path from `plan()` down. The same guarantee for
+    /// the other two renderers is `every_renderer_records_what_it_rendered`
+    /// in `render.rs`, asserted where `rendered_hooks` is actually built —
+    /// three separate accumulations, one per renderer, of which this test
+    /// reaches only one.
+    #[test]
+    fn a_launchs_ledger_is_written_host_side_and_names_what_rendered() {
+        let fx = fixture();
+        let p = plan_for(&fx, "claude");
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        let written = std::fs::read_to_string(&shadow.events_ledger)
+            .expect("a real launch must write the ledger");
+        let ledger: crate::ledger::Ledger = serde_json::from_str(&written)
+            .unwrap_or_else(|e| panic!("the ledger must parse: {e}: {written}"));
+        for (name, _) in own_commands(Some(crate::shadow::GUEST_EVENTS)) {
+            assert!(
+                ledger.hooks.iter().any(|h| h == name),
+                "{name} was staged but is missing from the ledger: {:?}",
+                ledger.hooks
+            );
+        }
+        // And the mount the ledger's own file lives beside is really there —
+        // a ledger naming hooks with nowhere for their events to land would
+        // be a promise `omh sNN` could not keep.
+        assert!(p
+            .mounts
+            .iter()
+            .any(|m| m.guest.to_string_lossy() == crate::shadow::GUEST_GITDIR));
+    }
+
+    /// The two halves of the ledger must describe the same window. The
+    /// trusted half is rewritten by every `Staging::Apply`; the observed half
+    /// lives in the shadow gitdir, which `Shadow::ensure` deliberately leaves
+    /// exactly as it is on a relaunch, so nothing used to truncate it. A
+    /// per-launch ledger reconciled against observations accumulated over
+    /// every previous launch reports last launch's firing counts as this
+    /// launch's, and — worse — a stale line permanently masks a hook that has
+    /// since gone dormant, which is the one row `Ledger` and `Observations`
+    /// exist as separate types to express.
+    ///
+    /// Created rather than merely truncated, and asserted as *existing and
+    /// empty*: its absence is what tells `read_hooks` the gitdir never
+    /// mounted, so the launch that writes the ledger must leave the file
+    /// there for the launch's reader to find.
+    #[test]
+    fn a_launch_starts_the_observed_half_empty_beside_the_trusted_one() {
+        let fx = fixture();
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+
+        let _ = plan_for(&fx, "claude");
+        let events = crate::shadow::events_file(&shadow.gitdir);
+        assert_eq!(
+            std::fs::read_to_string(&events).expect("a real launch must create the events file"),
+            "",
+            "a launch must start its own observed half empty"
+        );
+
+        // A line from this launch, then the relaunch that must not inherit it.
+        std::fs::write(&events, "{\"hook\":\"tdd-guard\",\"decision\":\"fired\"}\n").unwrap();
+        let _ = plan_for(&fx, "claude");
+        assert_eq!(
+            std::fs::read_to_string(&events).expect("the events file must survive a relaunch"),
+            "",
+            "a relaunch must not inherit the previous launch's observations"
+        );
+    }
+
+    /// A layer that exists and cannot be read is a failed launch, not a
+    /// quietly empty one. `profile.sources` only returns paths that exist,
+    /// so a `read_dir` failing here means the layer is there and unreadable
+    /// — a file where a directory belongs, or permissions — and skipping it
+    /// started the session with the agent's skills silently absent and
+    /// nothing anywhere saying so.
+    ///
+    /// This is `hooks_row`'s own rule, applied where the stakes are higher:
+    /// `doctor.rs` was fixed to report an unreadable hooks directory in the
+    /// same pass that left the staging path it audits still skipping one.
+    #[test]
+    fn a_layer_that_exists_and_cannot_be_read_fails_the_launch() {
+        let fx = fixture();
+        let skills = fx.paths.root.join("skills");
+        let _ = std::fs::remove_dir_all(&skills);
+        // A plain file where the layer directory belongs: it exists, so
+        // `sources` hands it over, and `read_dir` then fails on it.
+        std::fs::write(&skills, "not a directory").unwrap();
+
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let (own, repo) = decided_from(&fx);
+        let result = plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Apply,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        );
+        assert!(
+            result.is_err(),
+            "an unreadable layer must not stage as an empty one"
+        );
+    }
+
+    /// A dry run reports the plan a launch *would* carry out — including
+    /// naming the shadow mount, per that mount's own doc — but writing the
+    /// ledger is not reporting. `Staging::Skip` must leave no file for a
+    /// later real `omh sNN` to misread as this launch's own.
+    #[test]
+    fn a_dry_run_writes_no_ledger() {
+        let fx = fixture();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let (own, repo) = decided_from(&fx);
+        plan(
+            &fx.paths,
+            &fx.profile,
+            &adapter,
+            &fx.session,
+            &[],
+            Options {
+                staging: Staging::Skip,
+                persist: crate::persist::Mode::None,
+                tty: true,
+                account_dir: None,
+                memory_bin: None,
+                base: None,
+                omh: own,
+                repo,
+                image: crate::image::tag_for(&adapter, None),
+                resolves: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        assert!(
+            !shadow.events_ledger.exists(),
+            "a dry run must not write a ledger a real launch never asked for"
+        );
+    }
+
+    /// A scratch session (`omh auth`, `omh doctor`'s probe) has no branch and
+    /// mounts no shadow gitdir at all — `log` is `None` for it
+    /// (`session.branch.is_some()`, tested once for `log` and again for the
+    /// mount, the two some distance apart in `plan`), so there is no events
+    /// file for a ledger to name and no ledger gets written either.
+    #[test]
+    fn a_scratch_session_writes_no_ledger() {
+        let mut fx = fixture();
+        fx.session =
+            crate::session::Session::scratch(fx.session.worktree.clone(), fx.session.id.clone());
+        let p = plan_for(&fx, "claude");
+        assert!(
+            !p.mounts
+                .iter()
+                .any(|m| m.guest.to_string_lossy() == crate::shadow::GUEST_GITDIR),
+            "a scratch session must not mount the shadow gitdir at all"
+        );
+        let shadow = crate::shadow::Shadow::new(&fx.paths.shadows(), &fx.session.id);
+        assert!(!shadow.events_ledger.exists());
+    }
+
     /// The list is the order — the thing P3 deferred, because ordering can only
     /// really come from a list somebody wrote. Rules build on each other: a
     /// general one followed by its exception reads differently reversed.
@@ -2824,6 +3031,7 @@ mod tests {
     /// to look for in a settings document is the rendering — asserting the
     /// authored `run` string would pass against a harness that was handed
     /// nothing.
+    ///
     /// `log` must match whatever the `plan()` a caller compares against would
     /// use — `fixture()`'s session always has a branch (`Session::new`), so
     /// every caller comparing against a real `plan()` output passes

@@ -935,6 +935,45 @@ read as guards that ran and found nothing. `omh eject` carries none of this —
 the wrapper that writes it is spliced in only when a real launch is staging
 the events file, never into a config handed to you.
 
+Two more lines appear only when something is wrong, and both are in `--json`
+alongside `hooks`, `dormant` and `unreadable`:
+
+```console
+$ omh s01
+  s01  omh/s01  stopped
+
+  hooks this session
+    graph-read   2 fired
+  tdd-guard reported activity (2 fired) this launch never rendered
+  1 event line could not be read
+```
+
+**unlisted** — *"reported activity … this launch never rendered"* — is a name
+in the events file that this launch's own ledger does not contain. The two
+halves are deliberately unequal in trust: omh writes the ledger itself, on the
+host, before the container starts, while the events file lives in the sandbox
+where the agent can write to it. A name omh never rendered is therefore shown
+apart from the counts it vouches for, and never folded into them. Expect it in
+one of two cases — something in the sandbox invented the name, or a renderer
+rendered a hook and failed to record it. What it does *not* mean any more is a
+leftover from an earlier launch: a launch now starts its own events file
+empty, so the two halves describe the same window.
+
+That trust split is bounded, and worth being plain about: it keeps *unrendered*
+names out of the counts. Within the names a launch did render, an observation
+is still the sandbox's own claim about itself — the guest is handed every
+rendered hook name in its settings document, so a hook's `run` could write a
+line under any of them.
+
+**unreadable** counts lines omh could not parse as an observation, including
+any that is not valid UTF-8. They are counted, never dropped, and never
+silently rounded to nothing: a damaged record and a quiet launch must not look
+alike. If the record is damaged past reading altogether, the block says
+**could not read** and names the file and the reason; if the launch wrote a
+ledger but its events file is missing entirely — a shadow gitdir that never
+mounted — it says so rather than reporting every hook as dormant, which would
+assert they ran and never fired.
+
 The write itself is cheap enough to leave unconditional rather than gate
 behind a setting: measured 2026-09-09, one append averages ~0.65ms in the
 shell wrapper claude's hooks run through (200 appends in a loop) and ~0.03ms

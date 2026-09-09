@@ -1041,14 +1041,7 @@ pub(crate) fn applicable_hooks(
 /// The names a `[use]` list may hold for `cap`: what the catalogue and this
 /// repo declare, minus omh's own, which `[omh]` governs and `[use]` refuses.
 pub(crate) fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result<Vec<String>> {
-    let manifest = base::Manifest::load_dir(&paths.base())?;
-    let owned = manifest.owns();
-    let profile = Profile::resolve(paths);
-    let names: Vec<String> = profile
-        .entries(cap)?
-        .into_iter()
-        .filter(|n| !owned.get(&cap).is_some_and(|o| o.contains_key(n)))
-        .collect();
+    let names = catalogue_names_unfiltered(paths, cap)?;
     if cap != adapter::Capability::Hooks {
         return Ok(names);
     }
@@ -1060,6 +1053,28 @@ pub(crate) fn catalogue_names(paths: &Paths, cap: adapter::Capability) -> Result
         .into_iter()
         .map(|d| d.name.clone())
         .collect();
+    let profile = Profile::resolve(paths);
     let declared = render::declared_stacks(&profile.sources(cap)?)?;
     Ok(applicable_hooks(names, &declared, &detected))
+}
+
+/// `catalogue_names`, before the hooks-only stack filter — every name the
+/// catalogue holds for `cap`, whether or not this checkout's detected stacks
+/// would offer it. `doctor::use_row` needs this half on its own: a `[use]`
+/// name naming a hook a different stack owns is not the same fact as one
+/// naming nothing in the catalogue at all, and reporting both as "not in the
+/// catalogue" sends the reader to `omh info --repo`, which would show the
+/// hook right there.
+pub(crate) fn catalogue_names_unfiltered(
+    paths: &Paths,
+    cap: adapter::Capability,
+) -> Result<Vec<String>> {
+    let manifest = base::Manifest::load_dir(&paths.base())?;
+    let owned = manifest.owns();
+    let profile = Profile::resolve(paths);
+    Ok(profile
+        .entries(cap)?
+        .into_iter()
+        .filter(|n| !owned.get(&cap).is_some_and(|o| o.contains_key(n)))
+        .collect())
 }

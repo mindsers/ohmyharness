@@ -700,9 +700,12 @@ impl Vocabulary {
 ///
 /// `log`, when given, is the guest path of this launch's events file — a
 /// rendered command that reaches a decision runs one more statement first,
-/// recording it (`ledger::line`). `None` for `omh eject` and for anything that
-/// only inspects a rendering rather than staging one for a real launch: an
-/// ejected config handed to the user must carry none of omh's own plumbing.
+/// recording it (`ledger::line`). `None` for `omh eject` (an ejected config
+/// handed to the user must carry none of omh's own plumbing), for anything
+/// that only inspects a rendering rather than staging one, and — per
+/// `container::plan`'s own rule, `session.branch.is_some()` — for a scratch
+/// session (`omh auth`, `omh doctor`'s probe), which never mounts the shadow
+/// gitdir this path would point into.
 pub fn render(
     name: &str,
     hook: &Hook,
@@ -815,8 +818,14 @@ fn fill(template: &str, text: &str, event: &str) -> String {
 /// `printf` itself, and the group never writes to stdout, which on Claude
 /// *is* the protocol payload.
 fn log_statement(path: &str, name: &str, decision: crate::ledger::Decision) -> String {
+    // `2>/dev/null` sits *outside* the group, not inside it next to `>>`.
+    // Redirections on a simple command take effect in the order written, so
+    // `>>path 2>/dev/null` opens `path` — and can fail, printing `sh`'s own
+    // diagnostic to the real stderr — before the `2>/dev/null` beside it is
+    // in effect at all. Applied to the group as a whole, it is in effect
+    // for every redirection the group performs, including the failing one.
     format!(
-        "{{ printf '%s\\n' {} >>{} 2>/dev/null || true; }}",
+        "{{ printf '%s\\n' {} >>{}; }} 2>/dev/null || true",
         shell_single_quote(&crate::ledger::line(name, decision)),
         shell_single_quote(path),
     )
@@ -1778,7 +1787,7 @@ mod tests {
 
     // ── the decision ledger, claude's side ──────────────────────────────────
     //
-    // `logging_line`, below, is `hook::render` with `log` given, run against a
+    // `run_logged`, below, runs `hook::render` with `log` given against a
     // real payload the way `guard.rs`'s `refused` runs a guard. It stays a
     // separate helper from `rendered`/`dropped` rather than growing them a
     // `log` parameter: every other test in this file is about *what* renders,
@@ -1786,15 +1795,14 @@ mod tests {
     // opposite of what `hook::render`'s own doc says about it.
 
     /// Runs a rendered command against a JSON payload and returns
-    /// `(stdout, exit code, what the log file holds)`.
+    /// `(stdout, exit code, stderr)`.
     ///
-    /// The log path is always given, even to a caller checking `log: None`
-    /// renders nothing — the file existing-but-empty and not-existing-at-all
-    /// are both legitimate "nothing was logged" outcomes, and a caller can
-    /// tell which happened from whether `read_to_string` succeeds.
-    fn run_logged(command: &str, payload: &serde_json::Value) -> (String, i32, Option<String>) {
-        let log_dir = tempfile::tempdir().unwrap();
-        let log = log_dir.path().join("events.jsonl");
+    /// Not the log file's own content — every caller here embeds the log
+    /// path it cares about in `command` itself (via `render`'s `log`
+    /// parameter) and reads that path back directly, so a fourth element
+    /// naming a path this helper invented on its own would be a value
+    /// nothing in `command` actually writes to.
+    fn run_logged(command: &str, payload: &serde_json::Value) -> (String, i32, String) {
         let mut child = Command::new("sh")
             .arg("-c")
             .arg(command)
@@ -1813,7 +1821,7 @@ mod tests {
         (
             String::from_utf8_lossy(&out.stdout).to_string(),
             out.status.code().unwrap_or(-1),
-            std::fs::read_to_string(&log).ok(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
         )
     }
 
@@ -1882,11 +1890,14 @@ mod tests {
     }
 
     /// However the events file itself misbehaves — its directory absent, no
-    /// permission to write it — the hook's own exit code must be untouched.
-    /// `log_statement`'s `2>/dev/null || true` is what this proves is load-
-    /// bearing rather than decorative.
+    /// permission to write it — the hook's own exit code and stderr must be
+    /// untouched. The exit code alone is not enough: `sh`'s own `>>` failing
+    /// to open a path prints its diagnostic to stderr the instant it opens
+    /// the redirect, *before* `2>/dev/null` — placed after `>>` inside the
+    /// same simple command — is in effect. `2>/dev/null` has to wrap the
+    /// whole group from *outside* it to catch that.
     #[test]
-    fn logging_cannot_change_the_exit_code_when_the_file_is_unwritable() {
+    fn logging_cannot_change_the_exit_code_or_leak_stderr_when_the_file_is_unwritable() {
         let payload = serde_json::json!({ "tool_input": { "file_path": "x" } });
         for hook in [always_fires(), declines(), always_refuses()] {
             let unwritable = "/no/such/directory/events.jsonl";
@@ -1902,8 +1913,12 @@ mod tests {
                 Outcome::Rendered(r) => r.command,
                 Outcome::Dropped(d) => panic!("{d}"),
             };
-            let (_, code, _) = run_logged(&cmd, &payload);
+            let (_, code, stderr) = run_logged(&cmd, &payload);
             assert_eq!(code, 0, "an unwritable log path must not fail the hook");
+            assert!(
+                stderr.trim().is_empty(),
+                "an unwritable log path must not leak onto stderr either: {stderr}"
+            );
         }
     }
 

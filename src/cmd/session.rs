@@ -857,24 +857,78 @@ fn read_hooks(
     let ledger_text = match std::fs::read_to_string(&shadow.events_ledger) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            // Not every session with hooks has one yet: a scratch session
+            // Not every session with hooks has one: a scratch session
             // (`omh auth`, `omh doctor`) never mounts the shadow gitdir at
             // all, and a session launched by an omh built before this
             // feature shipped never wrote one either. Neither is a damaged
             // record.
-            return report::HooksState::NotRecorded("this session has no recorded ledger".into());
+            //
+            // A third cause omh cannot rule out from here: `plan` writes
+            // this file best-effort and swallows the error, so a launch that
+            // failed to write it lands in exactly this branch. The sentence
+            // therefore names what is missing and stops — an earlier version
+            // asserted the session predated the feature, which sent anyone
+            // hitting a full disk looking in the wrong place entirely.
+            return report::HooksState::NotRecorded(
+                "no ledger was recorded for this session — a scratch session \
+                 writes none, and neither does a launch from an omh older than \
+                 the ledger"
+                    .into(),
+            );
         }
-        Err(_) => return report::HooksState::Unreadable,
+        Err(e) => {
+            return report::HooksState::Unreadable(format!(
+                "{}: {e}",
+                shadow.events_ledger.display()
+            ))
+        }
     };
-    let Ok(ledger) = serde_json::from_str::<crate::ledger::Ledger>(&ledger_text) else {
-        return report::HooksState::Unreadable;
+    let ledger: crate::ledger::Ledger = match serde_json::from_str(&ledger_text) {
+        Ok(ledger) => ledger,
+        Err(e) => {
+            return report::HooksState::Unreadable(format!(
+                "{}: {e}",
+                shadow.events_ledger.display()
+            ))
+        }
     };
-    // The events file is written by the hook wrapper only when a hook
-    // actually reaches a decision — a launch whose hooks never fired never
-    // creates it, and that is zero observations, not a missing record.
-    let events_text =
-        std::fs::read_to_string(crate::shadow::events_file(&shadow.gitdir)).unwrap_or_default();
-    let observed = crate::ledger::Observations::parse_all(&events_text);
+    // Read as bytes, and handed to `parse_bytes` still as bytes: the events
+    // file is agent-writable (it lives inside the mounted gitdir, same as
+    // everything else `shadow.rs` documents as such), and `read_to_string`
+    // fails the *entire* read on the first invalid UTF-8 byte anywhere in
+    // the file — which would collapse every genuine line already written
+    // into zero observations. A torn or binary-corrupted file is a record
+    // omh could not read, not an empty one. Decoding here instead, with
+    // `from_utf8_lossy`, traded that for a subtler fault: see
+    // `Observations::parse_all`, which owns the per-line rule now.
+    //
+    // `NotFound` is not "no hook ever fired". `container::plan` creates
+    // this file empty, host-side, in the same block that writes the ledger
+    // beside it — so a ledger with no events file means the gitdir never
+    // reached the guest, and the honest answer is that omh has no record
+    // rather than a confident zero. Reported as an empty read, it made
+    // every rendered hook `dormant`, which asserts they ran and never
+    // fired; a mount that never happened would have looked exactly like a
+    // quiet launch, and nothing anywhere would have said otherwise. An
+    // empty file that *is* there remains the genuine "rendered, none
+    // fired".
+    let events_bytes = match std::fs::read(crate::shadow::events_file(&shadow.gitdir)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return report::HooksState::NotRecorded(
+                "this launch's shadow gitdir never mounted — omh wrote the ledger but the \
+                 events file beside it is gone"
+                    .into(),
+            );
+        }
+        Err(e) => {
+            return report::HooksState::Unreadable(format!(
+                "{}: {e}",
+                crate::shadow::events_file(&shadow.gitdir).display()
+            ))
+        }
+    };
+    let observed = crate::ledger::Observations::parse_all(&events_bytes);
     report::HooksState::Seen(crate::ledger::Summary::of(&ledger, &observed))
 }
 
@@ -2090,7 +2144,7 @@ mod tests {
         std::fs::write(&shadow.events_ledger, "not json").unwrap();
         assert!(matches!(
             read_hooks(&paths, "s01", &Some(claude)),
-            report::HooksState::Unreadable
+            report::HooksState::Unreadable(_)
         ));
     }
 
@@ -2124,6 +2178,148 @@ mod tests {
         let a = summary.activity["graph-read"];
         assert_eq!((a.fired, a.silent), (1, 1));
         assert_eq!(summary.dormant, vec!["graph-first".to_string()]);
+    }
+
+    /// An events file that will not read at all — a directory sitting at
+    /// that path, say — is a damaged record, not the "hooks rendered and
+    /// none of them fired" that an absent file means. Before the fix, both
+    /// came back as zero observations via `unwrap_or_default`.
+    #[test]
+    fn an_events_file_that_cannot_be_read_is_unreadable_not_empty() {
+        let (_dir, paths) = fixture_paths();
+        let claude = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let shadow = crate::shadow::Shadow::new(&paths.shadows(), "s01");
+        std::fs::create_dir_all(&shadow.gitdir).unwrap();
+        std::fs::write(
+            &shadow.events_ledger,
+            serde_json::to_string(&crate::ledger::Ledger {
+                hooks: vec!["graph-read".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        // A directory where the events file should be a plain file.
+        std::fs::create_dir_all(crate::shadow::events_file(&shadow.gitdir)).unwrap();
+        assert!(matches!(
+            read_hooks(&paths, "s01", &Some(claude)),
+            report::HooksState::Unreadable(_)
+        ));
+    }
+
+    /// One poisoned byte anywhere in the file must cost one unreadable line,
+    /// not the whole file's worth of genuine observations — the same
+    /// "counted, not dropped" rule `Observations::parse_all` already
+    /// enforces per line, extended to surviving a read that isn't valid
+    /// UTF-8 end to end.
+    #[test]
+    fn a_non_utf8_byte_in_the_events_file_costs_one_line_not_the_whole_read() {
+        let (_dir, paths) = fixture_paths();
+        let claude = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let shadow = crate::shadow::Shadow::new(&paths.shadows(), "s01");
+        std::fs::create_dir_all(&shadow.gitdir).unwrap();
+        std::fs::write(
+            &shadow.events_ledger,
+            serde_json::to_string(&crate::ledger::Ledger {
+                hooks: vec!["graph-read".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut bytes = b"{\"hook\":\"graph-read\",\"decision\":\"fired\"}\n".to_vec();
+        bytes.extend_from_slice(&[0xFF, 0xFE, b'\n']);
+        std::fs::write(crate::shadow::events_file(&shadow.gitdir), bytes).unwrap();
+        let report::HooksState::Seen(summary) = read_hooks(&paths, "s01", &Some(claude)) else {
+            panic!("a decodable line beside a mangled one is still Seen");
+        };
+        assert_eq!(summary.activity["graph-read"].fired, 1);
+        assert_eq!(summary.unreadable, 1);
+    }
+
+    /// The other half of "one poisoned byte costs one line": a byte *inside*
+    /// a JSON string value. `from_utf8_lossy` turns it into U+FFFD, which
+    /// leaves the line valid JSON, so it parses — under a hook name no
+    /// ledger will ever contain. `Summary::of` then files it as `unlisted`
+    /// and `omh sNN` prints, in warning colour, that a hook nobody rendered
+    /// reported activity. One corrupt byte manufactures a forgery.
+    ///
+    /// Damage must read as damage wherever it lands, so the count is what
+    /// moves, not the roster.
+    #[test]
+    fn a_poisoned_byte_inside_a_hook_name_is_damage_not_a_hook_nobody_rendered() {
+        let (_dir, paths) = fixture_paths();
+        let claude = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let shadow = crate::shadow::Shadow::new(&paths.shadows(), "s01");
+        std::fs::create_dir_all(&shadow.gitdir).unwrap();
+        std::fs::write(
+            &shadow.events_ledger,
+            serde_json::to_string(&crate::ledger::Ledger {
+                hooks: vec!["graph-read".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut bytes = b"{\"hook\":\"graph-read\",\"decision\":\"fired\"}\n".to_vec();
+        bytes.extend_from_slice(b"{\"hook\":\"graph-");
+        bytes.push(0xFF);
+        bytes.extend_from_slice(b"read\",\"decision\":\"fired\"}\n");
+        std::fs::write(crate::shadow::events_file(&shadow.gitdir), bytes).unwrap();
+
+        let report::HooksState::Seen(summary) = read_hooks(&paths, "s01", &Some(claude)) else {
+            panic!("a decodable line beside a mangled one is still Seen");
+        };
+        assert_eq!(
+            summary.activity["graph-read"].fired, 1,
+            "the good line survives"
+        );
+        assert_eq!(
+            summary.unreadable, 1,
+            "the mangled line is counted as damage"
+        );
+        assert!(
+            summary.unlisted.is_empty(),
+            "a mangled name must not be reported as a hook this launch never \
+             rendered: {:?}",
+            summary.unlisted
+        );
+    }
+
+    /// A ledger with no events file beside it is not a quiet launch — it is
+    /// a launch whose gitdir never reached the guest. `container::plan`
+    /// creates the file host-side, empty, in the same block that writes the
+    /// ledger, so the pair arrives together or not at all.
+    ///
+    /// Three layers each correctly refuse to let a failed log write change
+    /// what a hook does — the shell redirect group in `hook.rs`, the `try`
+    /// around `appendFileSync` in `render.rs`, and this read. Composed, they
+    /// left no channel by which a mount that never happened was ever
+    /// noticed, and the report then stated a falsehood rather than a gap:
+    /// every rendered hook fell into `dormant`, which says they ran and
+    /// never fired. omh had no idea what they did.
+    #[test]
+    fn a_ledger_with_no_events_file_beside_it_is_a_missing_record_not_a_quiet_launch() {
+        let (_dir, paths) = fixture_paths();
+        let claude = crate::adapter::Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let shadow = crate::shadow::Shadow::new(&paths.shadows(), "s01");
+        std::fs::create_dir_all(&shadow.gitdir).unwrap();
+        std::fs::write(
+            &shadow.events_ledger,
+            serde_json::to_string(&crate::ledger::Ledger {
+                hooks: vec!["graph-read".into(), "graph-first".into()],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        // No events file: exactly what a gitdir that never mounted leaves.
+
+        match read_hooks(&paths, "s01", &Some(claude)) {
+            report::HooksState::NotRecorded(why) => assert!(
+                why.contains("never mounted"),
+                "the sentence must point at the mount, not at the hooks: {why}"
+            ),
+            other => panic!(
+                "a ledger with no events file must not be reported as observed hooks: {other:?}"
+            ),
+        }
     }
 
     // ── the launch path, without a container runtime ─────────────────────────

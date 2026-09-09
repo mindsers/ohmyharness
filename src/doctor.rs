@@ -633,39 +633,92 @@ pub fn audit(paths: &crate::profile::Paths) -> Vec<Outcome> {
 /// worth checking against what `catalogue_names` says exists today.
 fn use_row(paths: &crate::profile::Paths, repo: &crate::settings::RepoPolicy) -> Outcome {
     let mut missing = Vec::new();
+    let mut inapplicable = Vec::new();
+    let mut unreadable = Vec::new();
     for cap in crate::adapter::Capability::ALL {
         let Some(names) = repo.selection.order(cap) else {
             continue;
         };
-        let Ok(available) = crate::cmd::catalogue::catalogue_names(paths, cap) else {
-            continue;
+        // Reported rather than skipped: a broken `.omh/stacks/*.toml` or an
+        // unreadable catalogue directory means this capability's drift went
+        // unchecked, and a row that says "resolves" having checked nothing
+        // is worse than one that says why it could not look.
+        //
+        // Collected rather than returned. This runs inside the `for cap`
+        // loop, so returning here threw away every `missing` and
+        // `inapplicable` already found for the capabilities before it — the
+        // user fixed the catalogue, reran `omh doctor`, and only then met
+        // the rest of the drift. One audit should cost one round trip.
+        let available = match crate::cmd::catalogue::catalogue_names(paths, cap) {
+            Ok(names) => names,
+            Err(e) => {
+                unreadable.push(format!("could not read the catalogue for {cap}: {e:#}"));
+                continue;
+            }
         };
+        // Not a second fallible call: `catalogue_names` above starts by
+        // calling this and returns its error, so reaching here at all means
+        // this cannot fail. It is the same read, without the stack filter.
+        let unfiltered =
+            crate::cmd::catalogue::catalogue_names_unfiltered(paths, cap).unwrap_or_default();
         for name in names {
-            if !available.iter().any(|a| a == name) {
+            if available.iter().any(|a| a == name) {
+                continue;
+            }
+            // In the catalogue, just not applicable here — a hook belonging
+            // to a stack this checkout no longer detects — is a different
+            // fact from naming nothing the catalogue has at all, and only
+            // the second is what `omh info --repo` would actually show as
+            // missing.
+            if unfiltered.iter().any(|a| a == name) {
+                inapplicable.push(format!("{cap}/{name}"));
+            } else {
                 missing.push(format!("{cap}/{name}"));
             }
         }
     }
-    if missing.is_empty() {
-        Outcome {
+    if missing.is_empty() && inapplicable.is_empty() && unreadable.is_empty() {
+        return Outcome {
             name: "use".into(),
             ok: true,
             detail: "every name in [use] resolves in the catalogue".into(),
+        };
+    }
+    let mut detail = String::new();
+    // First, because it is the fact that makes the other two incomplete:
+    // whatever else this row says, a capability that could not be read was
+    // never checked at all.
+    if !unreadable.is_empty() {
+        detail.push_str(&unreadable.join("; "));
+    }
+    if !missing.is_empty() {
+        if !detail.is_empty() {
+            detail.push_str("; ");
         }
-    } else {
-        Outcome {
-            name: "use".into(),
-            ok: false,
-            detail: format!(
-                "named in [use], not in the catalogue: {}. `omh info --repo` \
-                 shows what each layer holds",
-                missing.join(", ")
-            ),
+        detail.push_str(&format!(
+            "named in [use], not in the catalogue: {}. `omh info --repo` \
+             shows what each layer holds",
+            missing.join(", ")
+        ));
+    }
+    if !inapplicable.is_empty() {
+        if !detail.is_empty() {
+            detail.push_str("; ");
         }
+        detail.push_str(&format!(
+            "named in [use], in the catalogue but not applicable to a stack this \
+             checkout detects: {}",
+            inapplicable.join(", ")
+        ));
+    }
+    Outcome {
+        name: "use".into(),
+        ok: false,
+        detail,
     }
 }
 
-/// Every file in this repo's own `.omh/hooks/` still parses. The catalogue's
+/// Every `.json` file in this repo's own `.omh/hooks/` still parses. The catalogue's
 /// copies are covered by `everything_in_the_repo_is_embedded_byte_for_byte`;
 /// this is the one place nothing else checks, because it is the one place a
 /// person, not `omh init`, wrote the file.
@@ -688,8 +741,23 @@ fn hooks_row(paths: &crate::profile::Paths) -> Outcome {
             }
         }
     };
+    // Not `.flatten()`. `readdir` can fail part-way through a directory —
+    // `render.rs`'s own rule for the same situation — and dropping that
+    // entry silently would report a directory this row never finished
+    // reading as one where "every file parses". Unguarded by a test: a
+    // `DirEntry` yielding `Err` mid-iteration (as opposed to `read_dir`
+    // itself failing, which the arm above this loop does cover) has no
+    // portable, reliable way to provoke on the platforms this ships for —
+    // written down here rather than left implied by the comment alone.
     let mut broken = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(e) => {
+                broken.push(format!("reading {}: {e}", dir.display()));
+                continue;
+            }
+        };
         let path = entry.path();
         if path.extension().is_none_or(|e| e != "json") {
             continue;
@@ -708,7 +776,7 @@ fn hooks_row(paths: &crate::profile::Paths) -> Outcome {
         Outcome {
             name: "repo hooks".into(),
             ok: true,
-            detail: "every file in .omh/hooks parses".into(),
+            detail: "every .json file in .omh/hooks parses".into(),
         }
     } else {
         Outcome {
@@ -719,12 +787,51 @@ fn hooks_row(paths: &crate::profile::Paths) -> Outcome {
     }
 }
 
-/// Every `carry_in` path exists in this checkout, the same test
-/// `carry::apply`'s `Action::Missing` makes at launch — run here so it
-/// shows up before a session ever starts rather than after one silently
-/// carried nothing.
+/// Every `carry_in` entry is a pattern `carry::validate_pattern` accepts,
+/// and every one that is names something that exists in this checkout.
+///
+/// Two different failures, checked in that order because they fail two
+/// different ways at launch: `carry::apply` validates the *whole list*
+/// before copying anything, so one entry like `/etc/hosts` or `../secrets`
+/// hard-fails the launch outright — `.exists()` alone would miss that
+/// entirely, since the path it names can be real. A path that validates but
+/// is not there, by contrast, is `carry::apply`'s own `Action::Missing`: it
+/// is reported and never copied, launch proceeds — this row exists so that
+/// shows up before a session starts rather than after one silently carried
+/// nothing.
 fn carry_in_row(paths: &crate::profile::Paths) -> Outcome {
-    let patterns = crate::config::policy_list(paths, "carry_in");
+    // The checked read: a `carry_in` that is declared but is not a list
+    // resolves to nothing, and "nothing declared" is exactly the wrong thing
+    // to tell someone who declared something.
+    let patterns = match crate::config::policy_list_checked(paths, "carry_in") {
+        Ok(patterns) => patterns,
+        Err(why) => {
+            return Outcome {
+                name: "carry_in".into(),
+                ok: false,
+                detail: format!("{why} — nothing will be carried until this is a list"),
+            }
+        }
+    };
+    let invalid: Vec<String> = patterns
+        .iter()
+        .filter_map(|p| {
+            crate::carry::validate_pattern(p)
+                .err()
+                .map(|e| format!("{e:#}"))
+        })
+        .collect();
+    if !invalid.is_empty() {
+        return Outcome {
+            name: "carry_in".into(),
+            ok: false,
+            detail: format!(
+                "invalid, and this fails the whole launch rather than just this \
+                 entry: {}",
+                invalid.join("; ")
+            ),
+        };
+    }
     let missing: Vec<&str> = patterns
         .iter()
         .map(String::as_str)
@@ -745,9 +852,9 @@ fn carry_in_row(paths: &crate::profile::Paths) -> Outcome {
             name: "carry_in".into(),
             ok: false,
             detail: format!(
-                "listed, not in this checkout: {} — carried at launch anyway, \
-                 which omh always reports and never fails on; named here so \
-                 it shows up before a session starts",
+                "listed, not in this checkout: {} — never carried, which omh \
+                 always reports and never fails on; named here so it shows up \
+                 before a session starts",
                 missing.join(", ")
             ),
         }
@@ -4321,10 +4428,9 @@ mod tests {
         std::fs::write(p, body).unwrap();
     }
 
-    /// This repo's own catalogue and settings, audited by the function that
-    /// is about to become part of `omh doctor` — the CI gate. It needs no
-    /// container, so it must run on every platform CI builds on, not only
-    /// the one with Docker.
+    /// This repo's own catalogue and settings, audited by the function
+    /// `omh doctor` runs — the CI gate. It needs no container, so it must
+    /// run on every platform CI builds on, not only the one with Docker.
     #[test]
     fn this_repos_own_config_audits_clean() {
         let dir = tempfile::tempdir().unwrap();
@@ -4373,6 +4479,140 @@ mod tests {
         );
         // And the rows around it still ran — one bad name is not a crash.
         assert!(rows.iter().any(|r| r.name == "declared config" && r.ok));
+    }
+
+    /// A hook belonging to a stack this checkout does not detect is in the
+    /// catalogue — `omh info --repo` would show it — so reporting it the
+    /// same way as a name that names nothing at all sends the reader to a
+    /// command that contradicts the row.
+    #[test]
+    fn a_hook_inapplicable_to_this_stack_is_distinct_from_absent() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/settings.toml"),
+            "[use]\nhooks = [\"go-test\"]\n",
+        );
+        // No `go.mod`, so the go stack is not detected here.
+        let rows = audit(&paths);
+        let use_row = rows.iter().find(|r| r.name == "use").unwrap();
+        assert!(!use_row.ok, "{rows:?}");
+        assert!(
+            use_row.detail.contains("go-test") && use_row.detail.contains("not applicable"),
+            "must say inapplicable, not absent: {}",
+            use_row.detail
+        );
+        assert!(
+            !use_row.detail.contains("not in the catalogue"),
+            "go-test is in the catalogue, just not applicable here: {}",
+            use_row.detail
+        );
+    }
+
+    /// A broken `.omh/stacks/*.toml` breaks `catalogue_names` for hooks —
+    /// `use_row` must report that as its own failure, not skip the
+    /// capability and print "resolves" having checked nothing.
+    #[test]
+    fn a_catalogue_use_row_cannot_read_is_a_failing_row_not_a_skip() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/settings.toml"),
+            "[use]\nhooks = [\"go-test\"]\n",
+        );
+        write(&paths.repo.join(".omh/stacks/broken.toml"), "not valid [[[");
+        let rows = audit(&paths);
+        let use_row = rows.iter().find(|r| r.name == "use").unwrap();
+        assert!(
+            !use_row.ok,
+            "a catalogue the row could not read must not report clean: {rows:?}"
+        );
+        // Which failure, not just that one happened. The same fixture also
+        // leaves `go-test` inapplicable to a checkout with no `go.mod`, and
+        // that branch fails the row too — so `!ok` alone would still hold if
+        // a refactor routed the unreadable catalogue back into a skip.
+        assert!(
+            use_row.detail.contains("could not read"),
+            "the row must say the catalogue could not be read, not merely \
+             fail for some other reason: {}",
+            use_row.detail
+        );
+    }
+
+    /// Drift already found is not thrown away by a later capability failing
+    /// to read. `use_row` returned from inside the `for cap` loop, so an
+    /// `mcp` name naming nothing in the catalogue was discarded the moment
+    /// `hooks` hit a broken `.omh/stacks/*.toml` — the user fixed the
+    /// catalogue, reran `omh doctor`, and only then learned about the second
+    /// problem. One audit, two round trips, and the row never lied: it just
+    /// said less than it knew.
+    #[test]
+    fn a_capability_that_cannot_be_read_does_not_discard_drift_already_found() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/settings.toml"),
+            "[use]\nmcp = [\"no-such-server\"]\nhooks = [\"go-test\"]\n",
+        );
+        write(&paths.repo.join(".omh/stacks/broken.toml"), "not valid [[[");
+        let rows = audit(&paths);
+        let use_row = rows.iter().find(|r| r.name == "use").unwrap();
+        assert!(!use_row.ok, "{rows:?}");
+        assert!(
+            use_row.detail.contains("could not read"),
+            "the unreadable catalogue must still be reported: {}",
+            use_row.detail
+        );
+        assert!(
+            use_row.detail.contains("no-such-server"),
+            "and the drift found before it must survive into the same row: {}",
+            use_row.detail
+        );
+    }
+
+    /// `carry::apply` validates every pattern before copying anything, so an
+    /// invalid one hard-fails the whole launch — `.exists()` alone would
+    /// miss it entirely, since the path an invalid pattern names can be
+    /// real.
+    #[test]
+    fn an_invalid_carry_in_pattern_is_its_own_failing_row() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/settings.toml"),
+            "carry_in = [\"../secrets\"]\n",
+        );
+        let rows = audit(&paths);
+        let carry = rows.iter().find(|r| r.name == "carry_in").unwrap();
+        assert!(!carry.ok, "{rows:?}");
+        assert!(
+            carry.detail.contains("whole launch"),
+            "must say this fails the launch, not just this entry: {}",
+            carry.detail
+        );
+    }
+
+    /// `carry_in = ".env"` — a string where a list belongs — is the shape a
+    /// person writes first, and it parsed fine, resolved to nothing, and was
+    /// reported as nothing declared. The `.env` never reached the sandbox
+    /// and every layer agreed there had been nothing to carry: `policy_list`
+    /// dropped the wrong type, `container::plan` carried the empty list it
+    /// got, and this row — whose whole purpose is to surface carry_in
+    /// problems before a session starts — said ok.
+    #[test]
+    fn a_carry_in_that_is_not_a_list_is_a_failing_row_not_nothing_declared() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/settings.toml"),
+            "carry_in = \".env\"\n",
+        );
+        let rows = audit(&paths);
+        let carry = rows.iter().find(|r| r.name == "carry_in").unwrap();
+        assert!(
+            !carry.ok,
+            "a carry_in omh cannot read must not report as nothing declared: {rows:?}"
+        );
+        assert!(
+            carry.detail.contains("list"),
+            "the row must say what shape was expected: {}",
+            carry.detail
+        );
     }
 
     #[test]

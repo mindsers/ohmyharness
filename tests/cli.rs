@@ -9130,7 +9130,7 @@ fn a_hook_init_derives_later_is_selected_too() {
 }
 
 /// A guard (`refuse`) is a catalogue member like any other hook — nameable
-/// with `omh use hooks tdd-guard`, listed by `omh catalog info`, removable the
+/// with `omh use hooks tdd-guard`, listed by `omh info`, removable the
 /// same way — but it is never part of what a bare `omh init` turns on for
 /// you. Every other catalogue hook is safe to run unattended; a guard can
 /// refuse the agent's very first edit, which is not the promise `omh init &&

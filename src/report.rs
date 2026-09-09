@@ -1115,14 +1115,27 @@ pub enum Activity {
 pub enum HooksState {
     /// A launch that could have logged, read back against what it did.
     Seen(crate::ledger::Summary),
-    /// codex (no hooks capability), or a session launched before the ledger
-    /// existed — two different sentences, kept as one variant because a
-    /// reader only ever needs the one that applies to say why the section is
-    /// empty.
+    /// codex (no hooks capability), a session whose harness omh could not
+    /// even identify, or one launched before the ledger existed — three
+    /// different sentences, kept as one variant because a reader only ever
+    /// needs the one that applies to say why the section is empty.
     NotRecorded(String),
-    /// The ledger or the events file exists and omh could not read it as
-    /// either — a damaged record must not read as "nothing happened".
-    Unreadable,
+    /// The ledger file or the events file exists and omh could not read it
+    /// as one — a damaged record must not read as "nothing happened". The
+    /// sentence is carried, as `NotRecorded` carries one: three unrelated
+    /// faults reach this variant, and "omh could not read this session's
+    /// hook events" told a user with an `EACCES` on the ledger, a user whose
+    /// disk filled mid-write, and a user with a directory at the events path
+    /// exactly the same unactionable thing.
+    ///
+    /// `read_hooks` reaches this from either file, but only from damage
+    /// that defeats the whole read: a ledger that will not parse, or an
+    /// events file that will not open at all (a directory sitting at that
+    /// path, say). Damage to *part* of a readable events file — a torn or
+    /// non-UTF-8 line — is counted by `Observations::parse_all` instead and
+    /// still reaches `Seen`, because the lines around it are real
+    /// observations and dropping them would be its own dishonesty.
+    Unreadable(String),
 }
 
 /// The last result of `omh sNN commit`'s checks, from `runs/<id>/check.json`.
@@ -1459,31 +1472,53 @@ fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
 /// `hooks this session`, one line per hook that has anything to say, and a
 /// closing `dormant` line for any that rendered and never fired at all.
 ///
-/// Silent about a `Seen` summary with nothing in it — every rendered hook
-/// dormant is not a defect and does not need a paragraph — but says why an
-/// empty section is empty otherwise, matching the rest of this file's rule
-/// that a blank line and "nothing to report" must never look the same.
+/// Silent only when there is truly nothing to say about this launch's hooks
+/// at all — `activity`, `dormant` and `unlisted` all empty *and* nothing
+/// unreadable, which means this launch's ledger named no hooks in the first
+/// place and the events file held nothing torn. A launch whose hooks rendered
+/// and *all* went dormant still prints the `dormant` line — that is itself the
+/// fact worth showing, not a case to stay quiet about.
+///
+/// `unreadable` belongs in that condition and was once left out of it, which
+/// is the whole of `a_summary_whose_only_fact_is_damage_is_not_silent`: a
+/// ledger naming no hooks, read against an events file of only torn lines,
+/// printed a blank while `--json` reported the damage — the two channels
+/// disagreeing about one summary.
+/// One hook's tally, as the words the report says out loud — omitting every
+/// decision that never happened, so a guard that only ever fired reads as
+/// `3 fired` rather than `3 fired, 0 silent, 0 refused`.
+///
+/// One function because the caller had two verbatim copies, in the activity
+/// block and the unlisted block, and a fifth `Decision` would have had to be
+/// remembered in both.
+fn decision_parts(a: &crate::ledger::Activity) -> Vec<String> {
+    let mut parts = Vec::new();
+    for (n, word) in [
+        (a.fired, "fired"),
+        (a.silent, "silent"),
+        (a.refused, "refused"),
+        (a.unevaluated, "unevaluated"),
+    ] {
+        if n > 0 {
+            parts.push(format!("{n} {word}"));
+        }
+    }
+    parts
+}
+
 fn hooks_lines(p: &out::Palette, hooks: &HooksState) -> String {
     match hooks {
         HooksState::Seen(summary) => {
-            if summary.activity.is_empty() && summary.dormant.is_empty() {
+            if summary.activity.is_empty()
+                && summary.dormant.is_empty()
+                && summary.unlisted.is_empty()
+                && summary.unreadable == 0
+            {
                 return String::new();
             }
             let mut s = format!("  {}\n", p.paint(out::HEAD, "hooks this session"));
             for (name, a) in &summary.activity {
-                let mut parts = Vec::new();
-                if a.fired > 0 {
-                    parts.push(format!("{} fired", a.fired));
-                }
-                if a.silent > 0 {
-                    parts.push(format!("{} silent", a.silent));
-                }
-                if a.refused > 0 {
-                    parts.push(format!("{} refused", a.refused));
-                }
-                if a.unevaluated > 0 {
-                    parts.push(format!("{} unevaluated", a.unevaluated));
-                }
+                let parts = decision_parts(a);
                 s.push_str(&format!(
                     "    {}   {}\n",
                     out::untrusted(name),
@@ -1500,6 +1535,24 @@ fn hooks_lines(p: &out::Palette, hooks: &HooksState) -> String {
                         .map(|n| out::untrusted(n))
                         .collect::<Vec<_>>()
                         .join(", ")
+                ));
+            }
+            // Named as what it is — an observation this launch's own ledger
+            // does not vouch for — rather than folded into `activity`, where
+            // it would read as a real hook's own doing. See `ledger.rs`'s
+            // doc on `Summary.unlisted`.
+            for (name, a) in &summary.unlisted {
+                let parts = decision_parts(a);
+                s.push_str(&format!(
+                    "  {}\n",
+                    p.paint(
+                        out::WARN,
+                        &format!(
+                            "{} reported activity ({}) this launch never rendered",
+                            out::untrusted(name),
+                            parts.join(", ")
+                        )
+                    )
                 ));
             }
             if summary.unreadable > 0 {
@@ -1527,9 +1580,12 @@ fn hooks_lines(p: &out::Palette, hooks: &HooksState) -> String {
                 p.paint(out::DIM, &format!("hooks: not recorded — {why}"))
             )
         }
-        HooksState::Unreadable => format!(
+        HooksState::Unreadable(why) => format!(
             "  {}\n",
-            p.paint(out::WARN, "omh could not read this session's hook events")
+            p.paint(
+                out::WARN,
+                &format!("omh could not read this session's hook events — {why}")
+            )
         ),
     }
 }
@@ -1567,10 +1623,14 @@ fn focus_json(focus: &Focus) -> serde_json::Value {
                 "refused": a.refused, "unevaluated": a.unevaluated,
             }))).collect::<serde_json::Map<_, _>>(),
             "dormant": summary.dormant,
+            "unlisted": summary.unlisted.iter().map(|(name, a)| (name.clone(), json!({
+                "fired": a.fired, "silent": a.silent,
+                "refused": a.refused, "unevaluated": a.unevaluated,
+            }))).collect::<serde_json::Map<_, _>>(),
             "unreadable": summary.unreadable,
         }),
         HooksState::NotRecorded(why) => json!({ "state": "not-recorded", "why": why }),
-        HooksState::Unreadable => json!({ "state": "unreadable" }),
+        HooksState::Unreadable(why) => json!({ "state": "unreadable", "why": why }),
     };
     json!({ "activity": activity, "check": check, "hooks": hooks })
 }
