@@ -1427,6 +1427,7 @@ fn a_failed_check_is_legible_with_no_colour_at_all() {
             tag: "omh/claude:abc".into(),
         }),
         account: None,
+        host_count: 0,
         outcomes: vec![check("rules", true), check("mcp", false)],
     };
 
@@ -1455,6 +1456,69 @@ fn a_failed_check_is_legible_with_no_colour_at_all() {
     );
 }
 
+/// A host row and a sandbox row used to render as one undivided table —
+/// `every_check` flattened `HostRows` and the sandbox's own answers into a
+/// single `Vec` before either report saw them, so nothing downstream could
+/// tell "your disk is full" from "this harness has no `mcp.json`" apart.
+/// `host_count` is the split point that survives the flattening: a heading
+/// between the two halves, in the order they were gathered.
+#[test]
+fn a_doctor_run_keeps_its_sections() {
+    let report = Doctor {
+        sandbox: Some(DoctorSandbox {
+            harness: "claude".into(),
+            tag: "omh/claude:abc".into(),
+        }),
+        account: None,
+        outcomes: vec![
+            check("container runtime", true),
+            check("disk", true),
+            check("rules", true),
+            check("mcp", false),
+        ],
+        host_count: 2,
+    };
+    let human = report.human(&Palette::plain());
+
+    let host_heading = human.find("host").expect("a host heading");
+    let harness_heading = human
+        .find("claude in omh/claude:abc")
+        .expect("a heading naming the harness and its image");
+    let disk = human.find("disk").expect("a host row");
+    let rules = human.find("rules").expect("a sandbox row");
+    let mcp = human.find("mcp").expect("the failing sandbox row");
+
+    assert!(
+        host_heading < disk && disk < harness_heading,
+        "a host row must land under the host heading, before the harness \
+         heading starts: {human}"
+    );
+    assert!(
+        harness_heading < rules && harness_heading < mcp,
+        "a sandbox row must land under the harness heading, never above it: {human}"
+    );
+}
+
+/// A host-only run (nothing ran in a sandbox) is exactly one table with no
+/// heading at all — the two-section split only exists once there is a
+/// second section to tell apart from the first.
+#[test]
+fn a_host_only_run_has_no_section_heading() {
+    let report = Doctor {
+        sandbox: None,
+        account: None,
+        outcomes: vec![check("container runtime", true), check("disk", true)],
+        host_count: 2,
+    };
+    let human = report.human(&Palette::plain());
+    assert!(
+        !human.starts_with("host\n"),
+        "a host-only run must not print a heading for a section that has no \
+         sibling — its own success line already says \"the host answered\", \
+         so this checks for the heading specifically, not the word: {human}"
+    );
+}
+
 /// The tally and the list cannot disagree, and **the verdict is a bool**.
 ///
 /// The counts are derived, not stored, so a script can trust them against
@@ -1475,6 +1539,7 @@ fn the_tally_is_the_list_counted_and_the_verdict_is_not_a_tally() {
             tag: "t".into(),
         }),
         account: Some("work".into()),
+        host_count: 0,
         outcomes: vec![check("a", true), check("b", false), check("c", false)],
     };
     let machine = report.json();
@@ -1514,6 +1579,7 @@ fn a_probe_that_produced_nothing_is_not_reported_as_a_pass() {
             tag: "t".into(),
         }),
         account: None,
+        host_count: 0,
         outcomes: vec![],
     };
     assert_eq!(empty.failed(), 0, "nothing failed, because nothing ran");

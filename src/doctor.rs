@@ -589,6 +589,171 @@ pub fn settings_checks(read: &SettingsRead, known: &[&str]) -> Vec<Outcome> {
 /// moves into the type instead of being given up.
 pub struct HostRows(pub Vec<Outcome>);
 
+/// What this checkout *declares* — read without a container, so it runs on
+/// a machine with no runtime and belongs beside `settings_checks` in the
+/// host chain rather than behind the sandbox.
+///
+/// `settings_checks` already catches a settings file that will not parse
+/// or a key nothing reads; this catches drift `settings::resolve` itself
+/// cannot see, because it never looks at the catalogue or the filesystem —
+/// a `[use]` name a rename left behind, a `carry_in` path that moved, a
+/// hand-edited repo hook that does not parse.
+pub fn audit(paths: &crate::profile::Paths) -> Vec<Outcome> {
+    let (_, repo) = match crate::cmd::session::resolved(paths) {
+        Ok(pair) => pair,
+        // Every check below reads the resolved policy, so a repo whose
+        // settings do not even resolve gets one named row instead of a
+        // crash — `settings::resolve` fails on real structural mistakes
+        // `settings_checks` cannot see, since that reads the raw TOML and
+        // this reads what omh made of it (an owned name in `[use]`, a
+        // removed `[toolchain]` table, `[[omhh]]`).
+        Err(e) => {
+            return vec![Outcome {
+                name: "declared config".into(),
+                ok: false,
+                detail: format!("{e:#}"),
+            }]
+        }
+    };
+
+    let mut out = vec![Outcome {
+        name: "declared config".into(),
+        ok: true,
+        detail: "resolves".into(),
+    }];
+    out.push(use_row(paths, &repo));
+    out.push(hooks_row(paths));
+    out.push(carry_in_row(paths));
+    out
+}
+
+/// Every name in `[use]` still names a catalogue entry. `Selection::order`
+/// answers `None` for a capability following the whole catalogue — nothing
+/// was declared, so nothing can have drifted — and only a `Some` list is
+/// worth checking against what `catalogue_names` says exists today.
+fn use_row(paths: &crate::profile::Paths, repo: &crate::settings::RepoPolicy) -> Outcome {
+    let mut missing = Vec::new();
+    for cap in crate::adapter::Capability::ALL {
+        let Some(names) = repo.selection.order(cap) else {
+            continue;
+        };
+        let Ok(available) = crate::cmd::catalogue::catalogue_names(paths, cap) else {
+            continue;
+        };
+        for name in names {
+            if !available.iter().any(|a| a == name) {
+                missing.push(format!("{cap}/{name}"));
+            }
+        }
+    }
+    if missing.is_empty() {
+        Outcome {
+            name: "use".into(),
+            ok: true,
+            detail: "every name in [use] resolves in the catalogue".into(),
+        }
+    } else {
+        Outcome {
+            name: "use".into(),
+            ok: false,
+            detail: format!(
+                "named in [use], not in the catalogue: {}. `omh info --repo` \
+                 shows what each layer holds",
+                missing.join(", ")
+            ),
+        }
+    }
+}
+
+/// Every file in this repo's own `.omh/hooks/` still parses. The catalogue's
+/// copies are covered by `everything_in_the_repo_is_embedded_byte_for_byte`;
+/// this is the one place nothing else checks, because it is the one place a
+/// person, not `omh init`, wrote the file.
+fn hooks_row(paths: &crate::profile::Paths) -> Outcome {
+    let dir = paths.repo.join(".omh").join("hooks");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Outcome {
+                name: "repo hooks".into(),
+                ok: true,
+                detail: "none declared here".into(),
+            }
+        }
+        Err(e) => {
+            return Outcome {
+                name: "repo hooks".into(),
+                ok: false,
+                detail: format!("reading {}: {e}", dir.display()),
+            }
+        }
+    };
+    let mut broken = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        let name = path.file_stem().unwrap_or_default().to_string_lossy();
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => {
+                if let Err(e) = crate::hook::Hook::parse(&raw, &path.display().to_string()) {
+                    broken.push(format!("{name}: {e:#}"));
+                }
+            }
+            Err(e) => broken.push(format!("{name}: {e}")),
+        }
+    }
+    if broken.is_empty() {
+        Outcome {
+            name: "repo hooks".into(),
+            ok: true,
+            detail: "every file in .omh/hooks parses".into(),
+        }
+    } else {
+        Outcome {
+            name: "repo hooks".into(),
+            ok: false,
+            detail: broken.join("; "),
+        }
+    }
+}
+
+/// Every `carry_in` path exists in this checkout, the same test
+/// `carry::apply`'s `Action::Missing` makes at launch — run here so it
+/// shows up before a session ever starts rather than after one silently
+/// carried nothing.
+fn carry_in_row(paths: &crate::profile::Paths) -> Outcome {
+    let patterns = crate::config::policy_list(paths, "carry_in");
+    let missing: Vec<&str> = patterns
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !paths.repo.join(p.trim().trim_end_matches('/')).exists())
+        .collect();
+    if missing.is_empty() {
+        Outcome {
+            name: "carry_in".into(),
+            ok: true,
+            detail: if patterns.is_empty() {
+                "nothing declared".into()
+            } else {
+                "every listed path exists".into()
+            },
+        }
+    } else {
+        Outcome {
+            name: "carry_in".into(),
+            ok: false,
+            detail: format!(
+                "listed, not in this checkout: {} — carried at launch anyway, \
+                 which omh always reports and never fails on; named here so \
+                 it shows up before a session starts",
+                missing.join(", ")
+            ),
+        }
+    }
+}
+
 /// What the host has to offer, before any of it is used.
 ///
 /// **These belong before the container work, not after it.** Every other
@@ -4123,5 +4288,125 @@ mod tests {
                 "the probe greps for a phrase the description does not use: {phrasing}"
             );
         }
+    }
+
+    /// A repo and a catalogue `audit` can resolve against — the shipped
+    /// `base/` and `adapters/`, copied byte for byte the way `tests/cli.rs`'s
+    /// `seed_base`/`seed_adapters` do, so a hand-built manifest cannot drift
+    /// from the one `settings::resolve` actually reads in production.
+    fn audit_fixture() -> (tempfile::TempDir, Paths) {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        for kind in ["base", "adapters", "hooks", "stacks"] {
+            let src = Path::new(env!("CARGO_MANIFEST_DIR")).join(kind);
+            let dst = paths.root.join(kind);
+            std::fs::create_dir_all(&dst).unwrap();
+            for entry in std::fs::read_dir(src).unwrap().flatten() {
+                std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+            }
+        }
+        std::fs::create_dir_all(paths.repo.join(".git")).unwrap();
+        (dir, paths)
+    }
+
+    fn write(p: &Path, body: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    /// This repo's own catalogue and settings, audited by the function that
+    /// is about to become part of `omh doctor` — the CI gate. It needs no
+    /// container, so it must run on every platform CI builds on, not only
+    /// the one with Docker.
+    #[test]
+    fn this_repos_own_config_audits_clean() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().to_path_buf(),
+            repo: PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        };
+        for kind in ["base", "adapters", "hooks", "stacks"] {
+            let src = paths.repo.join(kind);
+            let dst = paths.root.join(kind);
+            std::fs::create_dir_all(&dst).unwrap();
+            for entry in std::fs::read_dir(src).unwrap().flatten() {
+                std::fs::copy(entry.path(), dst.join(entry.file_name())).unwrap();
+            }
+        }
+        let rows = audit(&paths);
+        for row in &rows {
+            assert!(row.ok, "{}: {}", row.name, row.detail);
+        }
+    }
+
+    #[test]
+    fn a_settings_file_that_does_not_parse_is_a_row_not_a_crash() {
+        let (_dir, paths) = audit_fixture();
+        write(&paths.repo.join(".omh/settings.toml"), "not valid toml [[[");
+        let rows = audit(&paths);
+        assert_eq!(rows.len(), 1, "nothing else can be checked: {rows:?}");
+        assert_eq!(rows[0].name, "declared config");
+        assert!(!rows[0].ok);
+    }
+
+    #[test]
+    fn a_name_in_use_that_the_catalogue_lost_is_one_failing_row() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/settings.toml"),
+            "[use]\nskills = [\"renamed-away\"]\n",
+        );
+        let rows = audit(&paths);
+        let use_row = rows.iter().find(|r| r.name == "use").unwrap();
+        assert!(!use_row.ok, "{rows:?}");
+        assert!(
+            use_row.detail.contains("renamed-away"),
+            "named, not just counted: {}",
+            use_row.detail
+        );
+        // And the rows around it still ran — one bad name is not a crash.
+        assert!(rows.iter().any(|r| r.name == "declared config" && r.ok));
+    }
+
+    #[test]
+    fn a_carry_in_path_that_is_gone_is_a_row() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/settings.toml"),
+            "carry_in = [\".env.local\"]\n",
+        );
+        let rows = audit(&paths);
+        let carry = rows.iter().find(|r| r.name == "carry_in").unwrap();
+        assert!(!carry.ok, "{rows:?}");
+        assert!(carry.detail.contains(".env.local"), "{}", carry.detail);
+    }
+
+    #[test]
+    fn a_carry_in_path_that_exists_is_clean() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/settings.toml"),
+            "carry_in = [\".env.local\"]\n",
+        );
+        write(&paths.repo.join(".env.local"), "SECRET=1");
+        let rows = audit(&paths);
+        let carry = rows.iter().find(|r| r.name == "carry_in").unwrap();
+        assert!(carry.ok, "{rows:?}");
+    }
+
+    #[test]
+    fn a_repo_hook_that_does_not_parse_is_a_row_not_a_crash() {
+        let (_dir, paths) = audit_fixture();
+        write(
+            &paths.repo.join(".omh/hooks/broken.json"),
+            "{ this is not json",
+        );
+        let rows = audit(&paths);
+        let hooks = rows.iter().find(|r| r.name == "repo hooks").unwrap();
+        assert!(!hooks.ok, "{rows:?}");
+        assert!(hooks.detail.contains("broken"), "{}", hooks.detail);
     }
 }

@@ -279,6 +279,7 @@ pub(crate) fn doctor_cmd(
                 .output(),
         ))
         .chain(doctor::git_checks())
+        .chain(doctor::audit(&paths))
         .collect::<Vec<_>>();
     let host = doctor::HostRows(host);
 
@@ -292,6 +293,7 @@ pub(crate) fn doctor_cmd(
         let report = report::Doctor {
             sandbox: None,
             account: None,
+            host_count: rows.len(),
             outcomes: rows,
         };
         ctx.say(&report);
@@ -542,6 +544,7 @@ pub(crate) fn doctor_cmd(
                                                                    // explanation to a cause — with an empty stderr rendering as a bare
                                                                    // `omh:` and nothing after it. The sentence omh wrote stays first, and
                                                                    // what the container said follows it, sanitised: it is not omh's text.
+        let host_count = host.0.len();
         let outcomes = crate::cmd::harvest::every_check(from_the_sandbox, host).map_err(|e| {
             match crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim()) {
                 said if said.is_empty() => e,
@@ -555,6 +558,7 @@ pub(crate) fn doctor_cmd(
                 tag: sandbox.tag.clone(),
             }),
             account: account_name,
+            host_count,
             outcomes,
         };
         ctx.say(&report);

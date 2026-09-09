@@ -1515,7 +1515,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         //
         // One of them was written `omh s rm <id>`, which does not parse,
         // and the scan caught it.
-        ("src/doctor.rs", 6),
+        ("src/doctor.rs", 7), // + `omh info --repo` in the `use` row's detail
         // Three. One is the `# `omh set --local ca_cert`` line `ca_layer`
         // writes into the generated Dockerfile, telling whoever reads the
         // recipe where the certificate came from. **Not** either of

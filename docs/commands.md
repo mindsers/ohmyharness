@@ -290,20 +290,27 @@ Launches the real image with the real mounts and checks the guest paths the
 adapter claims. The only thing that can verify an adapter. See
 [Troubleshooting](troubleshooting.md).
 
-**It gathers the host first, and reports it whatever happens next.** Seven
-rows, computed before any container work: whether the container runtime is
-**answering** (not merely installed — a stopped Docker Desktop is on `PATH` and
-useless), the stacks it detected and the marker file that decided each,
-settings set here that omh does not read, what omh has left behind, which omh
-set this checkout up, disk free where omh keeps its state, and the host's git.
-An eighth appears only when this repo has no commit for a session branch to
-fork from.
+**It gathers the host first, and reports it whatever happens next.** Computed
+before any container work: whether the container runtime is **answering** (not
+merely installed — a stopped Docker Desktop is on `PATH` and useless), the
+stacks it detected and the marker file that decided each, settings set here
+that omh does not read, what omh has left behind, which omh set this checkout
+up, disk free where omh keeps its state, the host's git, and — read the same
+way, without a container — whether this checkout's own declared config still
+holds up: every name in `[use]` still names a catalogue entry, every file in
+`.omh/hooks/` still parses, and every `carry_in` path still exists. A twelfth
+row appears only when this repo has no commit for a session branch to fork
+from.
 
-They print in the same table as the adapter rows, above them. Gathering them
-first is what matters: on a machine with no runtime, or one where the image
-cannot be built, they are the whole of what omh can tell you. They are computed without a sandbox on purpose — on a machine with no
-runtime, or one where the image cannot be built, they are the whole of what
-omh can tell you, and they used to be thrown away with the failure.
+Gathering them first is what matters: on a machine with no runtime, or one
+where the image cannot be built, they are the whole of what omh can tell you,
+and they used to be thrown away with the failure. They print under their own
+`host` heading now, above a second heading naming the harness and the image
+that ran — a host row and an adapter row used to share one undivided table,
+so a fact about your machine and a fact about the container looked identical.
+A host-only run — nothing ran in a sandbox at all — prints the one table it
+always did, with no heading to tell it apart from a section that does not
+exist.
 
 The git row is the version, and whether it can take a `--keep` selection, asked
 of the binary rather than compared against a version number. Only a git omh

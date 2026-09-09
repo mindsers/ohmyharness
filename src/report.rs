@@ -1650,6 +1650,15 @@ pub struct Doctor {
     /// `None` means no account was staged, so credentials went unchecked.
     pub account: Option<String>,
     pub outcomes: Vec<crate::doctor::Outcome>,
+    /// How many of the *leading* `outcomes` were gathered on the host —
+    /// the rest came back from inside the sandbox. A split point rather than
+    /// a second `Vec`, so `outcomes`, `failed()` and `json()` stay exactly
+    /// the flat list they always were; only `human()` reads it, to put a
+    /// heading between the two halves instead of printing one undivided
+    /// table where a row about this machine and a row about the container
+    /// look identical. Equal to `outcomes.len()` when nothing ran in a
+    /// sandbox at all — no second section to head.
+    pub host_count: usize,
 }
 
 impl Doctor {
@@ -1668,19 +1677,41 @@ impl Doctor {
 
 impl Report for Doctor {
     fn human(&self, p: &out::Palette) -> String {
-        let mut t = Table::new();
-        for o in &self.outcomes {
-            t = t.row(vec![
-                if o.ok {
-                    Cell::styled("✓", out::OK)
-                } else {
-                    Cell::styled("✗", out::BAD)
-                },
-                Cell::plain(&o.name),
-                Cell::plain(&o.detail),
-            ]);
+        let table = |outcomes: &[crate::doctor::Outcome]| {
+            let mut t = Table::new();
+            for o in outcomes {
+                t = t.row(vec![
+                    if o.ok {
+                        Cell::styled("✓", out::OK)
+                    } else {
+                        Cell::styled("✗", out::BAD)
+                    },
+                    Cell::plain(&o.name),
+                    Cell::plain(&o.detail),
+                ]);
+            }
+            t.render(p)
+        };
+        let split = self.host_count.min(self.outcomes.len());
+        let (host, rest) = self.outcomes.split_at(split);
+        let mut s = String::new();
+        // A heading only when there is a second section to tell it apart
+        // from — a host-only run (`rest` empty) is exactly today's one
+        // undivided table, not "host" labelling the whole thing for no
+        // reason.
+        if rest.is_empty() {
+            s.push_str(&table(host));
+        } else {
+            s.push_str(&out::heading(p, "host"));
+            s.push_str(&table(host));
+            s.push('\n');
+            let name = match &self.sandbox {
+                Some(sb) => format!("{} in {}", sb.harness, sb.tag),
+                None => "the sandbox".to_string(),
+            };
+            s.push_str(&out::heading(p, &name));
+            s.push_str(&table(rest));
         }
-        let mut s = t.render(p);
 
         // Only the success line. A failure is reported by the command failing
         // — `out::problem` prints the tally in omh's error voice and the exit
