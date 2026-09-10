@@ -10432,3 +10432,250 @@ fn a_real_upgrade_rebuilds_when_the_image_is_missing() {
         "and the stamp advanced"
     );
 }
+
+// ── the leftovers row, end to end ───────────────────────────────────────────
+//
+// Both of these drive the real binary because both claims are about what a
+// person sees: *every invocation* for the first, and the whole `inspect` →
+// `leftovers_from` → row path for the second. The `hooks.json` defect itself is
+// pinned at the unit level too; what is not reachable there is the claim that it
+// reached the terminal on every run, and the `inspect` mapping, which no unit
+// test of `leftovers` can see at all.
+
+/// **omh does not warn about the snapshot it writes itself.**
+///
+/// `notice::record_path` puts `hooks.json` directly under `runs()`. The runs
+/// sweep took every entry there for a session id and asked
+/// `idle::recorded_use` for its marker, and for a regular file that is
+/// `NotADirectory` rather than `NotFound` — so the arm reporting a failed read
+/// fired, `omh s` warned on *every* invocation, and the leftovers row could
+/// never print "none" again on any machine that had launched a session.
+///
+/// `{}` is what `Record::commit` writes for a repo with no hooks: an empty
+/// `BTreeMap` through `serde_json::to_string`.
+#[test]
+fn omh_does_not_warn_about_the_snapshot_it_writes_under_run() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    // Asked before the file is planted: `keyed` spawns `omh info --repo --json`.
+    let run = sb.keyed("run");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(run.join("hooks.json"), "{}").unwrap();
+
+    let out = sb.omh(&["doctor", "--json"]);
+    let v = report_json(&String::from_utf8_lossy(&out.stdout));
+    let detail = v["checks"]
+        .as_array()
+        .and_then(|c| c.iter().find(|o| o["name"] == "leftovers"))
+        .unwrap_or_else(|| panic!("no leftovers row: {v}"))["detail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the leftovers row had no `detail` string: {v}"))
+        .to_string();
+
+    assert!(
+        !detail.contains("hooks.json"),
+        "omh's own snapshot is not a read it could not make: {detail}"
+    );
+    assert_eq!(
+        detail, "none — nothing orphaned on this machine",
+        "a clean machine reads as one — this is the line docs/troubleshooting.md \
+         quotes: {detail}"
+    );
+
+    // The other half of the claim, and the half a `doctor` test cannot make:
+    // *every* invocation, not only the one that reports.
+    let ls = sb.omh(&["s"]);
+    let said = String::from_utf8_lossy(&ls.stderr).to_string();
+    assert!(ls.status.success(), "`omh s` did not run: {said}");
+    assert!(
+        !said.contains("hooks.json"),
+        "and `omh s` says nothing about it either: {said}"
+    );
+}
+
+/// **A leftover survives the read that failed, all the way to the row.**
+///
+/// `inspect` collapsed the pair into a `Result` — `(_, Some(why)) => Err(why)` —
+/// so one failed read discarded every leftover the other two had already found:
+/// a permission error on `shadow/` hid a real orphaned run, and omh reported
+/// *less* than it knew in the row whose whole job is to notice what is left
+/// behind.
+///
+/// **Written after its fix**, which #103 already landed, so it could not be red
+/// against a live defect. It was checked red by restoring that original
+/// `Result` collapse at the `inspect` call site — the shape as it shipped, not
+/// a mutation chosen afterwards. The nearest existing guard,
+/// `a_leftover_and_a_failed_read_both_reach_the_row`, drives `leftovers_from`
+/// directly and stays green through that restoration; this is the one that does
+/// not.
+#[cfg(unix)]
+#[test]
+fn doctor_names_a_leftover_and_the_read_it_could_not_make() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads an unreadable directory, so this proves nothing");
+        return;
+    }
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    // Both asked before the chmod: `keyed` spawns `omh info --repo --json`, and
+    // one of these directories is about to stop being readable.
+    let shadow = sb.keyed("shadow");
+    let run = sb.keyed("run");
+    std::fs::create_dir_all(&shadow).unwrap();
+    // A run nothing points at, marked the way `idle::touch` marks one.
+    std::fs::create_dir_all(run.join("s09")).unwrap();
+    std::fs::write(run.join("s09").join("last-used"), "").unwrap();
+
+    // The mode it had, for the reason the unit-test `Restore` reads it: these
+    // come from `create_dir_all`, so the mode is the umask's.
+    let was = std::fs::metadata(&shadow).unwrap().permissions();
+    std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let bites = std::fs::read_dir(&shadow).is_err();
+    let out = sb.omh(&["doctor", "--json"]);
+    // Restored before any assertion: a failure here would otherwise leave a
+    // directory `TempDir::drop` cannot remove, and it discards that error.
+    std::fs::set_permissions(&shadow, was).unwrap();
+
+    if !bites {
+        eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
+        return;
+    }
+    let v = report_json(&String::from_utf8_lossy(&out.stdout));
+    let detail = v["checks"]
+        .as_array()
+        .and_then(|c| c.iter().find(|o| o["name"] == "leftovers"))
+        .unwrap_or_else(|| panic!("no leftovers row: {v}"))["detail"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the leftovers row had no `detail` string: {v}"))
+        .to_string();
+
+    assert!(
+        detail.contains("s09"),
+        "the leftover the runs read found must survive the shadows read that \
+         failed: {detail}"
+    );
+    assert!(
+        detail.contains("sandbox repositories"),
+        "and the failed read is still named: {detail}"
+    );
+}
+
+/// **A reason omh records is a reason omh says.**
+///
+/// `Unchecked::note` exists so there is no way to warn without recording — but
+/// only the recording half had a guard, and dropping the `ctx.warn` from it
+/// left all 1507 unit and 230 end-to-end tests green. The stderr copy is what
+/// `omh s` readers get: `omh s` throws `unchecked` away and keeps only the
+/// found list, so for that command the warning is the *whole* report.
+///
+/// `Ctx::warn` is an unconditional `eprint!`, so this cannot be asserted from a
+/// unit test.
+#[cfg(unix)]
+#[test]
+fn a_read_omh_could_not_make_reaches_stderr_and_not_only_the_report() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads an unreadable directory, so this proves nothing");
+        return;
+    }
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "editors", "stacks"]);
+    let shadow = sb.keyed("shadow");
+    std::fs::create_dir_all(&shadow).unwrap();
+
+    let was = std::fs::metadata(&shadow).unwrap().permissions();
+    std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let bites = std::fs::read_dir(&shadow).is_err();
+    let out = sb.omh(&["s"]);
+    std::fs::set_permissions(&shadow, was).unwrap();
+
+    if !bites {
+        eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
+        return;
+    }
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(out.status.success(), "`omh s` did not run: {said}");
+    assert!(
+        said.contains("sandbox repositories went unchecked"),
+        "the read omh could not make has to reach the one stream `omh s` shows \
+         it on: {said}"
+    );
+}
+
+/// **A live session's container is not a leftover.**
+///
+/// `found.retain(|id| !live.contains(id))` is the only filter standing between
+/// a running session and being named as an orphan, and this branch is what made
+/// that so: the shadow and run sweeps now short-circuit on `live` themselves,
+/// so `retain` carries the container half alone. Deleting it left both suites
+/// green.
+#[test]
+fn a_container_belonging_to_a_live_session_is_not_a_leftover() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let _worktree = sb.session("s01");
+    // What `docker ps -a` answers: the live session's own container.
+    std::fs::write(
+        sb.bin.join("containers"),
+        format!("{}\n", sb.container("s01")),
+    )
+    .unwrap();
+
+    let out = sb.omh(&["s", "--json"]);
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`--json` is one document");
+
+    assert_eq!(
+        doc["leftovers"],
+        serde_json::json!([]),
+        "s01 has a worktree, so its container is the sandbox it is running in — \
+         and the row hands `omh <id> rm` to whatever it names: {doc}"
+    );
+}
+
+/// **`omh s --json` says which reads it could not make, too.**
+///
+/// The `leftovers` field is the whole report for a script: `omh s` keeps the
+/// found list and throws the reasons away, so an unreadable `worktrees/` — where
+/// omh now clears the list rather than name live sessions as orphans — printed
+/// `"leftovers": []`, byte for byte what a clean checkout prints. That is the
+/// collapse this branch exists to close, one command over, and this branch is
+/// what created this instance of it.
+#[cfg(unix)]
+#[test]
+fn the_sessions_document_says_which_reads_omh_could_not_make() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads an unreadable directory, so this proves nothing");
+        return;
+    }
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let _worktree = sb.session("s01");
+    let worktrees = sb.worktrees();
+
+    let was = std::fs::metadata(&worktrees).unwrap().permissions();
+    std::fs::set_permissions(&worktrees, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let bites = std::fs::read_dir(&worktrees).is_err();
+    let out = sb.omh(&["s", "--json"]);
+    std::fs::set_permissions(&worktrees, was).unwrap();
+
+    if !bites {
+        eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
+        return;
+    }
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`--json` is one document");
+    let said = doc["unchecked"].to_string();
+    assert!(
+        said.contains("worktrees"),
+        "the document has to carry the read omh could not make, not only stderr: {doc}"
+    );
+}

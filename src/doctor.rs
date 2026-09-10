@@ -2736,13 +2736,6 @@ mod tests {
         );
     }
 
-    /// The row tells the three apart, and says all three.
-    ///
-    /// Before the registry it could only count: a cache is keyed by a digest
-    /// of the path it was made for, so from inside one checkout the others
-    /// were indistinguishable from orphans. The row said so honestly and
-    /// stopped there. It can do better now, and the thing it must not do is
-    /// let "omh could not tell" quietly join either of the other two.
     /// `Leftovers` for a test, in the order the fields read.
     fn seen(found: &[&str], unchecked: &[&str]) -> crate::cmd::session::Leftovers {
         crate::cmd::session::Leftovers {
@@ -2751,6 +2744,13 @@ mod tests {
         }
     }
 
+    /// The row tells the three apart, and says all three.
+    ///
+    /// Before the registry it could only count: a cache is keyed by a digest
+    /// of the path it was made for, so from inside one checkout the others
+    /// were indistinguishable from orphans. The row said so honestly and
+    /// stopped there. It can do better now, and the thing it must not do is
+    /// let "omh could not tell" quietly join either of the other two.
     #[test]
     fn the_row_separates_gone_from_live_from_could_not_tell() {
         use crate::profile::Attribution;

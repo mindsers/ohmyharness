@@ -250,7 +250,11 @@ pub(crate) fn doctor_cmd(
     // pair into a `Result`, so a single failed read discarded every leftover the
     // other two reads had already found — the failure made omh report *less*
     // than it knew, in the row whose whole job is to notice what is left behind.
-    let orphans = crate::cmd::session::leftovers(&paths, chosen.as_ref().ok(), ctx);
+    let orphans = crate::cmd::session::leftovers(
+        &paths,
+        chosen.as_ref().map_err(|e| format!("{e:#}")),
+        crate::cmd::session::Unchecked::new(ctx),
+    );
 
     let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
         .into_iter()

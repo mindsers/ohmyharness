@@ -838,10 +838,17 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     let backend = match runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)
     }) {
-        Ok(backend) => Some(backend),
+        Ok(backend) => Ok(backend),
+        // **The reason is kept, not only said.** It was warned to stderr and
+        // dropped, so `leftovers` could not tell "omh looked and found no
+        // container" from "omh never chose a runtime to ask". The row that said
+        // the first while meaning the second is `omh doctor`'s, fed by
+        // `inspect.rs`'s own `chosen`; this half is the same loss at the other
+        // caller, and is kept in step with it.
         Err(e) => {
-            ctx.warn(&format!("omh cannot say which sandboxes are up: {e:#}"));
-            None
+            let why = format!("{e:#}");
+            ctx.warn(&format!("omh cannot say which sandboxes are up: {why}"));
+            Err(why)
         }
     };
     let base = session::default_branch(&paths.repo);
@@ -858,7 +865,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     let (up, upstreams): (Option<image::Listed>, session::Upstreams) = match ids.is_empty() {
         true => (None, session::Upstreams::default()),
         false => (
-            backend.as_ref().map(image::running_set),
+            backend.as_ref().ok().map(image::running_set),
             session::upstreams(&paths.repo).unwrap_or_else(|e| {
                 ctx.warn(&format!(
                     "could not read what the session branches track: {e:#}"
@@ -982,6 +989,23 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     // The scoped view reads the focused session's transcript and its last
     // check result. Only when one session is named: the wide listing does not
     // read a transcript per row.
+    // **Both halves reach the document.** `omh s` used to keep the found list
+    // and drop the reasons, so a read that failed printed `"leftovers": []` —
+    // byte for byte what a clean checkout prints, which is the collapse the
+    // whole leftovers row exists to avoid, one command over.
+    let swept = match only {
+        None => leftovers(
+            &paths,
+            backend.as_ref().map_err(String::clone),
+            Unchecked::new(ctx),
+        ),
+        // Not swept when one session was asked for. A leftover is an id with no
+        // worktree, and the focused id was proved to have one, so a focused
+        // sweep can only ever turn up other people's — guaranteed off-topic
+        // rather than merely usually. Skipping it also saves the sweep's `ps`
+        // and its walks.
+        Some(_) => Leftovers::default(),
+    };
     let focus = only.map(|id| report::Focus {
         activity: session_activity(&paths, id, &adapter_of(&paths, id)),
         check: read_check(&paths, id),
@@ -1005,11 +1029,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         // off-topic rather than merely usually. The overlap section is the
         // opposite case and stays: a collision *is* a fact about this
         // session. Skipping it also saves the sweep's `ps` and its walks.
-        leftovers: match only {
-            // The list half; `omh s` already had the reason on stderr.
-            None => leftovers(&paths, backend.as_ref(), ctx).found,
-            Some(_) => Vec::new(),
-        },
+        leftovers: swept.found,
+        leftovers_unchecked: swept.unchecked,
         overlaps,
         // Deliberately *not* narrowed. A session omh could not read is why
         // the overlap answer above may be short a line, and that is a fact
@@ -1029,56 +1050,252 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
 /// and reads as a clean machine reporting reasons as orphans. Naming the halves
 /// closes that, and moves the *found* versus *could not look* distinction out of
 /// a doc comment and into the type.
+#[derive(Default)]
 pub(crate) struct Leftovers {
     /// Sessions nothing points at: sandbox repositories, run directories and
     /// containers, minus the ones a live worktree still claims.
     pub(crate) found: Vec<String>,
-    /// One line per read that failed, in the words the warning used. Empty is
-    /// "omh looked everywhere", which is the only thing that makes `found`
-    /// being empty mean *nothing is orphaned*.
+    /// One line per read omh could not make, in the words the warning used —
+    /// plus the consequence, when a failed predicate costs the whole list.
+    ///
+    /// Empty is "omh looked everywhere", which is the only thing that makes
+    /// `found` being empty mean *nothing is orphaned* — and it was a claim
+    /// rather than a fact while two reads could come back empty-handed without
+    /// recording anything. The container half was skipped entirely when there
+    /// was no runtime to ask, and `session::list` answered `Vec::new()` for a
+    /// `worktrees/` it could not open. Five reads report here now: the three
+    /// sources, the predicate, and the runtime omh never chose.
     pub(crate) unchecked: Vec<String>,
 }
 
-/// The reason line for `count` entries omh could not read under `dir`, or
-/// `None` when it read them all.
+/// Every read that failed, said once and recorded once.
 ///
-/// Split out for the same reason `listed` is. The count is only ever non-zero
-/// when the directory stream yields an `Err`, which no fixture on this platform
-/// can produce, so the step from a count to a reason is unreachable in a test
-/// unless it is reachable on its own.
-pub(crate) fn unreadable_reason(count: usize, what: &str, dir: &std::path::Path) -> Option<String> {
-    (count > 0).then(|| {
+/// Seven copies of `ctx.warn(&why); unchecked.push(why);` stood here, and a
+/// warn whose push went missing *is* the defect this function was rewritten
+/// for: the reason reaches `omh s`'s stderr and never reaches `omh doctor`'s
+/// row, where a `--json` reader has no stderr to read it from. There is now no
+/// syntax for the one without the other.
+///
+/// A type rather than a local closure because the sweeps below take it by
+/// `&mut` while `found` is being built, which a closure capturing the `Vec`
+/// cannot allow — and because a closure cannot carry `ctx` into them.
+///
+/// **Not [`out::Asides`].** Asides reach `Ctx::say`, which drops warnings under
+/// `--json` — the exact stream `doctor` reports on, and the exact collapse this
+/// exists to stop.
+pub(crate) struct Unchecked<'a> {
+    ctx: &'a out::Ctx,
+    why: Vec<String>,
+}
+
+impl<'a> Unchecked<'a> {
+    pub(crate) fn new(ctx: &'a out::Ctx) -> Self {
+        Self {
+            ctx,
+            why: Vec::new(),
+        }
+    }
+
+    /// Say it, and record it. Never one without the other.
+    pub(crate) fn note(&mut self, why: String) {
+        self.ctx.warn(&why);
+        self.why.push(why);
+    }
+
+    /// Record it without saying it again.
+    ///
+    /// One caller, deliberately: both commands that reach this function already
+    /// print "there is no container runtime" in their own words — `omh s` as
+    /// `omh cannot say which sandboxes are up`, `omh doctor` in its own
+    /// `container runtime` row. What neither carries is the fact *in the
+    /// report*, which is the half this row exists to fix.
+    pub(crate) fn record(&mut self, why: String) {
+        self.why.push(why);
+    }
+
+    pub(crate) fn recorded(&self) -> usize {
+        self.why.len()
+    }
+
+    pub(crate) fn reasons(self) -> Vec<String> {
+        self.why
+    }
+}
+
+/// One entry in a directory listing, as much of it as a sweep reads.
+///
+/// `std::fs::DirEntry` has no public constructor, so while the sweeps read one
+/// directly no test could hand them an entry that fails: every branch below was
+/// reachable only through a fixture that made `read_dir` *itself* fail, and
+/// reverting any of them to `.flatten()` left the whole suite green. This is
+/// the smallest surface that makes them driveable.
+pub(crate) trait Entry {
+    fn name(&self) -> String;
+    /// Whether this is a directory — a read of its own, which can fail.
+    ///
+    /// **Follows symlinks, deliberately.** `session::list` asks
+    /// `e.path().is_dir()`, and `idle::recorded_use` stats through a link too.
+    /// A sweep that disagreed with `session::list` about what a directory is
+    /// would report a session `omh s` lists as an orphan — with `omh <id> rm`
+    /// beside it, which takes the sandbox repository as well.
+    fn is_dir(&self) -> std::io::Result<bool>;
+}
+
+impl Entry for std::fs::DirEntry {
+    fn name(&self) -> String {
+        self.file_name().to_string_lossy().into_owned()
+    }
+
+    fn is_dir(&self) -> std::io::Result<bool> {
+        // `std::fs::metadata`, not `DirEntry::metadata`: the second does not
+        // follow the link, and neither does `file_type()`.
+        Ok(std::fs::metadata(self.path())?.is_dir())
+    }
+}
+
+/// The entries omh read, and one line per entry it could not.
+///
+/// `read_dir` fails in two places — opening the directory, and reading an entry
+/// out of the open stream. The second is what `.flatten()` drops, and no
+/// fixture on the platforms omh is tested on can produce one.
+///
+/// **The errors, not a count.** Counting them is why `unreadable_reason` used
+/// to be the one line in this file that could not end in `: {e}` like every
+/// other reason omh gives.
+pub(crate) fn listed<E, X: std::fmt::Display>(
+    entries: impl IntoIterator<Item = Result<E, X>>,
+) -> (Vec<E>, Vec<String>) {
+    let mut read = Vec::new();
+    let mut failed = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok(e) => read.push(e),
+            Err(e) => failed.push(e.to_string()),
+        }
+    }
+    (read, failed)
+}
+
+/// The reason line for entries omh could not read under `dir`, or `None` when
+/// it read them all.
+pub(crate) fn unreadable_reason(
+    failed: &[String],
+    what: &str,
+    dir: &std::path::Path,
+) -> Option<String> {
+    (!failed.is_empty()).then(|| {
+        let mut seen: Vec<&str> = failed.iter().map(String::as_str).collect();
+        seen.sort_unstable();
+        seen.dedup();
         format!(
-            "omh could not read {count} entr{} under {}, so those {what} went unchecked",
-            if count == 1 { "y" } else { "ies" },
-            dir.display()
+            "omh could not read {} entr{} under {}, so those {what} went unchecked: {}",
+            failed.len(),
+            if failed.len() == 1 { "y" } else { "ies" },
+            dir.display(),
+            seen.join("; ")
         )
     })
 }
 
-/// The names in a directory listing, and how many entries omh could not read.
+/// What a directory read yielded.
 ///
-/// `read_dir` fails in two places: opening the directory, and reading an entry
-/// out of the open stream. The second is what `.flatten()` drops, and a fixture
-/// cannot produce one on the platforms omh is tested on, so the branch is only
-/// reachable through a seam like this one. Taking the iterator rather than the
-/// path is the difference between a guard and a comment.
-///
-/// Counted rather than named: the name is the part omh failed to read, so there
-/// is nothing trustworthy to print per entry.
-pub(crate) fn listed<T, E>(
-    entries: impl IntoIterator<Item = Result<T, E>>,
-    name_of: impl Fn(&T) -> String,
-) -> (Vec<String>, usize) {
-    let mut names = Vec::new();
-    let mut unreadable = 0usize;
-    for entry in entries {
-        match entry {
-            Ok(e) => names.push(name_of(&e)),
-            Err(_) => unreadable += 1,
+/// **`Absent` is its own answer.** It is the ordinary "nothing has ever been
+/// made here"; `Refused` is omh being unable to look, and is already recorded
+/// by the time it is returned. Collapsing the two into an empty listing is the
+/// whole of what this row exists to stop.
+enum Opened {
+    Listing(std::fs::ReadDir),
+    Absent,
+    Refused,
+}
+
+/// `refused` completes "omh could not read <dir>, so …" — the consequence,
+/// which differs per caller in a way the plural noun does not.
+fn opened(dir: &std::path::Path, refused: &str, unchecked: &mut Unchecked) -> Opened {
+    match std::fs::read_dir(dir) {
+        Ok(entries) => Opened::Listing(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Opened::Absent,
+        Err(e) => {
+            unchecked.note(format!(
+                "omh could not read {}, so {refused}: {e}",
+                dir.display()
+            ));
+            Opened::Refused
         }
     }
-    (names, unreadable)
+}
+
+/// One directory of session state, swept for ids nothing points at.
+///
+/// Generic over the entry so a test can drive this exact body — see [`Entry`].
+/// `id_of` maps a filename to an id (`s01.git` → `s01`, or identity); `counts`
+/// is the per-id read that decides whether the id belongs in the found list, and
+/// phrases its own failure. Named for its answer: it was `keep`, which reads as
+/// the opposite of what `Ok(true)` means here.
+pub(crate) fn sweep<E: Entry, X: std::fmt::Display>(
+    entries: impl IntoIterator<Item = Result<E, X>>,
+    dir: &std::path::Path,
+    what: &str,
+    id_of: impl Fn(&str) -> Option<String>,
+    counts: impl Fn(&str) -> Result<bool, String>,
+    live: &[String],
+    unchecked: &mut Unchecked,
+) -> Vec<String> {
+    let (entries, failed) = listed(entries);
+    // Before the loop, not after. This reason is about the directory and the
+    // ones below are about things inside it, and in the runs read it used to be
+    // pushed last — so the row read that half of its reasons inside-out.
+    if let Some(why) = unreadable_reason(&failed, what, dir) {
+        unchecked.note(why);
+    }
+    let mut found = Vec::new();
+    for e in entries {
+        let name = e.name();
+        // **A session's state is a directory.** `notice::record_path` writes
+        // `hooks.json` directly under `runs()`, and every entry was taken for an
+        // id: `recorded_use` stat'd `runs/hooks.json/last-used`, which for a
+        // regular file is `NotADirectory` rather than `NotFound`, so `keep`
+        // reported a run omh could not read — on every `omh s`, about a snapshot
+        // omh had written itself.
+        //
+        // Filtered here rather than widened in `recorded_use`: a regular file is
+        // not a run omh failed to read, it is not a run at all.
+        // `id_of` first, so a name that was never a candidate is dropped without
+        // being stat'd: `shadow/` holds `s01.seed` beside `s01.git`, and a seed
+        // omh could not stat would otherwise become a reason about a file that
+        // is not a sandbox repository and never was.
+        let Some(id) = id_of(&name) else { continue };
+        // **A live worktree settles it, before any further read.** `is_dir` is a
+        // further read, and it used to run first: a `shadow/` that could be
+        // listed but not searched made omh say it could not tell whether `s01`
+        // was a sandbox repository — about a session with a worktree, on every
+        // `omh s`. A reason for a read whose answer could not have changed
+        // anything is the shape this branch opened by removing.
+        //
+        // `found.retain` below filters the found list alone and never reaches
+        // the reasons, which is why the skip has to be here.
+        if live.contains(&id) {
+            continue;
+        }
+        match e.is_dir() {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(err) => {
+                unchecked.note(format!(
+                    "omh could not tell whether {} is one of this repo's {what}, so it \
+                     went unchecked: {err}",
+                    dir.join(&name).display()
+                ));
+                continue;
+            }
+        }
+        match counts(&id) {
+            Ok(true) => found.push(id),
+            Ok(false) => {}
+            Err(why) => unchecked.note(why),
+        }
+    }
+    found
 }
 
 /// Session ids with a container, a run directory or a sandbox repository but
@@ -1095,138 +1312,173 @@ pub(crate) fn listed<T, E>(
 /// and neither is a session anybody could resume or would want reported.
 pub(crate) fn leftovers(
     paths: &Paths,
-    backend: Option<&runtime::Backend>,
-    ctx: &out::Ctx,
+    backend: Result<&runtime::Backend, String>,
+    mut unchecked: Unchecked<'_>,
 ) -> Leftovers {
-    // **Why omh could not look, when it could not.** The warning goes to
-    // stderr, which `omh s` wants — but `omh doctor` puts this in a report, and
-    // a row that says "none" because nothing was listed is the collapse the
-    // whole leftovers row exists to avoid.
+    let itself = |n: &str| Some(n.to_string());
+    let always = |_: &str| Ok(true);
+
+    // **The predicate, not a fourth source.** `session::list` answers
+    // `Vec::new()` both for "no session has ever been made here" and for "omh
+    // could not look", and here those are opposite answers: an unreadable
+    // `worktrees/` left `live` empty, so every run, sandbox repository and
+    // container below was unclaimed. omh named live sessions as orphans with
+    // `omh <id> rm` beside each — the command that takes the worktree *and* the
+    // sandbox repository holding every commit the agent made — while `unchecked`
+    // stayed empty to say it had looked everywhere.
     //
-    // A `Vec`, not an `Option`: there are three independent reads here and one
-    // slot held only the last of them, so the two that could not reach it —
-    // shadows and runs — had nowhere to put a failure and reported as though
-    // they had looked and found nothing. Each read appends its own reason.
-    let mut unchecked: Vec<String> = Vec::new();
-    let live = session::list(&paths.worktrees());
+    // Read here rather than through `session::list`, which is left alone: its
+    // other callers reap and render, and emptiness is the right answer for
+    // them. Only this one needs to know it could not look — the same split as
+    // `idle::recorded_use` from `last_used`, one layer up.
+    // Nothing else may record between here and `live_is_certain` below: the
+    // comparison is what makes a reason from *this* read mean the predicate
+    // failed, and a reason from anywhere else would make every read one.
+    let mark = unchecked.recorded();
+    let live = match opened(
+        &paths.worktrees(),
+        "it cannot tell which sessions are live",
+        &mut unchecked,
+    ) {
+        Opened::Listing(entries) => sweep(
+            entries,
+            &paths.worktrees(),
+            "sessions",
+            itself,
+            always,
+            &[],
+            &mut unchecked,
+        ),
+        Opened::Absent | Opened::Refused => Vec::new(),
+    };
+    // One boolean, not a special case: a refused directory, a per-entry stream
+    // error and an `is_dir` that would not answer all land in `unchecked`, and
+    // any of them means `live` is short. `Absent` records nothing and so keeps
+    // this true, which is right — a checkout that has never made a session
+    // genuinely has none.
+    let live_is_certain = unchecked.recorded() == mark;
+
     // A sandbox repository with no worktree — [risks](docs/design/risks.md) 8c.
     // The most valuable orphan of the three: a container is re-creatable and a
     // run directory holds a timestamp, while this holds every commit the agent
     // made and nothing points at it. `omh <id> rm` clears it, and since #58
     // says what it would take with it first.
-    // `NotFound` is the ordinary "no sandbox has ever been built here". Any
-    // other failure is omh being unable to look, and an empty `leftovers`
-    // prints *nothing at all* — byte for byte what a clean checkout prints. Of
-    // the three orphans this hunts, the repository is the one that holds work.
-    let mut found: Vec<String> = match std::fs::read_dir(paths.shadows()) {
-        Ok(entries) => {
-            // `.flatten()` here dropped every per-entry error as silently as the
-            // runs branch below did, one layer further in: a repository omh
-            // could not read left the listing looking clean rather than short.
-            let (names, unreadable) = listed(entries, |e: &std::fs::DirEntry| {
-                e.file_name().to_string_lossy().into_owned()
-            });
-            if let Some(why) =
-                unreadable_reason(unreadable, "sandbox repositories", &paths.shadows())
-            {
-                ctx.warn(&why);
-                unchecked.push(why);
-            }
-            names
-                .into_iter()
-                .filter_map(|name| name.strip_suffix(".git").map(str::to_string))
-                .collect()
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(e) => {
-            let why = format!(
-                "omh could not read {}, so orphaned sandbox repositories went unchecked: {e}",
-                paths.shadows().display()
-            );
-            ctx.warn(&why);
-            unchecked.push(why);
-            Vec::new()
-        }
+    let mut found = match opened(
+        &paths.shadows(),
+        "orphaned sandbox repositories went unchecked",
+        &mut unchecked,
+    ) {
+        Opened::Listing(entries) => sweep(
+            entries,
+            &paths.shadows(),
+            "sandbox repositories",
+            |n| n.strip_suffix(".git").map(str::to_string),
+            always,
+            &live,
+            &mut unchecked,
+        ),
+        Opened::Absent | Opened::Refused => Vec::new(),
     };
-    // `into_iter().flatten().flatten()` dropped the `read_dir` failure and
-    // every per-entry failure without so much as a warning, so a run directory
-    // omh could not open was indistinguishable from one that held nothing.
-    match std::fs::read_dir(paths.runs()) {
-        Ok(entries) => {
-            let (ids, unreadable) = listed(entries, |e: &std::fs::DirEntry| {
-                e.file_name().to_string_lossy().into_owned()
-            });
-            for id in ids {
-                // **A marker omh could not read is not an absent marker.**
-                // `last_used` collapsed both into `None`, so a run that could be
-                // listed but whose `last-used` omh was refused was recorded
-                // neither as a leftover nor as a read that failed: the same
-                // false-clean report, one directory further down.
-                match idle::recorded_use(&paths.runs(), &id) {
-                    Ok(Some(_)) => found.push(id),
-                    Ok(None) => {}
-                    Err(e) => {
-                        let why = format!(
-                            "omh could not read when run {id} was last used, so it went \
-                             unchecked: {e}"
-                        );
-                        ctx.warn(&why);
-                        unchecked.push(why);
-                    }
-                }
-            }
-            if let Some(why) = unreadable_reason(unreadable, "runs", &paths.runs()) {
-                ctx.warn(&why);
-                unchecked.push(why);
-            }
-        }
-        // The ordinary "no run has ever been made here", exactly as for shadows.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            let why = format!(
-                "omh could not read {}, so orphaned run directories went unchecked: {e}",
-                paths.runs().display()
-            );
-            ctx.warn(&why);
-            unchecked.push(why);
-        }
-    }
 
-    if let Some(backend) = backend {
-        let prefix = paths.container("");
-        // **Could not look is not "none".** This swallowed its failure, so a
-        // daemon that was down reported *fewer* leftovers rather than saying
-        // it had not looked — the same collapse `Running` exists to prevent,
-        // in the function whose whole job is to notice what is left behind.
-        match backend.output(&["ps", "-a", "--format", "{{.Names}}"]) {
-            Ok(out) if out.status.success() => found.extend(
-                String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .filter_map(|n| n.trim().strip_prefix(&prefix))
-                    .map(str::to_string),
+    // A run directory counts only when it carries the marker `idle::touch`
+    // writes: `omh doctor` and `omh auth` stage into this same tree under their
+    // own names, and neither is a session anybody could resume.
+    found.extend(
+        match opened(
+            &paths.runs(),
+            "orphaned run directories went unchecked",
+            &mut unchecked,
+        ) {
+            Opened::Listing(entries) => sweep(
+                entries,
+                &paths.runs(),
+                "run directories",
+                itself,
+                |id| match idle::recorded_use(&paths.runs(), id) {
+                    // **A marker omh could not read is not an absent marker.**
+                    // `last_used` collapsed both into `None`, so a run omh could
+                    // list but not examine was recorded neither as a leftover nor
+                    // as a read that failed.
+                    Ok(seen) => Ok(seen.is_some()),
+                    Err(e) => Err(format!(
+                        "omh could not read when run {id} was last used, so it went \
+                     unchecked: {e}"
+                    )),
+                },
+                &live,
+                &mut unchecked,
             ),
-            Ok(out) => {
-                let why = format!(
+            Opened::Absent | Opened::Refused => Vec::new(),
+        },
+    );
+
+    match backend {
+        Ok(backend) => {
+            let prefix = paths.container("");
+            // **Could not look is not "none".** This swallowed its failure, so a
+            // daemon that was down reported *fewer* leftovers rather than saying
+            // it had not looked — the same collapse `Running` exists to prevent,
+            // in the function whose whole job is to notice what is left behind.
+            match backend.output(&["ps", "-a", "--format", "{{.Names}}"]) {
+                Ok(out) if out.status.success() => found.extend(
+                    String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .filter_map(|n| n.trim().strip_prefix(&prefix))
+                        .map(str::to_string),
+                ),
+                Ok(out) => unchecked.note(format!(
                     "omh could not list containers, so orphaned sandboxes went unchecked: {}",
                     crate::image::unreadable(&String::from_utf8_lossy(&out.stderr), &out.status)
-                );
-                ctx.warn(&why);
-                unchecked.push(why);
-            }
-            Err(e) => {
-                let why = format!(
+                )),
+                Err(e) => unchecked.note(format!(
                     "omh could not list containers, so orphaned sandboxes went unchecked: {e}"
-                );
-                ctx.warn(&why);
-                unchecked.push(why);
+                )),
             }
         }
+        // **A runtime omh never chose is a read it never made.** This half sat
+        // inside `if let Some(backend)`, so on a machine with no container
+        // runtime omh listed no container at all, `unchecked` came back empty,
+        // and the row read "none — nothing orphaned on this machine" having
+        // never looked for a sandbox. The reason travels as a `Result` rather
+        // than being dropped at the call site, so this ends in `: {e}` like
+        // every other line. `record` rather than `note`: both callers already
+        // say this on stderr in their own words.
+        Err(e) => unchecked.record(format!(
+            "omh could not choose a container runtime, so orphaned sandbox \
+             containers went unchecked: {e}"
+        )),
     }
 
     found.retain(|id| !live.contains(id));
     found.sort();
     found.dedup();
-    Leftovers { found, unchecked }
+    // **A failed predicate invalidates every candidate.** Everything above is a
+    // *source*, and one failing loses candidates — which is what its reason
+    // says, and what the other arms exist to report. `worktrees()` is the filter
+    // applied to all of them, so a reason from it does not shorten this list, it
+    // makes every name in it untrustworthy.
+    //
+    // Counted rather than named, for the reason the volumes half of this row is
+    // (`doctor.rs`): an earlier version named caches it could not attribute and
+    // handed over `docker volume rm` for them, which was `omh doctor` in one
+    // checkout calling another's live cache garbage. Naming is what makes a
+    // leftover actionable, and omh must not make something actionable that it
+    // cannot stand behind — here the command on offer takes the sandbox
+    // repository with it.
+    if !live_is_certain && !found.is_empty() {
+        unchecked.note(format!(
+            "{} candidate{} went unnamed rather than be reported as orphans — \
+             `omh <id> rm` on a live session takes the worktree and the sandbox \
+             repository with it",
+            found.len(),
+            if found.len() == 1 { "" } else { "s" }
+        ));
+        found.clear();
+    }
+    Leftovers {
+        found,
+        unchecked: unchecked.reasons(),
+    }
 }
 
 /// Where a session is in the cycle, phrased as the next thing to do about it.

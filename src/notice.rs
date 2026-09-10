@@ -466,10 +466,23 @@ mod tests {
     fn an_unchanged_repo_hook_is_silent_on_the_next_launch() {
         let fx = fixture(&[(".omh/hooks/rust-test.json", HOOK)]);
         said(&fx);
+        let record = record_path(&fx.paths);
         assert!(
-            fx.paths.runs().join("hooks.json").exists(),
+            record.exists(),
             "silence has to come from a record, not from the absence of one"
         );
+        // **A regular file, directly under `runs()`** — which is where
+        // `cmd::session::leftovers` sweeps for session directories. It took
+        // this for a session id and stat'd `hooks.json/last-used`, reporting a
+        // run it could not read on every `omh s`. Pinned here so the fixtures
+        // that guard it over there are copying a real shape rather than a name
+        // somebody invented.
+        assert_eq!(
+            record.parent(),
+            Some(fx.paths.runs().as_path()),
+            "the sweep in `leftovers` reads exactly this directory"
+        );
+        assert!(record.is_file(), "and this is a file, not a session");
         assert!(!said(&fx).join("\n").contains("new or changed"));
     }
 

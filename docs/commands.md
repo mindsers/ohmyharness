@@ -125,9 +125,20 @@ $ omh s --json
       }
     }
   ],
+  "unchecked": [],
   "unreadable": []
 }
 ```
+
+**`unchecked` and `unreadable` are how a partial answer says so.** Both render
+as nothing at all when they are empty, so without them a script cannot tell
+"nothing was left behind" from "omh could not go and look": `leftovers: []` is
+what a clean checkout prints either way. `unchecked` carries one line per read
+omh could not make while sweeping for leftovers — an unreadable `shadow/`, a
+container runtime it could not choose — plus, when omh could not read
+`worktrees/` and so cannot tell a live session from an orphan, the count it
+declined to name rather than hand you `omh <id> rm` for a session that is
+running. `unreadable` is the sessions omh could not read for the overlap scan.
 
 `work.state` is one of `clean`, `uncommitted`, `unpushed`, `published` or
 `unknown` — `uncommitted` and `unpushed` carry a `count`, `published` carries

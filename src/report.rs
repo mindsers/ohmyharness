@@ -1063,6 +1063,14 @@ pub struct Sessions {
     /// Session ids with a container, a run directory or a sandbox repository
     /// but no worktree.
     pub leftovers: Vec<String>,
+    /// One line per read omh could not make while looking for those.
+    ///
+    /// Same reason `unreadable` below exists, for the other half of this
+    /// document: an empty `leftovers` is what a clean checkout prints, so
+    /// without this a script cannot tell "nothing was left behind" from "omh
+    /// could not go and look". `omh s` says these on stderr, which is prose a
+    /// person reads and not something a `--json` caller has.
+    pub leftovers_unchecked: Vec<String>,
     /// Files more than one session is changing.
     pub overlaps: Vec<Overlap>,
     /// Sessions omh could not read, and so could not include above.
@@ -1349,6 +1357,7 @@ impl Report for Sessions {
                 "behind": s.behind,
             })).collect::<Vec<_>>(),
             "leftovers": self.leftovers,
+            "unchecked": self.leftovers_unchecked,
             "overlaps": self.overlaps.iter().map(|o| json!({
                 "sessions": o.sessions,
                 "paths": o.paths,
