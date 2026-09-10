@@ -838,10 +838,15 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     let backend = match runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)
     }) {
-        Ok(backend) => Some(backend),
+        Ok(backend) => Ok(backend),
+        // **The reason is kept, not only said.** It was warned to stderr and
+        // dropped, so `leftovers` below could not tell "omh looked and found no
+        // container" from "omh never chose a runtime to ask" — and the row said
+        // the first while meaning the second.
         Err(e) => {
-            ctx.warn(&format!("omh cannot say which sandboxes are up: {e:#}"));
-            None
+            let why = format!("{e:#}");
+            ctx.warn(&format!("omh cannot say which sandboxes are up: {why}"));
+            Err(why)
         }
     };
     let base = session::default_branch(&paths.repo);
@@ -858,7 +863,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     let (up, upstreams): (Option<image::Listed>, session::Upstreams) = match ids.is_empty() {
         true => (None, session::Upstreams::default()),
         false => (
-            backend.as_ref().map(image::running_set),
+            backend.as_ref().ok().map(image::running_set),
             session::upstreams(&paths.repo).unwrap_or_else(|e| {
                 ctx.warn(&format!(
                     "could not read what the session branches track: {e:#}"
@@ -1007,7 +1012,7 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         // session. Skipping it also saves the sweep's `ps` and its walks.
         leftovers: match only {
             // The list half; `omh s` already had the reason on stderr.
-            None => leftovers(&paths, backend.as_ref(), ctx).found,
+            None => leftovers(&paths, backend.as_ref().map_err(String::clone), ctx).found,
             Some(_) => Vec::new(),
         },
         overlaps,
@@ -1095,7 +1100,7 @@ pub(crate) fn listed<T, E>(
 /// and neither is a session anybody could resume or would want reported.
 pub(crate) fn leftovers(
     paths: &Paths,
-    backend: Option<&runtime::Backend>,
+    backend: Result<&runtime::Backend, String>,
     ctx: &out::Ctx,
 ) -> Leftovers {
     // **Why omh could not look, when it could not.** The warning goes to
@@ -1108,6 +1113,35 @@ pub(crate) fn leftovers(
     // shadows and runs — had nowhere to put a failure and reported as though
     // they had looked and found nothing. Each read appends its own reason.
     let mut unchecked: Vec<String> = Vec::new();
+    // **The predicate, not a fourth source.** `session::list` answers
+    // `Vec::new()` both for "no session has ever been made here" and for "omh
+    // could not look", and here those are opposite answers: an unreadable
+    // `worktrees/` left `live` empty, so every run, sandbox repository and
+    // container below was unclaimed. omh named live sessions as orphans with
+    // `omh <id> rm` beside each — the command that takes the worktree *and* the
+    // sandbox repository holding every commit the agent made — while `unchecked`
+    // stayed empty to say it had looked everywhere.
+    //
+    // Read here rather than through `session::list`, which is left alone: its
+    // eight other callers reap and render, and emptiness is the right answer
+    // for them. Only this one needs to know it could not look — the same split
+    // as `idle::recorded_use` from `last_used`, one layer up.
+    let live_is_certain = match std::fs::read_dir(paths.worktrees()) {
+        Ok(_) => true,
+        // The ordinary "no session has ever been made here", as for the two
+        // directories below. Not a failed look, and warning here would put a
+        // line on every `omh s` in a fresh checkout.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            let why = format!(
+                "omh could not read {}, so it cannot tell which sessions are live: {e}",
+                paths.worktrees().display()
+            );
+            ctx.warn(&why);
+            unchecked.push(why);
+            false
+        }
+    };
     let live = session::list(&paths.worktrees());
     // A sandbox repository with no worktree — [risks](docs/design/risks.md) 8c.
     // The most valuable orphan of the three: a container is re-creatable and a
@@ -1157,6 +1191,29 @@ pub(crate) fn leftovers(
                 e.file_name().to_string_lossy().into_owned()
             });
             for id in ids {
+                // **A run is a directory.** `notice::record_path` writes
+                // `hooks.json` directly under `runs()`, and every entry here was
+                // taken for a session id: `recorded_use` stat'd
+                // `runs/hooks.json/last-used`, which for a regular file is
+                // `NotADirectory` rather than `NotFound`, so the arm below
+                // reported a run omh could not read — on every `omh s`, about a
+                // snapshot omh had written itself.
+                //
+                // Filtered here rather than widened in `recorded_use`: a regular
+                // file is not a run omh failed to read, it is not a run at all,
+                // and that function's two states are the right two.
+                if !paths.runs().join(&id).is_dir() {
+                    continue;
+                }
+                // **A live worktree settles it, before any marker is read.**
+                // This loop asked for every id and pushed its failure without
+                // ever asking whether the session was live, so a session omh had
+                // already proved was not an orphan was reported as one it could
+                // not check. `found.retain` below filters `found` alone and
+                // never reaches here.
+                if live.contains(&id) {
+                    continue;
+                }
                 // **A marker omh could not read is not an absent marker.**
                 // `last_used` collapsed both into `None`, so a run that could be
                 // listed but whose `last-used` omh was refused was recorded
@@ -1192,7 +1249,26 @@ pub(crate) fn leftovers(
         }
     }
 
-    if let Some(backend) = backend {
+    if let Err(e) = &backend {
+        // **A runtime omh never chose is a read it never made.** This half sat
+        // inside `if let Some(backend)`, so on a machine with no container
+        // runtime omh listed no container at all, `unchecked` came back empty,
+        // and the row read "none — nothing orphaned on this machine" having
+        // never looked for a sandbox. The reason travels as a `Result` rather
+        // than being dropped at the call site, so this line ends in `: {e}`
+        // like every other one.
+        //
+        // Recorded without `ctx.warn`, and that is the one deliberate
+        // asymmetry here: both callers already say this on stderr — `omh s` at
+        // `omh cannot say which sandboxes are up`, and `omh doctor` in its own
+        // `container runtime` row. What neither carries is the fact *in the
+        // report*, which is where `--json` reads it.
+        unchecked.push(format!(
+            "omh could not choose a container runtime, so orphaned sandbox \
+             containers went unchecked: {e}"
+        ));
+    }
+    if let Ok(backend) = backend {
         let prefix = paths.container("");
         // **Could not look is not "none".** This swallowed its failure, so a
         // daemon that was down reported *fewer* leftovers rather than saying
@@ -1226,6 +1302,31 @@ pub(crate) fn leftovers(
     found.retain(|id| !live.contains(id));
     found.sort();
     found.dedup();
+    // **A failed predicate invalidates every candidate.** Everything above is a
+    // *source*, and one failing loses candidates — which is what its reason
+    // says, and what the other three arms exist to report. `worktrees()` is the
+    // filter applied to all of them, so a reason from it does not shorten this
+    // list, it makes every name in it untrustworthy.
+    //
+    // Counted rather than named, for the reason the volumes half of this row is
+    // (`doctor.rs`): an earlier version named caches it could not attribute and
+    // handed over `docker volume rm` for them, which was `omh doctor` in one
+    // checkout calling another's live cache garbage. Naming is what makes a
+    // leftover actionable, and omh must not make something actionable that it
+    // cannot stand behind — here the command on offer takes the sandbox
+    // repository with it.
+    if !live_is_certain && !found.is_empty() {
+        let why = format!(
+            "{} candidate{} went unnamed rather than be reported as orphans — \
+             `omh <id> rm` on a live session takes the worktree and the sandbox \
+             repository with it",
+            found.len(),
+            if found.len() == 1 { "" } else { "s" }
+        );
+        ctx.warn(&why);
+        unchecked.push(why);
+        found.clear();
+    }
     Leftovers { found, unchecked }
 }
 

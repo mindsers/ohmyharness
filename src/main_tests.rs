@@ -1501,7 +1501,9 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("src/cmd/prune.rs", 1),
         // The twelfth is `harness_for_attach`'s refusal, which names
         // `omh <id> resume <harness>` the way the `Resume` arm does.
-        ("src/cmd/session.rs", 13), // + the `omh s` pointer when rm names no session
+        // + the `omh s` pointer when rm names no session, and the `omh <id> rm`
+        // in the reason `leftovers` gives for naming nothing.
+        ("src/cmd/session.rs", 14),
         ("src/cmd/settings.rs", 10),
         ("src/config.rs", 3),
         ("src/container.rs", 4),
@@ -6192,7 +6194,7 @@ fn an_unreadable_shadow_directory_is_reported_rather_than_read_as_empty() {
 
     let Some(cmd::session::Leftovers { unchecked, .. }) =
         while_unreadable(&paths.shadows(), || {
-            cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+            cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain())
         })
     else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
@@ -6218,7 +6220,7 @@ fn an_unreadable_run_directory_is_reported_rather_than_read_as_empty() {
     std::fs::create_dir_all(paths.runs()).unwrap();
 
     let Some(cmd::session::Leftovers { unchecked, .. }) = while_unreadable(&paths.runs(), || {
-        cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain())
     }) else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
         return;
@@ -6230,21 +6232,28 @@ fn an_unreadable_run_directory_is_reported_rather_than_read_as_empty() {
     );
 }
 
-/// **A failed shadow read reports itself, and the runs read still lands.**
+/// **A failed source does not discard what another source found.**
 ///
-/// Named for what it actually pins, after review: at *this* layer the three
-/// reads were already independent, so `found` keeping `s07` was never at risk
-/// and that half of the assertion is green on the old code too. What was red
-/// is `unchecked` carrying the shadow failure at all, which is the arm that
-/// warned to stderr and returned an empty list without recording anything.
+/// Renamed, and it now pins something: `shadow/`, `run/` and `docker ps -a` are
+/// three independent *sources* of candidates, so one failing loses candidates
+/// and the others' answers stand. `worktrees()` is the *predicate* applied to
+/// all three, and when **that** fails every candidate is wrong rather than
+/// merely incomplete — which is why
+/// `a_worktrees_read_omh_could_not_make_names_no_orphans` clears the list and
+/// this one must not.
 ///
-/// The headline regression, one failed read discarding what the others found,
-/// lived in `inspect.rs`'s `Result` collapse rather than here, and it is pinned
-/// where it can be: `a_leftover_and_a_failed_read_both_reach_the_row` below,
-/// over `leftovers_from` directly.
+/// That contrast is the whole of it. Widening "clear when the *live* sweep
+/// failed" to "clear when *anything* failed" is the obvious over-correction on
+/// reading the new code, and it turns this red and nothing else.
+///
+/// Before that it was decoration, and its own doc said so: at this layer the
+/// three sources were already independent, so `found` keeping `s07` was green
+/// on the old code, and the surviving half was a strict subset of
+/// `an_unreadable_shadow_directory_is_reported_rather_than_read_as_empty` on an
+/// identical fixture.
 #[cfg(unix)]
 #[test]
-fn a_failed_shadow_read_reports_itself_and_the_runs_read_still_lands() {
+fn a_failed_source_read_does_not_discard_what_another_source_found() {
     let dir = tempfile::tempdir().unwrap();
     let paths = leftover_paths(&dir);
     std::fs::create_dir_all(paths.shadows()).unwrap();
@@ -6252,22 +6261,26 @@ fn a_failed_shadow_read_reports_itself_and_the_runs_read_still_lands() {
 
     let Some(cmd::session::Leftovers { found, unchecked }) =
         while_unreadable(&paths.shadows(), || {
-            cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+            cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain())
         })
     else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
         return;
     };
 
+    // Named, not counted: `!unchecked.is_empty()` stood here and is now
+    // satisfied by the container-runtime line alone, which has nothing to do
+    // with this test.
     assert!(
-        !unchecked.is_empty(),
-        "the failed read must be reported: {unchecked:?}"
+        unchecked
+            .iter()
+            .any(|w| w.contains("sandbox repositories")),
+        "the failed source must be reported: {unchecked:?}"
     );
-    // Green on the old code as well, kept as the statement of the shape rather
-    // than as a guard: the runs read is independent of the shadows read.
     assert!(
         found.contains(&"s07".to_string()),
-        "and the run this did read is still there: {found:?}"
+        "and what another source found survives it — a failed *source* loses \
+         candidates, where a failed *predicate* invalidates them: {found:?}"
     );
 }
 
@@ -6288,7 +6301,7 @@ fn a_run_whose_marker_could_not_be_read_is_reported_rather_than_read_as_unused()
     let bites = idle::recorded_use(&paths.runs(), "s07").is_err();
 
     let cmd::session::Leftovers { found, unchecked } =
-        cmd::session::leftovers(&paths, None, &out::Ctx::plain());
+        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain());
     drop(restore);
 
     if !bites {
@@ -6440,7 +6453,7 @@ fn a_file_omh_writes_under_run_is_neither_a_leftover_nor_a_read_that_failed() {
     std::fs::write(paths.runs().join("hooks.json"), "{}").unwrap();
 
     let cmd::session::Leftovers { found, unchecked } =
-        cmd::session::leftovers(&paths, None, &out::Ctx::plain());
+        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain());
 
     assert!(
         !unchecked.iter().any(|w| w.contains("hooks.json")),
@@ -6472,7 +6485,7 @@ fn a_live_session_whose_marker_omh_could_not_read_is_not_unchecked() {
     let bites = idle::recorded_use(&paths.runs(), "s07").is_err();
 
     let cmd::session::Leftovers { found, unchecked } =
-        cmd::session::leftovers(&paths, None, &out::Ctx::plain());
+        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain());
     drop(restore);
 
     if !bites {
@@ -6501,11 +6514,18 @@ fn no_container_runtime_is_a_read_that_did_not_happen() {
     let paths = leftover_paths(&dir);
 
     let cmd::session::Leftovers { unchecked, .. } =
-        cmd::session::leftovers(&paths, None, &out::Ctx::plain());
+        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain());
 
     assert!(
         unchecked.iter().any(|w| w.contains("container")),
         "omh looked for no container at all, and must say so: {unchecked:?}"
+    );
+    // And says *why*, like every other reason in this function. The reason used
+    // to be warned to stderr and dropped at the call site, so nothing but the
+    // `Option`'s emptiness reached here.
+    assert!(
+        unchecked.iter().any(|w| w.contains("docker: not found")),
+        "the reason travels rather than being thrown away: {unchecked:?}"
     );
 }
 
@@ -6535,7 +6555,7 @@ fn a_worktrees_read_omh_could_not_make_names_no_orphans() {
 
     let Some(cmd::session::Leftovers { found, unchecked }) =
         while_unreadable(&paths.worktrees(), || {
-            cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+            cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain())
         })
     else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
