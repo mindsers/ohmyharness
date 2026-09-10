@@ -6126,6 +6126,43 @@ fn leftover_paths(dir: &tempfile::TempDir) -> Paths {
     paths
 }
 
+/// Makes `dir` unreadable, and puts its mode back when this drops.
+///
+/// **The mode it had, not `0o755`.** A `TempDir` is `0o700` under a umask of
+/// 077, so restoring a hard-coded `0o755` widens the very directory the test is
+/// measuring.
+///
+/// **And on an unwind, not only on the happy path.** A panic between the chmod
+/// and the restore left a `0o000` directory behind, which `remove_dir_all`
+/// cannot walk — and `TempDir::drop` discards that error, so the tempdir leaked
+/// into `$TMPDIR` with nothing said.
+#[cfg(unix)]
+struct Restore {
+    dir: std::path::PathBuf,
+    mode: u32,
+}
+
+#[cfg(unix)]
+impl Restore {
+    fn unreadable(dir: &std::path::Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir)?.permissions().mode();
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000))?;
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            mode,
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Restore {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(self.mode));
+    }
+}
+
 /// Run `f` with `dir` unreadable, restoring it afterwards so the `TempDir` can
 /// still clean itself up when the assertion fails.
 ///
@@ -6135,11 +6172,8 @@ fn leftover_paths(dir: &tempfile::TempDir) -> Paths {
 /// precondition itself, where a uid check is only a proxy for it.
 #[cfg(unix)]
 fn while_unreadable<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> Option<T> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let out = std::fs::read_dir(dir).is_err().then(f);
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
-    out
+    let _restore = Restore::unreadable(dir).unwrap();
+    std::fs::read_dir(dir).is_err().then(f)
 }
 
 /// **Could not look is not "none", for the orphan that holds the work.**
@@ -6246,17 +6280,16 @@ fn a_failed_shadow_read_reports_itself_and_the_runs_read_still_lands() {
 #[cfg(unix)]
 #[test]
 fn a_run_whose_marker_could_not_be_read_is_reported_rather_than_read_as_unused() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
     let paths = leftover_paths(&dir);
     idle::touch(&paths.runs(), "s07").unwrap();
     let run = paths.runs().join("s07");
-    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let restore = Restore::unreadable(&run).unwrap();
     let bites = idle::recorded_use(&paths.runs(), "s07").is_err();
 
     let cmd::session::Leftovers { found, unchecked } =
         cmd::session::leftovers(&paths, None, &out::Ctx::plain());
-    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(restore);
 
     if !bites {
         eprintln!("skipped: this user reads through an unreadable directory");
@@ -6385,4 +6418,142 @@ fn a_count_of_unreadable_entries_becomes_the_line_that_names_them() {
 
     let many = cmd::session::unreadable_reason(2, "runs", dir).expect("two failures are a reason");
     assert!(many.contains("2 entries"), "plural: {many}");
+}
+
+/// **A file omh writes itself is not a run it could not read.**
+///
+/// `notice::record_path` puts `hooks.json` directly under `runs()`, and the
+/// sweep took every entry there for a session id: `idle::recorded_use` stat'd
+/// `runs/hooks.json/last-used`, which is `NotADirectory` rather than
+/// `NotFound`, so the arm that reports a failed read fired. `omh s` warned on
+/// every single invocation and the doctor row could never read "none" again —
+/// about a snapshot omh had written itself, one directory up.
+///
+/// `{}` is what `Record::commit` writes for a repo with no hooks: an empty
+/// `BTreeMap` through `serde_json::to_string`. A file of any other shape would
+/// be a fixture inventing a state omh never produces.
+#[test]
+fn a_file_omh_writes_under_run_is_neither_a_leftover_nor_a_read_that_failed() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    std::fs::create_dir_all(paths.runs()).unwrap();
+    std::fs::write(paths.runs().join("hooks.json"), "{}").unwrap();
+
+    let cmd::session::Leftovers { found, unchecked } =
+        cmd::session::leftovers(&paths, None, &out::Ctx::plain());
+
+    assert!(
+        !unchecked.iter().any(|w| w.contains("hooks.json")),
+        "omh's own snapshot is not a read that failed: {unchecked:?}"
+    );
+    assert!(
+        !found.iter().any(|id| id.contains("hooks.json")),
+        "and not a session left behind either: {found:?}"
+    );
+}
+
+/// **A live worktree settles it, before any marker is read.**
+///
+/// The runs loop asked `recorded_use` for every id and pushed its failure
+/// without ever asking whether the session was live, so a session omh had
+/// already proved was *not* an orphan was reported as one it could not check.
+/// `found.retain(|id| !live.contains(id))` filtered the found list alone and
+/// never reached the reasons.
+#[cfg(unix)]
+#[test]
+fn a_live_session_whose_marker_omh_could_not_read_is_not_unchecked() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    // `session::list` reports every directory under `worktrees()` as live.
+    std::fs::create_dir_all(paths.worktrees().join("s07")).unwrap();
+    idle::touch(&paths.runs(), "s07").unwrap();
+    let run = paths.runs().join("s07");
+    let restore = Restore::unreadable(&run).unwrap();
+    let bites = idle::recorded_use(&paths.runs(), "s07").is_err();
+
+    let cmd::session::Leftovers { found, unchecked } =
+        cmd::session::leftovers(&paths, None, &out::Ctx::plain());
+    drop(restore);
+
+    if !bites {
+        eprintln!("skipped: this user reads through an unreadable directory");
+        return;
+    }
+    assert!(
+        !unchecked.iter().any(|w| w.contains("s07")),
+        "a session with a live worktree is not one omh could not check: {unchecked:?}"
+    );
+    assert!(
+        !found.contains(&"s07".to_string()),
+        "and it is not a leftover: {found:?}"
+    );
+}
+
+/// **No container runtime is a read omh did not make.**
+///
+/// The container half sits inside `if let Some(backend)`, so on a machine with
+/// no runtime omh listed no container at all, `unchecked` came back empty, and
+/// the row read "none — nothing orphaned on this machine" having never looked
+/// for a sandbox. That is the sentence this whole row exists to refuse.
+#[test]
+fn no_container_runtime_is_a_read_that_did_not_happen() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+
+    let cmd::session::Leftovers { unchecked, .. } =
+        cmd::session::leftovers(&paths, None, &out::Ctx::plain());
+
+    assert!(
+        unchecked.iter().any(|w| w.contains("container")),
+        "omh looked for no container at all, and must say so: {unchecked:?}"
+    );
+}
+
+/// **A failed predicate invalidates every candidate; a failed source does not.**
+///
+/// `shadow/`, `run/` and `docker ps -a` are three independent *sources* of
+/// candidates — one failing loses candidates, which is what `unchecked` says.
+/// `worktrees()` is the *predicate* applied to all three, and `session::list`
+/// answers `Vec::new()` for "omh could not look" exactly as it does for "no
+/// session has ever been made here". So an unreadable `worktrees/` made every
+/// live session unclaimed: omh named them as orphans with `omh <id> rm` beside
+/// each — the command that takes the worktree *and* the sandbox repository
+/// holding every commit the agent made — and `unchecked` empty to say it had
+/// looked everywhere.
+///
+/// Counted rather than named, for the reason the volumes half of this row is
+/// (`doctor.rs`): naming is what makes a leftover actionable, and omh must not
+/// hand over a destructive command for something it cannot attribute.
+#[cfg(unix)]
+#[test]
+fn a_worktrees_read_omh_could_not_make_names_no_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    std::fs::create_dir_all(paths.worktrees()).unwrap();
+    // One candidate, which omh would name were the predicate readable.
+    idle::touch(&paths.runs(), "s07").unwrap();
+
+    let Some(cmd::session::Leftovers { found, unchecked }) =
+        while_unreadable(&paths.worktrees(), || {
+            cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+        })
+    else {
+        eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
+        return;
+    };
+
+    assert!(
+        unchecked.iter().any(|w| w.contains("worktrees")),
+        "the read omh could not make must be named: {unchecked:?}"
+    );
+    assert!(
+        found.is_empty(),
+        "and nothing may be named an orphan, because omh cannot tell one from a \
+         live session: {found:?}"
+    );
+    assert!(
+        unchecked.iter().any(|w| w.contains("1 candidate")),
+        "the count survives, so the reader knows there is something to look at: \
+         {unchecked:?}"
+    );
 }
