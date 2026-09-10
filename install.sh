@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Install omh from a published release.
 #
-#   curl -fsSL https://raw.githubusercontent.com/mindsers/ohmyharness/main/install.sh | sh
+#   curl -fsSL https://ohmyharness.sh/install.sh | sh
 #
 # Picks the tarball for this machine, checks it against the published
 # SHA256SUMS, and puts `omh` somewhere on your PATH. Nothing else — omh itself
@@ -37,7 +37,7 @@ usage() {
   cat <<'EOF'
 Install omh from a published release.
 
-  curl -fsSL https://raw.githubusercontent.com/mindsers/ohmyharness/main/install.sh | sh
+  curl -fsSL https://ohmyharness.sh/install.sh | sh
 
   OMH_VERSION   tag to install (default: the latest release)
   OMH_BIN_DIR   where to put the binary (default: ~/.local/bin)

@@ -32,8 +32,12 @@ release published, so the two cannot disagree about what shipped.
 ### The install script
 
 ```console
-$ curl -fsSL https://raw.githubusercontent.com/mindsers/ohmyharness/main/install.sh | sh
+$ curl -fsSL https://ohmyharness.sh/install.sh | sh
 ```
+
+That URL redirects to [`install.sh`](../install.sh) in this repository — a
+redirect rather than a copy, so the script you pipe to `sh` is the one in the
+tree you are reading.
 
 The script resolves the latest release, picks the build matching your OS and
 architecture, verifies it against the published `SHA256SUMS`, and installs to
