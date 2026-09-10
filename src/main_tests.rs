@@ -6115,3 +6115,274 @@ fn materialise_never_removes_the_placeholders_omh_mounts_over() {
         "and the ordinary case still writes the tree"
     );
 }
+
+/// A `Paths` under a throwaway home, with the repo initialised.
+fn leftover_paths(dir: &tempfile::TempDir) -> Paths {
+    let paths = Paths {
+        root: dir.path().join("home"),
+        repo: dir.path().join("repo"),
+    };
+    std::fs::create_dir_all(&paths.repo).unwrap();
+    paths
+}
+
+/// Run `f` with `dir` unreadable, restoring it afterwards so the `TempDir` can
+/// still clean itself up when the assertion fails.
+///
+/// `None` when the mode does not bite, which is the case as root: the directory
+/// stays readable, `unchecked` comes back empty, and every assertion below would
+/// pass for the wrong reason. Asking whether the read actually fails is the
+/// precondition itself, where a uid check is only a proxy for it.
+#[cfg(unix)]
+fn while_unreadable<T>(dir: &std::path::Path, f: impl FnOnce() -> T) -> Option<T> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let out = std::fs::read_dir(dir).is_err().then(f);
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+    out
+}
+
+/// **Could not look is not "none", for the orphan that holds the work.**
+///
+/// The `Err` arm warned to stderr and returned an empty list without touching
+/// `unchecked`, so `doctor` printed "none, nothing orphaned on this machine",
+/// the claim this row's own doc forbids, about a directory omh had failed to
+/// open. The sandbox repository is the orphan that holds every commit the agent
+/// made, so a clean report is the one answer that stops anybody going to look.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_shadow_directory_is_reported_rather_than_read_as_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    std::fs::create_dir_all(paths.shadows()).unwrap();
+
+    let Some(cmd::session::Leftovers { unchecked, .. }) =
+        while_unreadable(&paths.shadows(), || {
+            cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+        })
+    else {
+        eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
+        return;
+    };
+
+    assert!(
+        unchecked.iter().any(|w| w.contains("sandbox repositories")),
+        "a shadow directory omh could not read must say so: {unchecked:?}"
+    );
+}
+
+/// The same collapse in the arm that could not even warn.
+///
+/// `read_dir(..).into_iter().flatten().flatten()` dropped the directory error
+/// *and* every per-entry error, so this half reported "found nothing" with
+/// nothing on stderr at all.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_run_directory_is_reported_rather_than_read_as_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    std::fs::create_dir_all(paths.runs()).unwrap();
+
+    let Some(cmd::session::Leftovers { unchecked, .. }) = while_unreadable(&paths.runs(), || {
+        cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+    }) else {
+        eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
+        return;
+    };
+
+    assert!(
+        unchecked.iter().any(|w| w.contains("run directories")),
+        "a run directory omh could not read must say so: {unchecked:?}"
+    );
+}
+
+/// **A failed shadow read reports itself, and the runs read still lands.**
+///
+/// Named for what it actually pins, after review: at *this* layer the three
+/// reads were already independent, so `found` keeping `s07` was never at risk
+/// and that half of the assertion is green on the old code too. What was red
+/// is `unchecked` carrying the shadow failure at all, which is the arm that
+/// warned to stderr and returned an empty list without recording anything.
+///
+/// The headline regression, one failed read discarding what the others found,
+/// lived in `inspect.rs`'s `Result` collapse rather than here, and it is pinned
+/// where it can be: `a_leftover_and_a_failed_read_both_reach_the_row` below,
+/// over `leftovers_from` directly.
+#[cfg(unix)]
+#[test]
+fn a_failed_shadow_read_reports_itself_and_the_runs_read_still_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    std::fs::create_dir_all(paths.shadows()).unwrap();
+    idle::touch(&paths.runs(), "s07").unwrap();
+
+    let Some(cmd::session::Leftovers { found, unchecked }) =
+        while_unreadable(&paths.shadows(), || {
+            cmd::session::leftovers(&paths, None, &out::Ctx::plain())
+        })
+    else {
+        eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
+        return;
+    };
+
+    assert!(
+        !unchecked.is_empty(),
+        "the failed read must be reported: {unchecked:?}"
+    );
+    // Green on the old code as well, kept as the statement of the shape rather
+    // than as a guard: the runs read is independent of the shadows read.
+    assert!(
+        found.contains(&"s07".to_string()),
+        "and the run this did read is still there: {found:?}"
+    );
+}
+
+/// **A marker omh could not read is not a run that was never used.**
+///
+/// `last_used` mapped both to `None`, so a run omh could list but not examine
+/// was recorded neither as a leftover nor as a read that failed. The directory
+/// above it is readable here: this is the false-clean report one level further
+/// down than the two tests above, and the one a `read_dir` guard cannot reach.
+#[cfg(unix)]
+#[test]
+fn a_run_whose_marker_could_not_be_read_is_reported_rather_than_read_as_unused() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    idle::touch(&paths.runs(), "s07").unwrap();
+    let run = paths.runs().join("s07");
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let bites = idle::recorded_use(&paths.runs(), "s07").is_err();
+
+    let cmd::session::Leftovers { found, unchecked } =
+        cmd::session::leftovers(&paths, None, &out::Ctx::plain());
+    std::fs::set_permissions(&run, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    if !bites {
+        eprintln!("skipped: this user reads through an unreadable directory");
+        return;
+    }
+    assert!(
+        !found.contains(&"s07".to_string()),
+        "omh must not claim a run it could not examine: {found:?}"
+    );
+    assert!(
+        unchecked.iter().any(|w| w.contains("s07")),
+        "a marker omh could not read must say so, by name: {unchecked:?}"
+    );
+}
+
+/// The per-entry failure, which no fixture can produce.
+///
+/// Both directory tests above make `read_dir` itself fail, so the iterator is
+/// never created and restoring the old `.flatten()` would leave them green. The
+/// seam is what makes this branch reachable at all.
+#[test]
+fn an_entry_that_could_not_be_read_is_counted_rather_than_dropped() {
+    let entries: Vec<std::io::Result<&str>> = vec![
+        Ok("a.git"),
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        Ok("b.git"),
+    ];
+
+    let (names, unreadable) = cmd::session::listed(entries, |e: &&str| (*e).to_string());
+
+    assert_eq!(names, vec!["a.git", "b.git"], "the readable ones survive");
+    assert_eq!(
+        unreadable, 1,
+        "and the one that failed is counted, not dropped"
+    );
+}
+
+/// Every reason reaches the row, not just the last one written.
+#[test]
+fn the_doctor_row_carries_each_reason_it_could_not_look() {
+    let row = doctor::leftovers_from(
+        cmd::session::Leftovers {
+            found: vec!["s07".into()],
+            unchecked: vec![
+                "omh could not read /x, so orphaned sandbox repositories went unchecked: denied"
+                    .into(),
+                "omh could not read /y, so orphaned run directories went unchecked: denied".into(),
+            ],
+        },
+        Ok(Vec::new()),
+        doctor::Attributed::default(),
+    );
+    assert!(row.ok, "a leftover is never a failure");
+    assert!(
+        row.detail.contains("sandbox repositories") && row.detail.contains("run directories"),
+        "both reasons must reach the row: {}",
+        row.detail
+    );
+    assert!(
+        row.detail.contains("s07"),
+        "and the leftover it did find is still named: {}",
+        row.detail
+    );
+    assert!(
+        !row.detail.contains("none"),
+        "a row that could not look must not read as a clean machine: {}",
+        row.detail
+    );
+}
+
+/// **The headline bug, pinned where it lived.**
+///
+/// `inspect` collapsed the pair into a `Result` (`(_, Some(why)) => Err(why)`),
+/// so a single failed read discarded every leftover the other two had already
+/// found: a permission error on `shadow/` hid a real orphaned run, and omh
+/// reported *less* than it knew. Nothing exercised that but the shape of the
+/// code, so this asserts the row carries both halves at once.
+#[test]
+fn a_leftover_and_a_failed_read_both_reach_the_row() {
+    let row = doctor::leftovers_from(
+        cmd::session::Leftovers {
+            found: vec!["s01".into()],
+            unchecked: vec![
+                "omh could not read /shadow, so orphaned sandbox repositories went unchecked: \
+                 denied"
+                    .into(),
+            ],
+        },
+        Ok(Vec::new()),
+        doctor::Attributed::default(),
+    );
+
+    assert!(row.ok, "a leftover is never a failure");
+    assert!(
+        row.detail.contains("s01"),
+        "the leftover the other read found must survive the one that failed: {}",
+        row.detail
+    );
+    assert!(
+        row.detail.contains("could not read /shadow"),
+        "and the failed read is still named: {}",
+        row.detail
+    );
+}
+
+/// A count of entries omh could not read becomes a reason, and zero becomes
+/// silence.
+///
+/// The step between `listed`'s count and the `unchecked` line was covered by
+/// neither: `listed` is tested with a synthetic `Err`, and the branch that turns
+/// its count into a reason needs a per-entry failure no fixture can produce.
+#[test]
+fn a_count_of_unreadable_entries_becomes_the_line_that_names_them() {
+    let dir = std::path::Path::new("/tmp/shadow");
+
+    assert_eq!(
+        cmd::session::unreadable_reason(0, "sandbox repositories", dir),
+        None,
+        "a directory omh read completely has nothing to report"
+    );
+
+    let one = cmd::session::unreadable_reason(1, "runs", dir).expect("one failure is a reason");
+    assert!(one.contains("1 entry"), "singular, not `1 entries`: {one}");
+    assert!(one.contains("runs went unchecked"), "{one}");
+    assert!(one.contains("/tmp/shadow"), "the directory is named: {one}");
+
+    let many = cmd::session::unreadable_reason(2, "runs", dir).expect("two failures are a reason");
+    assert!(many.contains("2 entries"), "plural: {many}");
+}

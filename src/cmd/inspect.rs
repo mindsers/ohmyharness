@@ -246,16 +246,17 @@ pub(crate) fn doctor_cmd(
         Err(_) => doctor::Attributed::default(),
     };
 
+    // **Both halves, not one or the other.** This was a `match` collapsing the
+    // pair into a `Result`, so a single failed read discarded every leftover the
+    // other two reads had already found — the failure made omh report *less*
+    // than it knew, in the row whose whole job is to notice what is left behind.
+    let orphans = crate::cmd::session::leftovers(&paths, chosen.as_ref().ok(), ctx);
+
     let host = doctor::host_checks(answering.map_err(|e| format!("{e:#}")), stacks, &provision)
         .into_iter()
         .chain(doctor::settings_checks(&files, &known))
         .chain(std::iter::once(doctor::leftovers_from(
-            match crate::cmd::session::leftovers(&paths, chosen.as_ref().ok(), ctx) {
-                (found, None) => Ok(found),
-                (_, Some(why)) => Err(why),
-            },
-            volumes,
-            split,
+            orphans, volumes, split,
         )))
         .chain(std::iter::once(doctor::seeded_from(
             std::fs::read_to_string(paths.repo.join(".omh").join(crate::cmd::init::SEEDED_BY))

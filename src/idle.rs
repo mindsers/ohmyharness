@@ -133,11 +133,27 @@ pub fn live_from(session: &str, probe: &crate::image::Probe) -> Live {
     }
 }
 
+/// When a session was last used: `Ok(None)` if it has never been recorded.
+///
+/// Split from `last_used` because a caller deciding whether it *could look*
+/// needs the difference the `Option` throws away. `NotFound` is the ordinary
+/// "this run has no marker"; anything else is omh being unable to tell, and for
+/// as long as the two were one `None` a marker omh was refused read as though
+/// the run had never been used, which is the false-clean report one level up.
+pub fn recorded_use(run_dir: &Path, session: &str) -> std::io::Result<Option<SystemTime>> {
+    match std::fs::metadata(marker(run_dir, session)) {
+        Ok(m) => m.modified().map(Some),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// When a session was last used, if it has ever been recorded.
+///
+/// The lossy form, for the callers that reap: a marker omh cannot read is a
+/// session it must not reap, which is what `None` already means there.
 pub fn last_used(run_dir: &Path, session: &str) -> Option<SystemTime> {
-    std::fs::metadata(marker(run_dir, session))
-        .ok()
-        .and_then(|m| m.modified().ok())
+    recorded_use(run_dir, session).ok().flatten()
 }
 
 #[cfg(test)]
@@ -208,6 +224,28 @@ mod tests {
         let now = SystemTime::now();
         let running = vec![("s01".into(), None)];
         assert!(expired(&running, Duration::from_secs(1), now, "", &|_| Live::Idle).is_empty());
+    }
+
+    /// **Never recorded is not could not read**, which is the whole reason this
+    /// function exists beside `last_used`.
+    ///
+    /// Only the `Err` arm had a guard (a chmod'd run directory, in the leftovers
+    /// tests). Drop the `NotFound => Ok(None)` arm and every one of those still
+    /// passes, while omh starts reporting a run nobody has ever used as one it
+    /// could not check.
+    #[test]
+    fn a_run_with_no_marker_reads_as_never_used_rather_than_unreadable() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(
+            matches!(recorded_use(d.path(), "s01"), Ok(None)),
+            "a run directory with no marker has simply never been used"
+        );
+
+        touch(d.path(), "s01").unwrap();
+        assert!(
+            matches!(recorded_use(d.path(), "s01"), Ok(Some(_))),
+            "and once touched it reads back as a time"
+        );
     }
 
     #[test]
