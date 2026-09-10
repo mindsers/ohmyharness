@@ -6,6 +6,7 @@
 
 use crate::adapter::{Binding, Capability, Render};
 use crate::hook::{self, Outcome};
+use crate::ledger;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -22,6 +23,12 @@ use std::path::{Path, PathBuf};
 pub struct Document {
     pub body: String,
     pub dropped: Vec<hook::Dropped>,
+    /// The hooks that reached the body, by name — empty for a capability that
+    /// is not hook-shaped. This is what `container::plan` writes into
+    /// `ledger::Ledger`: the trusted, host-written half of what a launch's
+    /// events file is read back against, so it must name every hook the
+    /// launch *could* log and none it could not.
+    pub rendered_hooks: Vec<String>,
 }
 
 impl From<String> for Document {
@@ -29,29 +36,53 @@ impl From<String> for Document {
         Self {
             body,
             dropped: Vec::new(),
+            rendered_hooks: Vec::new(),
         }
     }
 }
 
+/// A parameter object, not a domain type: `document` crossed clippy's
+/// too-many-arguments threshold when `log` was added, and these five values
+/// are the ones that stay the same across a whole `Capability::ALL` pass —
+/// only `cap`, `binding` and `sources` change call to call. Unlike
+/// `container::Stager`, which really is constructed once outside its loop,
+/// a `RenderContext` is built fresh on every `Stager::stage` call, from
+/// fields `Stager` already holds; grouping them here says nothing about
+/// when they were computed, only that `document` needs all five together.
+pub struct RenderContext<'a> {
+    /// What omh itself contributes. Not a layer — omh's hooks belong to no
+    /// directory.
+    pub own: &'a crate::base::Own,
+    /// What this checkout decided. Not a layer either — a server whose
+    /// feature is disabled here is still in your `mcp.json`, which is yours
+    /// and is left exactly as you have it.
+    pub repo: &'a crate::settings::RepoPolicy,
+    pub tools: &'a BTreeMap<hook::Tool, String>,
+    /// What the image this session will run has been measured to contain,
+    /// from `facts::Facts::about`. A program absent from it is one nobody
+    /// probed, which suppresses nothing — see `suppressed_by_probe`.
+    pub resolves: &'a BTreeMap<String, bool>,
+    /// The guest path of this launch's events file, or `None` when nothing
+    /// is being staged for a real launch — `omh eject`, `omh doctor`'s
+    /// probe, and (per `container::plan`) a scratch session with no branch,
+    /// which never mounts the shadow gitdir this path would point into.
+    pub log: Option<&'a str>,
+}
+
 /// Render a capability into the shape this harness parses.
-///
-/// Two inputs from outside, and they are deliberately two: `own` is what omh
-/// itself contributes, `repo` is what this checkout decided. Neither is a
-/// layer — omh's hooks belong to no directory, and a server whose feature is
-/// disabled here is still in your `mcp.json`, which is yours and is left
-/// exactly as you have it.
 pub fn document(
     cap: Capability,
     binding: &Binding,
     sources: &[PathBuf],
-    own: &crate::base::Own,
-    repo: &crate::settings::RepoPolicy,
-    tools: &BTreeMap<hook::Tool, String>,
-    // `resolves`: what the image this session will run has been measured to
-    // contain, from `facts::Facts::about`. A program absent from it is one
-    // nobody probed, which suppresses nothing — see `suppressed_by_probe`.
-    resolves: &BTreeMap<String, bool>,
+    ctx: &RenderContext,
 ) -> Result<Document> {
+    let RenderContext {
+        own,
+        repo,
+        tools,
+        resolves,
+        log,
+    } = *ctx;
     match binding.render {
         Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
             let mut servers = merge_servers(sources)?;
@@ -97,17 +128,19 @@ pub fn document(
         Render::ClaudeSettings => {
             let mut hooks = merge_hooks(sources, own, repo)?;
             let mut dropped = suppressed_by_probe(&mut hooks, resolves);
-            let (rendered, unspellable) = translate(&hooks, binding, tools)?;
+            let (rendered, unspellable) = translate(&hooks, binding, tools, log)?;
             dropped.extend(unspellable);
+            let rendered_hooks = rendered.keys().cloned().collect();
             Ok(Document {
                 body: claude_settings(&rendered)?,
                 dropped,
+                rendered_hooks,
             })
         }
         Render::OpencodePlugin => {
             let mut hooks = merge_hooks(sources, own, repo)?;
             let mut dropped = suppressed_by_probe(&mut hooks, resolves);
-            let mut doc = opencode_plugin(&hooks, binding, tools)?;
+            let mut doc = opencode_plugin(&hooks, binding, tools, log)?;
             dropped.extend(std::mem::take(&mut doc.dropped));
             doc.dropped = dropped;
             Ok(doc)
@@ -115,7 +148,7 @@ pub fn document(
         Render::OmpPlugin => {
             let mut hooks = merge_hooks(sources, own, repo)?;
             let mut dropped = suppressed_by_probe(&mut hooks, resolves);
-            let mut doc = omp_plugin(&hooks, binding, tools)?;
+            let mut doc = omp_plugin(&hooks, binding, tools, log)?;
             dropped.extend(std::mem::take(&mut doc.dropped));
             doc.dropped = dropped;
             Ok(doc)
@@ -395,11 +428,12 @@ fn translate(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
     tools: &BTreeMap<hook::Tool, String>,
+    log: Option<&str>,
 ) -> Result<(BTreeMap<String, hook::Rendered>, Vec<hook::Dropped>)> {
     let mut rendered = BTreeMap::new();
     let mut dropped = Vec::new();
     for (name, h) in hooks {
-        match hook::render(name, h, binding, tools)? {
+        match hook::render(name, h, binding, tools, log)? {
             Outcome::Rendered(r) => {
                 rendered.insert(name.clone(), r);
             }
@@ -608,8 +642,10 @@ fn opencode_plugin(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
     tools: &BTreeMap<hook::Tool, String>,
+    log: Option<&str>,
 ) -> Result<Document> {
     let mut dropped = Vec::new();
+    let mut rendered_hooks = Vec::new();
     // Keyed by plugin hook name, so several omh hooks sharing a moment land in
     // one handler, in a stable order.
     let mut bodies: BTreeMap<&str, Vec<String>> = BTreeMap::new();
@@ -671,10 +707,15 @@ fn opencode_plugin(
         bodies
             .entry(slot.handler())
             .or_default()
-            .push(one_hook(name, hook, &wired, slot, protocol));
+            .push(one_hook(name, hook, &wired, slot, protocol, log));
+        rendered_hooks.push(name.clone());
     }
 
-    let mut out = String::from(SHELL_BRIDGE) + PLUGIN_PREAMBLE;
+    let mut out = String::from(SHELL_BRIDGE);
+    if log.is_some() {
+        out.push_str(LOG_BRIDGE);
+    }
+    out.push_str(PLUGIN_PREAMBLE);
     for (handler, blocks) in &bodies {
         // Every hook in a handler shares its parameter list, which is why the
         // drop above has to happen before a hook reaches one.
@@ -686,7 +727,11 @@ fn opencode_plugin(
         out.push_str("  },\n");
     }
     out.push_str("}))\n");
-    Ok(Document { body: out, dropped })
+    Ok(Document {
+        body: out,
+        dropped,
+        rendered_hooks,
+    })
 }
 
 /// The four moments of oh-my-pi's that omh has a word for.
@@ -753,8 +798,10 @@ fn omp_plugin(
     hooks: &BTreeMap<String, hook::Hook>,
     binding: &Binding,
     tools: &BTreeMap<hook::Tool, String>,
+    log: Option<&str>,
 ) -> Result<Document> {
     let mut dropped = Vec::new();
+    let mut rendered_hooks = Vec::new();
     // One `pi.on` per hook, in hook-name order.
     //
     // They were grouped by moment first, one registration holding every hook
@@ -767,7 +814,11 @@ fn omp_plugin(
     // `tool_result` handlers chain, each seeing the last one's edits. omh
     // cannot reproduce that from inside one handler and has no business
     // trying.
-    let mut out = String::from(SHELL_BRIDGE) + OMP_PREAMBLE;
+    let mut out = String::from(SHELL_BRIDGE);
+    if log.is_some() {
+        out.push_str(LOG_BRIDGE);
+    }
+    out.push_str(OMP_PREAMBLE);
 
     for (name, hook) in hooks {
         let wired = match hook::wire(name, hook, binding, tools) {
@@ -812,29 +863,6 @@ fn omp_plugin(
             dropped.push(give_up("way to inject text before a tool runs"));
             continue;
         }
-        // A field the adapter maps for the harness, on a tool that has not got
-        // it. omp's `edit` takes one `input` string with the path inside a
-        // `[PATH#TAG]` payload, so `event.input.path` is never there — while
-        // `read`, which the same map serves correctly, does have it.
-        //
-        // Emitting it anyway bound `""`, and a hook that then guards on the
-        // value simply never fired: in the module, in `doctor`'s name list, not
-        // in `dropped`, indistinguishable from a hook with nothing to say.
-        //
-        // The knowledge is omp's and lives in omp's renderer because the schema
-        // has no way to say "this field exists on these tools and not those" —
-        // `fields` is one map per harness. That is a real limit of the adapter
-        // format and is recorded in `adapters/omp.toml` beside the map itself.
-        if let Some(edit) = tools.get(&hook::Tool::Edit) {
-            let wants_file = wired
-                .fields
-                .iter()
-                .any(|(f, _)| *f == hook::Field::ToolFile);
-            if wants_file && wired.tools.iter().any(|t| t == edit) {
-                dropped.push(give_up(&format!("`tool-file` on `{edit}`")));
-                continue;
-            }
-        }
         // There is deliberately no mirror of that check for a `refuse` at
         // `after-tool`. It reads like the obvious counterpart and would be dead
         // code: omh refuses that pairing when the hook is *parsed*, so no such
@@ -847,11 +875,16 @@ fn omp_plugin(
                 continue;
             }
         };
-        out.push_str(&omp_one_hook(name, hook, &wired, moment, protocol));
+        out.push_str(&omp_one_hook(name, hook, &wired, moment, protocol, log));
+        rendered_hooks.push(name.clone());
     }
 
     out.push_str("}\n");
-    Ok(Document { body: out, dropped })
+    Ok(Document {
+        body: out,
+        dropped,
+        rendered_hooks,
+    })
 }
 
 /// One hook, as its own `pi.on` registration.
@@ -861,6 +894,7 @@ fn omp_one_hook(
     wired: &hook::Wired<'_>,
     moment: Moment,
     protocol: Option<&crate::adapter::Template>,
+    log: Option<&str>,
 ) -> String {
     // The handler *is* the hook's function scope, so a `return` ends this hook
     // and nothing else — no IIFE, and no name mangled into an identifier to
@@ -884,10 +918,19 @@ fn omp_one_hook(
     b.push_str("    const env = {}\n");
     // Both tool moments keep the call's arguments on `event.input` — unlike
     // opencode, where the parameter they hang off changes with the moment.
+    // A `fields-by-tool` entry is already a complete expression (the escape
+    // hatch this exists for is `edit`, whose path lives inside one `input`
+    // string rather than a property) and must be used verbatim; the shared
+    // default is a bare suffix, wrapped in `event.input?.` as always.
     if moment != Moment::Bare {
-        for (field, at) in &wired.fields {
+        for (field, at, overridden) in &wired.fields {
+            let expr = if *overridden {
+                at.to_string()
+            } else {
+                format!("event.input?.{at}")
+            };
             b.push_str(&format!(
-                "    env[{:?}] = String(event.input?.{at} ?? \"\")\n",
+                "    env[{:?}] = String({expr} ?? \"\")\n",
                 field.var()
             ));
         }
@@ -917,7 +960,8 @@ fn omp_one_hook(
         // `inject` or a `run` in the same state still falls through to silence.
         if let (hook::Action::Refuse { .. }, Some(t)) = (&hook.action, protocol) {
             b.push_str(&format!(
-                "    if (!p.ran) {}\n",
+                "    if (!p.ran) {{ {}{} }}\n",
+                log_call(log, name, ledger::Decision::Unevaluated),
                 t.template.replace(
                     "{{text}}",
                     &js(&format!(
@@ -926,7 +970,18 @@ fn omp_one_hook(
                 ),
             ));
         }
-        b.push_str("    if (p.code !== 0) return\n");
+        b.push_str(&format!(
+            "    if (p.code !== 0) {{ {}return }}\n",
+            log_call(log, name, ledger::Decision::Silent),
+        ));
+    }
+    if log.is_some() {
+        let decision = if matches!(hook.action, hook::Action::Refuse { .. }) {
+            ledger::Decision::Refused
+        } else {
+            ledger::Decision::Fired
+        };
+        b.push_str(&format!("    {}\n", log_call(log, name, decision)));
     }
     match &hook.action {
         hook::Action::Run(run) => b.push_str(&format!(
@@ -963,6 +1018,7 @@ fn one_hook(
     wired: &hook::Wired<'_>,
     slot: Slot<'_>,
     protocol: Option<&crate::adapter::Template>,
+    log: Option<&str>,
 ) -> String {
     // Each hook gets a function of its own. A bare block does not scope a
     // `return`, so a hook whose tool guard did not match would leave the whole
@@ -992,9 +1048,16 @@ fn one_hook(
     // `before` and on `input` at `after`, and reading the wrong one binds the
     // empty string rather than failing.
     if let Slot::Call { args, .. } = slot {
-        for (field, at) in &wired.fields {
+        // A `fields-by-tool` entry is a complete expression, used verbatim;
+        // the shared default is a bare suffix off `{args}?.args`, as always.
+        for (field, at, overridden) in &wired.fields {
+            let expr = if *overridden {
+                at.to_string()
+            } else {
+                format!("{args}?.args?.{at}")
+            };
             b.push_str(&format!(
-                "      env[{:?}] = String({args}?.args?.{at} ?? \"\")\n",
+                "      env[{:?}] = String({expr} ?? \"\")\n",
                 field.var()
             ));
         }
@@ -1013,10 +1076,22 @@ fn one_hook(
     }
     if let Some(when) = &hook.when {
         b.push_str(&format!(
-            "      const p = sh({}, env)\n      if (!p.ran || p.err) warn({}, \"its `when`\", p)\n      if (p.code !== 0) return\n",
+            "      const p = sh({}, env)\n      if (!p.ran || p.err) warn({}, \"its `when`\", p)\n      if (p.code !== 0) {{ {}return }}\n",
             js(when),
             js(name),
+            log_call(log, name, ledger::Decision::Silent),
         ));
+    }
+    // Right before the action, regardless of whether `when` was present: a
+    // hook with no `when` always reaches its action, same reasoning as
+    // `hook::render`'s own splice point.
+    if log.is_some() {
+        let decision = if matches!(hook.action, hook::Action::Refuse { .. }) {
+            ledger::Decision::Refused
+        } else {
+            ledger::Decision::Fired
+        };
+        b.push_str(&format!("      {}\n", log_call(log, name, decision)));
     }
     match &hook.action {
         // The exit code is not a decision — `graph-refresh` ends in `|| true`
@@ -1051,6 +1126,22 @@ fn one_hook(
     }
     b.push_str("    })()\n");
     b
+}
+
+/// One `omh_log(...)` call, as a JS statement ending in `; ` — never a bare
+/// `""` with trailing whitespace of its own, so a caller can splice it inline
+/// (`{ CALL return }`) or onto its own line without leaving a blank one when
+/// `log` is `None`.
+fn log_call(log: Option<&str>, name: &str, decision: ledger::Decision) -> String {
+    match log {
+        Some(path) => format!(
+            "omh_log({}, {}, {:?}); ",
+            js(path),
+            js(name),
+            decision.wire()
+        ),
+        None => String::new(),
+    }
 }
 
 /// A Rust string as a JavaScript string literal. Through `serde_json` because
@@ -1139,6 +1230,28 @@ const t = (hook, raw, word, env) => {
     return raw
   }
   return r.out
+}
+
+"#;
+
+/// Spliced in only when this launch logs — `String::from(SHELL_BRIDGE)` alone
+/// is what `omh eject` and every other `log: None` render still gets, and an
+/// ejected config handed to the user must carry none of omh's own plumbing.
+/// Kept as its own constant rather than folded permanently into
+/// `SHELL_BRIDGE` for exactly that reason.
+const LOG_BRIDGE: &str = r#"import { appendFileSync } from "node:fs"
+
+// One JSON line per decision, appended to this launch's events file. Never
+// lets a write failure — the file's directory not mounted, say — change what
+// the hook itself does: the write is inside its own `try`, and this function
+// never throws or returns a value a call site could branch on — so wherever
+// it is called from, the call itself cannot fail.
+const omh_log = (path, hook, decision) => {
+  try {
+    appendFileSync(path, JSON.stringify({ hook, decision }) + "\n")
+  } catch {
+    // Swallowed on purpose — see the comment above.
+  }
 }
 
 "#;
@@ -1409,7 +1522,7 @@ mod tests {
             ),
         ]);
 
-        let (rendered, dropped) = translate(&mine, &binding, &tools).unwrap();
+        let (rendered, dropped) = translate(&mine, &binding, &tools, None).unwrap();
         assert!(dropped.is_empty(), "the fixture must render: {dropped:?}");
         let document = claude_settings(&rendered).unwrap();
 
@@ -1843,10 +1956,13 @@ mod tests {
             Capability::Hooks,
             hooks_binding(&adapter),
             &[dir.path().join("h")],
-            &Default::default(),
-            &Default::default(),
-            &adapter.tools,
-            &Default::default(),
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
@@ -1881,10 +1997,13 @@ mod tests {
             Capability::Hooks,
             hooks_binding(&adapter),
             &[dir.path().join("h")],
-            &Default::default(),
-            &Default::default(),
-            &adapter.tools,
-            &Default::default(),
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
@@ -1924,10 +2043,13 @@ mod tests {
             Capability::Hooks,
             hooks_binding(&adapter),
             &[dir.path().join("h")],
-            &Default::default(),
-            &Default::default(),
-            &adapter.tools,
-            &Default::default(),
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out.body).unwrap();
@@ -1991,10 +2113,13 @@ mod tests {
             Capability::Hooks,
             hooks_binding(&adapter),
             &dirs,
-            &Default::default(),
-            &Default::default(),
-            &adapter.tools,
-            &measured,
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &adapter.tools,
+                resolves: &measured,
+                log: None,
+            },
         )
         .unwrap()
         .dropped
@@ -2051,10 +2176,13 @@ mod tests {
                 Capability::Hooks,
                 binding,
                 &[dir.path().join("h")],
-                &Default::default(),
-                &Default::default(),
-                tools,
-                &measured,
+                &RenderContext {
+                    own: &Default::default(),
+                    repo: &Default::default(),
+                    tools,
+                    resolves: &measured,
+                    log: None,
+                },
             )
             .unwrap();
 
@@ -2076,6 +2204,81 @@ mod tests {
                 binding.render,
                 out.body
             );
+        }
+    }
+
+    /// `rendered_hooks` is the trusted half of the decision ledger, and it is
+    /// built three times — once in each renderer's own arm of `document`.
+    /// Only claude's was covered, by a `container::plan` test that cannot
+    /// reach the other two; deleting the `push` from *both* the opencode and
+    /// omp arms left the entire suite green.
+    ///
+    /// What that silence costs is not a missing feature. `ledger::Summary`
+    /// partitions observations on membership of this list, so a renderer
+    /// that renders a hook and forgets to record it sends every genuine
+    /// observation of that hook into `unlisted` — which `omh sNN` prints, in
+    /// warning colour, as a hook reporting activity this launch never
+    /// rendered. The report accuses a working hook of forging its own name.
+    ///
+    /// Asserted per the field's own contract — "every hook the launch could
+    /// log and none it could not" — rather than by count, so a fourth
+    /// renderer, or a hook the sandbox drops, is covered without this test
+    /// moving.
+    #[test]
+    fn every_renderer_records_what_it_rendered() {
+        let dir = tempfile::tempdir().unwrap();
+        file(
+            dir.path(),
+            "h/graph-read.json",
+            r#"{"on":"turn-end","run":"echo read"}"#,
+        );
+        file(
+            dir.path(),
+            "h/graph-first.json",
+            r#"{"on":"turn-end","run":"echo first"}"#,
+        );
+
+        let claude = claude_hooks();
+        let paths: [(&Binding, &BTreeMap<hook::Tool, String>); 3] = [
+            (hooks_binding(&claude), &claude.tools),
+            (opencode_hooks(), &opencode().tools),
+            (omp_hooks(), &omp().tools),
+        ];
+        for (binding, tools) in paths {
+            let out = document(
+                Capability::Hooks,
+                binding,
+                &[dir.path().join("h")],
+                &RenderContext {
+                    own: &Default::default(),
+                    repo: &Default::default(),
+                    tools,
+                    resolves: &Default::default(),
+                    log: Some(crate::shadow::GUEST_EVENTS),
+                },
+            )
+            .unwrap();
+
+            for name in ["graph-read", "graph-first"] {
+                assert!(
+                    out.rendered_hooks.iter().any(|h| h == name),
+                    "{:?}: {name} reached the body but not the ledger — every \
+                     observation of it would be reported as unlisted: {:?}",
+                    binding.render,
+                    out.rendered_hooks
+                );
+            }
+            // "and none it could not": a name here that never reached the
+            // body would make `dormant` claim a hook rendered and stayed
+            // quiet when it was never there to run.
+            for name in &out.rendered_hooks {
+                assert!(
+                    out.body.contains(name.as_str()),
+                    "{:?}: the ledger names {name}, which never reached the body:\n{}",
+                    binding.render,
+                    out.body
+                );
+            }
         }
     }
 
@@ -2108,10 +2311,13 @@ mod tests {
             Capability::Hooks,
             omp_hooks(),
             &[dir.path().join("h")],
-            &Default::default(),
-            &Default::default(),
-            &omp().tools,
-            &Default::default(),
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &omp().tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap()
     }
@@ -2123,6 +2329,23 @@ mod tests {
             .unwrap_or_else(|| panic!("{name} was not dropped: {:?}", doc.dropped))
             .wanted
             .clone()
+    }
+
+    /// `omh eject` calls exactly this render, with `log: None` — this is what
+    /// makes `LOG_BRIDGE` a separate constant from `SHELL_BRIDGE` rather than
+    /// folded permanently into it. `plugin()` (opencode's helper, below) and
+    /// `omp_module()` (above) both default to `log: None`, so their ordinary
+    /// output is the fixture: a caller passing `Some` has to say so, same as
+    /// every other test here.
+    #[test]
+    fn an_unlogged_module_carries_no_plumbing() {
+        let hook = ("noted", r#"{"on":"turn-end","run":"echo hi"}"#);
+        for body in [plugin(&[hook]).body, omp_module(&[hook]).body] {
+            assert!(
+                !body.contains("omh_log") && !body.contains("appendFileSync"),
+                "an ejected module must carry none of omh's own plumbing: {body}"
+            );
+        }
     }
 
     /// Each moment omh knows about registers itself under omp's own name for
@@ -2366,10 +2589,13 @@ template = 'return { block: true, reason: {{text}} }'
             Capability::Hooks,
             binding,
             &[src.path().join("h")],
-            &Default::default(),
-            &Default::default(),
-            &adapter.tools,
-            &Default::default(),
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap_err()
         .to_string();
@@ -2397,7 +2623,7 @@ template = 'return { block: true, reason: {{text}} }'
             r#"{"on":"before-tool","tools":["shell"],"when":"test -x /nope","refuse":"use omh commit"}"#,
         )]);
         assert!(
-            doc.body.contains("if (!p.ran) return { block: true"),
+            doc.body.contains("if (!p.ran) { return { block: true"),
             "an unevaluable guard on a refusal must block, not fall through: {}",
             doc.body
         );
@@ -2427,29 +2653,36 @@ template = 'return { block: true, reason: {{text}} }'
         );
     }
 
-    /// A file path on omp's `edit` is a thing this harness cannot say, so the
-    /// hook wanting it is dropped by name rather than handed an empty string.
+    /// A file path on omp's `edit` used to be a thing this harness could not
+    /// say — its `input` is one string with the path embedded in
+    /// `[PATH#TAG]` sections, not a `path` property — until
+    /// `[capabilities.hooks.fields-by-tool.edit]` gave the renderer a
+    /// complete expression to read it with instead of a bare suffix.
     ///
-    /// omp's edit tool takes one `input` string with the path embedded in
-    /// `[PATH#TAG]` sections, so `event.input.path` is never there. The adapter
-    /// wrote that down and the renderer emitted the binding anyway: the hook
-    /// shipped, bound `""`, and never fired — present in the module, present in
-    /// `omh doctor`'s name list, absent from `dropped`, and indistinguishable
-    /// from a hook with nothing to say. Naming it is the whole rule.
+    /// Before that existed, the adapter recorded the gap and the renderer
+    /// emitted the binding anyway: the hook shipped, bound `""`, and never
+    /// fired — present in the module, present in `omh doctor`'s name list,
+    /// absent from `dropped`, and indistinguishable from a hook with nothing
+    /// to say. That failure mode is what this now proves does not recur: the
+    /// binding must be the override expression, not the plain `path` suffix,
+    /// and it must not be dropped.
     #[test]
-    fn a_file_path_on_omps_edit_tool_is_dropped_by_name() {
+    fn a_file_path_on_omps_edit_tool_reads_the_override() {
         let doc = omp_module(&[(
             "fmt-one",
             r#"{"on":"after-tool","tools":["edit"],"run":"prettier $OMH_TOOL_FILE"}"#,
         )]);
-        let wanted = dropped_for(&doc, "fmt-one");
+        assert!(doc.dropped.is_empty(), "dropped: {:?}", doc.dropped);
         assert!(
-            wanted.contains("tool-file") && wanted.contains("edit"),
-            "the drop must name the field and the tool it cannot come from: {wanted}"
+            doc.body
+                .contains(r#"env["OMH_TOOL_FILE"] = String((event.input?.input?.match("#),
+            "edit must read the override, not the bare `path` suffix that is \
+             never there: {}",
+            doc.body
         );
         assert!(
-            !doc.body.contains(r#"env["OMH_TOOL_FILE"]"#),
-            "a dropped hook left its binding behind: {}",
+            !doc.body.contains(r#"String(event.input?.path ?? "")"#),
+            "the plain suffix would silently bind empty: {}",
             doc.body
         );
     }
@@ -2515,7 +2748,7 @@ template = 'return { block: true, reason: {{text}} }'
         ]);
         assert!(doc.dropped.is_empty(), "dropped: {:?}", doc.dropped);
         assert!(
-            doc.body.contains("in git*)") && doc.body.contains("if (p.code !== 0) return"),
+            doc.body.contains("in git*)") && doc.body.contains("if (p.code !== 0) { return }"),
             "the `when` predicate and its gate must both be emitted: {}",
             doc.body
         );
@@ -2623,10 +2856,13 @@ template = 'return { block: true, reason: {{text}} }'
             Capability::Hooks,
             opencode_hooks(),
             &[dir.path().join("h")],
-            &Default::default(),
-            &Default::default(),
-            &opencode().tools,
-            &Default::default(),
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &opencode().tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap()
     }
@@ -2826,6 +3062,156 @@ try {{
             String::from_utf8_lossy(&out.stdout).trim(),
             String::from_utf8_lossy(&out.stderr).trim()
         )
+    }
+
+    /// Drives one omp module the way `guard.rs`'s private `drive_omp` does,
+    /// duplicated rather than shared across a module boundary neither crate
+    /// item needs to cross for one helper.
+    fn drive_omp(body: &str, event_name: &str, event: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, body).unwrap();
+        let driver = dir.path().join("run.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import register from "file://{}"
+const handlers = {{}}
+const pi = {{ on: (event, handler) => {{ handlers[event] = handler }} }}
+register(pi)
+const event = {event}
+try {{
+  const result = await handlers[{event_name:?}]?.(event, {{}})
+  console.log(JSON.stringify(result ?? null))
+}} catch (e) {{ console.log("THREW: " + e.message) }}
+"#,
+                module.display()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&driver)
+            .output()
+            .expect("node is required: a probe that skips is a probe that passes");
+        assert!(
+            out.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// `log_call` is one function shared by opencode's and omp's renderers,
+    /// not written twice — this is the test that would catch it landing in
+    /// one and being forgotten in the other. Same hook, driven for real
+    /// through both (each `node`); claude's twin lives in `hook.rs`, where
+    /// the same hook runs through `sh` and the logging statement is
+    /// `log_statement` rather than `log_call` — a shell string, not a JS one.
+    #[test]
+    #[ignore]
+    fn every_harness_that_has_hooks_logs_them() {
+        let log_dir = tempfile::tempdir().unwrap();
+        let hook = r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#;
+
+        let log = log_dir.path().join("opencode.jsonl");
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "h/guard.json", hook);
+        let doc = document(
+            Capability::Hooks,
+            opencode_hooks(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &opencode().tools,
+                resolves: &Default::default(),
+                log: Some(log.to_str().unwrap()),
+            },
+        )
+        .unwrap();
+        drive(
+            &doc.body,
+            "tool.execute.before",
+            r#"{ tool: "edit", sessionID: "s", callID: "c" }"#,
+            r#"{ args: { filePath: "/work/x" } }"#,
+        );
+        let written = std::fs::read_to_string(&log).expect("opencode must have written a line");
+        let obs = crate::ledger::Observation::parse(written.trim())
+            .unwrap_or_else(|| panic!("not a readable line: {written:?}"));
+        assert_eq!(obs.hook, "guard");
+        assert_eq!(obs.decision.wire(), "refused", "opencode: {written}");
+
+        let log = log_dir.path().join("omp.jsonl");
+        let dir2 = tempfile::tempdir().unwrap();
+        file(dir2.path(), "h/guard.json", hook);
+        let doc2 = document(
+            Capability::Hooks,
+            omp_hooks(),
+            &[dir2.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &omp().tools,
+                resolves: &Default::default(),
+                log: Some(log.to_str().unwrap()),
+            },
+        )
+        .unwrap();
+        drive_omp(
+            &doc2.body,
+            "tool_call",
+            r#"{ toolName: "edit", input: { filePath: "/work/x" } }"#,
+        );
+        let written = std::fs::read_to_string(&log).expect("omp must have written a line");
+        let obs = crate::ledger::Observation::parse(written.trim())
+            .unwrap_or_else(|| panic!("not a readable line: {written:?}"));
+        assert_eq!(obs.hook, "guard");
+        assert_eq!(obs.decision.wire(), "refused", "omp: {written}");
+    }
+
+    /// `Unevaluated`, proven the same way as the three decisions above: real
+    /// `node`, a real events file, read back through `Observation::parse` —
+    /// not the source-text assertion `a_refusal_whose_guard_cannot_be_evaluated_blocks`
+    /// makes about the same branch. `spawnSync` reports `status: null` for a
+    /// killed-by-signal child the same way it does for one that never
+    /// started (`SHELL_BRIDGE`'s `sh`'s own doc), so a `when` that kills its
+    /// own shell (`kill -9 $$`) is a `when` that never ran, from `sh`'s point
+    /// of view, without needing a broken binary in `PATH`.
+    #[test]
+    #[ignore]
+    fn omps_unevaluated_guard_reaches_a_real_events_file() {
+        let hook = r#"{"on":"before-tool","tools":["edit"],"when":"kill -9 $$","refuse":"no"}"#;
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = log_dir.path().join("omp.jsonl");
+        let dir = tempfile::tempdir().unwrap();
+        file(dir.path(), "h/guard.json", hook);
+        let doc = document(
+            Capability::Hooks,
+            omp_hooks(),
+            &[dir.path().join("h")],
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &omp().tools,
+                resolves: &Default::default(),
+                log: Some(log.to_str().unwrap()),
+            },
+        )
+        .unwrap();
+        let result = drive_omp(
+            &doc.body,
+            "tool_call",
+            r#"{ toolName: "edit", input: { filePath: "/work/x" } }"#,
+        );
+        assert!(
+            result.contains("block"),
+            "a predicate that could not be evaluated blocks, fails closed: {result}"
+        );
+        let written = std::fs::read_to_string(&log).expect("omp must have written a line");
+        let obs = crate::ledger::Observation::parse(written.trim())
+            .unwrap_or_else(|| panic!("not a readable line: {written:?}"));
+        assert_eq!(obs.hook, "guard");
+        assert_eq!(obs.decision.wire(), "unevaluated", "omp: {written}");
     }
 
     /// A hook that could not run must not look like a hook that said nothing.
@@ -3154,10 +3540,13 @@ try {{
             Capability::Mcp,
             adapter.supports(Capability::Mcp).unwrap(),
             &[mcp],
-            &Default::default(),
-            &repo,
-            &adapter.tools,
-            &Default::default(),
+            &RenderContext {
+                own: &Default::default(),
+                repo: &repo,
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap();
 
@@ -3186,10 +3575,13 @@ try {{
             Capability::Mcp,
             adapter.supports(Capability::Mcp).unwrap(),
             &[mcp],
-            &Default::default(),
-            &repo,
-            &adapter.tools,
-            &Default::default(),
+            &RenderContext {
+                own: &Default::default(),
+                repo: &repo,
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap_err();
         assert!(format!("{err:#}").contains("linear"), "got: {err:#}");
@@ -3351,10 +3743,13 @@ try {{
             Capability::Skills,
             skills,
             &[],
-            &Default::default(),
-            &Default::default(),
-            &adapter.tools,
-            &Default::default(),
+            &RenderContext {
+                own: &Default::default(),
+                repo: &Default::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
         )
         .unwrap_err();
         assert!(err.to_string().contains("staged by the launcher"));

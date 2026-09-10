@@ -546,8 +546,14 @@ pub struct Wired<'a> {
     /// This harness's names for the tools the hook narrows to. Empty means
     /// every tool, which is the only sensible reading for a moment with none.
     pub tools: Vec<&'a str>,
-    /// Where this harness keeps each field the hook actually reads.
-    pub fields: Vec<(Field, &'a str)>,
+    /// Where this harness keeps each field the hook actually reads, and
+    /// whether that expression came from `[fields-by-tool]` rather than the
+    /// shared `[fields]` map. A renderer that substitutes fields into a
+    /// template (the JS plugins' `event.input?.SUFFIX`) needs to know which:
+    /// a `fields-by-tool` entry is already a complete expression and must be
+    /// used verbatim, never wrapped a second time. Claude's jq paths are
+    /// complete either way, so its renderer ignores the flag.
+    pub fields: Vec<(Field, &'a str, bool)>,
 }
 
 /// Resolve a hook against one harness's vocabulary.
@@ -581,12 +587,43 @@ pub fn wire<'a>(
     }
     let mut fields = Vec::new();
     for field in hook.fields() {
-        let at = binding
-            .fields
-            .get(&field)
-            .map(String::as_str)
-            .ok_or_else(|| drop(format!("`{field}` field")))?;
-        fields.push((field, at));
+        let default = || {
+            binding
+                .fields
+                .get(&field)
+                .map(String::as_str)
+                .ok_or_else(|| drop(format!("`{field}` field")))
+        };
+        let at = if hook.tools.is_empty() {
+            // No tool to check an override against, so this is exactly
+            // today's behaviour: the shared default, or a drop.
+            (default()?, false)
+        } else {
+            let mut resolved = Vec::new();
+            for tool in &hook.tools {
+                resolved.push(
+                    match binding.tool_fields.get(tool).and_then(|m| m.get(&field)) {
+                        Some(expr) => (expr.as_str(), true),
+                        None => (default()?, false),
+                    },
+                );
+            }
+            let first = resolved[0];
+            if resolved.iter().all(|r| r.0 == first.0) {
+                first
+            } else {
+                // A hook narrowing to several tools that keep this field in
+                // genuinely different places has no shipped example — every
+                // renderer's field emission is one expression, not a
+                // dispatch on which tool fired. Refusing here is honest
+                // about that rather than picking one tool's answer and
+                // silently mishandling the others.
+                return Err(drop(format!(
+                    "way to read `{field}` the same way across every tool this hook narrows to"
+                )));
+            }
+        };
+        fields.push((field, at.0, at.1));
     }
     Ok(Wired {
         event,
@@ -660,11 +697,21 @@ impl Vocabulary {
 }
 
 /// Translate one hook into the shape this harness parses.
+///
+/// `log`, when given, is the guest path of this launch's events file — a
+/// rendered command that reaches a decision runs one more statement first,
+/// recording it (`ledger::line`). `None` for `omh eject` (an ejected config
+/// handed to the user must carry none of omh's own plumbing), for anything
+/// that only inspects a rendering rather than staging one, and — per
+/// `container::plan`'s own rule, `session.branch.is_some()` — for a scratch
+/// session (`omh auth`, `omh doctor`'s probe), which never mounts the shadow
+/// gitdir this path would point into.
 pub fn render(
     name: &str,
     hook: &Hook,
     binding: &Binding,
     tools: &BTreeMap<Tool, String>,
+    log: Option<&str>,
 ) -> Result<Outcome> {
     let dropped = |wanted: String| {
         Ok(Outcome::Dropped(Dropped {
@@ -690,7 +737,10 @@ pub fn render(
     // text while the hook does nothing.
     if !fields.is_empty() {
         command.push_str("p=$(cat); ");
-        for (field, expr) in &fields {
+        // The bool marks a `fields-by-tool` override — irrelevant here: a jq
+        // path is a complete expression whichever map it came from, unlike
+        // the JS renderers' `event.input?.SUFFIX` template.
+        for (field, expr, _) in &fields {
             command.push_str(&format!(
                 "{}=$(printf '%s' \"$p\" | jq -r '{expr} // empty'); ",
                 field.var()
@@ -707,7 +757,24 @@ pub fn render(
         command.push_str(&format!("{CAPTURE_VAR}=$({capture}); "));
     }
     if let Some(when) = &hook.when {
-        command.push_str(&format!("{when} || exit 0; "));
+        let silent = match log {
+            Some(path) => format!(
+                "{{ {}; exit 0; }}",
+                log_statement(path, name, crate::ledger::Decision::Silent)
+            ),
+            None => "exit 0".to_string(),
+        };
+        command.push_str(&format!("{when} || {silent}; "));
+    }
+    // Right before the action, regardless of whether `when` was present: a
+    // hook with no `when` always reaches its action, and that decision is as
+    // much a fact for the ledger as one a predicate gated.
+    if let Some(path) = log {
+        let decision = match &hook.action {
+            Action::Refuse { .. } => crate::ledger::Decision::Refused,
+            Action::Run(_) | Action::Inject { .. } => crate::ledger::Decision::Fired,
+        };
+        command.push_str(&format!("{}; ", log_statement(path, name, decision)));
     }
 
     match &hook.action {
@@ -741,6 +808,35 @@ fn fill(template: &str, text: &str, event: &str) -> String {
     template
         .replace("{{text}}", &interpolating(text))
         .replace("{{event}}", event)
+}
+
+/// The shell statement a rendered hook runs to record one decision.
+///
+/// Wrapped so that whatever this statement meets — a directory that does not
+/// exist, a mount that is not there — can never be the reason the hook itself
+/// behaves differently: `2>/dev/null || true` swallows any failure of the
+/// `printf` itself, and the group never writes to stdout, which on Claude
+/// *is* the protocol payload.
+fn log_statement(path: &str, name: &str, decision: crate::ledger::Decision) -> String {
+    // `2>/dev/null` sits *outside* the group, not inside it next to `>>`.
+    // Redirections on a simple command take effect in the order written, so
+    // `>>path 2>/dev/null` opens `path` — and can fail, printing `sh`'s own
+    // diagnostic to the real stderr — before the `2>/dev/null` beside it is
+    // in effect at all. Applied to the group as a whole, it is in effect
+    // for every redirection the group performs, including the failing one.
+    format!(
+        "{{ printf '%s\\n' {} >>{}; }} 2>/dev/null || true",
+        shell_single_quote(&crate::ledger::line(name, decision)),
+        shell_single_quote(path),
+    )
+}
+
+/// A single-quoted shell word — no interpolation of any kind, which a JSON
+/// line built from omh's own catalogue-validated hook names never needs.
+/// Embedded single quotes (none a shipped hook name or guest path can carry
+/// today) are still closed correctly rather than assumed absent.
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// A double-quoted shell word: `$` stays live so a hook can name what it is
@@ -788,14 +884,14 @@ mod tests {
     }
 
     fn rendered(name: &str, hook: &Hook, b: &Binding) -> Rendered {
-        match render(name, hook, b, &shipped().tools).unwrap() {
+        match render(name, hook, b, &shipped().tools, None).unwrap() {
             Outcome::Rendered(r) => r,
             Outcome::Dropped(d) => panic!("unexpectedly dropped: {d}"),
         }
     }
 
     fn dropped(name: &str, hook: &Hook, b: &Binding) -> Dropped {
-        match render(name, hook, b, &shipped().tools).unwrap() {
+        match render(name, hook, b, &shipped().tools, None).unwrap() {
             Outcome::Rendered(r) => panic!("unexpectedly rendered: {r:?}"),
             Outcome::Dropped(d) => d,
         }
@@ -1380,9 +1476,98 @@ mod tests {
         )
         .unwrap();
 
-        match render("peek", &h, &b, &tools).unwrap() {
+        match render("peek", &h, &b, &tools, None).unwrap() {
             Outcome::Dropped(d) => assert!(d.wanted.contains("read"), "got: {}", d.wanted),
             Outcome::Rendered(r) => panic!("unexpectedly rendered: {r:?}"),
+        }
+    }
+
+    /// `[fields-by-tool.<tool>]` — the escape hatch for a field that lives
+    /// somewhere other than the shared map on one specific tool. omp's
+    /// `edit` is the real case; this is the same shape against a hand-built
+    /// binding, isolated from any particular harness's syntax.
+    #[test]
+    fn a_field_can_be_declared_per_tool() {
+        let b = binding(
+            "path = \"/x\"\nrender = \"claude-settings\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
+             [fields]\ntool-file = \".shared_path\"\n\
+             [fields-by-tool.edit]\ntool-file = \".edit_only_path\"\n",
+        );
+        let tools = BTreeMap::from([(Tool::Edit, "Edit".to_string())]);
+        let h = Hook::parse(
+            r#"{"on":"before-tool","tools":["edit"],"when":"[ -n \"$OMH_TOOL_FILE\" ]","run":"x"}"#,
+            "h.json",
+        )
+        .unwrap();
+        let r = match render("guard", &h, &b, &tools, None).unwrap() {
+            Outcome::Rendered(r) => r,
+            Outcome::Dropped(d) => panic!("unexpectedly dropped: {d}"),
+        };
+        assert!(
+            r.command.contains(".edit_only_path"),
+            "the override, not the shared default: {}",
+            r.command
+        );
+        assert!(!r.command.contains(".shared_path"), "got: {}", r.command);
+    }
+
+    /// A tool with no entry in `[fields-by-tool]` still falls back to
+    /// `[fields]` — additive, so a binding that never declared an override
+    /// keeps behaving exactly as it did before this existed.
+    #[test]
+    fn an_absent_override_falls_back_to_the_default_map() {
+        let b = binding(
+            "path = \"/x\"\nrender = \"claude-settings\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
+             [fields]\ntool-file = \".shared_path\"\n\
+             [fields-by-tool.edit]\ntool-file = \".edit_only_path\"\n",
+        );
+        let tools = BTreeMap::from([(Tool::Read, "Read".to_string())]);
+        let h = Hook::parse(
+            r#"{"on":"before-tool","tools":["read"],"when":"[ -n \"$OMH_TOOL_FILE\" ]","run":"x"}"#,
+            "h.json",
+        )
+        .unwrap();
+        let r = match render("guard", &h, &b, &tools, None).unwrap() {
+            Outcome::Rendered(r) => r,
+            Outcome::Dropped(d) => panic!("unexpectedly dropped: {d}"),
+        };
+        assert!(
+            r.command.contains(".shared_path"),
+            "read has no override, so the default applies: {}",
+            r.command
+        );
+    }
+
+    /// A hook narrowing to several tools that keep a field in genuinely
+    /// different places has no renderer that can express it — none emits a
+    /// runtime dispatch on which tool actually fired. Dropped rather than
+    /// silently picking one tool's answer for all of them.
+    #[test]
+    fn tools_that_disagree_on_a_field_are_dropped_not_guessed() {
+        let b = binding(
+            "path = \"/x\"\nrender = \"claude-settings\"\n\
+             [events]\nbefore-tool = \"PreToolUse\"\n\
+             [fields]\ntool-file = \".shared_path\"\n\
+             [fields-by-tool.edit]\ntool-file = \".edit_only_path\"\n",
+        );
+        let tools = BTreeMap::from([
+            (Tool::Edit, "Edit".to_string()),
+            (Tool::Read, "Read".to_string()),
+        ]);
+        let h = Hook::parse(
+            r#"{"on":"before-tool","tools":["edit","read"],"when":"[ -n \"$OMH_TOOL_FILE\" ]","run":"x"}"#,
+            "h.json",
+        )
+        .unwrap();
+        match render("guard", &h, &b, &tools, None).unwrap() {
+            Outcome::Dropped(d) => assert!(
+                d.wanted.contains("tool-file"),
+                "the drop must name the field: {}",
+                d.wanted
+            ),
+            Outcome::Rendered(r) => panic!("must not silently pick one tool's answer: {r:?}"),
         }
     }
 
@@ -1598,5 +1783,208 @@ mod tests {
             cmd.find("OMH_CAPTURE=$(").unwrap() < cmd.find("|| exit 0").unwrap(),
             "got: {cmd}"
         );
+    }
+
+    // ── the decision ledger, claude's side ──────────────────────────────────
+    //
+    // `run_logged`, below, runs `hook::render` with `log` given against a
+    // real payload the way `guard.rs`'s `refused` runs a guard. It stays a
+    // separate helper from `rendered`/`dropped` rather than growing them a
+    // `log` parameter: every other test in this file is about *what* renders,
+    // and giving all of them an extra always-`None` argument would say the
+    // opposite of what `hook::render`'s own doc says about it.
+
+    /// Runs a rendered command against a JSON payload and returns
+    /// `(stdout, exit code, stderr)`.
+    ///
+    /// Not the log file's own content — every caller here embeds the log
+    /// path it cares about in `command` itself (via `render`'s `log`
+    /// parameter) and reads that path back directly, so a fourth element
+    /// naming a path this helper invented on its own would be a value
+    /// nothing in `command` actually writes to.
+    fn run_logged(command: &str, payload: &serde_json::Value) -> (String, i32, String) {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh must run");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .ok();
+        let out = child.wait_with_output().unwrap();
+        (
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    }
+
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    /// A hook that always advises — `when` absent, so there is no `Silent`
+    /// path to confuse with `Fired`.
+    fn always_fires() -> Hook {
+        Hook::parse(
+            r#"{"on":"before-tool","tools":["read"],"inject":"noted"}"#,
+            "h.json",
+        )
+        .unwrap()
+    }
+
+    /// A hook whose `when` is false — the `Silent` path.
+    fn declines() -> Hook {
+        Hook::parse(
+            r#"{"on":"before-tool","tools":["read"],"when":"false","inject":"noted"}"#,
+            "h.json",
+        )
+        .unwrap()
+    }
+
+    /// A hook that blocks — the `Refused` path.
+    fn always_refuses() -> Hook {
+        Hook::parse(
+            r#"{"on":"before-tool","tools":["edit"],"refuse":"no"}"#,
+            "h.json",
+        )
+        .unwrap()
+    }
+
+    /// Enabling the ledger must not add or remove a single byte of what the
+    /// harness itself reads on stdout — stdout *is* the protocol payload on
+    /// claude, and `omh_log`'s shell twin, `log_statement`, writes only to the
+    /// events file. Checked both ways: a hook that fires and one that is
+    /// refused, since the two protocols are two different templates.
+    #[test]
+    fn logging_does_not_touch_stdout() {
+        let payload = serde_json::json!({ "tool_input": { "file_path": "x" } });
+        for hook in [always_fires(), always_refuses()] {
+            let bare = match render("h", &hook, hooks_binding(), &shipped().tools, None).unwrap() {
+                Outcome::Rendered(r) => r.command,
+                Outcome::Dropped(d) => panic!("{d}"),
+            };
+            let logged_path = tempfile::NamedTempFile::new().unwrap();
+            let logged = match render(
+                "h",
+                &hook,
+                hooks_binding(),
+                &shipped().tools,
+                Some(logged_path.path().to_str().unwrap()),
+            )
+            .unwrap()
+            {
+                Outcome::Rendered(r) => r.command,
+                Outcome::Dropped(d) => panic!("{d}"),
+            };
+            let (out_bare, code_bare, _) = run_logged(&bare, &payload);
+            let (out_logged, code_logged, _) = run_logged(&logged, &payload);
+            assert_eq!(out_bare, out_logged, "stdout must be byte-identical");
+            assert_eq!(code_bare, code_logged, "exit code must be unchanged");
+        }
+    }
+
+    /// However the events file itself misbehaves — its directory absent, no
+    /// permission to write it — the hook's own exit code and stderr must be
+    /// untouched. The exit code alone is not enough: `sh`'s own `>>` failing
+    /// to open a path prints its diagnostic to stderr the instant it opens
+    /// the redirect, *before* `2>/dev/null` — placed after `>>` inside the
+    /// same simple command — is in effect. `2>/dev/null` has to wrap the
+    /// whole group from *outside* it to catch that.
+    #[test]
+    fn logging_cannot_change_the_exit_code_or_leak_stderr_when_the_file_is_unwritable() {
+        let payload = serde_json::json!({ "tool_input": { "file_path": "x" } });
+        for hook in [always_fires(), declines(), always_refuses()] {
+            let unwritable = "/no/such/directory/events.jsonl";
+            let cmd = match render(
+                "h",
+                &hook,
+                hooks_binding(),
+                &shipped().tools,
+                Some(unwritable),
+            )
+            .unwrap()
+            {
+                Outcome::Rendered(r) => r.command,
+                Outcome::Dropped(d) => panic!("{d}"),
+            };
+            let (_, code, stderr) = run_logged(&cmd, &payload);
+            assert_eq!(code, 0, "an unwritable log path must not fail the hook");
+            assert!(
+                stderr.trim().is_empty(),
+                "an unwritable log path must not leak onto stderr either: {stderr}"
+            );
+        }
+    }
+
+    /// The three decisions, each written as its own line — this is what makes
+    /// `Silent` distinguishable from a hook that simply was not part of the
+    /// launch at all.
+    #[test]
+    fn a_rendered_hook_reports_the_moment_it_declines() {
+        let payload = serde_json::json!({ "tool_input": { "file_path": "x" } });
+        let cases: [(&str, Hook, &str); 3] = [
+            ("fired", always_fires(), "fired"),
+            ("silent", declines(), "silent"),
+            ("refused", always_refuses(), "refused"),
+        ];
+        for (name, hook, want) in cases {
+            let log_dir = tempfile::tempdir().unwrap();
+            let log = log_dir.path().join("events.jsonl");
+            let cmd = match render(
+                name,
+                &hook,
+                hooks_binding(),
+                &shipped().tools,
+                Some(log.to_str().unwrap()),
+            )
+            .unwrap()
+            {
+                Outcome::Rendered(r) => r.command,
+                Outcome::Dropped(d) => panic!("{d}"),
+            };
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.to_string().as_bytes())
+                .ok();
+            child.wait().unwrap();
+            let written = std::fs::read_to_string(&log).unwrap_or_default();
+            let observed = crate::ledger::Observation::parse(written.trim())
+                .unwrap_or_else(|| panic!("{name}: not a readable line: {written:?}"));
+            assert_eq!(observed.hook, name);
+            assert_eq!(observed.decision.wire(), want, "{name}: {written}");
+        }
+    }
+
+    /// `omh eject` hands the user a config with none of omh's own plumbing —
+    /// `log: None` is what that promise rests on, and this is the test that
+    /// would catch a call site defaulting it to `Some` by mistake.
+    #[test]
+    fn an_unlogged_render_carries_no_plumbing() {
+        for hook in [always_fires(), declines(), always_refuses()] {
+            let cmd = match render("h", &hook, hooks_binding(), &shipped().tools, None).unwrap() {
+                Outcome::Rendered(r) => r.command,
+                Outcome::Dropped(d) => panic!("{d}"),
+            };
+            assert!(
+                !cmd.contains("printf") || !cmd.contains("decision"),
+                "an unlogged render must carry no log statement: {cmd}"
+            );
+        }
     }
 }

@@ -1097,6 +1097,7 @@ pub struct Sessions {
 pub struct Focus {
     pub activity: Activity,
     pub check: Option<CheckState>,
+    pub hooks: HooksState,
 }
 
 /// What a session's transcript says the agent did.
@@ -1109,6 +1110,40 @@ pub enum Activity {
     NotRecorded(String),
     /// A transcript omh opened and could make nothing of.
     Unreadable,
+}
+
+/// What this session's hooks did, read back from the decision ledger.
+///
+/// Three states, the same shape `Activity` and `CheckState` already use, and
+/// for the same reason: `NotRecorded` must never be spelled the same as
+/// `Seen` with every count at zero — a harness with no hooks capability and a
+/// harness that fired nothing look identical unless the state itself says
+/// which one happened.
+#[derive(Debug, Clone)]
+pub enum HooksState {
+    /// A launch that could have logged, read back against what it did.
+    Seen(crate::ledger::Summary),
+    /// codex (no hooks capability), a session whose harness omh could not
+    /// even identify, or one launched before the ledger existed — three
+    /// different sentences, kept as one variant because a reader only ever
+    /// needs the one that applies to say why the section is empty.
+    NotRecorded(String),
+    /// The ledger file or the events file exists and omh could not read it
+    /// as one — a damaged record must not read as "nothing happened". The
+    /// sentence is carried, as `NotRecorded` carries one: three unrelated
+    /// faults reach this variant, and "omh could not read this session's
+    /// hook events" told a user with an `EACCES` on the ledger, a user whose
+    /// disk filled mid-write, and a user with a directory at the events path
+    /// exactly the same unactionable thing.
+    ///
+    /// `read_hooks` reaches this from either file, but only from damage
+    /// that defeats the whole read: a ledger that will not parse, or an
+    /// events file that will not open at all (a directory sitting at that
+    /// path, say). Damage to *part* of a readable events file — a torn or
+    /// non-UTF-8 line — is counted by `Observations::parse_all` instead and
+    /// still reaches `Seen`, because the lines around it are real
+    /// observations and dropping them would be its own dishonesty.
+    Unreadable(String),
 }
 
 /// The last result of `omh sNN commit`'s checks, from `runs/<id>/check.json`.
@@ -1439,7 +1474,129 @@ fn focus_lines(p: &out::Palette, focus: &Focus) -> String {
         };
         s.push_str(&format!("  {}\n", p.paint(style, &text)));
     }
+    s.push_str(&hooks_lines(p, &focus.hooks));
     s
+}
+
+/// `hooks this session`, one line per hook that has anything to say, and a
+/// closing `dormant` line for any that rendered and never fired at all.
+///
+/// Silent only when there is truly nothing to say about this launch's hooks
+/// at all — `activity`, `dormant` and `unlisted` all empty *and* nothing
+/// unreadable, which means this launch's ledger named no hooks in the first
+/// place and the events file held nothing torn. A launch whose hooks rendered
+/// and *all* went dormant still prints the `dormant` line — that is itself the
+/// fact worth showing, not a case to stay quiet about.
+///
+/// `unreadable` belongs in that condition and was once left out of it, which
+/// is the whole of `a_summary_whose_only_fact_is_damage_is_not_silent`: a
+/// ledger naming no hooks, read against an events file of only torn lines,
+/// printed a blank while `--json` reported the damage — the two channels
+/// disagreeing about one summary.
+/// One hook's tally, as the words the report says out loud — omitting every
+/// decision that never happened, so a guard that only ever fired reads as
+/// `3 fired` rather than `3 fired, 0 silent, 0 refused`.
+///
+/// One function because the caller had two verbatim copies, in the activity
+/// block and the unlisted block, and a fifth `Decision` would have had to be
+/// remembered in both.
+fn decision_parts(a: &crate::ledger::Activity) -> Vec<String> {
+    let mut parts = Vec::new();
+    for (n, word) in [
+        (a.fired, "fired"),
+        (a.silent, "silent"),
+        (a.refused, "refused"),
+        (a.unevaluated, "unevaluated"),
+    ] {
+        if n > 0 {
+            parts.push(format!("{n} {word}"));
+        }
+    }
+    parts
+}
+
+fn hooks_lines(p: &out::Palette, hooks: &HooksState) -> String {
+    match hooks {
+        HooksState::Seen(summary) => {
+            if summary.activity.is_empty()
+                && summary.dormant.is_empty()
+                && summary.unlisted.is_empty()
+                && summary.unreadable == 0
+            {
+                return String::new();
+            }
+            let mut s = format!("  {}\n", p.paint(out::HEAD, "hooks this session"));
+            for (name, a) in &summary.activity {
+                let parts = decision_parts(a);
+                s.push_str(&format!(
+                    "    {}   {}\n",
+                    out::untrusted(name),
+                    parts.join(", ")
+                ));
+            }
+            if !summary.dormant.is_empty() {
+                s.push_str(&format!(
+                    "    {}        {}\n",
+                    p.paint(out::DIM, "dormant"),
+                    summary
+                        .dormant
+                        .iter()
+                        .map(|n| out::untrusted(n))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            // Named as what it is — an observation this launch's own ledger
+            // does not vouch for — rather than folded into `activity`, where
+            // it would read as a real hook's own doing. See `ledger.rs`'s
+            // doc on `Summary.unlisted`.
+            for (name, a) in &summary.unlisted {
+                let parts = decision_parts(a);
+                s.push_str(&format!(
+                    "  {}\n",
+                    p.paint(
+                        out::WARN,
+                        &format!(
+                            "{} reported activity ({}) this launch never rendered",
+                            out::untrusted(name),
+                            parts.join(", ")
+                        )
+                    )
+                ));
+            }
+            if summary.unreadable > 0 {
+                s.push_str(&format!(
+                    "  {}\n",
+                    p.paint(
+                        out::WARN,
+                        &format!(
+                            "{} event line{} could not be read",
+                            summary.unreadable,
+                            if summary.unreadable == 1 { "" } else { "s" }
+                        )
+                    )
+                ));
+            }
+            s
+        }
+        // Said explicitly rather than left silent — the whole reason this is
+        // its own variant. A blank section here would read exactly like a
+        // harness whose guards ran and found nothing to say, which is a
+        // different fact from having no hooks capability at all.
+        HooksState::NotRecorded(why) => {
+            format!(
+                "  {}\n",
+                p.paint(out::DIM, &format!("hooks: not recorded — {why}"))
+            )
+        }
+        HooksState::Unreadable(why) => format!(
+            "  {}\n",
+            p.paint(
+                out::WARN,
+                &format!("omh could not read this session's hook events — {why}")
+            )
+        ),
+    }
 }
 
 /// The scoped focus, as JSON.
@@ -1467,7 +1624,24 @@ fn focus_json(focus: &Focus) -> serde_json::Value {
         CheckState::NotRun(why) => json!({ "state": "not-run", "why": why }),
         CheckState::Unreadable => json!({ "state": "unreadable" }),
     });
-    json!({ "activity": activity, "check": check })
+    let hooks = match &focus.hooks {
+        HooksState::Seen(summary) => json!({
+            "state": "seen",
+            "hooks": summary.activity.iter().map(|(name, a)| (name.clone(), json!({
+                "fired": a.fired, "silent": a.silent,
+                "refused": a.refused, "unevaluated": a.unevaluated,
+            }))).collect::<serde_json::Map<_, _>>(),
+            "dormant": summary.dormant,
+            "unlisted": summary.unlisted.iter().map(|(name, a)| (name.clone(), json!({
+                "fired": a.fired, "silent": a.silent,
+                "refused": a.refused, "unevaluated": a.unevaluated,
+            }))).collect::<serde_json::Map<_, _>>(),
+            "unreadable": summary.unreadable,
+        }),
+        HooksState::NotRecorded(why) => json!({ "state": "not-recorded", "why": why }),
+        HooksState::Unreadable(why) => json!({ "state": "unreadable", "why": why }),
+    };
+    json!({ "activity": activity, "check": check, "hooks": hooks })
 }
 
 // ── omh info ────────────────────────────────────────────────────────────────
@@ -1659,6 +1833,15 @@ pub struct Doctor {
     /// `None` means no account was staged, so credentials went unchecked.
     pub account: Option<String>,
     pub outcomes: Vec<crate::doctor::Outcome>,
+    /// How many of the *leading* `outcomes` were gathered on the host —
+    /// the rest came back from inside the sandbox. A split point rather than
+    /// a second `Vec`, so `outcomes`, `failed()` and `json()` stay exactly
+    /// the flat list they always were; only `human()` reads it, to put a
+    /// heading between the two halves instead of printing one undivided
+    /// table where a row about this machine and a row about the container
+    /// look identical. Equal to `outcomes.len()` when nothing ran in a
+    /// sandbox at all — no second section to head.
+    pub host_count: usize,
 }
 
 impl Doctor {
@@ -1677,19 +1860,41 @@ impl Doctor {
 
 impl Report for Doctor {
     fn human(&self, p: &out::Palette) -> String {
-        let mut t = Table::new();
-        for o in &self.outcomes {
-            t = t.row(vec![
-                if o.ok {
-                    Cell::styled("✓", out::OK)
-                } else {
-                    Cell::styled("✗", out::BAD)
-                },
-                Cell::plain(&o.name),
-                Cell::plain(&o.detail),
-            ]);
+        let table = |outcomes: &[crate::doctor::Outcome]| {
+            let mut t = Table::new();
+            for o in outcomes {
+                t = t.row(vec![
+                    if o.ok {
+                        Cell::styled("✓", out::OK)
+                    } else {
+                        Cell::styled("✗", out::BAD)
+                    },
+                    Cell::plain(&o.name),
+                    Cell::plain(&o.detail),
+                ]);
+            }
+            t.render(p)
+        };
+        let split = self.host_count.min(self.outcomes.len());
+        let (host, rest) = self.outcomes.split_at(split);
+        let mut s = String::new();
+        // A heading only when there is a second section to tell it apart
+        // from — a host-only run (`rest` empty) is exactly today's one
+        // undivided table, not "host" labelling the whole thing for no
+        // reason.
+        if rest.is_empty() {
+            s.push_str(&table(host));
+        } else {
+            s.push_str(&out::heading(p, "host"));
+            s.push_str(&table(host));
+            s.push('\n');
+            let name = match &self.sandbox {
+                Some(sb) => format!("{} in {}", sb.harness, sb.tag),
+                None => "the sandbox".to_string(),
+            };
+            s.push_str(&out::heading(p, &name));
+            s.push_str(&table(rest));
         }
-        let mut s = t.render(p);
 
         // Only the success line. A failure is reported by the command failing
         // — `out::problem` prints the tally in omh's error voice and the exit

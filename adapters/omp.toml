@@ -8,16 +8,17 @@ bin  = "omp"
 #
 # The sums under `[checksums]` are the source of truth `omh doctor` reads; the
 # install repeats the right one per arch and `sha256sum -c` refuses a download
-# that does not match. MAINTAINER: fill the real sums for this tag — the
-# placeholders below fail verification on purpose, so a build refuses rather
-# than installing an unverified binary.
+# that does not match. Both filled from `SHA256SUMS.txt` published alongside
+# this tag's release, cross-checked by downloading `omp-linux-arm64` and
+# `omp-linux-x64` independently and hashing them rather than trusting the sums
+# file alone — the two agreed.
 version = "17.3.3"
-install = """arch=$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) && sum=$(case "$arch" in arm64) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;; *) echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;; esac) && curl -fsSL https://github.com/can1357/oh-my-pi/releases/download/v{{version}}/omp-linux-$arch -o /usr/local/bin/omp && echo "$sum  /usr/local/bin/omp" | sha256sum -c - && chmod +x /usr/local/bin/omp"""
+install = """arch=$(case "$(uname -m)" in aarch64|arm64) echo arm64 ;; *) echo x64 ;; esac) && sum=$(case "$arch" in arm64) echo b2e8ae942cbd8aee2cabea62c96166753ca9b258c1314897ab81ef8f18fd090e ;; *) echo 25d642d35cf07a6b94336da94fa6d69b7a0a8b2f1b865ccf92e770ba37aaa606 ;; esac) && curl -fsSL https://github.com/can1357/oh-my-pi/releases/download/v{{version}}/omp-linux-$arch -o /usr/local/bin/omp && echo "$sum  /usr/local/bin/omp" | sha256sum -c - && chmod +x /usr/local/bin/omp"""
 
-# Per-`uname -m` SHA-256 of the release binary. MAINTAINER: replace with the
-# real sums for the pinned tag. Inline, so it stays a top-level key rather than
-# swallowing the keys below it into a `[checksums]` section.
-checksums = { x86_64 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", aarch64 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+# Per-`uname -m` SHA-256 of the release binary — `omp-linux-arm64` and
+# `omp-linux-x64` from `v17.3.3`. Inline, so it stays a top-level key rather
+# than swallowing the keys below it into a `[checksums]` section.
+checksums = { x86_64 = "25d642d35cf07a6b94336da94fa6d69b7a0a8b2f1b865ccf92e770ba37aaa606", aarch64 = "b2e8ae942cbd8aee2cabea62c96166753ca9b258c1314897ab81ef8f18fd090e" }
 
 # The whole directory, and it has to be: omp keeps credentials in **SQLite**
 # (`auth_credentials`, `auth_credential_blocks` in `agent.db`), and a bind-
@@ -156,15 +157,31 @@ after-tool    = "tool_result"
 # field to `event.toolName`, which the renderer would emit as
 # `event.input?.toolName` and bind to the empty string.
 #
-# `tool-file` is `path`, which is `read`'s parameter. It is **not** `edit`'s:
-# omp's edit tool takes a single `input` string with the path embedded in
-# `[PATH#TAG]` sections. A hook narrowing to `edit` *and* wanting the file is
-# therefore dropped by name in the renderer rather than handed `""` — the
-# schema has one `fields` map per harness and no way to say "this field exists
-# on these tools and not those", so that one lives in `render::omp_plugin`.
+# `tool-file` is `path`, which is `read`'s parameter. It is **not** `edit`'s.
 [capabilities.hooks.fields]
 tool-file    = "path"
 tool-command = "command"
+
+# `edit`'s own copy of `tool-file` — the escape hatch `[fields]` cannot
+# express, since it has one entry per canonical field, not one per (field,
+# tool) pair. `edit`'s own parameter is *also* named `input` — confusingly,
+# since `event.input` already means "this call's arguments" in every other
+# entry here — so the string is `event.input.input`, not `event.input`
+# itself; the first version of this line read `event.input` directly and
+# threw `event.input?.match is not a function` the first time it actually
+# ran. That string contains one or more `[PATH#TAG]` sections rather than a
+# plain path at all: confirmed against `docs/tools/edit.md` in the pinned
+# v17.3.3 source tree — "One or more `[PATH#TAG]` sections containing
+# hashline operations", TAG being "four-uppercase-hex". This reads the first
+# section's PATH.
+#
+# The known gap: a single `edit` call can batch sections across *several*
+# files (the same doc: "Same-path sections are merged"; a call can also
+# touch unrelated paths). `$OMH_TOOL_FILE` is one value, so a guard sees only
+# the first file a batched edit touches — discipline, not full coverage, the
+# same posture every guard already takes toward a bypass it cannot close.
+[capabilities.hooks.fields-by-tool.edit]
+tool-file = '(event.input?.input?.match(/\[([^\]#]*)#[0-9A-F]{4}\]/) ?? [])[1]'
 
 # Advisory text, at the one moment there is a channel for it: a `tool_result`
 # handler returning `content` replaces what the model reads next, so appending

@@ -912,8 +912,8 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("accounts.md", 4),
         ("adapters.md", 1),
         ("code-graph.md", 1),
-        ("commands.md", 140),     // + the `omh upgrade` section and its examples
-        ("configuration.md", 46), // + the sbx set-runtime and doctor examples
+        ("commands.md", 142), // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples
+        ("configuration.md", 47), // + `omh use hooks tdd-guard`
         ("decisions.md", 1),
         ("editors.md", 4),
         ("getting-started.md", 14),
@@ -1517,7 +1517,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         //
         // One of them was written `omh s rm <id>`, which does not parse,
         // and the scan caught it.
-        ("src/doctor.rs", 6),
+        ("src/doctor.rs", 7), // + `omh info --repo` in the `use` row's detail
         // Three. One is the `# `omh set --local ca_cert`` line `ca_layer`
         // writes into the generated Dockerfile, telling whoever reads the
         // recipe where the certificate came from. **Not** either of
@@ -3751,6 +3751,42 @@ fn what_the_catalogue_covers_elsewhere_covers_nothing_here() {
         cmd::catalogue::covered_here(&dirs, &[&rust]).unwrap(),
         ["rust".to_string()].into_iter().collect(),
         "and a rust repo is covered, so its Makefile earns no second hook"
+    );
+}
+
+/// A guard (`refuse`) does not run anything, so it cannot be what
+/// `derive::hooks` means by *some ecosystem hook already runs this
+/// project's tests* — a stack with only a guard in the catalogue still has
+/// no test runner, and must still earn one from `derive::hooks`.
+///
+/// This is the regression an early draft of `tdd-guard` exposed: while it
+/// was still one file per stack, declaring `stack: "node"` on `node-tdd.json`
+/// was enough by itself to silence pnpm-test derivation in every node repo,
+/// without the guard ever running a test. `tdd-guard` shipped stack-less
+/// instead (it dispatches on file extension itself, one file for every
+/// language), so the fixture below stands for any *future* guard that
+/// declares a `stack`, not for a file that exists today.
+#[test]
+fn a_guard_hook_does_not_count_as_ecosystem_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let hooks = dir.path().join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    std::fs::write(
+        hooks.join("go-tdd.json"),
+        r#"{"on":"before-tool","stack":"go","tools":["edit"],"when":"false","refuse":"no"}"#,
+    )
+    .unwrap();
+    let dirs = [hooks];
+    let go = stack::Definition {
+        name: "go".into(),
+        marker: "go.mod".into(),
+        provides: Vec::new(),
+    };
+    assert_eq!(
+        cmd::catalogue::covered_here(&dirs, &[&go]).unwrap(),
+        BTreeSet::new(),
+        "a guard is not a test runner, so it must not report the stack as \
+         covered — derive::hooks would otherwise never derive a runner for it"
     );
 }
 

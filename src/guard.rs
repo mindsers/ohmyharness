@@ -1,0 +1,938 @@
+//! Guards — hooks whose action is `refuse`, opt-in via the catalogue.
+//!
+//! This module owns no runtime behaviour. The predicate a guard actually runs
+//! lives in the hook's own `when`, in `hooks/*.json`, because that is what
+//! ships to the sandbox — a Rust function here would be a second copy of the
+//! rule, free to disagree with the first. What this module holds instead is an
+//! **oracle**: an independent, pure description of the same rule (`role`,
+//! `coverage`), used only to check the shipped predicate against, over a
+//! table of paths a hand-picked example set would not have covered.
+//!
+//! `#[cfg(test)]`, deliberately: nothing at runtime consumes `role` or
+//! `coverage`. A `pub fn` with no runtime caller is dead code under
+//! `-D warnings`, and giving it one only to satisfy the linter would be the
+//! second copy this module exists to avoid.
+
+#![cfg(test)]
+
+use std::path::Path;
+
+/// What a path *is*, within one stack's convention for pairing source and
+/// test. `Neither` covers everything the convention has no opinion about —
+/// including, for a stack with no guard, every path there is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    Source,
+    Test,
+    Neither,
+}
+
+/// Where a `Source`'s test could live, most-likely-first. A guard allows the
+/// edit if *any* candidate is dirty — one changed test is enough to say "the
+/// test came first."
+pub fn coverage(stack: &str, path: &Path) -> Vec<String> {
+    let s = path.to_string_lossy();
+    match stack {
+        "go" => {
+            if let Some(base) = s.strip_suffix(".go") {
+                vec![format!("{base}_test.go")]
+            } else {
+                vec![]
+            }
+        }
+        "python" => {
+            let Some(base) = s.strip_suffix(".py") else {
+                return vec![];
+            };
+            let (dir, name) = match base.rsplit_once('/') {
+                Some((d, n)) => (format!("{d}/"), n),
+                None => (String::new(), base),
+            };
+            vec![
+                format!("{dir}test_{name}.py"),
+                format!("{dir}tests/test_{name}.py"),
+            ]
+        }
+        "node" => {
+            let exts = ["ts", "tsx", "js", "jsx"];
+            let Some(ext) = exts.iter().find(|e| s.ends_with(&format!(".{e}"))) else {
+                return vec![];
+            };
+            let base = s.strip_suffix(&format!(".{ext}")).unwrap();
+            let (dir, name) = match base.rsplit_once('/') {
+                Some((d, n)) => (format!("{d}/"), n),
+                None => (String::new(), base),
+            };
+            vec![
+                format!("{base}.test.{ext}"),
+                format!("{base}.spec.{ext}"),
+                format!("{dir}__tests__/{name}.test.{ext}"),
+            ]
+        }
+        _ => vec![],
+    }
+}
+
+/// `role` is the one place "is this a test file" is decided, so a stack
+/// whose test convention is not source-file suffix has to say `Neither` here
+/// rather than let `coverage` guess — `coverage` is never asked about a `Test`
+/// or `Neither` path in the first place.
+pub fn role(stack: &str, path: &Path) -> Role {
+    let s = path.to_string_lossy();
+    match stack {
+        "go" => {
+            if s.ends_with("_test.go") {
+                Role::Test
+            } else if s.ends_with(".go") {
+                Role::Source
+            } else {
+                Role::Neither
+            }
+        }
+        "python" => {
+            let name = path.file_name().map(|f| f.to_string_lossy().to_string());
+            let is_test_name = name.is_some_and(|n| n.starts_with("test_") || n == "conftest.py");
+            if !s.ends_with(".py") {
+                Role::Neither
+            } else if is_test_name || s.contains("/tests/") || s.starts_with("tests/") {
+                Role::Test
+            } else {
+                Role::Source
+            }
+        }
+        "node" => {
+            let is_dts = s.ends_with(".d.ts");
+            let is_test = s.contains(".test.") || s.contains(".spec.") || s.contains("__tests__/");
+            let is_source = ["ts", "tsx", "js", "jsx"]
+                .iter()
+                .any(|e| s.ends_with(&format!(".{e}")));
+            if is_dts {
+                Role::Neither
+            } else if is_test {
+                Role::Test
+            } else if is_source {
+                Role::Source
+            } else {
+                Role::Neither
+            }
+        }
+        _ => Role::Neither,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_test_file_is_never_a_source_file() {
+        let cases = [
+            ("go", "foo_test.go"),
+            ("go", "pkg/bar_test.go"),
+            ("python", "test_foo.py"),
+            ("python", "tests/test_foo.py"),
+            ("python", "src/tests/test_bar.py"),
+            ("python", "conftest.py"),
+            ("node", "foo.test.ts"),
+            ("node", "foo.spec.tsx"),
+            ("node", "__tests__/foo.test.js"),
+            ("node", "foo.d.ts"),
+        ];
+        for (stack, path) in cases {
+            assert_ne!(
+                role(stack, Path::new(path)),
+                Role::Source,
+                "{stack}: {path} must not be Source"
+            );
+        }
+    }
+
+    #[test]
+    fn coverage_names_every_place_the_test_could_be() {
+        assert_eq!(
+            coverage("go", Path::new("pkg/foo.go")),
+            vec!["pkg/foo_test.go"]
+        );
+        assert_eq!(
+            coverage("python", Path::new("src/a/b.py")),
+            vec!["src/a/test_b.py", "src/a/tests/test_b.py"]
+        );
+        assert_eq!(
+            coverage("node", Path::new("src/a.ts")),
+            vec!["src/a.test.ts", "src/a.spec.ts", "src/__tests__/a.test.ts"]
+        );
+    }
+
+    #[test]
+    fn a_path_outside_the_stack_has_no_role() {
+        for (stack, path) in [
+            ("go", "README.md"),
+            ("go", "go.mod"),
+            ("python", "pyproject.toml"),
+            ("node", "package.json"),
+            ("node", "README.md"),
+        ] {
+            assert_eq!(
+                role(stack, Path::new(path)),
+                Role::Neither,
+                "{stack}: {path}"
+            );
+        }
+    }
+}
+
+/// The rendered guards — run against the real `claude` adapter, in a real
+/// git repository, exactly the way `no_shipped_hook_refuses_a_git_command`
+/// (`src/base.rs`) proves a hook by firing it rather than by reading it.
+#[cfg(test)]
+mod rendered {
+    use super::*;
+    use crate::adapter::{Adapter, Capability};
+    use crate::hook::{Hook, Outcome};
+    use std::io::Write;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+
+    const ADAPTERS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/adapters");
+    const HOOKS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/hooks");
+
+    /// One catalogue hook, rendered for claude — the harness every guard has
+    /// to work on. `hook::render` is what a hand-written predicate has to
+    /// survive: claude's own field-extraction preamble, not the raw JSON.
+    fn claude_command(hook_name: &str) -> String {
+        let path = PathBuf::from(HOOKS).join(format!("{hook_name}.json"));
+        let raw =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let hook = Hook::parse(&raw, hook_name).unwrap();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let binding = adapter
+            .supports(Capability::Hooks)
+            .expect("claude has hooks");
+        match crate::hook::render(hook_name, &hook, binding, &adapter.tools, None).unwrap() {
+            Outcome::Rendered(r) => r.command,
+            Outcome::Dropped(d) => panic!("claude cannot express {hook_name}: {d}"),
+        }
+    }
+
+    /// No shipped `when` may end its own process. The instance was
+    /// `tdd-guard`'s `|| exit 0`; the class is every predicate, including
+    /// the ones added after this was written.
+    ///
+    /// A `when` is a *predicate*, and the two ways it is consumed disagree
+    /// about what ending the process means. Claude inlines it, so an `exit`
+    /// inside it ends the whole hook — before `hook::render`'s own
+    /// `{when} || { <log silent>; exit 0; }` wrapper can run, so the
+    /// decision never reaches the ledger at all. Every other renderer runs
+    /// it as a child and reads the exit code, where `exit 0` says the
+    /// predicate *held* — so a line written to fail open (`|| exit 0`,
+    /// meaning "give up, allow") refused instead, on exactly the paths a
+    /// guard is documented to allow: no git repository, `git` erroring.
+    /// One line, opposite meanings, and the fail-open promise in
+    /// `docs/configuration.md` broken on every harness but one.
+    ///
+    /// Only `hooks/`: a stack's `when` in `stacks/*.toml` is a different
+    /// evaluator with its own exit-code contract, spelled out in
+    /// `stacks/node.toml`'s own header.
+    #[test]
+    fn no_shipped_hook_when_ends_its_own_process() {
+        let mut checked = 0;
+        for entry in std::fs::read_dir(HOOKS).unwrap().flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "json") {
+                continue;
+            }
+            let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            let hook = Hook::parse(&raw, &name).unwrap();
+            let Some(when) = hook.when.as_deref() else {
+                continue;
+            };
+            checked += 1;
+            for ending in ["exit ", "exit;", "exit\n", "return "] {
+                assert!(
+                    !when.contains(ending),
+                    "{name}: `when` contains `{}` — a predicate that ends its own \
+                     process is read as *true* by every renderer that runs it as a \
+                     child, so a line meant to fail open refuses instead. Let the \
+                     predicate be false and return non-zero: {when}",
+                    ending.trim_end(),
+                );
+            }
+        }
+        assert!(
+            checked >= 2,
+            "fixture: only {checked} shipped hooks have a `when` — this sweep \
+             has to be looking at something"
+        );
+    }
+
+    /// Feeds `file_path` to the rendered command as Claude's own payload
+    /// shape and reads back whether it refused. Claude's protocol is
+    /// silence-means-proceed: a hook that does not print a
+    /// `permissionDecision` allows the call, exactly as one that exits
+    /// before ever reading stdin does — `when` declining and a `refuse`
+    /// firing are the only two shapes this hook can produce, so this
+    /// returns a plain `bool` rather than an `Option`.
+    ///
+    /// Deliberately spawned from a directory that has nothing to do with
+    /// `file_path` — every guard resolves its own directory from
+    /// `$OMH_TOOL_FILE` and passes it to `git -C` explicitly, so the process
+    /// `cwd` must not matter. A caller passing the file's own repo as `cwd`
+    /// would make a predicate that silently depended on cwd anyway (e.g. a
+    /// bare `git status` with no `-C`) pass every test by coincidence, since
+    /// cwd and dirname would always agree.
+    fn refused(command: &str, file_path: &str) -> bool {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(command)
+            .current_dir(std::env::temp_dir())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("sh must run");
+        let payload = serde_json::json!({ "tool_input": { "file_path": file_path } });
+        if let Err(e) = child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+        {
+            // Every guard mentions `$OMH_TOOL_FILE`, so `hook::render`
+            // prepends `p=$(cat)` ahead of `when` — stdin is always read in
+            // full before a guard can decide anything. This branch cannot
+            // fire for a guard; it is kept only because the base.rs pattern
+            // this helper follows needs it for hooks with no fields at all
+            // (`graph-refresh`, `git-turn`), where `when` can exit before
+            // reading stdin.
+            assert_eq!(e.kind(), std::io::ErrorKind::BrokenPipe, "{e}");
+        }
+        let out = child.wait_with_output().unwrap();
+        // Exit status first, and asserted rather than swallowed: none of
+        // these hooks use Claude's *other* block mechanism (exiting 2 with a
+        // reason on stderr, which prints no JSON) — `no_shipped_hook_refuses_a_git_command`
+        // in `src/base.rs` is where that path is legitimately checked. Here a
+        // nonzero exit means the rendered command itself is broken, and
+        // reading that as "did not refuse" would report a crashed guard as a
+        // working one.
+        assert!(
+            out.status.success(),
+            "guard exited {:?} on `{command}`: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stdout.trim()) else {
+            return false;
+        };
+        parsed
+            .get("hookSpecificOutput")
+            .and_then(|h| h.get("permissionDecision"))
+            .and_then(|d| d.as_str())
+            == Some("deny")
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A repo with `source` and its paired test both committed clean —
+    /// `tdd-guard`'s own refuse condition, since neither has moved since the
+    /// last commit. Callers that want the *allowed* state dirty the test
+    /// file after this returns.
+    fn repo_with(source: &str, test_file: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        for f in [source, test_file] {
+            let p = dir.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "x").unwrap();
+        }
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "init"]);
+        dir
+    }
+
+    /// One representative source/test pair per stack, all run through the
+    /// same hook — `tdd-guard` covers every stack itself, dispatching on
+    /// extension the way `config-guard` dispatches on path. Table-driven
+    /// rather than three copies of each test below that iterates it, so a
+    /// fourth stack is one more row and never a fourth catalogue entry: a
+    /// monorepo with go and node turns on one name, `tdd-guard`, not two.
+    const STACKS: &[(&str, &str, &str)] = &[
+        ("go", "foo.go", "foo_test.go"),
+        ("python", "foo.py", "test_foo.py"),
+        ("node", "foo.ts", "foo.test.ts"),
+    ];
+
+    #[test]
+    fn a_clean_test_file_refuses_the_source_edit() {
+        let command = claude_command("tdd-guard");
+        for (stack, source, test) in STACKS {
+            let dir = repo_with(source, test);
+            let file = dir.path().join(source);
+            assert!(
+                refused(&command, &file.to_string_lossy()),
+                "{stack}: the test file has not moved since the last commit"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dirty_test_file_allows_it() {
+        let command = claude_command("tdd-guard");
+        for (stack, source, test) in STACKS {
+            let dir = repo_with(source, test);
+            std::fs::write(dir.path().join(test), "changed").unwrap();
+            let file = dir.path().join(source);
+            assert!(!refused(&command, &file.to_string_lossy()), "{stack}");
+        }
+    }
+
+    #[test]
+    fn editing_the_test_itself_is_never_refused() {
+        let command = claude_command("tdd-guard");
+        for (stack, source, test) in STACKS {
+            let dir = repo_with(source, test);
+            let file = dir.path().join(test);
+            assert!(!refused(&command, &file.to_string_lossy()), "{stack}");
+        }
+    }
+
+    #[test]
+    fn a_file_with_no_role_is_never_refused() {
+        let command = claude_command("tdd-guard");
+        for (stack, source, test) in STACKS {
+            let dir = repo_with(source, test);
+            let file = dir.path().join("README.md");
+            assert!(!refused(&command, &file.to_string_lossy()), "{stack}");
+        }
+    }
+
+    #[test]
+    fn a_guard_that_cannot_ask_git_allows() {
+        let command = claude_command("tdd-guard");
+        for (stack, source, _test) in STACKS {
+            // Not a git repository at all — `git status` fails outright, and
+            // the guard has to read failure as "cannot tell" rather than as
+            // "refuse". This is the case the invariant exists for.
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(source), "x").unwrap();
+            let file = dir.path().join(source);
+            assert!(
+                !refused(&command, &file.to_string_lossy()),
+                "{stack}: no git repository at all — a hard failure, not a refusal"
+            );
+        }
+    }
+
+    /// Failing open is correct, and failing open *in silence* is its own
+    /// defect. A guard that cannot reach `git` allows the edit — but the
+    /// ledger writes that down as `Silent`, the same word as a guard that
+    /// looked and found nothing to object to, and the predicate's own
+    /// `2>/dev/null` means the renderers' `warn` on a hook's stderr never
+    /// fires either. So a worktree whose `.git` points outside the mount, or
+    /// a `dubious ownership` refusal, disables the guard for a whole session
+    /// while `omh sNN` prints a confident `47 silent` — which reads as 47
+    /// edits checked and cleared.
+    ///
+    /// One line on stderr is the whole fix: it costs nothing on the happy
+    /// path, keeps the exit status non-zero so the edit is still allowed,
+    /// and gives the renderers something to surface. Asserted on the
+    /// rendered command, because that is what ships.
+    #[test]
+    fn a_guard_that_cannot_ask_git_says_so_rather_than_standing_down_in_silence() {
+        let command = claude_command("tdd-guard");
+        for (stack, source, _test) in STACKS {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(source), "x").unwrap();
+            let file = dir.path().join(source);
+
+            let mut child = Command::new("sh")
+                .arg("-c")
+                .arg(&command)
+                .current_dir(std::env::temp_dir())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("sh must run");
+            let payload =
+                serde_json::json!({ "tool_input": { "file_path": file.to_string_lossy() } });
+            let _ = child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.to_string().as_bytes());
+            let out = child.wait_with_output().unwrap();
+            let stderr = String::from_utf8_lossy(&out.stderr);
+
+            assert!(
+                stderr.contains("tdd-guard"),
+                "{stack}: the guard stood down without a word — a session's \
+                 worth of unchecked edits would report as `silent`: {stderr:?}"
+            );
+            // And still allows: saying so must not become refusing.
+            assert!(
+                !String::from_utf8_lossy(&out.stdout).contains("deny"),
+                "{stack}: a guard that cannot ask git must still allow the edit"
+            );
+        }
+    }
+
+    /// The same invariant `a_guard_that_cannot_ask_git_allows` proves for
+    /// claude, proved for omp too — and this is the one that actually
+    /// exercises the bridge, not the inlined script.
+    ///
+    /// The bug this guards against: the predicate spells "cannot tell" as
+    /// `s=$(git …) || exit 0; [ -z "$s" ]`. Inlined into claude's single
+    /// top-level script, `exit 0` ends the whole hook before the action ever
+    /// dispatches — fail-open, but only because of how claude happens to be
+    /// rendered. Every other renderer runs `when` as its own child process
+    /// (`SHELL_BRIDGE`'s `sh`) and reads its exit code as the predicate's
+    /// answer — 0 means *true* there, so `exit 0` on a `git` failure read as
+    /// "the predicate held" and the guard **refused**, exactly backwards
+    /// from "fail open" and from what `docs/configuration.md` promises. The
+    /// fix replaces `|| exit 0` with `&&`, so a `git` failure's own nonzero
+    /// status propagates as the predicate's answer on every renderer, inline
+    /// or not.
+    #[test]
+    fn a_guard_that_cannot_ask_git_allows_through_the_bridge_too() {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "omp").unwrap();
+        let binding = adapter.supports(Capability::Hooks).expect("omp has hooks");
+        let sources = vec![PathBuf::from(HOOKS)];
+        let doc = crate::render::document(
+            Capability::Hooks,
+            binding,
+            &sources,
+            &crate::render::RenderContext {
+                own: &crate::base::Own::default(),
+                repo: &crate::settings::RepoPolicy::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
+        )
+        .unwrap();
+        for (stack, source, test) in STACKS {
+            // The positive control, run first and with the *identical*
+            // payload shape: a real repository whose test file is committed
+            // and clean, which every guard must block. Without it the
+            // no-repo assertion below is satisfiable by any path that never
+            // reaches `git` at all — a regex that stopped matching, a
+            // renderer that threw — and the fail-open property this test
+            // exists for would go unverified in silence. The absolute path
+            // is the part needing proof: the only other omp block test uses
+            // a relative one.
+            let live = repo_with(source, test);
+            let live_file = live.path().join(source).to_string_lossy().into_owned();
+            let live_input = format!("[{live_file}#A1B2]\nPUT <1:\n+x\n");
+            let blocked = drive_omp(
+                &doc.body,
+                tempfile::tempdir().unwrap().path(),
+                "tool_call",
+                &format!(r#"{{ toolName: "edit", input: {{ input: {live_input:?} }} }}"#),
+            );
+            assert!(
+                blocked.contains(r#""block":true"#),
+                "{stack}: the payload must reach `git` and refuse when the test \
+                 file is clean — otherwise the no-repo case below proves nothing \
+                 about failing open: {blocked}"
+            );
+
+            // No git repository at all, and `cwd` is deliberately not the
+            // directory the file sits in — same reasoning `refused`'s own
+            // doc gives: a predicate that silently depended on cwd would
+            // pass by coincidence if the two always agreed.
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(source), "x").unwrap();
+            let elsewhere = tempfile::tempdir().unwrap();
+            let file = dir.path().join(source).to_string_lossy().into_owned();
+            // omp's own `[PATH#TAG]` hashline shape — a bare path here
+            // would not match the `fields-by-tool.edit` regex at all,
+            // leaving `$OMH_TOOL_FILE` empty and the predicate's `case`
+            // falling through *without ever reaching `git`*, which would
+            // pass this test for a reason that has nothing to do with the
+            // bug it exists to catch. The control above closes that: it
+            // sends the same shape at a real repository and requires a
+            // refusal, so the path below is known to reach `git`.
+            let input = format!("[{file}#A1B2]\nPUT <1:\n+x\n");
+            let result = drive_omp(
+                &doc.body,
+                elsewhere.path(),
+                "tool_call",
+                &format!(r#"{{ toolName: "edit", input: {{ input: {input:?} }} }}"#),
+            );
+            // `== "null"`, not `!contains("block")`: `drive_omp` reports an
+            // exception as `THREW: …`, which contains no "block" either, so
+            // the looser form would read a crashing renderer as a guard
+            // politely standing down.
+            assert_eq!(
+                result, "null",
+                "{stack}: no git repository at all — a hard failure, which a \
+                 guard allows through rather than refusing on"
+            );
+        }
+    }
+
+    /// The same bug, seen from the ledger rather than the block decision:
+    /// with the old `|| exit 0`, claude's inlined `when` ended the *whole*
+    /// hook process on a `git` failure — before `hook::render`'s own
+    /// `{when} || { <log silent>; exit 0; }` wrapper (appended after the
+    /// predicate's own text, wrapping it rather than living inside it) ever
+    /// ran, so nothing was logged at all and the hook read as dormant
+    /// rather than `Silent`. The
+    /// same `&&` fix that makes the bridge fail open also gives the
+    /// predicate itself a plain nonzero exit here, letting the wrapper's own
+    /// `|| { ... }` catch it.
+    #[test]
+    fn a_guard_that_cannot_ask_git_is_logged_as_silent_not_dormant() {
+        let path = PathBuf::from(HOOKS).join("tdd-guard.json");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let hook = Hook::parse(&raw, "tdd-guard").unwrap();
+        let adapter = Adapter::find(Path::new(ADAPTERS), "claude").unwrap();
+        let binding = adapter
+            .supports(Capability::Hooks)
+            .expect("claude has hooks");
+        let log_dir = tempfile::tempdir().unwrap();
+        let log = log_dir.path().join("events.jsonl");
+        let command = match crate::hook::render(
+            "tdd-guard",
+            &hook,
+            binding,
+            &adapter.tools,
+            Some(log.to_str().unwrap()),
+        )
+        .unwrap()
+        {
+            Outcome::Rendered(r) => r.command,
+            Outcome::Dropped(d) => panic!("claude cannot express tdd-guard: {d}"),
+        };
+        // No git repository at all — the same fixture the bridge test above
+        // uses, run through claude's own inlined rendering this time.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("foo.go"), "x").unwrap();
+        let file = dir.path().join("foo.go");
+        assert!(
+            !refused(&command, &file.to_string_lossy()),
+            "still allowed — this test is about what got logged, not the decision"
+        );
+        let written = std::fs::read_to_string(&log).unwrap_or_default();
+        let observed = crate::ledger::Observation::parse(written.trim())
+            .unwrap_or_else(|| panic!("nothing was logged at all: {written:?}"));
+        assert_eq!(observed.decision.wire(), "silent", "{written}");
+    }
+
+    /// Distinct from the case above: git answers successfully, but the test
+    /// file has never existed — that is not "cannot tell", it is the
+    /// ordinary TDD state "no test written yet", and a guard is allowed to
+    /// refuse it exactly as it refuses an untouched-but-existing test.
+    #[test]
+    fn no_test_file_at_all_still_refuses() {
+        let command = claude_command("tdd-guard");
+        for (stack, source, _test) in STACKS {
+            let dir = tempfile::tempdir().unwrap();
+            git(dir.path(), &["init", "-q"]);
+            std::fs::write(dir.path().join(source), "x").unwrap();
+            git(dir.path(), &["add", "-A"]);
+            git(dir.path(), &["commit", "-q", "-m", "init"]);
+            let file = dir.path().join(source);
+            assert!(
+                refused(&command, &file.to_string_lossy()),
+                "{stack}: git answered fine; there is simply no test yet"
+            );
+        }
+    }
+
+    /// python and node each name more than one place the test could be —
+    /// `coverage()`'s whole reason to return a `Vec`. Driven off `coverage()`
+    /// itself rather than one hand-picked candidate: a predicate that
+    /// dropped a candidate, or spelled `__tests__` wrong, fails against the
+    /// model instead of against a literal this test also typed.
+    #[test]
+    fn any_dirty_candidate_is_enough() {
+        let command = claude_command("tdd-guard");
+        for (stack, source) in [("python", "src/foo.py"), ("node", "src/foo.ts")] {
+            let candidates = coverage(stack, Path::new(source));
+            assert!(!candidates.is_empty(), "{stack}: no candidates to check");
+            for candidate in &candidates {
+                // Every *other* candidate exists too, clean — a real repo
+                // would have all of them committed; only `candidate` moves.
+                let dir = tempfile::tempdir().unwrap();
+                git(dir.path(), &["init", "-q"]);
+                for f in std::iter::once(source).chain(candidates.iter().map(String::as_str)) {
+                    let p = dir.path().join(f);
+                    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                    std::fs::write(&p, "x").unwrap();
+                }
+                git(dir.path(), &["add", "-A"]);
+                git(dir.path(), &["commit", "-q", "-m", "init"]);
+                std::fs::write(dir.path().join(candidate), "changed").unwrap();
+                let file = dir.path().join(source);
+                assert!(
+                    !refused(&command, &file.to_string_lossy()),
+                    "{stack}: dirtying {candidate} alone should be enough"
+                );
+            }
+        }
+    }
+
+    /// The oracle in `super::{role, coverage}` and the shipped predicate are
+    /// two independent descriptions of the same rule. This is the test that
+    /// makes them answer to each other, over paths a hand-picked example set
+    /// would not have hit.
+    #[test]
+    fn every_shipped_guard_agrees_with_the_model() {
+        let cases: &[(&str, &str)] = &[
+            ("go", "pkg/thing.go"),
+            ("go", "pkg/thing_test.go"),
+            ("go", "README.md"),
+            ("python", "pkg/thing.py"),
+            ("python", "pkg/test_thing.py"),
+            ("python", "pkg/tests/thing.py"),
+            ("python", "pyproject.toml"),
+            // A `*/test_*.py` glob spans `/`, so it also matches a *source*
+            // file that merely sits under a directory starting with
+            // `test_` — `role()` only checks the basename. The drift this
+            // catches: the shipped predicate reading `src/test_utils/x.py`
+            // as a test file it may never touch, when the oracle says it is
+            // an ordinary source file with no test of its own.
+            ("python", "src/test_utils/helper.py"),
+            // The merged hook's node arm used to check `*.test.*` as a
+            // top-level pattern, ahead of the python fallback — so a python
+            // file whose name merely *contains* `.test.` (an unusual name,
+            // but a plain source file) was read as an already-tested node
+            // file and never refused, while the oracle — which only reads
+            // `test_`-prefix and `/tests/` for python — says Source.
+            ("python", "foo.test.py"),
+            ("node", "src/thing.ts"),
+            ("node", "src/thing.test.ts"),
+            ("node", "src/thing.d.ts"),
+            ("node", "deep/__tests__/x.ts"),
+            ("node", "package.json"),
+        ];
+        let command = claude_command("tdd-guard");
+        for (stack, rel) in cases {
+            let source_role = role(stack, Path::new(rel));
+            // A guard oracle only has an opinion about `Source` paths — for
+            // `Test`/`Neither` the invariant is "always allow", already
+            // covered by the tests above. What this checks is the boundary
+            // itself: the model must not silently call something `Source`
+            // that the shipped predicate's `case` arms do not recognise
+            // either, or the two have drifted.
+            let dir = repo_with(rel, "unrelated_test_file_that_never_matches.never");
+            let file = dir.path().join(rel);
+            let claude_refuses = refused(&command, &file.to_string_lossy());
+            match source_role {
+                Role::Source => assert!(
+                    claude_refuses,
+                    "{stack}/{rel}: oracle says Source, no matching test exists, \
+                     the shipped predicate must refuse"
+                ),
+                Role::Test | Role::Neither => assert!(
+                    !claude_refuses,
+                    "{stack}/{rel}: oracle says {source_role:?}, the shipped \
+                     predicate must never refuse it"
+                ),
+            }
+        }
+    }
+
+    /// A monorepo names one guard, and it has to cover every stack in it at
+    /// once — the whole reason `tdd-guard` is one file rather than one per
+    /// stack. A go edit with a clean test and a python edit with a dirty one,
+    /// against the *same rendered command*, in the *same repo*.
+    #[test]
+    fn one_guard_covers_every_stack_in_a_monorepo() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-q"]);
+        for f in ["go/foo.go", "go/foo_test.go", "py/bar.py", "py/test_bar.py"] {
+            let p = dir.path().join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, "x").unwrap();
+        }
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "init"]);
+        std::fs::write(dir.path().join("py/test_bar.py"), "changed").unwrap();
+
+        let command = claude_command("tdd-guard");
+        assert!(
+            refused(&command, &dir.path().join("go/foo.go").to_string_lossy()),
+            "go's test has not moved"
+        );
+        assert!(
+            !refused(&command, &dir.path().join("py/bar.py").to_string_lossy()),
+            "python's test just did, in the same repo, under the same guard"
+        );
+    }
+
+    /// A decision, named rather than left implicit: `git status` compares
+    /// against `HEAD`, so once the agent commits, the test file it just
+    /// touched reads as clean again — the next source edit is refused until
+    /// a test is touched *again*. That is per-cycle TDD (every red/green
+    /// round starts with a test edit), not a bug, but it is a real behaviour
+    /// nobody wrote down until this test.
+    #[test]
+    fn a_committed_test_no_longer_counts_as_touched() {
+        let dir = repo_with("foo.go", "foo_test.go");
+        std::fs::write(dir.path().join("foo_test.go"), "changed").unwrap();
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "test change"]);
+        let command = claude_command("tdd-guard");
+        let file = dir.path().join("foo.go");
+        assert!(
+            refused(&command, &file.to_string_lossy()),
+            "the test change is now in HEAD, so `git status` reports it clean again"
+        );
+    }
+
+    #[test]
+    fn config_guard_refuses_edits_under_omh() {
+        let command = claude_command("config-guard");
+        assert!(refused(&command, "/work/.omh/settings.toml"));
+        assert!(refused(&command, "/work/.omh/hooks/x.json"));
+    }
+
+    #[test]
+    fn config_guard_allows_the_memory_store() {
+        let command = claude_command("config-guard");
+        assert!(!refused(&command, "/work/.omh/notes/2026-09-08-x.md"));
+    }
+
+    #[test]
+    fn config_guard_allows_everything_outside_omh() {
+        let command = claude_command("config-guard");
+        assert!(!refused(&command, "/work/src/main.rs"));
+        assert!(!refused(&command, "/work/AGENTS.md"));
+    }
+
+    /// Every guard rendered for omp, then actually run through `node`
+    /// against a realistic `edit` payload — `[PATH#TAG]` sections, the shape
+    /// `docs/tools/edit.md` documents for oh-my-pi v17.3.3, not a
+    /// hand-invented one. `[capabilities.hooks.fields-by-tool.edit]` in
+    /// `adapters/omp.toml` is what makes this render instead of drop; before
+    /// it existed, both guards were dropped by name here.
+    #[test]
+    fn every_guard_renders_and_blocks_on_omp() {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "omp").unwrap();
+        let binding = adapter.supports(Capability::Hooks).expect("omp has hooks");
+        let sources = vec![PathBuf::from(HOOKS)];
+        let doc = crate::render::document(
+            Capability::Hooks,
+            binding,
+            &sources,
+            &crate::render::RenderContext {
+                own: &crate::base::Own::default(),
+                repo: &crate::settings::RepoPolicy::default(),
+                tools: &adapter.tools,
+                resolves: &Default::default(),
+                log: None,
+            },
+        )
+        .unwrap();
+        for name in ["tdd-guard", "config-guard"] {
+            assert!(
+                !doc.dropped.iter().any(|d| d.name == name),
+                "{name}: expected to render, got dropped: {:?}",
+                doc.dropped
+            );
+        }
+
+        // A real git repo, exactly `repo_with`'s shape — the guard's `when`
+        // still shells out to `git status`, whichever harness renders it.
+        let dir = repo_with("foo.go", "foo_test.go");
+        // A source file whose paired test is untouched — `foo.go`, matching
+        // the go-tdd suite above — expressed as omp's real edit payload.
+        let input = "[foo.go#A1B2]\nPUT <1:\n+package foo\n";
+        let result = drive_omp(
+            &doc.body,
+            dir.path(),
+            "tool_call",
+            &format!(r#"{{ toolName: "edit", input: {{ input: {input:?} }} }}"#),
+        );
+        assert!(
+            result.contains(r#""block":true"#),
+            "an untouched test file must block on omp too: {result}"
+        );
+
+        // The negative: the same payload against a repo where the test file
+        // has moved must return nothing — omp's `tool_call` allows by
+        // returning no result, exactly as Claude Code allows by silence.
+        std::fs::write(dir.path().join("foo_test.go"), "changed").unwrap();
+        let allowed = drive_omp(
+            &doc.body,
+            dir.path(),
+            "tool_call",
+            &format!(r#"{{ toolName: "edit", input: {{ input: {input:?} }} }}"#),
+        );
+        assert_eq!(
+            allowed, "null",
+            "a dirty test file must not block on omp: {allowed}"
+        );
+    }
+
+    /// Registers every `pi.on(event, handler)` the module makes and invokes
+    /// the one matching `event_name`, returning what the handler returned as
+    /// JSON — or `THREW: …`. The same reasoning as `render.rs`'s opencode
+    /// `drive()`: a substring check on generated source cannot see whether a
+    /// handler actually runs, or what it does when it does.
+    ///
+    /// `cwd`: the guard's `when` shells out to `git`, so this has to run
+    /// from a real repository — never the harness's own, which `git -C "."`
+    /// would silently fall back to if the payload's path had no directory.
+    fn drive_omp(body: &str, cwd: &Path, event_name: &str, event: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let module = dir.path().join("omh.mjs");
+        std::fs::write(&module, body).unwrap();
+        let driver = dir.path().join("run.mjs");
+        std::fs::write(
+            &driver,
+            format!(
+                r#"import register from "file://{}"
+const handlers = {{}}
+const pi = {{ on: (event, handler) => {{ handlers[event] = handler }} }}
+register(pi)
+const event = {event}
+try {{
+  const result = await handlers[{event_name:?}]?.(event, {{}})
+  console.log(JSON.stringify(result ?? null))
+}} catch (e) {{ console.log("THREW: " + e.message) }}
+"#,
+                module.display()
+            ),
+        )
+        .unwrap();
+        let out = std::process::Command::new("node")
+            .arg(&driver)
+            .current_dir(cwd)
+            .output()
+            .expect("node is required: a probe that skips is a probe that passes");
+        assert!(
+            out.status.success(),
+            "node failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// codex has no hooks capability at all (`adapters/codex.toml`), so the
+    /// launcher gives up the whole capability rather than naming one hook —
+    /// that path is exercised in `container.rs`. What belongs to this guard
+    /// specifically is that codex is not silently offered the option: there
+    /// is no `[capabilities.hooks]` table to render against.
+    #[test]
+    fn codex_has_no_hooks_capability_to_render_against() {
+        let adapter = Adapter::find(Path::new(ADAPTERS), "codex").unwrap();
+        assert!(adapter.supports(Capability::Hooks).is_none());
+    }
+}

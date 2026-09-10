@@ -9129,6 +9129,87 @@ fn a_hook_init_derives_later_is_selected_too() {
     );
 }
 
+/// A guard (`refuse`) is a catalogue member like any other hook — nameable
+/// with `omh use hooks tdd-guard`, listed by `omh info`, removable the
+/// same way — but it is never part of what a bare `omh init` turns on for
+/// you. Every other catalogue hook is safe to run unattended; a guard can
+/// refuse the agent's very first edit, which is not the promise `omh init &&
+/// omh new claude` — zero questions, nothing surprising — makes.
+///
+/// Runs without a container, same as the sibling test above.
+#[test]
+fn a_fresh_repo_starts_with_guards_off() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    std::fs::write(fx.repo.join("go.mod"), "module x\n").unwrap();
+
+    fx.omh(&["init"]);
+
+    let settings = fx.settings();
+    assert!(
+        settings.contains("go-format") && settings.contains("go-test"),
+        "ordinary automation still turns on: {settings}"
+    );
+    assert!(
+        !settings.contains("tdd-guard"),
+        "a guard must not be in a fresh repo's selection: {settings}"
+    );
+    assert!(
+        !settings.contains("config-guard"),
+        "not even the stack-less one: {settings}"
+    );
+}
+
+/// `omh use --all` is the same "give me the whole catalogue" expansion
+/// `init` writes on a fresh repo, so it excludes guards for the same reason —
+/// a resync is meant to pick up ordinary automation added since, not to
+/// silently start blocking the agent.
+#[test]
+fn use_all_does_not_turn_on_a_guard() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.seed_catalogue(&["hooks", "stacks"]);
+    std::fs::write(fx.repo.join("go.mod"), "module x\n").unwrap();
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(fx.repo.join(".omh/settings.toml"), "[use]\nhooks = []\n").unwrap();
+
+    assert!(fx.omh(&["use", "--all"]).status.success());
+
+    let settings = fx.settings();
+    assert!(settings.contains("go-format") && settings.contains("go-test"));
+    assert!(!settings.contains("tdd-guard"), "got: {settings}");
+    assert!(!settings.contains("config-guard"), "got: {settings}");
+}
+
+/// Excluded from automatic expansion, never from being named. `catalogue_lists`
+/// narrows what `init`/`--all` write; `catalogue_names`, which validates a
+/// name you typed, does not — a guard is a real catalogue entry and `omh use
+/// hooks tdd-guard` has to find it.
+#[test]
+fn a_guard_is_still_nameable_by_hand() {
+    let fx = sandbox();
+    fx.seed_base();
+    fx.seed_adapters();
+    fx.seed_catalogue(&["hooks", "stacks"]);
+    std::fs::write(fx.repo.join("go.mod"), "module x\n").unwrap();
+    std::fs::create_dir_all(fx.repo.join(".omh")).unwrap();
+    std::fs::write(fx.repo.join(".omh/settings.toml"), "[use]\nhooks = []\n").unwrap();
+
+    let out = fx.omh(&["use", "hooks", "tdd-guard"]);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        fx.settings().contains("tdd-guard"),
+        "got: {}",
+        fx.settings()
+    );
+}
+
 /// **`--json` emits exactly one document, from every command that emits any.**
 ///
 /// The bug this exists to stop is invisible to a unit test by construction.

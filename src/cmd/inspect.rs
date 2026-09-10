@@ -284,6 +284,7 @@ pub(crate) fn doctor_cmd(
                 .output(),
         ))
         .chain(doctor::git_checks())
+        .chain(doctor::audit(&paths))
         .collect::<Vec<_>>();
     let host = doctor::HostRows(host);
 
@@ -297,6 +298,7 @@ pub(crate) fn doctor_cmd(
         let report = report::Doctor {
             sandbox: None,
             account: None,
+            host_count: rows.len(),
             outcomes: rows,
         };
         ctx.say(&report);
@@ -541,12 +543,18 @@ pub(crate) fn doctor_cmd(
 
         let out = backend.output(&backend.args(&plan))?;
         let from_the_sandbox = doctor::parse(&String::from_utf8_lossy(&out.stdout));
-        let _ = session.remove(&paths.repo, "", &paths.shadows()); // diagnostic: leave no session behind
-                                                                   // `with_context` would make the sandbox's stderr the *outer* error, so
-                                                                   // `out::problem` would print it as omh's own headline and demote omh's
-                                                                   // explanation to a cause — with an empty stderr rendering as a bare
-                                                                   // `omh:` and nothing after it. The sentence omh wrote stays first, and
-                                                                   // what the container said follows it, sanitised: it is not omh's text.
+        // Diagnostic: leave no session behind.
+        let _ = session.remove(&paths.repo, "", &paths.shadows());
+
+        // `host` is about to be moved into `every_check`; the split point
+        // `report::Doctor` needs to render host and sandbox rows separately
+        // has to be captured before that, not derived from `outcomes` after.
+        let host_count = host.0.len();
+        // `with_context` would make the sandbox's stderr the *outer* error, so
+        // `out::problem` would print it as omh's own headline and demote omh's
+        // explanation to a cause — with an empty stderr rendering as a bare
+        // `omh:` and nothing after it. The sentence omh wrote stays first, and
+        // what the container said follows it, sanitised: it is not omh's text.
         let outcomes = crate::cmd::harvest::every_check(from_the_sandbox, host).map_err(|e| {
             match crate::out::untrusted(String::from_utf8_lossy(&out.stderr).trim()) {
                 said if said.is_empty() => e,
@@ -560,6 +568,7 @@ pub(crate) fn doctor_cmd(
                 tag: sandbox.tag.clone(),
             }),
             account: account_name,
+            host_count,
             outcomes,
         };
         ctx.say(&report);

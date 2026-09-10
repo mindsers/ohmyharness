@@ -126,14 +126,21 @@ pub(crate) fn eject(
                         cap,
                         binding,
                         &sources,
-                        &own,
-                        &repo,
-                        &adapter.tools,
-                        // Nothing has been measured, because nothing is being
-                        // launched. An empty map suppresses nothing, which is
-                        // the right default: a hook omh cannot prove the image
-                        // lacks is one the user should see and decide about.
-                        &Default::default(),
+                        &render::RenderContext {
+                            own: &own,
+                            repo: &repo,
+                            tools: &adapter.tools,
+                            // Nothing has been measured, because nothing is
+                            // being launched. An empty map suppresses
+                            // nothing, which is the right default: a hook
+                            // omh cannot prove the image lacks is one the
+                            // user should see and decide about.
+                            resolves: &Default::default(),
+                            // An ejected config is handed to the user and
+                            // must carry none of omh's own plumbing — see
+                            // `hook::render`'s doc on this parameter.
+                            log: None,
+                        },
                     )?;
                     write_file(&out_path, &doc.body, dry_run)?;
                     if names_a_sandbox_path(&doc.body) {

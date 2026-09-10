@@ -825,21 +825,50 @@ fn write_servers(path: &Path, servers: &BTreeMap<String, Server>) -> Result<()> 
 /// A policy value that is a list. `policy()` renders values for display, so an
 /// array arrives as its TOML text and has to be parsed back.
 pub fn policy_list(paths: &Paths, key: &str) -> Vec<String> {
+    policy_list_checked(paths, key).unwrap_or_default()
+}
+
+/// The same read, with the one failure that is worth a word kept separate
+/// from the many that are not.
+///
+/// A key that is *declared* and is not a list of strings is a person's typo,
+/// not an absence: a bare dotfile name where a list belongs parses, resolves
+/// to nothing, and made every layer agree there was nothing to carry — so
+/// the file never reached the sandbox and no row said why. An undeclared key
+/// stays `Ok(vec![])`, because that genuinely is nothing declared.
+///
+/// Written without a quoted example on purpose: `key.rs`'s scan reads the
+/// first string literal after a `policy_list(` call shape, and this doc sits
+/// close enough to one that an example here becomes a setting omh appears to
+/// read.
+///
+/// A non-string element is dropped rather than rejected, deliberately: it is
+/// one bad entry beside good ones, and `carry_in`'s own row is better placed
+/// to say which patterns it could not use than this reader is.
+pub fn policy_list_checked(paths: &Paths, key: &str) -> Result<Vec<String>, String> {
     let Some(repr) = policy(paths)
         .ok()
         .and_then(|s| s.into_iter().find(|s| s.key == key))
     else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    toml::from_str::<toml::Table>(&format!("v = {}", repr.value))
+    let parsed = toml::from_str::<toml::Table>(&format!("v = {}", repr.value))
         .ok()
-        .and_then(|t| t.get("v").and_then(|v| v.as_array()).cloned())
-        .map(|a| {
-            a.iter()
-                .filter_map(|v| v.as_str().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+        .and_then(|t| t.get("v").cloned());
+    match parsed.as_ref().and_then(|v| v.as_array()) {
+        Some(a) => Ok(a
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()),
+        None => Err(format!(
+            "{key} must be a list of strings, and this one is {}: {}",
+            match parsed.as_ref() {
+                Some(v) => v.type_str(),
+                None => "unreadable",
+            },
+            repr.value
+        )),
+    }
 }
 
 #[cfg(test)]

@@ -822,8 +822,244 @@ fn focused(activity: Activity) -> Sessions {
     report.focus = Some(Focus {
         activity,
         check: None,
+        // `Seen` with nothing in it renders no line at all (`hooks_lines`) —
+        // unlike `NotRecorded`, which prints its own "not recorded" text and
+        // would trivially satisfy this file's `contains("not recorded")`
+        // assertions on `Activity::NotRecorded` for the wrong reason.
+        hooks: HooksState::Seen(Default::default()),
     });
     report
+}
+
+fn focused_hooks(hooks: HooksState) -> Sessions {
+    let mut report = sessions(vec![session("s01", Work::Clean)]);
+    report.focus = Some(Focus {
+        activity: Activity::NotRecorded("no activity fixture for this test".into()),
+        check: None,
+        hooks,
+    });
+    report
+}
+
+/// `hooks this session`: fired and silent counts on the same line, a refused
+/// hook on its own, and a rendered-but-never-observed hook reported as
+/// dormant rather than silently dropped from the picture — the three facts
+/// `ledger::Summary` carries, each landing somewhere a reader can see it.
+#[test]
+fn hooks_this_session_names_each_decision_and_what_never_fired() {
+    let p = out::Palette::plain();
+    let mut activity = std::collections::BTreeMap::new();
+    activity.insert(
+        "graph-read".to_string(),
+        crate::ledger::Activity {
+            fired: 1,
+            silent: 14,
+            refused: 0,
+            unevaluated: 0,
+        },
+    );
+    activity.insert(
+        "tdd-guard".to_string(),
+        crate::ledger::Activity {
+            fired: 0,
+            silent: 0,
+            refused: 2,
+            unevaluated: 0,
+        },
+    );
+    let summary = crate::ledger::Summary {
+        activity,
+        dormant: vec!["graph-first".to_string()],
+        unlisted: Default::default(),
+        unreadable: 0,
+    };
+    let text = focused_hooks(HooksState::Seen(summary)).human(&p);
+    assert!(text.contains("hooks this session"), "{text}");
+    assert!(
+        text.contains("graph-read") && text.contains("1 fired") && text.contains("14 silent"),
+        "fired and silent land on the same line: {text}"
+    );
+    assert!(
+        text.contains("tdd-guard") && text.contains("2 refused"),
+        "{text}"
+    );
+    assert!(
+        text.contains("dormant") && text.contains("graph-first"),
+        "a hook that never fired is named, not omitted: {text}"
+    );
+}
+
+/// An observation naming a hook outside the ledger — a stray write, or one
+/// left over from an earlier launch of a resumed session — is shown as its
+/// own fact, never folded into `activity` where it would read as a rendered
+/// hook's own doing.
+#[test]
+fn an_unlisted_hook_is_shown_apart_from_activity() {
+    let p = out::Palette::plain();
+    let mut unlisted = std::collections::BTreeMap::new();
+    unlisted.insert(
+        "tdd-guard".to_string(),
+        crate::ledger::Activity {
+            fired: 2,
+            silent: 0,
+            refused: 0,
+            unevaluated: 0,
+        },
+    );
+    let summary = crate::ledger::Summary {
+        activity: Default::default(),
+        dormant: vec![],
+        unlisted,
+        unreadable: 0,
+    };
+    let text = focused_hooks(HooksState::Seen(summary)).human(&p);
+    assert!(
+        text.contains("tdd-guard") && text.contains("never rendered"),
+        "{text}"
+    );
+    // "apart from", which the name promises and the assertion above does
+    // not test: this fixture's `activity` is empty, so a renderer that
+    // *also* printed the hook as an ordinary activity row would satisfy
+    // every line above. Counted rather than pattern-matched, because the
+    // claim is that the name is spoken once — in the sentence that says omh
+    // cannot vouch for it — and not a second time as a row that looks like
+    // any other hook's.
+    assert_eq!(
+        text.matches("tdd-guard").count(),
+        1,
+        "an unlisted hook is named once, in its own line — never also as an \
+         activity row omh would be standing behind: {text}"
+    );
+}
+
+/// A launch whose ledger named no hooks, read against an events file holding
+/// nothing but torn lines, has one fact to report: the record is damaged.
+/// `hooks_lines`' early return weighed `activity`, `dormant` and `unlisted`
+/// and not `unreadable`, so the single state where damage is the *only* fact
+/// rendered as a blank — a damaged record and a quiet launch looking exactly
+/// alike, which is the confusion `HooksState::Unreadable` exists to prevent,
+/// reached from the other side. Built through `Summary::of` rather than by
+/// hand, because the point is that a real launch can land here.
+#[test]
+fn a_summary_whose_only_fact_is_damage_is_not_silent() {
+    let p = out::Palette::plain();
+    let ledger = crate::ledger::Ledger { hooks: vec![] };
+    let observed = crate::ledger::Observations::parse_all("{\"hook\":\"gra\nnot json at all\n");
+    let summary = crate::ledger::Summary::of(&ledger, &observed);
+    assert_eq!(summary.unreadable, 2, "fixture: both lines are torn");
+    assert!(
+        summary.activity.is_empty() && summary.dormant.is_empty() && summary.unlisted.is_empty(),
+        "fixture: damage is the only fact this summary carries"
+    );
+
+    let text = focused_hooks(HooksState::Seen(summary)).human(&p);
+    assert!(
+        text.contains("could not be read"),
+        "a damaged record must not render as silence: {text:?}"
+    );
+}
+
+/// codex, or a session that predates the ledger: the section says why it has
+/// nothing, rather than staying blank in a way that reads exactly like a
+/// harness whose guards ran and found nothing.
+#[test]
+fn a_harness_with_no_ledger_says_so_rather_than_staying_blank() {
+    let p = out::Palette::plain();
+    let text = focused_hooks(HooksState::NotRecorded(
+        "codex has no hooks capability".into(),
+    ))
+    .human(&p);
+    assert!(
+        text.contains("not recorded") && text.contains("codex has no hooks capability"),
+        "{text}"
+    );
+}
+
+/// `--json` is a contract, and it had no test at all: every caller of
+/// `focused_hooks` above reads `.human(&p)`, so deleting a key from
+/// `focus_json` outright left the suite green. The two channels are meant to
+/// carry the same four facts about a launch's hooks, and the human one has
+/// already been caught saying less than the JSON did.
+///
+/// Every state is asserted here, not just the interesting one, because the
+/// gap this closes was a whole branch nothing read.
+#[test]
+fn the_hooks_json_carries_every_fact_the_human_report_does() {
+    let mut activity = std::collections::BTreeMap::new();
+    activity.insert(
+        "graph-read".to_string(),
+        crate::ledger::Activity {
+            fired: 3,
+            silent: 1,
+            refused: 0,
+            unevaluated: 0,
+        },
+    );
+    let mut unlisted = std::collections::BTreeMap::new();
+    unlisted.insert(
+        "tdd-guard".to_string(),
+        crate::ledger::Activity {
+            fired: 2,
+            silent: 0,
+            refused: 1,
+            unevaluated: 0,
+        },
+    );
+    let summary = crate::ledger::Summary {
+        activity,
+        dormant: vec!["graph-first".to_string()],
+        unlisted,
+        unreadable: 4,
+    };
+
+    let doc = focused_hooks(HooksState::Seen(summary)).json();
+    let hooks = &doc["focus"]["hooks"];
+    assert_eq!(hooks["state"], serde_json::json!("seen"));
+    assert_eq!(hooks["hooks"]["graph-read"]["fired"], serde_json::json!(3));
+    assert_eq!(hooks["hooks"]["graph-read"]["silent"], serde_json::json!(1));
+    assert_eq!(hooks["dormant"], serde_json::json!(["graph-first"]));
+    assert_eq!(
+        hooks["unlisted"]["tdd-guard"]["fired"],
+        serde_json::json!(2)
+    );
+    assert_eq!(
+        hooks["unlisted"]["tdd-guard"]["refused"],
+        serde_json::json!(1)
+    );
+    assert_eq!(hooks["unreadable"], serde_json::json!(4));
+
+    // `unlisted` is its own key, never folded into `hooks` — the JSON half
+    // of the separation `an_unlisted_hook_is_shown_apart_from_activity`
+    // asserts for the console.
+    assert!(
+        hooks["hooks"]["tdd-guard"].is_null(),
+        "an unlisted hook must not appear as observed activity: {hooks}"
+    );
+
+    // The two states that carry a reason must carry it, so a reader is never
+    // told "no hooks" where the truth is "omh could not look".
+    let not_recorded = focused_hooks(HooksState::NotRecorded("gitdir never mounted".into())).json();
+    assert_eq!(
+        not_recorded["focus"]["hooks"]["state"],
+        serde_json::json!("not-recorded")
+    );
+    assert_eq!(
+        not_recorded["focus"]["hooks"]["why"],
+        serde_json::json!("gitdir never mounted")
+    );
+    let unreadable = focused_hooks(HooksState::Unreadable(
+        "a directory sits at that path".into(),
+    ))
+    .json();
+    assert_eq!(
+        unreadable["focus"]["hooks"]["state"],
+        serde_json::json!("unreadable")
+    );
+    assert_eq!(
+        unreadable["focus"]["hooks"]["why"],
+        serde_json::json!("a directory sits at that path"),
+        "damage must say which damage — three unrelated faults reach this state"
+    );
 }
 
 /// A scoped, running session offers the shell that reaches it — the `ssh`
@@ -1428,6 +1664,7 @@ fn a_failed_check_is_legible_with_no_colour_at_all() {
             tag: "omh/claude:abc".into(),
         }),
         account: None,
+        host_count: 0,
         outcomes: vec![check("rules", true), check("mcp", false)],
     };
 
@@ -1456,6 +1693,69 @@ fn a_failed_check_is_legible_with_no_colour_at_all() {
     );
 }
 
+/// A host row and a sandbox row used to render as one undivided table —
+/// `every_check` flattened `HostRows` and the sandbox's own answers into a
+/// single `Vec` before either report saw them, so nothing downstream could
+/// tell "your disk is full" from "this harness has no `mcp.json`" apart.
+/// `host_count` is the split point that survives the flattening: a heading
+/// between the two halves, in the order they were gathered.
+#[test]
+fn a_doctor_run_keeps_its_sections() {
+    let report = Doctor {
+        sandbox: Some(DoctorSandbox {
+            harness: "claude".into(),
+            tag: "omh/claude:abc".into(),
+        }),
+        account: None,
+        outcomes: vec![
+            check("container runtime", true),
+            check("disk", true),
+            check("rules", true),
+            check("mcp", false),
+        ],
+        host_count: 2,
+    };
+    let human = report.human(&Palette::plain());
+
+    let host_heading = human.find("host").expect("a host heading");
+    let harness_heading = human
+        .find("claude in omh/claude:abc")
+        .expect("a heading naming the harness and its image");
+    let disk = human.find("disk").expect("a host row");
+    let rules = human.find("rules").expect("a sandbox row");
+    let mcp = human.find("mcp").expect("the failing sandbox row");
+
+    assert!(
+        host_heading < disk && disk < harness_heading,
+        "a host row must land under the host heading, before the harness \
+         heading starts: {human}"
+    );
+    assert!(
+        harness_heading < rules && harness_heading < mcp,
+        "a sandbox row must land under the harness heading, never above it: {human}"
+    );
+}
+
+/// A host-only run (nothing ran in a sandbox) is exactly one table with no
+/// heading at all — the two-section split only exists once there is a
+/// second section to tell apart from the first.
+#[test]
+fn a_host_only_run_has_no_section_heading() {
+    let report = Doctor {
+        sandbox: None,
+        account: None,
+        outcomes: vec![check("container runtime", true), check("disk", true)],
+        host_count: 2,
+    };
+    let human = report.human(&Palette::plain());
+    assert!(
+        !human.starts_with("host\n"),
+        "a host-only run must not print a heading for a section that has no \
+         sibling — its own success line already says \"the host answered\", \
+         so this checks for the heading specifically, not the word: {human}"
+    );
+}
+
 /// The tally and the list cannot disagree, and **the verdict is a bool**.
 ///
 /// The counts are derived, not stored, so a script can trust them against
@@ -1476,6 +1776,7 @@ fn the_tally_is_the_list_counted_and_the_verdict_is_not_a_tally() {
             tag: "t".into(),
         }),
         account: Some("work".into()),
+        host_count: 0,
         outcomes: vec![check("a", true), check("b", false), check("c", false)],
     };
     let machine = report.json();
@@ -1515,6 +1816,7 @@ fn a_probe_that_produced_nothing_is_not_reported_as_a_pass() {
             tag: "t".into(),
         }),
         account: None,
+        host_count: 0,
         outcomes: vec![],
     };
     assert_eq!(empty.failed(), 0, "nothing failed, because nothing ran");

@@ -301,20 +301,27 @@ Launches the real image with the real mounts and checks the guest paths the
 adapter claims. The only thing that can verify an adapter. See
 [Troubleshooting](troubleshooting.md).
 
-**It gathers the host first, and reports it whatever happens next.** Seven
-rows, computed before any container work: whether the container runtime is
-**answering** (not merely installed — a stopped Docker Desktop is on `PATH` and
-useless), the stacks it detected and the marker file that decided each,
-settings set here that omh does not read, what omh has left behind, which omh
-set this checkout up, disk free where omh keeps its state, and the host's git.
-An eighth appears only when this repo has no commit for a session branch to
-fork from.
+**It gathers the host first, and reports it whatever happens next.** Computed
+before any container work: whether the container runtime is **answering** (not
+merely installed — a stopped Docker Desktop is on `PATH` and useless), the
+stacks it detected and the marker file that decided each, settings set here
+that omh does not read, what omh has left behind, which omh set this checkout
+up, disk free where omh keeps its state, the host's git, and — read the same
+way, without a container — whether this checkout's own declared config still
+holds up: every name in `[use]` still names a catalogue entry, every file in
+`.omh/hooks/` still parses, and every `carry_in` path still exists. A twelfth
+row appears only when this repo has no commit for a session branch to fork
+from.
 
-They print in the same table as the adapter rows, above them. Gathering them
-first is what matters: on a machine with no runtime, or one where the image
-cannot be built, they are the whole of what omh can tell you. They are computed without a sandbox on purpose — on a machine with no
-runtime, or one where the image cannot be built, they are the whole of what
-omh can tell you, and they used to be thrown away with the failure.
+Gathering them first is what matters: on a machine with no runtime, or one
+where the image cannot be built, they are the whole of what omh can tell you,
+and they used to be thrown away with the failure. They print under their own
+`host` heading now, above a second heading naming the harness and the image
+that ran — a host row and an adapter row used to share one undivided table,
+so a fact about your machine and a fact about the container looked identical.
+A host-only run — nothing ran in a sandbox at all — prints the one table it
+always did, with no heading to tell it apart from a section that does not
+exist.
 
 The git row is the version, and whether it can take a `--keep` selection, asked
 of the binary rather than compared against a version number. Only a git omh
@@ -912,6 +919,78 @@ turns*. Cost is summed per model from a dated price table; a model omh has no
 price for reports its tokens and **cost unknown**, never `$0`. All of it is in
 `--json`.
 
+### `omh sNN` shows which hooks fired
+
+Every hook rendered for a launch writes one decision — fired, silent or
+refused — to that session's own events file, and `omh sNN` reads it back as a
+`hooks this session` block:
+
+```console
+$ omh s01
+  s01  omh/s01  stopped  1 uncommitted
+
+  activity not recorded — no transcript written yet
+  hooks this session
+    graph-orient   1 fired
+    graph-read   1 fired, 14 silent
+    dormant        graph-first, git-turn
+```
+
+Fired and silent land on the same line when a hook did both across the
+session — `graph-read` narrows to `Read`, so it is checked far more often than
+it has anything to say. A hook that rendered and never once fired is named
+under **dormant**, not omitted — silence there would read exactly like the
+hook was never part of the launch. A harness with no hooks capability at all
+(codex, today) says **not recorded**, never `0 fired`: that would misleadingly
+read as guards that ran and found nothing. `omh eject` carries none of this —
+the wrapper that writes it is spliced in only when a real launch is staging
+the events file, never into a config handed to you.
+
+Two more lines appear only when something is wrong, and both are in `--json`
+alongside `hooks`, `dormant` and `unreadable`:
+
+```console
+$ omh s01
+  s01  omh/s01  stopped
+
+  hooks this session
+    graph-read   2 fired
+  tdd-guard reported activity (2 fired) this launch never rendered
+  1 event line could not be read
+```
+
+**unlisted** — *"reported activity … this launch never rendered"* — is a name
+in the events file that this launch's own ledger does not contain. The two
+halves are deliberately unequal in trust: omh writes the ledger itself, on the
+host, before the container starts, while the events file lives in the sandbox
+where the agent can write to it. A name omh never rendered is therefore shown
+apart from the counts it vouches for, and never folded into them. Expect it in
+one of two cases — something in the sandbox invented the name, or a renderer
+rendered a hook and failed to record it. What it does *not* mean any more is a
+leftover from an earlier launch: a launch now starts its own events file
+empty, so the two halves describe the same window.
+
+That trust split is bounded, and worth being plain about: it keeps *unrendered*
+names out of the counts. Within the names a launch did render, an observation
+is still the sandbox's own claim about itself — the guest is handed every
+rendered hook name in its settings document, so a hook's `run` could write a
+line under any of them.
+
+**unreadable** counts lines omh could not parse as an observation, including
+any that is not valid UTF-8. They are counted, never dropped, and never
+silently rounded to nothing: a damaged record and a quiet launch must not look
+alike. If the record is damaged past reading altogether, the block says
+**could not read** and names the file and the reason; if the launch wrote a
+ledger but its events file is missing entirely — a shadow gitdir that never
+mounted — it says so rather than reporting every hook as dormant, which would
+assert they ran and never fired.
+
+The write itself is cheap enough to leave unconditional rather than gate
+behind a setting: measured 2026-09-09, one append averages ~0.65ms in the
+shell wrapper claude's hooks run through (200 appends in a loop) and ~0.03ms
+through `node`'s `appendFileSync` (opencode, omp) — against `git-turn`'s own
+~80ms per turn, the heaviest thing omh already does on every tool call.
+
 ### `omh sNN commit` promotes the session's notes
 
 A commit is the human gate a note passes to reach the team layer, so
@@ -1483,6 +1562,12 @@ omh's own — `codegraph`, `memory`, the five generated hooks and their rules
 sections — are not selectable in either direction. `omh set <feature> on|off`
 is their switch, because a feature is all or nothing. See
 [Configuration](configuration.md#a-feature-is-not-selectable).
+
+A **guard** — a hook that refuses rather than advises — is a catalogue entry
+like any other and `omh use hooks tdd-guard` finds it, but neither `omh init`
+nor `omh use --all` ever turns one on for you: every other catalogue hook is
+safe to run unattended, and a guard can refuse the agent's first edit. See
+[Guards, and their bypass](configuration.md#guards-and-their-bypass).
 
 ## `omh import <capability> <harness>`
 

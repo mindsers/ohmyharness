@@ -1,0 +1,6 @@
+{
+  "on": "before-tool",
+  "tools": ["edit"],
+  "when": "case \"$OMH_TOOL_FILE\" in /work/.omh/notes/*) false ;; /work/.omh/*) true ;; *) false ;; esac",
+  "refuse": "$OMH_TOOL_FILE decides what the next session gets and what `omh sNN commit` runs before it lands anything. Editing it from inside this session is the session approving its own work — ask on the host instead."
+}
