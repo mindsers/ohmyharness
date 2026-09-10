@@ -106,13 +106,14 @@ which is the part the script below cannot do.
 Without Homebrew:
 
 ```console
-$ curl -fsSL https://raw.githubusercontent.com/mindsers/ohmyharness/main/install.sh | sh
+$ curl -fsSL https://ohmyharness.sh/install.sh | sh
 ```
 
 Picks the build for your machine, checks it against the published
 `SHA256SUMS`, runs it once to confirm it works here, and moves it into
 `~/.local/bin`. A failed install never replaces a working `omh`. Read it first
-if you would rather — it is [one file](install.sh). Re-run it to update.
+if you would rather — it is [one file](install.sh), and that URL is a redirect
+to exactly that file, so there is only ever one of it. Re-run it to update.
 
 From source, which needs Rust 1.85+:
 
