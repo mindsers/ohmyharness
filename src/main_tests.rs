@@ -6130,9 +6130,11 @@ fn leftover_paths(dir: &tempfile::TempDir) -> Paths {
 
 /// Makes `dir` unreadable, and puts its mode back when this drops.
 ///
-/// **The mode it had, not `0o755`.** `tempfile` creates a directory `0o700`,
-/// so restoring a hard-coded `0o755` widens the very directory the test is
-/// measuring.
+/// **The mode it had, not `0o755`.** These are `create_dir_all` directories,
+/// so their mode is the umask's: `0o755` at umask 022, where a hard-coded
+/// `0o755` happens to be right, and narrower under a stricter one, where it
+/// widens the very directory the test is measuring. Reading it costs one stat
+/// and cannot be wrong.
 ///
 /// **And on an unwind, not only on the happy path.** A panic between the chmod
 /// and the restore left a `0o000` directory behind, which `remove_dir_all`
@@ -6161,7 +6163,19 @@ impl Restore {
 impl Drop for Restore {
     fn drop(&mut self) {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(self.mode));
+        // Said, not panicked: this runs during an unwind, where a panic aborts —
+        // and this type exists so a failing assertion still leaves a removable
+        // tree. Swallowed entirely, a poisoned `$TMPDIR` would be invisible on
+        // top of whatever actually failed.
+        if let Err(e) =
+            std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(self.mode))
+        {
+            eprintln!(
+                "could not restore {} to {:o}, so its tempdir will leak: {e}",
+                self.dir.display(),
+                self.mode
+            );
+        }
     }
 }
 
@@ -6194,7 +6208,11 @@ fn an_unreadable_shadow_directory_is_reported_rather_than_read_as_empty() {
 
     let Some(cmd::session::Leftovers { unchecked, .. }) =
         while_unreadable(&paths.shadows(), || {
-            cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain())
+            cmd::session::leftovers(
+                &paths,
+                Err("docker: not found".into()),
+                cmd::session::Unchecked::new(&out::Ctx::plain()),
+            )
         })
     else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
@@ -6220,7 +6238,11 @@ fn an_unreadable_run_directory_is_reported_rather_than_read_as_empty() {
     std::fs::create_dir_all(paths.runs()).unwrap();
 
     let Some(cmd::session::Leftovers { unchecked, .. }) = while_unreadable(&paths.runs(), || {
-        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain())
+        cmd::session::leftovers(
+            &paths,
+            Err("docker: not found".into()),
+            cmd::session::Unchecked::new(&out::Ctx::plain()),
+        )
     }) else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
         return;
@@ -6244,13 +6266,15 @@ fn an_unreadable_run_directory_is_reported_rather_than_read_as_empty() {
 ///
 /// That contrast is the whole of it. Widening "clear when the *live* sweep
 /// failed" to "clear when *anything* failed" is the obvious over-correction on
-/// reading the new code, and it turns this red and nothing else.
+/// reading the new code, and it turns this red — along with
+/// `doctor_names_a_leftover_and_the_read_it_could_not_make`, which is the same
+/// contrast driven end to end.
 ///
 /// Before that it was decoration, and its own doc said so: at this layer the
 /// three sources were already independent, so `found` keeping `s07` was green
 /// on the old code, and the surviving half was a strict subset of
-/// `an_unreadable_shadow_directory_is_reported_rather_than_read_as_empty` on an
-/// identical fixture.
+/// `an_unreadable_shadow_directory_is_reported_rather_than_read_as_empty` on the
+/// same shadow fixture.
 #[cfg(unix)]
 #[test]
 fn a_failed_source_read_does_not_discard_what_another_source_found() {
@@ -6261,7 +6285,11 @@ fn a_failed_source_read_does_not_discard_what_another_source_found() {
 
     let Some(cmd::session::Leftovers { found, unchecked }) =
         while_unreadable(&paths.shadows(), || {
-            cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain())
+            cmd::session::leftovers(
+                &paths,
+                Err("docker: not found".into()),
+                cmd::session::Unchecked::new(&out::Ctx::plain()),
+            )
         })
     else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
@@ -6298,8 +6326,11 @@ fn a_run_whose_marker_could_not_be_read_is_reported_rather_than_read_as_unused()
     let restore = Restore::unreadable(&run).unwrap();
     let bites = idle::recorded_use(&paths.runs(), "s07").is_err();
 
-    let cmd::session::Leftovers { found, unchecked } =
-        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain());
+    let cmd::session::Leftovers { found, unchecked } = cmd::session::leftovers(
+        &paths,
+        Err("docker: not found".into()),
+        cmd::session::Unchecked::new(&out::Ctx::plain()),
+    );
     drop(restore);
 
     if !bites {
@@ -6353,6 +6384,9 @@ impl cmd::session::Entry for FakeEntry {
         self.name.to_string()
     }
     fn is_dir(&self) -> std::io::Result<bool> {
+        // Rebuilt from the kind, because `io::Error` is not `Clone` — so the
+        // message does not survive. Assert on the kind through this fake, never
+        // on error text.
         self.kind
             .as_ref()
             .map(|d| *d)
@@ -6583,14 +6617,28 @@ fn the_entries_omh_could_not_read_become_the_line_that_names_them() {
         "and it ends in the reason, like every other line: {one}"
     );
 
-    let many =
-        cmd::session::unreadable_reason(&["denied".to_string(), "denied".to_string()], "runs", dir)
-            .expect("two failures are a reason");
-    assert!(many.contains("2 entries"), "plural: {many}");
+    // Distinct reasons as well as repeated ones: fed only `["denied", "denied"]`,
+    // `dedup` and `truncate(1)` are indistinguishable, so the line could quietly
+    // start dropping every reason but the first.
+    let many = cmd::session::unreadable_reason(
+        &[
+            "denied".to_string(),
+            "gone".to_string(),
+            "denied".to_string(),
+        ],
+        "runs",
+        dir,
+    )
+    .expect("three failures are a reason");
+    assert!(many.contains("3 entries"), "counted, not deduped: {many}");
+    assert!(
+        many.contains("denied") && many.contains("gone"),
+        "every distinct reason survives: {many}"
+    );
     assert_eq!(
         many.matches("denied").count(),
         1,
-        "the same reason twice is said once: {many}"
+        "and the same reason twice is said once: {many}"
     );
 }
 
@@ -6613,8 +6661,11 @@ fn a_file_omh_writes_under_run_is_neither_a_leftover_nor_a_read_that_failed() {
     std::fs::create_dir_all(paths.runs()).unwrap();
     std::fs::write(paths.runs().join("hooks.json"), "{}").unwrap();
 
-    let cmd::session::Leftovers { found, unchecked } =
-        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain());
+    let cmd::session::Leftovers { found, unchecked } = cmd::session::leftovers(
+        &paths,
+        Err("docker: not found".into()),
+        cmd::session::Unchecked::new(&out::Ctx::plain()),
+    );
 
     assert!(
         !unchecked.iter().any(|w| w.contains("hooks.json")),
@@ -6645,8 +6696,11 @@ fn a_live_session_whose_marker_omh_could_not_read_is_not_unchecked() {
     let restore = Restore::unreadable(&run).unwrap();
     let bites = idle::recorded_use(&paths.runs(), "s07").is_err();
 
-    let cmd::session::Leftovers { found, unchecked } =
-        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain());
+    let cmd::session::Leftovers { found, unchecked } = cmd::session::leftovers(
+        &paths,
+        Err("docker: not found".into()),
+        cmd::session::Unchecked::new(&out::Ctx::plain()),
+    );
     drop(restore);
 
     if !bites {
@@ -6657,15 +6711,16 @@ fn a_live_session_whose_marker_omh_could_not_read_is_not_unchecked() {
         !unchecked.iter().any(|w| w.contains("s07")),
         "a session with a live worktree is not one omh could not check: {unchecked:?}"
     );
-    assert!(
-        !found.contains(&"s07".to_string()),
-        "and it is not a leftover: {found:?}"
-    );
+    // `found` is deliberately not asserted on: with the live skip removed the
+    // marker read errors and s07 stays out of `found` anyway, so the assertion
+    // would be green against the defect this test is named for — the same
+    // decoration removed from `a_failed_source_read_…` in this branch.
+    let _ = &found;
 }
 
 /// **No container runtime is a read omh did not make.**
 ///
-/// The container half sits inside `if let Some(backend)`, so on a machine with
+/// The container half sat inside `if let Some(backend)`, so on a machine with
 /// no runtime omh listed no container at all, `unchecked` came back empty, and
 /// the row read "none — nothing orphaned on this machine" having never looked
 /// for a sandbox. That is the sentence this whole row exists to refuse.
@@ -6674,8 +6729,11 @@ fn no_container_runtime_is_a_read_that_did_not_happen() {
     let dir = tempfile::tempdir().unwrap();
     let paths = leftover_paths(&dir);
 
-    let cmd::session::Leftovers { unchecked, .. } =
-        cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain());
+    let cmd::session::Leftovers { unchecked, .. } = cmd::session::leftovers(
+        &paths,
+        Err("docker: not found".into()),
+        cmd::session::Unchecked::new(&out::Ctx::plain()),
+    );
 
     assert!(
         unchecked.iter().any(|w| w.contains("container")),
@@ -6716,7 +6774,11 @@ fn a_worktrees_read_omh_could_not_make_names_no_orphans() {
 
     let Some(cmd::session::Leftovers { found, unchecked }) =
         while_unreadable(&paths.worktrees(), || {
-            cmd::session::leftovers(&paths, Err("docker: not found".into()), &out::Ctx::plain())
+            cmd::session::leftovers(
+                &paths,
+                Err("docker: not found".into()),
+                cmd::session::Unchecked::new(&out::Ctx::plain()),
+            )
         })
     else {
         eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
@@ -6736,5 +6798,101 @@ fn a_worktrees_read_omh_could_not_make_names_no_orphans() {
         unchecked.iter().any(|w| w.contains("1 candidate")),
         "the count survives, so the reader knows there is something to look at: \
          {unchecked:?}"
+    );
+}
+
+/// **A live session is settled before omh reads anything else about it.**
+///
+/// `is_dir` is a read, and it ran *before* the live check — so a `shadow/` that
+/// is readable but not searchable made omh say it could not tell whether `s01`
+/// was a sandbox repository, about a session with a worktree, on every `omh s`.
+/// The same shape as the `hooks.json` regression this branch opened by fixing:
+/// a reason for a read whose answer could not have changed anything.
+#[test]
+fn a_sweep_settles_a_live_session_before_reading_anything_else_about_it() {
+    let ctx = out::Ctx::plain();
+    let mut unchecked = cmd::session::Unchecked::new(&ctx);
+    let entries: Vec<std::io::Result<FakeEntry>> = vec![Ok(FakeEntry::refused("s01"))];
+
+    let found = cmd::session::sweep(
+        entries,
+        std::path::Path::new("/tmp/shadow"),
+        "sandbox repositories",
+        |n| Some(n.to_string()),
+        |_| Ok(true),
+        &["s01".to_string()],
+        &mut unchecked,
+    );
+    let why = unchecked.reasons();
+
+    assert!(
+        found.is_empty(),
+        "a live session is not a leftover: {found:?}"
+    );
+    assert!(
+        why.is_empty(),
+        "and omh must not report a read it had no reason to make: {why:?}"
+    );
+}
+
+/// **A name that was never a candidate is not stat'd, so it cannot be a reason.**
+///
+/// `shadow/` holds `s01.seed` beside `s01.git`, and `.strip_suffix(".git")`
+/// drops the seed — but only if `id_of` runs first. With the stat first, a seed
+/// omh could not read became a reason about a file that is not a sandbox
+/// repository and never was.
+#[test]
+fn a_sweep_does_not_report_a_name_its_filter_would_have_dropped() {
+    let ctx = out::Ctx::plain();
+    let mut unchecked = cmd::session::Unchecked::new(&ctx);
+    let entries: Vec<std::io::Result<FakeEntry>> = vec![Ok(FakeEntry::refused("s01.seed"))];
+
+    cmd::session::sweep(
+        entries,
+        std::path::Path::new("/tmp/shadow"),
+        "sandbox repositories",
+        |n| n.strip_suffix(".git").map(str::to_string),
+        |_| Ok(true),
+        &[],
+        &mut unchecked,
+    );
+    let why = unchecked.reasons();
+
+    assert!(
+        why.is_empty(),
+        "a seed is not a sandbox repository omh could not read: {why:?}"
+    );
+}
+
+/// **A symlinked run directory is still a run.**
+///
+/// `Entry::is_dir` follows links because `session::list` does
+/// (`e.path().is_dir()`), and a sweep that disagreed with it about what a
+/// directory is would call a session `omh s` lists an orphan — with
+/// `omh <id> rm` beside it, which takes the sandbox repository too. The claim
+/// was in the doc and in nothing else: swapping `std::fs::metadata` for
+/// `file_type()` left all 1507 tests green.
+#[cfg(unix)]
+#[test]
+fn a_run_reached_through_a_symlink_is_read_like_any_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = leftover_paths(&dir);
+    // The real directory, marked, somewhere the sweep does not look.
+    let real = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&real).unwrap();
+    std::fs::write(real.join("last-used"), "").unwrap();
+    std::fs::create_dir_all(paths.runs()).unwrap();
+    std::os::unix::fs::symlink(&real, paths.runs().join("s07")).unwrap();
+
+    let cmd::session::Leftovers { found, .. } = cmd::session::leftovers(
+        &paths,
+        Err("docker: not found".into()),
+        cmd::session::Unchecked::new(&out::Ctx::plain()),
+    );
+
+    assert!(
+        found.contains(&"s07".to_string()),
+        "`session::list` would call this live, so the sweep must call it a run: \
+         {found:?}"
     );
 }

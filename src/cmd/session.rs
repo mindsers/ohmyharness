@@ -840,9 +840,11 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     }) {
         Ok(backend) => Ok(backend),
         // **The reason is kept, not only said.** It was warned to stderr and
-        // dropped, so `leftovers` below could not tell "omh looked and found no
-        // container" from "omh never chose a runtime to ask" — and the row said
-        // the first while meaning the second.
+        // dropped, so `leftovers` could not tell "omh looked and found no
+        // container" from "omh never chose a runtime to ask". The row that said
+        // the first while meaning the second is `omh doctor`'s, fed by
+        // `inspect.rs`'s own `chosen`; this half is the same loss at the other
+        // caller, and is kept in step with it.
         Err(e) => {
             let why = format!("{e:#}");
             ctx.warn(&format!("omh cannot say which sandboxes are up: {why}"));
@@ -987,6 +989,23 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     // The scoped view reads the focused session's transcript and its last
     // check result. Only when one session is named: the wide listing does not
     // read a transcript per row.
+    // **Both halves reach the document.** `omh s` used to keep the found list
+    // and drop the reasons, so a read that failed printed `"leftovers": []` —
+    // byte for byte what a clean checkout prints, which is the collapse the
+    // whole leftovers row exists to avoid, one command over.
+    let swept = match only {
+        None => leftovers(
+            &paths,
+            backend.as_ref().map_err(String::clone),
+            Unchecked::new(ctx),
+        ),
+        // Not swept when one session was asked for. A leftover is an id with no
+        // worktree, and the focused id was proved to have one, so a focused
+        // sweep can only ever turn up other people's — guaranteed off-topic
+        // rather than merely usually. Skipping it also saves the sweep's `ps`
+        // and its walks.
+        Some(_) => Leftovers::default(),
+    };
     let focus = only.map(|id| report::Focus {
         activity: session_activity(&paths, id, &adapter_of(&paths, id)),
         check: read_check(&paths, id),
@@ -1010,11 +1029,8 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         // off-topic rather than merely usually. The overlap section is the
         // opposite case and stays: a collision *is* a fact about this
         // session. Skipping it also saves the sweep's `ps` and its walks.
-        leftovers: match only {
-            // The list half; `omh s` already had the reason on stderr.
-            None => leftovers(&paths, backend.as_ref().map_err(String::clone), ctx).found,
-            Some(_) => Vec::new(),
-        },
+        leftovers: swept.found,
+        leftovers_unchecked: swept.unchecked,
         overlaps,
         // Deliberately *not* narrowed. A session omh could not read is why
         // the overlap answer above may be short a line, and that is a fact
@@ -1034,11 +1050,13 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
 /// and reads as a clean machine reporting reasons as orphans. Naming the halves
 /// closes that, and moves the *found* versus *could not look* distinction out of
 /// a doc comment and into the type.
+#[derive(Default)]
 pub(crate) struct Leftovers {
     /// Sessions nothing points at: sandbox repositories, run directories and
     /// containers, minus the ones a live worktree still claims.
     pub(crate) found: Vec<String>,
-    /// One line per read omh could not make, in the words the warning used.
+    /// One line per read omh could not make, in the words the warning used —
+    /// plus the consequence, when a failed predicate costs the whole list.
     ///
     /// Empty is "omh looked everywhere", which is the only thing that makes
     /// `found` being empty mean *nothing is orphaned* — and it was a claim
@@ -1116,10 +1134,10 @@ pub(crate) trait Entry {
     /// Whether this is a directory — a read of its own, which can fail.
     ///
     /// **Follows symlinks, deliberately.** `session::list` asks
-    /// `e.path().is_dir()`, and every consumer of these entries reads *through*
-    /// a link: `idle::recorded_use` stats through it, `Shadow::new` opens the
-    /// gitdir through it. A sweep that disagreed with `session::list` about what
-    /// a directory is would report a session `omh s` lists as an orphan.
+    /// `e.path().is_dir()`, and `idle::recorded_use` stats through a link too.
+    /// A sweep that disagreed with `session::list` about what a directory is
+    /// would report a session `omh s` lists as an orphan — with `omh <id> rm`
+    /// beside it, which takes the sandbox repository as well.
     fn is_dir(&self) -> std::io::Result<bool>;
 }
 
@@ -1210,21 +1228,23 @@ fn opened(dir: &std::path::Path, refused: &str, unchecked: &mut Unchecked) -> Op
 /// One directory of session state, swept for ids nothing points at.
 ///
 /// Generic over the entry so a test can drive this exact body — see [`Entry`].
-/// `id_of` maps a filename to an id (`s01.git` → `s01`, or identity); `keep` is
-/// the per-id read that decides, and phrases its own failure.
+/// `id_of` maps a filename to an id (`s01.git` → `s01`, or identity); `counts`
+/// is the per-id read that decides whether the id belongs in the found list, and
+/// phrases its own failure. Named for its answer: it was `keep`, which reads as
+/// the opposite of what `Ok(true)` means here.
 pub(crate) fn sweep<E: Entry, X: std::fmt::Display>(
     entries: impl IntoIterator<Item = Result<E, X>>,
     dir: &std::path::Path,
     what: &str,
     id_of: impl Fn(&str) -> Option<String>,
-    keep: impl Fn(&str) -> Result<bool, String>,
+    counts: impl Fn(&str) -> Result<bool, String>,
     live: &[String],
     unchecked: &mut Unchecked,
 ) -> Vec<String> {
     let (entries, failed) = listed(entries);
     // Before the loop, not after. This reason is about the directory and the
-    // ones below are about things inside it, and it used to be pushed last — so
-    // the row read its reasons inside-out.
+    // ones below are about things inside it, and in the runs read it used to be
+    // pushed last — so the row read that half of its reasons inside-out.
     if let Some(why) = unreadable_reason(&failed, what, dir) {
         unchecked.note(why);
     }
@@ -1245,6 +1265,18 @@ pub(crate) fn sweep<E: Entry, X: std::fmt::Display>(
         // omh could not stat would otherwise become a reason about a file that
         // is not a sandbox repository and never was.
         let Some(id) = id_of(&name) else { continue };
+        // **A live worktree settles it, before any further read.** `is_dir` is a
+        // further read, and it used to run first: a `shadow/` that could be
+        // listed but not searched made omh say it could not tell whether `s01`
+        // was a sandbox repository — about a session with a worktree, on every
+        // `omh s`. A reason for a read whose answer could not have changed
+        // anything is the shape this branch opened by removing.
+        //
+        // `found.retain` below filters the found list alone and never reaches
+        // the reasons, which is why the skip has to be here.
+        if live.contains(&id) {
+            continue;
+        }
         match e.is_dir() {
             Ok(true) => {}
             Ok(false) => continue,
@@ -1257,15 +1289,7 @@ pub(crate) fn sweep<E: Entry, X: std::fmt::Display>(
                 continue;
             }
         }
-        // **A live worktree settles it, before any further read.** This loop
-        // asked `keep` for every id and pushed its failure without ever asking
-        // whether the session was live, so a session omh had already proved was
-        // not an orphan was reported as one it could not check. `found.retain`
-        // below filters the found list alone and never reaches the reasons.
-        if live.contains(&id) {
-            continue;
-        }
-        match keep(&id) {
+        match counts(&id) {
             Ok(true) => found.push(id),
             Ok(false) => {}
             Err(why) => unchecked.note(why),
@@ -1289,9 +1313,8 @@ pub(crate) fn sweep<E: Entry, X: std::fmt::Display>(
 pub(crate) fn leftovers(
     paths: &Paths,
     backend: Result<&runtime::Backend, String>,
-    ctx: &out::Ctx,
+    mut unchecked: Unchecked<'_>,
 ) -> Leftovers {
-    let mut unchecked = Unchecked::new(ctx);
     let itself = |n: &str| Some(n.to_string());
     let always = |_: &str| Ok(true);
 
@@ -1305,9 +1328,9 @@ pub(crate) fn leftovers(
     // stayed empty to say it had looked everywhere.
     //
     // Read here rather than through `session::list`, which is left alone: its
-    // eight other callers reap and render, and emptiness is the right answer
-    // for them. Only this one needs to know it could not look — the same split
-    // as `idle::recorded_use` from `last_used`, one layer up.
+    // other callers reap and render, and emptiness is the right answer for
+    // them. Only this one needs to know it could not look — the same split as
+    // `idle::recorded_use` from `last_used`, one layer up.
     // Nothing else may record between here and `live_is_certain` below: the
     // comparison is what makes a reason from *this* read mean the predicate
     // failed, and a reason from anywhere else would make every read one.

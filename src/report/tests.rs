@@ -761,6 +761,7 @@ fn sessions(rows: Vec<Session>) -> Sessions {
         sessions: rows,
         base: "main".into(),
         leftovers: vec![],
+        leftovers_unchecked: vec![],
         overlaps: vec![],
         unreadable: vec![],
         shell: None,
