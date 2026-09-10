@@ -6130,8 +6130,8 @@ fn leftover_paths(dir: &tempfile::TempDir) -> Paths {
 
 /// Makes `dir` unreadable, and puts its mode back when this drops.
 ///
-/// **The mode it had, not `0o755`.** A `TempDir` is `0o700` under a umask of
-/// 077, so restoring a hard-coded `0o755` widens the very directory the test is
+/// **The mode it had, not `0o755`.** `tempfile` creates a directory `0o700`,
+/// so restoring a hard-coded `0o755` widens the very directory the test is
 /// measuring.
 ///
 /// **And on an unwind, not only on the happy path.** A panic between the chmod

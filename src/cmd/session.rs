@@ -1240,6 +1240,11 @@ pub(crate) fn sweep<E: Entry, X: std::fmt::Display>(
         //
         // Filtered here rather than widened in `recorded_use`: a regular file is
         // not a run omh failed to read, it is not a run at all.
+        // `id_of` first, so a name that was never a candidate is dropped without
+        // being stat'd: `shadow/` holds `s01.seed` beside `s01.git`, and a seed
+        // omh could not stat would otherwise become a reason about a file that
+        // is not a sandbox repository and never was.
+        let Some(id) = id_of(&name) else { continue };
         match e.is_dir() {
             Ok(true) => {}
             Ok(false) => continue,
@@ -1252,7 +1257,6 @@ pub(crate) fn sweep<E: Entry, X: std::fmt::Display>(
                 continue;
             }
         }
-        let Some(id) = id_of(&name) else { continue };
         // **A live worktree settles it, before any further read.** This loop
         // asked `keep` for every id and pushed its failure without ever asking
         // whether the session was live, so a session omh had already proved was
@@ -1304,6 +1308,9 @@ pub(crate) fn leftovers(
     // eight other callers reap and render, and emptiness is the right answer
     // for them. Only this one needs to know it could not look — the same split
     // as `idle::recorded_use` from `last_used`, one layer up.
+    // Nothing else may record between here and `live_is_certain` below: the
+    // comparison is what makes a reason from *this* read mean the predicate
+    // failed, and a reason from anywhere else would make every read one.
     let mark = unchecked.recorded();
     let live = match opened(
         &paths.worktrees(),
