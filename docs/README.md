@@ -3,23 +3,23 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.10.0`. This release is about being told what is wrong
-before it costs you an hour. [`omh doctor`](troubleshooting.md#omh-doctor)
-reports the **host** first — the runtime, the settings omh actually reads, disk,
-leftovers, which omh set the checkout up — so a machine that cannot build a
-sandbox gets a page of answers instead of one error. A sandbox can trust a
-corporate root with [`ca_cert`](configuration.md#ca_cert), and doctor names a
-TLS-inspecting proxy as the cause rather than leaving you with a build that
-fails somewhere inside docker. `omh sNN rm` asks before destroying work no
-branch has, and a removal that did not finish is now a failure that says which
-part survived — it used to report success over a worktree still on disk.
-The [silent failures](design/roadmap.md) closed in 0.8.0, the
-[command surface](design/profile.md) landed in 0.7.0 and the
-[work loop](design/git.md) in 0.6.0.
+**Status: early.** `0.11.0`. This release is about knowing what ran inside a
+session. `omh sNN` reads back
+[which hooks fired](commands.md#omh-snn-shows-which-hooks-fired) against the
+list omh rendered for that launch, and names the ones that never did. Two
+opt-in [guards](configuration.md#guards-and-their-bypass) refuse an edit rather
+than advise around it. [`omh doctor`](troubleshooting.md#omh-doctor) heads its
+host rows apart from its sandbox rows, and says which reads it could not make
+rather than calling the machine clean.
+[`omh upgrade`](commands.md#omh-upgrade) and the checks `omh sNN commit` runs
+before landing arrived in 0.10.0, the [silent failures](design/roadmap.md)
+closed in 0.8.0, the [command surface](design/profile.md) landed in 0.7.0 and
+the [work loop](design/git.md) in 0.6.0.
 
-One harness (`claude`) has been driven for real work; `opencode` and `omp` pass
-`omh doctor`, which proves their paths and nothing about their behaviour.
-Docker is the only verified runtime. Several design pages describe work that is **partly
+One harness (`claude`) has been driven for real work; `opencode`, `omp` and
+`codex` pass `omh doctor`, which proves their paths and nothing about their
+behaviour. Docker is the only end-to-end-verified runtime; `podman` and `sbx`
+are opt-in. Several design pages describe work that is **partly
 built** — each says which parts, at the top. See the [roadmap](design/roadmap.md).
 
 ## Start here
