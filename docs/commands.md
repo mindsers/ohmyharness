@@ -71,8 +71,10 @@ A flag learned on one command is true on the next, or it is not there.
 `omh s rm --yes`, `omh s commit --allow-conflicts` and `omh settings mcp import
 --replace` were all `--force` until 0.10, which made three meanings for one word
 — and `--force` on `rm` did not even force the removal, only the answer to its
-prompt. Each is now named for what it does; `--force` still parses on all three,
-unprinted, for one release.
+prompt. Each is now named for what it does. `--force` parsed on all three as a
+hidden alias through 0.10, and from 0.11 each command refuses it by naming its
+own replacement — as `omh settings mcp import` does `--file`, which it took
+before it read `--from` like `omh import` does.
 
 ### What every command prints
 
@@ -1045,9 +1047,9 @@ omh: s01 has 2 commits that no branch has. Removing it deletes the only copy:
 Nothing is taken down before that refusal — not the container, not the marker
 `omh s` reads, not the repository the refusal is about.
 
-`--force` is the way past **that question**, and only that. It does not make
+`--yes` is the way past **that question**, and only that. It does not make
 the removal itself try harder: `git worktree remove --force` is passed either
-way, so a worktree that will not go will not go with `--force` either.
+way, so a worktree that will not go will not go with `--yes` either.
 
 **The count is wider than the one `omh s01 log` prints**, on purpose. `log`
 numbers what you can act on; this asks whether anything in that repository
@@ -1057,7 +1059,7 @@ neither appears in the numbered list, and both are gone once the repository is.
 
 A sandbox that never ran removes quietly. One omh **cannot read** does not:
 that is a third answer, not a quiet yes, and it is the state a half-finished
-removal leaves behind. `--force` covers it too, so nobody is stuck — they are
+removal leaves behind. `--yes` covers it too, so nobody is stuck — they are
 asked once.
 
 ### Getting work out of a session

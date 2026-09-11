@@ -284,7 +284,7 @@ a file watcher with it open, a mount that has gone read-only, or a parent whose
 permissions changed. Close whatever it is and run `omh sNN rm` again — the
 parts that already went are gone, and re-running finishes the rest.
 
-`--force` does not help here. It answers the question about unreviewed work; it
+`--yes` does not help here. It answers the question about unreviewed work; it
 does not make the removal try harder, and `git worktree remove --force` was
 passed either way.
 

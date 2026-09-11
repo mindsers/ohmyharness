@@ -425,7 +425,7 @@ fn nothing_still_offers_a_verb_that_was_retired() {
     // was: the JSON guard went on invoking a line that no longer parsed,
     // and passed, because its empty stdout read as nothing to say.
     const ON_PURPOSE: &str = "types the retired verb on purpose";
-    let gone: [String; 19] = [
+    let gone: [String; 23] = [
         // `attach` became a session verb in 2026.08.
         //
         // **No trailing character.** The first version of this needle had a
@@ -515,6 +515,17 @@ fn nothing_still_offers_a_verb_that_was_retired() {
         // works teaches the reader to route around the guard.
         format!("{:?}, {:?}]", "s", "ls"), // types the retired verb on purpose
         format!("{:?}, {:?}]", "sessions", "ls"), // types the retired verb on purpose
+        // Flags, retired in 0.11 after a release as hidden aliases. The
+        // marker says *verb* and covers these too: it means "types a retired
+        // spelling", and a second marker would be a second thing to grep for.
+        //
+        // Argv forms only. The prose form of the first is `rm --force`, and
+        // `sbx rm --force` is a live command the architecture page quotes —
+        // a needle that fires on it would be a needle somebody deletes.
+        format!("{:?}, {:?}", "rm", "--force"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "commit", "--force"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "claude", "--force"), // types the retired verb on purpose
+        format!("{:?}, {:?}", "claude", "--file"), // types the retired verb on purpose
     ];
     let mut found = Vec::new();
     let mut read = Vec::new();
@@ -1479,7 +1490,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
         ("base/2026.08.toml", 19),
         ("src/auth.rs", 2),
         ("src/base.rs", 3),
-        ("src/cli.rs", 14),
+        ("src/cli.rs", 19), // + the retired --force and --file sentences
         ("src/cmd/auth.rs", 3),
         ("src/cmd/catalogue.rs", 12),
         ("src/cmd/harvest.rs", 21), // + the --no-verify pointer, + `omh s` in the name-a-session refusal
@@ -5852,17 +5863,14 @@ fn one_flag_names_a_path_everywhere() {
             .any(|(p, l)| p == "omh settings mcp import" && l == "from"),
         "the MCP import reads --from like `omh import` does: {seen:?}"
     );
-    let old = Cli::try_parse_from(cli_argv(&[
-        "settings", "mcp", "import", "claude", "--file", "x",
-    ]));
+    let old = ["settings", "mcp", "import", "claude", "--file", "x"]; // types the retired verb on purpose
     assert!(
-        old.is_ok(),
-        "the retired spelling still parses, as an alias: {:?}",
-        old.err()
+        Cli::try_parse_from(cli_argv(&old)).is_err(),
+        "`--file` was an alias through 0.10 and parses nowhere from 0.11"
     );
 }
 
-/// `--force` is a retired spelling, printed nowhere.
+/// `--force` is a retired spelling, and parses nowhere.
 ///
 /// It meant three things. On `rm` it answered the question about unreviewed
 /// work; on `commit` it landed conflict markers; on the MCP import it
@@ -5870,58 +5878,65 @@ fn one_flag_names_a_path_everywhere() {
 /// a dozen times typed it on `commit` without reading either. `commit` and the
 /// import were named for what they do (`--allow-conflicts`, `--replace`), and
 /// `rm`'s consent — which does not force the removal, only answers the prompt
-/// in advance — is now `--yes`. `--force` survives as an unprinted alias on all
-/// three for one release, landing on each command's real field.
+/// in advance — is now `--yes`. `--force` survived as an unprinted alias on all
+/// three through 0.10, and 0.11 removed it: an alias kept past the release it
+/// was promised for is a second spelling nobody decided to keep.
+///
+/// The walk reads hidden aliases as well as printed names, because a hidden
+/// alias is what the retired spelling was. `--file` is in it because it went
+/// the same way.
 #[test]
 fn force_is_retired_and_named_for_what_each_command_does() {
     use clap::CommandFactory;
-    fn walk(cmd: &clap::Command, path: &str, forces: &mut Vec<String>) {
+    fn walk(cmd: &clap::Command, path: &str, found: &mut Vec<String>) {
         for arg in cmd.get_arguments() {
-            if arg.get_long() == Some("force") {
-                forces.push(path.to_string());
+            let aliases = arg.get_all_aliases().unwrap_or_default();
+            for gone in ["force", "file"] {
+                if arg.get_long() == Some(gone) || aliases.contains(&gone) {
+                    found.push(format!("{path} --{gone}"));
+                }
             }
         }
         for sub in cmd.get_subcommands() {
-            walk(sub, &format!("{path} {}", sub.get_name()), forces);
+            walk(sub, &format!("{path} {}", sub.get_name()), found);
         }
     }
-    let mut forces = Vec::new();
-    walk(&Cli::command(), "omh", &mut forces);
+    let mut found = Vec::new();
+    walk(&Cli::command(), "omh", &mut found);
     assert!(
-        forces.is_empty(),
-        "--force is printed on no command; it is a hidden alias everywhere: {forces:?}"
+        found.is_empty(),
+        "no command takes these, printed or as a hidden alias: {found:?}"
     );
 
-    // Each command's real, printed flag — and `--force` still parsing as the
-    // alias for one release, on every one of them.
-    for (line, field) in [
-        (&["sessions", "rm", "--yes"][..], "yes"),
-        (&["sessions", "rm", "--force"][..], "the rm alias"),
-        (
-            &["sessions", "commit", "--allow-conflicts"][..],
-            "allow-conflicts",
-        ),
-        (&["sessions", "commit", "--force"][..], "the commit alias"),
-        (
-            &["settings", "mcp", "import", "claude", "--replace"][..],
-            "replace",
-        ),
-        (
-            &["settings", "mcp", "import", "claude", "--force"][..],
-            "the import alias",
-        ),
+    // Each command's real flag parses…
+    for line in [
+        &["sessions", "rm", "--yes"][..],
+        &["sessions", "commit", "--allow-conflicts"][..],
+        &["settings", "mcp", "import", "claude", "--replace"][..],
     ] {
         let parsed = Cli::try_parse_from(cli_argv(line));
         assert!(
             parsed.is_ok(),
-            "`{}` ({field}) parses: {:?}",
+            "`{}` parses: {:?}",
             line.join(" "),
             parsed.err()
         );
     }
+    // …and the spelling it replaced does not, on any of them.
+    for line in [
+        &["sessions", "rm", "--force"][..], // types the retired verb on purpose
+        &["sessions", "commit", "--force"][..], // types the retired verb on purpose
+        &["settings", "mcp", "import", "claude", "--force"][..], // types the retired verb on purpose
+    ] {
+        assert!(
+            Cli::try_parse_from(cli_argv(line)).is_err(),
+            "`{}` was an alias through 0.10 and parses nowhere from 0.11",
+            line.join(" ")
+        );
+    }
 
-    // The rm alias lands on the same `yes` field its printed spelling does.
-    let rm = Cli::try_parse_from(cli_argv(&["sessions", "rm", "--force"])).unwrap();
+    // `--yes` lands on the field `rm` reads.
+    let rm = Cli::try_parse_from(cli_argv(&["sessions", "rm", "--yes"])).unwrap();
     assert!(
         matches!(
             rm.cmd,
@@ -5929,7 +5944,7 @@ fn force_is_retired_and_named_for_what_each_command_does() {
                 cmd: Some(SessionsCmd::Rm { yes: true })
             }
         ),
-        "`rm --force` still means the consent `rm --yes` gives"
+        "`rm --yes` is the consent `rm` reads"
     );
 }
 

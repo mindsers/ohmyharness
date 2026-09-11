@@ -468,8 +468,8 @@ host, in your repository, and the sandbox only ever receives files.
    true anyway: `cherry-pick` drops a commit whose changes are already on the
    branch, so trunk's changes cannot arrive twice.
 7. **Guard the exit.** `commit` refuses while `git diff --check` reports
-   leftover conflict markers, naming file and line, and `--force` is how you
-   mean it anyway (a fixture holding markers on purpose is a real thing — this
+   leftover conflict markers, naming file and line, and `--allow-conflicts`
+   (`--force` when this step landed) is how you mean it anyway (a fixture holding markers on purpose is a real thing — this
    repository has some).
 
    Two measurements shaped it. `--check` reports **whitespace errors too, by

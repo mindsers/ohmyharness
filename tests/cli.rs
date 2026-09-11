@@ -936,7 +936,7 @@ fn omh_turn_hook_body(gitdir: &std::path::Path, worktree: &std::path::Path) -> S
 /// a count handed to it, so nothing proved that `rm` asks for a real one.
 /// Replacing that call with a literal `0` left the whole suite green.
 #[test]
-fn rm_names_the_snapshots_it_takes_and_force_still_removes() {
+fn rm_names_the_snapshots_it_takes_and_yes_still_removes() {
     let sb = sandbox();
     let worktree = sb.session("s01");
     sb.sandbox_repo_with_unkept_work("s01", &worktree);
@@ -962,8 +962,8 @@ fn rm_names_the_snapshots_it_takes_and_force_still_removes() {
     );
 
     assert!(
-        sb.omh(&["s01", "rm", "--force"]).status.success(),
-        "and `--force` still means it"
+        sb.omh(&["s01", "rm", "--yes"]).status.success(),
+        "and `--yes` still means it"
     );
 }
 
@@ -1621,7 +1621,7 @@ fn removing_a_session_holding_unkept_work_is_refused_until_it_is_meant() {
     assert!(gitdir.exists(), "and the repository the refusal is about");
     assert!(worktree.exists());
 
-    let out = sb.omh(&["s01", "rm", "--force"]);
+    let out = sb.omh(&["s01", "rm", "--yes"]);
     assert!(
         out.status.success(),
         "--force means it: {}",
@@ -5842,6 +5842,51 @@ fn every_retired_spelling_is_refused_and_names_a_replacement() {
     );
 }
 
+/// A retired flag is refused with what replaced it, on every command that took it.
+///
+/// `--force` meant three things until 0.10, so clap's `unexpected argument` —
+/// true, and all clap can say — leaves a script that typed it on `rm` guessing
+/// which of three flags it wanted. The binary is asked rather than the table:
+/// the claim is what omh refuses, and that nothing ran before it refused.
+#[test]
+fn a_retired_flag_is_refused_with_what_replaced_it() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for (argv, replacement) in [
+        (vec!["s01", "rm", "--force"], "--yes"), // types the retired verb on purpose
+        (vec!["s01", "commit", "--force"], "--allow-conflicts"), // types the retired verb on purpose
+        (
+            vec!["settings", "mcp", "import", "claude", "--force"], // types the retired verb on purpose
+            "--replace",
+        ),
+        (
+            vec!["settings", "mcp", "import", "claude", "--file", "x"], // types the retired verb on purpose
+            "--from",
+        ),
+    ] {
+        let out = sb.omh(&argv);
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            !out.status.success(),
+            "`omh {}` names a retired flag and must be refused",
+            argv.join(" ")
+        );
+        assert!(
+            out.stdout.is_empty(),
+            "`omh {}` ran something before refusing: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        assert!(
+            said.contains(replacement) && !said.contains("unexpected argument"),
+            "`omh {}` must name `{replacement}`, not clap's complaint: {said}",
+            argv.join(" ")
+        );
+    }
+}
+
 /// The retired command is gone; everything under it answers to `omh settings`,
 /// and each verb is asked for an **effect** rather than an exit code.
 ///
@@ -6061,6 +6106,24 @@ fn a_retired_spelling_somewhere_other_than_the_verb_gets_claps_own_refusal() {
         (vec!["s", "c"], "unrecognized subcommand"),
         (vec!["doctor", "c"], "unexpected argument"),
         (vec!["s", "attach", "--nope"], "unexpected argument"),
+        // `--force` and `--file` are retired flags of three commands, not of
+        // every line. A harness flag typed without its `--` is the one people
+        // will actually hit, and clap's tip — pass it after `--` — is the
+        // right answer there; so is its plain refusal on commands that never
+        // took either flag.
+        (
+            vec!["new", "claude", "--force"], // types the retired verb on purpose
+            "unexpected argument",
+        ),
+        (
+            vec!["settings", "mcp", "rm", "x", "--force"],
+            "unexpected argument",
+        ),
+        (vec!["memory", "rm", "x", "--force"], "unexpected argument"),
+        (
+            vec!["import", "claude", "--file", "x"], // types the retired verb on purpose
+            "unexpected argument",
+        ),
     ] {
         let out = sb.omh(&argv);
         let said = String::from_utf8_lossy(&out.stderr).to_string();
@@ -7381,7 +7444,7 @@ fn rm_fails_when_the_worktree_is_still_on_disk() {
     let parent = sb.worktrees();
     let was = std::fs::metadata(&parent).unwrap().permissions();
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let out = sb.omh(&["s01", "rm", "--force"]);
+    let out = sb.omh(&["s01", "rm", "--yes"]);
     std::fs::set_permissions(&parent, was).unwrap();
 
     let said = format!(
@@ -7579,7 +7642,7 @@ fn a_partly_removed_session_says_the_branch_that_survived_it() {
     let parent = sb.worktrees();
     let was = std::fs::metadata(&parent).unwrap().permissions();
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let out = sb.omh(&["s01", "rm", "--force"]);
+    let out = sb.omh(&["s01", "rm", "--yes"]);
     std::fs::set_permissions(&parent, was).unwrap();
 
     let said = format!(
@@ -7862,7 +7925,7 @@ fn a_partly_removed_session_claims_only_what_it_did() {
     let parent = sb.worktrees();
     let was = std::fs::metadata(&parent).unwrap().permissions();
     std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
-    let out = sb.omh(&["s01", "rm", "--force"]);
+    let out = sb.omh(&["s01", "rm", "--yes"]);
     std::fs::set_permissions(&parent, was).unwrap();
 
     let said = format!(
