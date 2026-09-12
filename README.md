@@ -13,7 +13,7 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.10.0`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.11.0`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -21,17 +21,18 @@ architecture is built for and not yet a thing anybody has done.
 
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
-This release makes that loop something you reach for daily —
-[`omh sNN commit`](docs/commands.md#omh-snn-commit-runs-this-repos-checks-first)
-runs the repo's own turn-end checks in the sandbox before it lands anything,
-`omh sNN` shows what the agent did and what it cost, and a session's notes
-promote to the team on commit. It
-adds [`omh upgrade`](docs/commands.md#omh-upgrade) — one command to apply a
-newer omh, so `omh init` is now a one-time setup — a `podman` runtime, and the
-measured, opt-in [`sbx`](docs/design/architecture.md#runtime-backends) backend.
-The session verbs lost their footguns: naming no session means *every* session
-for `sync`/`down` and is refused elsewhere, and `omh sNN rm` no longer reports
-removing a session that was never there.
+This release is about knowing what ran inside it. `omh sNN` shows
+[which hooks fired](docs/commands.md#omh-snn-shows-which-hooks-fired): every
+hook a launch rendered records one decision, read back against the list omh
+wrote on the host before the container started, so a hook that never fired is
+named rather than left out. Two opt-in
+[guards](docs/configuration.md#guards-and-their-bypass) refuse where the rest
+of the catalogue advises — `tdd-guard` blocks editing a go, python or node
+source file whose test has not moved since the last commit, `config-guard`
+blocks a session editing this repo's `.omh/`. `omh doctor` heads its host rows apart from its sandbox
+rows, and its leftovers row names each read it could not make instead of
+calling the machine clean. The `--force` and `--file` aliases 0.10 kept for one
+release are gone, refused with what replaced them.
 
 [What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
 

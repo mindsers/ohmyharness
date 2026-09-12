@@ -5,23 +5,34 @@
 ```console
 $ omh doctor
 checking claude in omh/claude:8eae0d5c1511fa89 — no account, so credentials go unchecked…
+host
   ✓  container runtime   docker — answering, and every sandbox omh builds and runs uses it
   ✓  stacks detected     rust (from Cargo.toml)
   ✓  settings omh reads  every key set here is one omh reads
   ✓  leftovers           none — nothing orphaned on this machine
-  ✓  seeded by           version 0.10.0, the one running now
+  ✓  seeded by           version 0.11.0, the one running now
   ✓  disk                76.6 GB free on the filesystem holding /Users/you/.omh — …
   ✓  git on the host     git version 2.55.0 — takes a `--keep` selection; syncs
-  ✓  rules               /work/CLAUDE.md
-  ✓  skills              /home/agent/.claude/skills
+  ✓  declared config     resolves
+  ✓  use                 every name in [use] resolves in the catalogue
+  ✓  repo hooks          every .json file in .omh/hooks parses
+  ✓  carry_in            nothing declared
+
+claude in omh/claude:8eae0d5c1511fa89
+  ✓  rules       /work/CLAUDE.md
+  ✓  skills      /home/agent/.claude/skills
   …
 ```
 
-The first seven rows are the **host's**, gathered before any container work — so
-on a machine that cannot build a sandbox they are still what you get, instead of
-a single error. The rest are the adapter paths, checked inside the sandbox, and
-they are the reason the command exists. An eighth host row appears only when
-this repo has no commit for a session branch to fork from.
+The rows under **host** are gathered before any container work — so on a
+machine that cannot build a sandbox they are still what you get, instead of a
+single error. The last four read what this checkout declares — that its
+settings resolve, that every `[use]` name is in the catalogue, that every file
+in `.omh/hooks` parses, that every `carry_in` path exists — which needs no
+container either. The rows under the harness's heading are the adapter paths,
+checked inside the sandbox, and they are the reason the command exists. One
+more host row appears only when this repo has no commit for a session branch to
+fork from.
 
 Run it after changing an adapter, after upgrading a harness, and any time a
 session behaves as though your profile is not there.
