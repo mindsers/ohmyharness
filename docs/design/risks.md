@@ -53,7 +53,7 @@ inside a real container, which is `doctor`'s job.
 
 **2c. ~~`omh s rm` destroys the agent's own commits.~~** *(Closed in #58.
 `omh sNN rm` refuses over checkpoints no branch has, naming how many and what
-to do, before it takes anything down; `--force` is the way past. Everything
+to do, before it takes anything down; `--yes` is the way past. Everything
 below is what it was answering.)* *(Previously: partly addressed — what
 has already been harvested is on the branch, and `--keep` is repeatable now, so
 the window is what the agent has done since the last landing rather than the
@@ -71,7 +71,7 @@ sandbox wandered off, which `preflight` already refuses a *harvest* over while
 A sandbox that never ran removes quietly. One omh cannot read does not: that is
 a third answer rather than a quiet yes, because the states that produce it — a
 truncated replay record, a repository with no seed — are ones where the work is
-demonstrably still there and only its classification is missing. `--force`
+demonstrably still there and only its classification is missing. `--yes`
 covers every refusal, so the door is never held shut; the user is asked once.
 
 **3. sshd is an attack surface pointed at yourself.** Loopback-only, per-repo
@@ -220,7 +220,7 @@ but it runs through a different query, and saying so matters: a refactor of
 **One config line defeats the exclusion.** `core.logAllRefUpdates = always`
 makes git write a reflog for every ref under `refs/`, and `unkept`'s
 `--reflog` arm is not reachable by `--exclude`. The effect is noise rather than
-a breach — `rm` refuses for the rest of the session and only `--force` gets
+a breach — `rm` refuses for the rest of the session and only `--yes` gets
 past — and `write_config` pins the key on every launch so it does not survive.
 
 ## Correctness

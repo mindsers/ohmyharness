@@ -443,13 +443,14 @@ pub(crate) enum McpCmd {
         harness: String,
         /// Read this file instead of where the adapter says the harness keeps
         /// its servers. The same flag `omh import` takes; `--file` was its
-        /// name here until 0.10, and still parses.
-        #[arg(long = "from", alias = "file")]
+        /// name here until 0.10, an alias through it, and is refused by name
+        /// from 0.11 — see `RETIRED`.
+        #[arg(long = "from")]
         file: Option<std::path::PathBuf>,
         /// Overwrite a catalogue entry of the same name that differs. Without
         /// it yours is kept and the difference reported. `--force` was its
-        /// name until 0.10, and still parses.
-        #[arg(long = "replace", alias = "force")]
+        /// name until 0.10, and is refused by name from 0.11.
+        #[arg(long = "replace")]
         force: bool,
     },
 }
@@ -579,8 +580,8 @@ pub(crate) enum SessionsCmd {
         /// Commit even with conflict markers still in the files. Named for
         /// what it does rather than `--force`, which on `rm` means *I have
         /// read the warning* — a different thing to be sure of. `--force`
-        /// still parses here until 0.10.
-        #[arg(long = "allow-conflicts", alias = "force")]
+        /// was an alias through 0.10, and is refused by name from 0.11.
+        #[arg(long = "allow-conflicts")]
         force: bool,
         /// Land the work without running this repo's turn-end checks first.
         ///
@@ -625,9 +626,9 @@ pub(crate) enum SessionsCmd {
         /// script, a CI job, a closed pipe. On a terminal omh asks instead of
         /// refusing. Named `--yes` for that reason; the old `--force` read as
         /// "force the removal" and did no such thing (`git worktree remove
-        /// --force` is passed either way). `--force` stays as a hidden alias
-        /// for one release.
-        #[arg(long = "yes", short = 'y', alias = "force")]
+        /// --force` is passed either way). `--force` was a hidden alias
+        /// through 0.10, and is refused by name from 0.11.
+        #[arg(long = "yes", short = 'y')]
         yes: bool,
     },
 }
@@ -817,6 +818,30 @@ pub(crate) const RETIRED: &[Retired] = &[
         at: At::Under(&["s", "sessions"]),
         said: "there is no `ls` verb any more:\n  omh s      is the listing\n  omh s01    is one row of it",
     },
+    // Three meanings for one word until 0.10, each renamed for what it does
+    // and kept as a hidden alias for one release. Clap can say the flag is
+    // unexpected; it cannot say which flag replaced it on *this* command,
+    // because that depends on the command — so one entry per command.
+    Retired {
+        spellings: &["--force"],
+        at: At::Flag(&[("rm", &["s", "sessions"])]),
+        said: "`--force` is `--yes` now — it answers the prompt about unreviewed work, and never forced the removal:\n  omh s01 rm --yes",
+    },
+    Retired {
+        spellings: &["--force"],
+        at: At::Flag(&[("commit", &["s", "sessions"])]),
+        said: "`--force` is `--allow-conflicts` now, named for what it lets through:\n  omh s01 commit --allow-conflicts",
+    },
+    Retired {
+        spellings: &["--force"],
+        at: At::Flag(&[("import", &["mcp"])]),
+        said: "`--force` is `--replace` now, named for what it does to your entry:\n  omh settings mcp import claude --replace",
+    },
+    Retired {
+        spellings: &["--file"],
+        at: At::Flag(&[("import", &["mcp"])]),
+        said: "`--file` is `--from` now, as it is on `omh import`:\n  omh settings mcp import claude --from <path>",
+    },
 ];
 
 /// One retired spelling, and where it was retired *from*.
@@ -843,6 +868,15 @@ pub(crate) enum At {
     Verb,
     /// The verb after one of these: `ls` was only ever a verb under `s`.
     Under(&'static [&'static str]),
+    /// A flag, on one of these commands: each a verb and the words it
+    /// follows, read as `Under` reads them, anywhere before the flag.
+    ///
+    /// Not anywhere in the line. `omh new claude --force` is a harness flag
+    /// typed without its `--`, and clap's tip to add one is the right answer
+    /// there — the first version of this answered it with the migration
+    /// instead. A session id is lifted to `s` before this reads the line, so
+    /// `omh s01 rm` arrives as `s rm`.
+    Flag(&'static [(&'static str, &'static [&'static str])]),
 }
 
 /// Where the verb sits, once the global options in front of it are stepped
@@ -893,6 +927,11 @@ pub(crate) fn retired(argv: &[String]) -> Option<&'static str> {
                         At::Under(parents) => i
                             .checked_sub(1)
                             .is_some_and(|prev| parents.contains(&words[prev])),
+                        At::Flag(commands) => (1..i).any(|j| {
+                            commands.iter().any(|(verb, parents)| {
+                                words[j] == *verb && parents.contains(&words[j - 1])
+                            })
+                        }),
                     }
             })
             .map(|r| r.said)
