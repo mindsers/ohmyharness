@@ -1334,9 +1334,12 @@ fn sync_no_longer_takes_all() {
 }
 
 /// The dashboard reads every session's upstream from one `for-each-ref`, and
-/// each session's standing against trunk from one `rev-list`.
+/// each session's standing against trunk from one `git log`.
 ///
 /// It used to ask `git config` twice and `rev-list` up to three times per row.
+/// The two-sided walk is a `log` rather than a `rev-list --count` since it
+/// began answering a third question — whether trunk already holds this work —
+/// from the trees it walks past anyway.
 /// Counted through a `git` on `PATH` that logs and hands over to the real one,
 /// because the number of processes a listing forks is only visible from
 /// outside the process.
@@ -1361,15 +1364,18 @@ fn listing_three_sessions_asks_git_once_per_question() {
         .iter()
         .filter(|c| c.starts_with("config --get branch."))
         .count();
-    let counts: Vec<&String> = calls.iter().filter(|c| c.contains("rev-list")).collect();
+    let counts: Vec<&String> = calls
+        .iter()
+        .filter(|c| c.contains("--left-right"))
+        .collect();
     assert_eq!(
         (upstreams, per_branch),
         (1, 0),
         "one listing of upstreams, no per-branch config reads: {calls:?}"
     );
     assert!(
-        counts.len() == 3 && counts.iter().all(|c| c.contains("--left-right")),
-        "one two-sided rev-list per session, not one per count: {counts:?}"
+        counts.len() == 3 && counts.iter().all(|c| c.starts_with("log ")),
+        "one two-sided walk per session, not one per count: {calls:?}"
     );
 }
 
@@ -6691,6 +6697,132 @@ fn removing_a_session_that_committed_keeps_the_branch_for_review() {
         doc["commits"],
         serde_json::json!(1),
         "and the count reported is the one that decided it"
+    );
+}
+
+/// Work that reached `main` as a squash is not work waiting for review.
+///
+/// `rm` decides by ancestry, and a squash merge — this project's own merge
+/// button — writes a new commit with new parents, so the session's commits are
+/// never ancestors of `main` afterwards. Measured on this repository: `omh/s02`
+/// held two commits squash-merged as 58acbaa, and a month later `rm` still
+/// reported `2 commits to review` and kept the branch.
+///
+/// Asserted against git and the JSON document rather than the sentence, like
+/// the test above: the prose may be reworded, the branch may not survive, and
+/// the commit named has to be the one the work actually landed as.
+#[test]
+fn a_session_whose_work_landed_as_a_squash_has_its_branch_dropped() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let worktree = sb.session("s01");
+
+    let git = |at: &std::path::Path, args: &[&str]| -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(at)
+            .args(args)
+            .output()
+            .expect("git must be installed to run this test");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    std::fs::write(worktree.join("work.txt"), "agent output").unwrap();
+    git(&worktree, &["add", "-A"]);
+    git(&worktree, &["commit", "-q", "-m", "agent work"]);
+
+    // The merge button, in the two commands it is made of. Nothing else in this
+    // suite squashes, and the whole defect lives in what a squash does to
+    // ancestry — so the fixture has to be the real thing rather than a
+    // cherry-pick that would leave the shas comparable.
+    git(&sb.repo, &["merge", "--squash", "omh/s01"]);
+    git(&sb.repo, &["commit", "-q", "-m", "agent work (#1)"]);
+    let landed = git(&sb.repo, &["rev-parse", "HEAD"]);
+
+    let out = sb.omh(&["s01", "rm", "--json"]);
+    assert!(
+        out.status.success(),
+        "rm failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let alive = Command::new("git")
+        .arg("-C")
+        .arg(&sb.repo)
+        .args(["rev-parse", "--verify", "omh/s01"])
+        .output()
+        .unwrap();
+    assert!(
+        !alive.status.success(),
+        "a branch whose content is already on main preserves nothing: {alive:?}"
+    );
+
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`--json` is one document");
+    assert_eq!(doc["branch_kept"], serde_json::json!(false));
+    assert_eq!(
+        doc["landed"],
+        serde_json::json!(landed),
+        "and it names the commit the work landed as, not merely that it did"
+    );
+    assert_eq!(
+        doc["landed_unknown"],
+        serde_json::Value::Null,
+        "a proof and a reason it could not tell are never both present"
+    );
+}
+
+/// The dashboard says *landed*, not *to push*, for work already on trunk.
+///
+/// The row is where somebody decides what to do next, and `1 to push` about a
+/// merged pull request sends them to push it again. The dashboard answers from
+/// the look it already pays for and never runs the expensive probe, so what it
+/// can say here is exactly what the trees prove.
+#[test]
+fn the_dashboard_says_landed_for_work_already_on_trunk() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let worktree = sb.session("s01");
+
+    let git = |at: &std::path::Path, args: &[&str]| -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(at)
+            .args(args)
+            .output()
+            .expect("git must be installed to run this test");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    std::fs::write(worktree.join("work.txt"), "agent output").unwrap();
+    git(&worktree, &["add", "-A"]);
+    git(&worktree, &["commit", "-q", "-m", "agent work"]);
+    git(&sb.repo, &["merge", "--squash", "omh/s01"]);
+    git(&sb.repo, &["commit", "-q", "-m", "agent work (#1)"]);
+    let landed = git(&sb.repo, &["rev-parse", "HEAD"]);
+
+    let out = sb.omh(&["s", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`--json` is one document");
+    let work = &doc["sessions"][0]["work"];
+    assert_eq!(work["state"], serde_json::json!("landed"), "got {doc:#}");
+    assert_eq!(
+        work["commit"],
+        serde_json::json!(landed),
+        "and the whole sha, which is what a program needs"
+    );
+
+    let said = String::from_utf8_lossy(&sb.omh(&["s"]).stdout).to_string();
+    assert!(
+        said.contains(&format!("landed {}", &landed[..7])),
+        "the row a person reads says it too, short: {said}"
     );
 }
 

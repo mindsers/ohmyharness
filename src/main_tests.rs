@@ -12,23 +12,37 @@ use std::process::Command;
 /// needs no repository and cannot be defeated by a fixture.
 #[test]
 fn a_tally_omh_could_not_take_is_absent_rather_than_zero() {
+    use crate::landing::{Holding, Proof};
     assert_eq!(
-        cmd::harvest::branch_tally(&Ok(1)),
+        cmd::harvest::branch_tally(&Holding::Unreviewed { commits: 1 }),
         " (1 commit on the branch)"
     );
     assert_eq!(
-        cmd::harvest::branch_tally(&Ok(3)),
+        cmd::harvest::branch_tally(&Holding::Unreviewed { commits: 3 }),
         " (3 commits on the branch)"
     );
     assert_eq!(
-        cmd::harvest::branch_tally(&Ok(0)),
+        cmd::harvest::branch_tally(&Holding::Nothing),
         " (0 commits on the branch)",
         "a real zero is still an answer and still gets said"
     );
     assert_eq!(
-        cmd::harvest::branch_tally(&Err(anyhow::anyhow!("bad revision"))),
+        cmd::harvest::branch_tally(&Holding::Unsettled {
+            commits: None,
+            why: "bad revision".into()
+        }),
         "",
         "and a count nobody took says nothing at all"
+    );
+    assert!(
+        cmd::harvest::branch_tally(&Holding::Landed {
+            commits: 2,
+            by: Proof::SameTree {
+                at: "58acbaa4169ce44a843ec122c3fec27efa5f1196".into()
+            }
+        })
+        .contains("58acbaa"),
+        "work that is on trunk under another sha says so, and says which"
     );
 }
 
@@ -923,7 +937,9 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("accounts.md", 4),
         ("adapters.md", 1),
         ("code-graph.md", 1),
-        ("commands.md", 142), // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples
+        // + `omh sNN`'s hooks-this-session and unlisted/unreadable examples,
+        // then `omh s` and `omh s01 rm` in the landed-branch block
+        ("commands.md", 144),
         ("configuration.md", 47), // + `omh use hooks tdd-guard`
         ("decisions.md", 1),
         ("editors.md", 4),

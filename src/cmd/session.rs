@@ -991,70 +991,88 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
     // had just stashed.
     let mut changed: Vec<(String, Vec<String>)> = Vec::new();
     let mut unreadable: Vec<String> = Vec::new();
-    let sessions: Vec<report::Session> = ids
-        .into_iter()
-        .map(|id| {
-            let sess = Session::new(&paths.worktrees(), id.clone());
-            let touched = sess.changed();
-            // Behind trunk and ahead of it, from one `rev-list`: the two
-            // columns that used to be two processes per row.
-            let standing = sess.against(&paths.repo, &base);
-            match &touched {
-                Ok(touched) => changed.push((id.clone(), touched.clone())),
-                // Carried, not dropped. A session omh cannot read contributes
-                // no paths, so it silently belongs to no collision — and *no
-                // overlap line* is exactly how "no collisions" is rendered.
-                // `work_state` renders the same failure as `Work::Unknown` one
-                // column over; the two must not disagree about whether it is
-                // worth mentioning.
-                Err(_) => unreadable.push(id.clone()),
-            }
-            report::Session {
-                // `None` for *nobody asked*, which is what no backend at all
-                // means, and `Unknown` inside it for *asked and could not
-                // tell*. The same two-level shape `work` uses one column over,
-                // and for the same reason it gives: the mistake becomes
-                // unspellable rather than merely absent.
-                running: up.as_ref().map(|up| {
-                    let asked = image::running_in(up, &paths.container(&id));
-                    // Say why, which the first version of this did not — it
-                    // built the reason, carried it through two layers and
-                    // dropped it, while both docs promised it reached stderr.
-                    // The same defect as the `.ok()` thirteen lines below,
-                    // introduced in the change that fixed that one.
-                    if let image::Running::Unknown(why) = &asked {
-                        ctx.warn(&format!(
-                            "could not tell whether {id}'s sandbox is running: {why}"
-                        ));
-                    }
-                    asked
-                }),
-                label: sess.label().to_string(),
-                work: Some(work_state(
-                    &sess,
-                    &upstreams,
-                    standing.as_ref().ok().map(|s| s.ahead),
-                    touched.as_ref().ok().map(Vec::len),
-                )),
-                // Not `.ok()`. The dashboard renders a failed count as a
-                // question rather than as zero, which is only half the rule —
-                // the other half is that the reason exists and git already
-                // said it. `changed()` ten lines up pushes to `unreadable` for
-                // the same class of failure, and `log` prints git's own words;
-                // this was the one that threw them away.
-                behind: match &standing {
-                    Ok(s) => Some(s.behind),
-                    Err(e) => {
-                        ctx.warn(&format!(
-                            "could not tell how far behind {base} {id} is: {e:#}"
-                        ));
-                        None
-                    }
-                },
-                id,
-            }
-        })
-        .collect();
+    let sessions: Vec<report::Session> =
+        ids.into_iter()
+            .map(|id| {
+                let sess = Session::new(&paths.worktrees(), id.clone());
+                let touched = sess.changed();
+                // Behind trunk, ahead of it, and whether trunk already holds this
+                // work — all from one `git log`: the two columns that used to be
+                // two processes per row, plus the evidence a squash leaves.
+                let survey = sess.survey(&paths.repo, &base);
+                // The cheap half only. `settle` asks for the branch's whole patch
+                // when the trees settle nothing, and the dashboard declines: that
+                // probe costs a fifth of a second per row (measured on a range of
+                // 84 commits), and `omh s` is read at a glance. Declining is not an
+                // answer — the row goes on printing what it printed before, which
+                // never claimed anything about landing.
+                let landed =
+                    survey
+                        .as_ref()
+                        .ok()
+                        .and_then(|survey| match crate::landing::settle(survey) {
+                            crate::landing::Settling::Settled(
+                                crate::landing::Holding::Landed { by, .. },
+                            ) => Some(by.at().to_string()),
+                            _ => None,
+                        });
+                match &touched {
+                    Ok(touched) => changed.push((id.clone(), touched.clone())),
+                    // Carried, not dropped. A session omh cannot read contributes
+                    // no paths, so it silently belongs to no collision — and *no
+                    // overlap line* is exactly how "no collisions" is rendered.
+                    // `work_state` renders the same failure as `Work::Unknown` one
+                    // column over; the two must not disagree about whether it is
+                    // worth mentioning.
+                    Err(_) => unreadable.push(id.clone()),
+                }
+                report::Session {
+                    // `None` for *nobody asked*, which is what no backend at all
+                    // means, and `Unknown` inside it for *asked and could not
+                    // tell*. The same two-level shape `work` uses one column over,
+                    // and for the same reason it gives: the mistake becomes
+                    // unspellable rather than merely absent.
+                    running: up.as_ref().map(|up| {
+                        let asked = image::running_in(up, &paths.container(&id));
+                        // Say why, which the first version of this did not — it
+                        // built the reason, carried it through two layers and
+                        // dropped it, while both docs promised it reached stderr.
+                        // The same defect as the `.ok()` thirteen lines below,
+                        // introduced in the change that fixed that one.
+                        if let image::Running::Unknown(why) = &asked {
+                            ctx.warn(&format!(
+                                "could not tell whether {id}'s sandbox is running: {why}"
+                            ));
+                        }
+                        asked
+                    }),
+                    label: sess.label().to_string(),
+                    work: Some(work_state(
+                        &sess,
+                        &upstreams,
+                        survey.as_ref().ok().map(|s| s.standing.ahead),
+                        touched.as_ref().ok().map(Vec::len),
+                        landed.as_deref(),
+                    )),
+                    // Not `.ok()`. The dashboard renders a failed count as a
+                    // question rather than as zero, which is only half the rule —
+                    // the other half is that the reason exists and git already
+                    // said it. `changed()` ten lines up pushes to `unreadable` for
+                    // the same class of failure, and `log` prints git's own words;
+                    // this was the one that threw them away.
+                    behind: match &survey {
+                        Ok(s) => Some(s.standing.behind),
+                        Err(e) => {
+                            ctx.warn(&format!(
+                                "could not tell how far behind {base} {id} is: {e:#}"
+                            ));
+                            None
+                        }
+                    },
+                    id,
+                }
+            })
+            .collect();
 
     // Every session is read even when one is asked for, and that is not
     // waste: a collision is a fact about *two* sessions, so the paths of the
@@ -1600,6 +1618,7 @@ pub(crate) fn work_state(
     upstreams: &session::Upstreams,
     commits: Option<usize>,
     uncommitted: Option<usize>,
+    landed: Option<&str>,
 ) -> report::Work {
     use report::Work;
 
@@ -1620,6 +1639,12 @@ pub(crate) fn work_state(
 
     if let n @ 1.. = uncommitted {
         return Work::Uncommitted(n);
+    }
+    // Before the push states and after the uncommitted one. Work that has
+    // landed is done with, whatever origin knows about the branch it was on —
+    // but a file the agent has not committed is still the next thing to do.
+    if let Some(at) = landed {
+        return Work::Landed(at.to_string());
     }
     match unpushed {
         Some(n @ 1..) => Work::ToPush(n),
@@ -2138,11 +2163,21 @@ pub(crate) fn rm(
         // offers: a typo must not hand you a command that destroys work.
         let base = session::default_branch(&paths.repo);
         let note = match session.branch_exists(&paths.repo) {
-            Ok(true) => match session.commits(&paths.repo, &base) {
-                Ok(n) if n > 0 => format!(
-                    "\nnote: a branch omh/{id} exists ({n} {}) but no session does — \
+            Ok(true) => match session.holding(&paths.repo, &base) {
+                // Said, and still no `git branch -D` beside it: knowing the
+                // work landed does not make somebody else's branch omh's to
+                // delete, which is the whole point of this arm.
+                crate::landing::Holding::Landed { commits, by } => format!(
+                    "\nnote: a branch omh/{id} exists ({commits} {}) but no session does — \
+                     its work is already on {base} as {}. omh did not make it.\n  \
+                     git log {base}..omh/{id}   to read it",
+                    if commits == 1 { "commit" } else { "commits" },
+                    report::short(by.at())
+                ),
+                crate::landing::Holding::Unreviewed { commits } => format!(
+                    "\nnote: a branch omh/{id} exists ({commits} {}) but no session does — \
                      omh did not make it.\n  git log {base}..omh/{id}   to read it",
-                    if n == 1 { "commit" } else { "commits" }
+                    if commits == 1 { "commit" } else { "commits" }
                 ),
                 _ => format!("\nnote: a branch omh/{id} exists, but no session does."),
             },
@@ -2306,7 +2341,7 @@ pub(crate) fn rm(
             session::Removed::BranchKept(_) => {
                 format!("the branch omh/{id} is still there.\n")
             }
-            session::Removed::BranchDropped => String::new(),
+            session::Removed::BranchDropped(_) => String::new(),
             session::Removed::NoBranch => String::new(),
         };
         // Only what was observed. The first version asserted four removals
@@ -2316,8 +2351,14 @@ pub(crate) fn rm(
         // The branch is its own sentence: `BranchKept` did *not* go, so
         // folding it into the "what went" list would be a new false claim in
         // the message written to remove one.
-        if removed == session::Removed::BranchDropped {
-            went.push(format!("the branch omh/{id}, which held no commits"));
+        if let session::Removed::BranchDropped(why) = &removed {
+            went.push(match why {
+                session::Dropped::Empty => format!("the branch omh/{id}, which held no commits"),
+                session::Dropped::Landed { by, .. } => format!(
+                    "the branch omh/{id}, whose work is on {base} as {}",
+                    report::short(by.at())
+                ),
+            });
         }
         let done = if went.is_empty() {
             String::new()
@@ -2355,17 +2396,34 @@ pub(crate) fn rm(
             // standing on that is the base — so a line beginning `<base>..`
             // would fail in the user's hands for the reason they are being
             // shown it.
-            let (kept, review) = match n {
-                Some(n) => (
+            let (kept, review, commits, why) = match n {
+                session::Kept::Commits(n) => (
                     format!(
                         "kept ({n} {} to review)",
                         if n == 1 { "commit" } else { "commits" }
                     ),
                     format!("git log {base}..omh/{id}"),
+                    Some(n),
+                    None,
                 ),
-                None => (
-                    format!("kept — omh could not count it against {base}"),
-                    format!("git log omh/{id}"),
+                session::Kept::Uncertain { commits, why } => (
+                    match commits {
+                        // Counted, and only the *landing* unknown: omh knows
+                        // how much is on the branch and cannot say whether
+                        // trunk has it too. Saying "could not count it" here
+                        // would throw away a number omh holds.
+                        Some(n) => format!(
+                            "kept ({n} {}; omh could not tell whether they are already on {base})",
+                            if n == 1 { "commit" } else { "commits" }
+                        ),
+                        None => format!("kept — omh could not count it against {base}"),
+                    },
+                    match commits {
+                        Some(_) => format!("git log {base}..omh/{id}"),
+                        None => format!("git log omh/{id}"),
+                    },
+                    commits,
+                    Some(why),
                 ),
             };
             report::Action::new(
@@ -2378,22 +2436,52 @@ pub(crate) fn rm(
                 "session": id,
                 "branch": format!("omh/{id}"),
                 "branch_kept": true,
-                "commits": n,
+                "commits": commits,
+                "landed": serde_json::Value::Null,
+                "landed_unknown": why,
             }))
         }
-        session::Removed::BranchDropped => report::Action::new(
-            "session-removed",
-            format!("removed session {id}; branch omh/{id} dropped (no commits)"),
-        )
-        .data(serde_json::json!({
-            "session": id,
-            "branch": format!("omh/{id}"),
-            "branch_kept": false,
-            "commits": 0,
-        })),
+        session::Removed::BranchDropped(why) => {
+            let (said, commits, landed) = match why {
+                session::Dropped::Empty => (
+                    "dropped (no commits)".to_string(),
+                    0,
+                    serde_json::Value::Null,
+                ),
+                // Named, not merely asserted: a deletion justified by *it is
+                // already on trunk* is only checkable if omh says where.
+                session::Dropped::Landed { commits, by } => (
+                    format!(
+                        "dropped — its work is on {base} as {}",
+                        report::short(by.at())
+                    ),
+                    commits,
+                    serde_json::Value::String(by.at().to_string()),
+                ),
+            };
+            report::Action::new(
+                "session-removed",
+                format!("removed session {id}; branch omh/{id} {said}"),
+            )
+            .data(serde_json::json!({
+                "session": id,
+                "branch": format!("omh/{id}"),
+                "branch_kept": false,
+                "commits": commits,
+                "landed": landed,
+                "landed_unknown": serde_json::Value::Null,
+            }))
+        }
         session::Removed::NoBranch => {
-            report::Action::new("session-removed", format!("removed session {id}"))
-                .data(serde_json::json!({ "session": id, "branch_kept": false }))
+            report::Action::new("session-removed", format!("removed session {id}")).data(
+                serde_json::json!({
+                    "session": id,
+                    "branch_kept": false,
+                    "commits": serde_json::Value::Null,
+                    "landed": serde_json::Value::Null,
+                    "landed_unknown": serde_json::Value::Null,
+                }),
+            )
         }
     };
     ctx.say(&action);

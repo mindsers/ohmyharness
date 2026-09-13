@@ -526,7 +526,8 @@ whether anything reads it. That gap is what `doctor` closes.
 Known rough edges: the graph store is shared across sessions of one repo, so an
 agent can query another session's graph (mitigated, not prevented);
 `.claude.json` is a file mount that cannot be atomically replaced; `omh s rm`
-drops a session branch only when it has no commits; upgrading to 0.8.0 leaves
+keeps a session branch whenever omh cannot prove trunk already holds its work,
+so a squash it could not match leaves a branch behind and says so; upgrading to 0.8.0 leaves
 the old `omh-cache-<name>` volume and `omh-<name>` network behind and nothing
 reports them (`docker volume ls | grep omh-cache-` finds them); and `omh s`
 lists any directory under a session's worktree root as a session, so stray

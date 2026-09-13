@@ -851,6 +851,11 @@ pub enum Work {
     /// git would not answer. **Never rendered as clean** — see the test.
     Unknown,
     Uncommitted(usize),
+    /// Trunk already holds this work under another sha — a squash merge — and
+    /// this is the commit it landed as. Ahead of the push states on purpose: a
+    /// merged pull request is more final than a pushed branch, and behind
+    /// `Uncommitted`, which is still something to do.
+    Landed(String),
     ToPush(usize),
     /// Pushed, under the name it went out as.
     Published(String),
@@ -865,6 +870,7 @@ impl Work {
         match self {
             Self::Unknown => "?".into(),
             Self::Uncommitted(n) => format!("{n} uncommitted"),
+            Self::Landed(at) => format!("landed {}", short(at)),
             Self::ToPush(n) => format!("{n} to push"),
             Self::Published(target) => format!("→ {target}"),
             Self::Clean => String::new(),
@@ -877,6 +883,7 @@ impl Work {
         match self {
             Self::Unknown => out::WARN,
             Self::Uncommitted(_) | Self::ToPush(_) => out::WARN,
+            Self::Landed(_) => out::OK,
             Self::Published(_) => out::OK,
             Self::Clean => out::DIM,
         }
@@ -886,10 +893,25 @@ impl Work {
         match self {
             Self::Unknown => json!({ "state": "unknown" }),
             Self::Uncommitted(n) => json!({ "state": "uncommitted", "count": n }),
+            // The whole sha, because `--json` is read by programs and a short
+            // one is ambiguous by design. `short` is a render-boundary concern.
+            Self::Landed(at) => json!({ "state": "landed", "commit": at }),
             Self::ToPush(n) => json!({ "state": "unpushed", "count": n }),
             Self::Published(target) => json!({ "state": "published", "branch": target }),
             Self::Clean => json!({ "state": "clean" }),
         }
+    }
+}
+
+/// A sha as a person reads it: the first seven, or whatever there is.
+///
+/// Only ever at the render boundary. Every value omh records or emits as JSON
+/// is the whole thing — a short sha is a convenience, not an identifier, and a
+/// program that grepped for one would find the wrong commit eventually.
+pub fn short(sha: &str) -> &str {
+    match sha.char_indices().nth(7) {
+        Some((at, _)) => &sha[..at],
+        None => sha,
     }
 }
 

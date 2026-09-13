@@ -5,6 +5,7 @@
 //! this is the half that runs on the host, decides what the user is allowed
 //! to do next, and says why when the answer is no.
 
+use crate::landing::Holding;
 use crate::out;
 use crate::profile::Paths;
 use crate::profile::Profile;
@@ -1135,8 +1136,8 @@ pub(crate) fn commit(
                     session.id
                 ));
             }
-            let n = session.commits(&paths.repo, &base);
-            warn_uncounted(&n, ctx, &base);
+            let held = session.holding(&paths.repo, &base);
+            warn_uncounted(&held, ctx, &base);
             ctx.say(
                 &report::Action::new(
                     "committed",
@@ -1167,7 +1168,7 @@ pub(crate) fn commit(
                         _ => format!(
                             "kept {landed} of {}'s own commits{}",
                             session.label(),
-                            branch_tally(&n)
+                            branch_tally(&held)
                         ),
                     },
                 )
@@ -1175,7 +1176,9 @@ pub(crate) fn commit(
                     "session": session.id,
                     "branch": session.label(),
                     "kept": landed,
-                    "commits": n.as_ref().ok(),
+                    "commits": counted(&held),
+                    "landed": landed_at(&held),
+                    "landed_unknown": landed_unknown(&held),
                     "base": base,
                     "promoted": promoted,
                 })),
@@ -1200,17 +1203,19 @@ pub(crate) fn commit(
     // number is what tells you whether the branch is worth pushing — and it is
     // the same number `omh s rm` will use to decide the branch survives.
     let base = session::default_branch(&paths.repo);
-    let n = session.commits(&paths.repo, &base);
-    warn_uncounted(&n, ctx, &base);
+    let held = session.holding(&paths.repo, &base);
+    warn_uncounted(&held, ctx, &base);
     ctx.say(
         &report::Action::new(
             "committed",
-            format!("committed to {}{}", session.label(), branch_tally(&n)),
+            format!("committed to {}{}", session.label(), branch_tally(&held)),
         )
         .data(serde_json::json!({
             "session": session.id,
             "branch": session.label(),
-            "commits": n.as_ref().ok(),
+            "commits": counted(&held),
+            "landed": landed_at(&held),
+            "landed_unknown": landed_unknown(&held),
             "base": base,
             "promoted": promoted,
         })),
@@ -1233,11 +1238,45 @@ pub(crate) fn commit(
 /// there for the first time, over a branch, is worse than hearing about it now
 /// over a commit that already succeeded. On stderr, like every other warning,
 /// so it stays out of anything being redirected.
-pub(crate) fn warn_uncounted(n: &Result<usize>, ctx: &out::Ctx, base: &str) {
-    if let Err(e) = n {
+pub(crate) fn warn_uncounted(held: &Holding, ctx: &out::Ctx, base: &str) {
+    if let Holding::Unsettled { why, .. } = held {
         ctx.warn(&format!(
-            "could not count this branch against {base} — {e:#}"
+            "could not count this branch against {base} — {why}"
         ));
+    }
+}
+
+/// What omh counted, for the `--json` field that has always carried it.
+///
+/// `Unsettled` keeps whatever count it did take: only the *landing* is unknown
+/// when the branch was counted and the search was what failed, and `null` there
+/// would say omh could not count a branch it counted.
+pub(crate) fn counted(held: &Holding) -> Option<usize> {
+    match held {
+        Holding::NoBranch => None,
+        Holding::Nothing => Some(0),
+        Holding::Landed { commits, .. } | Holding::Unreviewed { commits } => Some(*commits),
+        Holding::Unsettled { commits, .. } => *commits,
+    }
+}
+
+/// The commit this branch's work landed as, for `--json`.
+pub(crate) fn landed_at(held: &Holding) -> Option<String> {
+    match held {
+        Holding::Landed { by, .. } => Some(by.at().to_string()),
+        _ => None,
+    }
+}
+
+/// Why omh could not tell whether it landed, for `--json`.
+///
+/// The pair `running` / `running_unknown` sets the rule this follows: a reason
+/// that reaches only `ctx.warn` is a reason `--json` never sees, and `--json`
+/// is the surface a script reads before deleting anything.
+pub(crate) fn landed_unknown(held: &Holding) -> Option<String> {
+    match held {
+        Holding::Unsettled { why, .. } => Some(why.clone()),
+        _ => None,
     }
 }
 
@@ -1247,13 +1286,23 @@ pub(crate) fn warn_uncounted(n: &Result<usize>, ctx: &out::Ctx, base: &str) {
 /// precisely because a base that does not resolve is a question with no answer,
 /// and *"(0 commits on the branch)"* is the wrong one. The sentence in front of
 /// this reports what omh just did, which is true either way.
-pub(crate) fn branch_tally(n: &Result<usize>) -> String {
-    match n {
-        Ok(n) => format!(
-            " ({n} {} on the branch)",
-            if *n == 1 { "commit" } else { "commits" }
+pub(crate) fn branch_tally(held: &Holding) -> String {
+    let plural = |n: &usize| if *n == 1 { "commit" } else { "commits" };
+    match held {
+        Holding::Nothing => " (0 commits on the branch)".to_string(),
+        Holding::Unreviewed { commits } => {
+            format!(" ({commits} {} on the branch)", plural(commits))
+        }
+        // Vanishingly rare here — `commit` has just moved both the tip tree and
+        // the branch's whole patch, so nothing on trunk matches either any
+        // more. It is spelled out because the alternative is an arm that says
+        // *on the branch* about work that is also somewhere else.
+        Holding::Landed { commits, by } => format!(
+            " ({commits} {} on the branch, already on trunk as {})",
+            plural(commits),
+            crate::report::short(by.at())
         ),
-        Err(_) => String::new(),
+        Holding::Unsettled { .. } | Holding::NoBranch => String::new(),
     }
 }
 
