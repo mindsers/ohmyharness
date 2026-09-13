@@ -4,45 +4,271 @@ use clap::CommandFactory;
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
-/// The tally omits itself rather than saying zero.
+/// The tally omits itself rather than saying zero, and says where work went.
 ///
 /// `omh s rm` deleted a branch because a count it could not take read as
 /// `0`; this is the same mistake one layer out, where it would be printed
-/// rather than acted on. A pure function over the `Result`, so the guard
+/// rather than acted on. A pure function over the answer, so the guard
 /// needs no repository and cannot be defeated by a fixture.
+///
+/// `NeedsPatchProof` is the ordinary case here: `commit` takes the cheap look
+/// only, so the count is known and the landing was never asked about.
 #[test]
 fn a_tally_omh_could_not_take_is_absent_rather_than_zero() {
-    use crate::landing::{Holding, Proof};
+    use crate::cmd::harvest::branch_tally;
+    use crate::landing::{Holding, Proof, Settling};
+    let settled = |h: Holding| Settling::Settled(h);
     assert_eq!(
-        cmd::harvest::branch_tally(&Holding::Unreviewed { commits: 1 }),
+        branch_tally(&settled(Holding::Unreviewed { commits: 1 })),
         " (1 commit on the branch)"
     );
     assert_eq!(
-        cmd::harvest::branch_tally(&Holding::Unreviewed { commits: 3 }),
-        " (3 commits on the branch)"
+        branch_tally(&Settling::NeedsPatchProof { commits: 3 }),
+        " (3 commits on the branch)",
+        "a count omh took is said whether or not it asked about the landing"
     );
     assert_eq!(
-        cmd::harvest::branch_tally(&Holding::Nothing),
+        branch_tally(&settled(Holding::Nothing)),
         " (0 commits on the branch)",
         "a real zero is still an answer and still gets said"
     );
     assert_eq!(
-        cmd::harvest::branch_tally(&Holding::Unsettled {
+        branch_tally(&settled(Holding::Unsettled {
             commits: None,
             why: "bad revision".into()
-        }),
+        })),
         "",
         "and a count nobody took says nothing at all"
     );
+    assert_eq!(
+        branch_tally(&settled(Holding::Unsettled {
+            commits: Some(2),
+            why: "omh did not look that far".into()
+        })),
+        " (2 commits on the branch)",
+        "a count omh *did* take survives a landing it could not settle"
+    );
     assert!(
-        cmd::harvest::branch_tally(&Holding::Landed {
+        branch_tally(&settled(Holding::Landed {
             commits: 2,
             by: Proof::SameTree {
                 at: "58acbaa4169ce44a843ec122c3fec27efa5f1196".into()
             }
-        })
+        }))
         .contains("58acbaa"),
         "work that is on trunk under another sha says so, and says which"
+    );
+}
+
+/// Only two facts justify deleting a branch, and this is where that is said.
+///
+/// The decision used to be three match arms inside `remove`, reachable only
+/// through git — so *omh deletes only what is provably duplicated* could be
+/// read and never asserted. A table over every state, with no repository.
+#[test]
+fn a_branch_is_dropped_for_two_reasons_and_kept_for_the_rest() {
+    use crate::landing::{Holding, Proof};
+    use crate::session::{decide, Dropped, Kept, Removed};
+
+    assert_eq!(decide(&Holding::NoBranch), Removed::NoBranch);
+    assert_eq!(
+        decide(&Holding::Nothing),
+        Removed::BranchDropped(Dropped::Empty)
+    );
+    let by = Proof::SamePatch {
+        at: "58acbaa".into(),
+    };
+    assert_eq!(
+        decide(&Holding::Landed {
+            commits: 2,
+            by: by.clone()
+        }),
+        Removed::BranchDropped(Dropped::Landed { commits: 2, by }),
+        "and the proof travels into the outcome, so the deletion can be checked"
+    );
+    assert_eq!(
+        decide(&Holding::Unreviewed { commits: 3 }),
+        Removed::BranchKept(Kept::Commits(3))
+    );
+    assert_eq!(
+        decide(&Holding::Unsettled {
+            commits: Some(1),
+            why: "could not look".into()
+        }),
+        Removed::BranchKept(Kept::Uncertain {
+            commits: Some(1),
+            why: "could not look".into()
+        }),
+        "a question is never a deletion"
+    );
+}
+
+/// The note about a branch with no session says what omh could tell, and
+/// never offers to delete it.
+///
+/// `omh s09 rm` over a typo'd id reaches a branch omh did not make. The rule
+/// (#100) is that a typo must not hand you a command that destroys work — and
+/// knowing the work landed does not make somebody else's branch omh's to
+/// delete. The `Unsettled` arm is the one that used to say nothing: the branch
+/// was reported as existing with no count, no reason, and nothing to read it
+/// with, while omh was holding git's own words for why it could not tell.
+#[test]
+fn the_stray_branch_note_says_what_omh_could_tell_and_offers_no_delete() {
+    use crate::cmd::session::stray_branch_note;
+    use crate::landing::{Holding, Proof};
+
+    let landed = stray_branch_note(
+        "s09",
+        "main",
+        &Holding::Landed {
+            commits: 2,
+            by: Proof::SameTree {
+                at: "58acbaa4169ce44a843ec122c3fec27efa5f1196".into(),
+            },
+        },
+    );
+    assert!(landed.contains("2 commits"), "got {landed}");
+    assert!(
+        landed.contains("already on main as 58acbaa"),
+        "it says where the work went: {landed}"
+    );
+
+    let unreviewed = stray_branch_note("s09", "main", &Holding::Unreviewed { commits: 1 });
+    assert!(unreviewed.contains("1 commit"), "got {unreviewed}");
+    assert!(
+        unreviewed.contains("git log main..omh/s09"),
+        "got {unreviewed}"
+    );
+
+    let unsettled = stray_branch_note(
+        "s09",
+        "main",
+        &Holding::Unsettled {
+            commits: None,
+            why: "unknown revision main".into(),
+        },
+    );
+    assert!(
+        unsettled.contains("unknown revision main"),
+        "the reason omh holds reaches the reader: {unsettled}"
+    );
+    assert!(
+        unsettled.contains("git log omh/s09"),
+        "and a way to read it that does not depend on the base that failed: {unsettled}"
+    );
+
+    for note in [
+        landed,
+        unreviewed,
+        unsettled,
+        stray_branch_note("s09", "main", &Holding::NoBranch),
+        stray_branch_note("s09", "main", &Holding::Nothing),
+    ] {
+        assert!(
+            !note.contains("branch -D"),
+            "no arm of this note destroys a branch omh did not make: {note}"
+        );
+    }
+}
+
+/// Work that has landed outranks the push states and yields to uncommitted.
+///
+/// The order is the whole content of the column: a merged pull request is more
+/// final than a pushed branch, and a file the agent has not committed is still
+/// the next thing to do whatever else is true. `report::Work`'s doc states
+/// this; nothing held it.
+#[test]
+fn landed_outranks_the_push_states_and_yields_to_uncommitted() {
+    use crate::report::Work;
+    let sess = Session::new(std::path::Path::new("/nowhere"), "s01".into());
+    let at = "58acbaa4169ce44a843ec122c3fec27efa5f1196";
+
+    // Never pushed: without the landing this row reads `2 to push`.
+    let ups = session::parse_upstreams("");
+    assert_eq!(
+        cmd::session::work_state(&sess, &ups, Some(2), Some(0), Some(at)),
+        Work::Landed(at.to_string())
+    );
+    // Pushed and level with origin: without the landing, `→ fix/thing`.
+    let ups = session::parse_upstreams("omh/s01	origin	refs/heads/fix/thing	");
+    assert_eq!(
+        cmd::session::work_state(&sess, &ups, Some(2), Some(0), Some(at)),
+        Work::Landed(at.to_string()),
+        "a merged pull request is more final than the branch it went out on"
+    );
+    // Pushed with commits origin does not have.
+    let ups = session::parse_upstreams("omh/s01	origin	refs/heads/fix/thing	ahead 2");
+    assert_eq!(
+        cmd::session::work_state(&sess, &ups, Some(2), Some(0), Some(at)),
+        Work::Landed(at.to_string())
+    );
+    // Uncommitted work wins: it is the thing to do next.
+    let ups = session::parse_upstreams("");
+    assert_eq!(
+        cmd::session::work_state(&sess, &ups, Some(2), Some(3), Some(at)),
+        Work::Uncommitted(3)
+    );
+}
+
+/// A short sha is seven characters, which is what the docs and the eye expect.
+///
+/// Asserted by length rather than by `contains`: an eight-character short sha
+/// contains its own seven-character prefix, so every `contains` assertion in
+/// the suite passes over a widened cut.
+#[test]
+fn a_short_sha_is_seven_characters() {
+    let full = "58acbaa4169ce44a843ec122c3fec27efa5f1196";
+    assert_eq!(report::short(full), "58acbaa");
+    assert_eq!(report::short(full).len(), 7);
+    assert_eq!(report::short("abc"), "abc", "or whatever there is");
+}
+
+/// Every state says something, or says why it cannot — including the one
+/// that used to say nothing at all.
+///
+/// `NoBranch` reaches these helpers when `show-ref` says there is no
+/// `refs/heads/omh/sNN` — a corrupt ref file reads that way too. It used to
+/// produce an empty tally, a `null` count and no warning anywhere, which is
+/// how `omh s01 commit` could report success over a branch omh never found.
+#[test]
+fn the_fields_a_commit_reports_never_leave_a_state_silent() {
+    use crate::cmd::harvest::{counted, landed_at, landed_unknown};
+    use crate::landing::{Holding, Proof, Settling};
+    let settled = |h: Holding| Settling::Settled(h);
+
+    assert_eq!(counted(&settled(Holding::Nothing)), Some(0));
+    assert_eq!(counted(&Settling::NeedsPatchProof { commits: 4 }), Some(4));
+    assert_eq!(
+        counted(&settled(Holding::Unsettled {
+            commits: Some(2),
+            why: "capped".into()
+        })),
+        Some(2),
+        "`null` there would say omh could not count a branch it counted"
+    );
+    assert_eq!(counted(&settled(Holding::NoBranch)), None);
+
+    let landed = settled(Holding::Landed {
+        commits: 1,
+        by: Proof::SamePatch {
+            at: "abc1234".into(),
+        },
+    });
+    assert_eq!(landed_at(&landed), Some("abc1234".to_string()));
+    assert_eq!(landed_unknown(&landed), None, "never both");
+    let unsettled = settled(Holding::Unsettled {
+        commits: Some(1),
+        why: "could not read trunk".into(),
+    });
+    assert_eq!(landed_at(&unsettled), None, "never both");
+    assert_eq!(
+        landed_unknown(&unsettled),
+        Some("could not read trunk".to_string())
+    );
+    assert_eq!(
+        landed_unknown(&Settling::NeedsPatchProof { commits: 1 }),
+        None,
+        "nobody asked is not a failure to answer"
     );
 }
 

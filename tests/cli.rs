@@ -1377,6 +1377,11 @@ fn listing_three_sessions_asks_git_once_per_question() {
         counts.len() == 3 && counts.iter().all(|c| c.starts_with("log ")),
         "one two-sided walk per session, not one per count: {calls:?}"
     );
+    assert!(
+        !calls.iter().any(|c| c.contains("patch-id")),
+        "and the listing never pays for the landing probe — 235 ms a row, on a \
+         command read at a glance: {calls:?}"
+    );
 }
 
 /// A command that has no use for a container runtime never runs one.
@@ -1837,6 +1842,98 @@ fn committing_with_no_session_says_so_rather_than_inventing_one() {
     assert!(!out.status.success(), "there is nothing to commit to");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("no sessions"), "got: {err}");
+}
+
+/// `commit` reports the branch's count, and pays for nothing else.
+///
+/// The landing question is the expensive one — `git log -p` over as much as
+/// 500 trunk commits piped through `patch-id`, measured at 235 ms on a range
+/// of 84 — and `commit` has no use for it: the commit it just made moved both
+/// the tip tree and the branch's whole change, so nothing on trunk can match.
+/// Counted through a `git` on `PATH` that logs, because the processes a
+/// command forks are only visible from outside it.
+#[test]
+fn commit_counts_the_branch_without_asking_whether_it_landed() {
+    let sb = sandbox();
+    let log = sb.fake_git();
+    let worktree = sb.session("s01");
+    std::fs::write(worktree.join("feature.rs"), "fn main() {}").unwrap();
+
+    let out = sb.omh(&["s01", "commit", "-m", "Add the feature", "--json"]);
+    assert!(
+        out.status.success(),
+        "commit failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`--json` is one document");
+    assert_eq!(doc["commits"], serde_json::json!(1), "got {doc:#}");
+    assert_eq!(
+        doc["landed"],
+        serde_json::Value::Null,
+        "nobody asked, so there is no proof to report"
+    );
+    assert_eq!(
+        doc["landed_unknown"],
+        serde_json::Value::Null,
+        "and not asking is not a failure to answer"
+    );
+
+    let calls = sb.docker_calls(&log);
+    assert!(
+        !calls.iter().any(|c| c.contains("patch-id")),
+        "commit must not walk trunk's patches: {calls:?}"
+    );
+}
+
+/// The stray-branch note says where the work went, and still offers nothing
+/// that destroys it.
+///
+/// The other shapes of this note are a table in `main_tests.rs`: what varies
+/// is the sentence, and driving the binary four times to read four strings
+/// buys nothing the table does not.
+#[test]
+fn the_note_about_a_branch_with_no_session_says_what_omh_could_tell() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let worktree = sb.session("s01");
+    let git = |at: &std::path::Path, args: &[&str]| -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(at)
+            .args(args)
+            .output()
+            .expect("git must be installed to run this test");
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+
+    // A branch whose work landed, and whose session is gone.
+    std::fs::write(worktree.join("work.txt"), "agent output").unwrap();
+    git(&worktree, &["add", "-A"]);
+    git(&worktree, &["commit", "-q", "-m", "agent work"]);
+    git(&sb.repo, &["merge", "--squash", "omh/s01"]);
+    git(&sb.repo, &["commit", "-q", "-m", "agent work (#1)"]);
+    let landed = git(&sb.repo, &["rev-parse", "HEAD"]);
+    git(
+        &sb.repo,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            &worktree.display().to_string(),
+        ],
+    );
+
+    let said = String::from_utf8_lossy(&sb.omh(&["s01", "rm"]).stderr).to_string();
+    assert!(
+        said.contains(&format!("already on main as {}", &landed[..7])),
+        "it says where the work went: {said}"
+    );
+    assert!(
+        !said.contains("git branch -D"),
+        "and still does not offer to delete a branch omh did not make: {said}"
+    );
 }
 
 /// Committing does not *stop* `s diff` reporting: the work is the same work
@@ -6698,11 +6795,17 @@ fn removing_a_session_that_committed_keeps_the_branch_for_review() {
         serde_json::json!(1),
         "and the count reported is the one that decided it"
     );
+    assert_eq!(
+        (&doc["landed"], &doc["landed_unknown"]),
+        (&serde_json::Value::Null, &serde_json::Value::Null),
+        "a branch omh looked at and could not prove landed has neither a proof \
+         nor a reason it could not tell: {doc:#}"
+    );
 }
 
 /// Work that reached `main` as a squash is not work waiting for review.
 ///
-/// `rm` decides by ancestry, and a squash merge — this project's own merge
+/// `rm` decided by ancestry, and a squash merge — this project's own merge
 /// button — writes a new commit with new parents, so the session's commits are
 /// never ancestors of `main` afterwards. Measured on this repository: `omh/s02`
 /// held two commits squash-merged as 58acbaa, and a month later `rm` still

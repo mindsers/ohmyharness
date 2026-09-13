@@ -1220,9 +1220,25 @@ removed session s01; branch omh/s01 dropped — its work is on main as e15d33c
 The commit is named because a deletion justified by *it is already on trunk* is
 only checkable if omh says where. A squash that had to **resolve a conflict** is
 not this branch's work — neither its tree nor its patch is what landed — so that
-branch is kept, which is the only direction this is allowed to be wrong in. omh
-looks back at most 500 commits on trunk; past that it says it could not tell
-rather than that nothing landed.
+branch is kept, which is the only direction this is allowed to be wrong in.
+
+**A patch that matches is then checked byte for byte.** `git patch-id` finds the
+candidate cheaply, and it is not evidence of sameness on its own: it strips
+whitespace, so a Makefile recipe indented with a tab and the same line indented
+with spaces share an id, and it tells two binaries at one path apart only on git
+2.39 and later. What settles it is the two patches being the same bytes, which
+holds on every version — so a whitespace-only difference keeps the branch.
+
+omh reads the **first 500 commits trunk gained after this branch forked** —
+where a session's own squash almost always lands — and past that it says it
+could not tell rather than that nothing landed. A branch that forked long ago
+and was merged much later is the case that answers *could not tell*.
+
+What the proof says is that **trunk's history** holds this content, not that
+trunk's tip still does: work that landed and was then reverted still reads as
+landed, and the branch goes. The commit named is where it is, and `git show` on
+it is the recovery. Deleting a branch is also not the end of it — `git reflog`
+keeps the tip for 30 days.
 
 A branch omh cannot *read* is kept too, and says so — that read is one
 `git log --left-right <base>...<branch>`, and it has no answer in a checkout
@@ -1239,9 +1255,21 @@ removed session s01; branch omh/s01 kept — omh could not count it against main
 
 When the count came back and only the *landing* could not be settled, the count
 is said rather than thrown away — `kept (3 commits; omh could not tell whether
-they are already on main)`. Under `--json`, `landed` carries the commit when
-there is a proof and `landed_unknown` carries the reason when there is not;
-never both, and the pair travels on `omh sNN commit` too.
+they are already on main)`.
+
+A delete that **git refuses** is its own answer, not a landing omh could not
+settle: `kept — git would not delete it: <git's words>`, with the proof omh
+acted on still in `--json` under `landed`. When the delete ran and omh could not
+re-read the branch afterwards, `branch_kept` is `null` rather than `false`: omh
+does not know, and a `false` would be a claim about a ref it never managed to
+look at.
+
+Under `--json`, `landed` carries the commit when there is a proof and
+`landed_unknown` carries the reason when there is not; never both, and the pair
+travels on `omh sNN commit` too — where it is always `null`, because `commit`
+takes the cheap look only and never asks the expensive question. `delete_refused`
+and `delete_unconfirmed` carry git's words for the two ways the deletion itself
+can go wrong.
 
 **A removal that did not finish is a failure, not a footnote.** `rm` asks the
 disk whether the worktree is actually gone rather than trusting git's exit

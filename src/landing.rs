@@ -12,23 +12,25 @@
 //! pair a count cannot tell apart. A branch is deleted on the strength of this,
 //! which is why the reason travels inside the answer rather than beside it.
 //!
-//! **The decision is here and the git is not.** `settle` and `settle_with_patch`
-//! are pure functions over values; `History` is the seam the facts arrive
-//! through, implemented by `session::GitHistory` for real work and by
-//! `FakeHistory` below for the states no git fixture can reach — a look that
-//! stopped at its limit, a repository that answered an error halfway. The fake
-//! pins the *policy*. Only the tests against real git pin the plumbing, and
-//! nothing here should be cited as evidence that a git invocation is right.
+//! **The decision is here and the git is not.** `settle` and
+//! `settle_with_change` are pure functions over values; `History` is the seam
+//! the facts arrive through, implemented by `session::GitHistory` for real work
+//! and by `FakeHistory` below for the one thing no git fixture produces
+//! reliably — a read that fails. (A look that stops at its limit *is*
+//! fixturable, and `a_survey_that_stopped_at_its_limit_says_so_and_still_counts`
+//! does it against real git.) The fake pins the *policy*. Only the tests
+//! against real git pin the plumbing, and nothing here should be cited as
+//! evidence that a git invocation is right.
 
 use anyhow::Result;
 
 /// How far the look at trunk got.
 ///
-/// `Capped` is not a smaller `Whole`. A look that stopped early can only ever
-/// produce `Holding::Unsettled` — "omh did not look that far" — because the one
-/// thing it may not do is let a missing proof read as a proven absence. That
-/// rule is enforced by `settle` matching on this rather than by anybody
-/// remembering it.
+/// `Capped` is not a smaller `Whole`. A proof found inside the window is still
+/// a proof — evidence does not stop being evidence because omh stopped reading
+/// — but a look that stopped early may never answer `Unreviewed`, which claims
+/// omh looked and found nothing. That narrower rule is enforced by `settle`
+/// matching on this rather than by anybody remembering it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reach {
     Whole,
@@ -69,8 +71,8 @@ pub enum Holding {
     Nothing,
     /// Trunk holds this content under a different sha, and here is the proof.
     Landed { commits: usize, by: Proof },
-    /// omh looked as far as it was allowed to and found no proof. The branch
-    /// holds work nobody has reviewed.
+    /// omh read the whole window and found no proof — the branch holds work
+    /// nobody has reviewed. Only a `Reach::Whole` look can say this.
     Unreviewed { commits: usize },
     /// omh could not tell.
     ///
@@ -113,14 +115,23 @@ pub struct Survey {
     pub standing: Standing,
     /// The branch tip's tree, or `None` when there is no branch to have one.
     pub tip: Option<String>,
-    /// `(tree, commit)` for trunk's commits since the fork, **oldest first**.
-    pub trunk: Vec<(String, String)>,
+    /// Trunk's commits since the fork, **oldest first**, truncated to the
+    /// limit the survey was asked for — so this list is what omh *looked at*,
+    /// and `reach` says whether that was all of them.
+    pub trunk: Vec<SeenTree>,
     pub reach: Reach,
 }
 
-/// The branch's whole change as one patch id, and one `(patch id, commit)` per
-/// trunk commit since the fork — the expensive half of the evidence.
-pub type PatchProof = (Option<String>, Vec<(String, String)>);
+/// One trunk commit and the tree it left behind.
+///
+/// A struct rather than a pair: both halves are 40 hex characters, they are
+/// compared and reported one field apart, and reporting a tree as the commit
+/// the work landed as would be a proof nobody can look up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeenTree {
+    pub tree: String,
+    pub at: String,
+}
 
 /// Where the facts come from, so the decision can be tested without a repo.
 ///
@@ -129,7 +140,12 @@ pub type PatchProof = (Option<String>, Vec<(String, String)>);
 pub trait History {
     fn exists(&self, branch: &str) -> Result<bool>;
     fn survey(&self, base: &str, branch: &str, limit: usize) -> Result<Survey>;
-    fn patch_proof(&self, base: &str, branch: &str) -> Result<PatchProof>;
+    /// Trunk's commits since the fork whose change **is** this branch's whole
+    /// change, oldest first.
+    ///
+    /// Byte-for-byte, not by patch id — see `GitHistory::same_change` for why
+    /// an id can only nominate a candidate.
+    fn same_change(&self, base: &str, branch: &str) -> Result<Vec<String>>;
 }
 
 /// How far back along trunk omh looks for a squash.
@@ -148,10 +164,12 @@ pub fn settle(survey: &Survey) -> Settling {
         return Settling::Settled(Holding::Nothing);
     }
     if let Some(tip) = &survey.tip {
-        if let Some((_, at)) = survey.trunk.iter().find(|(tree, _)| tree == tip) {
+        if let Some(seen) = survey.trunk.iter().find(|seen| &seen.tree == tip) {
             return Settling::Settled(Holding::Landed {
                 commits,
-                by: Proof::SameTree { at: at.clone() },
+                by: Proof::SameTree {
+                    at: seen.at.clone(),
+                },
             });
         }
     }
@@ -175,29 +193,22 @@ pub fn settle(survey: &Survey) -> Settling {
 
 /// The expensive evidence, once the cheap look has asked for it.
 ///
-/// The branch's **whole** change as one patch, against trunk's own commits one
-/// at a time — which is the shape a squash takes: several commits arriving as
-/// one, so no individual patch id matches and `git cherry` reports nothing.
+/// `same` is trunk's commits whose change is this branch's whole change —
+/// the shape a squash takes: several commits arriving as one, so no individual
+/// patch id matches and `git cherry` reports nothing. The first is the oldest,
+/// for the revert-and-reapply reason `settle` gives.
 ///
-/// An absent or empty patch matches nothing. `git diff | git patch-id` prints
-/// nothing at all for an empty diff, and two absences comparing equal would
-/// delete a branch on the strength of neither side having said anything.
-pub fn settle_with_patch(
-    commits: usize,
-    mine: Option<&str>,
-    trunk: &[(String, String)],
-) -> Holding {
-    let mine = mine.unwrap_or_default();
-    if !mine.is_empty() {
-        // Oldest first, for the revert-and-reapply reason `settle` gives.
-        if let Some((_, at)) = trunk.iter().find(|(id, _)| !id.is_empty() && id == mine) {
-            return Holding::Landed {
-                commits,
-                by: Proof::SamePatch { at: at.clone() },
-            };
-        }
+/// No evidence is `Unreviewed`, never `Landed`. Two absences comparing equal
+/// is how a branch gets deleted on the strength of neither side having said
+/// anything, so an empty name is not a match either.
+pub fn settle_with_change(commits: usize, same: &[String]) -> Holding {
+    match same.iter().find(|at| !at.is_empty()) {
+        Some(at) => Holding::Landed {
+            commits,
+            by: Proof::SamePatch { at: at.clone() },
+        },
+        None => Holding::Unreviewed { commits },
     }
-    Holding::Unreviewed { commits }
 }
 
 /// The whole decision, over a `History`.
@@ -205,7 +216,8 @@ pub fn settle_with_patch(
 /// Every failure becomes `Unsettled` **here**, at the boundary, so no caller
 /// downstream can `?` one into an absence or `.ok()` it into a `None` that
 /// reads as a clean answer. That collapse is the one `doctor`'s leftovers row
-/// shipped, in six shapes, and it is a deletion this time rather than a report.
+/// shipped — `.flatten()`, `.ok()`, one `Option` for several reasons, a
+/// `Result` for a whole sweep — and it is a deletion this time, not a report.
 pub fn holding(history: &dyn History, branch: Option<&str>, base: &str, limit: usize) -> Holding {
     let Some(branch) = branch else {
         return Holding::NoBranch;
@@ -238,8 +250,8 @@ pub fn holding(history: &dyn History, branch: Option<&str>, base: &str, limit: u
         // The count is known here and only the landing is not, which is why it
         // travels into `Unsettled` rather than being dropped for a `None` the
         // caller would render as *omh could not count it*.
-        Settling::NeedsPatchProof { commits } => match history.patch_proof(base, branch) {
-            Ok((mine, trunk)) => settle_with_patch(commits, mine.as_deref(), &trunk),
+        Settling::NeedsPatchProof { commits } => match history.same_change(base, branch) {
+            Ok(same) => settle_with_change(commits, &same),
             Err(e) => Holding::Unsettled {
                 commits: Some(commits),
                 why: format!("{e:#}"),
@@ -264,7 +276,10 @@ mod tests {
             tip: Some(tip.into()),
             trunk: trunk
                 .iter()
-                .map(|(t, c)| ((*t).to_string(), (*c).to_string()))
+                .map(|(tree, at)| SeenTree {
+                    tree: (*tree).to_string(),
+                    at: (*at).to_string(),
+                })
                 .collect(),
             reach,
         }
@@ -353,15 +368,12 @@ mod tests {
         );
     }
 
-    /// The squash of several commits: no tree matches, one patch does.
+    /// The squash of several commits: no tree matches, and trunk holds a
+    /// commit whose change is this branch's whole change.
     #[test]
     fn the_branchs_whole_change_matching_one_trunk_commit_is_the_proof() {
-        let trunk = vec![
-            ("patch-a".to_string(), "c1".to_string()),
-            ("patch-mine".to_string(), "c2".to_string()),
-        ];
         assert_eq!(
-            settle_with_patch(2, Some("patch-mine"), &trunk),
+            settle_with_change(2, &["c2".to_string()]),
             Holding::Landed {
                 commits: 2,
                 by: Proof::SamePatch { at: "c2".into() }
@@ -369,20 +381,30 @@ mod tests {
         );
     }
 
+    /// Two commits with the branch's change: the older is the one named, for
+    /// the same reason the tree probe names the older.
+    #[test]
+    fn the_older_of_two_matching_changes_is_the_one_named() {
+        match settle_with_change(1, &["older".to_string(), "newer".to_string()]) {
+            Holding::Landed { by, .. } => assert_eq!(by.at(), "older"),
+            other => panic!("trunk holds this change twice: {other:?}"),
+        }
+    }
+
     /// Nothing to compare is not a match with everything.
     ///
-    /// `git diff | git patch-id` prints nothing for an empty diff. Read as a
-    /// value, that empty string would equal the next empty one and delete a
-    /// branch on the strength of two absences.
+    /// A branch whose change is empty (an `--allow-empty` commit) matches no
+    /// trunk commit, and a name that is empty is not a commit anybody can look
+    /// up — read as values, two absences would compare equal and delete a
+    /// branch on the strength of neither side having said anything.
     #[test]
-    fn a_branch_with_no_patch_at_all_proves_nothing() {
-        let trunk = vec![(String::new(), "c1".to_string())];
+    fn no_change_in_common_proves_nothing() {
         assert_eq!(
-            settle_with_patch(1, None, &trunk),
+            settle_with_change(1, &[]),
             Holding::Unreviewed { commits: 1 }
         );
         assert_eq!(
-            settle_with_patch(1, Some(""), &trunk),
+            settle_with_change(1, &[String::new()]),
             Holding::Unreviewed { commits: 1 }
         );
     }
@@ -391,9 +413,8 @@ mod tests {
     /// without hedging.
     #[test]
     fn a_whole_look_with_no_match_is_unreviewed() {
-        let trunk = vec![("patch-a".to_string(), "c1".to_string())];
         assert_eq!(
-            settle_with_patch(3, Some("patch-mine"), &trunk),
+            settle_with_change(3, &[]),
             Holding::Unreviewed { commits: 3 }
         );
     }
@@ -403,7 +424,7 @@ mod tests {
     struct FakeHistory {
         exists: Result<bool>,
         survey: Result<Survey>,
-        patch: Result<PatchProof>,
+        same: Result<Vec<String>>,
     }
 
     impl Default for FakeHistory {
@@ -411,7 +432,7 @@ mod tests {
             Self {
                 exists: Ok(true),
                 survey: Ok(survey(1, 3, "tree-x", &[("tree-w", "c1")], Reach::Whole)),
-                patch: Ok((Some("patch-mine".into()), vec![])),
+                same: Ok(vec![]),
             }
         }
     }
@@ -429,9 +450,9 @@ mod tests {
                 Err(e) => Err(anyhow::anyhow!("{e}")),
             }
         }
-        fn patch_proof(&self, _base: &str, _branch: &str) -> Result<PatchProof> {
-            match &self.patch {
-                Ok(p) => Ok(p.clone()),
+        fn same_change(&self, _base: &str, _branch: &str) -> Result<Vec<String>> {
+            match &self.same {
+                Ok(same) => Ok(same.clone()),
                 Err(e) => Err(anyhow::anyhow!("{e}")),
             }
         }
@@ -474,7 +495,7 @@ mod tests {
             ),
             (
                 FakeHistory {
-                    patch: Err(anyhow::anyhow!("bad object")),
+                    same: Err(anyhow::anyhow!("bad object")),
                     ..Default::default()
                 },
                 Some(1),

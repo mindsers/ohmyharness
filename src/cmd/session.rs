@@ -1007,15 +1007,26 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
                 // answer — the row goes on printing what it printed before, which
                 // never claimed anything about landing.
                 let landed =
-                    survey
-                        .as_ref()
-                        .ok()
-                        .and_then(|survey| match crate::landing::settle(survey) {
-                            crate::landing::Settling::Settled(
-                                crate::landing::Holding::Landed { by, .. },
-                            ) => Some(by.at().to_string()),
-                            _ => None,
-                        });
+                    match survey.as_ref().map(crate::landing::settle) {
+                        Ok(crate::landing::Settling::Settled(
+                            crate::landing::Holding::Landed { by, .. },
+                        )) => Some(by.at().to_string()),
+                        // A look that stopped at its limit is the one state this
+                        // row cannot render: `to push` stays true of it either
+                        // way, since origin does not have these commits — but *omh
+                        // did not look that far* would otherwise reach nobody at
+                        // all. The reason names the limit and how far behind trunk
+                        // the session is, which is what makes it actionable.
+                        Ok(crate::landing::Settling::Settled(
+                            crate::landing::Holding::Unsettled { why, .. },
+                        )) => {
+                            ctx.warn(&format!(
+                                "could not tell whether {id}'s work is on {base}: {why}"
+                            ));
+                            None
+                        }
+                        _ => None,
+                    };
                 match &touched {
                     Ok(touched) => changed.push((id.clone(), touched.clone())),
                     // Carried, not dropped. A session omh cannot read contributes
@@ -1608,6 +1619,43 @@ pub(crate) fn leftovers(
     }
 }
 
+/// What to say about a branch omh did not make.
+///
+/// Surfaced as information — a namespace filling with dead refs is worth
+/// knowing — but never under a removal claim, and **never with the
+/// `git branch -D` a real removal's leftover offers**: a typo must not hand
+/// you a command that destroys work, whatever omh can tell about what is on
+/// it. Pure, so every arm can be read at once rather than one fixture at a
+/// time.
+pub(crate) fn stray_branch_note(id: &str, base: &str, held: &crate::landing::Holding) -> String {
+    use crate::landing::Holding;
+    let plural = |n: &usize| if *n == 1 { "commit" } else { "commits" };
+    match held {
+        Holding::Landed { commits, by } => format!(
+            "\nnote: a branch omh/{id} exists ({commits} {}) but no session does — its work is \
+             already on {base} as {}. omh did not make it.\n  \
+             git log {base}..omh/{id}   to read it",
+            plural(commits),
+            report::short(by.at())
+        ),
+        Holding::Unreviewed { commits } => format!(
+            "\nnote: a branch omh/{id} exists ({commits} {}) but no session does — omh did not \
+             make it.\n  git log {base}..omh/{id}   to read it",
+            plural(commits)
+        ),
+        // The reason omh is holding, and a way to read the branch that does
+        // not depend on the base that failed — the same pairing `rm` makes
+        // when it cannot count.
+        Holding::Unsettled { why, .. } => format!(
+            "\nnote: a branch omh/{id} exists but no session does, and omh could not tell what \
+             it holds: {why}\n  git log omh/{id}   to read it"
+        ),
+        Holding::Nothing | Holding::NoBranch => {
+            format!("\nnote: a branch omh/{id} exists, but no session does.")
+        }
+    }
+}
+
 /// Where a session is in the cycle, phrased as the next thing to do about it.
 ///
 /// Ordered most-actionable first, and deliberately one answer rather than a
@@ -1628,7 +1676,7 @@ pub(crate) fn work_state(
     // — and a blank column reads as "nothing here" for a session that may be
     // holding a day of work the user is about to `s rm`.
     // The counts come from the caller, which already asked: `uncommitted` from
-    // the status it also reads paths from, `commits` from the `rev-list` that
+    // the status it also reads paths from, `commits` from the `git log` that
     // also answers the *behind* column, and the upstream from one listing over
     // every branch. `None` is the same failure this used to discover for
     // itself, one process at a time.
@@ -2163,24 +2211,7 @@ pub(crate) fn rm(
         // offers: a typo must not hand you a command that destroys work.
         let base = session::default_branch(&paths.repo);
         let note = match session.branch_exists(&paths.repo) {
-            Ok(true) => match session.holding(&paths.repo, &base) {
-                // Said, and still no `git branch -D` beside it: knowing the
-                // work landed does not make somebody else's branch omh's to
-                // delete, which is the whole point of this arm.
-                crate::landing::Holding::Landed { commits, by } => format!(
-                    "\nnote: a branch omh/{id} exists ({commits} {}) but no session does — \
-                     its work is already on {base} as {}. omh did not make it.\n  \
-                     git log {base}..omh/{id}   to read it",
-                    if commits == 1 { "commit" } else { "commits" },
-                    report::short(by.at())
-                ),
-                crate::landing::Holding::Unreviewed { commits } => format!(
-                    "\nnote: a branch omh/{id} exists ({commits} {}) but no session does — \
-                     omh did not make it.\n  git log {base}..omh/{id}   to read it",
-                    if commits == 1 { "commit" } else { "commits" }
-                ),
-                _ => format!("\nnote: a branch omh/{id} exists, but no session does."),
-            },
+            Ok(true) => stray_branch_note(id, &base, &session.holding(&paths.repo, &base)),
             _ => String::new(),
         };
         anyhow::bail!("no session {id} in this checkout — `omh s` lists the ones there are.{note}");
@@ -2342,6 +2373,10 @@ pub(crate) fn rm(
                 format!("the branch omh/{id} is still there.\n")
             }
             session::Removed::BranchDropped(_) => String::new(),
+            // Neither claim: omh ran the delete and could not look afterwards.
+            session::Removed::BranchUnconfirmed { .. } => {
+                format!("omh could not tell what became of the branch omh/{id}.\n")
+            }
             session::Removed::NoBranch => String::new(),
         };
         // Only what was observed. The first version asserted four removals
@@ -2380,50 +2415,59 @@ pub(crate) fn rm(
         );
     }
 
+    // What a `Dropped` says about the branch, for the two arms that carry one.
+    // Built once so the sentence and the document cannot disagree about the
+    // count, or about whether there is a proof to name.
+    let facts = |held: &session::Dropped| -> (usize, serde_json::Value) {
+        match held {
+            session::Dropped::Empty => (0, serde_json::Value::Null),
+            session::Dropped::Landed { commits, by } => {
+                (*commits, serde_json::Value::String(by.at().to_string()))
+            }
+        }
+    };
     let action = match removed {
-        session::Removed::BranchKept(n) => {
-            // Two ways to be kept, and they are not the same news. A branch
-            // kept because it holds three commits is an invitation to review
-            // them; one kept because omh could not tell what it holds is a
-            // question, and saying "3 commits" for it would be an invention.
-            //
+        session::Removed::BranchKept(session::Kept::Commits(n)) => {
             // The count comes back from `remove` rather than being asked
             // again: it is the number that *made* the decision, and a second
             // call could answer differently and narrate a decision nobody took.
-            //
-            // The review command changes with it. What stops omh counting is a
-            // range end that does not resolve, and for a branch this session is
-            // standing on that is the base — so a line beginning `<base>..`
-            // would fail in the user's hands for the reason they are being
-            // shown it.
-            let (kept, review, commits, why) = match n {
-                session::Kept::Commits(n) => (
+            report::Action::new(
+                "session-removed",
+                format!(
+                    "removed session {id}; branch omh/{id} kept ({n} {} to review)",
+                    if n == 1 { "commit" } else { "commits" }
+                ),
+            )
+            .next(format!("git log {base}..omh/{id}"))
+            .next(format!("git branch -D omh/{id}"))
+            .data(serde_json::json!({
+                "session": id,
+                "branch": format!("omh/{id}"),
+                "branch_kept": true,
+                "commits": n,
+                "landed": serde_json::Value::Null,
+                "landed_unknown": serde_json::Value::Null,
+            }))
+        }
+        // A branch kept because omh could not tell what it holds is a
+        // question, and saying "3 commits to review" for it would be an
+        // invention. The review command changes with it: what stops omh
+        // counting is a range end that does not resolve, and for a branch this
+        // session is standing on that is the base — so a line beginning
+        // `<base>..` would fail in the user's hands for the reason they are
+        // being shown it.
+        session::Removed::BranchKept(session::Kept::Uncertain { commits, why }) => {
+            let (kept, review) = match commits {
+                Some(n) => (
                     format!(
-                        "kept ({n} {} to review)",
+                        "kept ({n} {}; omh could not tell whether they are already on {base})",
                         if n == 1 { "commit" } else { "commits" }
                     ),
                     format!("git log {base}..omh/{id}"),
-                    Some(n),
-                    None,
                 ),
-                session::Kept::Uncertain { commits, why } => (
-                    match commits {
-                        // Counted, and only the *landing* unknown: omh knows
-                        // how much is on the branch and cannot say whether
-                        // trunk has it too. Saying "could not count it" here
-                        // would throw away a number omh holds.
-                        Some(n) => format!(
-                            "kept ({n} {}; omh could not tell whether they are already on {base})",
-                            if n == 1 { "commit" } else { "commits" }
-                        ),
-                        None => format!("kept — omh could not count it against {base}"),
-                    },
-                    match commits {
-                        Some(_) => format!("git log {base}..omh/{id}"),
-                        None => format!("git log omh/{id}"),
-                    },
-                    commits,
-                    Some(why),
+                None => (
+                    format!("kept — omh could not count it against {base}"),
+                    format!("git log omh/{id}"),
                 ),
             };
             report::Action::new(
@@ -2441,22 +2485,37 @@ pub(crate) fn rm(
                 "landed_unknown": why,
             }))
         }
-        session::Removed::BranchDropped(why) => {
-            let (said, commits, landed) = match why {
-                session::Dropped::Empty => (
-                    "dropped (no commits)".to_string(),
-                    0,
-                    serde_json::Value::Null,
+        // omh knew what the branch held and git would not delete it. The
+        // justification is reported as what it is, so the reader is told the
+        // *delete* failed rather than that omh cannot say what is on the ref.
+        session::Removed::BranchKept(session::Kept::Undropped { held, refused }) => {
+            let (commits, landed) = facts(&held);
+            report::Action::new(
+                "session-removed",
+                format!(
+                    "removed session {id}; branch omh/{id} kept — git would not delete it: {refused}"
                 ),
+            )
+            .next(format!("git branch -D omh/{id}"))
+            .data(serde_json::json!({
+                "session": id,
+                "branch": format!("omh/{id}"),
+                "branch_kept": true,
+                "commits": commits,
+                "landed": landed,
+                "landed_unknown": serde_json::Value::Null,
+                "delete_refused": refused,
+            }))
+        }
+        session::Removed::BranchDropped(held) => {
+            let (commits, landed) = facts(&held);
+            let said = match &held {
+                session::Dropped::Empty => "dropped (no commits)".to_string(),
                 // Named, not merely asserted: a deletion justified by *it is
                 // already on trunk* is only checkable if omh says where.
-                session::Dropped::Landed { commits, by } => (
-                    format!(
-                        "dropped — its work is on {base} as {}",
-                        report::short(by.at())
-                    ),
-                    commits,
-                    serde_json::Value::String(by.at().to_string()),
+                session::Dropped::Landed { by, .. } => format!(
+                    "dropped — its work is on {base} as {}",
+                    report::short(by.at())
                 ),
             };
             report::Action::new(
@@ -2470,6 +2529,28 @@ pub(crate) fn rm(
                 "commits": commits,
                 "landed": landed,
                 "landed_unknown": serde_json::Value::Null,
+            }))
+        }
+        // `branch_kept` is **null** here, not `false`: the delete ran and the
+        // read that would settle it did not. A `false` would be a claim about
+        // a ref omh never managed to look at.
+        session::Removed::BranchUnconfirmed { held, why } => {
+            let (commits, landed) = facts(&held);
+            report::Action::new(
+                "session-removed",
+                format!(
+                    "removed session {id}; omh could not tell whether branch omh/{id} went: {why}"
+                ),
+            )
+            .next(format!("git branch --list omh/{id}"))
+            .data(serde_json::json!({
+                "session": id,
+                "branch": format!("omh/{id}"),
+                "branch_kept": serde_json::Value::Null,
+                "commits": commits,
+                "landed": landed,
+                "landed_unknown": serde_json::Value::Null,
+                "delete_unconfirmed": why,
             }))
         }
         session::Removed::NoBranch => {
