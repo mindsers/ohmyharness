@@ -5,6 +5,7 @@
 //! mounted, so an agent cannot touch uncommitted work or `main` — review is a
 //! plain `git diff`.
 
+use crate::landing::{self, History, Holding, Proof, Reach, Standing, Survey};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -40,18 +41,18 @@ pub struct Removal {
 
 /// What `remove` did with the branch, so the caller can report it truthfully
 /// rather than always claiming the branch was kept.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Removed {
-    /// Commits nobody has reviewed; the branch outlives the session.
+    /// The branch outlives the session, and why.
+    BranchKept(Kept),
+    /// The branch preserved nothing, and how omh knows.
+    BranchDropped(Dropped),
+    /// omh ran the delete and could not find out what became of the branch.
     ///
-    /// Carries the count that decided it, and `None` when git could not take
-    /// one — a branch kept because it holds three commits is an invitation to
-    /// review them, and one kept because omh could not tell is a question. The
-    /// caller used to re-ask `commits` to tell them apart, which is two answers
-    /// to one question and a window for them to disagree.
-    BranchKept(Option<usize>),
-    /// Nothing was committed, so the branch preserved nothing.
-    BranchDropped,
+    /// Neither *kept* nor *dropped*: both are observations, and this is the
+    /// state where the observation is what failed. It carries what omh had
+    /// proved before it tried, so the news is the read and not the branch.
+    BranchUnconfirmed { held: Dropped, why: String },
     /// There was no branch to speak of.
     ///
     /// A scratch session (`omh auth`, `omh doctor`) never had one, and neither
@@ -59,6 +60,104 @@ pub enum Removed {
     /// it builds a session rather than looking one up. Reporting *kept* or
     /// *dropped* there is a claim about work that never existed.
     NoBranch,
+}
+
+/// Why the branch outlived the session. Two different pieces of news.
+///
+/// A branch kept because it holds three commits is an invitation to review
+/// them; one kept because omh could not tell what it holds is a question, and
+/// saying "3 commits" for it would be an invention. The count travels with the
+/// outcome rather than being re-asked, which is two answers to one question and
+/// a window for them to disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Kept {
+    Commits(usize),
+    /// Safe to drop, and git would not drop it.
+    ///
+    /// Distinct from `Uncertain`, which is *omh could not tell what this
+    /// branch holds*. Here omh could tell — `held` is the justification it
+    /// acted on — and the delete is what failed. Folding the two together
+    /// printed "kept (2 commits; omh could not tell whether they are already
+    /// on main)" over a branch omh had just proved landed.
+    Undropped {
+        held: Dropped,
+        refused: String,
+    },
+    /// `commits` is `Some` when the count was taken and only the *landing* is
+    /// unknown.
+    Uncertain {
+        commits: Option<usize>,
+        why: String,
+    },
+}
+
+/// Why dropping the branch was safe. **Only these two facts justify one.**
+///
+/// `Empty` is the old rule: nothing on the branch that trunk does not already
+/// have, by ancestry. `Landed` is the new one, and it cannot be spelled without
+/// the proof — a deletion justified by a claim nobody can look up is exactly
+/// what this type exists to prevent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Dropped {
+    Empty,
+    Landed { commits: usize, by: Proof },
+}
+
+/// What omh learned after running the delete.
+///
+/// Pure, so the three readings of git's answer can be stated as a table rather
+/// than discovered one fixture at a time. `still_there` is `branch_exists`'s
+/// answer *after* the delete: `Ok(false)` is the ordinary success, `Ok(true)`
+/// means the ref survived, and `Err` means omh could not look — which used to
+/// be folded in with `Ok(true)` by a `!matches!(.., Ok(false))`, so a delete
+/// that succeeded over a ref store omh could no longer read was reported as a
+/// branch still sitting there.
+pub fn after_delete(
+    held: Dropped,
+    refused: Option<String>,
+    still_there: Result<bool, String>,
+) -> Removed {
+    match still_there {
+        Ok(false) => Removed::BranchDropped(held),
+        Ok(true) => Removed::BranchKept(Kept::Undropped {
+            refused: match refused {
+                Some(why) => why,
+                // git exiting 0 over a branch that is still there is not a
+                // missing reason; it is the reason.
+                None => "git reported no error, and the branch is still there".to_string(),
+            },
+            held,
+        }),
+        Err(why) => Removed::BranchUnconfirmed {
+            held,
+            why: match refused {
+                Some(refusal) => format!("{refusal}; and omh could not re-read the branch: {why}"),
+                None => why,
+            },
+        },
+    }
+}
+
+/// What to do about the branch, given what it holds.
+///
+/// Pure, and the only place a deletion is authorised. It used to be three match
+/// arms inside `remove`, reachable only through git — so the rule *omh deletes
+/// only what is provably duplicated* could be read but never asserted on its
+/// own.
+pub fn decide(holding: &Holding) -> Removed {
+    match holding {
+        Holding::NoBranch => Removed::NoBranch,
+        Holding::Nothing => Removed::BranchDropped(Dropped::Empty),
+        Holding::Landed { commits, by } => Removed::BranchDropped(Dropped::Landed {
+            commits: *commits,
+            by: by.clone(),
+        }),
+        Holding::Unreviewed { commits } => Removed::BranchKept(Kept::Commits(*commits)),
+        Holding::Unsettled { commits, why } => Removed::BranchKept(Kept::Uncertain {
+            commits: *commits,
+            why: why.clone(),
+        }),
+    }
 }
 
 /// What `commit` does about files omh copied in from the checkout.
@@ -384,30 +483,15 @@ impl Session {
         let Some(branch) = &self.branch else {
             return Ok(false);
         };
-        match git(
-            repo,
-            &["show-ref", "--verify", &format!("refs/heads/{branch}")],
-        ) {
-            Ok(_) => Ok(true),
-            // `show-ref --verify` exits 1 with nothing on stdout for a ref
-            // that is simply not there, which is the ordinary answer.
-            Err(e) => {
-                let why = format!("{e:#}");
-                if why.contains("not a valid ref") || why.trim().ends_with(':') {
-                    Ok(false)
-                } else {
-                    Err(why)
-                }
-            }
-        }
+        branch_is_there(repo, branch)
     }
 
     /// How many commits `base` has that this session does not. A session that
     /// silently drifts behind trunk makes the agent work against stale code.
     ///
-    /// `Ok(0)` and *cannot tell* are different answers, for the reason
-    /// `commits` below is a `Result`: this asks git the same question, in the
-    /// same checkouts, and fails in the same ones. Nothing destructive reads
+    /// `Ok(0)` and *cannot tell* are different answers, for the same reason
+    /// `holding` below has an `Unsettled`: this asks git a question of the
+    /// same shape, in the same checkouts, and fails in the same ones. Nothing destructive reads
     /// it — but it is rendered beside a column that now says `?` for exactly
     /// this failure, and it was emitted into JSON as `"behind": 0`, which is a
     /// number omh did not have.
@@ -421,39 +505,79 @@ impl Session {
             .with_context(|| format!("counting how far {branch} is behind {base}"))
     }
 
-    /// Commits on this session's branch that are not already in `base`.
+    /// What keeping this branch would preserve.
     ///
-    /// The question `remove` needs answered: whether keeping the branch would
-    /// preserve anything.
+    /// The question `remove` needs answered, and the one a count could not
+    /// carry: `Ok(0)` and `Err(_)` were the only two ways to say *nothing to
+    /// keep* and *omh could not tell*, and one of them is a deletion.
     ///
-    /// **An error is never zero.** A git that would not answer is not a git
+    /// **An error is never nothing.** A git that would not answer is not a git
     /// that answered *none*, and this used to break that with more at stake
     /// than most, because the caller acts on the answer by deleting a branch.
+    /// There is no error return now: every failure arrives as
+    /// `Holding::Unsettled` carrying git's own words, and `decide` refuses to
+    /// drop on one.
     ///
-    /// The rule was stated on `uncommitted` until #59 removed that method, at
-    /// which point this citation pointed at nothing — so it is stated here,
-    /// where it is relied on. `changed` carries it too: it returns the paths
-    /// or the failure, never an empty list standing in for both.
+    /// The reads are `git show-ref --verify refs/heads/<branch>` and one
+    /// `git log --left-right <base>...refs/heads/<branch>`, plus the patch
+    /// comparison when the trees settle nothing. Any of them fails on a base
+    /// that does not resolve — a repo that renamed its trunk, or a clone whose
+    /// `main` exists only as `origin/main`, which `default_branch` will happily
+    /// name.
+    pub fn holding(&self, repo: &Path, base: &str) -> Holding {
+        landing::holding(
+            &GitHistory { repo },
+            self.branch.as_deref(),
+            base,
+            landing::SQUASH_SCAN_LIMIT,
+        )
+    }
+
+    /// What one look settles: the count always, a landing only when the trees
+    /// prove it.
     ///
-    /// `rev-list <base>..<branch>` fails whenever either end does not resolve.
-    /// The base end is the reachable one for a live session: a repo that
-    /// renamed its trunk, or a clone whose `main` exists only as
-    /// `origin/main`, which `default_branch` will happily name. Read as zero,
-    /// that failure spelled *no commits*, and `omh s rm` deleted a branch
-    /// holding work nobody had reviewed while reporting it had preserved
-    /// nothing.
-    pub fn commits(&self, repo: &Path, base: &str) -> Result<usize> {
+    /// The cheap half and no more. `commit` wants the number on the branch, and
+    /// paying `git log -p` over as much as 500 trunk commits through
+    /// `patch-id` to decorate a tally — for a landing that has just become
+    /// impossible, since the commit it made moved both the tip tree and the
+    /// branch's whole change — is a walk for an answer nobody asked for.
+    /// `NeedsPatchProof` reaches the caller as *nobody asked*, which is a
+    /// different thing from *omh looked and found nothing*.
+    pub fn glance(&self, repo: &Path, base: &str) -> crate::landing::Settling {
+        match self.survey(repo, base) {
+            Ok(survey) => crate::landing::settle(&survey),
+            Err(e) => crate::landing::Settling::Settled(Holding::Unsettled {
+                commits: None,
+                why: format!("{e:#}"),
+            }),
+        }
+    }
+
+    /// One look at this branch against trunk: the two counts `omh s` prints,
+    /// and the cheap evidence a squash leaves behind.
+    ///
+    /// `behind` and `commits` used to be two `rev-list` calls, then one; this
+    /// is that same one process answering a third question as well, because the
+    /// trees it already walks past are what proves a squash landed.
+    pub fn survey(&self, repo: &Path, base: &str) -> Result<Survey> {
         let Some(branch) = &self.branch else {
-            return Ok(0);
+            // A scratch session (`omh auth`, `omh doctor`) has no branch, and
+            // asking git about one would error rather than report nothing.
+            return Ok(Survey {
+                standing: Standing {
+                    behind: 0,
+                    ahead: 0,
+                },
+                tip: None,
+                trunk: Vec::new(),
+                reach: Reach::Whole,
+            });
         };
-        let out = git(repo, &["rev-list", "--count", &format!("{base}..{branch}")])?;
-        out.trim()
-            .parse()
-            .with_context(|| format!("counting commits on {branch}"))
+        GitHistory { repo }.survey(base, branch, landing::SQUASH_SCAN_LIMIT)
     }
 
     /// Remove the session: its worktree, the repository the sandbox had, and
-    /// the branch only when it holds nothing to review.
+    /// the branch only when keeping it would preserve nothing.
     ///
     /// The shadow goes because session ids come back around — `next_id` is the
     /// highest `sNN` among the worktrees plus one — and a shadow that outlives
@@ -467,28 +591,13 @@ impl Session {
         // the only thing left to ask.
         //
         // A question git could not answer keeps the branch. Dropping one is
-        // irreversible and justified by exactly one fact — that it holds
-        // nothing — so anything short of that fact has to fall the other way.
-        //
-        // Asked of a branch that exists, and that test is not a formality:
-        // `rev-list <base>..<branch>` fails for a missing *branch* exactly as
-        // it does for a missing base, so an id nothing ever created answered
-        // "cannot count" and was reported as a branch kept — over a branch that
-        // was never there, with a `git log` line that fails the same way.
-        let outcome = match &self.branch {
-            None => Removed::NoBranch,
-            // A question git could not answer keeps the branch, for the same
-            // reason a count it could not make does.
-            Some(_) => match self.branch_exists(repo) {
-                Err(_) => Removed::BranchKept(None),
-                Ok(false) => Removed::NoBranch,
-                Ok(true) => match self.commits(repo, base) {
-                    Ok(0) => Removed::BranchDropped,
-                    Ok(n) => Removed::BranchKept(Some(n)),
-                    Err(_) => Removed::BranchKept(None),
-                },
-            },
-        };
+        // irreversible and justified by exactly two facts — that the branch
+        // holds nothing, or that trunk already holds its content — so anything
+        // short of one of them has to fall the other way. `decide` is where
+        // that rule lives, and `holding` is where the reading that feeds it
+        // does, including the existence test that keeps an id nothing ever
+        // created from reading as a branch omh could not count.
+        let outcome = decide(&self.holding(repo, base));
 
         // **Asked of the disk, not of git's exit code.** The fallback used to
         // run only when `git worktree remove` reported failure — so a git that
@@ -534,25 +643,25 @@ impl Session {
         };
         let _ = git(repo, &["worktree", "prune"]);
 
-        // A branch carrying commits outlives its worktree on purpose: removing
-        // a session must never destroy work nobody has reviewed. A branch
-        // carrying none holds nothing to review — `--force` above has already
+        // A branch carrying work that exists nowhere else outlives its
+        // worktree on purpose: removing a session must never destroy work
+        // nobody has reviewed. One carrying nothing, or carrying what trunk
+        // already has, preserves nothing — `--force` above has already
         // discarded anything uncommitted — so keeping it only leaves a dead ref
         // behind after every abandoned session.
         let mut outcome = outcome;
-        if outcome == Removed::BranchDropped {
-            if let Some(branch) = &self.branch {
-                let _ = git(repo, &["branch", "-D", branch]);
-                // **Asked of git, not assumed** — the same rule the worktree
-                // above follows. `branch -D` refuses over an unwritable ref
-                // store, a stale lock, or a registration that outlived its
-                // directory, and the variant was decided before any of that
-                // could be known. Reporting a dropped branch that is still
-                // there fills `omh/` with refs omh has said are gone.
-                if !matches!(self.branch_exists(repo), Ok(false)) {
-                    outcome = Removed::BranchKept(None);
-                }
-            }
+        if let (Removed::BranchDropped(held), Some(branch)) = (&outcome, &self.branch) {
+            let held = held.clone();
+            let refused = git(repo, &["branch", "-D", branch])
+                .err()
+                .map(|e| format!("{e:#}"));
+            // **Asked of git, not assumed** — the same rule the worktree above
+            // follows. `branch -D` refuses over an unwritable ref store, a
+            // stale lock, or a registration that outlived its directory, and
+            // the variant was decided before any of that could be known.
+            // Reporting a dropped branch that is still there fills `omh/` with
+            // refs omh has said are gone.
+            outcome = after_delete(held, refused, self.branch_exists(repo));
         }
 
         // Unconditionally, and unlike the branch. A branch can hold commits
@@ -1128,47 +1237,6 @@ impl Session {
         })
     }
 
-    /// How far behind `base` this session is, and how many commits it has that
-    /// `base` does not — both from one `rev-list --left-right`.
-    ///
-    /// `behind` and `commits` ask the two halves separately, and the dashboard
-    /// used to call both for every row. This is the same two numbers from one
-    /// process; the equivalence is pinned by a test on a real repository.
-    pub fn against(&self, repo: &Path, base: &str) -> Result<Standing> {
-        // `behind: 0, ahead: 0` for a branchless (scratch) session. Named
-        // fields, not a pair, so the two same-typed counts cannot be read in
-        // the wrong order two files away.
-        let Some(branch) = &self.branch else {
-            return Ok(Standing {
-                behind: 0,
-                ahead: 0,
-            });
-        };
-        let out = git(
-            repo,
-            &[
-                "rev-list",
-                "--count",
-                "--left-right",
-                &format!("{base}...{branch}"),
-            ],
-        )?;
-        let (left, right) = out
-            .trim()
-            .split_once('\t')
-            .with_context(|| format!("reading `rev-list --left-right` for {branch}: {out:?}"))?;
-        Ok(Standing {
-            behind: left
-                .trim()
-                .parse()
-                .with_context(|| format!("counting how far {branch} is behind {base}"))?,
-            ahead: right
-                .trim()
-                .parse()
-                .with_context(|| format!("counting commits on {branch}"))?,
-        })
-    }
-
     /// Push the session branch to origin under a name a reviewer can read, and
     /// return the name it landed under.
     ///
@@ -1668,15 +1736,6 @@ pub(crate) fn still_there(at: &Path) -> Result<bool, String> {
     }
 }
 
-/// How a session stands against trunk: commits `base` has that it does not
-/// (`behind`), and commits it has that `base` does not (`ahead`). Both from one
-/// `rev-list --left-right`; named so the two counts are not swappable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Standing {
-    pub behind: usize,
-    pub ahead: usize,
-}
-
 /// What one branch tracks, out of the listing `upstreams` reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tracking {
@@ -1760,6 +1819,270 @@ pub fn parse_upstreams(text: &str) -> Upstreams {
         );
     }
     Upstreams(map)
+}
+
+/// Whether a ref by this name is there, for the callers that hold a name
+/// rather than a `Session`.
+///
+/// Extracted from `branch_exists` so `GitHistory` asks git the same question in
+/// the same words. Two spellings of "is this branch there" is one more than the
+/// number of answers there should be.
+fn branch_is_there(repo: &Path, branch: &str) -> Result<bool, String> {
+    match git(
+        repo,
+        &["show-ref", "--verify", &format!("refs/heads/{branch}")],
+    ) {
+        Ok(_) => Ok(true),
+        // `show-ref --verify` exits 1 with nothing on stdout for a ref that is
+        // simply not there, which is the ordinary answer.
+        Err(e) => {
+            let why = format!("{e:#}");
+            if why.contains("not a valid ref") || why.trim().ends_with(':') {
+                Ok(false)
+            } else {
+                Err(why)
+            }
+        }
+    }
+}
+
+/// The facts `landing` decides on, as git answers them.
+///
+/// The only code in the landing path that shells out. Everything it returns is
+/// values, which is what lets the decision be tested without a repository — and
+/// what keeps this file's share of the work down to *which command, in which
+/// words*.
+pub(crate) struct GitHistory<'a> {
+    pub repo: &'a Path,
+}
+
+impl History for GitHistory<'_> {
+    fn exists(&self, branch: &str) -> Result<bool> {
+        branch_is_there(self.repo, branch).map_err(|why| anyhow::anyhow!("{why}"))
+    }
+
+    /// One `git log`, answering three questions.
+    ///
+    /// `--left-right` marks each commit's side with `%m`: `<` is trunk's,
+    /// `>` is this branch's. `--reverse` puts both sides oldest-first, which
+    /// does two things — the branch tip becomes the **last** `>` line, and the
+    /// trunk commits omh retains under `limit` are the ones nearest the fork.
+    /// That is where a squash of this branch's work *usually* lands, since a
+    /// session is normally merged soon after it forks: a bet about which end of
+    /// a long trunk is worth reading, not a fact, and `Reach::Capped` is what
+    /// stops it being read as one. `--topo-order` is what makes "last" mean the
+    /// tip rather than whatever has the newest timestamp.
+    ///
+    /// The counts are taken from the whole stream, so `limit` bounds the
+    /// *search* and never a number omh reports.
+    fn survey(&self, base: &str, branch: &str, limit: usize) -> Result<Survey> {
+        let out = git(
+            self.repo,
+            &[
+                "log",
+                "--left-right",
+                "--topo-order",
+                "--reverse",
+                "--format=%m %T %H",
+                &format!("{base}...{}", qualified(branch)),
+            ],
+        )?;
+        let (mut behind, mut ahead) = (0, 0);
+        let mut tip = None;
+        let mut trunk: Vec<crate::landing::SeenTree> = Vec::new();
+        let mut capped = false;
+        for line in out.lines().filter(|l| !l.trim().is_empty()) {
+            let mut word = line.split_whitespace();
+            match (word.next(), word.next(), word.next()) {
+                (Some("<"), Some(tree), Some(at)) => {
+                    behind += 1;
+                    if trunk.len() < limit {
+                        trunk.push(crate::landing::SeenTree {
+                            tree: tree.to_string(),
+                            at: at.to_string(),
+                        });
+                    } else {
+                        capped = true;
+                    }
+                }
+                (Some(">"), Some(tree), Some(_)) => {
+                    ahead += 1;
+                    tip = Some(tree.to_string());
+                }
+                _ => anyhow::bail!("reading `git log --left-right` for {branch}: {line:?}"),
+            }
+        }
+        Ok(Survey {
+            standing: Standing { behind, ahead },
+            tip,
+            trunk,
+            reach: if capped {
+                Reach::Capped(limit)
+            } else {
+                Reach::Whole
+            },
+        })
+    }
+
+    /// Trunk's commits whose change **is** this branch's whole change.
+    ///
+    /// Two steps, and the second is the one that makes it a proof.
+    ///
+    /// **Nominate**, with `git patch-id`: the branch's whole change as one id
+    /// (`git diff {base}...{branch}` — *three-dot*; measured on this
+    /// repository, the two-dot form gives `823d61d` and matches nothing while
+    /// the three-dot form gives `dce14fb`, which is the squash's own id),
+    /// against one id per trunk commit since the fork (`{branch}..{base}` —
+    /// trunk's *whole* history would let a commit from before this branch
+    /// existed nominate itself, which
+    /// `work_trunk_held_before_this_branch_forked_is_not_proof` pins).
+    ///
+    /// **Confirm**, byte for byte: `git show` on the candidate, compared with
+    /// the branch's own patch. An id alone is not evidence of sameness —
+    /// measured on git 2.55, `patch-id` runs `remove_space` on every line, so a
+    /// Makefile recipe indented with a tab and the same line indented with
+    /// spaces share an id; and its ability to tell two binaries at one path
+    /// apart comes from reading the `index` line's oids, which git only learned
+    /// in **2.39** while `docs/commands.md` says omh needs 2.38. `--verbatim`
+    /// would fix the first and cannot be combined with `--stable`. Comparing
+    /// the bytes fixes both, on every version, and costs one `git show` per
+    /// candidate — of which there is almost always zero or one.
+    ///
+    /// `--pretty=medium` is forced because `patch-id` recovers the commit from
+    /// the line `git log -p` writes above each patch, and a user's
+    /// `format.pretty = reference` makes that line lead with an *abbreviated*
+    /// sha, which leaves every patch attributed to the null oid — measured. A
+    /// proof of `0000000` is a claim nobody can look up.
+    fn same_change(&self, base: &str, branch: &str) -> Result<Vec<String>> {
+        let branch = qualified(branch);
+        let mut args = vec!["diff"];
+        args.extend_from_slice(DIFF_FLAGS);
+        let three_dot = format!("{base}...{branch}");
+        args.push(&three_dot);
+        let mine = git_bytes(self.repo, &args)?;
+        if mine.is_empty() {
+            // A branch that changes nothing matches nothing. Comparing two
+            // empty patches is the shape that deletes a branch because neither
+            // side said anything.
+            return Ok(Vec::new());
+        }
+        let my_id = match patch_ids(self.repo, &mine)?.first() {
+            Some((id, _)) => id.clone(),
+            None => return Ok(Vec::new()),
+        };
+
+        let mut args = vec!["log", "-p", "--reverse", "--topo-order", "--pretty=medium"];
+        args.extend_from_slice(DIFF_FLAGS);
+        let two_dot = format!("{branch}..{base}");
+        args.push(&two_dot);
+        let theirs = git_bytes(self.repo, &args)?;
+
+        let mut same = Vec::new();
+        for (id, at) in patch_ids(self.repo, &theirs)? {
+            if id != my_id || at.chars().all(|c| c == '0') {
+                continue;
+            }
+            let mut args = vec!["show", "--format="];
+            args.extend_from_slice(DIFF_FLAGS);
+            args.push(&at);
+            if git_bytes(self.repo, &args)? == mine {
+                same.push(at);
+            }
+        }
+        Ok(same)
+    }
+}
+
+/// A branch, spelled so git cannot resolve it to something else.
+///
+/// `main...omh/s01` is subject to git's ref precedence, and a **tag** beats a
+/// branch: measured, a tag named `omh/s01` makes git answer about the tag,
+/// print `warning: refname 'omh/s01' is ambiguous` on stderr, and exit 0. Read
+/// that way a session holds nothing, and `rm` deletes a branch holding work
+/// nobody has reviewed.
+fn qualified(branch: &str) -> String {
+    format!("refs/heads/{branch}")
+}
+
+/// Pinned on every side of every comparison. See `same_change`.
+const DIFF_FLAGS: &[&str] = &[
+    "--full-index",
+    "--no-renames",
+    "-U3",
+    "--no-textconv",
+    "--no-ext-diff",
+    "--no-color",
+];
+
+/// git's stdout as raw bytes.
+///
+/// A patch is not text: a path can be any byte string, and the comparison
+/// `same_change` makes is byte-for-byte, so decoding it through
+/// `from_utf8_lossy` — which is what `git` one function down does — would map
+/// two different patches onto one string of replacement characters.
+fn git_bytes(cwd: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let out = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    anyhow::ensure!(
+        out.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        crate::out::untrusted(&String::from_utf8_lossy(&out.stderr))
+    );
+    Ok(out.stdout)
+}
+
+/// `git patch-id --stable` over a patch already in hand, as `(id, commit)`.
+///
+/// The pipe is built here rather than through a shell: a shell would need the
+/// arguments quoted, and one of them is a revision range a caller supplies.
+///
+/// Written from a thread while this one reads. `patch-id` emits a line per
+/// commit as it goes, so a parent that writes the whole diff before reading
+/// anything deadlocks the moment the child's stdout pipe fills — which for a
+/// range of a few hundred commits it does.
+///
+/// **Every line is parsed or the read fails**, the same rule `survey` follows
+/// fifteen lines up. A line silently dropped here is a candidate silently
+/// dropped, and the two readings of git's output in this module must not have
+/// opposite policies about damage.
+fn patch_ids(repo: &Path, patch: &[u8]) -> Result<Vec<(String, String)>> {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new("git")
+        .current_dir(repo)
+        .args(["patch-id", "--stable"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("running git patch-id")?;
+    let mut sink = child.stdin.take().context("git patch-id took no stdin")?;
+    let patch = patch.to_vec();
+    let writer = std::thread::spawn(move || sink.write_all(&patch));
+    let out = child.wait_with_output().context("running git patch-id")?;
+    // A patch-id that exits early leaves the write broken, which is its news
+    // rather than a second failure — so the status below speaks first.
+    let wrote = writer.join();
+    anyhow::ensure!(
+        out.status.success(),
+        "git patch-id: {}",
+        crate::out::untrusted(&String::from_utf8_lossy(&out.stderr))
+    );
+    wrote
+        .map_err(|_| anyhow::anyhow!("the thread feeding git patch-id panicked"))?
+        .context("feeding git patch-id")?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|line| match line.split_once(' ') {
+            Some((id, at)) => Ok((id.to_string(), at.trim().to_string())),
+            None => anyhow::bail!("reading `git patch-id` output: {line:?}"),
+        })
+        .collect()
 }
 
 fn git(cwd: &Path, args: &[&str]) -> Result<String> {
@@ -2176,10 +2499,10 @@ mod tests {
             alive.status.success(),
             "the fixture has to actually block the delete"
         );
-        assert_ne!(
-            done.branch,
-            Removed::BranchDropped,
-            "the branch is still there, so nothing may report it dropped"
+        assert!(
+            !matches!(done.branch, Removed::BranchDropped(_)),
+            "the branch is still there, so nothing may report it dropped: {:?}",
+            done.branch
         );
     }
 
@@ -2196,7 +2519,7 @@ mod tests {
         let done = s.remove(&root, "main", &d_shadows()).unwrap();
         let (outcome, gone) = (done.branch, done.worktree);
         assert_eq!(gone, Gone::Yes, "the worktree is gone");
-        assert_eq!(outcome, Removed::BranchDropped);
+        assert_eq!(outcome, Removed::BranchDropped(Dropped::Empty));
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s01"]).is_err(),
             "an empty branch should not survive its session"
@@ -2218,7 +2541,7 @@ mod tests {
         let done = s.remove(&root, "main", &d_shadows()).unwrap();
         let (outcome, gone) = (done.branch, done.worktree);
         assert_eq!(gone, Gone::Yes, "the worktree is gone");
-        assert_eq!(outcome, Removed::BranchKept(Some(1)));
+        assert_eq!(outcome, Removed::BranchKept(Kept::Commits(1)));
         assert!(
             git(&root, &["rev-parse", "--verify", "omh/s02"]).is_ok(),
             "unreviewed work must be unloseable"
@@ -2264,12 +2587,483 @@ mod tests {
             git(&root, &["rev-parse", "--verify", "omh/s03"]).is_ok(),
             "a count omh could not take is not a branch it may delete"
         );
-        assert_eq!(
-            outcome,
-            Removed::BranchKept(None),
-            "and it has to say *why* it was kept: a count omh never took is not a \
-             count of zero, and `rm` renders the two differently"
+        match outcome {
+            Removed::BranchKept(Kept::Uncertain { commits, why }) => {
+                assert_eq!(
+                    commits, None,
+                    "a count omh never took is not a count of zero, and `rm` \
+                     renders the two differently"
+                );
+                assert!(!why.is_empty(), "and it has to say *why* it was kept");
+            }
+            other => panic!("a branch omh could not count may not be dropped: {other:?}"),
+        }
+    }
+
+    /// The merge button, in the two commands it is made of.
+    ///
+    /// Nothing else in this repository squashes, and the whole defect lives in
+    /// what a squash does to ancestry — so the fixture has to be the real
+    /// thing. Returns the commit trunk gained, which is what omh has to name.
+    fn squash_onto_main(root: &Path, branch: &str) -> String {
+        // Not `git(...)?`: a squash that conflicts exits non-zero having left
+        // the work staged, and two of the tests below are about exactly that.
+        let _ = git(root, &["merge", "--squash", branch]);
+        git(root, &["commit", "-q", "-m", "the squash"]).unwrap();
+        git(root, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    /// Work that reached trunk as a squash is not work waiting for review.
+    ///
+    /// Ancestry says two commits; the tree says trunk already has every byte of
+    /// it. Measured on this repository before the fix: `omh/s02` was kept for a
+    /// month after `58acbaa` landed its content.
+    #[test]
+    fn a_branch_squash_merged_onto_trunk_is_dropped_and_named() {
+        let (dir, root) = repo();
+        let s = session_with_a_commit(&root, &dir.path().join("wt"), "work.rs");
+        let landed = squash_onto_main(&root, "omh/s01");
+
+        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        match done.branch {
+            Removed::BranchDropped(Dropped::Landed { commits, by }) => {
+                assert_eq!(commits, 1);
+                assert_eq!(
+                    by,
+                    Proof::SameTree { at: landed },
+                    "the tree is the cheap proof, and the commit named is trunk's"
+                );
+            }
+            other => panic!("trunk holds every byte of this branch: {other:?}"),
+        }
+        assert!(
+            git(&root, &["rev-parse", "--verify", "omh/s01"]).is_err(),
+            "a branch whose content is on trunk preserves nothing"
         );
+    }
+
+    /// The squash of several commits, where no tree matches.
+    ///
+    /// Trunk moved first, so trunk's tree carries a file the branch never had
+    /// and the cheap probe finds nothing. What still matches is the branch's
+    /// *whole change* against the squash's own patch — the reason the second
+    /// probe exists, and the case `git cherry` cannot see, since a squash of
+    /// two commits matches neither of them one at a time.
+    #[test]
+    fn a_squash_only_the_branchs_whole_patch_matches_is_still_proof() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}\n").unwrap();
+        s.commit(Some("first"), Carried::refusing(&[])).unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() { work() }\n").unwrap();
+        s.commit(Some("second"), Carried::refusing(&[])).unwrap();
+
+        std::fs::write(root.join("elsewhere.rs"), "// trunk moved\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "trunk moves"]).unwrap();
+        let landed = squash_onto_main(&root, "omh/s01");
+
+        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+            Removed::BranchDropped(Dropped::Landed { commits, by }) => {
+                assert_eq!(commits, 2);
+                assert_eq!(by, Proof::SamePatch { at: landed });
+            }
+            other => panic!("the branch's whole change is trunk's squash: {other:?}"),
+        }
+    }
+
+    /// A squash that had to resolve a conflict is not the branch's work.
+    ///
+    /// The tree trunk gained is neither side's, and the patch that landed is
+    /// not the patch the branch carries — so neither probe may claim it. This
+    /// is the over-match guard: the only direction this feature is allowed to
+    /// be wrong in is keeping a branch it could have dropped.
+    #[test]
+    fn a_squash_that_resolved_a_conflict_is_not_claimed_as_landed() {
+        let (dir, root) = repo();
+        std::fs::write(root.join("shared.rs"), "fn one() {}\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "shared"]).unwrap();
+
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("shared.rs"), "fn one() { agent() }\n").unwrap();
+        s.commit(Some("the agent's line"), Carried::refusing(&[]))
+            .unwrap();
+
+        std::fs::write(root.join("shared.rs"), "fn one() { human() }\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(
+            &root,
+            &["commit", "-q", "-m", "a human edits the same line"],
+        )
+        .unwrap();
+
+        // The merge conflicts; the resolution is a third version, which is what
+        // reaches trunk.
+        let _ = git(&root, &["merge", "--squash", "omh/s01"]);
+        std::fs::write(root.join("shared.rs"), "fn one() { both() }\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "resolved by hand"]).unwrap();
+
+        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+            Removed::BranchKept(Kept::Commits(1)) => {}
+            other => panic!("what landed is not what this branch holds: {other:?}"),
+        }
+        assert!(
+            git(&root, &["rev-parse", "--verify", "omh/s01"]).is_ok(),
+            "and the branch is still there to read"
+        );
+    }
+
+    /// Two different binaries at one path are not one change.
+    ///
+    /// A binary renders as `Binary files … differ` whatever the bytes, so a
+    /// patch *id* tells two of them apart only by the `index` line — which
+    /// `patch-id` reads on git 2.39 and later, and not on the 2.38 this project
+    /// says it supports. The byte-for-byte confirmation in `same_change` is
+    /// what makes this version-independent, and the property is what this test
+    /// pins: different bytes are not the same work.
+    #[test]
+    fn two_different_binaries_at_one_path_are_not_one_change() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("blob.bin"), [0u8, 1, 2, 3, 0, 255]).unwrap();
+        s.commit(Some("the agent's bytes"), Carried::refusing(&[]))
+            .unwrap();
+
+        std::fs::write(root.join("blob.bin"), [0u8, 9, 9, 9, 0, 1]).unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "different bytes, same path"]).unwrap();
+
+        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+            Removed::BranchKept(Kept::Commits(1)) => {}
+            other => panic!("different bytes are not the same work: {other:?}"),
+        }
+    }
+
+    /// The tip the survey reads is the branch's tip, on a branch with a merge.
+    ///
+    /// `--reverse` is what makes the **last** right-side line the tip, and this
+    /// catches a reading that took the *first* one. It does **not** pin
+    /// `--topo-order`: on this fixture the merge is both the topological tip
+    /// and the newest commit, so dropping that flag leaves this green. The flag
+    /// is defensive, and saying so is cheaper than implying a guard that is not
+    /// here.
+    #[test]
+    fn the_tip_the_survey_reads_is_the_branch_tip() {
+        let (dir, root) = repo();
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}\n").unwrap();
+        s.commit(Some("the agent's work"), Carried::refusing(&[]))
+            .unwrap();
+
+        // A side branch made *after* the tip and merged into it: its commit is
+        // newer by date, and the merge is the tip by topology.
+        git(&s.worktree, &["checkout", "-q", "-b", "side"]).unwrap();
+        std::fs::write(s.worktree.join("side.rs"), "fn side() {}\n").unwrap();
+        git(&s.worktree, &["add", "-A"]).unwrap();
+        git(&s.worktree, &["commit", "-q", "-m", "on the side"]).unwrap();
+        git(&s.worktree, &["checkout", "-q", "omh/s01"]).unwrap();
+        git(
+            &s.worktree,
+            &["merge", "-q", "--no-ff", "-m", "merge", "side"],
+        )
+        .unwrap();
+
+        let survey = s.survey(&root, "main").unwrap();
+        let tip = git(&root, &["rev-parse", "omh/s01^{tree}"])
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_eq!(
+            survey.tip,
+            Some(tip),
+            "the tree the proof is compared against is the branch's tip, not a commit beside it"
+        );
+    }
+
+    /// What omh learned after it ran the delete, over every way that can go.
+    ///
+    /// Pure, and a table rather than a fixture, because two of these six are
+    /// states a test cannot reliably produce: a ref store that answers an error
+    /// when asked whether the branch is still there, with and without the
+    /// delete itself having failed.
+    ///
+    /// The rule the table states: **the justification survives.** omh proved
+    /// the work landed before it tried the delete, so a delete that did not
+    /// happen may not be reported as omh not knowing what the branch holds.
+    #[test]
+    fn what_omh_learned_after_the_delete_is_not_what_it_knew_before() {
+        let proof = Dropped::Landed {
+            commits: 2,
+            by: Proof::SameTree {
+                at: "58acbaa".into(),
+            },
+        };
+        // Gone, which is the ordinary answer for both justifications.
+        assert_eq!(
+            after_delete(proof.clone(), None, Ok(false)),
+            Removed::BranchDropped(proof.clone())
+        );
+        assert_eq!(
+            after_delete(Dropped::Empty, None, Ok(false)),
+            Removed::BranchDropped(Dropped::Empty)
+        );
+
+        // Still there: kept, and the proof it was safe to drop travels with it
+        // — the branch is not a question, the delete is.
+        match after_delete(proof.clone(), Some("cannot lock ref".into()), Ok(true)) {
+            Removed::BranchKept(Kept::Undropped { held, refused }) => {
+                assert_eq!(
+                    held, proof,
+                    "omh knew what this branch held, and still does"
+                );
+                assert!(refused.contains("cannot lock ref"), "got {refused}");
+            }
+            other => panic!("the branch survived the delete: {other:?}"),
+        }
+        // git exiting 0 over a branch that is still there is its own news.
+        match after_delete(Dropped::Empty, None, Ok(true)) {
+            Removed::BranchKept(Kept::Undropped { held, refused }) => {
+                assert_eq!(held, Dropped::Empty);
+                assert!(
+                    !refused.is_empty(),
+                    "a refusal nobody can read is not a reason"
+                );
+            }
+            other => panic!("still there is still there: {other:?}"),
+        }
+
+        // Could not tell: neither kept nor dropped, and it says why. Reporting
+        // "kept" here would assert a branch omh never observed.
+        for refused in [None, Some("cannot lock ref".to_string())] {
+            match after_delete(proof.clone(), refused, Err("permission denied".into())) {
+                Removed::BranchUnconfirmed { held, why } => {
+                    assert_eq!(held, proof);
+                    assert!(
+                        why.contains("permission denied"),
+                        "the read omh could not make is the news: {why}"
+                    );
+                }
+                other => panic!("omh could not look, so it may claim nothing: {other:?}"),
+            }
+        }
+    }
+
+    /// A delete refused after a *proven* landing says the delete failed.
+    ///
+    /// It used to say `kept (2 commits; omh could not tell whether they are
+    /// already on main)` — over a branch omh had just proved landed, with the
+    /// commit in hand — and filed git's ref-store error under the field that
+    /// means *why omh could not tell whether it landed*.
+    #[test]
+    #[cfg(unix)]
+    fn a_delete_refused_after_a_proven_landing_keeps_the_proof() {
+        use std::os::unix::fs::PermissionsExt;
+        let (dir, root) = repo();
+        let s = session_with_a_commit(&root, &dir.path().join("wt"), "work.rs");
+        let landed = squash_onto_main(&root, "omh/s01");
+
+        let refs = root.join(".git/refs/heads/omh");
+        let was = std::fs::metadata(&refs).unwrap().permissions();
+        std::fs::set_permissions(&refs, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let done = s.remove(&root, "main", &d_shadows()).unwrap();
+        std::fs::set_permissions(&refs, was).unwrap();
+
+        assert!(
+            git(&root, &["rev-parse", "--verify", "refs/heads/omh/s01"]).is_ok(),
+            "the fixture has to actually block the delete"
+        );
+        match done.branch {
+            Removed::BranchKept(Kept::Undropped { held, refused }) => {
+                assert_eq!(
+                    held,
+                    Dropped::Landed {
+                        commits: 1,
+                        by: Proof::SameTree { at: landed }
+                    },
+                    "the proof omh acted on is the one it reports"
+                );
+                assert!(!refused.is_empty(), "and git's own words for the refusal");
+            }
+            other => panic!("the delete failed; the landing did not: {other:?}"),
+        }
+    }
+
+    /// Whitespace is a difference, and `git patch-id` cannot see it.
+    ///
+    /// Measured on git 2.55: a Makefile recipe indented with a tab and the same
+    /// line indented with spaces hash to one patch id — `get_one_patchid` runs
+    /// `remove_space` on every line, and `--verbatim` cannot be combined with
+    /// `--stable`. So the id finds a *candidate* and cannot confirm it. What
+    /// confirms it is the two patches being byte-for-byte the same, which is
+    /// also what makes the comparison exact on a git older than 2.39, where
+    /// `patch-id` does not read the `index` line's oids and two unrelated
+    /// binaries at one path hash alike.
+    #[test]
+    fn a_whitespace_only_difference_is_not_the_same_work() {
+        let (dir, root) = repo();
+        std::fs::write(root.join("build.mk"), "all:\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "a makefile"]).unwrap();
+
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("build.mk"), "all:\n\techo hi\n").unwrap();
+        s.commit(Some("a tab, as make requires"), Carried::refusing(&[]))
+            .unwrap();
+
+        // Trunk gains the same line with spaces — which `make` would reject,
+        // so this is a real difference and not a formatting nicety.
+        std::fs::write(root.join("build.mk"), "all:\n    echo hi\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "spaces"]).unwrap();
+
+        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+            Removed::BranchKept(Kept::Commits(1)) => {}
+            other => panic!("a tab is not four spaces, and this branch holds the tab: {other:?}"),
+        }
+    }
+
+    /// A proof is a commit you can look up.
+    ///
+    /// `git patch-id` attributes each patch to the preceding line that names a
+    /// commit, and `git log -p` writes that line in whatever `format.pretty`
+    /// the *user* has configured. Measured: with `format.pretty = reference`
+    /// (or any `format:%h …`), every patch comes back attributed to the null
+    /// oid — so omh would delete the branch and print `its work is on main as
+    /// 0000000`, a sha that resolves to nothing.
+    #[test]
+    fn a_proof_names_a_commit_whatever_the_user_configured_git_to_print() {
+        let (dir, root) = repo();
+        git(&root, &["config", "format.pretty", "reference"]).unwrap();
+
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("work.rs"), "fn main() {}\n").unwrap();
+        s.commit(Some("the work"), Carried::refusing(&[])).unwrap();
+
+        // Trunk moves first, so the trees differ and only the patch can prove it.
+        std::fs::write(root.join("elsewhere.rs"), "// trunk moved\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "trunk moves"]).unwrap();
+        let landed = squash_onto_main(&root, "omh/s01");
+
+        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+            Removed::BranchDropped(Dropped::Landed { by, .. }) => assert_eq!(
+                by.at(),
+                landed,
+                "the commit named has to be one `git show` can find"
+            ),
+            other => panic!("the patch is trunk's own: {other:?}"),
+        }
+    }
+
+    /// A tag wearing the branch's name does not make the branch empty.
+    ///
+    /// `main...omh/s01` is resolved by git's ref precedence, and a tag beats a
+    /// branch: measured, git prints `warning: refname 'omh/s01' is ambiguous`
+    /// on stderr, exits 0, and answers about the **tag**. Read that way the
+    /// session looks like it holds nothing, and the branch — which holds work
+    /// nobody has reviewed — is deleted. Every read here names
+    /// `refs/heads/<branch>` for that reason.
+    #[test]
+    fn a_tag_wearing_the_branchs_name_does_not_make_it_empty() {
+        let (dir, root) = repo();
+        let s = session_with_a_commit(&root, &dir.path().join("wt"), "work.rs");
+        git(&root, &["tag", "omh/s01", "main"]).unwrap();
+
+        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+            Removed::BranchKept(Kept::Commits(1)) => {}
+            other => panic!("the branch holds a commit whatever the tag says: {other:?}"),
+        }
+        assert!(
+            git(&root, &["rev-parse", "--verify", "refs/heads/omh/s01"]).is_ok(),
+            "and it is still there"
+        );
+    }
+
+    /// Work trunk held *before* this branch forked is not proof it landed.
+    ///
+    /// Trunk carried the change, reverted it, and the session then re-did it —
+    /// so trunk's history contains a commit with the branch's whole patch, and
+    /// trunk does not contain the work. The patch probe reads
+    /// `{branch}..{base}`, which is trunk's commits *since the fork*; widening
+    /// it to trunk's whole history makes that pre-fork commit a proof and
+    /// deletes the branch. Written after the range was, and checked red by
+    /// applying exactly that widening rather than a mutation of my choosing.
+    #[test]
+    fn work_trunk_held_before_this_branch_forked_is_not_proof() {
+        let (dir, root) = repo();
+        std::fs::write(root.join("feature.rs"), "fn feature() {}\n").unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["commit", "-q", "-m", "the feature"]).unwrap();
+        let reverted = git(&root, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string();
+        git(&root, &["revert", "--no-edit", &reverted]).unwrap();
+
+        // The session forks *after* the revert and re-does the same change.
+        let s = Session::new(&dir.path().join("wt"), "s01".into());
+        s.ensure(&root, "main").unwrap();
+        std::fs::write(s.worktree.join("feature.rs"), "fn feature() {}\n").unwrap();
+        s.commit(Some("do it again"), Carried::refusing(&[]))
+            .unwrap();
+
+        match s.remove(&root, "main", &d_shadows()).unwrap().branch {
+            Removed::BranchKept(Kept::Commits(1)) => {}
+            other => panic!("trunk reverted this work; it does not hold it: {other:?}"),
+        }
+    }
+
+    /// The limit is the survey's own, not a number a caller applies afterwards.
+    ///
+    /// The policy — a capped look may only ever be a question — is pinned
+    /// without a repository in `landing`. What this pins is the half a fake
+    /// cannot: that the git reading sets `Capped` when trunk has more commits
+    /// than omh was asked to read, and `Whole` when it does not, while the
+    /// counts stay exact either way.
+    #[test]
+    fn a_survey_that_stopped_at_its_limit_says_so_and_still_counts() {
+        let (dir, root) = repo();
+        let _session = session_with_a_commit(&root, &dir.path().join("wt"), "work.rs");
+        for _ in 0..3 {
+            git(
+                &root,
+                &["commit", "-q", "--allow-empty", "-m", "trunk moves"],
+            )
+            .unwrap();
+        }
+
+        let capped = GitHistory { repo: &root }
+            .survey("main", "omh/s01", 1)
+            .unwrap();
+        assert_eq!(capped.reach, Reach::Capped(1));
+        assert_eq!(
+            (capped.standing.behind, capped.standing.ahead),
+            (3, 1),
+            "the limit bounds what omh searches, never a number it reports"
+        );
+        assert_eq!(capped.trunk.len(), 1);
+        assert_eq!(
+            capped.trunk[0].at,
+            git(&root, &["rev-parse", "main~2"]).unwrap().trim(),
+            "and the one it kept is the oldest — the end of trunk nearest the fork"
+        );
+
+        let whole = GitHistory { repo: &root }
+            .survey("main", "omh/s01", 500)
+            .unwrap();
+        assert_eq!(whole.reach, Reach::Whole);
+        assert_eq!(whole.trunk.len(), 3);
     }
 
     /// A scratch session (`omh auth`, `omh doctor`) has no branch at all, and
@@ -3041,22 +3835,34 @@ mod tests {
         assert!(up.of("omh/s99").is_none());
     }
 
-    /// One `rev-list --left-right` answers both how far the session is behind
+    /// One `git log --left-right` answers both how far the session is behind
     /// trunk and how much it has that trunk does not — the two counts the
     /// dashboard used to ask for separately, per session.
+    ///
+    /// Compared against `rev-list --count` in each direction rather than
+    /// against another omh method: this used to check `against` against
+    /// `behind` + `commits`, and `commits` is gone. A test whose oracle is the
+    /// code beside it stops being evidence the moment both move together.
     #[test]
-    fn one_rev_list_answers_behind_and_commits_the_same_as_two() {
+    fn one_log_answers_behind_and_ahead_the_same_as_two_rev_lists() {
         let (d, root) = repo();
         let s = Session::new(&d.path().join("wt"), "s01".into());
         s.ensure(&root, "main").unwrap();
-        let both = |s: &Session| Standing {
-            behind: s.behind(&root, "main").unwrap(),
-            ahead: s.commits(&root, "main").unwrap(),
+        let raw = |range: &str| -> usize {
+            git(&root, &["rev-list", "--count", range])
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        let both = |_: &Session| Standing {
+            behind: raw("omh/s01..main"),
+            ahead: raw("main..omh/s01"),
         };
 
-        assert_eq!(s.against(&root, "main").unwrap(), both(&s));
+        assert_eq!(s.survey(&root, "main").unwrap().standing, both(&s));
         assert_eq!(
-            s.against(&root, "main").unwrap(),
+            s.survey(&root, "main").unwrap().standing,
             Standing {
                 behind: 0,
                 ahead: 0
@@ -3066,14 +3872,7 @@ mod tests {
         std::fs::write(s.worktree.join("work.rs"), "fn main() {}").unwrap();
         s.commit(Some("Add the work"), Carried::refusing(&[]))
             .unwrap();
-        assert_eq!(s.against(&root, "main").unwrap(), both(&s));
-        assert_eq!(
-            s.against(&root, "main").unwrap(),
-            Standing {
-                behind: 0,
-                ahead: 1
-            }
-        );
+        assert_eq!(s.survey(&root, "main").unwrap().standing, both(&s));
 
         for _ in 0..2 {
             git(
@@ -3082,9 +3881,9 @@ mod tests {
             )
             .unwrap();
         }
-        assert_eq!(s.against(&root, "main").unwrap(), both(&s));
+        assert_eq!(s.survey(&root, "main").unwrap().standing, both(&s));
         assert_eq!(
-            s.against(&root, "main").unwrap(),
+            s.survey(&root, "main").unwrap().standing,
             Standing {
                 behind: 2,
                 ahead: 1
@@ -3093,7 +3892,7 @@ mod tests {
 
         // A base git cannot resolve is a question it could not answer — for
         // both halves at once, never a zero for either.
-        assert!(s.against(&root, "no-such-branch").is_err());
+        assert!(s.survey(&root, "no-such-branch").is_err());
     }
 
     /// Before a push there is no upstream to measure against, which is a
@@ -3220,7 +4019,11 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("config.toml"), "got: {err}");
-        assert_eq!(s.commits(&root, "main").unwrap(), 0, "nothing may land");
+        assert_eq!(
+            s.survey(&root, "main").unwrap().standing.ahead,
+            0,
+            "nothing may land"
+        );
     }
 
     /// The escape hatch, because refusing forever would make a carried file that
@@ -3290,7 +4093,7 @@ mod tests {
 
         assert!(err.to_string().contains("aborted"), "got: {err}");
         assert_eq!(
-            s.commits(&root, "main").unwrap(),
+            s.survey(&root, "main").unwrap().standing.ahead,
             0,
             "nothing may land on the branch"
         );

@@ -255,8 +255,13 @@ not watch — is unresolved. Recorded rather than answered.
 ```console
 $ omh s                   # sessions, branches, state
 $ omh s01 down            # stop the container, keep worktree and branch
-$ omh s01 rm              # remove the session — branch survives
+$ omh s01 rm              # remove the session — the branch survives its work
 ```
+
+The branch survives whenever dropping it could lose something: it goes only
+when it holds no commits, or when omh can prove trunk already has their content
+under another sha — a squash merge — in which case `rm` names the commit it
+landed as. See [`omh sNN rm`](commands.md#omh-snn-rm--and-what-it-refuses-to-take-with-it).
 
 `omh s` reports state as English for you and as fields for a script: `omh s
 --json` gives each session's `running`, `behind` and `work.state` without

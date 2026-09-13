@@ -142,9 +142,10 @@ container runtime it could not choose — plus, when omh could not read
 declined to name rather than hand you `omh <id> rm` for a session that is
 running. `unreadable` is the sessions omh could not read for the overlap scan.
 
-`work.state` is one of `clean`, `uncommitted`, `unpushed`, `published` or
-`unknown` — `uncommitted` and `unpushed` carry a `count`, `published` carries
-the `branch`. The one that earns the enum is **`unknown`**: it means omh could
+`work.state` is one of `clean`, `uncommitted`, `landed`, `unpushed`,
+`published` or `unknown` — `uncommitted` and `unpushed` carry a `count`,
+`published` carries the `branch`, and `landed` carries the whole `commit` this
+session's work reached trunk as (the row a person reads shortens it). The one that earns the enum is **`unknown`**: it means omh could
 not tell, which is a different answer from `clean` and the one most dangerous to
 confuse with it. The human column prints `?` for it, and the string version of
 this API printed `""` for both.
@@ -1178,9 +1179,9 @@ earlier version of this said the first two refusals happen before the work
 leaves the sandbox. They do not — the carried-file scan reads the fetched
 commits, which is how it can see them at all.
 
-**`rm` never deletes a branch that has commits.** Unreviewed agent work must be
-unloseable, so the branch outlives the session that produced it, and `rm` tells
-you how to review or discard it:
+**`rm` never deletes a branch holding work that exists nowhere else.**
+Unreviewed agent work must be unloseable, so the branch outlives the session
+that produced it, and `rm` tells you how to review or discard it:
 
 ```console
 $ omh s01 rm
@@ -1198,11 +1199,52 @@ A branch with **no** commits is dropped. Keeping it preserved nothing —
 `worktree remove --force` has already discarded anything uncommitted — while a
 namespace filling with dead refs trains you to ignore the ones that matter.
 
-A branch omh cannot *count* is kept too, and says so — that count is
-`git rev-list <base>..<branch>`, and it has no answer in a checkout whose
-default branch exists only as `origin/<name>`. Dropping a branch is
-irreversible and justified by one fact only, that it holds nothing, so anything
-short of that fact falls the other way:
+**A branch whose work is already on trunk is dropped too, and says where.**
+Counting commits is a question about *ancestry*, and a squash merge — the
+default on GitHub, and this project's own merge button — gives the work a new
+sha with different parents. So a branch whose content landed a month ago still
+counts two commits, and omh kept it: measured here on `omh/s02`, whose work
+reached `main` as `58acbaa` and whose branch outlived it by a month. omh now
+compares the branch's tree against trunk's commits since it forked and, when
+the trees settle nothing, the branch's whole change against each of trunk's
+own:
+
+```console
+$ omh s
+  s01  omh/s01  stopped  landed e15d33c  (1 behind main)
+
+$ omh s01 rm
+removed session s01; branch omh/s01 dropped — its work is on main as e15d33c
+```
+
+The commit is named because a deletion justified by *it is already on trunk* is
+only checkable if omh says where. A squash that had to **resolve a conflict** is
+not this branch's work — neither its tree nor its patch is what landed — so that
+branch is kept, which is the only direction this is allowed to be wrong in.
+
+**A patch that matches is then checked byte for byte.** `git patch-id` finds the
+candidate cheaply, and it is not evidence of sameness on its own: it strips
+whitespace, so a Makefile recipe indented with a tab and the same line indented
+with spaces share an id, and it tells two binaries at one path apart only on git
+2.39 and later. What settles it is the two patches being the same bytes, which
+holds on every version — so a whitespace-only difference keeps the branch.
+
+omh reads the **first 500 commits trunk gained after this branch forked** —
+where a session's own squash almost always lands — and past that it says it
+could not tell rather than that nothing landed. A branch that forked long ago
+and was merged much later is the case that answers *could not tell*.
+
+What the proof says is that **trunk's history** holds this content, not that
+trunk's tip still does: work that landed and was then reverted still reads as
+landed, and the branch goes. The commit named is where it is, and `git show` on
+it is the recovery. Deleting a branch is also not the end of it — `git reflog`
+keeps the tip for 30 days.
+
+A branch omh cannot *read* is kept too, and says so — that read is one
+`git log --left-right <base>...<branch>`, and it has no answer in a checkout
+whose default branch exists only as `origin/<name>`. Dropping a branch is
+irreversible and justified by one fact only — that keeping it would preserve
+nothing — so anything short of that fact falls the other way:
 
 ```console
 $ omh s01 rm
@@ -1210,6 +1252,24 @@ removed session s01; branch omh/s01 kept — omh could not count it against main
   git log omh/s01
   git branch -D omh/s01
 ```
+
+When the count came back and only the *landing* could not be settled, the count
+is said rather than thrown away — `kept (3 commits; omh could not tell whether
+they are already on main)`.
+
+A delete that **git refuses** is its own answer, not a landing omh could not
+settle: `kept — git would not delete it: <git's words>`, with the proof omh
+acted on still in `--json` under `landed`. When the delete ran and omh could not
+re-read the branch afterwards, `branch_kept` is `null` rather than `false`: omh
+does not know, and a `false` would be a claim about a ref it never managed to
+look at.
+
+Under `--json`, `landed` carries the commit when there is a proof and
+`landed_unknown` carries the reason when there is not; never both, and the pair
+travels on `omh sNN commit` too — where it is always `null`, because `commit`
+takes the cheap look only and never asks the expensive question. `delete_refused`
+and `delete_unconfirmed` carry git's words for the two ways the deletion itself
+can go wrong.
 
 **A removal that did not finish is a failure, not a footnote.** `rm` asks the
 disk whether the worktree is actually gone rather than trusting git's exit

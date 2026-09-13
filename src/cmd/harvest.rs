@@ -5,6 +5,7 @@
 //! this is the half that runs on the host, decides what the user is allowed
 //! to do next, and says why when the answer is no.
 
+use crate::landing::{Holding, Settling};
 use crate::out;
 use crate::profile::Paths;
 use crate::profile::Profile;
@@ -1135,8 +1136,8 @@ pub(crate) fn commit(
                     session.id
                 ));
             }
-            let n = session.commits(&paths.repo, &base);
-            warn_uncounted(&n, ctx, &base);
+            let held = session.glance(&paths.repo, &base);
+            warn_uncounted(&held, ctx, &base);
             ctx.say(
                 &report::Action::new(
                     "committed",
@@ -1167,7 +1168,7 @@ pub(crate) fn commit(
                         _ => format!(
                             "kept {landed} of {}'s own commits{}",
                             session.label(),
-                            branch_tally(&n)
+                            branch_tally(&held)
                         ),
                     },
                 )
@@ -1175,7 +1176,9 @@ pub(crate) fn commit(
                     "session": session.id,
                     "branch": session.label(),
                     "kept": landed,
-                    "commits": n.as_ref().ok(),
+                    "commits": counted(&held),
+                    "landed": landed_at(&held),
+                    "landed_unknown": landed_unknown(&held),
                     "base": base,
                     "promoted": promoted,
                 })),
@@ -1200,17 +1203,19 @@ pub(crate) fn commit(
     // number is what tells you whether the branch is worth pushing — and it is
     // the same number `omh s rm` will use to decide the branch survives.
     let base = session::default_branch(&paths.repo);
-    let n = session.commits(&paths.repo, &base);
-    warn_uncounted(&n, ctx, &base);
+    let held = session.glance(&paths.repo, &base);
+    warn_uncounted(&held, ctx, &base);
     ctx.say(
         &report::Action::new(
             "committed",
-            format!("committed to {}{}", session.label(), branch_tally(&n)),
+            format!("committed to {}{}", session.label(), branch_tally(&held)),
         )
         .data(serde_json::json!({
             "session": session.id,
             "branch": session.label(),
-            "commits": n.as_ref().ok(),
+            "commits": counted(&held),
+            "landed": landed_at(&held),
+            "landed_unknown": landed_unknown(&held),
             "base": base,
             "promoted": promoted,
         })),
@@ -1233,11 +1238,62 @@ pub(crate) fn commit(
 /// there for the first time, over a branch, is worse than hearing about it now
 /// over a commit that already succeeded. On stderr, like every other warning,
 /// so it stays out of anything being redirected.
-pub(crate) fn warn_uncounted(n: &Result<usize>, ctx: &out::Ctx, base: &str) {
-    if let Err(e) = n {
-        ctx.warn(&format!(
-            "could not count this branch against {base} — {e:#}"
-        ));
+pub(crate) fn warn_uncounted(held: &Settling, ctx: &out::Ctx, base: &str) {
+    match held {
+        // Only when the count itself is missing. A landing omh could not
+        // settle is not a count it could not take, and warning about it here
+        // — where nothing was asked about landings — taught people to ignore
+        // the line.
+        Settling::Settled(Holding::Unsettled { commits: None, why }) => ctx.warn(&format!(
+            "could not count this branch against {base} — {why}"
+        )),
+        // git says there is no `refs/heads/omh/<id>`, which is also what a
+        // corrupt ref file says. It used to reach every field as a silent
+        // `null` — a commit reported as done with no tally and no warning,
+        // over a branch omh never found.
+        Settling::Settled(Holding::NoBranch) => {
+            ctx.warn("omh found no branch to count this against")
+        }
+        _ => {}
+    }
+}
+
+/// What omh counted, for the `--json` field that has always carried it.
+///
+/// `Unsettled` keeps whatever count it did take: only the *landing* is unknown
+/// when the branch was counted and the search was what failed, and `null` there
+/// would say omh could not count a branch it counted.
+pub(crate) fn counted(held: &Settling) -> Option<usize> {
+    match held {
+        Settling::NeedsPatchProof { commits } => Some(*commits),
+        Settling::Settled(Holding::NoBranch) => None,
+        Settling::Settled(Holding::Nothing) => Some(0),
+        Settling::Settled(Holding::Landed { commits, .. })
+        | Settling::Settled(Holding::Unreviewed { commits }) => Some(*commits),
+        Settling::Settled(Holding::Unsettled { commits, .. }) => *commits,
+    }
+}
+
+/// The commit this branch's work landed as, for `--json`.
+pub(crate) fn landed_at(held: &Settling) -> Option<String> {
+    match held {
+        Settling::Settled(Holding::Landed { by, .. }) => Some(by.at().to_string()),
+        _ => None,
+    }
+}
+
+/// Why omh could not tell whether it landed, for `--json`.
+///
+/// The pair `running` / `running_unknown` sets the rule this follows: a reason
+/// that reaches only `ctx.warn` is a reason `--json` never sees, and `--json`
+/// is the surface a script reads before deleting anything.
+pub(crate) fn landed_unknown(held: &Settling) -> Option<String> {
+    match held {
+        Settling::Settled(Holding::Unsettled { why, .. }) => Some(why.clone()),
+        // **Not a failure to answer.** `commit` never asks the expensive
+        // question, and a reason here would read as one omh tried and could
+        // not settle — the same collapse in the other direction.
+        _ => None,
     }
 }
 
@@ -1247,13 +1303,27 @@ pub(crate) fn warn_uncounted(n: &Result<usize>, ctx: &out::Ctx, base: &str) {
 /// precisely because a base that does not resolve is a question with no answer,
 /// and *"(0 commits on the branch)"* is the wrong one. The sentence in front of
 /// this reports what omh just did, which is true either way.
-pub(crate) fn branch_tally(n: &Result<usize>) -> String {
-    match n {
-        Ok(n) => format!(
-            " ({n} {} on the branch)",
-            if *n == 1 { "commit" } else { "commits" }
+pub(crate) fn branch_tally(held: &Settling) -> String {
+    let plural = |n: &usize| if *n == 1 { "commit" } else { "commits" };
+    match held {
+        Settling::NeedsPatchProof { commits }
+        | Settling::Settled(Holding::Unreviewed { commits })
+        | Settling::Settled(Holding::Unsettled {
+            commits: Some(commits),
+            ..
+        }) => format!(" ({commits} {} on the branch)", plural(commits)),
+        Settling::Settled(Holding::Nothing) => " (0 commits on the branch)".to_string(),
+        // Vanishingly rare here — `commit` has just moved both the tip tree and
+        // the branch's whole patch, so nothing on trunk matches either any
+        // more. It is spelled out because the alternative is an arm that says
+        // *on the branch* about work that is also somewhere else.
+        Settling::Settled(Holding::Landed { commits, by }) => format!(
+            " ({commits} {} on the branch, already on trunk as {})",
+            plural(commits),
+            crate::report::short(by.at())
         ),
-        Err(_) => String::new(),
+        Settling::Settled(Holding::Unsettled { commits: None, .. })
+        | Settling::Settled(Holding::NoBranch) => String::new(),
     }
 }
 
