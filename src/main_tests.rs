@@ -7189,3 +7189,102 @@ fn a_run_reached_through_a_symlink_is_read_like_any_other() {
          {found:?}"
     );
 }
+
+/// A directory omh could not list is not an empty catalogue.
+///
+/// `Adapter::load_dir` and `Editor::load_dir` both opened with
+/// `let Ok(entries) = read_dir(dir) else { return Ok(Vec::new()) }`, which
+/// spells "nothing is installed" and "omh could not look" the same way. The
+/// answer reaches `omh inspect`'s listings and the `available:` line omh prints
+/// when it does not recognise a word — so on a checkout where `~/.omh/editors`
+/// had become unreadable, omh would say an editor it ships is unknown rather
+/// than that it could not check.
+///
+/// `NotFound` stays empty, and that is not a nicety: a catalogue with no
+/// editors in it yet has no `editors/` directory, and erroring there would
+/// refuse every command on a fresh install.
+#[cfg(unix)]
+#[test]
+fn a_catalogue_omh_could_not_list_is_not_an_empty_one() {
+    // root reads through `0o000`, so the chmod half would prove nothing.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads through an unreadable directory");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+
+    // Absent is empty, for both.
+    let gone = dir.path().join("not-here");
+    assert!(
+        crate::adapter::Adapter::load_dir(&gone).unwrap().is_empty(),
+        "a catalogue that does not exist yet is empty, not an error"
+    );
+    assert!(
+        crate::editor::Editor::load_dir(&gone).unwrap().is_empty(),
+        "a catalogue that does not exist yet is empty, not an error"
+    );
+
+    // Present and unreadable is neither.
+    for kind in ["adapters", "editors"] {
+        let at = dir.path().join(kind);
+        std::fs::create_dir_all(&at).unwrap();
+        let _restore = Restore::unreadable(&at).unwrap();
+        let said = if kind == "adapters" {
+            crate::adapter::Adapter::load_dir(&at).map(|v| v.len())
+        } else {
+            crate::editor::Editor::load_dir(&at).map(|v| v.len())
+        };
+        let err = said.expect_err(
+            "an unreadable catalogue answered with a list, and every caller \
+             reads that list as what is installed",
+        );
+        assert!(
+            format!("{err:#}").contains(kind),
+            "the refusal has to name the directory omh could not read: {err:#}"
+        );
+    }
+}
+
+/// The next session id is not `s01` because omh could not count.
+///
+/// `next_id` read the worktrees directory and answered `0` for *any* failure,
+/// so an unreadable one produced `s01` — an id a live session may already hold.
+/// `Session::ensure` returns `Ok(())` for a worktree that exists, so a launch
+/// asking for a fresh session would have joined the existing one instead of
+/// making one.
+///
+/// The same `NotFound`-is-not-a-failure split as the catalogues: a checkout
+/// that has never made a session has no worktrees directory, and `s01` is the
+/// right answer there.
+#[cfg(unix)]
+#[test]
+fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads through an unreadable directory");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().join("worktrees");
+
+    assert_eq!(
+        crate::session::next_id(&dir.path().join("never-made-one")).unwrap(),
+        "s01",
+        "a checkout with no sessions yet starts at s01"
+    );
+
+    std::fs::create_dir_all(wt.join("s01")).unwrap();
+    std::fs::create_dir_all(wt.join("s02")).unwrap();
+    assert_eq!(
+        crate::session::next_id(&wt).unwrap(),
+        "s03",
+        "the highest id plus one, when omh can see them"
+    );
+
+    let _restore = Restore::unreadable(&wt).unwrap();
+    let err = crate::session::next_id(&wt)
+        .expect_err("an unreadable worktrees directory answered with an id a live session holds");
+    assert!(
+        format!("{err:#}").contains("worktrees"),
+        "the refusal has to name what omh could not read: {err:#}"
+    );
+}

@@ -1438,9 +1438,9 @@ pub fn default_branch(repo: &Path) -> String {
 /// Resolve which session to use. Creating a fresh one on every launch would
 /// defeat persistence entirely — you would never reattach to the agent you left
 /// running — so a new session is something you ask for.
-pub fn pick(worktrees_dir: &Path, start: Start) -> String {
+pub fn pick(worktrees_dir: &Path, start: Start) -> Result<String> {
     match start {
-        Start::Named(id) => id.to_string(),
+        Start::Named(id) => Ok(id.to_string()),
         Start::Fresh => next_id(worktrees_dir),
     }
 }
@@ -1558,23 +1558,42 @@ pub enum Start<'a> {
 }
 
 /// Human-readable, monotonic session ids: `s01`, `s02`, ...
-pub fn next_id(worktrees_dir: &Path) -> String {
-    let used = std::fs::read_dir(worktrees_dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .strip_prefix('s')?
-                        .parse::<u32>()
-                        .ok()
-                })
-                .max()
-                .unwrap_or(0)
-        })
-        .unwrap_or(0);
-    format!("s{:02}", used + 1)
+///
+/// **Absent is zero; unreadable is an error.** This answered `0` for every
+/// failure alike, so a worktrees directory omh could not list produced `s01` —
+/// an id a live session may already hold. `Session::ensure` returns `Ok(())`
+/// for a worktree that already exists, so a launch asking for a *fresh*
+/// session would have silently joined the one that was there. The same split
+/// `owning_checkout` makes about the same directory, for the same reason.
+///
+/// `NotFound` stays zero: a checkout that has never made a session has no
+/// worktrees directory, and `s01` is the right answer there.
+pub fn next_id(worktrees_dir: &Path) -> Result<String> {
+    let entries = match std::fs::read_dir(worktrees_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok("s01".to_string());
+        }
+        Err(e) => {
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("reading {}", worktrees_dir.display()))
+        }
+    };
+    let mut used = 0;
+    for entry in entries {
+        // Not `.flatten()`: an entry dropped there lowers the maximum, and the
+        // id that comes back is then one another session is already using.
+        let entry = entry.with_context(|| format!("reading {}", worktrees_dir.display()))?;
+        if let Some(n) = entry
+            .file_name()
+            .to_string_lossy()
+            .strip_prefix('s')
+            .and_then(|rest| rest.parse::<u32>().ok())
+        {
+            used = used.max(n);
+        }
+    }
+    Ok(format!("s{:02}", used + 1))
 }
 
 pub fn list(worktrees_dir: &Path) -> Vec<String> {
@@ -2222,7 +2241,7 @@ mod tests {
         s.remove(&root, "main", &shadows).unwrap();
 
         // the id comes back around
-        assert_eq!(next_id(&dir.path().join("wt")), "s01");
+        assert_eq!(next_id(&dir.path().join("wt")).unwrap(), "s01");
         let reborn = Session::new(&dir.path().join("wt"), "s01".into());
         reborn.ensure(&root, "main").unwrap();
         std::fs::write(reborn.worktree.join("different.rs"), "fn new() {}").unwrap();
@@ -4203,10 +4222,10 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let wt = d.path().join("wt");
         std::fs::create_dir_all(&wt).unwrap();
-        assert_eq!(next_id(&wt), "s01");
+        assert_eq!(next_id(&wt).unwrap(), "s01");
         std::fs::create_dir_all(wt.join("s01")).unwrap();
         std::fs::create_dir_all(wt.join("s02")).unwrap();
-        assert_eq!(next_id(&wt), "s03");
+        assert_eq!(next_id(&wt).unwrap(), "s03");
         assert_eq!(list(&wt), ["s01", "s02"]);
     }
 
@@ -4682,7 +4701,7 @@ mod tests {
     #[test]
     fn a_new_session_is_something_you_ask_for() {
         let (_d, wt) = worktrees(&["s01", "s02"]);
-        assert_eq!(pick(&wt, Start::Fresh), "s03");
+        assert_eq!(pick(&wt, Start::Fresh).unwrap(), "s03");
     }
 
     /// What was recorded reads back; what was not is not invented; and what
@@ -4751,7 +4770,7 @@ mod tests {
     #[test]
     fn an_explicit_id_always_wins() {
         let (_d, wt) = worktrees(&["s01", "s02"]);
-        assert_eq!(pick(&wt, Start::Named("s01")), "s01");
+        assert_eq!(pick(&wt, Start::Named("s01")).unwrap(), "s01");
     }
 
     /// Regression: git can lose a worktree's registration while the directory
