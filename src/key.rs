@@ -207,7 +207,28 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
                 None
             }
         }
-        Shape::Text | Shape::Paths | Shape::Duration => None,
+        Shape::Duration => {
+            // Asked of the reader, never of a second pattern written here: a
+            // quarrel that disagreed with `parse_duration` would either pass a
+            // value the launch goes on to ignore, or complain about one it
+            // reads perfectly well. There is one definition of "a duration omh
+            // can read" and this is a call to it.
+            //
+            // That also covers the value that is not a typo at all — digits
+            // that fit `u64` while their seconds do not. `94368760191893771d`
+            // is a plain enough "never reap this", and before `parse_duration`
+            // checked its multiply it meant 128 seconds.
+            match crate::idle::parse_duration(value) {
+                Some(_) => None,
+                None => Some(format!(
+                    "`{}` was given `{}`, which is not a duration omh can read \
+                     — it takes `90s`, `30m`, `2h`, `1d`, or bare seconds",
+                    key.name,
+                    value.trim().trim_matches('"')
+                )),
+            }
+        }
+        Shape::Text | Shape::Paths => None,
     }
 }
 

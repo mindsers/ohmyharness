@@ -835,9 +835,23 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Back
 }
 
 /// Real availability check, for the non-test path.
+///
+/// **The name is an argument, never part of the line.** This was
+/// `format!("command -v {program}")`, and two callers hand it a field out of a
+/// TOML under `~/.omh` — `installed(&ed.bin)` from an editor file, and adapter
+/// names through `detect::preferred_harness` — so a `;` in one of them was a
+/// second command, running on the host, with the first one's exit status
+/// deciding the answer. The runtime caller was never exposed: `build` checks
+/// the preference against `NAMES` before `available` runs.
+///
+/// Still `sh`, and still `command -v`: it is POSIX, it is a builtin so it needs
+/// nothing installed to answer, and it resolves builtins and functions as well
+/// as files on `PATH` — which `doctor`'s guest-side probe relies on and a walk
+/// of `PATH` would not reproduce. `sh -c <script> <argv0> <arg>` is the POSIX
+/// spelling that keeps the word a word.
 pub fn installed(program: &str) -> bool {
     std::process::Command::new("sh")
-        .args(["-c", &format!("command -v {program}")])
+        .args(["-c", "command -v \"$1\"", "sh", program])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
@@ -968,6 +982,51 @@ mod tests {
     use super::*;
     use crate::container::Mount;
     use std::path::PathBuf;
+
+    /// A program name is a word `command -v` is asked about, never a line the
+    /// shell gets to read.
+    ///
+    /// `installed` interpolated its argument into `sh -c "command -v {program}"`.
+    /// The runtime caller is safe by ordering — `build(preference)` checks the
+    /// name against `NAMES` before `available` is reached — but two other
+    /// callers are not: `runtime::installed(&ed.bin)` takes the `bin` field of
+    /// an editor TOML, and `detect::preferred_harness` takes adapter names.
+    /// Those are files under `~/.omh`, so this is the same trust boundary as
+    /// the harness name that could name a file outside the catalogue, and it
+    /// is the boundary that chose which file.
+    ///
+    /// Asserted twice over, because either half alone is satisfiable by an
+    /// accident: the answer must be "no", and nothing may have run.
+    #[test]
+    fn a_program_name_is_not_a_shell_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let ran = dir.path().join("it-ran");
+        let injected = format!(
+            "definitely-not-a-program; touch {}",
+            ran.to_str().expect("the temp path is utf-8")
+        );
+
+        assert!(
+            !installed(&injected),
+            "`{injected}` is not an installed program — the `touch` succeeding \
+             made the whole line's exit status zero"
+        );
+        assert!(
+            !ran.exists(),
+            "the name reached a shell as a line to run: {}",
+            ran.display()
+        );
+
+        // And it still answers the question. Without this, `installed` wired to
+        // return `false` unconditionally passes everything above — which is the
+        // shape that would take every runtime, editor and harness probe down at
+        // once, silently, and report every one of them as not installed.
+        assert!(
+            installed("sh"),
+            "`sh` is the program running this test, so a probe that cannot find \
+             it is answering nothing at all"
+        );
+    }
 
     fn plan_with(mounts: Vec<Mount>) -> Plan {
         Plan {

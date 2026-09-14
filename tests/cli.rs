@@ -11276,3 +11276,53 @@ fn a_dry_run_launch_writes_nothing() {
          case this test can learn from"
     );
 }
+
+/// A duration omh cannot read is quarrelled with when it is written, not only
+/// when it is next launched.
+///
+/// `Shape::Duration` had no validator at all, so `idle_timeout` accepted any
+/// string. The value then sat in a layer until the next launch, where
+/// `reap_idle` said "ignoring idle_timeout" on stderr in the middle of a
+/// session starting up — the one moment nobody is reading, and minutes or days
+/// after the typo was made.
+///
+/// A warning rather than a refusal, which is the standing policy for this
+/// command and is written down where the warning is raised: a value a newer omh
+/// will accept must not be refused by this one. So the assertion is that omh
+/// *says something naming the key*, and that the write still happens.
+#[test]
+fn writing_an_unreadable_duration_says_so_at_the_time() {
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+
+    for bad in ["half an hour", "94368760191893771d"] {
+        let out = sb.omh(&["settings", "set", "idle_timeout", bad]);
+        assert!(
+            out.status.success(),
+            "`omh settings set idle_timeout {bad}` is warned about, not refused: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let said = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(
+            said.contains("idle_timeout"),
+            "`{bad}` was stored with nothing said, so the first anyone hears of \
+             it is a line printed while a session is starting: {said}"
+        );
+    }
+
+    // A duration omh *can* read is not quarrelled with — otherwise the check
+    // above would pass against a command that complains about everything.
+    let fine = sb.omh(&["settings", "set", "idle_timeout", "45m"]);
+    assert!(
+        fine.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fine.stderr)
+    );
+    assert!(
+        !String::from_utf8_lossy(&fine.stderr).contains("idle_timeout"),
+        "`45m` is a duration omh reads, and complaining about it would train \
+         people to ignore the line: {}",
+        String::from_utf8_lossy(&fine.stderr)
+    );
+}

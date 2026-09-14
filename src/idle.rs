@@ -36,6 +36,15 @@ pub fn touch(run_dir: &Path, session: &str) -> std::io::Result<()> {
 /// Returns `None` rather than erroring: this is read from a profile layer on
 /// every launch, and a typo in `policy.toml` must not stop you working. The
 /// caller says what it ignored.
+///
+/// **A value too large to be seconds is unreadable, not small.** The unit
+/// multiply was unchecked, so digits that fit `u64` but whose seconds do not
+/// wrapped — `94368760191893771d` came back as 128 seconds and the reaper
+/// stopped sessions two minutes after they were touched, which is the reverse
+/// of what that value asks for. Debug builds panicked on the same input, so the
+/// binary that silently inverted the setting was the one people run.
+/// `checked_mul` routes both onto the answer this function already has for a
+/// value it cannot read.
 pub fn parse_duration(raw: &str) -> Option<Duration> {
     let s = raw.trim().trim_matches('"');
     if s.is_empty() {
@@ -45,9 +54,9 @@ pub fn parse_duration(raw: &str) -> Option<Duration> {
     let n: u64 = digits.parse().ok()?;
     let secs = match unit.trim() {
         "" | "s" => n,
-        "m" => n * 60,
-        "h" => n * 3600,
-        "d" => n * 86_400,
+        "m" => n.checked_mul(60)?,
+        "h" => n.checked_mul(3600)?,
+        "d" => n.checked_mul(86_400)?,
         _ => return None,
     };
     (secs > 0).then(|| Duration::from_secs(secs))
@@ -180,6 +189,42 @@ mod tests {
     fn an_unparseable_duration_is_ignored_rather_than_fatal() {
         for bad in ["half an hour", "m30", "", "0", "0m", "30x", "-5m"] {
             assert_eq!(parse_duration(bad), None, "{bad} should not parse");
+        }
+    }
+
+    /// A duration too large to be seconds is unreadable, not small.
+    ///
+    /// The unit multiply was unchecked, so a value whose digits fit `u64` but
+    /// whose *seconds* do not wrapped. It is not a rounding error: the wrap is
+    /// mod 2^64 and lands wherever it lands, so `94368760191893771d` — about
+    /// 2.6e14 years, as plain a "never reap this" as anyone could write —
+    /// came back as **128 seconds**, and the reaper stopped idle sessions two
+    /// minutes after they were last touched. The opposite of the instruction.
+    ///
+    /// Debug builds panicked instead, which is the same defect wearing the
+    /// other face: overflow checks are on there and off in release, so the
+    /// binary people run is the one that silently inverts the setting.
+    ///
+    /// The value is arrived at rather than guessed: 86400 = 2^7 × 675, so
+    /// `n × 86400 ≡ 128 (mod 2^64)` has a solution whenever 675 is inverted
+    /// mod 2^57, and this is it. A "big number" chosen by eye wraps to
+    /// something still enormous and the test passes without testing anything.
+    #[test]
+    fn a_duration_that_cannot_be_seconds_is_unreadable_not_small() {
+        for huge in [
+            // wraps to exactly 128 seconds
+            "94368760191893771d",
+            // and the plainer shapes of the same mistake
+            "18446744073709551615d",
+            "999999999999999999h",
+            "999999999999999999m",
+        ] {
+            assert_eq!(
+                parse_duration(huge),
+                None,
+                "{huge} is not a duration omh can hold, and answering with a \
+                 small one inverts the setting"
+            );
         }
     }
 
