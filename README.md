@@ -13,7 +13,7 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.11.0`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.12.0`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -21,18 +21,27 @@ architecture is built for and not yet a thing anybody has done.
 
 What is verified is the loop below: a sandboxed session with your config
 already inside it, and a branch you can read before it touches your checkout.
-This release is about knowing what ran inside it. `omh sNN` shows
-[which hooks fired](docs/commands.md#omh-snn-shows-which-hooks-fired): every
-hook a launch rendered records one decision, read back against the list omh
-wrote on the host before the container started, so a hook that never fired is
-named rather than left out. Two opt-in
-[guards](docs/configuration.md#guards-and-their-bypass) refuse where the rest
-of the catalogue advises — `tdd-guard` blocks editing a go, python or node
-source file whose test has not moved since the last commit, `config-guard`
-blocks a session editing this repo's `.omh/`. `omh doctor` heads its host rows apart from its sandbox
-rows, and its leftovers row names each read it could not make instead of
-calling the machine clean. The `--force` and `--file` aliases 0.10 kept for one
-release are gone, refused with what replaced them.
+This release is about a deletion you can check, and a name that cannot be a
+path. [`omh sNN rm`](docs/commands.md#omh-snn-rm--and-what-it-refuses-to-take-with-it)
+drops a session branch whose work is already on trunk under another sha — a
+squash merge — and names the commit it landed as, because a deletion justified
+by *it is already on trunk* is only checkable if omh says where. A squash that
+resolved a conflict, a difference that is only whitespace, and a read omh could
+not take all keep the branch, which is the one direction this is allowed to be
+wrong in.
+
+A **harness name is a name, not a path.** `..` in the word every command that
+names a harness takes — or in the `.harness` marker a session leaves on disk —
+could name an adapter file outside the catalogue, and omh loaded it: its
+`install` became a `RUN` line in a host `docker build` and its `bin` became the
+sandbox's argv. The rule is held by the field rather than checked at the door,
+so the credential directory keyed on it is the same rule — and a launch now
+mounts the credentials of the adapter it *resolved* rather than of the word
+that found it. A `--dry-run` launch writes nothing, where it used to seed the
+credential store before the flag was read. And a read omh could not take is
+named rather than answered as though it had looked: an unreadable catalogue
+disowned an editor omh ships, an unreadable credential directory started the
+agent logged out and exited 0.
 
 [What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
 

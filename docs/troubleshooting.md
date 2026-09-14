@@ -10,7 +10,7 @@ host
   ✓  stacks detected     rust (from Cargo.toml)
   ✓  settings omh reads  every key set here is one omh reads
   ✓  leftovers           none — nothing orphaned on this machine
-  ✓  seeded by           version 0.11.0, the one running now
+  ✓  seeded by           version 0.12.0, the one running now
   ✓  disk                76.6 GB free on the filesystem holding /Users/you/.omh — …
   ✓  git on the host     git version 2.55.0 — takes a `--keep` selection; syncs
   ✓  declared config     resolves

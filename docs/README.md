@@ -3,16 +3,22 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.11.0`. This release is about knowing what ran inside a
-session. `omh sNN` reads back
-[which hooks fired](commands.md#omh-snn-shows-which-hooks-fired) against the
-list omh rendered for that launch, and names the ones that never did. Two
-opt-in [guards](configuration.md#guards-and-their-bypass) refuse an edit rather
-than advise around it. [`omh doctor`](troubleshooting.md#omh-doctor) heads its
-host rows apart from its sandbox rows, and says which reads it could not make
-rather than calling the machine clean.
+**Status: early.** `0.12.0`. This release is about a deletion you can check,
+and a name that cannot be a path.
+[`omh sNN rm`](commands.md#omh-snn-rm--and-what-it-refuses-to-take-with-it)
+drops a session branch whose work a squash merge already landed on trunk, and
+names the commit it landed as; anything short of that proof keeps the branch.
+A harness name is checked to be a name rather than a path, so `..` in the word
+a command takes — or in the marker a session left on disk — can no longer reach
+an adapter file outside the catalogue, and the check is held by the field the
+credential directory is keyed on rather than at the door. A `--dry-run` launch
+writes nothing, and a read omh could not take is named rather than answered as
+though it had looked — an unreadable catalogue used to disown an editor omh
+ships, an unreadable credential directory to start the agent logged out.
+[Which hooks fired](commands.md#omh-snn-shows-which-hooks-fired) and the opt-in
+[guards](configuration.md#guards-and-their-bypass) arrived in 0.11.0,
 [`omh upgrade`](commands.md#omh-upgrade) and the checks `omh sNN commit` runs
-before landing arrived in 0.10.0, the [silent failures](design/roadmap.md)
+before landing in 0.10.0, the [silent failures](design/roadmap.md)
 closed in 0.8.0, the [command surface](design/profile.md) landed in 0.7.0 and
 the [work loop](design/git.md) in 0.6.0.
 
