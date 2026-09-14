@@ -3096,11 +3096,27 @@ mod tests {
         );
 
         // Relative: readable from this directory, which is what made it silent.
+        //
+        // Reached from where the test process already is, rather than by moving
+        // into `dir`. `set_current_dir` is process-global: a shell another test
+        // spawns meanwhile inherits `dir`, and once `dir` is dropped it starts in
+        // a directory that no longer exists and says so on stderr (#102).
         let cwd = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
-        let (_d2, paths) = ca_fixture(Some("corp.pem"));
+        let relative: std::path::PathBuf = cwd
+            .components()
+            .skip(1)
+            .map(|_| std::path::Component::ParentDir)
+            .collect::<std::path::PathBuf>()
+            .join(at.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+        assert_eq!(
+            std::fs::read_to_string(&relative).unwrap(),
+            PEM,
+            "the relative path has to resolve from here, or the refusal below \
+             could be about an unreadable file instead"
+        );
+        let (_d2, paths) = ca_fixture(Some(&relative.display().to_string()));
         let got = ca_for(&paths);
-        std::env::set_current_dir(cwd).unwrap();
 
         let e = format!("{:#}", got.unwrap_err());
         assert!(
