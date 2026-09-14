@@ -255,6 +255,16 @@ pub enum Staging {
     Skip,
 }
 
+impl Staging {
+    /// One spelling for "may this write", so a guard cannot be added in the
+    /// other one. `cmd::session::run` mixed `if !dry_run` with
+    /// `if staging == Apply` for the same question, and the two writes that
+    /// escaped were added in the gap.
+    pub fn is_apply(&self) -> bool {
+        *self == Self::Apply
+    }
+}
+
 /// Launch options that are not part of the profile.
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -327,7 +337,7 @@ pub fn plan(
     opts: Options,
 ) -> Result<Plan> {
     let staging = opts.staging;
-    let stage = paths.staging(&session.id, &adapter.name);
+    let stage = paths.staging(&session.id, adapter.name.as_str());
     let opts = &opts;
     let mut mounts = Vec::new();
     let mut dropped = Vec::new();
@@ -779,7 +789,7 @@ pub fn plan(
         argv: crate::persist::wrap(
             opts.persist,
             &session.id,
-            &adapter.name,
+            adapter.name.as_str(),
             std::iter::once(adapter.bin.clone())
                 .chain(harness_args.iter().cloned())
                 .collect(),

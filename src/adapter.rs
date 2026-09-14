@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Adapter {
-    pub name: String,
+    /// Checked as it is deserialized — see [`Name`]. This field keys
+    /// `paths.creds` and `paths.staging`, so an unchecked one is a path.
+    #[serde(deserialize_with = "crate::adapter::de_name")]
+    pub name: Name,
     /// Executable to invoke inside the container.
     pub bin: String,
     /// Command that installs `bin` into the image. May interpolate the pinned
@@ -329,8 +332,9 @@ pub enum Render {
 /// A harness or editor name, checked to be a name rather than a path.
 ///
 /// `Adapter::find` and `Editor::find` resolve a word by joining it into
-/// `<dir>/<word>.toml`, and the word arrives from `omh new <harness>`, from
-/// `omh auth <harness>`, and from a `.harness` marker on disk — which
+/// `<dir>/<word>.toml`, and the word arrives from every command that names a
+/// harness — `omh new`, `omh auth`, `omh doctor`, `omh eject`, `omh import` —
+/// and from a `.harness` marker on disk, which
 /// `session::harness_of` already distrusts on the grounds that "omh wrote this,
 /// but a file on disk is not omh's word". Unchecked, `..` in that word named a
 /// file outside the catalogue and omh loaded it: its `install` becomes a `RUN`
@@ -341,15 +345,26 @@ pub enum Render {
 /// Identifier shape, not merely "no separators". The predicate in
 /// `session::harness_of` rejects `/`, `\`, newlines and control characters,
 /// which is right for the marker it guards and **not** sufficient here: it
-/// admits `..`, `.` and the empty string, each of which still forms a path.
-/// Every adapter and editor omh ships already satisfies this rule.
+/// admits `..` and `.`, each of which still forms a path. (It does reject an
+/// empty name, five lines before the character check.) Every adapter and
+/// editor omh ships already satisfies this rule.
 ///
-/// This is the one place a name becomes a filename. It is not a barrier against
-/// some future `dir.join(name)` written elsewhere — only against the two that
-/// exist, which are the two that had the defect.
+/// **Held by the field, not only checked at the door.** The first version
+/// validated the typed word inside `Adapter::find` and left `Adapter.name`
+/// alone — and `auth::dir` then keyed the credential directory on that field,
+/// which swapped a checked string for an unchecked one. `paths.creds` and
+/// `paths.staging` both join it, and the first is mounted **writable** over
+/// the harness's config directory, so `name = "../../escaped"` put
+/// `create_dir_all` outside `~/.omh/creds`. Parsing on the way out of serde is
+/// what makes the two spellings one rule.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Name(String);
 
 impl Name {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     pub fn parse(name: &str) -> Result<Self> {
         anyhow::ensure!(!name.is_empty(), "a harness name cannot be empty");
         anyhow::ensure!(
@@ -362,9 +377,34 @@ impl Name {
     }
 }
 
+/// serde's hook for [`Name`], so a bad one is a parse error naming the file
+/// rather than a value that reaches a path join. `deserialize_with` rather
+/// than `try_from` on the struct: the container needs `deny_unknown_fields`,
+/// and `#[serde(try_from)]` on the outer type would take that off.
+pub fn de_name<'de, D>(d: D) -> std::result::Result<Name, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(d)?;
+    Name::parse(&raw).map_err(serde::de::Error::custom)
+}
+
+impl TryFrom<String> for Name {
+    type Error = anyhow::Error;
+    fn try_from(name: String) -> Result<Self> {
+        Self::parse(&name)
+    }
+}
+
 impl std::fmt::Display for Name {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for Name {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
     }
 }
 
@@ -446,7 +486,10 @@ impl Adapter {
         let name = &Name::parse(name)?;
         let path = dir.join(format!("{name}.toml"));
         if !path.exists() {
-            let known: Vec<_> = Self::load_dir(dir)?.into_iter().map(|a| a.name).collect();
+            let known: Vec<_> = Self::load_dir(dir)?
+                .into_iter()
+                .map(|a| a.name.to_string())
+                .collect();
             anyhow::bail!(
                 "unknown harness `{name}`\nknown: {}\nadd one by dropping {}",
                 if known.is_empty() {

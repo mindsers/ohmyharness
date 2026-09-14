@@ -119,7 +119,7 @@ pub(crate) fn auth_cmd(
             .collect();
     auth::login_outcome(status.success(), &unfilled)
         .map_err(|e| e.context(format!("run `omh auth {harness} --name {account}` again")))?;
-    let all = auth::accounts(&paths, &adapter);
+    let all = auth::accounts(&paths, &adapter)?;
     // What the files can and cannot settle. For a harness naming `token` files
     // an empty `unfilled` *is* the login; for one that keeps credentials
     // somewhere omh cannot stat it means only that nothing is obviously

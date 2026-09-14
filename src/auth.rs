@@ -10,6 +10,7 @@
 
 use crate::adapter::Adapter;
 use crate::profile::Paths;
+use anyhow::Context;
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -35,31 +36,60 @@ pub use crate::image::GUEST_HOME;
 /// `<word>.toml` by filename and nothing requires that filename to match the
 /// adapter's own `name`, so the two spellings are free to disagree — and this
 /// is the one place where they disagreeing is silent. `accounts` and
-/// `is_captured` read `creds/<adapter.name>/`; when this took a `&str` three
-/// of its four callers handed it the typed word instead, so a launch resolved
-/// an account out of one directory and mounted another. The report named the
+/// `is_captured` read `creds/<adapter.name>/`; when this took a `&str`, every
+/// caller outside this module handed it the typed word bar one, so a launch
+/// resolved an account out of one directory and mounted another. The report named the
 /// account, the agent started logged out, and the token it went on to obtain
 /// was written where `omh auth` does not look.
 ///
 /// Taking the `Adapter` is the whole fix: there is no longer a second string
 /// to pass, so the two halves cannot be keyed differently.
 pub fn dir(paths: &Paths, adapter: &Adapter, account: &str) -> PathBuf {
-    paths.creds(&adapter.name).join(account)
+    paths.creds(adapter.name.as_str()).join(account)
 }
 
 /// Accounts captured for a harness, in name order.
-pub fn accounts(paths: &Paths, adapter: &Adapter) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(paths.creds(&adapter.name)) else {
-        return Vec::new();
+///
+/// **Absent is none; unreadable is an error.** This opened with
+/// `let Ok(entries) = read_dir(..) else { return Vec::new() }` over a
+/// `.flatten()`, so a `creds/<harness>/` omh could not read answered "no
+/// accounts" — `resolve_for_launch` then returned `Ok(None)`, the launch
+/// mounted no credentials and exited 0, and the agent started logged out with
+/// its next token written where `omh auth` does not look. That is the symptom
+/// [`dir`] above says it exists to end, reached by the other door.
+///
+/// The per-entry read matters on its own: one entry dropped silently is one
+/// account fewer, and [`resolve`] then finds a single candidate where there
+/// are two and picks an identity without asking — which is the guess its own
+/// doc forbids, defeated by the read that feeds it.
+pub fn accounts(paths: &Paths, adapter: &Adapter) -> Result<Vec<String>> {
+    let at = paths.creds(adapter.name.as_str());
+    let entries = match std::fs::read_dir(&at) {
+        Ok(entries) => entries,
+        // Nobody has run `omh auth` for this harness yet, which is an ordinary
+        // state and the one `resolve` already has words for.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(anyhow::Error::new(e)).with_context(|| format!("reading {}", at.display()))
+        }
     };
-    let mut out: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| is_captured(paths, adapter, name))
-        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading {}", at.display()))?;
+        // Not `Path::is_dir()`, which answers `false` for every error alike —
+        // the same stat-failure-is-evidence rule `owning_checkout` follows.
+        let meta = std::fs::metadata(entry.path())
+            .with_context(|| format!("examining {}", entry.path().display()))?;
+        if !meta.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_captured(paths, adapter, &name) {
+            out.push(name);
+        }
+    }
     out.sort();
-    out
+    Ok(out)
 }
 
 /// Captured means credentials are actually present. An empty directory left by
@@ -74,7 +104,7 @@ pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
 /// picking the wrong identity is worse than stopping.
 pub fn resolve(paths: &Paths, adapter: &Adapter, configured: Option<&str>) -> Result<String> {
     let harness = &adapter.name;
-    let available = accounts(paths, adapter);
+    let available = accounts(paths, adapter)?;
     if available.is_empty() {
         anyhow::bail!("no account for {harness} — run `omh auth {harness}` first");
     }
@@ -207,7 +237,7 @@ pub fn resolve_for_launch(
     adapter: &Adapter,
     configured: Option<&str>,
 ) -> Result<Option<String>> {
-    if configured.is_none() && accounts(paths, adapter).is_empty() {
+    if configured.is_none() && accounts(paths, adapter)?.is_empty() {
         return Ok(None);
     }
     resolve(paths, adapter, configured).map(Some)
@@ -478,7 +508,7 @@ mod tests {
     #[test]
     fn there_are_no_accounts_before_any_login() {
         let (_d, paths) = fixture();
-        assert!(accounts(&paths, &claude()).is_empty());
+        assert!(accounts(&paths, &claude()).unwrap().is_empty());
     }
 
     #[test]
@@ -486,14 +516,17 @@ mod tests {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
         capture(&paths, "claude", "personal");
-        assert_eq!(accounts(&paths, &claude()), vec!["personal", "work"]);
+        assert_eq!(
+            accounts(&paths, &claude()).unwrap(),
+            vec!["personal", "work"]
+        );
     }
 
     #[test]
     fn accounts_are_kept_apart_per_harness() {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
-        assert!(accounts(&paths, &opencode()).is_empty());
+        assert!(accounts(&paths, &opencode()).unwrap().is_empty());
     }
 
     /// Regression in spirit: an interrupted `omh auth` used to leave a directory
@@ -504,7 +537,7 @@ mod tests {
         std::fs::create_dir_all(dir(&paths, &claude(), "work")).unwrap();
         assert!(!is_captured(&paths, &claude(), "work"));
         assert!(
-            accounts(&paths, &claude()).is_empty(),
+            accounts(&paths, &claude()).unwrap().is_empty(),
             "and it is not listed"
         );
     }
@@ -993,7 +1026,10 @@ mod tests {
             !is_captured(&paths, &claude(), "work"),
             "and the account is not usable"
         );
-        assert!(accounts(&paths, &claude()).is_empty(), "nor listed");
+        assert!(
+            accounts(&paths, &claude()).unwrap().is_empty(),
+            "nor listed"
+        );
     }
 
     #[test]
@@ -1005,7 +1041,7 @@ mod tests {
 
         assert!(unfilled(&claude(), &account, "/home/agent").is_empty());
         assert!(is_captured(&paths, &claude(), "work"));
-        assert_eq!(accounts(&paths, &claude()), vec!["work"]);
+        assert_eq!(accounts(&paths, &claude()).unwrap(), vec!["work"]);
     }
 
     /// Every adapter has to name the file that proves a login; nothing else can

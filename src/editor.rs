@@ -12,7 +12,11 @@ use std::path::Path;
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Editor {
-    pub name: String,
+    /// Checked as it is deserialized, exactly as an adapter's is — see
+    /// [`crate::adapter::Name`]. It keys no path today; a rule that held for
+    /// one catalogue and not its twin is one nobody could rely on.
+    #[serde(deserialize_with = "crate::adapter::de_name")]
+    pub name: crate::adapter::Name,
     /// Executable on the **host** — an editor is not installed in the sandbox.
     pub bin: String,
     /// Arguments, with `$ALIAS` and `$URL` substituted.
@@ -89,7 +93,7 @@ mod tests {
         let names: Vec<_> = Editor::load_dir(Path::new(BUNDLED))
             .unwrap()
             .into_iter()
-            .map(|e| e.name)
+            .map(|e| e.name.to_string())
             .collect();
         assert!(names.contains(&"zed".to_string()), "got: {names:?}");
         assert!(names.contains(&"code".to_string()), "got: {names:?}");
@@ -132,6 +136,39 @@ mod tests {
     #[test]
     fn an_unknown_editor_is_simply_absent() {
         assert!(Editor::find(Path::new(BUNDLED), "mystery-ide").is_none());
+    }
+
+    /// A word that is not a name does not reach the filesystem.
+    ///
+    /// `find` joins its argument into `<dir>/<word>.toml`, so `../planted`
+    /// names a file outside the catalogue. The name check that stops it had no
+    /// guard: deleting the line left the whole suite green.
+    ///
+    /// **The target is planted first**, which is the whole construction: `find`
+    /// answers `None` both for "not a name" and for "no such file", so a test
+    /// against a word that resolves to nothing passes either way and proves
+    /// nothing. With the file there, `None` can only mean the word was refused.
+    #[test]
+    fn an_editor_name_is_not_a_path() {
+        let d = tempfile::tempdir().unwrap();
+        let editors = d.path().join("editors");
+        std::fs::create_dir_all(&editors).unwrap();
+        std::fs::write(
+            d.path().join("planted.toml"),
+            "name = \"planted\"\nbin = \"planted\"\nargs = []\n",
+        )
+        .unwrap();
+
+        // The planted file is real: loaded from its own directory it parses.
+        assert!(
+            Editor::find(d.path(), "planted").is_some(),
+            "the fixture has to be a readable editor, or the refusal below is \
+             indistinguishable from a broken file"
+        );
+        assert!(
+            Editor::find(&editors, "../planted").is_none(),
+            "a word with `..` in it reached a file outside the catalogue"
+        );
     }
 
     /// A stray key means a typo'd editor file that silently does the wrong

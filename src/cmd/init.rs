@@ -1001,7 +1001,7 @@ pub(crate) fn install_bundled_adapters(paths: &Paths, ctx: &out::Ctx) -> Result<
     install_bundled(&paths.adapters(), bundled::Shipped::Adapters, ctx)?;
     Ok(Adapter::load_dir(&paths.adapters())?
         .into_iter()
-        .map(|a| a.name)
+        .map(|a| a.name.to_string())
         .collect())
 }
 

@@ -684,19 +684,36 @@ pub(crate) fn unknown_tool(paths: &Paths, name: &str, original: anyhow::Error) -
     if adapter::Name::parse(name).is_err() {
         return original;
     }
-    let harnesses: Vec<String> = Adapter::load_dir(&paths.adapters())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|a| a.name)
-        .collect();
+    // **Both catalogues, or neither.** `tool_hint` answers "what could you have
+    // meant", and it answers it from these two lists — so a list that is empty
+    // because omh could not read the directory produces a confident wrong
+    // sentence: `unknown harness \`zed\`` naming the harnesses, about an editor
+    // omh ships. Both reads were `.unwrap_or_default()`; the adapters one was
+    // saved by the `is_empty` fallback below and the editors one was not.
+    //
+    // Falling back to `original` rather than reporting here: `original` is
+    // `Adapter::find`'s error, which already names the catalogue and the file,
+    // and a second sentence about a second directory would bury it.
+    let harnesses: Vec<String> = match Adapter::load_dir(&paths.adapters()) {
+        Ok(found) => found.into_iter().map(|a| a.name.to_string()).collect(),
+        // `original` is `Adapter::find`'s own error about this same directory,
+        // which says it better than a second sentence would.
+        Err(_) => return original,
+    };
     if harnesses.is_empty() {
         return original;
     }
-    let editors: Vec<String> = editor::Editor::load_dir(&paths.editors())
-        .unwrap_or_default()
-        .into_iter()
-        .map(|e| e.name)
-        .collect();
+    let editors: Vec<String> = match editor::Editor::load_dir(&paths.editors()) {
+        Ok(found) => found.into_iter().map(|e| e.name.to_string()).collect(),
+        // Said, not swallowed. Nothing else on this path has looked at the
+        // editors directory, so falling through to `tool_hint` with an empty
+        // list is omh answering "not an editor either" having never opened it.
+        Err(e) => {
+            return e.context(format!(
+                "could not tell whether `{name}` is an editor omh knows"
+            ))
+        }
+    };
     anyhow::anyhow!("{}", tool_hint(name, &harnesses, &editors))
 }
 

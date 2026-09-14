@@ -11188,7 +11188,12 @@ fn a_harness_name_is_not_a_path() {
     std::fs::write(&outside, real.replacen("\"claude\"", "\"TRESPASSER\"", 1)).unwrap();
 
     // `~/.omh/adapters` -> `~`, so this is the file above.
-    for word in ["../../planted", "..", "."] {
+    // `""` is here because `Name::parse`'s empty-string clause had no guard:
+    // deleting it left the whole suite green, and the assertion below already
+    // carried the "cannot be empty" alternative that nothing reached. Without
+    // the clause, `""` passes `chars().all(..)` vacuously and `find` joins a
+    // bare `.toml`.
+    for word in ["../../planted", "..", ".", ""] {
         let out = sb.omh(&["new", word, "--dry-run"]);
         let said = format!(
             "{}{}",
@@ -11206,6 +11211,11 @@ fn a_harness_name_is_not_a_path() {
              name has to be refused as a name, before any file is opened: {said}"
         );
         assert!(
+            !said.contains("available:"),
+            "`omh new {word}` answered with the list of harnesses, which is an \
+             answer to a question this word never asked: {said}"
+        );
+        assert!(
             said.contains("not a harness name") || said.contains("cannot be empty"),
             "`omh new {word}` refused it as an unknown harness, which is the one \
              thing it is not — the word never named a harness at all: {said}"
@@ -11215,13 +11225,14 @@ fn a_harness_name_is_not_a_path() {
 
 /// A dry-run launch writes nothing — including into the credential store.
 ///
-/// `omh new` is the one writing command the omnibus `a_dry_run_writes_nothing`
-/// never covered: its cases are the settings and catalogue verbs, because a
-/// launch needs a container runtime and those do not. So the rule that command
-/// advertises — run as usual, withhold the writes — was never checked on the
-/// command with the most to write.
+/// `omh new` was the one writing command with no dry-run guard anywhere:
+/// `eject`, `import` and `upgrade` each have their own, and the omnibus
+/// `a_dry_run_writes_nothing` covers the settings and catalogue verbs, because
+/// a launch needs a container runtime and those do not. So the rule that
+/// command advertises — run as usual, withhold the writes — was never checked
+/// on the command with the most to write.
 ///
-/// `auth::prepare` ran three lines under the comment "A dry run must leave no
+/// `auth::prepare` ran a few lines under the comment "A dry run must leave no
 /// trace", before the flag was consulted at all, and laid down
 /// `creds/<harness>/<account>/…`: the mountpoint directories docker needs, and
 /// a placeholder file for each credential that is a file. On a machine where
@@ -11309,6 +11320,15 @@ fn writing_an_unreadable_duration_says_so_at_the_time() {
             "`{bad}` was stored with nothing said, so the first anyone hears of \
              it is a line printed while a session is starting: {said}"
         );
+        // Read back, because "warned, not refused" is a claim about the file
+        // and a zero exit status is not one. Withholding the write while
+        // warning would be the refusal this policy rejects, wearing a warning.
+        let stored = std::fs::read_to_string(sb.home.join(".omh/default.toml")).unwrap_or_default();
+        assert!(
+            stored.contains(bad),
+            "`{bad}` was warned about and not written — a warning is not a \
+             refusal: {stored:?}"
+        );
     }
 
     // A duration omh *can* read is not quarrelled with — otherwise the check
@@ -11324,5 +11344,114 @@ fn writing_an_unreadable_duration_says_so_at_the_time() {
         "`45m` is a duration omh reads, and complaining about it would train \
          people to ignore the line: {}",
         String::from_utf8_lossy(&fine.stderr)
+    );
+}
+
+/// A catalogue omh could not read is said so, in the line that lists what is
+/// available.
+///
+/// `Adapter::load_dir` and `Editor::load_dir` were taught to tell an absent
+/// catalogue from an unreadable one — and `unknown_tool` then called
+/// `.unwrap_or_default()` on both, putting the error straight back in the bin
+/// one call frame below the fix. The adapters half was saved by accident:
+/// `harnesses.is_empty()` returns the original error. The editors half had no
+/// counterpart, so `omh new zed` with an unreadable `~/.omh/editors` printed
+/// `unknown harness \`zed\`` and a list of harnesses — omh disowning an editor
+/// it ships, and pointing at the wrong catalogue, after the fix.
+#[test]
+fn an_unreadable_catalogue_is_named_rather_than_listed_as_empty() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads through an unreadable directory");
+        return;
+    }
+    let sb = sandbox();
+    sb.git_init();
+    sb.seed_base();
+    sb.seed_catalogue(&["adapters", "editors"]);
+
+    // Readable: `zed` is an editor, and omh says so rather than calling it a
+    // harness. Without this the assertion below could pass on any refusal.
+    let known = sb.omh(&["new", "zed"]);
+    let said = String::from_utf8_lossy(&known.stderr).to_string();
+    assert!(
+        said.contains("editor"),
+        "`zed` is an editor omh ships, and the hint says so: {said}"
+    );
+
+    let editors = sb.home.join(".omh/editors");
+    let was = std::fs::metadata(&editors).unwrap().permissions();
+    std::fs::set_permissions(
+        &editors,
+        std::os::unix::fs::PermissionsExt::from_mode(0o000),
+    )
+    .unwrap();
+    let out = sb.omh(&["new", "zed"]);
+    std::fs::set_permissions(&editors, was).unwrap();
+
+    let said = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "`omh new zed` has to fail: {said}");
+    assert!(
+        said.contains("editors"),
+        "omh could not read the editor catalogue and had to say so rather than \
+         answer as though it had looked: {said}"
+    );
+}
+
+/// An unreadable credential directory stops the launch, rather than starting
+/// an agent with no login and saying nothing.
+///
+/// `auth::accounts` opened with `let Ok(entries) = read_dir(..) else { return
+/// Vec::new() }` and `.flatten()` over the entries — two of the shapes this
+/// project has already fixed twice elsewhere, over omh's own state, on the
+/// path the credential fix edited. With `creds/<harness>/` unreadable,
+/// `resolve_for_launch` answers `Ok(None)`, `run` mounts no credentials, and
+/// the launch exits 0: the agent starts logged out and whatever token it
+/// obtains is written where `omh auth` does not look — which is verbatim the
+/// symptom `auth::dir`'s own doc comment says it exists to end.
+///
+/// The `.flatten()` half is narrower and worse: one entry that fails to read
+/// silently drops an account, and `resolve` then sees a single candidate where
+/// there are two and picks an identity without asking — defeating "ambiguity
+/// is an error, never a guess" by way of the read that feeds it.
+#[test]
+fn an_unreadable_credential_directory_stops_the_launch() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads through an unreadable directory");
+        return;
+    }
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.account("claude", "work");
+    assert!(sb.omh(&["set", "account", "work"]).status.success());
+
+    // Readable: the launch resolves the account. Without this the assertion
+    // below passes against a launch that was broken for some other reason.
+    assert!(
+        sb.omh(&["new", "claude", "--dry-run"]).status.success(),
+        "the launch has to work when omh can read the account"
+    );
+
+    let creds = sb.home.join(".omh/creds/claude");
+    let was = std::fs::metadata(&creds).unwrap().permissions();
+    std::fs::set_permissions(&creds, std::os::unix::fs::PermissionsExt::from_mode(0o000)).unwrap();
+    let out = sb.omh(&["new", "claude", "--dry-run"]);
+    std::fs::set_permissions(&creds, was).unwrap();
+
+    let said = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "the launch went ahead with no credentials over a directory omh could \
+         not read: {said}"
+    );
+    assert!(
+        said.contains("creds") || said.contains("Permission denied"),
+        "the refusal has to name what omh could not read, or it reads as \
+         `omh auth` never having been run: {said}"
     );
 }

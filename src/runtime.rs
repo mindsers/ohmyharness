@@ -837,12 +837,12 @@ pub fn select(preference: &str, available: &dyn Fn(&str) -> bool) -> Result<Back
 /// Real availability check, for the non-test path.
 ///
 /// **The name is an argument, never part of the line.** This was
-/// `format!("command -v {program}")`, and two callers hand it a field out of a
-/// TOML under `~/.omh` — `installed(&ed.bin)` from an editor file, and adapter
-/// names through `detect::preferred_harness` — so a `;` in one of them was a
-/// second command, running on the host, with the first one's exit status
-/// deciding the answer. The runtime caller was never exposed: `build` checks
-/// the preference against `NAMES` before `available` runs.
+/// `format!("command -v {program}")`, and callers hand it a field out of a TOML
+/// under `~/.omh` — `installed(&ed.bin)` from an editor file, and adapter names
+/// through `detect::preferred_harness` — so a `;` in one of them was a second
+/// command, running on the host, with the first one's exit status deciding the
+/// answer. The runtime caller was never exposed: the `build` closure in
+/// `select` checks the preference against `NAMES` before `available` runs.
 ///
 /// Still `sh`, and still `command -v`: it is POSIX, it is a builtin so it needs
 /// nothing installed to answer, and it resolves builtins and functions as well

@@ -153,7 +153,7 @@ pub(crate) fn eject(
     }
 
     ctx.say(&report::Ejected {
-        harness: adapter.name.clone(),
+        harness: adapter.name.to_string(),
         to: to.display().to_string(),
         wrote: wrote
             .into_iter()

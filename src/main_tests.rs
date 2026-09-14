@@ -5314,13 +5314,13 @@ fn no_bundled_adapter_shares_a_name_with_an_editor() {
         Adapter::load_dir(std::path::Path::new(BUNDLED_ADAPTERS))
             .unwrap()
             .into_iter()
-            .map(|a| a.name)
+            .map(|a| a.name.to_string())
             .collect();
     let editors: std::collections::BTreeSet<String> =
         editor::Editor::load_dir(std::path::Path::new(BUNDLED_EDITORS))
             .unwrap()
             .into_iter()
-            .map(|e| e.name)
+            .map(|e| e.name.to_string())
             .collect();
     assert!(
         !harnesses.is_empty() && !editors.is_empty(),
@@ -7286,5 +7286,56 @@ fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
     assert!(
         format!("{err:#}").contains("worktrees"),
         "the refusal has to name what omh could not read: {err:#}"
+    );
+}
+
+/// An adapter's declared `name` is a name, checked where it is born.
+///
+/// `adapter::Name` guarded the word a user types and left the field alone —
+/// and then `auth::dir` was changed to key the credential directory on
+/// `adapter.name` instead of that word, which swapped a checked string for an
+/// unchecked one. `Adapter::load` validated the version pin and the checksum
+/// declaration and never looked at `name`.
+///
+/// What that reaches: `paths.creds(&adapter.name)` (mounted **writable** over
+/// the harness's config directory) and `paths.staging(&session.id,
+/// &adapter.name)`. So `name = "../../escaped"` in a file called anything at
+/// all put `omh auth`'s `create_dir_all` outside `~/.omh/creds` and bound the
+/// result into the sandbox. Measured against the branch before this test: the
+/// launch reached `no account for ../../escaped`.
+///
+/// Editors get the same rule for the same reason — `Editor.bin` is already
+/// spawned on the host, and the name keys nothing yet, but a rule that holds
+/// for one catalogue and not its twin is a rule nobody can rely on.
+#[test]
+fn a_declared_name_is_checked_where_it_is_born() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/claude.toml"),
+    )
+    .unwrap();
+
+    for bad in ["../../escaped", "..", ".", "a/b", ""] {
+        let at = dir.path().join("probe.toml");
+        std::fs::write(&at, real.replacen("\"claude\"", &format!("\"{bad}\""), 1)).unwrap();
+        let err = crate::adapter::Adapter::load(&at).expect_err(&format!(
+            "`name = {bad:?}` was accepted, and it is what builds the credential \
+             directory omh mounts over the harness's config"
+        ));
+        assert!(
+            format!("{err:#}").contains("probe.toml"),
+            "the refusal has to name the file that declared it: {err:#}"
+        );
+    }
+
+    // And a real one still loads, or the check above is satisfied by an
+    // adapter loader that refuses everything.
+    std::fs::write(dir.path().join("fine.toml"), &real).unwrap();
+    assert_eq!(
+        crate::adapter::Adapter::load(&dir.path().join("fine.toml"))
+            .unwrap()
+            .name
+            .as_str(),
+        "claude"
     );
 }

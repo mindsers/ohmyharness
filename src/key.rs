@@ -167,13 +167,18 @@ pub fn describes(name: &str) -> Option<&'static Key> {
 
 /// What is wrong with this value for this key, if omh can tell.
 ///
-/// `Choice` and `Path` are what is checkable here: `Path` because docker reads
-/// a relative `-v` source as a named volume, so the mistake is silent and its
-/// symptom is far away. `Text` and `Paths` are freeform, and a `Duration` omh
-/// cannot parse is
-/// already reported where it is read, deliberately — `idle::parse_duration`
-/// returns `None` rather than erroring so a typo in one layer cannot stop you
-/// working. `None` back from here means *nothing to say*, never *this is fine*.
+/// `Choice`, `Path` and `Duration` are what is checkable here; `Text` and
+/// `Paths` are freeform. `Path` because docker reads a relative `-v` source as
+/// a named volume, so the mistake is silent and its symptom is far away.
+/// `Duration` because the alternative was hearing about it at the next launch,
+/// on stderr, while a session was starting.
+///
+/// Every one of these **warns**; none refuses. `idle::parse_duration` returns
+/// `None` rather than erroring so a typo in one layer cannot stop you working,
+/// and refusing the write here would undo that from the other end — see the
+/// rule `cmd::settings::set` states where it raises the warning.
+///
+/// `None` back from here means *nothing to say*, never *this is fine*.
 pub fn quarrel(key: &Key, value: &str) -> Option<String> {
     match key.shape {
         Shape::Choice(allowed) => {
