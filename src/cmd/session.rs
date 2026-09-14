@@ -1930,10 +1930,17 @@ pub(crate) fn run(
     // One parameter, not two. `Start` carries the id when there is one, so
     // there is no second argument that could disagree with it.
     start: session::Start<'_>,
-    dry_run: bool,
+    // **The decision, not the flag.** This was `dry_run: bool`, turned into a
+    // `Staging` only where `Options` was built — so every write before that
+    // point was guarded by a separate reading of the same bool, and the two
+    // that nobody wrote a reading for ran on a dry run: `auth::prepare`, three
+    // lines under the comment promising no trace, and the worktrees directory.
+    // Converted once, by the caller, there is no second reading to forget.
+    staging: container::Staging,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
+    let dry_run = staging == container::Staging::Skip;
     let name = &argv[0];
     let harness = name.clone();
 
@@ -1948,8 +1955,11 @@ pub(crate) fn run(
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
         .map(|a| auth::dir(&paths, &adapter, &a));
     if let Some(account_dir) = &account {
-        // The mountpoints have to exist before docker binds over them.
-        auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+        // The mountpoints have to exist before docker binds over them — which
+        // is staging, and is why this is not a third reading of the flag.
+        if staging == container::Staging::Apply {
+            auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+        }
     }
 
     // Always the trunk, never wherever HEAD happens to be: a session started on
@@ -1988,11 +1998,7 @@ pub(crate) fn run(
 
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
-        staging: if dry_run {
-            container::Staging::Skip
-        } else {
-            container::Staging::Apply
-        },
+        staging,
         persist: crate::policy_value(&paths, "persistence")
             .as_deref()
             .unwrap_or("dtach")
@@ -2007,7 +2013,11 @@ pub(crate) fn run(
         resolves: sandbox.resolves.clone(),
     };
 
-    std::fs::create_dir_all(paths.worktrees())?;
+    // Not on a dry run: `next_id` answers `s01` for a directory that is not
+    // there, so nothing downstream needs it to exist in order to *plan*.
+    if staging == container::Staging::Apply {
+        std::fs::create_dir_all(paths.worktrees())?;
+    }
     if let session::Start::Named(explicit) = start {
         session::validate_id(explicit)?;
     }

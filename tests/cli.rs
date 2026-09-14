@@ -4894,6 +4894,30 @@ fn ready() -> Sandbox {
     sb
 }
 
+/// The paths whose presence or content differs between two fingerprints.
+///
+/// `assert_eq!` on the fingerprints themselves is correct and unreadable: it
+/// prints every file in the sandbox with its bytes as a decimal array, which
+/// buries the one path that moved under half a megabyte of the ones that did
+/// not. The assertion is the same; only the report is smaller.
+fn differs(before: &[(String, Vec<u8>)], after: &[(String, Vec<u8>)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for (path, bytes) in after {
+        match before.iter().find(|(p, _)| p == path) {
+            None => out.push(format!("created {path}")),
+            Some((_, was)) if was != bytes => out.push(format!("rewrote {path}")),
+            Some(_) => {}
+        }
+    }
+    for (path, _) in before {
+        if !after.iter().any(|(p, _)| p == path) {
+            out.push(format!("removed {path}"));
+        }
+    }
+    out.sort();
+    out
+}
+
 /// The same fingerprint, with the other sandbox's temporary directory swapped
 /// in — two sandboxes have different roots, and comparing the paths would
 /// differ for that reason alone.
@@ -4912,11 +4936,20 @@ fn fingerprint_at(sb: &Sandbox, like: &[(String, Vec<u8>)]) -> Vec<(String, Vec<
         .collect()
 }
 
-/// Every file below the sandbox's home and repo, with its bytes.
+/// Every file and directory below the sandbox's home and repo, files with their
+/// bytes.
 ///
 /// A fingerprint rather than a list of paths: `--dry-run` writing the *same*
 /// files with different contents is the failure this is looking for as much as
 /// creating new ones.
+///
+/// **Directories are recorded, not only walked.** They were only walked, and a
+/// dry run that created nothing but empty directories was therefore invisible
+/// to every test built on this — which is how `auth::prepare` came to run on a
+/// dry launch, laying down `creds/<harness>/<account>/…` before anything
+/// checked the flag. Its placeholder *files* would have been caught; the
+/// mountpoint directories beside them would not, and on a machine where the
+/// account already existed neither would.
 fn fingerprint(sb: &Sandbox) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     for root in [&sb.home, &sb.repo] {
@@ -4933,6 +4966,9 @@ fn fingerprint(sb: &Sandbox) -> Vec<(String, Vec<u8>)> {
                     continue;
                 }
                 if p.is_dir() {
+                    // The trailing slash keeps a directory distinct from a file
+                    // of the same name in the sorted comparison.
+                    out.push((format!("{}/", p.display()), Vec::new()));
                     stack.push(p);
                 } else {
                     out.push((
@@ -11175,4 +11211,68 @@ fn a_harness_name_is_not_a_path() {
              thing it is not — the word never named a harness at all: {said}"
         );
     }
+}
+
+/// A dry-run launch writes nothing — including into the credential store.
+///
+/// `omh new` is the one writing command the omnibus `a_dry_run_writes_nothing`
+/// never covered: its cases are the settings and catalogue verbs, because a
+/// launch needs a container runtime and those do not. So the rule that command
+/// advertises — run as usual, withhold the writes — was never checked on the
+/// command with the most to write.
+///
+/// `auth::prepare` ran three lines under the comment "A dry run must leave no
+/// trace", before the flag was consulted at all, and laid down
+/// `creds/<harness>/<account>/…`: the mountpoint directories docker needs, and
+/// a placeholder file for each credential that is a file. On a machine where
+/// the account already existed the placeholders were no-ops and the directories
+/// were all that was left, which is the half `fingerprint` could not see.
+///
+/// Asserted as the whole tree before and after, like its omnibus sibling, and
+/// against a **wet** run that does write — a dry half proves nothing without it.
+#[test]
+fn a_dry_run_launch_writes_nothing() {
+    let launchable = || {
+        let sb = sandbox();
+        sb.git_init();
+        sb.seed_base();
+        sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+        sb.account("claude", "work");
+        assert!(
+            sb.omh(&["set", "account", "work"]).status.success(),
+            "the launch has to resolve an account, or `auth::prepare` is never \
+             reached and this test proves nothing"
+        );
+        sb
+    };
+
+    let dry = launchable();
+    let _dry_log = dry.fake_docker();
+    let before = fingerprint(&dry);
+    let said = dry.omh(&["new", "claude", "--dry-run"]);
+    assert!(
+        said.status.success(),
+        "`omh new claude --dry-run` did not run: {}",
+        String::from_utf8_lossy(&said.stderr)
+    );
+    let changed = differs(&before, &fingerprint(&dry));
+    assert!(
+        changed.is_empty(),
+        "`omh new claude --dry-run` changed {} path(s):\n  {}",
+        changed.len(),
+        changed.join("\n  ")
+    );
+
+    // And the wet run does write, so the dry half is a withheld write rather
+    // than a command that never had one to make.
+    let wet = launchable();
+    let _wet_log = wet.fake_docker();
+    let before_wet = fingerprint(&wet);
+    let _ = wet.omh(&["new", "claude"]);
+    assert_ne!(
+        before_wet,
+        fingerprint(&wet),
+        "`omh new claude` writes nothing even without --dry-run, so it is not a \
+         case this test can learn from"
+    );
 }

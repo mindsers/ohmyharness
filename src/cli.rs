@@ -47,6 +47,24 @@ pub(crate) struct Cli {
 }
 
 impl Cli {
+    /// Whether this run may write, decided once.
+    ///
+    /// The launch path read `--dry-run` in four places and built a `Staging`
+    /// from it in one of them, which is three readings that could disagree —
+    /// and two did: `auth::prepare` and the worktrees directory both wrote on
+    /// a dry run, under a comment promising no trace. Converted here, there is
+    /// one value and nothing downstream is handed the flag to re-read.
+    ///
+    /// `--dry-run` stays a bool on `Cli` because that is what clap parses and
+    /// what every non-launch command still reads.
+    pub(crate) fn staging(&self) -> crate::container::Staging {
+        if self.dry_run {
+            crate::container::Staging::Skip
+        } else {
+            crate::container::Staging::Apply
+        }
+    }
+
     /// How this run reports, decided once.
     ///
     /// Resolved here and passed down rather than consulted where it is used: a

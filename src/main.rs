@@ -408,7 +408,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
                     &cwd,
                     &argv,
                     session::Start::Named(&session.id),
-                    cli.dry_run,
+                    cli.staging(),
                     ctx,
                 );
                 // Said only when it is true. The record is what omh knows and
@@ -656,7 +656,7 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
             // `last = true` means `args` holds only what followed one.
             let mut argv = vec![harness.clone()];
             argv.extend(args.iter().cloned());
-            cmd::session::run(&cwd, &argv, session::Start::Fresh, cli.dry_run, ctx)
+            cmd::session::run(&cwd, &argv, session::Start::Fresh, cli.staging(), ctx)
         }
     }
 }
