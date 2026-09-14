@@ -362,15 +362,33 @@ pub fn unfilled(
 /// and hand the agent the user's real credential store. `Path::join` with an absolute
 /// path discards the prefix entirely, which needs no traversal at all.
 pub fn validate_name(name: &str) -> Result<()> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
+    // **One string, checked once.** The emptiness and dot checks read
+    // `name.trim()` while the separator check read `name`, and [`dir`] joined
+    // the raw one — so `"work "` passed as though it were `"work"` and then
+    // named a directory `accounts` would list under a name nothing matches.
+    // Refused rather than trimmed: [`resolve`] decides by membership of that
+    // listing, so a name quietly rewritten at capture stops matching what the
+    // user types afterwards.
+    if name != name.trim() {
+        anyhow::bail!(
+            "an account name cannot begin or end with a space: `{name}` would \
+             name a directory that does not read as `{}`",
+            name.trim()
+        );
+    }
+    if name.is_empty() {
         anyhow::bail!("an account needs a name");
     }
-    if trimmed == "." || trimmed == ".." {
+    if name == "." || name == ".." {
         anyhow::bail!("`{name}` is not an account name");
     }
     if name.contains('/') || name.contains('\\') {
         anyhow::bail!("an account name is a single name, not a path: `{name}`");
+    }
+    // The value reaches the terminal in every message about this account, and
+    // `session::harness_of` records what an escape in one printed.
+    if name.chars().any(char::is_control) {
+        anyhow::bail!("an account name cannot hold control characters");
     }
     Ok(())
 }
@@ -972,6 +990,47 @@ mod tests {
     fn an_empty_or_dot_account_name_is_rejected() {
         for name in ["", ".", "   "] {
             assert!(validate_name(name).is_err(), "`{name:?}` must be rejected");
+        }
+    }
+
+    /// An account name is the name it prints.
+    ///
+    /// The checks split across two strings: `.`, `..` and emptiness were tested
+    /// against `name.trim()` while the separators were tested against `name` —
+    /// and `dir` then joined the **raw** one. So `"work "` and `"work"` both
+    /// passed and named two different directories, one of which no listing of
+    /// the other would ever match. That is the same "two spellings, one
+    /// meaning" split `auth::dir` was just changed to make unrepresentable for
+    /// harnesses, one argument along.
+    ///
+    /// Refused rather than trimmed, which is the choice `resolve` already makes
+    /// about accounts: it compares against the directory listing, so a name
+    /// silently rewritten at capture would stop matching what the user typed
+    /// afterwards. One string, checked once.
+    ///
+    /// Control characters go with it for the reason `session::harness_of`
+    /// gives: the value reaches the terminal in error messages, and a marker
+    /// carrying an ANSI escape has printed one here before.
+    #[test]
+    fn an_account_name_is_the_name_it_prints() {
+        for name in ["work ", " work", "work\n", "wo\u{7}rk", "work\t"] {
+            assert!(
+                validate_name(name).is_err(),
+                "`{name:?}` must be rejected — it names a directory that no \
+                 listing of the name it looks like would match"
+            );
+        }
+
+        // The invariant the rejections exist to hold: anything accepted is
+        // exactly what `dir` will join.
+        for name in ["work", "personal", "acme-corp", "user.name", "a_b"] {
+            validate_name(name).unwrap();
+            assert_eq!(
+                name,
+                name.trim(),
+                "an accepted name has to be its own trim, or `dir` joins a \
+                 different string from the one that was checked"
+            );
         }
     }
 
