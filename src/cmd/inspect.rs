@@ -64,7 +64,7 @@ pub(crate) fn graph(cwd: &std::path::Path, stop: bool, ctx: &out::Ctx) -> Result
 
         let names: Vec<String> = Adapter::load_dir(&paths.adapters())?
             .into_iter()
-            .map(|a| a.name)
+            .map(|a| a.name.to_string())
             .collect();
         let harness = detect::preferred_harness(&names, &|h| runtime::installed(h))
             .context("no adapters installed — run `omh init`")?;
@@ -319,7 +319,7 @@ pub(crate) fn doctor_cmd(
         None => {
             let names: Vec<String> = Adapter::load_dir(&paths.adapters())?
                 .into_iter()
-                .map(|a| a.name)
+                .map(|a| a.name.to_string())
                 .collect();
             match detect::preferred_harness(&names, &|h| runtime::installed(h)) {
                 Some(h) => h,
@@ -368,7 +368,7 @@ pub(crate) fn doctor_cmd(
         // flag this was discarding.
         let configured = crate::policy_value(&paths, "account");
         let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
-            .map(|a| auth::dir(&paths, &name, &a));
+            .map(|a| auth::dir(&paths, &adapter, &a));
 
         // Resolved once and used for both the checks and the plan below, so the
         // probe cannot check a session different from the one it launches.
@@ -736,16 +736,18 @@ pub(crate) fn info(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         catalogue,
         harnesses: Adapter::load_dir(&paths.adapters())?
             .iter()
-            .map(|a| report::Harness {
-                name: a.name.clone(),
-                accounts: auth::accounts(&paths, a),
+            .map(|a| {
+                Ok(report::Harness {
+                    name: a.name.to_string(),
+                    accounts: auth::accounts(&paths, a)?,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>>>()?,
         adapters_dir: paths.adapters().display().to_string(),
         editors: editor::Editor::load_dir(&paths.editors())?
             .iter()
             .map(|e| report::Editor {
-                name: e.name.clone(),
+                name: e.name.to_string(),
                 installed: runtime::installed(&e.bin),
             })
             .collect(),

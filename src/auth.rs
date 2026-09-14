@@ -10,6 +10,7 @@
 
 use crate::adapter::Adapter;
 use crate::profile::Paths;
+use anyhow::Context;
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -29,23 +30,66 @@ pub const DEFAULT_ACCOUNT: &str = "default";
 /// `image`, but there is exactly one definition.
 pub use crate::image::GUEST_HOME;
 
-pub fn dir(paths: &Paths, harness: &str, account: &str) -> PathBuf {
-    paths.creds(harness).join(account)
+/// Where one account's captured login lives.
+///
+/// **The adapter, not the word that found it.** `Adapter::find` resolves
+/// `<word>.toml` by filename and nothing requires that filename to match the
+/// adapter's own `name`, so the two spellings are free to disagree — and this
+/// is the one place where they disagreeing is silent. `accounts` and
+/// `is_captured` read `creds/<adapter.name>/`; when this took a `&str`, every
+/// caller outside this module handed it the typed word bar one, so a launch
+/// resolved an account out of one directory and mounted another. The report named the
+/// account, the agent started logged out, and the token it went on to obtain
+/// was written where `omh auth` does not look.
+///
+/// Taking the `Adapter` is the whole fix: there is no longer a second string
+/// to pass, so the two halves cannot be keyed differently.
+pub fn dir(paths: &Paths, adapter: &Adapter, account: &str) -> PathBuf {
+    paths.creds(adapter.name.as_str()).join(account)
 }
 
 /// Accounts captured for a harness, in name order.
-pub fn accounts(paths: &Paths, adapter: &Adapter) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(paths.creds(&adapter.name)) else {
-        return Vec::new();
+///
+/// **Absent is none; unreadable is an error.** This opened with
+/// `let Ok(entries) = read_dir(..) else { return Vec::new() }` over a
+/// `.flatten()`, so a `creds/<harness>/` omh could not read answered "no
+/// accounts" — `resolve_for_launch` then returned `Ok(None)`, the launch
+/// mounted no credentials and exited 0, and the agent started logged out with
+/// its next token written where `omh auth` does not look. That is the symptom
+/// [`dir`] above says it exists to end, reached by the other door.
+///
+/// The per-entry read matters on its own: one entry dropped silently is one
+/// account fewer, and [`resolve`] then finds a single candidate where there
+/// are two and picks an identity without asking — which is the guess its own
+/// doc forbids, defeated by the read that feeds it.
+pub fn accounts(paths: &Paths, adapter: &Adapter) -> Result<Vec<String>> {
+    let at = paths.creds(adapter.name.as_str());
+    let entries = match std::fs::read_dir(&at) {
+        Ok(entries) => entries,
+        // Nobody has run `omh auth` for this harness yet, which is an ordinary
+        // state and the one `resolve` already has words for.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(anyhow::Error::new(e)).with_context(|| format!("reading {}", at.display()))
+        }
     };
-    let mut out: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| is_captured(paths, adapter, name))
-        .collect();
+    let mut out: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("reading {}", at.display()))?;
+        // Not `Path::is_dir()`, which answers `false` for every error alike —
+        // the same stat-failure-is-evidence rule `owning_checkout` follows.
+        let meta = std::fs::metadata(entry.path())
+            .with_context(|| format!("examining {}", entry.path().display()))?;
+        if !meta.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if is_captured(paths, adapter, &name) {
+            out.push(name);
+        }
+    }
     out.sort();
-    out
+    Ok(out)
 }
 
 /// Captured means credentials are actually present. An empty directory left by
@@ -53,14 +97,14 @@ pub fn accounts(paths: &Paths, adapter: &Adapter) -> Vec<String> {
 pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
     // Defined in terms of `unfilled` so the two answers can never disagree —
     // they did, and `omh auth` failed while `omh info` listed the account.
-    unfilled(adapter, &dir(paths, &adapter.name, account), GUEST_HOME).is_empty()
+    unfilled(adapter, &dir(paths, adapter, account), GUEST_HOME).is_empty()
 }
 
 /// Which account to use. Ambiguity is an error, never a guess — silently
 /// picking the wrong identity is worse than stopping.
 pub fn resolve(paths: &Paths, adapter: &Adapter, configured: Option<&str>) -> Result<String> {
     let harness = &adapter.name;
-    let available = accounts(paths, adapter);
+    let available = accounts(paths, adapter)?;
     if available.is_empty() {
         anyhow::bail!("no account for {harness} — run `omh auth {harness}` first");
     }
@@ -193,7 +237,7 @@ pub fn resolve_for_launch(
     adapter: &Adapter,
     configured: Option<&str>,
 ) -> Result<Option<String>> {
-    if configured.is_none() && accounts(paths, adapter).is_empty() {
+    if configured.is_none() && accounts(paths, adapter)?.is_empty() {
         return Ok(None);
     }
     resolve(paths, adapter, configured).map(Some)
@@ -318,15 +362,33 @@ pub fn unfilled(
 /// and hand the agent the user's real credential store. `Path::join` with an absolute
 /// path discards the prefix entirely, which needs no traversal at all.
 pub fn validate_name(name: &str) -> Result<()> {
-    let trimmed = name.trim();
-    if trimmed.is_empty() {
+    // **One string, checked once.** The emptiness and dot checks read
+    // `name.trim()` while the separator check read `name`, and [`dir`] joined
+    // the raw one — so `"work "` passed as though it were `"work"` and then
+    // named a directory `accounts` would list under a name nothing matches.
+    // Refused rather than trimmed: [`resolve`] decides by membership of that
+    // listing, so a name quietly rewritten at capture stops matching what the
+    // user types afterwards.
+    if name != name.trim() {
+        anyhow::bail!(
+            "an account name cannot begin or end with a space: `{name}` would \
+             name a directory that does not read as `{}`",
+            name.trim()
+        );
+    }
+    if name.is_empty() {
         anyhow::bail!("an account needs a name");
     }
-    if trimmed == "." || trimmed == ".." {
+    if name == "." || name == ".." {
         anyhow::bail!("`{name}` is not an account name");
     }
     if name.contains('/') || name.contains('\\') {
         anyhow::bail!("an account name is a single name, not a path: `{name}`");
+    }
+    // The value reaches the terminal in every message about this account, and
+    // `session::harness_of` records what an escape in one printed.
+    if name.chars().any(char::is_control) {
+        anyhow::bail!("an account name cannot hold control characters");
     }
     Ok(())
 }
@@ -376,7 +438,7 @@ mod tests {
             opencode()
         };
         for token in &adapter.token {
-            let p = dir(paths, harness, account).join(token.trim_start_matches("$HOME/"));
+            let p = dir(paths, &adapter, account).join(token.trim_start_matches("$HOME/"));
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "{\"token\":\"x\"}").unwrap();
         }
@@ -420,7 +482,7 @@ mod tests {
     #[test]
     fn boot_noise_alone_does_not_decide_an_omp_login() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "omp", "personal");
+        let account = dir(&paths, &omp(), "personal");
         std::fs::create_dir_all(account.join(".omp/agent")).unwrap();
         // What omp writes just by starting: settings and telemetry, no token.
         std::fs::write(account.join(".omp/agent/agent.db"), "SQLite format 3\0…").unwrap();
@@ -464,7 +526,7 @@ mod tests {
     #[test]
     fn there_are_no_accounts_before_any_login() {
         let (_d, paths) = fixture();
-        assert!(accounts(&paths, &claude()).is_empty());
+        assert!(accounts(&paths, &claude()).unwrap().is_empty());
     }
 
     #[test]
@@ -472,14 +534,17 @@ mod tests {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
         capture(&paths, "claude", "personal");
-        assert_eq!(accounts(&paths, &claude()), vec!["personal", "work"]);
+        assert_eq!(
+            accounts(&paths, &claude()).unwrap(),
+            vec!["personal", "work"]
+        );
     }
 
     #[test]
     fn accounts_are_kept_apart_per_harness() {
         let (_d, paths) = fixture();
         capture(&paths, "claude", "work");
-        assert!(accounts(&paths, &opencode()).is_empty());
+        assert!(accounts(&paths, &opencode()).unwrap().is_empty());
     }
 
     /// Regression in spirit: an interrupted `omh auth` used to leave a directory
@@ -487,10 +552,10 @@ mod tests {
     #[test]
     fn an_empty_account_directory_is_not_captured() {
         let (_d, paths) = fixture();
-        std::fs::create_dir_all(dir(&paths, "claude", "work")).unwrap();
+        std::fs::create_dir_all(dir(&paths, &claude(), "work")).unwrap();
         assert!(!is_captured(&paths, &claude(), "work"));
         assert!(
-            accounts(&paths, &claude()).is_empty(),
+            accounts(&paths, &claude()).unwrap().is_empty(),
             "and it is not listed"
         );
     }
@@ -673,7 +738,7 @@ mod tests {
     #[test]
     fn a_parseable_placeholder_is_still_not_a_login() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
         assert!(
             !is_captured(&paths, &claude(), "work"),
@@ -684,7 +749,7 @@ mod tests {
     #[test]
     fn preparing_alone_does_not_count_as_captured() {
         let (_d, paths) = fixture();
-        prepare(&claude(), &dir(&paths, "claude", "work"), "/home/agent").unwrap();
+        prepare(&claude(), &dir(&paths, &claude(), "work"), "/home/agent").unwrap();
         assert!(
             !is_captured(&paths, &claude(), "work"),
             "empty placeholder files are not a login"
@@ -928,6 +993,47 @@ mod tests {
         }
     }
 
+    /// An account name is the name it prints.
+    ///
+    /// The checks split across two strings: `.`, `..` and emptiness were tested
+    /// against `name.trim()` while the separators were tested against `name` —
+    /// and `dir` then joined the **raw** one. So `"work "` and `"work"` both
+    /// passed and named two different directories, one of which no listing of
+    /// the other would ever match. That is the same "two spellings, one
+    /// meaning" split `auth::dir` was just changed to make unrepresentable for
+    /// harnesses, one argument along.
+    ///
+    /// Refused rather than trimmed, which is the choice `resolve` already makes
+    /// about accounts: it compares against the directory listing, so a name
+    /// silently rewritten at capture would stop matching what the user typed
+    /// afterwards. One string, checked once.
+    ///
+    /// Control characters go with it for the reason `session::harness_of`
+    /// gives: the value reaches the terminal in error messages, and a marker
+    /// carrying an ANSI escape has printed one here before.
+    #[test]
+    fn an_account_name_is_the_name_it_prints() {
+        for name in ["work ", " work", "work\n", "wo\u{7}rk", "work\t"] {
+            assert!(
+                validate_name(name).is_err(),
+                "`{name:?}` must be rejected — it names a directory that no \
+                 listing of the name it looks like would match"
+            );
+        }
+
+        // The invariant the rejections exist to hold: anything accepted is
+        // exactly what `dir` will join.
+        for name in ["work", "personal", "acme-corp", "user.name", "a_b"] {
+            validate_name(name).unwrap();
+            assert_eq!(
+                name,
+                name.trim(),
+                "an accepted name has to be its own trim, or `dir` joins a \
+                 different string from the one that was checked"
+            );
+        }
+    }
+
     // ── did the login happen ────────────────────────────────────────────────
 
     /// Regression: the container's exit status was discarded, so a docker
@@ -965,7 +1071,7 @@ mod tests {
     #[test]
     fn boot_noise_in_the_config_directory_is_not_a_login() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
         std::fs::write(account.join(".claude.json"), r#"{"userID":"abc"}"#).unwrap();
         std::fs::create_dir_all(account.join(".claude/statsig")).unwrap();
@@ -979,19 +1085,22 @@ mod tests {
             !is_captured(&paths, &claude(), "work"),
             "and the account is not usable"
         );
-        assert!(accounts(&paths, &claude()).is_empty(), "nor listed");
+        assert!(
+            accounts(&paths, &claude()).unwrap().is_empty(),
+            "nor listed"
+        );
     }
 
     #[test]
     fn a_written_token_is_a_login() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
         std::fs::write(account.join(".claude/.credentials.json"), r#"{"t":"x"}"#).unwrap();
 
         assert!(unfilled(&claude(), &account, "/home/agent").is_empty());
         assert!(is_captured(&paths, &claude(), "work"));
-        assert_eq!(accounts(&paths, &claude()), vec!["work"]);
+        assert_eq!(accounts(&paths, &claude()).unwrap(), vec!["work"]);
     }
 
     /// Every adapter has to name the file that proves a login; nothing else can
@@ -1013,7 +1122,7 @@ mod tests {
     #[test]
     fn captured_means_exactly_nothing_left_unfilled() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
 
         for stage in ["", r#"{"userID":"a"}"#] {
@@ -1034,7 +1143,7 @@ mod tests {
     #[test]
     fn an_unreadable_credential_is_not_mistaken_for_an_empty_one() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
         std::fs::write(
             account.join(".claude/.credentials.json"),

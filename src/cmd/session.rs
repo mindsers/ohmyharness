@@ -226,7 +226,7 @@ pub(crate) fn session_up(
             &name,
             &plan,
             session,
-            &adapter.name,
+            adapter.name.as_str(),
             &stamp_path,
             ctx,
         )? {
@@ -328,7 +328,7 @@ pub(crate) fn attach(
     let profile = Profile::resolve(&paths);
     let names: Vec<String> = Adapter::load_dir(&paths.adapters())?
         .into_iter()
-        .map(|a| a.name)
+        .map(|a| a.name.to_string())
         .collect();
 
     // The session, before anything is built for it. `attach` used to pick the
@@ -382,7 +382,7 @@ pub(crate) fn attach(
 
     let configured = crate::policy_value(&paths, "account");
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
-        .map(|a| auth::dir(&paths, &adapter.name, &a));
+        .map(|a| auth::dir(&paths, &adapter, &a));
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
@@ -478,7 +478,7 @@ pub(crate) fn attach(
 
     let editors: Vec<(String, String)> = editor::Editor::load_dir(&paths.editors())?
         .into_iter()
-        .map(|e| (e.name.clone(), e.command(&alias).join(" ")))
+        .map(|e| (e.name.to_string(), e.command(&alias).join(" ")))
         .collect();
 
     // Which editor, if any, actually got a window open. Everything else about
@@ -494,7 +494,7 @@ pub(crate) fn attach(
                 .status()
                 .map(|s| s.success());
             if matches!(ok, Ok(true)) {
-                Some(ed.name.clone())
+                Some(ed.name.to_string())
             } else {
                 // Remote launches fail for ordinary reasons — missing
                 // extension, handshake refused. Saying nothing leaves the user
@@ -1930,7 +1930,13 @@ pub(crate) fn run(
     // One parameter, not two. `Start` carries the id when there is one, so
     // there is no second argument that could disagree with it.
     start: session::Start<'_>,
-    dry_run: bool,
+    // **The decision, not the flag.** This was `dry_run: bool`, turned into a
+    // `Staging` only where `Options` was built — so every write before that
+    // point was guarded by a separate reading of the same bool, and the two
+    // that nobody wrote a reading for ran on a dry run: `auth::prepare`, three
+    // lines under the comment promising no trace, and the worktrees directory.
+    // Converted once, by the caller, there is no second reading to forget.
+    staging: container::Staging,
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
@@ -1941,15 +1947,17 @@ pub(crate) fn run(
         Adapter::find(&paths.adapters(), name).map_err(|e| crate::unknown_tool(&paths, name, e))?;
     let profile = Profile::resolve(&paths);
 
-    // A dry run must leave no trace: no branch, no worktree, no staged files.
     // Which identity this session runs as. Ambiguity is an error rather than a
     // guess: silently using the wrong account is expensive and invisible.
     let configured = crate::policy_value(&paths, "account");
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
-        .map(|a| auth::dir(&paths, name, &a));
+        .map(|a| auth::dir(&paths, &adapter, &a));
     if let Some(account_dir) = &account {
-        // The mountpoints have to exist before docker binds over them.
-        auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+        // The mountpoints have to exist before docker binds over them — which
+        // is staging, and is why this is not a third reading of the flag.
+        if staging.is_apply() {
+            auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
+        }
     }
 
     // Always the trunk, never wherever HEAD happens to be: a session started on
@@ -1974,7 +1982,10 @@ pub(crate) fn run(
     let backend = runtime::select(&crate::runtime_preference(&paths), &|p| {
         runtime::installed(p)
     })?;
-    if !dry_run {
+    // A write guard, so it is spelled like the other write guards. It was
+    // `if !dry_run`, reading a local derived from this same value — which is
+    // how a guard comes to be added in the spelling that has no guard.
+    if staging.is_apply() {
         sandbox.top_up(
             &paths,
             &backend,
@@ -1988,11 +1999,7 @@ pub(crate) fn run(
 
     let opts = container::Options {
         // A dry run must leave no trace: no branch, no worktree, no staged files.
-        staging: if dry_run {
-            container::Staging::Skip
-        } else {
-            container::Staging::Apply
-        },
+        staging,
         persist: crate::policy_value(&paths, "persistence")
             .as_deref()
             .unwrap_or("dtach")
@@ -2007,11 +2014,15 @@ pub(crate) fn run(
         resolves: sandbox.resolves.clone(),
     };
 
-    std::fs::create_dir_all(paths.worktrees())?;
+    // Not on a dry run: `next_id` answers `s01` for a directory that is not
+    // there, so nothing downstream needs it to exist in order to *plan*.
+    if staging.is_apply() {
+        std::fs::create_dir_all(paths.worktrees())?;
+    }
     if let session::Start::Named(explicit) = start {
         session::validate_id(explicit)?;
     }
-    let id = session::pick(&paths.worktrees(), start);
+    let id = session::pick(&paths.worktrees(), start)?;
     let session = Session::new(&paths.worktrees(), id);
     if opts.staging == container::Staging::Apply {
         session.ensure(&paths.repo, &base)?;
@@ -2045,7 +2056,10 @@ pub(crate) fn run(
         None => format!("{} on {}", adapter.name, session.label()),
     };
 
-    if dry_run {
+    // Not a write guard: the question here is *print the plan instead of
+    // launching*, which is the one thing `Staging::Skip` means that is not
+    // about writing.
+    if !staging.is_apply() {
         // What the agent is given, read off the plan's own mounts — so the
         // report cannot describe a launch other than the one that would happen.
         let mut reads: Vec<(String, String)> = Vec::new();

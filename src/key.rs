@@ -167,13 +167,18 @@ pub fn describes(name: &str) -> Option<&'static Key> {
 
 /// What is wrong with this value for this key, if omh can tell.
 ///
-/// `Choice` and `Path` are what is checkable here: `Path` because docker reads
-/// a relative `-v` source as a named volume, so the mistake is silent and its
-/// symptom is far away. `Text` and `Paths` are freeform, and a `Duration` omh
-/// cannot parse is
-/// already reported where it is read, deliberately — `idle::parse_duration`
-/// returns `None` rather than erroring so a typo in one layer cannot stop you
-/// working. `None` back from here means *nothing to say*, never *this is fine*.
+/// `Choice`, `Path` and `Duration` are what is checkable here; `Text` and
+/// `Paths` are freeform. `Path` because docker reads a relative `-v` source as
+/// a named volume, so the mistake is silent and its symptom is far away.
+/// `Duration` because the alternative was hearing about it at the next launch,
+/// on stderr, while a session was starting.
+///
+/// Every one of these **warns**; none refuses. `idle::parse_duration` returns
+/// `None` rather than erroring so a typo in one layer cannot stop you working,
+/// and refusing the write here would undo that from the other end — see the
+/// rule `cmd::settings::set` states where it raises the warning.
+///
+/// `None` back from here means *nothing to say*, never *this is fine*.
 pub fn quarrel(key: &Key, value: &str) -> Option<String> {
     match key.shape {
         Shape::Choice(allowed) => {
@@ -207,7 +212,28 @@ pub fn quarrel(key: &Key, value: &str) -> Option<String> {
                 None
             }
         }
-        Shape::Text | Shape::Paths | Shape::Duration => None,
+        Shape::Duration => {
+            // Asked of the reader, never of a second pattern written here: a
+            // quarrel that disagreed with `parse_duration` would either pass a
+            // value the launch goes on to ignore, or complain about one it
+            // reads perfectly well. There is one definition of "a duration omh
+            // can read" and this is a call to it.
+            //
+            // That also covers the value that is not a typo at all — digits
+            // that fit `u64` while their seconds do not. `94368760191893771d`
+            // is a plain enough "never reap this", and before `parse_duration`
+            // checked its multiply it meant 128 seconds.
+            match crate::idle::parse_duration(value) {
+                Some(_) => None,
+                None => Some(format!(
+                    "`{}` was given `{}`, which is not a duration omh can read \
+                     — it takes `90s`, `30m`, `2h`, `1d`, or bare seconds",
+                    key.name,
+                    value.trim().trim_matches('"')
+                )),
+            }
+        }
+        Shape::Text | Shape::Paths => None,
     }
 }
 

@@ -554,13 +554,18 @@ pub(crate) fn no_account_that_no_login_answers_to(
     name: &str,
     ctx: &out::Ctx,
 ) -> Result<()> {
-    let adapters = Adapter::load_dir(&paths.adapters()).unwrap_or_default();
+    // Not `.unwrap_or_default()`. The refusal below — "no captured login called
+    // `x`" — is a positive claim about `~/.omh/creds`, and with the catalogue
+    // swallowed it was made having opened nothing: an unreadable adapters
+    // directory, or one malformed adapter, told a user with the login captured
+    // to go and capture it.
+    let adapters = Adapter::load_dir(&paths.adapters())?;
     let mut has: Vec<String> = Vec::new();
     let mut all: Vec<String> = Vec::new();
     for adapter in &adapters {
-        for account in auth::accounts(paths, adapter) {
+        for account in auth::accounts(paths, adapter)? {
             if account == name {
-                has.push(adapter.name.clone());
+                has.push(adapter.name.to_string());
             }
             all.push(format!("{} ({})", account, adapter.name));
         }

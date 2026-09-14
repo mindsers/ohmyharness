@@ -787,9 +787,9 @@ impl Kind<'_> {
         let mut s = vec![("omh.kind".to_string(), self.name().to_string())];
         match self {
             Kind::Base => {}
-            Kind::Harness(a) => s.push(("omh.adapter".into(), a.name.clone())),
+            Kind::Harness(a) => s.push(("omh.adapter".into(), a.name.to_string())),
             Kind::Stack(a, repo) => {
-                s.push(("omh.adapter".into(), a.name.clone()));
+                s.push(("omh.adapter".into(), a.name.to_string()));
                 s.push(("omh.repo".into(), repo.to_string_lossy().into_owned()));
             }
         }

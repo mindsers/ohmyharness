@@ -5314,13 +5314,13 @@ fn no_bundled_adapter_shares_a_name_with_an_editor() {
         Adapter::load_dir(std::path::Path::new(BUNDLED_ADAPTERS))
             .unwrap()
             .into_iter()
-            .map(|a| a.name)
+            .map(|a| a.name.to_string())
             .collect();
     let editors: std::collections::BTreeSet<String> =
         editor::Editor::load_dir(std::path::Path::new(BUNDLED_EDITORS))
             .unwrap()
             .into_iter()
-            .map(|e| e.name)
+            .map(|e| e.name.to_string())
             .collect();
     assert!(
         !harnesses.is_empty() && !editors.is_empty(),
@@ -7187,5 +7187,155 @@ fn a_run_reached_through_a_symlink_is_read_like_any_other() {
         found.contains(&"s07".to_string()),
         "`session::list` would call this live, so the sweep must call it a run: \
          {found:?}"
+    );
+}
+
+/// A directory omh could not list is not an empty catalogue.
+///
+/// `Adapter::load_dir` and `Editor::load_dir` both opened with
+/// `let Ok(entries) = read_dir(dir) else { return Ok(Vec::new()) }`, which
+/// spells "nothing is installed" and "omh could not look" the same way. The
+/// answer reaches `omh inspect`'s listings and the `available:` line omh prints
+/// when it does not recognise a word — so on a checkout where `~/.omh/editors`
+/// had become unreadable, omh would say an editor it ships is unknown rather
+/// than that it could not check.
+///
+/// `NotFound` stays empty, and that is not a nicety: a catalogue with no
+/// editors in it yet has no `editors/` directory, and erroring there would
+/// refuse every command on a fresh install.
+#[cfg(unix)]
+#[test]
+fn a_catalogue_omh_could_not_list_is_not_an_empty_one() {
+    // root reads through `0o000`, so the chmod half would prove nothing.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads through an unreadable directory");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+
+    // Absent is empty, for both.
+    let gone = dir.path().join("not-here");
+    assert!(
+        crate::adapter::Adapter::load_dir(&gone).unwrap().is_empty(),
+        "a catalogue that does not exist yet is empty, not an error"
+    );
+    assert!(
+        crate::editor::Editor::load_dir(&gone).unwrap().is_empty(),
+        "a catalogue that does not exist yet is empty, not an error"
+    );
+
+    // Present and unreadable is neither.
+    for kind in ["adapters", "editors"] {
+        let at = dir.path().join(kind);
+        std::fs::create_dir_all(&at).unwrap();
+        let _restore = Restore::unreadable(&at).unwrap();
+        let said = if kind == "adapters" {
+            crate::adapter::Adapter::load_dir(&at).map(|v| v.len())
+        } else {
+            crate::editor::Editor::load_dir(&at).map(|v| v.len())
+        };
+        let err = said.expect_err(
+            "an unreadable catalogue answered with a list, and every caller \
+             reads that list as what is installed",
+        );
+        assert!(
+            format!("{err:#}").contains(kind),
+            "the refusal has to name the directory omh could not read: {err:#}"
+        );
+    }
+}
+
+/// The next session id is not `s01` because omh could not count.
+///
+/// `next_id` read the worktrees directory and answered `0` for *any* failure,
+/// so an unreadable one produced `s01` — an id a live session may already hold.
+/// `Session::ensure` returns `Ok(())` for a worktree that exists, so a launch
+/// asking for a fresh session would have joined the existing one instead of
+/// making one.
+///
+/// The same `NotFound`-is-not-a-failure split as the catalogues: a checkout
+/// that has never made a session has no worktrees directory, and `s01` is the
+/// right answer there.
+#[cfg(unix)]
+#[test]
+fn the_next_session_id_is_not_s01_because_omh_could_not_count() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads through an unreadable directory");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let wt = dir.path().join("worktrees");
+
+    assert_eq!(
+        crate::session::next_id(&dir.path().join("never-made-one")).unwrap(),
+        "s01",
+        "a checkout with no sessions yet starts at s01"
+    );
+
+    std::fs::create_dir_all(wt.join("s01")).unwrap();
+    std::fs::create_dir_all(wt.join("s02")).unwrap();
+    assert_eq!(
+        crate::session::next_id(&wt).unwrap(),
+        "s03",
+        "the highest id plus one, when omh can see them"
+    );
+
+    let _restore = Restore::unreadable(&wt).unwrap();
+    let err = crate::session::next_id(&wt)
+        .expect_err("an unreadable worktrees directory answered with an id a live session holds");
+    assert!(
+        format!("{err:#}").contains("worktrees"),
+        "the refusal has to name what omh could not read: {err:#}"
+    );
+}
+
+/// An adapter's declared `name` is a name, checked where it is born.
+///
+/// `adapter::Name` guarded the word a user types and left the field alone —
+/// and then `auth::dir` was changed to key the credential directory on
+/// `adapter.name` instead of that word, which swapped a checked string for an
+/// unchecked one. `Adapter::load` validated the version pin and the checksum
+/// declaration and never looked at `name`.
+///
+/// What that reaches: `paths.creds(&adapter.name)` (mounted **writable** over
+/// the harness's config directory) and `paths.staging(&session.id,
+/// &adapter.name)`. So `name = "../../escaped"` in a file called anything at
+/// all put `omh auth`'s `create_dir_all` outside `~/.omh/creds` and bound the
+/// result into the sandbox. Measured against the branch before this test: the
+/// launch reached `no account for ../../escaped`.
+///
+/// Editors get the same rule for the same reason — `Editor.bin` is already
+/// spawned on the host, and the name keys nothing yet, but a rule that holds
+/// for one catalogue and not its twin is a rule nobody can rely on.
+#[test]
+fn a_declared_name_is_checked_where_it_is_born() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("adapters/claude.toml"),
+    )
+    .unwrap();
+
+    for bad in ["../../escaped", "..", ".", "a/b", ""] {
+        let at = dir.path().join("probe.toml");
+        std::fs::write(&at, real.replacen("\"claude\"", &format!("\"{bad}\""), 1)).unwrap();
+        let err = crate::adapter::Adapter::load(&at).expect_err(&format!(
+            "`name = {bad:?}` was accepted, and it is what builds the credential \
+             directory omh mounts over the harness's config"
+        ));
+        assert!(
+            format!("{err:#}").contains("probe.toml"),
+            "the refusal has to name the file that declared it: {err:#}"
+        );
+    }
+
+    // And a real one still loads, or the check above is satisfied by an
+    // adapter loader that refuses everything.
+    std::fs::write(dir.path().join("fine.toml"), &real).unwrap();
+    assert_eq!(
+        crate::adapter::Adapter::load(&dir.path().join("fine.toml"))
+            .unwrap()
+            .name
+            .as_str(),
+        "claude"
     );
 }

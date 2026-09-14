@@ -47,6 +47,25 @@ pub(crate) struct Cli {
 }
 
 impl Cli {
+    /// Whether this run may write, decided once.
+    ///
+    /// `cmd::session::run` read the bool in three places and turned it into a
+    /// `Staging` in one of them, so a write before that point needed its own
+    /// reading — and two writes had none at all: `auth::prepare` and the
+    /// worktrees directory, both running on a dry run under a comment promising
+    /// no trace. Converted here, there is one value and nothing downstream is
+    /// handed the flag to re-read.
+    ///
+    /// `--dry-run` stays a bool on `Cli` because that is what clap parses and
+    /// what every non-launch command still reads.
+    pub(crate) fn staging(&self) -> crate::container::Staging {
+        if self.dry_run {
+            crate::container::Staging::Skip
+        } else {
+            crate::container::Staging::Apply
+        }
+    }
+
     /// How this run reports, decided once.
     ///
     /// Resolved here and passed down rather than consulted where it is used: a

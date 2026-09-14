@@ -20,6 +20,7 @@
 
 use crate::adapter::{expand, Adapter, Capability, Render};
 use crate::profile::Profile;
+use anyhow::Context;
 use anyhow::Result;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
@@ -1628,9 +1629,9 @@ pub fn checks(
 
         let expect = match binding.render {
             Render::Concat => Expect::NonEmptyFile,
-            Render::Dir => Expect::Entries(entry_names(&sources, capability, repo)),
+            Render::Dir => Expect::Entries(entry_names(&sources, capability, repo)?),
             Render::McpJson | Render::CodexToml | Render::OpencodeJson => {
-                Expect::Mentions(server_names(&sources, repo))
+                Expect::Mentions(server_names(&sources, repo)?)
             }
             Render::ClaudeSettings => Expect::NonEmptyFile,
             // A program gets a stronger check than a config file, not a weaker
@@ -1639,10 +1640,14 @@ pub fn checks(
             // Both plugin renders, because both emit plain JavaScript under a
             // `.ts` name — the extension is what each harness's loader expects,
             // not a claim that either module needs a TypeScript parser.
-            Render::OpencodePlugin | Render::OmpPlugin => Expect::Parses(
-                hook_names(&sources, own, repo, binding, &adapter.tools, resolves)
-                    .unwrap_or_default(),
-            ),
+            Render::OpencodePlugin | Render::OmpPlugin => Expect::Parses(hook_names(
+                &sources,
+                own,
+                repo,
+                binding,
+                &adapter.tools,
+                resolves,
+            )?),
         };
 
         out.push(Check {
@@ -1662,7 +1667,7 @@ pub fn checks(
         // trade the rest of this function makes: no check beats one that fails
         // forever and blames the harness for a question omh never asked.
         if let (Some(verify), Some(ready)) = (&binding.verify, &binding.ready) {
-            let names = server_names(&sources, repo);
+            let names = server_names(&sources, repo)?;
             let ask_from = expand(&binding.path, GUEST_HOME)
                 .parent()
                 .map(PathBuf::from)
@@ -1698,32 +1703,40 @@ pub fn checks(
 /// symlinks; the selection is matched on `entry_name`, which is the name a
 /// `[use]` list holds. Comparing the same string on both sides would be wrong
 /// in one direction or the other for every capability whose entries are files.
+///
+/// **A directory omh could not list is an error, not an empty expectation.**
+/// This was `.filter_map(|d| read_dir(d).ok())` over the sources and
+/// `.flatten()` over the entries, so a source that could not be opened and an
+/// entry that failed part-way through both vanished — and what they left
+/// behind was a check demanding nothing, which prints `ok` without looking at
+/// the directory at all. The rule `profile::entries` states for every listing
+/// in this codebase.
 fn entry_names(
     sources: &[PathBuf],
     cap: Capability,
     repo: &crate::settings::RepoPolicy,
-) -> Vec<String> {
-    let mut names: Vec<String> = sources
-        .iter()
-        .filter_map(|d| std::fs::read_dir(d).ok())
-        .flat_map(|entries| {
-            entries
-                .flatten()
-                // The literal staged name. Stripping extensions would assert a
-                // guess about how the harness names things instead of asserting
-                // what omh actually mounted.
-                .map(|e| e.file_name())
-                .collect::<Vec<_>>()
-        })
-        .filter(|name| {
-            repo.selection
-                .allows(cap, &crate::profile::entry_name(name))
-        })
-        .map(|name| name.to_string_lossy().into_owned())
-        .collect();
+) -> Result<Vec<String>> {
+    let mut names: Vec<String> = Vec::new();
+    for dir in sources {
+        let entries = std::fs::read_dir(dir)
+            .with_context(|| format!("reading {} for {cap}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading {} for {cap}", dir.display()))?;
+            // The literal staged name. Stripping extensions would assert a
+            // guess about how the harness names things instead of asserting
+            // what omh actually mounted.
+            let name = entry.file_name();
+            if repo
+                .selection
+                .allows(cap, &crate::profile::entry_name(&name))
+            {
+                names.push(name.to_string_lossy().into_owned());
+            }
+        }
+    }
     names.sort();
     names.dedup();
-    names
+    Ok(names)
 }
 
 /// The hooks that actually reached the generated module.
@@ -1769,15 +1782,18 @@ fn hook_names(
 /// A server whose feature is off here is deliberately left out of that
 /// document. Demanding it makes `omh doctor` fail forever and blame the
 /// harness for obeying, which is the opposite of what this command is for.
-fn server_names(sources: &[PathBuf], repo: &crate::settings::RepoPolicy) -> Vec<String> {
-    crate::render::parse_layers(sources)
-        .map(|servers| {
-            servers
-                .into_keys()
-                .filter(|name| !repo.disabled_servers.contains(name))
-                .collect()
-        })
-        .unwrap_or_default()
+///
+/// **A layer omh could not parse is an error, not an empty expectation.** This
+/// ended in `.unwrap_or_default()`, which spelled "every server is switched
+/// off here" and "nobody could read the catalogue" the same way — and the
+/// second one then built a check that demands nothing and prints `ok`.
+/// `parse_layers` propagates, like `profile::entries` and `doctor_cmd`; this
+/// was the one caller that did not.
+fn server_names(sources: &[PathBuf], repo: &crate::settings::RepoPolicy) -> Result<Vec<String>> {
+    Ok(crate::render::parse_layers(sources)?
+        .into_keys()
+        .filter(|name| !repo.disabled_servers.contains(name))
+        .collect())
 }
 
 /// Shell run inside the sandbox. Emits one `ok|fail<TAB>name<TAB>detail` line
@@ -3638,6 +3654,159 @@ mod tests {
         );
     }
 
+    /// A source omh could not read is an error, never a check that demands
+    /// nothing.
+    ///
+    /// `Expect::Mentions(vec![])` and `Expect::Entries(vec![])` are legitimate
+    /// answers — `a_server_this_repo_switched_off_is_not_demanded` above says
+    /// exactly when — and the probe built from an empty list is
+    /// `for n in ; do ...; done; if [ -z "$missing" ]; then printf 'ok'`, an
+    /// empty loop that prints `ok` without testing that the file is even there.
+    /// So "nothing to demand" and "nothing could be read" produced the same
+    /// green row, which is the collapse #103 and #117 were both about.
+    ///
+    /// **Reachable for a directory, not for `mcp.json`** — measured against the
+    /// binary before the fix, rather than reasoned about. A malformed
+    /// `mcp.json` is caught upstream by `doctor::audit`
+    /// (`cmd/inspect.rs:287`), whose `declared config` row resolves the
+    /// catalogue long before `checks` runs; the row goes red and the command
+    /// stops. The `?` at `cmd/inspect.rs:458` is **not** what catches it — that
+    /// is thirteen lines *after* `checks`. A capability directory has no such
+    /// upstream reader, and that half was live; see the sibling test below.
+    #[test]
+    fn a_source_omh_could_not_read_is_an_error_not_a_check_that_demands_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let write = |p: PathBuf, body: &str| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(paths.root.join("skills/graphify/SKILL.md"), "s");
+        // Readable, and not a document. `profile::sources` only asks whether
+        // the path exists, so this reaches the reader intact.
+        write(paths.root.join("mcp.json"), "{ this is not json");
+
+        let (own, repo) = decided();
+        let err = checks(
+            &Profile::resolve(&paths),
+            &adapter("claude"),
+            &own,
+            &repo,
+            &Default::default(),
+        )
+        .expect_err(
+            "a catalogue omh cannot parse has to stop the audit — a check built              from it demands nothing and passes",
+        );
+        let said = format!("{err:#}");
+        assert!(
+            said.contains("mcp.json"),
+            "the refusal has to name the file nobody could read: {said}"
+        );
+    }
+
+    /// And for a capability directory omh could not list, which is the half
+    /// that is **live**.
+    ///
+    /// `entry_names` fed `Expect::Entries`. Restoring its `read_dir(..).ok()`
+    /// left the whole suite green, so the `?` shipped unguarded — and unlike
+    /// the `mcp.json` half nothing catches this earlier: `profile::sources`
+    /// only asks `try_exists`, `init::sandbox` reads no capability directory,
+    /// and `top_up` takes `sources(Hooks)`, which is existence-only. `checks`
+    /// at `cmd/inspect.rs:445` is the first thing to open the directory, so a
+    /// `0o000` `commands/` reached the empty-list probe and printed `ok`.
+    #[cfg(unix)]
+    #[test]
+    fn a_capability_directory_omh_could_not_list_is_an_error_too() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root reads through an unreadable directory");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let write = |p: PathBuf, body: &str| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(paths.root.join("commands/ship.md"), "c");
+        write(
+            paths.root.join("mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        let at = paths.root.join("commands");
+        let was = std::fs::metadata(&at).unwrap().permissions();
+        std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (own, repo) = decided();
+        let got = checks(
+            &Profile::resolve(&paths),
+            &adapter("claude"),
+            &own,
+            &repo,
+            &Default::default(),
+        );
+        std::fs::set_permissions(&at, was).unwrap();
+
+        let err = got.err().unwrap_or_else(|| {
+            panic!("an unreadable commands/ produced checks that demand nothing of it")
+        });
+        assert!(
+            format!("{err:#}").contains("commands"),
+            "the refusal has to name the directory: {err:#}"
+        );
+    }
+
+    /// And for the hooks module, whose expectation is a list of names too.
+    ///
+    /// `hook_names(..).unwrap_or_default()` became `?` in the same commit as
+    /// its two siblings and, unlike them, got no guard — restoring it left the
+    /// whole suite green. `Expect::Parses(vec![])` is the same empty loop: the
+    /// probe reports `ok` for a module it never asked anything of.
+    ///
+    /// `opencode` rather than `claude`, because `Parses` is the plugin renders;
+    /// claude's hooks bind to `ClaudeSettings`, which expects a non-empty file
+    /// and never reaches this list.
+    #[test]
+    fn a_hooks_layer_omh_could_not_render_is_an_error_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            root: dir.path().join("home"),
+            repo: dir.path().join("repo"),
+        };
+        let write = |p: PathBuf, body: &str| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        };
+        write(
+            paths.root.join("mcp.json"),
+            r#"{"mcpServers":{"codegraph":{"command":"c"}}}"#,
+        );
+        // A hook file that is not a hook. `render::document` parses every one
+        // it is handed, so this is the readable-but-unusable case — the one a
+        // `try_exists` upstream cannot catch.
+        write(paths.root.join("hooks/broken.json"), "{ not json at all");
+
+        let (own, repo) = decided();
+        let err = checks(
+            &Profile::resolve(&paths),
+            &adapter("opencode"),
+            &own,
+            &repo,
+            &Default::default(),
+        )
+        .expect_err("a hooks layer omh cannot render produced a check demanding nothing of it");
+        assert!(
+            format!("{err:#}").contains("broken.json"),
+            "the refusal has to name the file: {err:#}"
+        );
+    }
+
     /// An entry this repo did not select is deliberately absent from the
     /// directory the harness is given, so a check demanding it fails forever
     /// and blames the harness for obeying — the same argument
@@ -3889,7 +4058,7 @@ mod tests {
         std::fs::create_dir_all(commands.join("nested")).unwrap();
 
         assert_eq!(
-            entry_names(&[commands], Capability::Commands, &decided().1),
+            entry_names(&[commands], Capability::Commands, &decided().1).unwrap(),
             vec!["nested".to_string(), "ship.md".to_string()]
         );
     }

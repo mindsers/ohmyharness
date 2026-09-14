@@ -77,7 +77,7 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
         let outcome = outcome_for(adapter.version.as_deref(), &tags, &|t| {
             image::exists(&backend, t)
         });
-        harnesses.push((adapter.name.clone(), outcome));
+        harnesses.push((adapter.name.to_string(), outcome));
 
         // These tags are current whatever the outcome — an `Unpinnable`
         // adapter is left on the image it already had, so a session on it is
