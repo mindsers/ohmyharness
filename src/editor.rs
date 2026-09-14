@@ -39,7 +39,11 @@ impl Editor {
         Ok(out)
     }
 
+    /// An editor by name, or `None` — including when the word is not a name at
+    /// all. The same join, and so the same hazard, as `Adapter::find`; see
+    /// `adapter::Name`.
     pub fn find(dir: &Path, name: &str) -> Option<Self> {
+        let name = crate::adapter::Name::parse(name).ok()?;
         let path = dir.join(format!("{name}.toml"));
         std::fs::read_to_string(path)
             .ok()

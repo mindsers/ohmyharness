@@ -33,7 +33,7 @@ pub(crate) fn auth_cmd(
     }
 
     auth::validate_name(account)?;
-    let account_dir = auth::dir(&paths, harness, account);
+    let account_dir = auth::dir(&paths, &adapter, account);
     let already = auth::is_captured(&paths, &adapter, account);
     auth::prepare(&adapter, &account_dir, "/home/agent")?;
 

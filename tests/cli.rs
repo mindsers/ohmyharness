@@ -11058,3 +11058,121 @@ fn the_sessions_document_says_which_reads_omh_could_not_make() {
         "the document has to carry the read omh could not make, not only stderr: {doc}"
     );
 }
+
+/// A launch mounts the credentials of the adapter it resolved, not of the word
+/// that found it.
+///
+/// `Adapter::find` resolves `<name>.toml` by **filename**; everything else keys
+/// on the adapter's own `name` field. Nothing requires the two to agree, and
+/// where they disagree the two halves of the credential decision split:
+/// `auth::resolve_for_launch` picks the account out of `creds/<adapter.name>/`
+/// while `auth::dir` built the mount path from the typed word. The launch then
+/// reports the account it resolved and binds a directory that does not hold it
+/// — the agent starts logged out, and whatever token it obtains is written
+/// where `omh auth` will never look for it.
+///
+/// Asserted as an invariant over every `creds` mount rather than on one
+/// expected string: the failure is a path built from the wrong half, and any
+/// mount under `creds/<anything but claude>/` is that failure whatever it is
+/// spelled.
+#[test]
+fn a_launch_mounts_the_credentials_of_the_adapter_it_resolved() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+
+    // The same adapter, reachable under a second filename. `name = "claude"`
+    // is left as it is — that is the whole point.
+    let adapters = sb.home.join(".omh/adapters");
+    std::fs::copy(adapters.join("claude.toml"), adapters.join("alias.toml")).unwrap();
+
+    // Captured for `claude`, because that is the adapter's name. `omh auth`
+    // stores it there whichever filename found the adapter.
+    sb.account("claude", "work");
+    let set = sb.omh(&["set", "account", "work"]);
+    assert!(
+        set.status.success(),
+        "the account has to be selectable for the launch to resolve one: {}",
+        String::from_utf8_lossy(&set.stderr)
+    );
+
+    let out = sb.omh(&["new", "alias", "--dry-run", "--json"]);
+    assert!(
+        out.status.success(),
+        "`omh new alias --dry-run` did not run: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("`--json` is one document");
+    let argv = doc["argv"].to_string();
+
+    let creds: Vec<&str> = argv
+        .split('"')
+        .flat_map(|s| s.split(' '))
+        .filter(|s| s.contains("/creds/"))
+        .collect();
+    assert!(
+        !creds.is_empty(),
+        "no credential mount at all, so this test would pass over the bug: {argv}"
+    );
+    for mount in &creds {
+        assert!(
+            mount.contains("/creds/claude/"),
+            "the account was resolved out of creds/claude and mounted from \
+             somewhere else — the agent starts logged out: {mount}"
+        );
+    }
+}
+
+/// A harness name is a name, not a path.
+///
+/// `omh new <word>` reached `Adapter::find`, which joins the word straight into
+/// `<dir>/<word>.toml`. A word with `..` in it therefore names a file outside
+/// the catalogue, and omh loads it: its `install` becomes a `RUN` line in a
+/// host `docker build` and its `bin` becomes the sandbox's argv. The same word
+/// also picked the credential directory, so it chose what got bound over
+/// `/home/agent`.
+///
+/// The planted adapter is **valid**, so the refusal cannot come from a parse
+/// error — it has to come from the name being refused as a name.
+#[test]
+fn a_harness_name_is_not_a_path() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.git_init();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+
+    // A real adapter, outside the catalogue, under a name a traversal reaches.
+    // Its `name` is deliberately nothing like its filename: the typed word is
+    // echoed back by any refusal, so only a string that lives *inside* the file
+    // can distinguish "omh refused the word" from "omh read the file first".
+    let outside = sb.home.join("planted.toml");
+    let real = std::fs::read_to_string(sb.home.join(".omh/adapters/claude.toml")).unwrap();
+    std::fs::write(&outside, real.replacen("\"claude\"", "\"TRESPASSER\"", 1)).unwrap();
+
+    // `~/.omh/adapters` -> `~`, so this is the file above.
+    for word in ["../../planted", "..", "."] {
+        let out = sb.omh(&["new", word, "--dry-run"]);
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success(),
+            "`omh new {word}` was accepted, so a word chose a file outside the \
+             catalogue: {said}"
+        );
+        assert!(
+            !said.contains("TRESPASSER"),
+            "`omh new {word}` read the planted adapter before refusing it — the \
+             name has to be refused as a name, before any file is opened: {said}"
+        );
+        assert!(
+            said.contains("not a harness name") || said.contains("cannot be empty"),
+            "`omh new {word}` refused it as an unknown harness, which is the one \
+             thing it is not — the word never named a harness at all: {said}"
+        );
+    }
+}

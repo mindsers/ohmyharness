@@ -382,7 +382,7 @@ pub(crate) fn attach(
 
     let configured = crate::policy_value(&paths, "account");
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
-        .map(|a| auth::dir(&paths, &adapter.name, &a));
+        .map(|a| auth::dir(&paths, &adapter, &a));
     if let Some(account_dir) = &account {
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;
     }
@@ -1946,7 +1946,7 @@ pub(crate) fn run(
     // guess: silently using the wrong account is expensive and invisible.
     let configured = crate::policy_value(&paths, "account");
     let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
-        .map(|a| auth::dir(&paths, name, &a));
+        .map(|a| auth::dir(&paths, &adapter, &a));
     if let Some(account_dir) = &account {
         // The mountpoints have to exist before docker binds over them.
         auth::prepare(&adapter, account_dir, auth::GUEST_HOME)?;

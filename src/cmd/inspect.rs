@@ -368,7 +368,7 @@ pub(crate) fn doctor_cmd(
         // flag this was discarding.
         let configured = crate::policy_value(&paths, "account");
         let account = auth::resolve_for_launch(&paths, &adapter, configured.as_deref())?
-            .map(|a| auth::dir(&paths, &name, &a));
+            .map(|a| auth::dir(&paths, &adapter, &a));
 
         // Resolved once and used for both the checks and the plan below, so the
         // probe cannot check a session different from the one it launches.

@@ -676,6 +676,14 @@ pub(crate) fn tool_hint(name: &str, harnesses: &[String], editors: &[String]) ->
 /// Neither a harness nor a reserved word — say what is available, since the
 /// user cannot tell from the name alone which kind they meant.
 pub(crate) fn unknown_tool(paths: &Paths, name: &str, original: anyhow::Error) -> anyhow::Error {
+    // A word that is not a name at all is not an *unknown* one, and the list of
+    // what is available answers a question this user did not ask. `Adapter::find`
+    // already said the useful thing — that the word cannot be a harness name —
+    // and replacing it with "unknown harness `../../x`\n  available: ..." buries
+    // the only sentence that explains the refusal.
+    if adapter::Name::parse(name).is_err() {
+        return original;
+    }
     let harnesses: Vec<String> = Adapter::load_dir(&paths.adapters())
         .unwrap_or_default()
         .into_iter()

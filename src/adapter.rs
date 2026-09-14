@@ -326,6 +326,48 @@ pub enum Render {
     OmpPlugin,
 }
 
+/// A harness or editor name, checked to be a name rather than a path.
+///
+/// `Adapter::find` and `Editor::find` resolve a word by joining it into
+/// `<dir>/<word>.toml`, and the word arrives from `omh new <harness>`, from
+/// `omh auth <harness>`, and from a `.harness` marker on disk — which
+/// `session::harness_of` already distrusts on the grounds that "omh wrote this,
+/// but a file on disk is not omh's word". Unchecked, `..` in that word named a
+/// file outside the catalogue and omh loaded it: its `install` becomes a `RUN`
+/// line in a host `docker build`, its `bin` becomes the sandbox's argv, and
+/// before the sibling fix in `auth::dir` the same word also chose what was
+/// bound over `/home/agent`.
+///
+/// Identifier shape, not merely "no separators". The predicate in
+/// `session::harness_of` rejects `/`, `\`, newlines and control characters,
+/// which is right for the marker it guards and **not** sufficient here: it
+/// admits `..`, `.` and the empty string, each of which still forms a path.
+/// Every adapter and editor omh ships already satisfies this rule.
+///
+/// This is the one place a name becomes a filename. It is not a barrier against
+/// some future `dir.join(name)` written elsewhere — only against the two that
+/// exist, which are the two that had the defect.
+pub struct Name(String);
+
+impl Name {
+    pub fn parse(name: &str) -> Result<Self> {
+        anyhow::ensure!(!name.is_empty(), "a harness name cannot be empty");
+        anyhow::ensure!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "`{name}` is not a harness name — names are letters, digits, `-` and `_`, \
+             so they cannot reach outside the catalogue"
+        );
+        Ok(Self(name.to_string()))
+    }
+}
+
+impl std::fmt::Display for Name {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl Adapter {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
@@ -390,6 +432,7 @@ impl Adapter {
     }
 
     pub fn find(dir: &Path, name: &str) -> Result<Self> {
+        let name = &Name::parse(name)?;
         let path = dir.join(format!("{name}.toml"));
         if !path.exists() {
             let known: Vec<_> = Self::load_dir(dir)?.into_iter().map(|a| a.name).collect();

@@ -29,8 +29,22 @@ pub const DEFAULT_ACCOUNT: &str = "default";
 /// `image`, but there is exactly one definition.
 pub use crate::image::GUEST_HOME;
 
-pub fn dir(paths: &Paths, harness: &str, account: &str) -> PathBuf {
-    paths.creds(harness).join(account)
+/// Where one account's captured login lives.
+///
+/// **The adapter, not the word that found it.** `Adapter::find` resolves
+/// `<word>.toml` by filename and nothing requires that filename to match the
+/// adapter's own `name`, so the two spellings are free to disagree — and this
+/// is the one place where they disagreeing is silent. `accounts` and
+/// `is_captured` read `creds/<adapter.name>/`; when this took a `&str` three
+/// of its four callers handed it the typed word instead, so a launch resolved
+/// an account out of one directory and mounted another. The report named the
+/// account, the agent started logged out, and the token it went on to obtain
+/// was written where `omh auth` does not look.
+///
+/// Taking the `Adapter` is the whole fix: there is no longer a second string
+/// to pass, so the two halves cannot be keyed differently.
+pub fn dir(paths: &Paths, adapter: &Adapter, account: &str) -> PathBuf {
+    paths.creds(&adapter.name).join(account)
 }
 
 /// Accounts captured for a harness, in name order.
@@ -53,7 +67,7 @@ pub fn accounts(paths: &Paths, adapter: &Adapter) -> Vec<String> {
 pub fn is_captured(paths: &Paths, adapter: &Adapter, account: &str) -> bool {
     // Defined in terms of `unfilled` so the two answers can never disagree —
     // they did, and `omh auth` failed while `omh info` listed the account.
-    unfilled(adapter, &dir(paths, &adapter.name, account), GUEST_HOME).is_empty()
+    unfilled(adapter, &dir(paths, adapter, account), GUEST_HOME).is_empty()
 }
 
 /// Which account to use. Ambiguity is an error, never a guess — silently
@@ -376,7 +390,7 @@ mod tests {
             opencode()
         };
         for token in &adapter.token {
-            let p = dir(paths, harness, account).join(token.trim_start_matches("$HOME/"));
+            let p = dir(paths, &adapter, account).join(token.trim_start_matches("$HOME/"));
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, "{\"token\":\"x\"}").unwrap();
         }
@@ -420,7 +434,7 @@ mod tests {
     #[test]
     fn boot_noise_alone_does_not_decide_an_omp_login() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "omp", "personal");
+        let account = dir(&paths, &omp(), "personal");
         std::fs::create_dir_all(account.join(".omp/agent")).unwrap();
         // What omp writes just by starting: settings and telemetry, no token.
         std::fs::write(account.join(".omp/agent/agent.db"), "SQLite format 3\0…").unwrap();
@@ -487,7 +501,7 @@ mod tests {
     #[test]
     fn an_empty_account_directory_is_not_captured() {
         let (_d, paths) = fixture();
-        std::fs::create_dir_all(dir(&paths, "claude", "work")).unwrap();
+        std::fs::create_dir_all(dir(&paths, &claude(), "work")).unwrap();
         assert!(!is_captured(&paths, &claude(), "work"));
         assert!(
             accounts(&paths, &claude()).is_empty(),
@@ -673,7 +687,7 @@ mod tests {
     #[test]
     fn a_parseable_placeholder_is_still_not_a_login() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
         assert!(
             !is_captured(&paths, &claude(), "work"),
@@ -684,7 +698,7 @@ mod tests {
     #[test]
     fn preparing_alone_does_not_count_as_captured() {
         let (_d, paths) = fixture();
-        prepare(&claude(), &dir(&paths, "claude", "work"), "/home/agent").unwrap();
+        prepare(&claude(), &dir(&paths, &claude(), "work"), "/home/agent").unwrap();
         assert!(
             !is_captured(&paths, &claude(), "work"),
             "empty placeholder files are not a login"
@@ -965,7 +979,7 @@ mod tests {
     #[test]
     fn boot_noise_in_the_config_directory_is_not_a_login() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
         std::fs::write(account.join(".claude.json"), r#"{"userID":"abc"}"#).unwrap();
         std::fs::create_dir_all(account.join(".claude/statsig")).unwrap();
@@ -985,7 +999,7 @@ mod tests {
     #[test]
     fn a_written_token_is_a_login() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
         std::fs::write(account.join(".claude/.credentials.json"), r#"{"t":"x"}"#).unwrap();
 
@@ -1013,7 +1027,7 @@ mod tests {
     #[test]
     fn captured_means_exactly_nothing_left_unfilled() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
 
         for stage in ["", r#"{"userID":"a"}"#] {
@@ -1034,7 +1048,7 @@ mod tests {
     #[test]
     fn an_unreadable_credential_is_not_mistaken_for_an_empty_one() {
         let (_d, paths) = fixture();
-        let account = dir(&paths, "claude", "work");
+        let account = dir(&paths, &claude(), "work");
         prepare(&claude(), &account, "/home/agent").unwrap();
         std::fs::write(
             account.join(".claude/.credentials.json"),
