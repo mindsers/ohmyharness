@@ -192,16 +192,7 @@ pub(crate) fn doctor_cmd(
     // working sbx as not answering. The trait is the right seam; the sbx
     // measurement is the thing still owed, and its doc names `omh doctor` as
     // where it lands.
-    let answering = chosen.as_ref().map(|b| {
-        (
-            b.program(),
-            doctor::daemon_from(
-                std::process::Command::new(b.program())
-                    .args(b.running_args())
-                    .output(),
-            ),
-        )
-    });
+    let answering = chosen.as_ref().map(|b| (b.program(), daemon_answering(b)));
     // **The two layers that actually resolve.** `omh settings` already makes
     // this comparison for `Layer::Personal`, the template — these are the
     // files a launch reads, and nothing has ever checked them. Not `?`: a file
@@ -787,4 +778,51 @@ pub(crate) fn info(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
         base,
     });
     Ok(())
+}
+
+/// Whether the selected runtime answers at all — a real round trip, not
+/// `runtime::installed`'s look along `PATH`.
+///
+/// Through `Backend::output` like every other wait-for-it exec. It was
+/// `Command::new(b.program()).args(b.running_args()).output()`, which is
+/// `Backend::real`'s body written out a second time, and writing it out here
+/// meant `Backend::scripted` could not answer it — so the answer
+/// `doctor::host_checks` reports the runtime on had no test.
+fn daemon_answering(backend: &runtime::Backend) -> std::result::Result<(), String> {
+    doctor::daemon_from(backend.output(&backend.running_args()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::{answered, Backend, Docker, Runtime};
+
+    /// The probe is asked of the backend, in the runtime's own spelling.
+    #[test]
+    fn the_runtime_probe_goes_through_the_backend() {
+        let (backend, log) = Backend::scripted(
+            Box::new(Docker),
+            vec![(vec!["ps"], answered(0, "omh-repo-s01\n", ""))],
+        );
+        assert_eq!(daemon_answering(&backend), Ok(()));
+        let asked = log.borrow();
+        assert_eq!(asked.len(), 1, "one round trip: {asked:?}");
+        assert_eq!(asked[0], Docker.running_args(), "and in docker's own words");
+    }
+
+    /// A daemon that will not answer is a reason, never a silent pass.
+    #[test]
+    fn a_runtime_that_refuses_is_reported_with_what_it_said() {
+        let (backend, _) = Backend::scripted(
+            Box::new(Docker),
+            vec![(
+                vec!["ps"],
+                answered(1, "", "Cannot connect to the Docker daemon"),
+            )],
+        );
+        let Err(why) = daemon_answering(&backend) else {
+            panic!("a daemon that refused the question has not answered it");
+        };
+        assert!(why.contains("Cannot connect to the Docker daemon"), "{why}");
+    }
 }

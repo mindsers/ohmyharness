@@ -1103,35 +1103,60 @@ fn place_destination(path: &Path) -> Result<()> {
 /// Entries a harness would have been given, counting only the ones that pass
 /// `keep`. Names are matched without their extension, the way a hook's
 /// manifest name is written.
+///
+/// A source omh cannot read counts as [`AT_LEAST_ONE`], for the reason given
+/// there: this was `.filter_map(|p| read_dir(p).ok())` over a `.flatten()`, so
+/// it counted zero and the degradation line understated the loss by exactly
+/// what omh had failed to look at.
 fn count_named(sources: &[PathBuf], keep: impl Fn(&str) -> bool) -> usize {
     sources
         .iter()
-        .filter_map(|p| std::fs::read_dir(p).ok())
-        .flat_map(|entries| entries.flatten())
-        .filter(|e| {
-            let name = e.file_name();
-            let name = std::path::Path::new(&name);
-            keep(
-                &name
-                    .file_stem()
-                    .unwrap_or(name.as_os_str())
-                    .to_string_lossy(),
-            )
-        })
-        .count()
-}
-
-/// How much a harness is giving up, for the one-line degradation warning.
-fn count_entries(sources: &[PathBuf]) -> usize {
-    sources
-        .iter()
-        .map(|p| {
-            std::fs::read_dir(p)
-                .map(|e| e.flatten().count())
-                .unwrap_or(1)
+        .map(|p| match std::fs::read_dir(p) {
+            Err(_) => AT_LEAST_ONE,
+            Ok(entries) => entries
+                .map(|e| match e {
+                    // A `readdir` that fails part-way is the same answer as an
+                    // open that fails: unseen, not absent.
+                    Err(_) => AT_LEAST_ONE,
+                    Ok(e) => {
+                        let name = e.file_name();
+                        let name = std::path::Path::new(&name);
+                        let stem = name.file_stem().unwrap_or(name.as_os_str());
+                        usize::from(keep(&stem.to_string_lossy()))
+                    }
+                })
+                .sum(),
         })
         .sum()
 }
+
+/// How much a harness is giving up, for the one-line degradation warning.
+///
+/// Same rule as [`count_named`]: a source omh could not read is counted as
+/// [`AT_LEAST_ONE`] rather than skipped.
+fn count_entries(sources: &[PathBuf]) -> usize {
+    sources
+        .iter()
+        .map(|p| match std::fs::read_dir(p) {
+            Err(_) => AT_LEAST_ONE,
+            Ok(entries) => entries
+                .map(|e| if e.is_err() { AT_LEAST_ONE } else { 1 })
+                .sum(),
+        })
+        .sum()
+}
+
+/// What a source omh could not read contributes to a degradation count.
+///
+/// The number is a floor, not a measurement, and it is the only honest one
+/// available here: the count reaches the user as *N entries dropped* in a line
+/// that has no room for a second clause, and this function has nowhere to
+/// return "and one source I could not open" to. **Under-counting is the
+/// failure that matters** — it tells someone a degraded launch costs less than
+/// it does, which is the collapse `could not look is not none` names — so an
+/// unreadable source is worth one entry rather than none. A count this fudges
+/// can only be too low, never too high by more than the sources omh was denied.
+const AT_LEAST_ONE: usize = 1;
 
 #[cfg(unix)]
 fn symlink(src: &Path, dst: &Path) -> Result<()> {
@@ -4324,5 +4349,75 @@ mod tests {
             reuse(&stamp_of(&p), &p, &["claude".to_string()]),
             Reuse::Attach
         ));
+    }
+
+    /// A source omh could not read is not a source with nothing in it.
+    ///
+    /// Both counters feed one line — *this harness has no hooks, so N entries
+    /// are dropped* — and it is the only place the user is told what a
+    /// degraded launch costs. `count_named` opened with
+    /// `.filter_map(|p| read_dir(p).ok())` over a `.flatten()`, so an
+    /// unreadable capability source was counted as zero and the sentence
+    /// understated the loss by however much omh had failed to look at. Its
+    /// neighbour `count_entries` already fudged the same case to 1; the two
+    /// now answer alike, and the fudge is written down rather than inferred
+    /// from a bare `unwrap_or`.
+    ///
+    /// Skipped under root, which reads through `0o000`.
+    #[cfg(unix)]
+    #[test]
+    fn a_capability_source_omh_cannot_read_is_never_counted_as_empty() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let readable = d.path().join("readable");
+        let denied = d.path().join("denied");
+        std::fs::create_dir_all(&readable).unwrap();
+        std::fs::create_dir_all(&denied).unwrap();
+        std::fs::write(readable.join("one.json"), "{}").unwrap();
+        std::fs::write(readable.join("two.json"), "{}").unwrap();
+        std::fs::write(denied.join("three.json"), "{}").unwrap();
+        let _restore = Restore::unreadable(&denied).unwrap();
+
+        let sources = vec![readable.clone(), denied.clone()];
+        assert!(
+            count_named(&sources, |_| true) > 2,
+            "the readable source holds two; the one omh could not open must \
+             not count as none"
+        );
+        assert!(
+            count_entries(&sources) > 2,
+            "and the same for the counter beside it"
+        );
+    }
+
+    /// Mode guard: `0o000` on the way in, the observed mode back on drop, so a
+    /// panic cannot leave a directory `TempDir` then fails to remove.
+    #[cfg(unix)]
+    struct Restore {
+        dir: PathBuf,
+        mode: u32,
+    }
+
+    #[cfg(unix)]
+    impl Restore {
+        fn unreadable(dir: &Path) -> std::io::Result<Self> {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir)?.permissions().mode();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000))?;
+            Ok(Self {
+                dir: dir.to_path_buf(),
+                mode,
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(self.mode));
+        }
     }
 }
