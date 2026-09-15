@@ -1731,6 +1731,27 @@ pub(crate) fn say_rules(plan: &container::Plan, ctx: &out::Ctx) {
     }
 }
 
+/// Drop a session's graph entry from the shared index, while its container is
+/// still around to do it.
+///
+/// A function rather than four lines inline so there is somewhere to put a
+/// test: `Backend::scripted` answers the argv from a table, which is the whole
+/// reason the seam exists, and this was the last exec on the removal path with
+/// no way to reach it.
+fn drop_graph_entry(backend: &runtime::Backend, name: &str, project: &str) -> Result<(), String> {
+    let argv = backend.exec_args(name, &base::drop_graph_command(project), false);
+    match backend.output(&argv) {
+        Err(e) => Err(format!("omh could not run the container runtime: {e}")),
+        Ok(out) if out.status.success() => Ok(()),
+        // `drop_graph_command` ends in `|| true`, so the delete itself cannot
+        // fail this — a non-zero status here is the exec, not the deletion.
+        Ok(out) => Err(image::unreadable(
+            &String::from_utf8_lossy(&out.stderr),
+            &out.status,
+        )),
+    }
+}
+
 /// What the launcher noticed about this repo's hooks: which ones it has, which
 /// are new or changed, and where detection and the directory disagree.
 ///
@@ -2315,10 +2336,17 @@ pub(crate) fn rm(
             }
             if matches!(up, image::Running::Yes) {
                 let project = base::project_name(&paths.repo_name(), id);
-                let _ = Command::new(backend.program())
-                    .args(backend.exec_args(&name, &base::drop_graph_command(&project), false))
-                    .output();
-                went.push("its graph entry".to_string());
+                match drop_graph_entry(&backend, &name, &project) {
+                    Ok(()) => went.push("its graph entry".to_string()),
+                    // The report is built from what happened, not from the list
+                    // of things this function set out to do — and this line
+                    // pushed "its graph entry" over a discarded result, so a
+                    // removal that never reached the runtime still claimed it.
+                    Err(why) => {
+                        ctx.warn(&format!("{id}'s graph entry was left behind: {why}"));
+                        unreached.push("its graph entry".to_string());
+                    }
+                }
             }
             // Best-effort: a container that was never started has nothing to
             // remove, and that must not stop the worktree from going.
@@ -3150,5 +3178,52 @@ mod tests {
             said.contains("s01") && said.contains("port is already allocated"),
             "{said}"
         );
+    }
+
+    /// The graph drop goes through the seam, like every other wait-for-it exec.
+    ///
+    /// It was `Command::new(backend.program()).args(..).output()` — the only
+    /// exec on the removal path that never reached `Backend::output`, so
+    /// `Backend::scripted` could not see it and there was nowhere to write
+    /// this down. A `Command` built by hand is for the spawns that need a
+    /// `Child` — a tty attach, a build fed on stdin, a backgrounded index;
+    /// this one waits for an answer, which is what `Backend::output` is.
+    #[test]
+    fn dropping_a_graph_entry_is_asked_of_the_backend() {
+        let (backend, log) =
+            Backend::scripted(Box::new(Docker), vec![(vec!["exec"], answered(0, "", ""))]);
+        assert_eq!(drop_graph_entry(&backend, NAME, "repo-s01"), Ok(()));
+        let asked = log.borrow();
+        assert_eq!(
+            asked.len(),
+            1,
+            "one exec, and the backend saw it: {asked:?}"
+        );
+        let line = asked[0].join(" ");
+        assert!(
+            line.contains(NAME) && line.contains("delete_project") && line.contains("repo-s01"),
+            "the argv names the container and the project it drops: {line}"
+        );
+    }
+
+    /// And a drop that did not happen is said, not counted as done.
+    ///
+    /// `omh sNN rm` pushed "its graph entry" onto the list of what went over a
+    /// discarded result, so a runtime that refused the exec still produced
+    /// *its graph entry — gone*. `drop_graph_command` ends in `|| true`, so a
+    /// non-zero status is the exec failing, never the deletion.
+    #[test]
+    fn a_graph_entry_that_could_not_be_dropped_is_not_reported_as_gone() {
+        let (backend, _) = Backend::scripted(
+            Box::new(Docker),
+            vec![(
+                vec!["exec"],
+                answered(126, "", "OCI runtime exec failed: container not running"),
+            )],
+        );
+        let Err(why) = drop_graph_entry(&backend, NAME, "repo-s01") else {
+            panic!("a refused exec is not a dropped graph entry");
+        };
+        assert!(why.contains("container not running"), "{why}");
     }
 }
