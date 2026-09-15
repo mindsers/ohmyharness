@@ -1187,6 +1187,27 @@ impl Report for Sessions {
         // sessions have all been removed badly — the one case where "no
         // sessions" is the answer and something is also wrong.
         if self.sessions.is_empty() {
+            // **And no longer unconditional.** `no sessions` is the only line
+            // in this report that claims something about a directory rather
+            // than about its contents, and `session::list` handed an empty
+            // `Vec` back for a `worktrees/` it could not open — so a checkout
+            // full of sessions printed what a checkout with none prints, and
+            // exited 0. `--json` already carried the reason in `unchecked`;
+            // stdout said the opposite of it.
+            //
+            // The reasons come from `leftovers`, which opens the same
+            // directory, so the two halves of this document cannot disagree
+            // about whether omh managed to look.
+            if !self.leftovers_unchecked.is_empty() {
+                let mut said = format!(
+                    "{}\n",
+                    p.paint(out::WARN, "omh could not list this checkout's sessions")
+                );
+                for why in &self.leftovers_unchecked {
+                    said.push_str(&format!("  {}\n", p.paint(out::DIM, why)));
+                }
+                return said;
+            }
             return format!("{}\n", p.paint(out::DIM, "no sessions"));
         }
 

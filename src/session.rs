@@ -1596,17 +1596,57 @@ pub fn next_id(worktrees_dir: &Path) -> Result<String> {
     Ok(format!("s{:02}", used + 1))
 }
 
-pub fn list(worktrees_dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(worktrees_dir) else {
-        return Vec::new();
+/// Every session of this checkout, in id order.
+///
+/// **Absent is none; unreadable is an error** — the split [`next_id`] makes
+/// directly above, about this same directory, and the last place under `~/.omh`
+/// that had not made it. This was
+/// `let Ok(entries) = read_dir(..) else { return Vec::new() }` over a
+/// `.flatten()`, so *this checkout has never made a session* and *omh could not
+/// open the directory* were one value — and nine callers received it, of which
+/// two render it. `omh s` printed an empty session table and exited 0; `omh
+/// info` printed an empty section. Both are "there are no sessions", said on
+/// stdout, about sessions that are there.
+///
+/// It was left alone once deliberately, on the argument that "its other callers
+/// reap and render, and emptiness is the right answer for them". That is true
+/// of reaping and false of rendering: a rendered emptiness is a claim, which is
+/// the whole of what [`crate::cmd::session::Leftovers`] exists to keep out of a
+/// report. Seven of the nine take the error now. The two that still swallow it
+/// say why where they do it — `reap_idle`, which prints nothing and feeds no
+/// report, and `omh s`, which has to answer with a document whatever happened
+/// and carries the reason through `unchecked` instead.
+///
+/// The per-entry read matters on its own: an entry dropped mid-walk is a
+/// session missing from `omh s`, from the ssh config `attach` rewrites, and
+/// from the set a bare `omh s down` stops.
+pub fn list(worktrees_dir: &Path) -> Result<Vec<String>> {
+    let entries = match std::fs::read_dir(worktrees_dir) {
+        Ok(entries) => entries,
+        // A checkout that has never made a session has no worktrees directory,
+        // and warning there would be the `hooks.json` mistake again.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(anyhow::Error::new(e))
+                .with_context(|| format!("reading {}", worktrees_dir.display()))
+        }
     };
-    let mut out: Vec<_> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
+    let mut out = Vec::new();
+    for entry in entries {
+        // Not `.flatten()`, for the reason `next_id` gives about the same
+        // stream: an entry dropped here is a session that silently is not in
+        // the answer.
+        let entry = entry.with_context(|| format!("reading {}", worktrees_dir.display()))?;
+        // Not `Path::is_dir()`, which answers `false` for every error alike —
+        // the same stat-failure-is-evidence rule `auth::accounts` follows.
+        let meta = std::fs::metadata(entry.path())
+            .with_context(|| format!("examining {}", entry.path().display()))?;
+        if meta.is_dir() {
+            out.push(entry.file_name().to_string_lossy().to_string());
+        }
+    }
     out.sort();
-    out
+    Ok(out)
 }
 
 /// `git` for the callers that build their arguments dynamically.
@@ -4226,7 +4266,48 @@ mod tests {
         std::fs::create_dir_all(wt.join("s01")).unwrap();
         std::fs::create_dir_all(wt.join("s02")).unwrap();
         assert_eq!(next_id(&wt).unwrap(), "s03");
-        assert_eq!(list(&wt), ["s01", "s02"]);
+        assert_eq!(list(&wt).unwrap(), ["s01", "s02"]);
+    }
+
+    /// **Absent is none; unreadable is an error** — the split [`next_id`] makes
+    /// eleven lines above, about the same directory.
+    ///
+    /// `list` answered `Vec::new()` for both, and its callers render: `omh s`
+    /// printed an empty session table and exited 0 over a `worktrees/` it could
+    /// not open, which is *there are no sessions* said about sessions that are
+    /// there. `omh info` did the same. The lead clause in `README.md` had
+    /// already claimed omh does not do this.
+    ///
+    /// Skipped under root, which reads through `0o000` and would pass without
+    /// testing anything.
+    #[cfg(unix)]
+    #[test]
+    fn a_worktrees_directory_omh_cannot_read_is_not_a_checkout_with_no_sessions() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let wt = d.path().join("wt");
+        std::fs::create_dir_all(wt.join("s01")).unwrap();
+
+        // Absent is genuinely nobody: a checkout that never made a session.
+        assert_eq!(
+            list(&d.path().join("never")).unwrap(),
+            Vec::<String>::new(),
+            "a checkout with no worktrees directory has no sessions"
+        );
+
+        use std::os::unix::fs::PermissionsExt;
+        let was = std::fs::metadata(&wt).unwrap().permissions();
+        std::fs::set_permissions(&wt, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let asked = list(&wt);
+        std::fs::set_permissions(&wt, was).unwrap();
+
+        let err = asked.expect_err("a directory omh could not open is not an empty one");
+        assert!(
+            err.to_string().contains(&wt.display().to_string()),
+            "and the reason names it: {err:#}"
+        );
     }
 
     #[test]
@@ -4931,7 +5012,7 @@ mod tests {
             .ensure(&root, "main")
             .unwrap();
 
-        assert_eq!(list(&wt), ["s01"]);
+        assert_eq!(list(&wt).unwrap(), ["s01"]);
     }
 
     #[test]

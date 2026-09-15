@@ -2529,3 +2529,33 @@ fn nothing_to_report_is_still_something_to_say() {
         "and the machine format is an empty list, not a missing key"
     );
 }
+
+/// But an empty list omh could not fill does **not** say "no sessions".
+///
+/// `no sessions` goes to stdout, the answer channel, and it is the one line in
+/// this report that is a claim about a directory rather than about its
+/// contents. `session::list` answered `Vec::new()` for a `worktrees/` it could
+/// not open, so a checkout with sessions in it printed exactly what a checkout
+/// with none prints, and exited 0. The `--json` half already carried the reason
+/// in `unchecked`; the person reading stdout had nothing.
+///
+/// The reason comes from `leftovers`, which opens the same directory and
+/// records why — so the two halves cannot disagree about whether omh looked.
+#[test]
+fn an_empty_list_omh_could_not_fill_does_not_say_no_sessions() {
+    let mut report = sessions(vec![]);
+    report.leftovers_unchecked = vec![
+        "omh could not read /x/worktrees, so it cannot tell which sessions are live: \
+         Permission denied (os error 13)"
+            .into(),
+    ];
+    let human = emit(&report, Format::Human, &Palette::plain());
+    assert!(
+        !human.contains("no sessions"),
+        "omh did not look, so it must not report an absence: {human}"
+    );
+    assert!(
+        human.contains("could not"),
+        "and it says so on the channel the answer is on: {human}"
+    );
+}

@@ -98,11 +98,17 @@ pub(crate) fn upgrade_cmd(cwd: &Path, dry_run: bool, ctx: &out::Ctx) -> Result<(
     // the runtime will not list what is running, that is not "nothing is
     // stale" — the check did not run, and the report says so rather than a
     // false all-clear.
-    let (stale_sessions, sessions_unchecked) = match image::running_set(&backend) {
-        Err(why) => (Vec::new(), Some(why)),
-        Ok(up) => {
+    // A `worktrees/` omh cannot read is the same shape as a runtime that will
+    // not answer, and this row already has the field for it: not `?`, because
+    // the rest of the upgrade report is still worth printing, and not an empty
+    // list either, which is the false all-clear the comment above refuses.
+    let listed = session::list(&paths.worktrees());
+    let (stale_sessions, sessions_unchecked) = match (image::running_set(&backend), listed) {
+        (_, Err(e)) => (Vec::new(), Some(format!("{e:#}"))),
+        (Err(why), _) => (Vec::new(), Some(why)),
+        (Ok(up), Ok(ids)) => {
             let mut running = Vec::new();
-            for id in session::list(&paths.worktrees()) {
+            for id in ids {
                 let name = paths.container(&id);
                 if !up.contains(&name) {
                     continue;

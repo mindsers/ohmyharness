@@ -14,7 +14,8 @@ an adapter file outside the catalogue, and the check is held by the field the
 credential directory is keyed on rather than at the door. A `--dry-run` launch
 writes nothing, and a read omh could not take is named rather than answered as
 though it had looked — an unreadable catalogue used to disown an editor omh
-ships, an unreadable credential directory to start the agent logged out.
+ships, an unreadable credential directory to start the agent logged out, and an
+unreadable `worktrees/` to make `omh s` report no sessions at all.
 [Which hooks fired](commands.md#omh-snn-shows-which-hooks-fired) and the opt-in
 [guards](configuration.md#guards-and-their-bypass) arrived in 0.11.0,
 [`omh upgrade`](commands.md#omh-upgrade) and the checks `omh sNN commit` runs
