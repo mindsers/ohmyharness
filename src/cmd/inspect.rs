@@ -751,7 +751,12 @@ pub(crate) fn info(cwd: &std::path::Path, ctx: &out::Ctx) -> Result<()> {
                 installed: runtime::installed(&e.bin),
             })
             .collect(),
-        sessions: session::list(&paths.worktrees())
+        // `?` like every other read this command makes — the catalogue, the
+        // adapters, the accounts and the editors above all stop here rather
+        // than render a section omh could not fill. An empty `sessions` is what
+        // a checkout with none prints, so a `worktrees/` omh cannot open would
+        // have printed exactly that.
+        sessions: session::list(&paths.worktrees())?
             .into_iter()
             .map(|id| {
                 let sess = Session::new(&paths.worktrees(), id.clone());

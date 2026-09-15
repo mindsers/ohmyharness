@@ -11095,6 +11095,48 @@ fn the_sessions_document_says_which_reads_omh_could_not_make() {
     );
 }
 
+/// **And the person reading stdout gets the same answer the script does.**
+///
+/// The test above covers `--json`. The human half printed `no sessions` — on
+/// stdout, the answer channel — because `session::list` returned `Vec::new()`
+/// for a `worktrees/` it could not open and the renderer treated an empty list
+/// as an absence. A checkout with sessions in it said it had none and exited 0,
+/// which is the line in `README.md` claiming omh does not do this.
+#[cfg(unix)]
+#[test]
+fn omh_s_does_not_say_no_sessions_over_a_directory_it_could_not_read() {
+    use std::os::unix::fs::PermissionsExt;
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: root reads an unreadable directory, so this proves nothing");
+        return;
+    }
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    let _worktree = sb.session("s01");
+    // Captured before the chmod: `sb.omh` spawns the binary on every call.
+    let worktrees = sb.worktrees();
+
+    let was = std::fs::metadata(&worktrees).unwrap().permissions();
+    std::fs::set_permissions(&worktrees, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let bites = std::fs::read_dir(&worktrees).is_err();
+    let out = sb.omh(&["s"]);
+    std::fs::set_permissions(&worktrees, was).unwrap();
+
+    if !bites {
+        eprintln!("skipped: this user reads an unreadable directory, so this proves nothing");
+        return;
+    }
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !said.contains("no sessions"),
+        "s01 is right there — omh could not look, which is not the same answer: {said}"
+    );
+    assert!(
+        said.contains("could not"),
+        "and stdout has to say so, not only stderr: {said}"
+    );
+}
+
 /// A launch mounts the credentials of the adapter it resolved, not of the word
 /// that found it.
 ///

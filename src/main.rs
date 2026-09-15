@@ -201,7 +201,17 @@ fn say_what_moved_off_the_old_key(cwd: &std::path::Path, ctx: &out::Ctx) {
     let running = |legacy: &str| {
         let dir = paths.root.join("worktrees").join(legacy);
         let backend = runtime::select(&runtime_preference(&paths), &|p| runtime::installed(p)).ok();
-        session::list(&dir).into_iter().any(|id| {
+        // **And the same defect through the other door.** The paragraph above
+        // is about a backend omh could not resolve reading as *not running*;
+        // this is the listing omh could not read doing it. `Vec::new()` makes
+        // `any` false, which is `nothing is running here`, which lets the
+        // rename go ahead — over the live mounts it exists to protect. A
+        // directory omh cannot open is a directory it cannot clear, so it says
+        // running and the migration waits.
+        let Ok(ids) = session::list(&dir) else {
+            return true;
+        };
+        ids.into_iter().any(|id| {
             backend.as_ref().is_none_or(|b| {
                 !matches!(
                     image::container_running(b, &format!("omh-{legacy}-{id}")),

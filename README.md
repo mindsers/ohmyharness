@@ -41,7 +41,8 @@ that found it. A `--dry-run` launch writes nothing, where it used to seed the
 credential store before the flag was read. And a read omh could not take is
 named rather than answered as though it had looked: an unreadable catalogue
 disowned an editor omh ships, an unreadable credential directory started the
-agent logged out and exited 0.
+agent logged out and exited 0, and an unreadable `worktrees/` made `omh s`
+print *no sessions* over sessions that were there.
 
 [What isn't done](#what-isnt-done) is a real list, not a modesty ritual.
 
