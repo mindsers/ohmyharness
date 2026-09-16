@@ -438,7 +438,12 @@ pub(crate) fn attach(
     let host_pub =
         std::fs::read_to_string(ssh::ensure_host_key(&paths.keys())?.with_extension("pub"))?;
     let known_hosts = paths.keys().join("known_hosts");
-    let sessions = session::list(&paths.worktrees());
+    // `?`: these two listings are *rewritten* whole, not appended to —
+    // `write_known_hosts` and `write_hosts` replace omh's block. An empty list
+    // is therefore not a no-op, it is a deletion: every other session of this
+    // checkout would lose its alias and its pinned host key, and the next
+    // `omh sNN attach` would fail on a host ssh no longer has an entry for.
+    let sessions = session::list(&paths.worktrees())?;
     let blocks: Vec<String> = sessions
         .iter()
         .map(|s| {
@@ -550,7 +555,18 @@ pub(crate) fn reap_idle(paths: &Paths, launching: &str, ctx: &out::Ctx) {
     };
 
     let up = image::running_set(&backend);
-    let running: Vec<(String, Option<std::time::SystemTime>)> = session::list(&paths.worktrees())
+    // The one caller where an empty answer is safe, and it is safe because of
+    // which way it fails: reaping nothing is this function declining to act,
+    // never a claim that nothing was idle. Nothing is printed about it and no
+    // report carries it, so there is nobody to mislead — the same reason
+    // `idle::last_used` keeps the lossy spelling `recorded_use` does not.
+    // Warned anyway, because the directory it could not read is the one the
+    // launch about to happen also needs.
+    let listed = session::list(&paths.worktrees()).unwrap_or_else(|e| {
+        ctx.warn(&format!("could not check for idle sessions — {e:#}"));
+        Vec::new()
+    });
+    let running: Vec<(String, Option<std::time::SystemTime>)> = listed
         .into_iter()
         .filter(|id| crate::cmd::harvest::reapable(&image::running_in(&up, &paths.container(id))))
         .map(|id| {
@@ -602,7 +618,12 @@ pub(crate) fn down(
         // is the explicit way to say all, so a script or CI that did so meant
         // it. A declined prompt stops nothing.
         None => {
-            let every = session::list(&paths.worktrees());
+            // `?`: the whole meaning of the bare call is *every session*, and
+            // an empty list is what makes this stop nothing and say so. Over a
+            // directory omh could not read, that is `no sessions` on stdout —
+            // the line `report::Stopped` exists because it was printed once
+            // already over a daemon omh never reached.
+            let every = session::list(&paths.worktrees())?;
             if !every.is_empty() {
                 if terminal {
                     // On stderr, like every other prompt here: the answer
@@ -960,7 +981,14 @@ pub(crate) fn sessions_ls(cwd: &std::path::Path, only: Option<&str>, ctx: &out::
         }
     };
     let base = session::default_branch(&paths.repo);
-    let ids = session::list(&paths.worktrees());
+    // **Not `?`.** `omh s --json` has to answer with a document whatever went
+    // wrong — `the_sessions_document_says_which_reads_omh_could_not_make`
+    // fixes that, and a script with no stdout to parse learns less than one
+    // that reads `unchecked`. The reason is not dropped: `leftovers` below
+    // opens this same directory through `opened`, and records it there. What
+    // had to change is the *renderer*, which printed `no sessions` over it —
+    // see `Sessions::human`.
+    let ids = session::list(&paths.worktrees()).unwrap_or_default();
     // Two questions asked **once** for every row below, and not at all when
     // there are no rows: a checkout with no sessions has nothing to ask git
     // about, and a listing that failed there would be a warning about nothing.
@@ -1465,10 +1493,18 @@ pub(crate) fn leftovers(
     // sandbox repository holding every commit the agent made — while `unchecked`
     // stayed empty to say it had looked everywhere.
     //
-    // Read here rather than through `session::list`, which is left alone: its
-    // other callers reap and render, and emptiness is the right answer for
-    // them. Only this one needs to know it could not look — the same split as
-    // `idle::recorded_use` from `last_used`, one layer up.
+    // Read here rather than through `session::list` because this one needs the
+    // *consequence* named — "it cannot tell which sessions are live" is this
+    // caller's sentence, not a fact about the directory.
+    //
+    // This used to say `session::list` was left alone because "its other
+    // callers reap and render, and emptiness is the right answer for them".
+    // The reaping half was right; the rendering half was the same collapse one
+    // command over. A rendered emptiness *is* a claim — `omh s` printed `no
+    // sessions` on stdout over a `worktrees/` it could not open, and `omh info`
+    // printed an empty section. `list` returns a `Result` now; the two callers
+    // that still take the lossy answer — `reap_idle` and `sessions_ls` — each
+    // say why at the call site.
     // Nothing else may record between here and `live_is_certain` below: the
     // comparison is what makes a reason from *this* read mean the predicate
     // failed, and a reason from anywhere else would make every read one.

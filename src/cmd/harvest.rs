@@ -62,7 +62,10 @@ pub(crate) fn sync_all(
     ctx: &out::Ctx,
 ) -> Result<()> {
     let paths = Paths::discover(cwd)?;
-    let ids = session::list(&paths.worktrees());
+    // `?`: a bare `omh sync` means *every session*, and a listing that came
+    // back empty because omh could not read it would sync nothing and report
+    // success over it.
+    let ids = session::list(&paths.worktrees())?;
     let base = base.map(str::to_string);
     let report = sync_over(ids, |id| {
         let session = Session::new(&paths.worktrees(), id.to_string());
@@ -994,8 +997,12 @@ pub(crate) fn existing_session(paths: &Paths, explicit: Option<&str>) -> Result<
         // a session *is* named; with none, they act on every session and never
         // call here.
         None => {
+            // `?`: the two answers this chooses between are *you have no
+            // sessions* and *say which one*, and both are claims about a
+            // listing. Told the directory was empty when omh could not read it,
+            // this sent someone to `omh new` over sessions they already have.
             anyhow::ensure!(
-                !session::list(&paths.worktrees()).is_empty(),
+                !session::list(&paths.worktrees())?.is_empty(),
                 "no sessions yet — start one with `omh new <harness>`"
             );
             anyhow::bail!(
