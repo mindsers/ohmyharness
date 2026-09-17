@@ -13,7 +13,7 @@ $ omh sessions attach   # open that same session in your editor
 $ omh graph             # browse your codebase as a graph
 ```
 
-**Status: early, and one harness deep.** `0.13.1`. **Claude Code is the only
+**Status: early, and one harness deep.** `0.13.2`. **Claude Code is the only
 harness anyone has done real work through.** `opencode`, `omp` and `codex` pass
 `omh doctor`, which proves their paths are right and nothing whatever about
 their behaviour — so *declare once, switch harness* is the shape the
@@ -41,7 +41,12 @@ every harness had to share. And two more reads that could not look now say
 so: an unreadable `worktrees/` no longer makes `omh s` print *no sessions*, and
 a graph entry `omh sNN rm` could not drop is no longer reported gone.
 
-**`0.13.1` fixes two launches 0.13.0 broke.** opencode died on start —
+**`0.13.2` lets Codex act.** Codex runs every shell command and file edit
+inside its own bubblewrap sandbox, which cannot start inside omh's container, so
+under 0.13.1 an agent could read nothing and change nothing. omh now turns that
+sandbox off; the container is the sandbox, as it is for every harness.
+
+**0.13.1 fixed two launches 0.13.0 broke.** opencode died on start —
 `EACCES` creating `~/.local/state` under a directory the image had left to root
 — and Codex's interactive app could not save that it trusts `/work`, because
 omh mounted a file where Codex rewrites its own config. Codex now finds `/work`

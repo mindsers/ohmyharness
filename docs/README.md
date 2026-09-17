@@ -3,7 +3,7 @@
 > oh-my-zsh for agentic coding — the best agentic coding environment without the
 > hassle of understanding, installing, and configuring everything.
 
-**Status: early.** `0.13.1`. This release is about running the harnesses
+**Status: early.** `0.13.2`. This release is about running the harnesses
 their makers ship now, and about Codex. Every pin moved to its current release
 and each adapter was re-read against it; the two claims that broke were fixed
 rather than carried. [`omh auth codex`](accounts.md#a-login-that-cannot-finish-in-a-sandbox)
@@ -21,7 +21,9 @@ before landing in 0.10.0, the [silent failures](design/roadmap.md)
 closed in 0.8.0, the [command surface](design/profile.md) landed in 0.7.0 and
 the [work loop](design/git.md) in 0.6.0.
 
-`0.13.1` fixes two launches 0.13.0 broke: opencode died on start over a
+`0.13.2` lets Codex run commands and edit files: its own sandbox cannot start
+inside omh's container, so omh turns it off. 0.13.1 fixed two launches 0.13.0
+broke: opencode died on start over a
 directory the image left to root, and Codex could not save its own config.
 [`omh doctor`](troubleshooting.md#omh-doctor) now asks first whether a harness
 starts at all.
