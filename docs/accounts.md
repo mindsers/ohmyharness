@@ -113,7 +113,7 @@ host does not reach the account; import again, or log in with a device code.
   in a sandbox:
 
   ```
-  omh: no codex account — starting logged out. `omh auth codex` to log in, or `omh auth codex --import` to copy this machine's
+  omh: no codex account — starting logged out. `omh auth codex` to log in, or `omh auth codex --import` to copy this machine's login
   ```
 - **An account you named and do not have** stops it. Running with no credentials
   produces a session that is logged out for reasons nothing explains.

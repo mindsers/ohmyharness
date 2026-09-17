@@ -4,7 +4,7 @@
 omh init                          set this repo up (once)
 omh upgrade                       apply a newer omh: refresh and rebuild
 omh new <harness> [-- args…]      start a session, run an agent in it
-omh s01 resume [harness]          rejoin one · claude · omp · opencode
+omh s01 resume [harness]          rejoin one · claude · codex · omp · opencode
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
 omh doctor [--harness <name>]     verify a harness sees your profile · d

@@ -429,7 +429,7 @@ pub(crate) enum Cmd {
     // `--help` is not the reader of this paragraph.
     /// Start a session and run a harness in it.
     New {
-        /// The harness to start: `claude`, `opencode`, `omp`.
+        /// The harness to start: `claude`, `codex`, `opencode`, `omp`.
         harness: String,
         /// Arguments for the harness, after a `--`.
         #[arg(last = true)]

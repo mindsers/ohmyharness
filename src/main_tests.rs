@@ -1174,7 +1174,7 @@ fn the_lines_the_docs_print_are_lines_omh_accepts() {
         ("memory.md", 5),
         ("profile.md", 3),
         ("sessions.md", 11),
-        ("troubleshooting.md", 11),
+        ("troubleshooting.md", 13),
         ("trust.md", 2),
     ]
     .into_iter()
@@ -1730,7 +1730,7 @@ fn the_lines_omh_prints_are_lines_omh_accepts() {
     // file while another gains lines is loud, and no floor can see that.
     let expected: std::collections::BTreeMap<String, usize> = [
         ("base/2026.08.toml", 19),
-        ("src/auth.rs", 5),
+        ("src/auth.rs", 6),
         ("src/base.rs", 3),
         ("src/cli.rs", 19), // + the retired --force and --file sentences
         ("src/cmd/auth.rs", 3),

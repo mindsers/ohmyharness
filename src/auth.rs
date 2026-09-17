@@ -106,7 +106,15 @@ pub fn resolve(paths: &Paths, adapter: &Adapter, configured: Option<&str>) -> Re
     let harness = &adapter.name;
     let available = accounts(paths, adapter)?;
     if available.is_empty() {
-        anyhow::bail!("no account for {harness} — run `omh auth {harness}` first");
+        // The same `--import` offer as `logged_out`, and where it matters more:
+        // this is the line a user with `account` set sees, and the setting is
+        // one name for every harness.
+        let import = if adapter.token.is_empty() {
+            String::new()
+        } else {
+            format!(", or `omh auth {harness} --import` to copy this machine's login")
+        };
+        anyhow::bail!("no account for {harness} — run `omh auth {harness}` first{import}");
     }
 
     // One source. It was `explicit.or(configured)` — a global `-a` overriding
@@ -254,7 +262,7 @@ pub fn logged_out(adapter: &Adapter) -> String {
     let import = if adapter.token.is_empty() {
         String::new()
     } else {
-        format!(", or `omh auth {harness} --import` to copy this machine's")
+        format!(", or `omh auth {harness} --import` to copy this machine's login")
     };
     format!("no {harness} account — starting logged out. `omh auth {harness}` to log in{import}")
 }
