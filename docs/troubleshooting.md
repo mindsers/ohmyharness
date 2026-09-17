@@ -121,6 +121,22 @@ omh: opencode on omh/s01 — dropped hooks: git-note (no `session-start` moment)
 
 That is the harness genuinely not supporting the feature, not omh losing it.
 
+### Codex says "Login using `codex login` and then run this command again"
+
+That line is Codex 0.5.0's, the pin omh shipped before 0.154.0. Its
+`codex login` signs in through a browser redirect that waits inside the
+sandbox, where your browser never arrives, so `omh auth codex` could not
+finish that way and a launch started logged out. Update omh, run
+`omh upgrade` to move the pin, then either:
+
+```console
+$ omh auth codex                     # choose "Sign in with Device Code"
+$ omh auth codex --import            # or copy the login this machine has
+```
+
+With `account` set for the repo, use that name: `omh auth codex --name <it>`.
+See [Accounts](accounts.md#a-login-that-cannot-finish-in-a-sandbox).
+
 ### I logged in, but the next session is logged out
 
 The token was written somewhere that does not persist. `omh doctor` names it:

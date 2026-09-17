@@ -289,11 +289,15 @@ pub(crate) enum Cmd {
     },
     /// Log a harness in once. Repeat with different names for several accounts.
     Auth {
-        /// Which harness to log in: `claude`, `opencode`, `omp`.
+        /// Which harness to log in: `claude`, `codex`, `opencode`, `omp`.
         harness: String,
         /// Account name, e.g. `personal` or `work`.
         #[arg(long = "name", short = 'n', default_value = auth::DEFAULT_ACCOUNT)]
         account: String,
+        /// Copy the login this machine already has instead of logging in
+        /// again — for a harness whose login cannot finish inside a sandbox.
+        #[arg(long)]
+        import: bool,
     },
     /// What you have here: harnesses, editors, sessions, your catalogue.
     Info {
@@ -425,7 +429,7 @@ pub(crate) enum Cmd {
     // `--help` is not the reader of this paragraph.
     /// Start a session and run a harness in it.
     New {
-        /// The harness to start: `claude`, `opencode`, `omp`.
+        /// The harness to start: `claude`, `codex`, `opencode`, `omp`.
         harness: String,
         /// Arguments for the harness, after a `--`.
         #[arg(last = true)]

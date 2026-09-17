@@ -1,6 +1,6 @@
 # Adapters
 
-**Status: built.** Adapters are data and three ship — `claude`, `opencode`, `omp`. Only `claude` has been driven for real work; the other two pass `omh doctor`, which proves their paths and nothing about their behaviour.
+**Status: built.** Adapters are data and four ship — `claude`, `codex`, `opencode`, `omp`. Only `claude` has been driven for real work; the other three pass `omh doctor`, which proves their paths and nothing about their behaviour.
 
 A harness is a TOML file, not a code change. So is an editor.
 
@@ -108,7 +108,11 @@ a project's own file is hidden for the session and returned untouched.
 
 A `path` is a claim about software omh did not write, and the suite cannot check
 it. `verify` is the harness's own command for listing what it loaded; `ready` is
-the word its output uses for a server that is actually running. `omh doctor`
+the word its output uses for a server the harness has taken up — as much as
+that harness can say. Claude Code's `Connected` is a running server; Codex's
+`enabled` is only a server its parsed config holds, so for Codex the check
+proves the file was read, not that the server starts. The pass line names the
+word, so the two do not read as the same fact. `omh doctor`
 runs the one and greps for the other, on the same line as the server's name.
 
 Both are optional. An adapter that declares neither is simply not asked — the

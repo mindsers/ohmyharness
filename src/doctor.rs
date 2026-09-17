@@ -1939,7 +1939,7 @@ pub fn probe_script(checks: &[Check]) -> String {
             } => out.push_str(&format!(
                 "out=$( cd '{path}' 2>/dev/null && {command} 2>&1 ); missing=''; \
                  for n in {}; do printf '%s\\n' \"$out\" | grep -- \"$n\" | grep -q -- '{ready}' || missing=\"$missing $n\"; done; \
-                 if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t{path} ({command})\\n'; \
+                 if [ -z \"$missing\" ]; then printf 'ok\\t{name}\\t{path} ({command}: {ready})\\n'; \
                  else printf 'fail\\t{name}\\t{command} in {path} does not report as {ready}:%s\\n' \"$missing\"; fi\n",
                 shell_list(names),
                 ready = ready.replace('\'', ""),
@@ -4507,6 +4507,19 @@ mod tests {
     fn a_server_the_harness_reports_running_passes() {
         let out = probe_against("memory: omh memory serve - Connected", &["memory"]);
         assert!(out.ok, "{out:?}");
+    }
+
+    /// A pass says what the harness reported, not only that it passed.
+    ///
+    /// The row is `mcp-loaded` for every harness, and the word behind it is
+    /// not the same fact on each: Claude Code's `Connected` is a running
+    /// server, Codex's `enabled` is a server its parsed config holds. A green
+    /// row that hid which one was a stronger claim than the check made.
+    #[test]
+    fn a_pass_names_the_word_the_harness_reported() {
+        let out = probe_against("memory: omh memory serve - Connected", &["memory"]);
+        assert!(out.ok, "{out:?}");
+        assert!(out.detail.contains("Connected"), "{out:?}");
     }
 
     /// Line-wise, not over the whole output. Every listing names every server,

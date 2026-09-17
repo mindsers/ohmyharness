@@ -2496,6 +2496,61 @@ fn a_launch_records_the_harness_it_started_and_a_dry_run_does_not() {
     );
 }
 
+/// A launch with no account for its harness says so before the harness does.
+///
+/// Starting logged out is allowed — the harness prompts — but the prompt is
+/// the harness's, and it names the harness's own login: Codex told a user to
+/// run `codex login` inside a sandbox where that login cannot finish, and
+/// nothing mentioned `omh auth`. `--import` is offered once there is a login
+/// on this machine to import, and once an account exists the line goes.
+#[test]
+fn a_launch_with_no_account_points_at_omh_auth() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    sb.seed_catalogue(&["adapters", "base", "stacks", "editors"]);
+    sb.session("s01");
+    let launch = || {
+        let out = sb.omh(&["s01", "--dry-run", "resume", "codex"]);
+        assert!(
+            out.status.success(),
+            "the dry run failed, so it says nothing about the warning: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+
+    let err = launch();
+    assert!(
+        err.contains("starting logged out") && err.contains("omh auth codex"),
+        "a logged-out launch is not pointed at `omh auth`: {err}"
+    );
+    assert!(
+        !err.contains("--import"),
+        "nothing on this machine to import, and `--import` offered anyway: {err}"
+    );
+
+    let login = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test"}"#;
+    std::fs::create_dir_all(sb.home.join(".codex")).unwrap();
+    std::fs::write(sb.home.join(".codex/auth.json"), login).unwrap();
+    let err = launch();
+    assert!(
+        err.contains("omh auth codex --import"),
+        "a login to import, and `--import` not offered: {err}"
+    );
+
+    std::fs::create_dir_all(sb.home.join(".omh/creds/codex/work/.codex")).unwrap();
+    std::fs::write(
+        sb.home.join(".omh/creds/codex/work/.codex/auth.json"),
+        login,
+    )
+    .unwrap();
+    let err = launch();
+    assert!(
+        !err.contains("starting logged out"),
+        "an account exists, and the launch still says there is none: {err}"
+    );
+}
+
 /// A resumed session runs the harness it ran before.
 ///
 /// `omh new` creates and `omh s resume` rejoins, which needs a fact almost
@@ -8433,6 +8488,57 @@ fn a_named_value_is_the_value_the_command_uses() {
         err.contains("definitely-not-a-harness"),
         "and the refusal names what was asked for: {err}"
     );
+}
+
+/// `omh auth codex --import` copies this machine's login into the account
+/// named, and needs no container runtime to do it.
+///
+/// Through the binary, because the function being right says nothing about
+/// the flag reaching it: an `--import` dropped on the way to `auth_cmd` runs
+/// the sandbox login instead, and a `--name` dropped captures into `default`.
+///
+/// A runtime that refuses every call is what proves "no runtime". A log with
+/// no `run` line did not: provisioning moved back above the branch still
+/// builds and inspects, and writes no `run`.
+#[test]
+fn an_imported_login_is_the_hosts_in_the_named_account() {
+    let sb = sandbox();
+    let _log = sb.fake_docker();
+    std::fs::write(sb.bin.join("docker-refuses"), "").unwrap();
+    sb.seed_adapters();
+    let login = r#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk-test"}"#;
+    std::fs::create_dir_all(sb.home.join(".codex")).unwrap();
+    std::fs::write(sb.home.join(".codex/auth.json"), login).unwrap();
+
+    let out = sb.omh(&["--json", "auth", "codex", "--name", "work", "--import"]);
+
+    assert!(
+        out.status.success(),
+        "import failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(sb.home.join(".omh/creds/codex/work/.codex/auth.json")).unwrap(),
+        login
+    );
+    assert!(
+        !sb.home.join(".omh/creds/codex/default").exists(),
+        "into `work`, not the default account"
+    );
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["action"], "account-captured", "{doc}");
+    assert_eq!(
+        doc["imported"],
+        serde_json::json!([sb.home.join(".codex/auth.json").display().to_string()]),
+        "{doc}"
+    );
+    assert_eq!(doc["reauthenticated"], false, "{doc}");
+
+    // Again, over the account it just made: a replacement, and said to be one.
+    let again = sb.omh(&["--json", "auth", "codex", "--name", "work", "--import"]);
+    assert!(again.status.success());
+    let doc: serde_json::Value = serde_json::from_slice(&again.stdout).unwrap();
+    assert_eq!(doc["reauthenticated"], true, "{doc}");
 }
 
 /// The inventory answers to `info`, and `ls` is gone from the top level too.

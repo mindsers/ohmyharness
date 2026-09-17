@@ -4,7 +4,7 @@
 omh init                          set this repo up (once)
 omh upgrade                       apply a newer omh: refresh and rebuild
 omh new <harness> [-- args…]      start a session, run an agent in it
-omh s01 resume [harness]          rejoin one · claude · omp · opencode
+omh s01 resume [harness]          rejoin one · claude · codex · omp · opencode
 omh graph [--stop]                browse the code graph in a browser
 omh auth <harness> [-n <acct>]    log in once; repeat for several accounts
 omh doctor [--harness <name>]     verify a harness sees your profile · d
@@ -286,7 +286,7 @@ omh: graph at http://127.0.0.1:56286
 One service per repo, not per session, and it needs no session to exist. See
 [Code graph](code-graph.md#omh-graph).
 
-## `omh auth <harness> [--name <account>]`
+## `omh auth <harness> [--name <account>] [--import]`
 
 Runs the harness's own login and captures the result. `--name` defaults to
 `default`.
@@ -294,6 +294,18 @@ Runs the harness's own login and captures the result. `--name` defaults to
 ```console
 $ omh auth claude --name personal
 $ omh auth claude --name work
+```
+
+`--import` copies the login this machine already has instead, and needs no
+container runtime. It copies the adapter's `token` files, so it works only
+where the harness keeps its login in that file on this machine too — Codex by
+default does; Claude Code on macOS keeps it in the Keychain, so there it finds
+nothing to copy. A harness with no `token` file (omp) is refused:
+
+```console
+$ omh auth codex --name work --import
+`work` captured for codex
+  copied from /Users/you/.codex/auth.json
 ```
 
 See [Accounts](accounts.md).

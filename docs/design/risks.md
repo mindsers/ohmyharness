@@ -352,7 +352,7 @@ project, and it is not a technical one.
   [code graph](../code-graph.md#what-the-agent-can-still-see).
 - **`.claude.json` is a single-file mount** that cannot be atomically replaced.
   `doctor` reports it rather than pretending otherwise.
-- **Only `claude` has been driven for real work.** `opencode` and `omp` pass
+- **Only `claude` has been driven for real work.** `codex`, `opencode` and `omp` pass
   `doctor`, which proves their paths and nothing about their behaviour. `omp`
   carries one gap beyond that: its login probe greps for a field name read out
   of oh-my-pi's source, and no logged-in run has confirmed it.

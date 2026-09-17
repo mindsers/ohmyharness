@@ -78,10 +78,54 @@ JSON Parse error: Unexpected EOF
 
 A placeholder is recognised as one, so it never counts as a login.
 
+## A login that cannot finish in a sandbox
+
+Codex's default sign-in opens a browser and waits for the redirect on
+`127.0.0.1:1455` — inside the container, where the host's browser never
+arrives. Two ways round it:
+
+- **Device code.** In `omh auth codex`, choose *Sign in with Device Code*:
+  Codex prints a URL and a one-time code to enter in any browser, so no
+  redirect has to reach the sandbox.
+- **Import.** If you are already logged in on this machine, copy that login:
+
+  ```console
+  $ omh auth codex --name work --import
+  `work` captured for codex
+    copied from /Users/you/.codex/auth.json
+  ```
+
+`--import` copies the adapter's `token` files and nothing else — not the config
+directory around them, which also holds your config, skills and history, and
+omh stages those separately. Every file is read before anything is written;
+each is staged at `0600` and renamed into place only once all are staged, so a
+file omh cannot read, or a write that fails, leaves the account as it was. A
+harness whose login is not a file (omp keeps its credentials in SQLite) is
+refused.
+
+It only finds a login kept in that file. Claude Code on macOS keeps its login
+in the Keychain, and a harness can be pointed at another home by its own
+environment variable (`CODEX_HOME`); in either case `--import` says what it
+looked at and finds nothing. That is also why a launch offers `--import` only
+when there is a login there to copy.
+
+**It is a copy of one login, not a second one.** An API key is a key, and two
+copies of it work side by side. An OAuth login is a refresh chain: when the
+provider replaces the refresh token on each use, whichever copy refreshes
+second is holding a spent one and is logged out. If the host and the sandbox
+both need to stay logged in, give the sandbox its own login with a device
+code. A later login on the host does not reach the account either way.
+
 ## What stops a launch
 
 - **Not being logged in is fine.** The harness prompts, which is what you want
-  before your first `omh auth`.
+  before your first `omh auth`. omh says so first, because the harness's prompt
+  names the harness's own login, and that login may be one that cannot finish
+  in a sandbox:
+
+  ```
+  omh: no codex account — starting logged out. `omh auth codex` to log in, or `omh auth codex --import` to copy this machine's login
+  ```
 - **An account you named and do not have** stops it. Running with no credentials
   produces a session that is logged out for reasons nothing explains.
 - **Two identities and no stated preference** stops it too. Guessing would send

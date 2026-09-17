@@ -175,7 +175,9 @@ pub struct Binding {
     /// never read a byte of it. Every unit test was green throughout.
     #[serde(default)]
     pub verify: Option<String>,
-    /// What `verify`'s output calls a server that is actually running.
+    /// What `verify`'s output calls a server the harness has taken up — as
+    /// much as that harness can say. Claude Code's `Connected` means running;
+    /// Codex's `enabled` means only that its parsed config holds the server.
     ///
     /// Separate from being *listed*, and the distinction is the whole check: a
     /// project-scoped document Claude Code has not been told to trust is listed
@@ -858,6 +860,49 @@ mod tests {
         assert!(
             !claude.tools.contains_key(&crate::hook::Tool::Search),
             "native Claude Code searches through Bash; `Grep|Glob` never matches"
+        );
+    }
+
+    /// `verify` without `ready`, or `ready` without `verify`, is a check
+    /// `omh doctor` skips without a word — it runs only when both are set.
+    /// And codex's pair is the one measured: `codex mcp list` reports a server
+    /// its config holds as `enabled`.
+    #[test]
+    fn verify_and_ready_come_as_a_pair() {
+        for adapter in Adapter::load_dir(Path::new(REAL)).unwrap() {
+            for (cap, binding) in &adapter.capabilities {
+                assert_eq!(
+                    binding.verify.is_some(),
+                    binding.ready.is_some(),
+                    "{} {cap:?}: half a check is no check",
+                    adapter.name
+                );
+            }
+        }
+        let codex = Adapter::find(Path::new(REAL), "codex").unwrap();
+        let mcp = codex.supports(Capability::Mcp).expect("codex has mcp");
+        assert_eq!(mcp.verify.as_deref(), Some("codex mcp list"));
+        assert_eq!(mcp.ready.as_deref(), Some("enabled"));
+    }
+
+    /// Codex's skills land beside its own, not over them.
+    ///
+    /// Codex installs its system skills into `~/.codex/skills/.system`, and a
+    /// read-only mount over `~/.codex/skills` hid them without a word —
+    /// measured with `codex debug prompt-input` in the 0.154.0 image. The
+    /// assertion is on the invariant, so a later path that reintroduces it
+    /// under another spelling fails too.
+    #[test]
+    fn codex_skills_never_cover_codexs_own() {
+        let codex = Adapter::find(Path::new(REAL), "codex").unwrap();
+        let skills = codex
+            .supports(Capability::Skills)
+            .expect("codex has skills");
+        let path = crate::adapter::expand(&skills.path, "/home/agent");
+        assert!(
+            !Path::new("/home/agent/.codex/skills/.system").starts_with(&path),
+            "{} covers Codex's system skills",
+            path.display()
         );
     }
 

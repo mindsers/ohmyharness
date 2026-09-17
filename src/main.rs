@@ -298,7 +298,11 @@ fn dispatch(cli: &Cli, ctx: &out::Ctx) -> Result<()> {
 
     match &cli.cmd {
         Cmd::Init => cmd::init::init(&cwd, ctx),
-        Cmd::Auth { harness, account } => cmd::auth::auth_cmd(&cwd, harness, account, ctx),
+        Cmd::Auth {
+            harness,
+            account,
+            import,
+        } => cmd::auth::auth_cmd(&cwd, harness, account, *import, ctx),
         Cmd::Info { repo } => {
             if *repo {
                 cmd::settings::show_repo(&cwd, ctx)
