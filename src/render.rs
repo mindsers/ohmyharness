@@ -1375,7 +1375,13 @@ fn codex_hooks(hooks: &BTreeMap<String, hook::Rendered>, binding: &Binding) -> R
         trust_level: &'static str,
     }
     #[derive(Serialize)]
+    struct Notice {
+        hide_full_access_warning: bool,
+    }
+    #[derive(Serialize)]
     struct Doc<'a> {
+        sandbox_mode: &'static str,
+        notice: Notice,
         projects: BTreeMap<&'static str, Trust>,
         hooks: BTreeMap<&'a str, Vec<Group<'a>>>,
     }
@@ -1387,7 +1393,17 @@ fn codex_hooks(hooks: &BTreeMap<String, hook::Rendered>, binding: &Binding) -> R
     // answer to `~/.codex/config.toml`; untrusted, Codex was measured skipping
     // `/work/AGENTS.md` — omh's rules — and asking before every command. The
     // repo is the one you chose to run a session on.
+    // Codex's own sandbox off: omh's container is the sandbox, and inside it
+    // Codex's cannot start. With omh's capabilities, `workspace-write` failed
+    // every shell command and every `apply_patch` with `bwrap: No permissions
+    // to create a new namespace`; `danger-full-access` here ran both, and
+    // Codex stops warning that bubblewrap is missing. The notice that mode
+    // raises is answered with it.
     let mut doc = Doc {
+        sandbox_mode: "danger-full-access",
+        notice: Notice {
+            hide_full_access_warning: true,
+        },
         projects: BTreeMap::from([(
             crate::container_workdir(),
             Trust {
@@ -1799,6 +1815,22 @@ mod tests {
                 doc.body
             );
         }
+    }
+
+    /// Codex's own sandbox is off: omh's container is the sandbox, and inside
+    /// it Codex's cannot start. Measured with omh's capabilities: in
+    /// `workspace-write`, every shell command and every `apply_patch` failed
+    /// with `bwrap: No permissions to create a new namespace`; with
+    /// `danger-full-access` set in this file, both ran. The notice that mode
+    /// would raise is answered here too.
+    #[test]
+    fn codex_hands_sandboxing_to_the_container() {
+        let table: toml::Table = codex_document(&[]).body.parse().unwrap();
+        assert_eq!(table["sandbox_mode"].as_str(), Some("danger-full-access"));
+        assert_eq!(
+            table["notice"]["hide_full_access_warning"].as_bool(),
+            Some(true)
+        );
     }
 
     /// And an injection keeps its stdout, which *is* its protocol.

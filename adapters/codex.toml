@@ -114,7 +114,11 @@ ready  = "enabled"
 # a `trusted_hash` for it; measured, the same hook fired from `/etc/codex` and
 # not from `~/.codex`. Yours stay in `~/.codex`, under Codex's own trust.
 #
-# The same file trusts `/work`, on every launch whatever hooks there are.
+# The same file trusts `/work`, and turns Codex's own sandbox off, on every
+# launch whatever hooks there are. Codex sandboxes commands with bubblewrap,
+# which cannot create a namespace under omh's capabilities: every shell command
+# and every `apply_patch` failed until `sandbox_mode = "danger-full-access"`.
+# omh's container is the sandbox.
 # Without it the interactive app asks — and cannot save the answer — and an
 # untrusted `/work` was measured skipping `AGENTS.md` and asking before every
 # command.
