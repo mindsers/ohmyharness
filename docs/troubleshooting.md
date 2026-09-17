@@ -19,6 +19,7 @@ host
   ✓  carry_in            nothing declared
 
 claude in omh/claude:8eae0d5c1511fa89
+  ✓  starts      claude --version
   ✓  rules       /work/CLAUDE.md
   ✓  skills      /home/agent/.claude/skills
   …
@@ -29,8 +30,12 @@ machine that cannot build a sandbox they are still what you get, instead of a
 single error. The last four read what this checkout declares — that its
 settings resolve, that every `[use]` name is in the catalogue, that every file
 in `.omh/hooks` parses, that every `carry_in` path exists — which needs no
-container either. The rows under the harness's heading are the adapter paths,
-checked inside the sandbox, and they are the reason the command exists. One
+container either. Under the harness's heading, `starts` comes first: the
+harness printing its own version, in the image a launch uses. Every row after
+it is an adapter path, checked inside the sandbox, and they are the reason the
+command exists — but none of them can notice a harness that dies before
+reading any of them, which is how opencode 1.18 failed every launch while every
+path row passed. One
 more host row appears only when this repo has no commit for a session branch to
 fork from.
 

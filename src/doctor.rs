@@ -99,6 +99,8 @@ pub enum Expect {
     /// host-side statement available is "a file exists that would exist
     /// anyway".
     Answers { command: String, ready: String },
+    /// The harness starts: `command` exits 0.
+    Starts { command: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1574,6 +1576,23 @@ pub fn ca_check(ca: Option<&str>) -> Option<Check> {
 }
 
 /// What must be true inside the sandbox, given this profile and adapter.
+/// Whether the harness starts at all — `<bin> --version`, from its home.
+///
+/// Every other sandbox check asks about a path omh mounted. opencode 1.18
+/// passed all of them and died on every launch, creating `~/.local/state`
+/// under a directory the image had left to root. A harness that cannot print
+/// its own version cannot read anything omh put beside it, so this runs first.
+pub fn start_check(adapter: &Adapter) -> Check {
+    Check {
+        name: "starts".into(),
+        guest: PathBuf::from(GUEST_HOME),
+        expect: Expect::Starts {
+            command: format!("{} --version", adapter.bin),
+        },
+        dir: true,
+    }
+}
+
 pub fn checks(
     profile: &Profile,
     adapter: &Adapter,
@@ -1977,6 +1996,16 @@ pub fn probe_script(checks: &[Check]) -> String {
             // format string. Interpolated into the format, a `%` in a command
             // was read as a directive and a `'` closed the quote and broke the
             // whole concatenated probe — taking every other check with it.
+            // The exit status, and the harness's own words when it is not 0 —
+            // a permission error, a missing library, a config it refused.
+            // `command` reaches `printf` as an argument, as in `Answers`.
+            Expect::Starts { command } => out.push_str(&format!(
+                "out=$( cd '{path}' 2>/dev/null && {command} 2>&1 ); code=$?; \
+                 if [ \"$code\" -eq 0 ]; then printf 'ok\\t{name}\\t%s\\n' {cmd}; \
+                 else printf 'fail\\t{name}\\t%s exited %s: %s\\n' {cmd} \"$code\" \
+                   \"$(printf '%s' \"$out\" | head -c 300 | tr '\\n' ' ')\"; fi\n",
+                cmd = single_quote(command),
+            )),
             Expect::Answers { command, ready } => out.push_str(&format!(
                 "e=$(mktemp 2>/dev/null || echo /tmp/omh-login.$$); \
                  out=$( cd '{path}' 2>/dev/null && {command} 2>\"$e\" ); code=$?; \
@@ -4414,6 +4443,80 @@ mod tests {
         let outcomes = parse(&String::from_utf8_lossy(&sh.stdout));
         assert_eq!(outcomes.len(), 1, "one check, one line: {script}");
         outcomes.into_iter().next().unwrap()
+    }
+
+    /// Run the start probe against a fake harness that exits `code` after
+    /// printing `said`.
+    fn start_probe_against(said: &str, code: i32) -> Outcome {
+        let stub = tempfile::tempdir().unwrap();
+        let at = stub.path().join("harness");
+        std::fs::write(&at, format!("#!/bin/sh\necho {said:?} >&2\nexit {code}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&at, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let adapter: Adapter = toml::from_str(
+            "name = \"harness\"\nbin = \"harness\"\ninstall = \"x\"\n\
+             [capabilities.rules]\npath = \"/work/AGENTS.md\"\nrender = \"concat\"\n",
+        )
+        .unwrap();
+        let mut check = start_check(&adapter);
+        check.guest = stub.path().to_path_buf();
+        let script = probe_script(&[check]);
+        let sh = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .env(
+                "PATH",
+                format!(
+                    "{}:{}",
+                    stub.path().display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            )
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("sh must run");
+        let outcomes = parse(&String::from_utf8_lossy(&sh.stdout));
+        assert_eq!(outcomes.len(), 1, "one check, one line: {script}");
+        outcomes.into_iter().next().unwrap()
+    }
+
+    /// Whether the harness **starts** is a check of its own, and the first one.
+    ///
+    /// Every other sandbox row asks about a path omh mounted, and all of them
+    /// passed while opencode 1.18 died on every launch with `EACCES:
+    /// permission denied, mkdir '/home/agent/.local/state'` — a directory omh
+    /// never mounts. A harness that cannot print its own version cannot read
+    /// anything omh put beside it.
+    #[test]
+    fn a_harness_that_cannot_start_fails_doctor_and_says_why() {
+        let broke = start_probe_against(
+            "EACCES: permission denied, mkdir '/home/agent/.local/state'",
+            1,
+        );
+        assert!(!broke.ok, "{broke:?}");
+        assert!(
+            broke.detail.contains("EACCES"),
+            "names the harness's own error: {broke:?}"
+        );
+
+        let fine = start_probe_against("harness 1.2.3", 0);
+        assert!(fine.ok, "{fine:?}");
+    }
+
+    #[test]
+    fn every_harness_is_asked_to_start_by_its_own_binary() {
+        for name in ["claude", "codex", "omp", "opencode"] {
+            let adapter = Adapter::find(Path::new(ADAPTERS), name).unwrap();
+            match start_check(&adapter).expect {
+                Expect::Starts { command } => {
+                    assert_eq!(command, format!("{} --version", adapter.bin))
+                }
+                other => panic!("{name}: {other:?}"),
+            }
+        }
     }
 
     #[test]

@@ -708,15 +708,21 @@ fn mount_parents(adapter: &Adapter) -> Vec<String> {
         .map(|b| b.path.clone())
         .chain(adapter.creds.iter().cloned())
         .chain(adapter.token.iter().cloned())
-        .filter_map(|template| {
+        .flat_map(|template| {
             let path = crate::adapter::expand(template.trim_end_matches('/'), GUEST_HOME);
             // `/work` is a mount omh owns; only the home side needs preparing.
             if !path.starts_with(GUEST_HOME) {
-                return None;
+                return Vec::new();
             }
-            path.parent().map(|p| p.display().to_string())
+            // Every ancestor below the home, not only the parent: `mkdir -p`
+            // creates them all as root, and a harness that makes a sibling of
+            // its own directory — opencode's `~/.local/state` — cannot.
+            path.ancestors()
+                .skip(1)
+                .take_while(|a| *a != std::path::Path::new(GUEST_HOME))
+                .map(|a| a.display().to_string())
+                .collect()
         })
-        .filter(|d| d != GUEST_HOME)
         .collect();
     dirs.sort();
     dirs.dedup();
@@ -4229,6 +4235,36 @@ mod tests {
                         .any(|d| parent == *d || parent.starts_with(&format!("{d}/"))),
                     "{name}: nothing creates {parent} for {template}"
                 );
+            }
+        }
+    }
+
+    /// Every directory `mkdir -p` creates under the home is handed to the
+    /// agent, not only the deepest one.
+    ///
+    /// `mkdir -p ~/.local/share/opencode` makes `~/.local` too, and chowning
+    /// only what was named left it root's — so opencode 1.18, which creates
+    /// `~/.local/state` beside its data on load, died on every launch with
+    /// `EACCES: permission denied, mkdir '/home/agent/.local/state'`, while
+    /// `omh doctor` checked the paths it mounts and reported green.
+    #[test]
+    fn every_directory_created_under_home_belongs_to_the_agent() {
+        for name in ["claude", "codex", "omp", "opencode"] {
+            let a = Adapter::find(adapters(), name).unwrap();
+            let owned = mount_parents(&a);
+            for dir in &owned {
+                let mut at = std::path::Path::new(dir);
+                while let Some(parent) = at.parent() {
+                    if parent == std::path::Path::new(GUEST_HOME) {
+                        break;
+                    }
+                    assert!(
+                        owned.iter().any(|d| std::path::Path::new(d) == parent),
+                        "{name}: `mkdir -p {dir}` creates {} as root, and nothing hands it over",
+                        parent.display()
+                    );
+                    at = parent;
+                }
             }
         }
     }
