@@ -498,6 +498,7 @@ than trusting that a file landed:
 ```console
 $ omh doctor
 checking claude in omh/claude:8eae0d5c1511fa89 — no account, so credentials go unchecked…
+  ✓  starts           claude --version
   ✓  rules            /work/CLAUDE.md
   ✓  skills           /home/agent/.claude/skills
   ✓  mcp              /work/.mcp.json

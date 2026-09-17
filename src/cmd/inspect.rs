@@ -433,7 +433,14 @@ pub(crate) fn doctor_cmd(
                 ctx,
             )?;
         }
-        let mut checks = doctor::checks(&profile, &adapter, &own, &repo, &sandbox.resolves)?;
+        let mut checks = vec![doctor::start_check(&adapter)];
+        checks.extend(doctor::checks(
+            &profile,
+            &adapter,
+            &own,
+            &repo,
+            &sandbox.resolves,
+        )?);
         if account.is_some() {
             checks.extend(doctor::credential_checks(&adapter));
         }
