@@ -83,9 +83,16 @@ path   = "$HOME/.agents/skills"
 render = "dir"
 import = "$HOME/.codex/skills"
 
-# User scope, TOML. Codex's config is `~/.codex/config.toml`, and its MCP
-# servers live under `[mcp_servers.<name>]` tables — which is why this renders
-# with `codex-toml` rather than the `mcp-json` the other harnesses use.
+# TOML, under `[mcp_servers.<name>]` tables — which is why this renders with
+# `codex-toml` rather than the `mcp-json` the other harnesses use.
+#
+# In `/etc/codex/managed_config.toml`, not `~/.codex/config.toml` where yours
+# are. Codex rewrites `~/.codex/config.toml` itself — a directory's trust, a
+# notice it was told to hide, the model picked — by writing a temporary file
+# and renaming it over, and a file omh mounted there refuses the rename: the
+# interactive app failed to start with "failed to persist config.toml". That
+# file now lives in the account's `~/.codex`, writable. Codex loads servers
+# from the managed file too — measured, `codex mcp list` names them.
 #
 # `codex mcp list` answers without a login (`omh doctor` runs it with no
 # account) and prints a `Status` column. Its `enabled` comes from the parsed
@@ -96,7 +103,7 @@ import = "$HOME/.codex/skills"
 # than Claude's `Connected`, and still the question `omh doctor` could not ask
 # before: whether the file is anything Codex opens.
 [capabilities.mcp]
-path   = "$HOME/.codex/config.toml"
+path   = "/etc/codex/managed_config.toml"
 render = "codex-toml"
 import = "$HOME/.codex/config.toml"
 verify = "codex mcp list"
@@ -106,6 +113,11 @@ ready  = "enabled"
 # user layer (`~/.codex/config.toml`) a hook runs only once Codex has recorded
 # a `trusted_hash` for it; measured, the same hook fired from `/etc/codex` and
 # not from `~/.codex`. Yours stay in `~/.codex`, under Codex's own trust.
+#
+# The same file trusts `/work`, on every launch whatever hooks there are.
+# Without it the interactive app asks — and cannot save the answer — and an
+# untrusted `/work` was measured skipping `AGENTS.md` and asking before every
+# command.
 [capabilities.hooks]
 path   = "/etc/codex/config.toml"
 render = "codex-hooks"

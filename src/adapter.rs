@@ -1337,10 +1337,32 @@ install="x""#,
         let binding = codex.supports(Capability::Mcp).unwrap();
         assert_eq!(binding.render, Render::CodexToml, "codex config is TOML");
         assert!(
-            binding.path.ends_with("config.toml"),
-            "into the file codex reads: {}",
+            binding.path.ends_with(".toml"),
+            "into a config file codex reads: {}",
             binding.path
         );
+    }
+
+    /// No file is mounted inside `~/.codex`. Codex rewrites
+    /// `~/.codex/config.toml` itself — a directory's trust, a notice it was
+    /// told to hide, the model picked — by writing a temporary file and
+    /// renaming it over, which a bind-mounted file refuses. The interactive
+    /// app failed to start with "failed to persist config.toml" until the
+    /// MCP document moved out.
+    #[test]
+    fn nothing_is_mounted_over_a_file_codex_rewrites() {
+        let codex = Adapter::find(Path::new(REAL), "codex").unwrap();
+        for (cap, binding) in &codex.capabilities {
+            if binding.render == Render::Dir {
+                continue;
+            }
+            for target in std::iter::once(&binding.path).chain(&binding.also) {
+                assert!(
+                    !expand(target, "/home/agent").starts_with("/home/agent/.codex"),
+                    "{cap:?} mounts a file at {target}, inside the directory Codex rewrites"
+                );
+            }
+        }
     }
 
     #[test]
