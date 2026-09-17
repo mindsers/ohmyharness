@@ -183,9 +183,20 @@ microVM, omh gets your profile inside it.
 `runtime::Runtime` is pure: a `Plan` in, an argv out, and nothing in it ever
 runs a process. `runtime::Backend` is the one place an argv becomes a process.
 `runtime::select` returns a `Backend`, every command that shells out to the
-runtime goes through `Backend::output`, and only the two things that need a
-`Child` — an interactive attach and a build fed its Dockerfile on stdin — take
-`program()` and spawn their own.
+runtime goes through `Backend::output`, and only the things that genuinely need
+a `Child` take `program()` and spawn their own. There are five, and they are
+named rather than counted, because this paragraph said "two" while the tree held
+seven: an interactive attach and an interactive login, which hand over the
+terminal; a build fed its Dockerfile on stdin; and two graph indexes, which are
+`spawn`ed into the background and never waited for.
+
+The two that did not belong on that list were plain `.output()` calls — the
+graph drop on `omh sNN rm`, and the daemon round-trip behind `omh doctor`'s host
+row — and each was `Backend::real`'s body written out a second time. Writing it
+out is what put them beyond `Backend::scripted`, so neither had a test until
+they came back through the seam. **A hand-built `Command` that waits for an
+answer is the shape to look for in review**; needing a `Child` is the only thing
+that justifies one.
 
 That split is what makes the launch path testable on a machine with no
 container runtime. `Backend::scripted` answers each argv from a table and logs

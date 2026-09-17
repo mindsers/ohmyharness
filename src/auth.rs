@@ -257,19 +257,36 @@ fn holds_content(path: &std::path::Path) -> bool {
 }
 
 /// Any file below `dir` holding more than what `prepare` put there.
+///
+/// **Absent is empty; unreadable is content**, which is [`holds_content`]'s
+/// rule one level up. This was `read_dir(dir).into_iter().flatten().flatten()`,
+/// so a directory omh could not open — and an entry that failed mid-walk —
+/// vanished into "nothing here", and the two predicates one function apart gave
+/// opposite answers to the same question. For a directory-mount adapter, whose
+/// `token` list is empty and which therefore reaches this rather than the early
+/// return in [`unfilled`], that turned a completed login into *the login did
+/// not complete*, naming a guest path the user has no way to fill.
 fn has_real_content(dir: &std::path::Path) -> bool {
-    std::fs::read_dir(dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|e| {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        // Nothing was ever written here. `prepare` creates the mount points, so
+        // this is a path no login has reached, not a read that failed.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,
+        Err(_) => return true,
+    };
+    entries.into_iter().any(|e| match e {
+        // `readdir` failing part-way through is the same answer as the open
+        // failing: omh did not get to look, so it must not report absence.
+        Err(_) => true,
+        Ok(e) => {
             let p = e.path();
             if p.is_dir() {
                 has_real_content(&p)
             } else {
                 holds_content(&p)
             }
-        })
+        }
+    })
 }
 
 /// Whether a file holds nothing but what `prepare` put there.
@@ -1156,5 +1173,68 @@ mod tests {
             "a non-UTF-8 token is still a token"
         );
         assert!(is_captured(&paths, &claude(), "work"));
+    }
+
+    /// The same rule one level up: a credential **directory** omh cannot read
+    /// is *present*, not empty.
+    ///
+    /// [`holds_content`] decided this for a file — "a credential omh cannot
+    /// read is still a credential" — and [`has_real_content`] answered the
+    /// opposite for the directory it walks, so an unreadable
+    /// `creds/<harness>/<account>/.omp/agent` made a completed login report as
+    /// *the login did not complete*, naming a guest path the user has no way
+    /// to fill. A directory-mount adapter is the only one that reaches it:
+    /// `claude` names `token` files and never gets past the early return.
+    ///
+    /// Skipped under root, which reads through `0o000` — the test would pass
+    /// without testing anything.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_credential_directory_is_not_mistaken_for_an_empty_one() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let (_d, paths) = fixture();
+        let account = dir(&paths, &omp(), "personal");
+        let agent = account.join(".omp/agent");
+        std::fs::create_dir_all(&agent).unwrap();
+        std::fs::write(agent.join("agent.db"), "SQLite format 3\0…").unwrap();
+        // Restores the mode it observed, so a panic cannot leave a `0o000`
+        // directory `TempDir` then fails to remove.
+        let _restore = Restore::unreadable(&agent).unwrap();
+
+        assert!(
+            unfilled(&omp(), &account, "/home/agent").is_empty(),
+            "a credential directory omh cannot read still holds credentials"
+        );
+    }
+
+    /// Mode guard for the fixture above: `0o000` on the way in, the observed
+    /// mode back on drop.
+    #[cfg(unix)]
+    struct Restore {
+        dir: PathBuf,
+        mode: u32,
+    }
+
+    #[cfg(unix)]
+    impl Restore {
+        fn unreadable(dir: &Path) -> std::io::Result<Self> {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir)?.permissions().mode();
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000))?;
+            Ok(Self {
+                dir: dir.to_path_buf(),
+                mode,
+            })
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(self.mode));
+        }
     }
 }
